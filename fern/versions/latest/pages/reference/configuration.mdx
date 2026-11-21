@@ -30,6 +30,68 @@ On multi-node deployments, the `swe_agents` server embeds these paths in command
 
 Servers that pre-staged setup trees next to the package (the layout before `cache_dir` existed, for example baked container images) keep using those trees **only while `cache_dir` is left at its default** — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. Contents accumulate across runs; both directories are safe to delete when no run is active.
 
+### Files Written at Runtime
+
+A server runs with its own source folder as its working directory. A relative path, or one built from `Path.cwd()`, therefore writes into the Gym checkout, which is on a shared filesystem on clusters. Under this convention, every file a server or agent writes while it runs goes to one of three places. Servers adopt it as they migrate; until then, some keep their own locations, as the section above says. The helpers are in `nemo_gym/core/runtime_files.py`.
+
+| Kind of file | Where it goes | Who removes it |
+|--------------|---------------|----------------|
+| Needed only while a request, a session or the run is going: workspaces, payloads, logs that are parsed and thrown away | A temporary folder under `temp_dir` | The process that made it, when that work ends |
+| Kept after the job: logs and screenshots someone may read later | Written in a temporary folder, then copied once under `<results_dir>/<server name>/` with `save_dir` | Whoever owns the run |
+| State a later run reads back, or generated media handed to another process | The server's `output_dir`, by default `<results_dir>/<server name>/`, written once as whole files | Whoever owns the run |
+| Reused across runs: downloads, installs, model weights | `cache_dir` | Unchanged |
+
+`nemo_gym_log_dir` (server process logs) and `model_call_capture_dir` (model-call capture ledgers, which several components read) keep their own settings.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `temp_dir` | `null`: `<system temp>/nemo_gym-<user id>/`, found by each process on its node | Where temporary folders go. Launchers set it, for example to a per-job folder on the node's local disk. A server may pass its own `temp_dir` to the helpers, and that wins. Made absolute at parse time without following symlinks, unlike `results_dir` and `cache_dir`, which are resolved: every node uses the path. An empty string is refused. |
+
+The default folder is private to its user (mode 700). Gym refuses one that is a symlink, not a folder, or another user's, with an error that says to set `temp_dir`, and makes an existing one that others can open private again, with a warning. A server's own `temp_dir`, passed to the helpers, must be absolute; `~` is expanded. Each process that creates a temporary folder checks `temp_dir` on its own node and logs a warning when it is on a filesystem shared by many hosts (Lustre, NFS, GPFS, BeeGFS, Ceph, CIFS, WekaFS and others), where every small file loads the metadata servers that the whole cluster shares, or in memory (`tmpfs`), where it counts against the job's memory.
+
+#### Helpers
+
+| Helper | Lifetime | Notes |
+|--------|----------|-------|
+| `request_temp_dir(name, *, temp_dir=None)` / `async_request_temp_dir(...)` | One request | A context manager; the folder is always removed when the block exits, also on errors and cancellation |
+| `session_temp_dir(name, *, temp_dir=None)` and `remove_temp_dir(path)`, or `await async_session_temp_dir(...)` and `await async_remove_temp_dir(path)` | One session | Keep the folder on the session; remove it after the session's in-flight requests finish, under the session's lock, and remove what remains when the server shuts down. `remove_temp_dir` returns whether the folder is gone and can be called again after a failure. It removes only a session folder of this process, and refuses any other path with a warning, including a request folder or a folder a tool made beside it. A coroutine uses the async versions, which create and remove the folder off the event loop |
+| `process_temp_dir(name, *, temp_dir=None)` | The server process | The same folder for every call with the same `name` and `temp_dir`; removed when the process exits. A forked child gets its own |
+| `await save_dir(src, *, server_name, name, label=None, output_dir=None)` | Kept | Copies a finished folder once into `<results_dir>/<server name>/<name>/<rollout>/<UTC time>-[<label>-]<random>/`, or under the server's `output_dir`; returns that folder, or `None` |
+
+`name` says what a folder holds, such as `verification`. For a temporary folder it starts the folder's name; for `process_temp_dir` it picks the folder; for `save_dir` it groups kept files in the results.
+
+`save_dir` copies file contents, folders and symlinks, and no permissions: kept files get the user's usual permissions, not the temporary folder's private ones or a file's execute bits. Copies run on a few threads of their own, so a burst of them never holds up the server's other work. A copy has no time limit. It never fails the request: a failed copy is logged, its partial folder removed, and it returns `None`. A file or folder it cannot read is skipped and logged, and the rest is kept. It also returns `None` without copying when the server's `output_dir` is relative, when no `results_dir` is set, and while the calling task is being cancelled, so shutdown skips copies that have not started. A copy already running when the task is cancelled stops and removes what it copied, since the request may remove the source next. A copy is written to `<folder>.partial` and renamed once it is complete, so a folder without that suffix always holds a whole copy, and a process killed mid-copy leaves only a `.partial` folder. An invalid `name` or `server_name` is a bug in the server and raises `ValueError`. Call it in a `finally`, so a failed request's files are kept too, and outside any `asyncio.timeout` block: inside one that has expired, the task counts as being cancelled and nothing is kept. For example:
+
+```python
+kept = None
+async with async_request_temp_dir("verification") as logs:
+    try:
+        result = await run_harness(log_dir=logs)  # writes on the node's own disk
+    finally:
+        if self.config.keep_verification_logs:  # the server's own setting, off by default
+            kept = await save_dir(logs, server_name=self.config.name, name="verification", label=instance_id)
+return make_response(result, kept_logs=kept)
+```
+
+Each server decides what to keep with its own setting, named for what it keeps, such as `keep_verification_logs`; Gym has no global switch for kept files.
+
+A temporary folder is private to its process: a server passes data to another process in the request, over HTTP or Ray, never as a temporary path. Code that runs without Gym's configuration, such as a Ray task on another node, does not see `temp_dir` or `results_dir`: the server passes its `temp_dir` to the task, which calls the helpers with `temp_dir=`.
+
+#### Cleanup
+
+| When | What removes a temporary folder |
+|------|---------------------------------|
+| The block exits, or `remove_temp_dir` is called | The helper |
+| The process exits normally, including a SIGTERM the server handles | An exit handler removes the process's own folder and everything in it. SIGKILL, an out-of-memory kill and `ray.kill` skip it |
+| The process was killed | The next Gym process on that node that uses the same `temp_dir` removes the folders of its own user's processes on the same boot that are no longer running. Best effort: only if such a process starts |
+| The job ends | The launcher removes the job's own `temp_dir`. This is the real bound |
+
+Each process keeps its temporary folders in one private folder of its own, `nemo-gym-<host boot>-<pid namespace>-<pid>-<random>`, so cleanup can tell a dead process's folder from a live one, also on a filesystem many hosts share. The random part keeps a new process that reuses a dead process's pid from losing its folder to that cleanup.
+
+A kind of file gets a top-level setting of its own only when its lifetime or cleanup owner differs from every existing setting, and where it lives is a deployment decision an entry point makes for every process that uses it. `temp_dir` and `model_call_capture_dir` meet both. Kept logs and screenshots do not: they live as long as the run's output, so they go under `results_dir`.
+
+A capture folder is deleted only by a consumer that has already taken what it needs from it: NeMo RL reads the capture rows into training during the run and resumes from its own checkpoints, so it deletes the capture folders it chose at shutdown. An evaluation run keeps capture as run output, because it can be the only copy of the request and response bodies.
+
 ### Server Virtual Environments
 
 `gym env start` sets up one uv virtual environment per server and starts the server with that environment's own interpreter (`<venv>/bin/python`), then logs which venv each server runs from. A venv that was copied or moved after it was built still runs its own interpreter, but its `bin/activate` still puts the original location first on `PATH`, so commands a server runs by name (such as `python` or `uv`) are looked up there first. Rebuild a moved venv, or create it with `uv venv --relocatable`, if its servers start such subprocesses.

@@ -1,0 +1,537 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Where servers and agents put the files they write while they run.
+
+A server starts with its own source folder as the working directory.
+A relative path, or one built from ``Path.cwd()``, therefore writes into the Gym checkout.
+On a cluster that checkout is on a shared filesystem, and every such write loads its metadata servers.
+
+Runtime files go to one of three places:
+
+- ``temp_dir``: temporary folders, deleted when their work ends. By default ``<system temp>/nemo_gym-<user id>/``.
+  :func:`request_temp_dir` and :func:`async_request_temp_dir` last one request, :func:`session_temp_dir` one
+  session, until :func:`remove_temp_dir` or :func:`async_remove_temp_dir`, and :func:`process_temp_dir` the whole
+  server process.
+- ``results_dir``: everything kept after the job. A server keeps a finished temporary folder with
+  :func:`save_dir`, which copies it once under ``<results_dir>/<server name>/`` or the server's ``output_dir``.
+  State a later run reads back goes in the server's ``output_dir``, written as whole files.
+- ``cache_dir``: files reused across runs.
+
+Each server decides what to keep, with its own setting; nothing here turns kept files on or off.
+Model-call capture keeps its own ``model_call_capture_dir``, because several components read it.
+"""
+
+import asyncio
+import atexit
+import logging
+import os
+import re
+import secrets
+import stat
+import tempfile
+import threading
+from collections.abc import AsyncIterator, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
+from functools import partial
+from pathlib import Path
+from typing import TypeVar
+from urllib.parse import quote
+from uuid import uuid4
+
+from nemo_gym.config.global_config import (
+    RESULTS_DIR_KEY_NAME,
+    TEMP_DIR_KEY_NAME,
+    maybe_get_global_config_dict,
+)
+from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.utils.file_trees import copy_tree, remove_tree
+from nemo_gym.utils.filesystems import warn_if_unsuitable
+from nemo_gym.utils.processes import process_may_be_running
+
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+# Keeps the leaf folder name well under the 255-byte limit after the timestamp and random suffix.
+_MAX_LABEL_LENGTH = 100
+# Keeps the rollout folder's name under the 255-byte limit: percent-encoding can triple a rollout id's length.
+# The leaf's random suffix keeps two rollouts that share a cut-off name from overwriting each other.
+_MAX_ROLLOUT_LENGTH = 200
+# The rollout folder of kept files for a request that carries no rollout id.
+_NO_ROLLOUT = "no-rollout"
+# How many save_dir copies one process runs at once. They get their own threads, so queued copies never hold the
+# event loop's default executor, which DNS lookups and other file work need.
+_SAVE_WORKERS = 4
+# How many threads one process uses to create and remove request folders, for the same reason: a burst of
+# requests removing large trees must not hold the default executor's threads from sandbox calls and DNS lookups.
+_TEMP_DIR_WORKERS = 8
+# Each process keeps its temporary folders in one folder of its own under a parent, named for the process:
+# nemo-gym-<host boot id>-<pid namespace>-<pid>-<random>. Folders inside it carry no process data.
+# PID namespace numbers repeat across hosts (every host's initial namespace has the same one), so the boot id is
+# what tells hosts apart when two of them share a directory. The random part tells apart two processes that had
+# the same pid, so removing a dead process's folder never removes the folder of a new process that reused its pid.
+_PROCESS_DIR = re.compile(r"^nemo-gym-(?P<host>[0-9a-f]{12})-(?P<namespace>\d+)-(?P<pid>\d+)-[0-9a-f]{8}$")
+_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+_UNKNOWN_HOST = "unknown"
+# Starts the name of each session folder, so remove_temp_dir removes nothing else: a request folder starts with
+# its name, which has no dot, and a process-wide folder with "process.".
+_SESSION_PREFIX = "session."
+
+# Per-process state. The after-fork hook resets all of it, so a forked child starts with none of its parent's.
+_default_temp_dir: Path | None = None
+# Parents this process has already checked and cleared of folders left by dead processes.
+_checked_temp_parents: set[Path] = set()
+# This process's own folder under each parent.
+_process_dirs: dict[Path, Path] = {}
+_exit_handler_registered = False
+# The random part of this process's folder names, the same for the whole process.
+_process_token = secrets.token_hex(4)
+# Guards the first use of a parent: its check and cleanup, and creating this process's folder in it.
+# Requests start their temporary folders in worker threads, so a burst of first requests arrives together.
+_first_use_lock = threading.Lock()
+_save_executor = ThreadPoolExecutor(max_workers=_SAVE_WORKERS, thread_name_prefix="nemo-gym-save-dir")
+_temp_dir_executor = ThreadPoolExecutor(max_workers=_TEMP_DIR_WORKERS, thread_name_prefix="nemo-gym-temp-dir")
+# Warnings this process has already logged, so each is reported once.
+_warned: set[str] = set()
+
+
+@contextmanager
+def request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Iterator[Path]:
+    """Create a temporary folder for one request and always remove it when the block exits.
+
+    ``name`` says what the folder holds; it starts the folder's name, so a reader of ``temp_dir`` can tell folders
+    apart.
+
+    The folder is under ``temp_dir``: this argument, which must be absolute, else the global ``temp_dir`` setting,
+    else ``<system temp>/nemo_gym-<user id>/``. Pass ``temp_dir`` from a server's own setting, or into a Ray task
+    that does not see Gym's configuration.
+    Processes and containers this process starts on the same node may use the folder; never send its path to another
+    Gym server, a Ray task or anything that may run on another node.
+    To keep what is in it, call :func:`save_dir` before the block exits.
+
+    This blocks on filesystem calls; use :func:`async_request_temp_dir` in a coroutine.
+    """
+    path = _create_temp_dir(name, temp_dir)
+    try:
+        yield path
+    finally:
+        remove_tree(path)
+
+
+@asynccontextmanager
+async def async_request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> AsyncIterator[Path]:
+    """:func:`request_temp_dir` for a coroutine: creating and removing the folder run on threads of their own.
+
+    The removal is shielded from cancellation.
+    Under an anyio cancel scope, which cancels again at every await, the block can exit before the folder is gone;
+    the removal then finishes in the background.
+    """
+    path = await _create_temp_dir_off_loop(name, temp_dir)
+    try:
+        yield path
+    finally:
+        # Shielded, so a second cancellation while the folder is being removed does not leave it behind.
+        await asyncio.shield(asyncio.get_running_loop().run_in_executor(_temp_dir_executor, remove_tree, path))
+
+
+def session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
+    """Create a temporary folder for one session, under ``temp_dir`` as :func:`request_temp_dir` places it.
+
+    Keep it on the session and remove it with :func:`remove_temp_dir` after the session's in-flight requests
+    finish, under the session's lock. Remove what remains when the server shuts down; the process exit removes
+    anything left after that.
+
+    This blocks on filesystem calls; use :func:`async_session_temp_dir` in a coroutine.
+    """
+    return _create_temp_dir(name, temp_dir, prefix=_SESSION_PREFIX)
+
+
+async def async_session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
+    """:func:`session_temp_dir` for a coroutine: the folder is created on the same threads as request folders use.
+
+    A folder created after the caller was cancelled is removed, since the caller never received it.
+    """
+    return await _create_temp_dir_off_loop(name, temp_dir, prefix=_SESSION_PREFIX)
+
+
+def remove_temp_dir(path: Path) -> bool:
+    """Remove a folder from :func:`session_temp_dir`; return whether it is gone.
+
+    It refuses, with a warning, any path that is not a session folder of this process, so a wrong or empty path,
+    a request folder or a folder a tool made beside it is never deleted. A failure is logged, never raised, so a
+    caller can try again later. A folder that is already gone counts as removed.
+
+    This blocks on filesystem calls; use :func:`async_remove_temp_dir` in a coroutine.
+    """
+    # Normalized first: pathlib keeps "..", so "<process folder>/.." would otherwise pass as a folder in it.
+    path = Path(os.path.normpath(path))
+    # Under the lock: this runs on worker threads, and another thread may add or drop a process folder meanwhile.
+    with _first_use_lock:
+        owned = path.parent in _process_dirs.values()
+    if not path.is_absolute() or not owned or not path.name.startswith(_SESSION_PREFIX):
+        _warn_once("refuse", "Not removing %s: it is not a session folder of this process.", path)
+        return False
+    return remove_tree(path)
+
+
+async def async_remove_temp_dir(path: Path) -> bool:
+    """:func:`remove_temp_dir` for a coroutine: the removal runs on the same threads as request folders use.
+
+    The removal is shielded from cancellation, so a cancelled caller never leaves it queued and not run.
+    """
+    loop = asyncio.get_running_loop()
+    return await asyncio.shield(loop.run_in_executor(_temp_dir_executor, remove_temp_dir, path))
+
+
+def process_temp_dir(name: str, *, temp_dir: str | Path | None = None) -> Path:
+    """Return the temporary folder called ``name`` that lasts as long as this process, creating it when missing.
+
+    Every call with the same ``name`` and ``temp_dir`` gets the same folder, for state shared across sessions,
+    such as a prepared workspace template; writers in it coordinate themselves. A server with several workers that
+    shares prepared state creates it in its main process before the workers start, and passes them the path.
+    The folder is removed when the process exits. A forked child gets its own.
+    """
+    _check_name(name)
+
+    def make(folder: Path) -> Path:
+        # A name has no dot, so this never collides with a request or session folder.
+        path = folder / f"process.{name}"
+        path.mkdir(mode=0o700, exist_ok=True)
+        return path
+
+    return _in_process_dir(temp_dir, make)
+
+
+async def save_dir(
+    src: str | Path,
+    *,
+    server_name: str,
+    name: str,
+    label: str | None = None,
+    output_dir: str | Path | None = None,
+) -> Path | None:
+    """Copy a finished folder into the run's kept files once; return the folder it copied to, or ``None``.
+
+    ``name`` says what the files are, such as ``verification``, and groups them in the results.
+    The copy goes to a new folder ``<output>/<name>/<rollout>/<UTC time>-[<label>-]<random>``, where ``<output>``
+    is the server's ``output_dir`` or ``<results_dir>/<server_name>``. The rollout comes from the request, and is
+    ``no-rollout`` outside one.
+    Copies run on a few threads of their own, so a burst of them never holds up the server's other work.
+    A copy has no time limit.
+
+    A copy never fails the request: a failed copy is logged, its partial folder removed, and it returns ``None``.
+    An entry it cannot read is skipped and logged, and the rest is kept.
+    It also returns ``None`` without copying when ``output_dir`` is relative, when no ``results_dir`` is set, and
+    while the calling task is being cancelled, so shutdown stays fast: it skips copies that have not started.
+    A copy already running when the task is cancelled stops and removes what it copied, since the source may be
+    removed next, and the cancellation goes on.
+    Call it in a ``finally`` so a failed request's files are kept too, and outside any ``asyncio.timeout`` block:
+    inside one that has expired, the task counts as being cancelled and nothing is kept.
+
+    An invalid ``name`` or ``server_name`` is a bug in the calling server, not a failed copy, and raises
+    ``ValueError``.
+    """
+    _check_name(name)
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        logger.info("Not keeping %s for %s: the request is being cancelled.", src, server_name)
+        return None
+    dest = _kept_dir(server_name, name, label, output_dir)
+    if dest is None:
+        return None
+    stop = threading.Event()
+    copying = partial(copy_tree, Path(src), dest, stop=stop)
+    try:
+        return await asyncio.get_running_loop().run_in_executor(_save_executor, copying)
+    except asyncio.CancelledError:
+        # The copy's thread keeps running after a cancel; it must not leave a partial folder that looks kept.
+        stop.set()
+        raise
+    except Exception:
+        # copy_tree has logged it.
+        return None
+
+
+def _reset_after_fork() -> None:
+    """Give a forked child state of its own: its parent's folders, locks and copy threads are not its own."""
+    global _default_temp_dir, _checked_temp_parents, _process_dirs, _exit_handler_registered
+    global _first_use_lock, _save_executor, _temp_dir_executor, _process_token
+    _default_temp_dir = None
+    _checked_temp_parents = set()
+    _process_dirs = {}
+    _exit_handler_registered = False
+    _process_token = secrets.token_hex(4)
+    _first_use_lock = threading.Lock()
+    _save_executor = ThreadPoolExecutor(max_workers=_SAVE_WORKERS, thread_name_prefix="nemo-gym-save-dir")
+    _temp_dir_executor = ThreadPoolExecutor(max_workers=_TEMP_DIR_WORKERS, thread_name_prefix="nemo-gym-temp-dir")
+
+
+def _warn_once(key: str, message: str, *args: object) -> None:
+    if key not in _warned:
+        _warned.add(key)
+        logger.warning(message, *args)
+
+
+def _host_id() -> str:
+    """This host's current boot, as 12 hex digits, or ``unknown`` where Linux does not expose it."""
+    try:
+        return _BOOT_ID.read_text().strip().replace("-", "")[:12] or _UNKNOWN_HOST
+    except OSError:
+        return _UNKNOWN_HOST
+
+
+def _pid_namespace() -> int | None:
+    """This process's PID namespace, or ``None`` where Linux does not expose one."""
+    try:
+        return os.stat("/proc/self/ns/pid").st_ino
+    except OSError:
+        return None
+
+
+def _process_dir_name() -> str:
+    return f"nemo-gym-{_host_id()}-{_pid_namespace() or 0}-{os.getpid()}-{_process_token}"
+
+
+def _remove_stale_process_dirs(parent: Path) -> list[Path]:
+    """Remove this user's process folders under ``parent`` whose process is gone, with everything inside.
+
+    A killed process cannot remove its own folder.
+    Each process folder's name records its host's boot, its PID namespace and its process.
+    A folder goes only when it belongs to this user, this boot of this host and this PID namespace,
+    and its process is no longer running.
+    A folder of another host, another boot or another container's namespace stays, which holds on a filesystem many
+    hosts share too: the launcher's per-job temp_dir and the system's temporary-file cleaner bound those.
+    """
+    host = _host_id()
+    namespace = _pid_namespace()
+    if host == _UNKNOWN_HOST or namespace is None:
+        return []
+    removed = []
+    uid = os.getuid()
+    try:
+        entries = list(os.scandir(parent))
+    except OSError:
+        return []
+    for entry in entries:
+        match = _PROCESS_DIR.fullmatch(entry.name)
+        if match is None or match["host"] != host or int(match["namespace"]) != namespace:
+            continue
+        try:
+            if not entry.is_dir(follow_symlinks=False) or entry.stat(follow_symlinks=False).st_uid != uid:
+                continue
+        except OSError:
+            continue
+        if process_may_be_running(int(match["pid"])):
+            continue
+        if remove_tree(entry.path):
+            removed.append(Path(entry.path))
+    return removed
+
+
+def _remove_own_process_dirs(pid: int) -> None:
+    """Remove the folders this process made, at its exit; a forked child that inherited the handler does nothing."""
+    if os.getpid() != pid:
+        return
+    for folder in list(_process_dirs.values()):
+        remove_tree(folder)
+
+
+def _process_dir(parent: Path) -> Path:
+    """This process's own folder under ``parent``, created once and removed when the process exits."""
+    global _exit_handler_registered
+    folder = _process_dirs.get(parent)
+    if folder is not None:
+        return folder
+    with _first_use_lock:
+        folder = _process_dirs.get(parent)
+        if folder is not None:
+            return folder
+        folder = parent / _process_dir_name()
+        # Private like the folders in it: a configured temp_dir may be a folder other users can open.
+        folder.mkdir(mode=0o700)
+        if not _exit_handler_registered:
+            atexit.register(_remove_own_process_dirs, os.getpid())
+            _exit_handler_registered = True
+        _process_dirs[parent] = folder
+    return folder
+
+
+def _make_private_dir(folder: Path) -> None:
+    """Create ``folder`` for this user only, or check that an existing one is this user's own real folder."""
+    try:
+        folder.mkdir(mode=0o700)
+        return
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise type(error)(
+            error.errno, f"Could not create the default temp_dir {folder}: {error.strerror}. Set temp_dir."
+        ) from error
+    info = os.lstat(folder)
+    # lstat does not follow a symlink, so a symlink is not a folder here.
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise PermissionError(
+            f"The default temp_dir {folder} is not a folder of this user's own. Set temp_dir to a folder of your own."
+        )
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        # Others who can write here could rename or replace this user's folders, such as one made by a launcher.
+        logger.warning(
+            "Making the default temp_dir %s private to this user: it was mode %o.", folder, stat.S_IMODE(info.st_mode)
+        )
+        os.chmod(folder, 0o700)
+
+
+def _resolve_default_temp_dir() -> Path:
+    """This user's default temp_dir, ``<system temp>/nemo_gym-<user id>/``, private to the user."""
+    global _default_temp_dir
+    if _default_temp_dir is None:
+        folder = Path(tempfile.gettempdir()) / f"nemo_gym-{os.getuid()}"
+        _make_private_dir(folder)
+        _default_temp_dir = folder
+    return _default_temp_dir
+
+
+def _temp_parent(temp_dir: str | Path | None) -> Path:
+    """The folder temporary folders go in: ``temp_dir``, else the global ``temp_dir``, else the user's default."""
+    if temp_dir is not None:
+        parent, source = Path(temp_dir).expanduser(), "the temp_dir argument"
+        if not parent.is_absolute():
+            # A server would resolve it against its own source folder.
+            raise ValueError(f"temp_dir must be an absolute path, got {str(temp_dir)!r}")
+    elif configured := (maybe_get_global_config_dict() or {}).get(TEMP_DIR_KEY_NAME):
+        parent, source = Path(configured), "the temp_dir setting"
+    else:
+        parent, source = _default_temp_dir, "the default temp_dir"
+    if parent is not None and parent in _checked_temp_parents:
+        return parent
+    with _first_use_lock:
+        if parent is None:
+            # Raises an error that names the default temp_dir when it cannot be used.
+            parent = _resolve_default_temp_dir()
+        if parent in _checked_temp_parents:
+            return parent
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise type(error)(
+                error.errno, f"Could not create temporary folders under {parent}, chosen by {source}: {error.strerror}"
+            ) from error
+        # Checked here, on the node that writes, because the mount table differs per node.
+        warn_if_unsuitable(TEMP_DIR_KEY_NAME, parent)
+        _checked_temp_parents.add(parent)
+    # Outside the lock: leftovers can be large trees, and other threads' first uses and session removals take the
+    # lock. It removes only folders of processes that are no longer running, so it races with nothing this process
+    # makes meanwhile. Removing leftovers is housekeeping: it must never fail the request that triggered it.
+    try:
+        _remove_stale_process_dirs(parent)
+    except Exception:
+        logger.warning("Could not remove leftover temporary folders under %s", parent, exc_info=True)
+    return parent
+
+
+def _forget(parent: Path) -> None:
+    """Drop what this process knows about ``parent`` after something outside removed it, so it is checked again.
+
+    Only what is really gone is dropped: another thread that hit the same removal may already have made the folders
+    again, and its new process folder must not count as a dead process's leftover.
+    """
+    global _default_temp_dir
+    with _first_use_lock:
+        if not parent.is_dir():
+            _checked_temp_parents.discard(parent)
+            if parent == _default_temp_dir:
+                _default_temp_dir = None
+        folder = _process_dirs.get(parent)
+        if folder is not None and not folder.is_dir():
+            del _process_dirs[parent]
+
+
+def _in_process_dir(temp_dir: str | Path | None, make: Callable[[Path], _T]) -> _T:
+    """Call ``make`` with this process's folder under ``temp_dir``, checking the folders again if one was removed."""
+    parent = _temp_parent(temp_dir)
+    try:
+        return make(_process_dir(parent))
+    except FileNotFoundError:
+        # Something outside this process removed its folder, such as a cleaner of old temporary files.
+        _forget(parent)
+        return make(_process_dir(_temp_parent(temp_dir)))
+
+
+def _check_name(name: str) -> None:
+    if not _NAME.fullmatch(name):
+        raise ValueError(f"name must be lowercase letters, digits, '-' and '_', got {name!r}")
+
+
+def _create_temp_dir(name: str, temp_dir: str | Path | None, *, prefix: str = "") -> Path:
+    _check_name(name)
+    return _in_process_dir(temp_dir, lambda folder: Path(tempfile.mkdtemp(prefix=f"{prefix}{name}-", dir=folder)))
+
+
+async def _create_temp_dir_off_loop(name: str, temp_dir: str | Path | None, *, prefix: str = "") -> Path:
+    """Create a temporary folder on the temporary folder threads, removing it if the caller is cancelled first."""
+    creating = asyncio.get_running_loop().run_in_executor(
+        _temp_dir_executor, partial(_create_temp_dir, name, temp_dir, prefix=prefix)
+    )
+    try:
+        return await asyncio.shield(creating)
+    except asyncio.CancelledError:
+        # The thread may still create the folder after this task is cancelled; remove it once it does.
+        creating.add_done_callback(_remove_created_dir)
+        raise
+
+
+def _remove_created_dir(creating: asyncio.Future[Path]) -> None:
+    if not creating.cancelled() and creating.exception() is None:
+        # A done callback runs on the event loop, so the removal goes to a thread.
+        _temp_dir_executor.submit(remove_tree, creating.result())
+
+
+def _kept_dir(server_name: str, name: str, label: str | None, output_dir: str | Path | None) -> Path | None:
+    """A new folder path for kept files: ``<output>/<name>/<rollout>/<UTC time>-[<label>-]<random>``."""
+    if output_dir is not None:
+        output = Path(output_dir)
+        if not output.is_absolute():
+            _warn_once(
+                f"relative:{output}",
+                "%s's output_dir %r is not an absolute path, so its files are not kept; "
+                "a relative path would resolve against the server's own source folder.",
+                server_name,
+                str(output),
+            )
+            return None
+    else:
+        if server_name in ("", ".", ".."):
+            raise ValueError(f"server_name must name a server, got {server_name!r}")
+        results_dir = (maybe_get_global_config_dict() or {}).get(RESULTS_DIR_KEY_NAME)
+        if not results_dir:
+            # Only a process started without Gym's configuration gets here, and it has no results folder.
+            _warn_once("no-results-dir", "No results_dir is set in this process, so kept files are not saved.")
+            return None
+        output = Path(results_dir) / quote(server_name, safe="")
+    leaf = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if label:
+        leaf += "-" + quote(label, safe="")[:_MAX_LABEL_LENGTH]
+    leaf += "-" + uuid4().hex[:12]
+    rollout = quote(current_rollout_id() or _NO_ROLLOUT, safe="")[:_MAX_ROLLOUT_LENGTH]
+    if rollout in (".", ".."):
+        # quote leaves dots alone, and these would name the folder itself or its parent.
+        rollout = rollout.replace(".", "%2E")
+    return output / name / rollout / leaf
+
+
+os.register_at_fork(after_in_child=_reset_after_fork)

@@ -40,6 +40,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
+from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME
 from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
@@ -65,6 +66,7 @@ from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON, CallI
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.utils.filesystems import warn_if_unsuitable
 
 
 logger = logging.getLogger(__name__)
@@ -366,6 +368,15 @@ def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]
         return None
     root = config.model_call_capture_dir
     assert root is not None  # enforced by ModelCallCaptureConfig
+    # Checked by the writer only, on its own node; readers such as rollout collection open the same folder quietly.
+    warn_if_unsuitable(
+        MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+        root,
+        advice=(
+            "That is expected when capture is kept as run output, as in an evaluation run. A run that deletes "
+            "capture at shutdown, such as NeMo RL, should place it on the node's local disk."
+        ),
+    )
     try:
         return CaptureStore(root)
     except Exception:

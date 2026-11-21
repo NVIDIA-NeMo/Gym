@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib
 import importlib.metadata
+import os
 import sys
 from argparse import ArgumentParser
 from contextlib import nullcontext as does_not_raise
@@ -109,6 +110,7 @@ class TestGlobalConfig:
             "uv_venv_dir": str(WORKING_DIR),
             "results_dir": str(RESULTS_DIR.expanduser().resolve()),
             "cache_dir": str(CACHE_DIR.expanduser().resolve()),
+            "temp_dir": None,
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -359,6 +361,38 @@ class TestGlobalConfig:
         self._mock_parse_environment(monkeypatch, DictConfig({"results_dir": 123}))
 
         with raises(ConfigError, match="results_dir must be a non-empty path string"):
+            get_global_config_dict()
+
+    def test_temp_dir_resolves_to_an_absolute_path(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": "~/gym-temp"}))
+
+        # A server resolves a relative path against its own source folder, so the parser hands it an absolute one.
+        assert get_global_config_dict()["temp_dir"] == os.path.join(os.path.expanduser("~"), "gym-temp")
+
+    def test_runtime_file_roots_keep_symlinks_for_each_node_to_follow(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        (tmp_path / "real").mkdir()
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": str(tmp_path / "link" / "temp")}))
+
+        assert get_global_config_dict()["temp_dir"] == str(tmp_path / "link" / "temp")
+
+    def test_a_relative_temp_dir_is_made_absolute(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": "gym-temp"}))
+
+        assert get_global_config_dict()["temp_dir"] == os.path.join(os.getcwd(), "gym-temp")
+
+    # An empty string would otherwise become the working directory: the source checkout.
+    @mark.parametrize("value", ["", 5])
+    def test_an_empty_or_non_string_temp_dir_is_refused(self, monkeypatch: MonkeyPatch, value: object) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": value}))
+
+        with raises(ConfigError, match="temp_dir must be a non-empty path string"):
             get_global_config_dict()
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:

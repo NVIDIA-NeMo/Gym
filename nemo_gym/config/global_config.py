@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import re
 import sys
 import textwrap
@@ -137,6 +138,8 @@ UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
+# Where temporary folders go. Null means <system temp>/nemo_gym-<user id>/ on each node.
+TEMP_DIR_KEY_NAME = "temp_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
@@ -200,6 +203,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_VENV_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     CACHE_DIR_KEY_NAME,
+    TEMP_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -2087,6 +2091,16 @@ Set the keys individually, in a config or as overrides, e.g.:
                 if not isinstance(dir_value, str) or not dir_value:
                     raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
                 global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
+
+            # Runtime files; see nemo_gym/core/runtime_files.py.
+            # An unset temp_dir is resolved by each process on its own node, never here.
+            temp_dir = global_config_dict.setdefault(TEMP_DIR_KEY_NAME, None)
+            if temp_dir is not None:
+                if not isinstance(temp_dir, str) or not temp_dir:
+                    raise ConfigError(f"{TEMP_DIR_KEY_NAME} must be a non-empty path string, got {temp_dir!r}.")
+                # Made absolute without following symlinks: the path is used on every node, and a symlink on the
+                # driver may point elsewhere, or nowhere, on another node.
+                global_config_dict[TEMP_DIR_KEY_NAME] = os.path.abspath(os.path.expanduser(temp_dir))
 
             # UV related configuration
             # An explicit `uv_cache_dir` wins, then a UV_CACHE_DIR the user already exported, then a
