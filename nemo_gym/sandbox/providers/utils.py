@@ -152,8 +152,11 @@ async def kill_cancelled_command(proc: asyncio.subprocess.Process) -> None:
     timeout kills the process, so a cancelled call leaves the command running. The reap is shielded from the
     cancellation that is still in force and bounded by ``REAP_TIMEOUT_S``.
     """
-    if proc.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    # Every caller starts a new session. Its group can outlive the CLI process,
+    # so retain the original group ID even when that process has already exited.
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
     with anyio.CancelScope(shield=True), anyio.move_on_after(REAP_TIMEOUT_S), contextlib.suppress(Exception):
-        await proc.wait()
+        # wait() can block on a paused stdout/stderr transport after SIGKILL.
+        # Drain both pipes while reaping, including output held by descendants.
+        await proc.communicate()
