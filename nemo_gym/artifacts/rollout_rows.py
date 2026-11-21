@@ -17,6 +17,7 @@
 from collections.abc import Mapping
 from typing import Any
 
+from nemo_gym.trajectory.row_media import prune_row_media
 from nemo_gym.trajectory.trajectory_record import (
     NG_TRAJECTORY_KEY,
     NG_VERIFIER_INVOCATIONS_KEY,
@@ -92,4 +93,6 @@ def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
         else:
             sanitized_capture.pop("calls", None)
         sanitized["ng_model_call_capture"] = sanitized_capture
+    # A row written with ``row_media: reference`` lists its referenced images; keep the entries this view still has.
+    prune_row_media(sanitized)
     return sanitized

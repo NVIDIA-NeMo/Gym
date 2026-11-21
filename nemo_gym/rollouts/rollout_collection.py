@@ -142,6 +142,7 @@ from nemo_gym.rollouts.model_calls import (
     model_call_capture_dirs_from_config,
     model_call_payloads_from_config,
     observability_enabled_from_config,
+    reference_record_media,
 )
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
@@ -264,6 +265,7 @@ from nemo_gym.models.token_capture.delivery import (
 from nemo_gym.models.token_capture.protocols import installed_token_source
 from nemo_gym.models.token_capture.store import TokenCaptureStore
 from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
+from nemo_gym.trajectory.row_media import NG_ROW_MEDIA_KEY, row_media_from_config
 
 
 logger = logging.getLogger(__name__)
@@ -1122,6 +1124,24 @@ def _returned_observation_envelopes(result: Any) -> list[tuple[dict[str, Any], s
         if isinstance(result.get("failure"), dict):
             envelopes.append((result["failure"], "trajectory", "agent_observations"))
     return envelopes
+
+
+async def _reference_record_media(
+    record: dict[str, Any], capture_dirs: Sequence[Path], rollouts_fpath: Optional[Path]
+) -> None:
+    """Store a finished record's large data URLs once and reference them (``row_media: reference``), in place.
+
+    Runs off the event loop: it hashes every image and writes the new ones durably. A failure is logged and leaves
+    the record's media inline, so the row is still written whole.
+    """
+    try:
+        await asyncio.to_thread(reference_record_media, record, capture_dirs, rollouts_fpath)
+    except Exception:
+        logger.warning(
+            "Could not reference the media of rollout %s; its row keeps them inline.",
+            record.get(ROLLOUT_ID_KEY_NAME),
+            exc_info=True,
+        )
 
 
 async def _enrich_returned_result(
@@ -4640,6 +4660,7 @@ executions → not run again (left to recovery)
         self._health_capture_dirs = capture_dirs
         observability_enabled = observability_enabled_from_config(global_config)
         model_call_payloads = model_call_payloads_from_config(global_config)
+        row_media = row_media_from_config(global_config)
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
@@ -4993,6 +5014,10 @@ executions → not run again (left to recovery)
                         global_config.get("model_call_capture") or {}
                     ).trajectory_schema_version,
                 )
+                if row_media == "reference":
+                    # Before anything reads or keeps the record, so the row, the retained result and the upload
+                    # spool all hold the same references.
+                    await _reference_record_media(result, capture_dirs, output_fpath)
 
                 # Freeze and rebuild tokens only for participating agents.
                 # This step does not retire the frozen snapshot.
@@ -5520,6 +5545,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         NG_AGENT_OBSERVATIONS_KEY,
                         "ng_model_call_capture",
                         NG_TRAJECTORY_KEY,
+                        # Lists places inside the evidence keys above.
+                        NG_ROW_MEDIA_KEY,
                     )
                 }
                 response = r.get("response") or {}
@@ -6601,6 +6628,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             model_call_payloads = model_call_payloads_from_config(global_config)
             if delete_model_call_capture and model_call_payloads != "inline":
                 raise ValueError("delete_model_call_capture needs model_call_payloads: inline")
+            row_media = row_media_from_config(global_config)
+            if delete_model_call_capture and row_media != "inline":
+                raise ValueError("delete_model_call_capture needs row_media: inline")
 
             async def enrich(completed: _CompletedRollout) -> None:
                 options = dict(
@@ -6631,6 +6661,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     completed.row, record, rollout_latency_ms=completed.rollout_latency_ms, **options
                 )
                 _reflect_enrichment(completed.result, record)
+                if row_media == "reference":
+                    # Only the shard's row references its media; the returned result keeps it inline. A staged
+                    # shard's blobs still go to their final place (the capture dir, or beside the run folder's
+                    # rollouts file) as each row is written, so its published rows name blobs that are there.
+                    record = dict(record)
+                    await _reference_record_media(record, capture_dirs, writer.rollouts_fpath)
                 writer.write(record)
 
         else:
