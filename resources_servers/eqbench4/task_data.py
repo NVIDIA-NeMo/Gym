@@ -7,15 +7,15 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-# The policy response that eqbench4_agent sends to /verify carries the conversation under this key of its metadata, as
-# a JSON string, as Gym's Simple Agent carries its outcome there. Gym re-judges a saved answer with a verify request
-# rebuilt from the task row and the saved response alone, so the conversation must be in the response for a re-judge
-# to grade it; the grading binding then covers the whole conversation, too.
+# The policy response that the eqbench4 environment server sends to /verify carries the conversation under this key of
+# its metadata, as a JSON string, as Gym's Simple Agent carries its outcome there. Gym re-judges a saved answer with a
+# verify request rebuilt from the task row and the saved response alone, so the conversation must be in the response
+# for a re-judge to grade it; the grading binding then covers the whole conversation, too.
 CONVERSATION_METADATA_KEY = "eqbench4_conversation"
 
-# How a conversation ended and, for one the policy stopped, why: eqbench4_agent sends them to /verify, and the
-# resources server reads them from there, so both declare them from here.
-ConversationStatus = Literal["completed", "persona_ended", "persona_failed", "policy_failed"]
+# How a conversation ended and, for one the policy stopped, why: the eqbench4 environment server sends them to
+# /verify, and the resources server reads them from there, so both declare them from here.
+ConversationStatus = Literal["completed", "persona_ended", "policy_failed"]
 PolicyStopReason = Literal["context_limit", "output_budget", "content_filter", "empty_reply"]
 
 

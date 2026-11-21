@@ -2,16 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """EQ-Bench 4 resources server: judges a policy's roleplay conversation against published transcripts.
 
-The ``eqbench4_agent`` runs the conversation between the policy and the simulated persona and sends the transcript
-here. Each row names published leaderboard transcripts of the same scenario. For each one the pairwise judge reads
-both transcripts twice, once in each order, and the comparison's fraction for the policy follows from the weighted
-margins. The reward is the policy's mean fraction. ``compute_metrics`` adds the policy's comparisons to the published
-comparison graph and fits Bradley-Terry ratings, which places the policy on the EQ-Bench 4 leaderboard scale.
+The ``eqbench4`` environment server runs the conversation between the policy and the simulated persona and sends the
+transcript here. Each row names published leaderboard transcripts of the same scenario. For each one the pairwise judge
+reads both transcripts twice, once in each order, and the comparison's fraction for the policy follows from the
+weighted margins. The reward is the policy's mean fraction. ``compute_metrics`` adds the policy's comparisons to the
+published comparison graph and fits Bradley-Terry ratings, which places the policy on the EQ-Bench 4 leaderboard scale.
 
-A conversation the policy stopped is scored as a loss to every opponent, without a judge; one the persona simulator
-broke (only from an older agent: the current agent fails the run, so it is retried) is left out of the score.
-EQ-Bench 4 instead rates only completed conversations and finishes the rest on a resumed run. ``aggregate_metrics``
-reports how many conversations the policy stopped or were left out, and why.
+A conversation the policy stopped is scored as a loss to every opponent, without a judge. EQ-Bench 4 instead rates
+only completed conversations and finishes the rest on a resumed run. ``aggregate_metrics`` reports how many
+conversations the policy stopped, and why. A conversation the persona simulator broke never reaches ``/verify``: it is
+the environment server's failure, which a resumed run runs again.
 """
 
 import asyncio
@@ -59,11 +59,11 @@ from resources_servers.eqbench4.judging import (
 )
 from resources_servers.eqbench4.metrics import (
     RatingInputs,
-    dropped_conversation_alerts,
-    dropped_conversation_metrics,
     eqbench4_metrics,
     eqbench4_repeat_metrics,
     key_metrics,
+    policy_stop_alerts,
+    policy_stop_metrics,
 )
 from resources_servers.eqbench4.task_data import (
     CONVERSATION_METADATA_KEY,
@@ -119,7 +119,7 @@ class EQBench4RunRequest(BaseRunRequest):
 
 
 class EQBench4VerifyRequest(EQBench4RunRequest, BaseVerifyRequest):
-    # Written by eqbench4_agent.
+    # Written by the eqbench4 environment server.
     transcript: list[TranscriptMessage] = Field(default_factory=list)
     conversation_status: ConversationStatus
     conversation_error: str | None = None
@@ -169,8 +169,7 @@ class OpponentComparison(BaseModel):
 
 
 class EQBench4VerifyResponse(EQBench4VerifyRequest, BaseVerifyResponse):
-    # Whether the conversation was scored: judged, or a policy stop scored as a loss. A conversation left out of the
-    # score was not.
+    # Whether the conversation was scored: judged, or a policy stop scored as a loss.
     evaluation_completed: bool = True
     comparisons: list[OpponentComparison] = Field(default_factory=list)
     policy_turns: int = 0
@@ -204,17 +203,6 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
     async def verify(self, body: EQBench4VerifyRequest) -> EQBench4VerifyResponse:
         fields = body.model_dump()
         policy_turns = sum(message.role == "assistant" for message in body.transcript)
-        if body.conversation_status == "persona_failed":
-            # The simulator, not the policy, broke the conversation: leave the row out of the score.
-            return EQBench4VerifyResponse(
-                **fields,
-                reward=0.0,
-                policy_turns=policy_turns,
-                mask_sample=True,
-                evaluation_completed=False,
-                failure_kind="eqbench4:persona_failed",
-                failure_reason=body.conversation_error or "the persona simulator gave no valid reply",
-            )
         if body.conversation_status == "policy_failed" or policy_turns == 0:
             # The policy stopped the conversation (no visible reply, an exhausted output budget, a content filter or
             # refusal, a context overflow): it loses every comparison of the scenario. Masking it would rate the
@@ -440,18 +428,16 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
         return self._reference_outcomes
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        """Gym's aggregation, plus how many conversations the policy stopped or were left out of the score, and why.
+        """Gym's aggregation, plus how many conversations the policy stopped, and why.
 
-        ``compute_metrics`` sees only scored rows, so these are counted here, over every row, and each kind that
+        ``compute_metrics`` sees only unmasked rows, so these are counted here, over every row, and each cause that
         occurred is logged as a warning.
         """
         result = await super().aggregate_metrics(body)
-        dropped = dropped_conversation_metrics(body.verify_responses)
-        result.agent_metrics.update(dropped)
-        result.key_metrics.update(
-            {name: dropped[name] for name in ("eqbench4_policy_stopped_rate", "eqbench4_persona_failed_rate")}
-        )
-        for alert in dropped_conversation_alerts(dropped):
+        stops = policy_stop_metrics(body.verify_responses)
+        result.agent_metrics.update(stops)
+        result.key_metrics["eqbench4_policy_stopped_rate"] = stops["eqbench4_policy_stopped_rate"]
+        for alert in policy_stop_alerts(stops):
             logger.warning(alert)
         return result
 

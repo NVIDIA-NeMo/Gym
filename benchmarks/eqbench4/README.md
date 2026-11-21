@@ -30,9 +30,11 @@ time with that turn's system prompt (role, presenting issue, demographics, goals
 dialogue so far; its first turn also sees the opening message that states the presenting issue. The persona never
 reveals its hidden profile to the policy. After each policy turn the persona simulator replies with a private
 `<internal>` monologue, its spoken `<dialogue>`, and a `<status>`; it can end the conversation early. The policy sees
-only the dialogue. The agent is `eqbench4_agent` (see its [README](../../responses_api_agents/eqbench4_agent/README.md)),
-and EQ-Bench 4 runs only with it: the resources server admits no other agent (`allowed_agents`), since another harness
-would leave out the conversation with the persona.
+only the dialogue. The [`eqbench4` environment server](../../environment_servers/eqbench4/README.md) runs the
+conversation: the policy and the persona simulator each answer through their own agent session (`simple_agent` with
+`max_steps: 1` and `execute_tools: false`), and each policy turn sends that turn's whole input, since the system prompt
+changes every turn. The persona simulator is part of the environment: a training framework's sampling values and
+training-token capture reach only the policy.
 
 **Scoring.** For each row the resources server compares the policy's conversation with four published conversations
 of the same scenario. The pairwise judge reads both transcripts, the persona's monologues, and the full hidden
@@ -52,14 +54,17 @@ how the policy's mean gap to the models within three ranks of it moves. `eqbench
 `eqbench4_win_rate` is the mean comparison fraction. Claude Opus 4.8 also scores twelve neutral behavioural traits
 per conversation (`eqbench4_trait/<name>`, 0 to 10); they are informational and do not enter the reward or rating.
 
-**Run conditions.** Policy sampling comes from each row: `temperature: 0.7`, `max_output_tokens: 10000`, EQ-Bench
-4's settings for the evaluated model. Upstream's direct Anthropic backend sends no temperature, so the published
-Claude models ran at Anthropic's default of 1.0; reproduce a Claude entry with `--temperature 1.0`. The persona
-uses temperature 0.7 and 10,000 output tokens; the pairwise judges temperature 0.3 and 4,096 tokens; the trait judge
-temperature 0.7 and 16,000 tokens. Reasoning is minimal for Gemini, none for GPT-5.5, and Claude runs without
-extended thinking, as in EQ-Bench 4. There is no episode deadline: an episode is bounded by eight turns per side,
-three persona replies per persona turn, seven policy replies per policy turn, the output-token limits above, each
-model server's request timeout, and `judge_timeout_secs` (1,800 s) per judge call. One repeat per scenario.
+**Run conditions.** Policy sampling comes from each row: `temperature: 0.7`, `max_output_tokens: 10000`, EQ-Bench 4's
+settings for the evaluated model. Upstream's direct Anthropic backend sends no temperature, so the published Claude
+models ran at Anthropic's default of 1.0; reproduce a Claude entry by pinning the policy's temperature on its model
+server, `++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0` (Gym refuses run-level
+overrides such as `--temperature` for task rows an environment server runs). The persona uses temperature 0.7 and
+10,000 output tokens; the pairwise judges temperature 0.3 and 4,096 tokens; the trait judge temperature 0.7 and 16,000
+tokens. Reasoning is minimal for Gemini, none for GPT-5.5, and Claude runs without extended thinking, as in EQ-Bench 4.
+An episode is bounded by eight turns per side, three persona replies per persona turn, seven policy replies per policy
+turn, the output-token limits above, each model server's request timeout, and `judge_timeout_secs` (1,800 s) per judge
+call; the environment server's `default_episode_timeout_seconds` (6 hours) bounds one that stalls. One repeat per
+scenario.
 
 **Grading path.** Path A: the resources server runs the pairwise judging inside `observe_llm_judge_grading`, calls
 every judge through `call_judge` and records each parsed verdict with `record_parsed_judge_verdict`. A comparison
@@ -80,21 +85,21 @@ finish, and a trainer cannot learn that stopping avoids a low reward. Its `polic
 | `content_filter` | A provider's content filter withheld the reply, or the model refused | Check the provider's filter |
 | `empty_reply` | Seven finished replies without visible text | Inspect the policy's replies. A server reasoning parser (such as vLLM's `--reasoning-parser nemotron_v3`) on a model that does not close `</think>` hides the whole reply as reasoning: serve without the parser and set `uses_reasoning_parser=false` on the policy |
 
-The agent logs a warning naming the scenario, turn and cause each time. After the run the aggregate metrics report
-`eqbench4_conversations` (all conversations), `eqbench4_policy_stopped_rate` and its breakdown
+The environment server logs a warning naming the scenario, turn and cause each time. After the run the aggregate
+metrics report `eqbench4_conversations` (all conversations), `eqbench4_policy_stopped_rate` and its breakdown
 `eqbench4_policy_stopped_rate/<cause>` (with counts in `eqbench4_policy_stopped/<cause>`); the rate is a key metric,
 and the resources server logs a run-level warning with the counts and the usual fix. Upstream EQ-Bench 4 rates only
 completed conversations and finishes unfinished ones when a run is resumed; its published runs completed 3,357 of
 3,360, so scoring a stop as a loss leaves the comparison with them unchanged.
 
 **The persona's failures are retried.** When the persona gives no usable reply in three attempts, the simulator, not
-the policy, broke the conversation: the agent fails the run, which the failures sidecar records as a retryable
-`agent_run_error`, and a resume runs the conversation again, so the scenario keeps its place in the score.
+the policy, broke the conversation: the environment server fails the episode with the retryable environment failure
+`eqbench4:persona_failed`, and a resume runs the conversation again, so the scenario keeps its place in the score.
 
 **Endpoint outages are retried, not masked.** A persona or judge endpoint that refuses connections for
 `eqbench4_connection_retry_timeout_s` (300 s by default; Gym's default would retry forever) fails the call. A persona
-outage fails the whole conversation: the benchmark sets `route_failures_to_sidecar: true`, so it is recorded in the
-failures sidecar as a retryable attempt, and the run exits 75. Once the endpoint is back, `--resume` (or
+outage fails the whole conversation as the retryable environment failure `eqbench4:persona_failed`; a policy outage
+fails it as a retryable failure of the policy's call. Neither is scored. Once the endpoint is back, `--resume` (or
 `gym eval resubmit --recover` on Slurm) runs those conversations again. A judge outage masks the row as
 `judge_failed` with its conversation kept, and the resume re-judges it without calling the policy again.
 
@@ -170,10 +175,12 @@ and 120 trait-judge calls.
 - Ratings and bootstrap intervals are upstream's own: the resources server runs the downloaded solver
   (`fit_soft_bt`, `compute_local_delta_percentile_bootstrap_ratings`). The committed `results/elo_results.json` differs
   from re-fitting the published comparisons with that solver by up to 1.4 Elo, so it is stale.
-- Claude Opus 4.6, evaluated end to end with the default persona and judges at `--temperature 1.0`, rates 1223.5
-  (95% interval 1207.9 to 1237.2), rank 13; its published rating is 1222.7 (1214.1 to 1231.6), rank 13. At the rows'
-  0.7 it rates 1197.2: compared with the same opponents in the same scenarios, its conversations score 0.034 lower
-  than the published ones at 0.7 and 0.002 lower at 1.0.
+- Claude Opus 4.6, evaluated end to end with the default persona and judges at temperature 1.0, rates 1223.5 (95%
+  interval 1207.9 to 1237.2), rank 13; its published rating is 1222.7 (1214.1 to 1231.6), rank 13. At the rows' 0.7 it
+  rates 1197.2: compared with the same opponents in the same scenarios, its conversations score 0.034 lower than the
+  published ones at 0.7 and 0.002 lower at 1.0. Run through the `eqbench4` environment server, with the temperature
+  pinned on the policy's model server, it rates 1213.0 (1197.9 to 1224.9), rank 15; three runs at 1.0 span 1213.0 to
+  1223.5.
 
 ## Differences from EQ-Bench 4
 

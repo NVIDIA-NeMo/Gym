@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
@@ -202,17 +203,11 @@ async def test_a_comparison_with_no_readable_order_fails_the_row(
         await make_server(tmp_path, judge_max_attempts=1).verify(make_request())
 
 
-async def test_persona_failure_is_masked_without_judging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    judge = ScriptedJudge()
-    monkeypatch.setattr(app_module, "call_judge", judge)
-    result = await make_server(tmp_path).verify(
-        make_request(conversation_status="persona_failed", conversation_error="persona turn 2: no <internal> section")
-    )
-    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "eqbench4:persona_failed")
-    assert result.failure_reason == "persona turn 2: no <internal> section"
-    assert not judge.calls and not result.comparisons
-    # Never judged, so no measurement was made.
-    assert result.evaluation_completed is False
+def test_a_conversation_the_persona_broke_is_not_a_verify_request() -> None:
+    # The persona simulator's failure is the environment server's: it fails the episode, which a resume runs again,
+    # so no conversation it broke is ever graded.
+    with pytest.raises(ValidationError, match="conversation_status"):
+        make_request(conversation_status="persona_failed")
 
 
 async def test_one_readable_order_decides_the_comparison(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -252,7 +247,7 @@ async def test_a_conversation_the_policy_stopped_loses_to_every_opponent(
     assert not judge.calls
 
 
-async def test_aggregate_metrics_report_and_warn_about_left_out_conversations(
+async def test_aggregate_metrics_report_and_warn_about_policy_stops(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     scored = {
@@ -261,10 +256,11 @@ async def test_aggregate_metrics_report_and_warn_about_left_out_conversations(
         "policy_turns": 8,
         "comparisons": [{"opponent": "ref-a", "fraction": 0.8}],
     }
+    # A judge failure is masked, and still counts among the conversations.
     dropped = [
-        {"reward": 0.0, "mask_sample": True, "conversation_status": "policy_failed", "policy_stop_reason": reason}
+        {"reward": 0.0, "conversation_status": "policy_failed", "policy_stop_reason": reason}
         for reason in ("context_limit", "context_limit", "output_budget")
-    ] + [{"reward": 0.0, "mask_sample": True, "conversation_status": "persona_failed"}]
+    ] + [{"reward": 0.0, "mask_sample": True, "conversation_status": "completed", "failure_kind": "judge_failed"}]
     rows = [
         row | {"_ng_task_index": index, "_ng_rollout_index": 0}
         for index, row in enumerate([scored, scored | {"reward": 0.6}, *dropped])
@@ -272,22 +268,20 @@ async def test_aggregate_metrics_report_and_warn_about_left_out_conversations(
     with caplog.at_level("WARNING"):
         result = await make_server(tmp_path).aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
     metrics = result.agent_metrics
-    assert metrics["eqbench4_conversations"] == 6 and metrics["eqbench4_judged_conversations"] == 2
+    assert metrics["eqbench4_conversations"] == 6
     assert metrics["eqbench4_policy_stopped_conversations"] == 3
     assert metrics["eqbench4_policy_stopped_rate"] == pytest.approx(0.5)
     assert metrics["eqbench4_policy_stopped_rate/context_limit"] == pytest.approx(2 / 6)
     assert metrics["eqbench4_policy_stopped/output_budget"] == 1
     assert metrics["eqbench4_policy_stopped/content_filter"] == 0
-    assert metrics["eqbench4_persona_failed_rate"] == pytest.approx(1 / 6)
+    assert not [name for name in metrics if "persona_failed" in name]
     assert "eqbench4_elo" in metrics
     assert result.key_metrics["eqbench4_policy_stopped_rate"] == pytest.approx(0.5)
-    assert result.key_metrics["eqbench4_persona_failed_rate"] == pytest.approx(1 / 6)
     warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
     assert any("stopped replying in 3 of 6 conversations (50.0%)" in w and "context_limit 2" in w for w in warnings)
-    assert any("persona simulator gave no usable reply in 1 of 6" in w for w in warnings)
 
 
-async def test_aggregate_metrics_stay_quiet_when_nothing_was_left_out(
+async def test_aggregate_metrics_stay_quiet_when_the_policy_stopped_nothing(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     rows = [{"reward": 0.5, "conversation_status": "completed", "comparisons": [], "_ng_task_index": 0}]

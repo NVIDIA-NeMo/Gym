@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [project]
-name = "gym-responses-api-agents-eqbench4-agent"
+name = "gym-environment-servers-eqbench4"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [

@@ -7,12 +7,12 @@ import pytest
 from resources_servers.eqbench4.metrics import (
     POLICY,
     RatingInputs,
-    dropped_conversation_alerts,
-    dropped_conversation_metrics,
     eqbench4_metrics,
     eqbench4_repeat_metrics,
     key_metrics,
     policy_outcomes,
+    policy_stop_alerts,
+    policy_stop_metrics,
 )
 from resources_servers.eqbench4.tests.stand_in_solver import install_stand_in_solver, stand_in_rating
 from resources_servers.eqbench4.upstream_rating import Outcome, UpstreamSolver
@@ -104,28 +104,26 @@ def test_key_metrics_select_the_headline() -> None:
     assert key_metrics({"eqbench4_elo": 1100.0, "eqbench4_conversations": 3}) == {"eqbench4_elo": 1100.0}
 
 
-def test_dropped_conversations_and_alerts() -> None:
+def test_policy_stops_and_alerts() -> None:
     rows = [
         {"conversation_status": "completed"},
         {"conversation_status": "policy_failed", "policy_stop_reason": "output_budget"},
         {"conversation_status": "policy_failed"},
-        {"conversation_status": "persona_failed"},
+        {"conversation_status": "persona_ended"},
     ]
-    metrics = dropped_conversation_metrics(rows)
+    metrics = policy_stop_metrics(rows)
     assert metrics["eqbench4_policy_stopped_conversations"] == 2
     assert metrics["eqbench4_policy_stopped/output_budget"] == 1
     assert metrics["eqbench4_policy_stopped/empty_reply"] == 1
     assert metrics["eqbench4_policy_stopped_rate/context_limit"] == 0.0
-    assert dropped_conversation_alerts(metrics) == [
+    assert policy_stop_alerts(metrics) == [
         "EQ-Bench 4: the policy stopped replying in 2 of 4 conversations (50.0%), each scored as a loss to every "
         "opponent: output_budget 1 (raise max_output_tokens or lower the policy's reasoning effort); "
         "empty_reply 1 (inspect the policy's replies in the rollouts; a server reasoning parser hides the whole reply "
         "as reasoning when the model does not close </think>).",
-        "EQ-Bench 4: the persona simulator gave no usable reply in 1 of 4 conversations (25.0%), which are left out "
-        "of the score; check the persona model, which should be the leaderboard's for comparable ratings.",
     ]
-    empty = dropped_conversation_metrics([])
-    assert empty["eqbench4_policy_stopped_rate"] == 0.0 and dropped_conversation_alerts(empty) == []
+    empty = policy_stop_metrics([])
+    assert empty["eqbench4_policy_stopped_rate"] == 0.0 and policy_stop_alerts(empty) == []
 
 
 def test_no_rating_without_the_prepared_files_but_the_rest_is_reported(caplog: pytest.LogCaptureFixture) -> None:

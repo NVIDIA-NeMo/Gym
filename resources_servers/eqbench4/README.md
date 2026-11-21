@@ -6,13 +6,16 @@ describes the measurement contract, provenance and differences from upstream; th
 
 ## Verify
 
-`eqbench4_agent` sends the row, the conversation (`transcript`), and how it ended (`conversation_status`):
+The [`eqbench4` environment server](../../environment_servers/eqbench4/README.md) sends the row, the conversation
+(`transcript`), and how it ended (`conversation_status`):
 
 | `conversation_status` | Result |
 | --- | --- |
 | `completed`, `persona_ended` | Judged against every opponent in the row; reward is the mean fraction |
 | `policy_failed` | No judge calls; a loss to every opponent (fraction 0 each), reward 0, not masked |
-| `persona_failed` | No judge calls; reward 0, masked as `eqbench4:persona_failed` (only from an older agent: the current agent fails the run instead, so it is retried) |
+
+A conversation the persona simulator broke never reaches `/verify`: it is the environment server's failure, which a
+resumed run runs again.
 
 A conversation the policy stopped keeps its `policy_stop_reason` (`context_limit`, `output_budget`,
 `content_filter`, or `empty_reply`, also when no reason is given). It is graded without a judge, inside
@@ -34,7 +37,7 @@ never changes the reward; a failure is kept in `trait_judge_error`.
 
 The response adds `comparisons` (per opponent: fraction, margins, and each judge reading with its verdicts and text),
 `policy_turns`, `trait_scores`, `trait_judge_text`, `trait_judge_error`, and `evaluation_completed`: true for a scored
-conversation, false for one left out of the score without judging.
+conversation, judged or a policy stop.
 
 ## Metrics
 
@@ -59,23 +62,23 @@ other metrics are:
 
 `compute_repeat_metrics` reports each repeat's rating and win rate without an interval.
 
-`aggregate_metrics` counts, over every row, the conversations the policy stopped and those left out of the score, and
-adds:
+`aggregate_metrics` counts, over every row, the conversations the policy stopped, and adds:
 
 | Metric | Meaning |
 | --- | --- |
 | `eqbench4_conversations` | All conversations |
 | `eqbench4_policy_stopped_rate`, `eqbench4_policy_stopped_conversations` | Share and count the policy stopped, each scored as a loss (key metric) |
 | `eqbench4_policy_stopped_rate/<cause>`, `eqbench4_policy_stopped/<cause>` | The same per cause: `context_limit`, `output_budget`, `content_filter`, `empty_reply` |
-| `eqbench4_persona_failed_rate` | Share an older agent reported the persona could not continue (key metric) |
 
 When the policy stopped any conversation it logs a warning with the counts per cause and the usual fix.
 
 ## Configuration
 
-`configs/eqbench4.yaml` pairs the server with `eqbench4_agent` and a `legacy_agent` environment server, and admits only
-that agent (`allowed_agents`): the conversation with the simulated persona is the agent's, so EQ-Bench 4 runs only with
-`eqbench4_agent`. `configs/eqbench4_models.yaml` defines the persona and judge model servers. Key settings:
+`configs/eqbench4.yaml` binds the server to the `eqbench4` environment server, which runs each conversation through
+two agent sessions: the policy (`eqbench4_policy_agent`) and the persona simulator (`eqbench4_persona_agent`), both
+`simple_agent` with `max_steps: 1` and `execute_tools: false`. `allowed_agents` lists the harnesses that passed a smoke
+run as the policy: `simple_agent`. `configs/eqbench4_models.yaml` defines the persona and judge model servers. Key
+settings:
 `judge_model_servers`, `judge_responses_create_params`, `judge_max_attempts`, `trait_judge_model_server`,
 `judge_concurrency`, `judge_timeout_secs`, `reference_comparisons_path`, `rating_solver_dir` and
 `rating_bootstrap_resamples`.
@@ -85,6 +88,7 @@ that agent (`allowed_agents`): the conversation with the simulated persona is th
 ```bash
 gym env test --resources-server eqbench4
 gym env test eqbench4
+ng_test +entrypoint=environment_servers/eqbench4
 ```
 
 ## Licensing

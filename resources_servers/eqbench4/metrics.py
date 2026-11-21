@@ -45,20 +45,14 @@ _STOP_ADVICE = {
 }
 
 
-def dropped_conversation_metrics(verify_responses: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """How many conversations the policy stopped (each scored as a loss to every opponent) and the persona failed (left
-    out of the score), over all rows."""
+def policy_stop_metrics(verify_responses: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """How many conversations the policy stopped, each scored as a loss to every opponent, and why, over all rows."""
     total = len(verify_responses)
     stopped = [row for row in verify_responses if row.get("conversation_status") == "policy_failed"]
     metrics: dict[str, Any] = {
         "eqbench4_conversations": total,
         "eqbench4_policy_stopped_conversations": len(stopped),
         "eqbench4_policy_stopped_rate": len(stopped) / total if total else 0.0,
-        "eqbench4_persona_failed_rate": (
-            sum(row.get("conversation_status") == "persona_failed" for row in verify_responses) / total
-            if total
-            else 0.0
-        ),
     }
     for reason in POLICY_STOP_REASONS:
         count = sum((row.get("policy_stop_reason") or "empty_reply") == reason for row in stopped)
@@ -67,29 +61,20 @@ def dropped_conversation_metrics(verify_responses: Sequence[dict[str, Any]]) -> 
     return metrics
 
 
-def dropped_conversation_alerts(metrics: dict[str, Any]) -> list[str]:
-    """Warnings for stopped and left-out conversations, naming each cause and what to check."""
-    total = metrics["eqbench4_conversations"]
-    alerts = []
-    if metrics["eqbench4_policy_stopped_conversations"]:
-        causes = "; ".join(
-            f"{reason} {metrics[f'eqbench4_policy_stopped/{reason}']} ({_STOP_ADVICE[reason]})"
-            for reason in POLICY_STOP_REASONS
-            if metrics[f"eqbench4_policy_stopped/{reason}"]
-        )
-        alerts.append(
-            f"EQ-Bench 4: the policy stopped replying in {metrics['eqbench4_policy_stopped_conversations']} of "
-            f"{total} conversations ({metrics['eqbench4_policy_stopped_rate']:.1%}), each scored as a loss to every "
-            f"opponent: {causes}."
-        )
-    persona_failed = round(metrics["eqbench4_persona_failed_rate"] * total)
-    if persona_failed:
-        alerts.append(
-            f"EQ-Bench 4: the persona simulator gave no usable reply in {persona_failed} of {total} conversations "
-            f"({metrics['eqbench4_persona_failed_rate']:.1%}), which are left out of the score; check the persona "
-            "model, which should be the leaderboard's for comparable ratings."
-        )
-    return alerts
+def policy_stop_alerts(metrics: dict[str, Any]) -> list[str]:
+    """A warning when the policy stopped any conversation, naming each cause and what to check."""
+    if not metrics["eqbench4_policy_stopped_conversations"]:
+        return []
+    causes = "; ".join(
+        f"{reason} {metrics[f'eqbench4_policy_stopped/{reason}']} ({_STOP_ADVICE[reason]})"
+        for reason in POLICY_STOP_REASONS
+        if metrics[f"eqbench4_policy_stopped/{reason}"]
+    )
+    return [
+        f"EQ-Bench 4: the policy stopped replying in {metrics['eqbench4_policy_stopped_conversations']} of "
+        f"{metrics['eqbench4_conversations']} conversations ({metrics['eqbench4_policy_stopped_rate']:.1%}), each "
+        f"scored as a loss to every opponent: {causes}."
+    ]
 
 
 def _rollouts(tasks: Sequence[Sequence[dict[str, Any]]]) -> list[dict[str, Any]]:

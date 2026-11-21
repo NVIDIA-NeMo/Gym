@@ -1,13 +1,18 @@
 # EQ-Bench 4: multi-turn roleplay with a simulated persona, judged pairwise against published transcripts.
-# Model servers for the persona simulator and the judges are in eqbench4_models.yaml.
+# The eqbench4 environment server runs each conversation: the policy and the persona simulator each answer through an
+# agent session, and this resources server grades the conversation. Model servers for the persona simulator and the
+# judges are in eqbench4_models.yaml.
+environment_server_routes:
+  eqbench4:example: eqbench4_environment_server
+
 eqbench4_resources_server:
   resources_servers:
     eqbench4:
       entrypoint: app.py
       domain: rlhf
       verified: true
-      # The conversation with the simulated persona is eqbench4_agent's; another harness would judge no conversation.
-      allowed_agents: [eqbench4_agent]
+      # Harnesses that answer each policy turn of the eqbench4 environment server's conversation and passed a smoke run.
+      allowed_agents: [simple_agent]
       description: EQ-Bench 4 applied emotional-intelligence roleplay benchmark with a simulated persona
       value: Measure perception, adaptability and repair in multi-turn conversations with simulated users
       # The pairwise judge panel; comparison n goes to judge n modulo the panel size, as in EQ-Bench 4.
@@ -42,20 +47,43 @@ eqbench4_resources_server:
       - name: example
         type: example
         jsonl_fpath: resources_servers/eqbench4/data/example.jsonl
+        taskset: eqbench4:example
 
-eqbench4_agent:
+# The policy: each activation answers one turn from the full input the environment server sends, without tools.
+eqbench4_policy_agent:
   responses_api_agents:
-    eqbench4_agent:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+      execute_tools: false
+
+# The persona simulator, part of the environment: an agent of the same kind on its own model server, never trained.
+eqbench4_persona_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: eqbench4_persona_model
+      max_steps: 1
+      execute_tools: false
+
+eqbench4_environment_server:
+  environment_servers:
+    eqbench4:
       entrypoint: app.py
       resources_server:
         type: resources_servers
         name: eqbench4_resources_server
-      model_server:
-        type: responses_api_models
-        name: policy_model
-      persona_model_server:
-        type: responses_api_models
-        name: eqbench4_persona_model
+      agent_server:
+        type: responses_api_agents
+        name: eqbench4_policy_agent
+      persona_agent:
+        type: responses_api_agents
+        name: eqbench4_persona_agent
       persona_responses_create_params:
         input: []
         temperature: 0.7
@@ -76,11 +104,6 @@ eqbench4_agent:
         active
         </status>
       policy_max_attempts: 7
-
-eqbench4_environment_server:
-  environment_servers:
-    legacy_agent:
-      entrypoint: app.py
-      agent_server:
-        type: responses_api_agents
-        name: eqbench4_agent
+      # A conversation is bounded by its turns, its attempts and each call's timeout; this bounds one that stalls.
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180

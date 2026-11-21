@@ -204,20 +204,6 @@ async def test_a_conversation_the_policy_stopped_is_a_recorded_loss_that_keeps_t
     assert result.response == request.response and result.transcript == request.transcript
 
 
-async def test_a_persona_failure_from_an_older_agent_is_typed_masked_and_keeps_the_answer(tmp_path: Path) -> None:
-    # The current agent raises instead (a retried agent_run_error); a saved row an older agent wrote stays masked.
-    transport = JudgeTransport()
-    request = make_request(conversation_status="persona_failed", conversation_error="stopped")
-    result, invocation = await verify_observed(judged_server(tmp_path, transport), request)
-
-    failure_kind = "eqbench4:persona_failed"
-    assert (result.mask_sample, result.evaluation_completed, result.failure_kind) == (True, False, failure_kind)
-    assert result.failure_reason == "stopped"
-    # Nothing was judged, and the policy's answer and conversation are kept as sent.
-    assert not transport.replies and not invocation.grading_operations
-    assert result.response == request.response and result.transcript == request.transcript
-
-
 async def test_a_judge_outage_is_a_masked_judge_failure_that_keeps_the_answer(tmp_path: Path) -> None:
     server = make_server(tmp_path, judge_max_attempts=1)
     server.server_client.post = AsyncMock(side_effect=ConnectionError("judge endpoint down"))
@@ -234,7 +220,7 @@ async def test_a_judge_outage_is_a_masked_judge_failure_that_keeps_the_answer(tm
 
 
 async def test_a_rejudge_grades_the_conversation_the_saved_response_carries(tmp_path: Path) -> None:
-    # The response as eqbench4_agent sends it: the conversation rides in its metadata.
+    # The response as the eqbench4 environment server sends it: the conversation rides in its metadata.
     conversation = {
         "transcript": _transcript(),
         "conversation_status": "completed",
@@ -272,7 +258,7 @@ def _fresh_digest_registries(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def eqbench4_config() -> dict[str, Any]:
-    """The EQ-Bench 4 server, agent, persona and judge configuration, with the policy `--model-type` adds."""
+    """The EQ-Bench 4 servers, agents, persona and judge configuration, with the policy `--model-type` adds."""
     config: dict[str, Any] = {
         "policy_model": {
             "responses_api_models": {"vllm_model": {"model": "the-policy", "base_url": "http://policy:8000/v1"}}
@@ -299,7 +285,7 @@ def changed(config: dict[str, Any], change: dict[str, Any]) -> dict[str, Any]:
 
 DROP = object()
 SERVER = "eqbench4_resources_server.resources_servers.eqbench4"
-AGENT = "eqbench4_agent.responses_api_agents.eqbench4_agent"
+ENVIRONMENT = "eqbench4_environment_server.environment_servers.eqbench4"
 PERSONA = "eqbench4_persona_model.responses_api_models.vllm_model"
 GPT_JUDGE = "eqbench4_gpt_judge_model.responses_api_models.vllm_model"
 
@@ -320,7 +306,7 @@ def saved_run(tmp_path: Path, config: dict[str, Any]) -> tuple[Path, Path]:
         {f"{SERVER}.judge_concurrency": 4},
         {f"{SERVER}.judge_timeout_secs": 600},
         {f"{SERVER}.judge_max_attempts": 5},
-        {f"{AGENT}.policy_max_attempts": 3},
+        {f"{ENVIRONMENT}.policy_max_attempts": 3},
         {f"{PERSONA}.max_http_attempts": 12},
         # A setting saved runs did not have, now present with its default.
         {f"{SERVER}.judge_concurrency": DROP},
@@ -361,8 +347,8 @@ def test_a_new_judge_endpoint_or_key_is_not_drift(tmp_path: Path) -> None:
         {f"{SERVER}.trait_judge_model_server.name": "eqbench4_gpt_judge_model"},
         {f"{SERVER}.rating_bootstrap_resamples": 50},
         {f"{PERSONA}.model": "another-persona"},
-        {f"{AGENT}.persona_responses_create_params.temperature": 1.0},
-        {f"{AGENT}.persona_correction_message": "Try again."},
+        {f"{ENVIRONMENT}.persona_responses_create_params.temperature": 1.0},
+        {f"{ENVIRONMENT}.persona_correction_message": "Try again."},
     ],
 )
 def test_material_drift_refuses_the_resume_and_names_the_setting(tmp_path: Path, drift: dict[str, Any]) -> None:
