@@ -97,6 +97,25 @@ These span attributes do, so a trace backend can show both without reading `roll
 `gym.rollout.health` is a child of the rollout's dispatch span and carries `nemo.gym.rollout.id`. It is
 emitted when the dispatch was traced, whether or not metrics export is on.
 
+### Run Context on Driver Spans
+
+A rollout's trace is not a child of `gym.job` (see
+[One Trace Per Rollout](#one-trace-per-rollout-linked-to-the-job)), so it cannot inherit the run's context
+from it. The eval driver puts that context on `gym.job` and on every `gym.rollout.dispatch` span:
+
+| Span | Attribute | Value |
+| --- | --- | --- |
+| `gym.job`, `gym.rollout.dispatch` | `nemo.gym.model.name` | The served model name, from `policy_model_name`. |
+| `gym.job` | `nemo.gym.benchmark.names` | The distinct benchmark datasets the job dispatches rows from, sorted. |
+| `gym.rollout.dispatch` | `nemo.gym.benchmark.name` | The benchmark dataset the row was prepared from. |
+| `gym.rollout.dispatch` | `nemo.gym.rollout.attempt.index` | The row's resume attempt, `0` on its first attempt. |
+
+An attribute whose value is unknown is omitted, never filled in. The benchmark is known only in a
+`split=benchmark` run, and only when the server instance that declares the row's dataset (or, for a
+materialized row, its taskset) maps to exactly one `type: benchmark` dataset. The run ID is not repeated:
+it is the `nemo.run.id` resource attribute of every span. These are span attributes only; none of them
+becomes a metric label.
+
 ### Engine Request Ids
 
 Inside a rollout, every call a Gym model server makes to its inference backend carries
