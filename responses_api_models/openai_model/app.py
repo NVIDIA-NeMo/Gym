@@ -32,6 +32,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
 from nemo_gym.telemetry import MeteredSemaphore
+from responses_api_models.openai_model.call_budget import UpstreamCallBudget, reserve_call
 from responses_api_models.openai_model.provider_refusals import provider_refusal, refusal_response
 
 
@@ -187,6 +188,16 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
             "existing behavior."
         ),
     )
+    upstream_call_budget: UpstreamCallBudget | None = Field(
+        default=None,
+        description=(
+            "Run-wide cap on provider HTTP attempts, shared through a ledger file by every process and restart "
+            "of the run. Each attempt is reserved durably before it is sent; once max_calls are reserved, or when an "
+            "existing ledger is empty or corrupt or cannot be locked or written, attempts fail without reaching the "
+            "provider. A local flock serializes reservations, so every process that shares a ledger must run on one "
+            "host unless the filesystem provides cluster-wide flock. Requires upstream_max_num_tries=1. None means no cap."
+        ),
+    )
     upstream_request_timeout_seconds: Optional[float] = Field(
         default=1800.0,
         gt=0,
@@ -239,6 +250,10 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
                 "An upstream retry policy with multiple attempts requires "
                 "upstream_max_num_tries=1 so no inner retry layer can add "
                 "provider attempts"
+            )
+        if self.upstream_call_budget is not None and self.upstream_max_num_tries != 1:
+            raise ValueError(
+                "upstream_call_budget requires upstream_max_num_tries=1 so each reserved call is one HTTP attempt"
             )
         if self.upstream_pool_timeout_seconds is not None and self.max_concurrent_requests is None:
             raise ValueError("upstream_pool_timeout_seconds requires max_concurrent_requests")
@@ -364,6 +379,15 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         self,
         operation: Callable[[], Awaitable[ResponseT]],
     ) -> ResponseT:
+        budget = self.config.upstream_call_budget
+        if budget is not None:
+            unbudgeted = operation
+
+            async def operation() -> ResponseT:
+                # Reserve inside the provider slot, right before the one HTTP attempt it pays for.
+                await asyncio.to_thread(reserve_call, budget)
+                return await unbudgeted()
+
         retry_policy = self.config.upstream_retry_policy
         if retry_policy.max_attempts == 1:
             # Preserve the ordinary model server's historical behavior: one
