@@ -1,0 +1,13 @@
+# Five native Video-MME rows for the resources-server data validation gate.
+config_paths:
+  - benchmarks/spatialclaw/videomme.yaml
+
+spatialclaw_videomme_benchmark_agent:
+  responses_api_agents:
+    spatialclaw_agent:
+      datasets:
+        - name: spatialclaw_example
+          type: example
+          jsonl_fpath: resources_servers/spatialclaw/data/example.jsonl
+          prompt_config: null
+          num_repeats: 1
