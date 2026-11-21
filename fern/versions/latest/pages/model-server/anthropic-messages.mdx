@@ -14,6 +14,16 @@ Buffered SSE also supports [external token staging](/model-server/model-call-cap
 The inference worker stores training tokens separately, and Gym replays the completed answer as SSE.
 Generation completes before replay begins, so no content is delivered during generation.
 
+### Reasoning effort
+
+The Messages bridge forwards an explicitly supplied `output_config.effort` as Responses
+`reasoning.effort`, unchanged. Supported values are `low`, `medium`, `high`, `xhigh`, and `max`;
+the downstream model determines which values it supports. Omitting effort or setting `output_config` or its `effort` to `null` leaves it unset.
+The bridge does not derive a thinking budget or translate unrelated output-format controls.
+
+Malformed `output_config` or effort values receive HTTP 400 before a model call or streaming
+headers, with an error naming the invalid control without echoing its value or request payload.
+
 ```mermaid
 flowchart LR
   CLI["Claude Code CLI"] -->|"POST /v1/messages"| MS["Gym model server"]
