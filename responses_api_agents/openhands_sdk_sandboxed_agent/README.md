@@ -41,12 +41,21 @@ sandbox and answers `/verify`, and a `model_server`.
   sent to `/verify`: a harness that never started has not attempted the task, and an untouched workspace would score
   as a 0.
 - **An unconfirmed launch is not graded either.** A provider error or exception while launching the runner (or while
-  running it in the foreground mode), or a detached launch whose pid file never appears, raises `openhands.execute`
-  and skips `/verify`.
-- **A run that started is graded on what it left.** A confirmed runner that times out or errors still goes to
-  `/verify`, which sees the partial workspace. Before anything is collected, the runner's process group, session
-  and tmux server are stopped and confirmed gone, so nothing writes or calls the model after the deadline. A partial
-  snapshot without metrics reports no usage instead of zero.
+  running it in the foreground mode), a detached launch whose pid file never appears, or a foreground run that never
+  recorded its pid, raises `openhands.execute` and skips `/verify`.
+- **A run that started is graded on what it left, once it is confirmed stopped.** The runner always has a session of its
+  own (the foreground mode runs it under `setsid -w`, with its pid recorded first), so its tool children share its process
+  group. At the deadline, or when the runner dies or polling gives up, the group, the session and the tmux server are
+  stopped, and the run is graded only if that exec succeeded and printed `QUIESCED`. A provider error, an exec that
+  raised, a missing marker or a process still alive is an ungraded `openhands.execute` failure, and nothing is
+  collected from a runner that may still be writing. A partial snapshot without metrics reports no usage.
+- **Polling needs positive evidence.** A poll that returns a provider error, a non-zero status or a reply it does not
+  recognize counts against `max_consecutive_poll_errors` and never counts as an exit. Natural completion is only an
+  explicit exit code (zero or not); `RUNNING` and `DEAD` are the other valid replies.
+- **Unsupported request fields are refused.** A request with `instructions` gets HTTP 422 before any sandbox is seeded or
+  set up: the runner receives only the user message, or the configured `user_prompt`.
+- **Usage details stay unknown when the SDK does not report them.** `cached_tokens` and `reasoning_tokens` are `None`,
+  not 0, unless the runner measured them (the runners write them as `null` when the SDK has no such counter).
 - **The seeded workdir and the request's reasoning effort are used.** The runner starts in the workdir the resources
   server seeded (nested workdirs included), and a `reasoning.effort` in the request wins over `reasoning_effort` in
   the config.

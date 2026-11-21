@@ -19,7 +19,7 @@ from traceback import format_exc
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -206,6 +206,46 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             failure_reason=reason,
         )
 
+    @staticmethod
+    def _reject_unsupported_request(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        """Refuse a request field the runner would silently ignore, before any sandbox work."""
+        if getattr(body, "instructions", None) is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "openhands_sdk_sandboxed_agent does not support the request field `instructions`: the runner is "
+                    "given only the user message, or the configured user_prompt"
+                ),
+            )
+
+    @staticmethod
+    def _foreground_command(run_cmd: str, pid_file: str) -> str:
+        """Run `run_cmd` in a session of its own that is waited for, so the whole process tree has one owner.
+
+        The inner shell records its pid first (it is the session leader, so its pid is the session and group id) and
+        the runner then runs as its child. A timeout of the exec leaves this tree running in the sandbox; the pid file
+        is how it is found and stopped.
+        """
+        inner = f"echo $$ > {pid_file}; {run_cmd}"
+        return f"setsid -w bash -c {quote(inner)}"
+
+    async def _read_pid(self, sandbox: AsyncSandbox, pid_file: str) -> str:
+        """The pid the runner's shell recorded, else a failure: without it the process tree cannot be owned."""
+        try:
+            check = await sandbox.exec(f"cat {pid_file}", cwd="/", timeout_s=60)
+        except Exception as exc:
+            raise self._execute_failure(
+                f"OpenHands runner pid could not be read: {type(exc).__name__}: {exc}"
+            ) from exc
+        pid = (getattr(check, "stdout", "") or "").strip()
+        if (
+            getattr(check, "return_code", 1) != 0
+            or getattr(check, "error_type", None) is not None
+            or not pid.isdigit()
+        ):
+            raise self._execute_failure("OpenHands runner did not start: no pid file after the foreground launch")
+        return pid
+
     async def _confirm_launch(self, sandbox: AsyncSandbox, pid_file: str, exit_file: str) -> str:
         """The detached runner's pid once it is running (or has already written its exit code), else a failure.
 
@@ -233,24 +273,36 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         return pid
 
     async def _quiesce(self, sandbox: AsyncSandbox, pid: Optional[str]) -> None:
-        """Stop the runner and everything it started (its process group, session and tmux server), and confirm it is
-        gone, before the result or the workspace is collected: a runner still writing would make both unreliable."""
+        """Stop the runner and everything it started (its process group, its session and the tmux server the terminal
+        tool leaves behind), and confirm it is gone, before the result or the workspace is collected: a runner still
+        writing would make both unreliable.
+
+        Only a successful exec that printed QUIESCED counts. A provider error, an exec that raised, a missing marker
+        or a process still alive is a failure: the row is reported ungraded and never sent to /verify.
+        """
         if pid is None or not pid.isdigit():
-            return
+            raise self._execute_failure("OpenHands runner could not be stopped: its pid is unknown")
         try:
             result = await sandbox.exec(
                 f"pid={pid}; kill -TERM -- -$pid 2>/dev/null; pkill -TERM -s $pid 2>/dev/null; sleep 2; "
-                "kill -KILL -- -$pid 2>/dev/null; pkill -KILL -s $pid 2>/dev/null; pkill -KILL -x tmux 2>/dev/null; sleep 1; "
-                "if kill -0 $pid 2>/dev/null || pgrep -s $pid >/dev/null 2>&1; then echo ALIVE; else echo QUIESCED; fi",
+                "kill -KILL -- -$pid 2>/dev/null; pkill -KILL -s $pid 2>/dev/null; pkill -KILL -x tmux 2>/dev/null; "
+                "sleep 1; if kill -0 $pid 2>/dev/null || pgrep -s $pid >/dev/null 2>&1 || "
+                "pgrep -x tmux >/dev/null 2>&1; then echo ALIVE; else echo QUIESCED; fi",
                 cwd="/",
                 timeout_s=60,
             )
-        except Exception:
-            # The sandbox cannot be reached, so nothing more can be collected from it either.
-            print("Could not stop the OpenHands runner", format_exc(), file=sys.stderr)
-            return
-        if "ALIVE" in (getattr(result, "stdout", "") or ""):
-            raise self._execute_failure(f"OpenHands runner {pid} is still running after the stop at its deadline")
+        except Exception as exc:
+            raise self._execute_failure(
+                f"OpenHands runner {pid} could not be confirmed stopped: {type(exc).__name__}: {exc}"
+            ) from exc
+        out = getattr(result, "stdout", "") or ""
+        if (
+            getattr(result, "return_code", 1) != 0
+            or getattr(result, "error_type", None) is not None
+            or "QUIESCED" not in out
+            or "ALIVE" in out
+        ):
+            raise self._execute_failure(f"OpenHands runner {pid} was not confirmed stopped at its deadline")
 
     def _install_command(self) -> str:
         venv = quote(self.config.venv_dir)
@@ -283,6 +335,7 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        self._reject_unsupported_request(body)
         session_key = request.cookies["sandbox_id"]
         sandbox = self._sandbox_id_to_sandbox[session_key]
         cfg = self.config
@@ -392,21 +445,22 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         runner_pid: Optional[str] = None
         if not cfg.background_exec:
             try:
-                # cwd is the seeded workdir so the SDK's terminal starts where start.md was written.
-                result = await sandbox.exec(run_cmd, cwd=workdir, timeout_s=cfg.sandbox_timeout)
+                # cwd is the seeded workdir so the SDK's terminal starts where start.md was written. The runner has a
+                # session of its own (see _foreground_command), so a timeout can stop it and everything it started.
+                result = await sandbox.exec(
+                    self._foreground_command(run_cmd, pid_file), cwd=workdir, timeout_s=cfg.sandbox_timeout
+                )
             except Exception as exc:
                 raise self._execute_failure(f"OpenHands runner could not be run: {type(exc).__name__}: {exc}") from exc
             error_type = getattr(result, "error_type", None)
             if error_type not in (None, "timeout"):
                 raise self._execute_failure(f"OpenHands runner exec reported a provider error ({error_type!r})")
+            # The pid file the runner's shell writes first confirms it started at all; a timeout leaves the tree
+            # running, so it is stopped and confirmed gone before anything is collected.
+            runner_pid = await self._read_pid(sandbox, pid_file)
             if error_type == "timeout":
                 poll_error = f"sandbox_timeout {cfg.sandbox_timeout}s exceeded"
-                try:
-                    await sandbox.exec(
-                        f"pkill -KILL -f {quote(remote_runner)} 2>/dev/null; true", cwd="/", timeout_s=60
-                    )
-                except Exception:
-                    print("Could not stop the OpenHands runner", format_exc(), file=sys.stderr)
+                await self._quiesce(sandbox, runner_pid)
             stdout += result.stdout or ""
             stderr += result.stderr or ""
             finished_marker = "OpenHands run finished" in (result.stdout or "")
@@ -434,13 +488,26 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
                         cwd="/",
                         timeout_s=120,
                     )
-                    consecutive_errors = 0
-                    if "DEAD" in (poll.stdout or ""):
+                    reply = (getattr(poll, "stdout", "") or "").strip()
+                    poll_error_type = getattr(poll, "error_type", None)
+                    if poll_error_type is not None or getattr(poll, "return_code", 1) != 0:
+                        # The provider could not answer: this says nothing about the runner and must not reset the
+                        # error budget or count as an exit.
+                        raise RuntimeError(
+                            f"poll failed (rc={getattr(poll, 'return_code', None)}, error_type={poll_error_type!r})"
+                        )
+                    if reply == "RUNNING":
+                        consecutive_errors = 0
+                    elif reply == "DEAD":
+                        consecutive_errors = 0
                         poll_error = "runner process died without writing an exit code"
                         break
-                    if "RUNNING" not in (poll.stdout or ""):
+                    elif reply.isdigit():
+                        # Natural completion is only an explicit exit code, zero or not.
                         runner_exited = True
                         break
+                    else:
+                        raise RuntimeError(f"unrecognized poll reply {reply[:80]!r}")
                 except Exception as exc:
                     consecutive_errors += 1
                     text = f"{type(exc).__name__}: {exc}"
@@ -497,12 +564,13 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
                 if not metrics
                 else NeMoGymResponseUsage(
                     input_tokens=metrics.get("prompt_tokens", 0),
+                    # Details the SDK did not report stay None: unknown is not a measured zero.
                     input_tokens_details=NeMoGymResponseInputTokensDetails(
-                        cached_tokens=metrics.get("cache_read_tokens", 0)
+                        cached_tokens=metrics.get("cache_read_tokens")
                     ),
                     output_tokens=metrics.get("completion_tokens", 0),
                     output_tokens_details=NeMoGymResponseOutputTokensDetails(
-                        reasoning_tokens=metrics.get("reasoning_tokens", 0)
+                        reasoning_tokens=metrics.get("reasoning_tokens")
                     ),
                     total_tokens=metrics.get("prompt_tokens", 0) + metrics.get("completion_tokens", 0),
                 )
@@ -588,6 +656,7 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
     async def run(
         self, request: Request, body: OpenHandsSDKSandboxedAgentRunRequest
     ) -> OpenHandsSDKSandboxedAgentVerifyResponse:
+        self._reject_unsupported_request(body.responses_create_params)  # before the sandbox is seeded
         cookies = request.cookies
         session_key = request.session[SESSION_ID_KEY]
         request.state._ng_rollout_id = self.rollout_id_from_run(body)

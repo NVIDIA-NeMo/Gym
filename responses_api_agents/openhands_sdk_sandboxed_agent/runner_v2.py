@@ -33,6 +33,18 @@ def _write_atomic(path: str, result: dict) -> None:
     os.replace(tmp, path)
 
 
+def _usage_metrics(metrics, usage) -> dict:
+    """The result file's metrics. Details the SDK does not report stay null: unknown, not a measured zero."""
+    return {
+        "cost": metrics.accumulated_cost,
+        "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+        "completion_tokens": getattr(usage, "completion_tokens", 0),
+        "cache_read_tokens": getattr(usage, "cache_read_tokens", None),
+        "reasoning_tokens": getattr(usage, "reasoning_tokens", None),
+        "n_llm_calls": len(metrics.token_usages),
+    }
+
+
 def main(request_path: str, result_path: str) -> None:
     req = json.load(open(request_path))
     result = {"finished": False, "partial": True, "error": None, "messages": [], "metrics": None, "errors": []}
@@ -119,14 +131,7 @@ def main(request_path: str, result_path: str) -> None:
         result["finished"] = result["execution_status"] == "finished"
         metrics = conversation.conversation_stats.get_combined_metrics()
         usage = metrics.accumulated_token_usage
-        result["metrics"] = {
-            "cost": metrics.accumulated_cost,
-            "prompt_tokens": getattr(usage, "prompt_tokens", 0),
-            "completion_tokens": getattr(usage, "completion_tokens", 0),
-            "cache_read_tokens": getattr(usage, "cache_read_tokens", 0),
-            "reasoning_tokens": getattr(usage, "reasoning_tokens", 0),
-            "n_llm_calls": len(metrics.token_usages),
-        }
+        result["metrics"] = _usage_metrics(metrics, usage)
         snapshot(final=True)
         conversation.close()
     except BaseException as exc:  # noqa: BLE001 - always write a result file
