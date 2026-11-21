@@ -22,7 +22,8 @@ held-out test patch, run the repo's pytest command, grade FAIL_TO_PASS / PASS_TO
 Two sandboxes per task, on purpose. The agent works in one created by ``seed_session`` that holds only
 the image plus a git-history scrub; the golden patch, the test patch and the test lists stay in the
 server process. Grading happens in a second sandbox created from the same image, seeded with those
-files. Nothing an agent can read or run in its sandbox reveals the fix or the hidden tests.
+files. The legacy image scrub is best-effort; audited offline agent images are opt-in through
+``agent_image_manifests``. Neither path changes the verifier sandbox contract.
 
 Set ``is_verifying_golden_patch: true`` to grade the dataset's own patch instead of an agent's. That is
 the dataset-health check: a row whose golden patch does not resolve is a broken row, and scoring an
@@ -63,6 +64,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.swe_gym.image_admission import OFFLINE_NETWORK_PROBE, admit_agent_image
 from resources_servers.swe_gym.swebench_specs import spec_for
 from resources_servers.swe_gym.verification import (
     CONDA_ENV,
@@ -106,6 +108,8 @@ class SWEGymResourcesServerConfig(BaseResourcesServerConfig):
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
     apply_anti_cheating: bool = True
+    # Trusted host paths keyed by task ID; never accepted from a dataset row. None keeps the existing path.
+    agent_image_manifests: dict[str, str] | None = None
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -174,6 +178,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
         super().model_post_init(context)
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
+        self._session_id_to_clean_base: dict[str, str] = {}
 
     def _inputs(self, body: SWEGymInstanceRequest, patch: str) -> VerificationInputs:
         return VerificationInputs(
@@ -207,9 +212,23 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             env = cpu_cap_env(sandbox_resources.cpu) | env
         env = TESTBED_ENV | env
 
+        admitted = None
+        if session_id is not None and self.config.agent_image_manifests is not None:
+            manifest_path = self.config.agent_image_manifests.get(body.instance_id)
+            if manifest_path is None:
+                raise ValueError("Task has no approved agent image manifest")
+            admitted = admit_agent_image(
+                manifest_path=manifest_path,
+                task_id=body.instance_id,
+                base_commit=body.base_commit,
+                provider_config=provider_config,
+                sandbox_config=self.config.sandbox_config,
+            )
+            self._session_id_to_clean_base[session_id] = admitted.agent_base_commit
+
         spec = SandboxSpec(
-            # The row names its own image; there is no repository template to apply.
-            image=body.image_name,
+            # Strict agent sessions use the host-approved image; verifier images still come from the row.
+            image=admitted.image_id if admitted else body.image_name,
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir=REPO_DIRECTORY,
@@ -223,8 +242,12 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
                 "language": body.language[:63],
             },
             resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=self.config.sandbox_config.get("provider_options") or {},
         )
+        if admitted:
+            spec.metadata.update(
+                {"agent-rootfs": admitted.rootfs_sha256[:63], "image-scanner": str(admitted.scanner_version)}
+            )
         sandbox = AsyncSandbox(provider_config)
         if session_id is not None:
             # Keep ownership even if start raises after the provider has allocated a sandbox.
@@ -251,7 +274,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
         return await capture_model_patch(
             self._session_id_to_sandbox[session_id],
             workdir,
-            base_commit,
+            self._session_id_to_clean_base.get(session_id, base_commit),
             mode=self.config.patch_capture_mode,
             pristine_untracked=self._session_id_to_pristine_untracked.get(session_id, frozenset()),
             drop_sections=drop_patch_sections,
@@ -284,15 +307,22 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
     async def _start_task_sandbox(self, session_id: str, body: SWEGymInstanceRequest) -> str:
         """Start the task sandbox for ``session_id`` and return the directory the agent works in.
 
-        The sandbox gets no files from the row. The git scrub drops every ref but HEAD and prunes the
-        objects behind them: SWE-bench images clone the whole upstream history, so without it the fix
-        commit and every later release tag sit in ``.git`` within a ``git log --all`` of the agent.
+        The sandbox gets no files from the row. Strict mode admits a reconstructed image and checks
+        offline networking before handoff. The legacy path retains its best-effort Git scrub.
         """
         self._forget_task_sandbox_state(session_id)
         sandbox = await self._create_sandbox(body, session_id=session_id)
         # Own the sandbox before preparing it, so a failed seed can still stop it.
         self._session_id_to_sandbox[session_id] = sandbox
-        if self.config.apply_anti_cheating:
+        if self.config.agent_image_manifests is not None:
+            probe = await sandbox.exec("python3 -I -c " + quote(OFFLINE_NETWORK_PROBE), timeout_s=30)
+            if (
+                probe.return_code != 0
+                or probe.error_type is not None
+                or (probe.stdout or "").strip() != "offline-network-admitted"
+            ):
+                raise RuntimeError("Agent sandbox network admission failed")
+        if self.config.apply_anti_cheating and self.config.agent_image_manifests is None:
             await apply_anti_cheat_setup(sandbox, REPO_DIRECTORY, body.instance_id, "swe_gym")
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, REPO_DIRECTORY, "swe_gym")
@@ -303,6 +333,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
 
     def _forget_task_sandbox_state(self, session_id: str) -> None:
         self._session_id_to_pristine_untracked.pop(session_id, None)
+        self._session_id_to_clean_base.pop(session_id, None)
 
     def _response(self, body: SWEGymVerifyRequest, **fields: Any) -> SWEGymVerifyResponse:
         # Spread the request: BaseVerifyResponse extends BaseVerifyRequest, so responses_create_params
