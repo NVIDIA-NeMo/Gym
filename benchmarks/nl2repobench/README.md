@@ -5,11 +5,13 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
 ## Datasets (pick one config family)
 | Dataset | Tasks | Configs | Notes |
 |---|---|---|---|
-| Upstream NL2RepoBench | 104 | `benchmarks/nl2repobench/opencode.yaml` | pinned per-task grading images (ghcr); tests run in the agent's own workspace |
+| Upstream NL2RepoBench | 104 | `benchmarks/nl2repobench/{opencode,openhands}.yaml` | pinned per-task grading images (ghcr); tests run in the agent's own workspace |
 | Internal held-out sets (verified-50, legacy 75-task) | 50 / 75 | not in Gym: kept in the internal nl2repo repo (`benchmarks/`), linked into `Gym/benchmarks/` by its launchers | same resources server and configs layout |
 
 ## Harnesses (pick one config per dataset)
 - **opencode** (`responses_api_agents/opencode_sandboxed_agent`): no compaction and no pruning (`compaction.auto: false`, `prune: false` in `opencode.yaml`), so a conversation that outgrows the declared 524288-token window (`opencode_max_context_window`) ends the run with a context error instead of being summarised. It continues an idle session with `idle_nudge` (finish with `TASK_COMPLETE`), ends a looping one with `stuck_detector`, and holds OpenCode's 500-step cap as one budget across resumes.
+- **OpenHands SDK 1.50** (`responses_api_agents/openhands_sdk_sandboxed_agent`): native tool calls, no condenser (no compaction). Needs an offline bundle (`build_bundle.sh`, then
+  `++nl2repobench_opencode_sandboxed_agent.responses_api_agents.openhands_sdk_sandboxed_agent.bundle_path=...`) for `block_target_v2` and `no_internet_preinstalled`.
 
 ## Network modes (`++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=<mode>`)
 | Mode | Agent sandbox | Egress | Reference-lookup protection |
@@ -44,10 +46,11 @@ On vahid_1016 tasks the guard identifiers come from the clone URL in `test_comma
 Use `preinstalled_opencode=true` instead of the two paths for an image that already has `opencode` on `PATH`. A deployment that sets the two paths without `require_opencode_runtime` (a cached runtime on an open-egress mode) works as before.
 
 ## Combinations and status (what has actually been run)
-- **Verified-50** x opencode x {`block_target_v2`, `no_internet_preinstalled`}: full runs (Lightning final, 4 SFT checkpoints, Qwen3.8-27B); `block_target_v2` results were regraded with the final verifier.
-- **75-task legacy** testset: opencode under `block_target` / `block_target_v2` / `no_internet_preinstalled` (graded with the old verifier; superseded).
+- **Verified-50** x {opencode, OpenHands} x {`block_target_v2`, `no_internet_preinstalled`}: full runs (Lightning final, 4 SFT checkpoints, Qwen3.8-27B); `block_target_v2` results were regraded with the final verifier.
+- **75-task legacy** testset: opencode and OpenHands under `block_target` / `block_target_v2` / `no_internet_preinstalled` (graded with the old verifier; superseded).
 - **Upstream** x opencode: `official`, `block_target` and `no_internet_preinstalled` runs predate this change; `block_target_v2` has only a partial Qwen run (5 of 104 tasks, timed out).
-- Parent-repo launchers: `launch_upstream_nl2repo_eval.sh` (opencode), `launch_v50_opencode.sh`.
+- **Upstream** x OpenHands: the config resolves and the agent has run on the vahid_1016 tasks, but there is **no completed upstream x OpenHands run yet**: treat it as untested end to end until a smoke run is recorded.
+- Parent-repo launchers: `launch_upstream_nl2repo_eval.sh` (opencode), `launch_upstream_nl2repo_eval_openhands.sh`, `launch_v50_{opencode,openhands}.sh`.
 
 ## Grading notes
 verified-50 / vahid_1016 grading: reference clone + install, (optional) test-only dependency step, **purge of the reference implementation**, overlay of the agent's workspace, held-out tests; every mode grades in

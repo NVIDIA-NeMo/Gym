@@ -1,7 +1,7 @@
 nl2repobench_resources_server:
   resources_servers:
     nl2repobench:
-      allowed_agents: [opencode_sandboxed_agent]
+      allowed_agents: [opencode_sandboxed_agent, openhands_sdk_sandboxed_agent]
       entrypoint: app.py
       domain: coding
       verified: false
