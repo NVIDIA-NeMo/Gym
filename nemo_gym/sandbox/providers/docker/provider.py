@@ -347,7 +347,7 @@ class DockerProvider:
     async def _run(
         self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
     ) -> tuple[int, str, str]:
-        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout."""
+        """Run a docker CLI command, killing its group and draining pipes on timeout."""
         async with self._semaphore:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -363,9 +363,9 @@ class DockerProvider:
                 raise
             except asyncio.TimeoutError as e:
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+                    # start_new_session makes pid the group ID even after the client exits.
+                    os.killpg(proc.pid, signal.SIGKILL)
+                await proc.communicate()
                 raise TimeoutError(f"docker command timed out after {timeout_s:g}s: {_redact_argv(argv)}") from e
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
