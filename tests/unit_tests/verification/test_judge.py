@@ -137,6 +137,14 @@ class TestJudgeFailsafe:
         assert "_ng_failure_terminal" not in data
 
     @pytest.mark.asyncio
+    async def test_placeholder_reward_is_the_callers(self) -> None:
+        async def verify(body):
+            raise JudgeError("judge 503")
+
+        data = orjson.loads((await judge_failsafe(verify, placeholder_reward=3.0)(_Req(response={}))).body)
+        assert (data["reward"], data["mask_sample"], data["_ng_failure_class"]) == (3.0, True, "judge_failed")
+
+    @pytest.mark.asyncio
     async def test_unparseable_judge_error_keeps_its_kind_on_the_sidecar_row(self) -> None:
         async def verify(body):
             raise JudgeError("no verdict in 3 attempts", failure_kind="judge_unparseable")

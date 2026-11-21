@@ -353,9 +353,10 @@ async def call_judge(
     return await _reraise_judge_errors(_call(), operation_id=operation_id, attempt_id=f"{operation_id}-{max_attempts}")
 
 
-def judge_failsafe(verify_fn: Callable) -> Callable:
-    """Wrap verify() so a judge failure returns a sidecar-routed row (reward 0.0, the
-    routing keys, the request's ``response`` carried) instead of propagating.
+def judge_failsafe(verify_fn: Callable, *, placeholder_reward: float = 0.0) -> Callable:
+    """Wrap verify() so a judge failure returns a sidecar-routed row (reward ``placeholder_reward``,
+    the routing keys, the request's ``response`` carried) instead of propagating.
+    The row is masked, so its placeholder reward reaches reward metrics but no training signal.
     functools.wraps keeps verify's signature so FastAPI injects the same params
     (``body``, and ``request`` for servers that take it); ``*args, **kwargs`` pass
     them straight through."""
@@ -379,7 +380,7 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             data = body.model_dump()
             instance_config = data.get("instance_config")
             data |= {
-                "reward": 0.0,
+                "reward": placeholder_reward,
                 "mask_sample": True,
                 # The judge owns this boundary; more specific diagnostics stay on the explicit cause.
                 "failure_kind": kind,
