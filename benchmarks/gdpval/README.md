@@ -593,6 +593,8 @@ gym eval run \
 - OpenHands reports a run that reaches its `timeout` as `stop_reason: timeout`, so GDPVal's `agent_timeout` rule
   (which requires `wall_time`) does not apply, as for Codex. A timed-out run that reaches verification without
   submitting is judged as an empty submission, and so is a run that reaches `max_iterations` (250 here).
+- OpenHands stops each task-tool call after 300 seconds, its own fixed limit, so a slower `web_search` or
+  `fetch_web_page` returns a tool error at 300 s; `mcp_tool_timeout_seconds` (300) can only lower it.
 - Change a harness setting with `++gdpval_openhands_agent.responses_api_agents.openhands_agent.<key>=<value>`.
 
 ## Multi-judge panel
