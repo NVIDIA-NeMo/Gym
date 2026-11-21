@@ -777,7 +777,7 @@ class RolloutStore:
         """
         return {logical_rollout_id(row) for row in self._state.pending(1 << 62)}
 
-    def write_coverage(self, **reporting: int) -> None:
+    def write_coverage(self, **reporting: object) -> None:
         atomic_write_json(
             coverage_path_for(self.output),
             self.coverage()

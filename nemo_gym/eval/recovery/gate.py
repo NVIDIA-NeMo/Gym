@@ -1048,6 +1048,15 @@ def subset_note(selection: Mapping[str, Any]) -> str:
     )
 
 
+def partial_score_note(partial: Mapping[str, Any]) -> str:
+    """The label of a score written with unsettled rollouts counted as zero (``max_failed_rollout_fraction``)."""
+    return (
+        f"partial score: {partial['accepted_failures']} of {partial['expected']} rollouts "
+        f"({partial['accepted_failure_fraction']:.2%}) were unsettled and counted as zero, within "
+        f"max_failed_rollout_fraction {partial['max_failed_rollout_fraction']}; it is not a full score"
+    )
+
+
 def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | None) -> str:
     """``evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); trial failures: ...;
     metric over 1000 of 1000 trials``."""
@@ -1238,6 +1247,9 @@ def gate_summary_from_collected(
     task["task_selection"] = collected.task_selection
     if collected.task_selection is not None:
         task["warnings"] = [subset_note(collected.task_selection)] + task["warnings"]
+    task["partial_score"] = collected.partial_score
+    if collected.partial_score is not None:
+        task["warnings"] = [partial_score_note(collected.partial_score)] + task["warnings"]
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
         task["errors"].append(f"{UNREADABLE_ARTIFACTS_ERROR}: {collected.unreadable_files[:20]}")

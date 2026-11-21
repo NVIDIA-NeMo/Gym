@@ -63,7 +63,7 @@ from nemo_gym.artifacts.rollout_rows import (
     NG_TERMINAL_KEY,
     _rollout_for_export,
 )
-from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
+from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY, PARTIAL_SCORE_KEY
 from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
@@ -1635,6 +1635,24 @@ class SharedRolloutCollectionConfig(
         ),
     )
 
+    max_failed_rollout_fraction: float | None = Field(
+        default=None,
+        gt=0,
+        lt=1,
+        description=(
+            "With require_complete, write a partial score for a run that ends with at most this share of its "
+            "expected rollouts unsettled (failed, masked by infrastructure, missing or not started), instead of "
+            "no score. Every failed and missing rollout enters the metrics as a zero, whatever its failure class; "
+            "a result masked by infrastructure stays out of the score. Each aggregate entry and the coverage "
+            "report carry _ng_partial_score (accepted_failures, expected, accepted_failure_fraction and the limit), "
+            "so the score is never read as a full one. The run is still rejected as incomplete, so the job chain and recovery go on as before, "
+            "and a later segment that settles the rollouts writes the full score. Above the limit, or when a "
+            "metric hook fails on a zero row, no score is written, as without this option. Unset by default. "
+            "Known limitation, shared with count_failure_classes_as_zero: a metric hook that reads verifier "
+            "fields may score a zero row as a measurement instead of failing."
+        ),
+    )
+
     environment_protocol_violation_stop_after: int = Field(
         default=3,
         ge=0,
@@ -2877,15 +2895,60 @@ def _aggregation_error_entry(
     }
 
 
-def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
-    """Signal failure after partial metrics and any batch status have been saved."""
-    if metrics_fpath is None:
-        return
-    failed_agents = sorted(
+def _aggregation_failed_agents(metrics_fpath: Path) -> List[str]:
+    """The agents whose entry in a written aggregate records an aggregation error."""
+    return sorted(
         entry[AGENT_REF_KEY_NAME]["name"]
         for entry in orjson.loads(metrics_fpath.read_bytes())
         if AGGREGATION_ERROR_KEY in entry
     )
+
+
+def _partial_score(coverage: Mapping[str, Any], limit: float) -> Dict[str, Any]:
+    """The partial-score record of a run that is not complete: its unsettled rollouts of those expected.
+
+    Rollouts an accepted partial stage omitted are not expected, as in the trial gate's denominator.
+    """
+    expected = coverage["expected"] - coverage["intentionally_omitted"]
+    unsettled = max(expected - coverage["settled"], 0)
+    return {
+        "accepted_failures": unsettled,
+        "expected": expected,
+        "accepted_failure_fraction": unsettled / expected if expected > 0 else 1.0,
+        "max_failed_rollout_fraction": limit,
+    }
+
+
+def _partial_score_text(partial_score: Mapping[str, Any]) -> str:
+    return (
+        f"{partial_score['accepted_failures']} of {partial_score['expected']} rollouts unsettled "
+        f"({partial_score['accepted_failure_fraction']:.2%})"
+    )
+
+
+def _uncounted_failure_rows(rows: Iterable[Mapping[str, Any]], failure_classes: List[str]) -> List[Dict[str, Any]]:
+    """Metric-input zeros for the failed rollouts that ``count_failure_classes_as_zero`` did not already count."""
+    wanted = set(failure_classes)
+    return [
+        _counted_failure_row(dict(row))
+        for row in rows
+        if not row.get("_ng_omitted") and not _counts_as_zero(row, wanted)
+    ]
+
+
+def _mark_partial_score(metrics_fpath: Path, partial_score: Mapping[str, Any]) -> None:
+    """Record the partial-score record on every entry of a written aggregate, so no reader takes it as a full one."""
+    entries = orjson.loads(metrics_fpath.read_bytes())
+    for entry in entries:
+        entry[PARTIAL_SCORE_KEY] = dict(partial_score)
+    metrics_fpath.write_bytes(orjson.dumps(entries, option=orjson.OPT_INDENT_2))
+
+
+def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
+    """Signal failure after partial metrics and any batch status have been saved."""
+    if metrics_fpath is None:
+        return
+    failed_agents = _aggregation_failed_agents(metrics_fpath)
     if failed_agents:
         raise RuntimeError(
             f"Aggregation failed for agents: {', '.join(failed_agents)}. "
@@ -5154,6 +5217,7 @@ executions → not run again (left to recovery)
             rejection = await asyncio.to_thread(
                 lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
             )
+        provider_stop = rejection is not None
         if rejection is None:
             rejection = config.completion_rejection(
                 expected=completion["expected"],
@@ -5164,13 +5228,28 @@ executions → not run again (left to recovery)
                 made_progress=store.progress_outcomes_recorded > 0,
                 unsettled_note=unsettled_masked_note(completion),
             )
+        # A provider stop needs a fix before any attempt can succeed, so it never gets a partial score.
+        partial_score: Optional[Dict[str, Any]] = None
+        if (
+            rejection is not None
+            and not provider_stop
+            and config.max_failed_rollout_fraction is not None
+            and not config.disable_aggregation
+        ):
+            partial_score = _partial_score(completion, config.max_failed_rollout_fraction)
+            if partial_score["accepted_failure_fraction"] > config.max_failed_rollout_fraction:
+                print(
+                    f"No partial score: {_partial_score_text(partial_score)} exceeds max_failed_rollout_fraction "
+                    f"{config.max_failed_rollout_fraction}."
+                )
+                partial_score = None
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
                 "Run `gym eval aggregate` after all shards finish to compute the global metrics."
             )
             aggregate_metrics_fpath = None
-        elif rejection is not None:
+        elif rejection is not None and partial_score is None:
             # An aggregate an earlier segment left describes a different set of rows: remove it with the score.
             await asyncio.to_thread(aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
             print(
@@ -5188,6 +5267,27 @@ executions → not run again (left to recovery)
                 imputed = missing
                 print(f"Counting {len(imputed)} materialized rollout(s) with no row as scored zeros")
                 counted.extend(imputed)
+            partial_rows: List[Dict[str, Any]] = []
+            partial_imputed: List[Dict[str, Any]] = []
+            if partial_score is not None:
+                partial_rows = await asyncio.to_thread(
+                    _uncounted_failure_rows, store.selected("failure"), config.count_failure_classes_as_zero
+                )
+                if not config.count_missing_rollouts_as_zero:
+                    partial_imputed = await asyncio.to_thread(
+                        _missing_rollout_rows_counted_as_zero,
+                        [config.materialized_jsonl_fpath],
+                        [],
+                        set(),
+                        history=store,
+                    )
+                print(
+                    f"Partial score: {_partial_score_text(partial_score)} is within max_failed_rollout_fraction "
+                    f"{config.max_failed_rollout_fraction}; counting {len(partial_rows)} failed and "
+                    f"{len(partial_imputed)} missing rollout(s) as scored zeros"
+                )
+                imputed = [*imputed, *partial_imputed]
+                counted.extend(partial_rows + partial_imputed)
             # One run never reuses a (task, rollout), so its rows need no server to tell them apart.
             await asyncio.to_thread(
                 _fill_task_fields, counted, persisted_results, [config.materialized_jsonl_fpath], _routing_identity
@@ -5203,6 +5303,20 @@ executions → not run again (left to recovery)
                 output_fpath,
                 raise_on_error=False,  # Write batch status before reporting aggregation failures below.
             )
+            if partial_score is not None and aggregate_metrics_fpath is not None:
+                failed_agents = await asyncio.to_thread(_aggregation_failed_agents, aggregate_metrics_fpath)
+                if failed_agents:
+                    # A metric hook that cannot score a zero row gives no partial score; the run is rejected as before.
+                    await asyncio.to_thread(aggregate_metrics_fpath.unlink, missing_ok=True)
+                    print(
+                        f"No partial score: aggregation failed for agents {', '.join(failed_agents)} on the rows "
+                        "counted as zero. Resume the run; the aggregate is written when the run completes."
+                    )
+                    aggregate_metrics_fpath = partial_score = None
+                    del counted[len(counted) - len(partial_rows) - len(partial_imputed) :]
+                    imputed = imputed[: len(imputed) - len(partial_imputed)]
+                else:
+                    await asyncio.to_thread(_mark_partial_score, aggregate_metrics_fpath, partial_score)
 
         if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
             batch_tracker.write_status(
@@ -5222,6 +5336,7 @@ executions → not run again (left to recovery)
             scored=scored_rollouts,
             failures_counted_as_zero=len(counted) - len(imputed) + completion.get("counted_zeros_in_successful", 0),
             imputed=len(imputed),
+            **({PARTIAL_SCORE_KEY: partial_score} if partial_score is not None else {}),
         )
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
@@ -5250,6 +5365,11 @@ executions → not run again (left to recovery)
                 "coverage/open": completion["open"],
                 "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
                 **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
+                **(
+                    {"coverage/accepted_failures": partial_score["accepted_failures"]}
+                    if partial_score is not None
+                    else {}
+                ),
                 **failure_metrics,
             }
             if get_exporters():
@@ -5261,6 +5381,12 @@ executions → not run again (left to recovery)
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
+        if partial_score is not None:
+            print(
+                f"The aggregate is a partial score ({_partial_score_text(partial_score)}): its failed and missing "
+                "rollouts are counted as zero. The run stays incomplete; a resume that settles them writes the full "
+                "score."
+            )
 
         if rejection is not None:
             raise rejection

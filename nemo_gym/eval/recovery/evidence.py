@@ -1092,6 +1092,20 @@ try:
         benchmark_metric_coverage = list(next(iter(declared)))
 except (OSError, ValueError, AttributeError, TypeError):
     pass
+partial_score = None
+try:
+    # A partial score (max_failed_rollout_fraction) marks every aggregate entry with the same record.
+    value = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json")))
+    marks = [entry.get("_ng_partial_score") for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+    mark = marks[0] if marks else None
+    if (isinstance(mark, dict) and all(m == mark for m in marks)
+            and all(type(mark.get(k)) is int and mark[k] >= 0 for k in ("accepted_failures", "expected"))
+            and all(type(mark.get(k)) in (int, float) and math.isfinite(mark[k])
+                    for k in ("accepted_failure_fraction", "max_failed_rollout_fraction"))):
+        partial_score = {k: mark[k] for k in ("accepted_failures", "expected", "accepted_failure_fraction",
+                                              "max_failed_rollout_fraction")}
+except (OSError, ValueError, AttributeError, TypeError):
+    pass
 score = None
 if len(sys.argv) > 2:
     try:
@@ -1160,7 +1174,8 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
                   "coverage_allocation_id": coverage_allocation_id, "coverage_writer_unrecorded": coverage_writer_unrecorded,
                   "coverage_scored": coverage_scored,
-                  "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection}
+                  "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection,
+                  "partial_score": partial_score}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 if quality is not None and (source_snapshot != closing_snapshot or changed_while_reading):
@@ -1405,6 +1420,9 @@ class CollectedEvidence(BaseModel):
     # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
     # the benchmark's headline metric covered, as the benchmark declares them.
     benchmark_metric_coverage: tuple[int, int, str | None] | None = None
+    # The aggregate's partial-score record (``_ng_partial_score``): the unsettled rollouts it counted as zero, of
+    # those expected, and the limit that accepted them; None for a full score or no aggregate.
+    partial_score: dict[str, int | float] | None = None
     # rollouts_task_selection.json: the subset the run selected by task id (source, tasks, rows, task_ids_sha256; a
     # field is None when the record was unreadable), or None when the run took every task of its input.
     task_selection: dict[str, Any] | None = None

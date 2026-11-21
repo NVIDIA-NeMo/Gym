@@ -653,6 +653,7 @@ _COLLECTION_OPTIONS = frozenset(
         "upload_rollouts",
         "count_failure_classes_as_zero",
         "count_missing_rollouts_as_zero",
+        "max_failed_rollout_fraction",
         "route_failures_to_sidecar",
         # How long a refused /run is resent: dispatch tuning, not a task setting. It is in ``_ADDED_COLLECTION_DEFAULTS``
         # too, so a run saved with it in its digest still resumes.

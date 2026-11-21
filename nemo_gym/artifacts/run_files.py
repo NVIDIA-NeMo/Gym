@@ -25,3 +25,6 @@ QUALITY_SUMMARY_SOURCES_KEY = "rollouts"
 
 
 AGGREGATION_ERROR_KEY = "aggregation_error"
+# Set on every aggregate entry, and in the coverage report, of a partial score (``max_failed_rollout_fraction``):
+# how many rollouts were unsettled and counted as zero, of how many expected, and the limit that accepted them.
+PARTIAL_SCORE_KEY = "_ng_partial_score"
