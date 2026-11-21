@@ -148,6 +148,18 @@ if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
     echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
     exit 1
 fi
+# Aggregated only: VLLM_AGGREGATED_MULTINODE=1 makes the NUM_NODES nodes form ONE
+# multi-node engine (e.g. --tensor-parallel-size 16 across 4 GB200 nodes) for models
+# too big for one node. Node 0 serves the API + router; the rest run --headless.
+VLLM_AGGREGATED_MULTINODE="${VLLM_AGGREGATED_MULTINODE:-0}"
+if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 && "$VLLM_MODE" != aggregated ]]; then
+    echo "VLLM_AGGREGATED_MULTINODE requires VLLM_MODE=aggregated" >&2
+    exit 1
+fi
+if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 && "${VLLM_ENGINES_PER_NODE:-1}" != 1 ]]; then
+    echo "VLLM_AGGREGATED_MULTINODE requires VLLM_ENGINES_PER_NODE=1" >&2
+    exit 1
+fi
 # Independent mode starts one TP replica, two TP2 replicas, or four TP1 replicas per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
@@ -252,6 +264,10 @@ read -r -a nodes <<< "\$ALL_NODES"
         # Coupled tiers expose one API server each; other ranks are headless.
         if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            continue
+        fi
+        # One multi-node engine: node 0 serves the API; every other rank is headless and has no endpoint to scrape.
+        if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]] && (( node_index != 0 )); then
             continue
         fi
         for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
@@ -998,12 +1014,17 @@ else
             done
         else
             router_args+=(--policy $ROUTER_POLICY --worker-urls)
-            for node in "\${nodes[@]}"; do
-                for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
-                    worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
-                    router_args+=("http://\$node:\$worker_port")
+            if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]]; then
+                # One engine; only node 0 exposes an API server.
+                router_args+=("http://\$this_node_hostname:$WORKER_SERVER_PORT")
+            else
+                for node in "\${nodes[@]}"; do
+                    for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+                        worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
+                        router_args+=("http://\$node:\$worker_port")
+                    done
                 done
-            done
+            fi
         fi
 
         vllm-router "\${router_args[@]}" &
@@ -1043,9 +1064,19 @@ else
         if (( $VLLM_ENGINES_PER_NODE > 1 )); then
             serve_independent_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT "\${aggregated_args[@]}"
         else
+            multinode_args=()
+            if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]]; then
+                master_addr=\$(getent ahostsv4 "\${nodes[0]}" | awk 'NR == 1 {print \$1}')
+                multinode_args=(--nnodes $NUM_NODES --node-rank \$SLURM_PROCID \
+                    --master-addr "\$master_addr" --master-port ${AGGREGATED_MASTER_PORT:-29500})
+                if (( SLURM_PROCID != 0 )); then
+                    multinode_args+=(--headless)
+                fi
+            fi
             vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${aggregated_args[@]}" \
                 --host \$this_node_hostname \
-                --port $WORKER_SERVER_PORT
+                --port $WORKER_SERVER_PORT \
+                "\${multinode_args[@]}"
         fi
     elif (( $VLLM_ENGINES_PER_NODE > 1 )); then
         if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
@@ -1132,6 +1163,11 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
             continue
         fi
+        # One multi-node engine: only node 0 serves the API, so only it is waited on. The caches of every node,
+        # headless ranks included, are still dumped below.
+        if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]] && (( node_index != 0 )); then
+            continue
+        fi
         for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
             cache_urls+=("http://\${nodes[node_index]}:\$(( $WORKER_SERVER_PORT + engine_index ))")
         done
@@ -1157,6 +1193,10 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
         dump_args=(--output "\$cache_export_dir/caches.tar")
         if [[ "$VLLM_MODE" == pd && "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]] && \
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
+            dump_args+=(--allow-empty)
+        fi
+        # A headless rank of one multi-node engine has compiled artifacts but may hold no autotuning JSON; node 0 must.
+        if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]] && (( node_index != 0 )); then
             dump_args+=(--allow-empty)
         fi
         srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
@@ -1272,6 +1312,7 @@ main_job_id=$(
         ${mooncake_memory_arg:+"$mooncake_memory_arg"} \
         --segment=$SEGMENT \
         ${NODELIST:+--nodelist="$NODELIST"} \
+        ${EXCLUDE_NODES:+--exclude="$EXCLUDE_NODES"} \
         --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
@@ -1279,12 +1320,17 @@ main_job_id=${main_job_id%%;*}
 if (( should_run_eval )); then
     # @bxyu-nvidia: Don't run cleanup job in reservation
     unset SBATCH_RESERVATION
+    # Run the cleanup with the Gym venv's interpreter when there is one: through its "#!/usr/bin/env python3" shebang
+    # the script got the CPU node's system Python, which is too old for its type hints and lacks aiohttp/yaml, so every
+    # cleanup job failed and sandboxes were never reaped.
+    cleanup_python="$submit_dir/.venv/bin/python"
+    [ -x "$cleanup_python" ] || cleanup_python=python3
     if ! cleanup_job_id=$(
         sbatch \
             --parsable \
             --dependency=afterany:"$main_job_id" \
-            --partition=cpu \
-            --qos=cpu-normal \
+            --partition="${SBATCH_CPU_PARTITION:-cpu}" \
+            --qos="${SBATCH_CPU_QOS:-cpu-normal}" \
             --gres=none \
             --gpus-per-node=0 \
             --nodes=1 \
@@ -1294,11 +1340,8 @@ if (( should_run_eval )); then
             --time=00:30:00 \
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
-            "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            "${cleanup_connection[@]}" \
-            --run-id "$main_job_id" \
-            --user "$cleanup_user" \
-            --reap
+            --wrap="$(printf '%q ' "$cleanup_python" "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+                "${cleanup_connection[@]}" --run-id "$main_job_id" --user "$cleanup_user" --reap)"
     ); then
         echo "Submitted batch job $main_job_id"
         echo "Failed to submit the sandbox-cleanup job for batch job $main_job_id;" \

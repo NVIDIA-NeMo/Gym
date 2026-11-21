@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import shlex
 import signal
 import subprocess
 from pathlib import Path
@@ -591,6 +592,18 @@ def install_sbatch_stub(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     return calls, env
 
 
+def cleanup_command(call: list[str]) -> list[str]:
+    """The cleanup job's command line. The launcher submits it as `--wrap`, run with the checkout's venv python
+    when there is one (the CPU node's system python is too old for the script) and python3 otherwise."""
+    [wrap] = [arg for arg in call if arg.startswith("--wrap=")]
+    return shlex.split(wrap.removeprefix("--wrap="))
+
+
+def cleanup_interpreter() -> str:
+    venv_python = Path.cwd().resolve() / ".venv/bin/python"
+    return str(venv_python) if os.access(venv_python, os.X_OK) else "python3"
+
+
 def read_sbatch_calls(path: Path) -> list[list[str]]:
     calls: list[list[str]] = []
     current: list[str] | None = None
@@ -645,6 +658,10 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
         "--time=00:30:00",
         "--job-name=gym-cleanup-7001",
         f"--output={submit_dir}/slurm-logs/%j-gym-cleanup-7001.log",
+        cleanup_call[-1],
+    ]
+    assert cleanup_command(cleanup_call) == [
+        cleanup_interpreter(),
         cleanup_script,
         "--domain",
         "sandbox.example",
@@ -974,9 +991,10 @@ def test_slurm_launcher_falls_back_to_the_checkout_env_yaml(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     _main_call, cleanup_call = read_sbatch_calls(calls_path)
     repo_root = SBATCH_SCRIPT.resolve().parents[2]
-    assert cleanup_call[cleanup_call.index("--connection-config") + 1] == f"{repo_root}/env.yaml"
-    assert "--domain" not in cleanup_call
-    assert "--api-key" not in cleanup_call
+    command = cleanup_command(cleanup_call)
+    assert command[command.index("--connection-config") + 1] == f"{repo_root}/env.yaml"
+    assert "--domain" not in command
+    assert "--api-key" not in command
 
 
 def test_tls_verification_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
