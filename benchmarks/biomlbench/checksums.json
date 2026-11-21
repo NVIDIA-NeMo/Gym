@@ -1,0 +1,200 @@
+{
+  "manual/open-problems-cell-cell-communication-ligand-target": {
+    "private": {
+      "answers.csv": "d79e7d90935825e50d2672ac08bc3902"
+    },
+    "public": {
+      "sample_submission.csv": "3e6b83b18c629d8a6d5ff2a93d2872d7",
+      "tnbc_data.h5ad": "8a6586a136bce0efaabf274ad7c33c7f"
+    }
+  },
+  "manual/open-problems-label-projection": {
+    "private": {
+      "answers.csv": "415b9fe92d60508e9443453bee5f0068",
+      "solution.h5ad": "c27476dd4d110b09897ae5354e1c0ba8"
+    },
+    "public": {
+      "label_vocabulary.csv": "a8eab93f68001ab488946423cb1f2279",
+      "sample_submission.csv": "b28cdcb29e5036d3fd701617d276ca95",
+      "test.h5ad": "e961c090495698e15c62d856707b5912",
+      "train.h5ad": "b10e42494ba40f2b04f98586765c59e1"
+    }
+  },
+  "manual/open-problems-predict-modality": {
+    "private": {
+      "answers.csv": "9de8323ac9481fc360f24dc7f89f5701"
+    },
+    "public": {
+      "sample_submission.csv": null,
+      "test_mod1.h5ad": "60b83f30b27234f4d5d741cce257bb47",
+      "train_mod1.h5ad": "5ebe9392a46e8c41f389e2a97e307ea7",
+      "train_mod2.h5ad": "ca345a0acc431e97ffab88c6447b002a"
+    }
+  },
+  "manual/open-problems-single-cell-perturbations": {
+    "private": {
+      "answers.csv": "ae026c746c9cb1b78f97e2823b1a8e54"
+    },
+    "public": {
+      "de_train.parquet": "2e1a4c994607082913f4900b06346743",
+      "id_map.csv": "80b6115b9ab7c3bd1a1e11687d31093a",
+      "sample_submission.csv": "b99e292c13095b0f61a3ed2cb7b8ee0a",
+      "sc_train.h5ad": "20a6bbcabb80af75cdbec34f5023fac2"
+    }
+  },
+  "manual/open-problems-spatially-variable-genes": {
+    "private": {
+      "answers.csv": "ed803078f72951641e1465c7ae07e2a6"
+    },
+    "public": {
+      "cerebellum_labels.h5ad": "46bfbfbd834acf05929788b0749b93b4",
+      "cerebellum_train.h5ad": "6f9e73aceb7263737e0b904ee2e32435",
+      "sample_submission.csv": null,
+      "train.h5ad": "6ec465258ea15391984a623a50522c4a"
+    }
+  },
+  "polarishub/polaris-adme-fang-hclint-1": {
+    "private": {
+      "answers.csv": "496b6bec81d1ba1ae6bee2de80df305e"
+    },
+    "public": {
+      "sample_submission.csv": "da9dfd624252fc08e36c2215990cdc72",
+      "test_features.csv": "7096194c5145168f01187cafd89800e3",
+      "train.csv": "747d2a1eb7b479be33fe20ac43b96061"
+    }
+  },
+  "polarishub/polaris-adme-fang-hppb-1": {
+    "private": {
+      "answers.csv": "9ddd0e70ac0ee23939b206dec2e371f1"
+    },
+    "public": {
+      "sample_submission.csv": "90d8aa5a510000a9e915f513a4dc2659",
+      "test_features.csv": "8795476eb6e72ecc751ec4bfb237a818",
+      "train.csv": "c55b2b86553812c064091eabc893f01e"
+    }
+  },
+  "polarishub/polaris-adme-fang-solu-1": {
+    "private": {
+      "answers.csv": "9f57e3d75fb71bfaa23d4d00ce973d70"
+    },
+    "public": {
+      "sample_submission.csv": "2840506baec160991a8fde160d943561",
+      "test_features.csv": "491089219fd91c482fb457565e1de8b2",
+      "train.csv": "82140bc24c7e4783ade3ccba771e2019"
+    }
+  },
+  "polarishub/polaris-pkis2-egfr-wt-c-1": {
+    "private": {
+      "answers.csv": "cf1ad39972e2850ec0fd90f613621354"
+    },
+    "public": {
+      "sample_submission.csv": "e95cffff1cc81e7621fc0b62217b9b3e",
+      "test_features.csv": "160793a227457a483b5165d8660172ef",
+      "train.csv": "2f460ecaa465642a63cb1618f68a8089"
+    }
+  },
+  "polarishub/tdcommons-bbb-martins": {
+    "private": {
+      "answers.csv": "2e46b9494f26c60d2dec78fda4de2579"
+    },
+    "public": {
+      "sample_submission.csv": "0694b9e0256653c5b14601a475820149",
+      "test_features.csv": "6b852dd2cc476f6c50895a91ebdca74e",
+      "train.csv": "52c013020c8c532792a4bedaa375f1d5"
+    }
+  },
+  "polarishub/tdcommons-caco2-wang": {
+    "private": {
+      "answers.csv": "49586b2fb677911fd7327ec28846482d"
+    },
+    "public": {
+      "sample_submission.csv": "4a31483fce89cc8f65212ca3cf2c65b7",
+      "test_features.csv": "a2cc4f3faaec51315657aa355d13d79f",
+      "train.csv": "fbbb95e866c661213e3ff8ff0f4c0ba9"
+    }
+  },
+  "polarishub/tdcommons-cyp2d6-substrate-carbonmangels": {
+    "private": {
+      "answers.csv": "cd07045e255bfc42b3db05088945bda8"
+    },
+    "public": {
+      "sample_submission.csv": "b9ab621666cbd27eeb8606bab474c6f0",
+      "test_features.csv": "21f64d436751b016b611ece560aafd46",
+      "train.csv": "74a5ce3944be0a94dbc0201c1b4bb34d"
+    }
+  },
+  "polarishub/tdcommons-herg": {
+    "private": {
+      "answers.csv": "e7f8ec5ac31daa7d1409fcb8aae7c9c5"
+    },
+    "public": {
+      "sample_submission.csv": "6883b367c99af6ab632ecc125d488bc0",
+      "test_features.csv": "47ae7f4e04eac7490bd96952a8f8367d",
+      "train.csv": "c74e45f2244751efb1d0952136ff3217"
+    }
+  },
+  "polarishub/tdcommons-lipophilicity-astrazeneca": {
+    "private": {
+      "answers.csv": "64bff2733efddb77893c7c0754335f65"
+    },
+    "public": {
+      "sample_submission.csv": "84b7a4c36cbc6d7f5a7315653bd1a2ea",
+      "test_features.csv": "29dafd809e9b440d8584616101721417",
+      "train.csv": "bc85e0f61806edcbfbeb08d8a73d23b4"
+    }
+  },
+  "proteingym-dms/CBX4_HUMAN_Tsuboyama_2023_2K28": {
+    "private": {
+      "answers.csv": "b7c4ca12b0c5a499009103c76c0d207a"
+    },
+    "public": {
+      "data.csv": "0b943ddc9a0c0687cf40707c35cf6406",
+      "sample_submission.csv": "90bcb73b9dc3a6c8e8ae703864e92db1"
+    }
+  },
+  "proteingym-dms/CSN4_MOUSE_Tsuboyama_2023_1UFM_indels": {
+    "private": {
+      "answers.csv": "aaab76b34f92bb06a932a2c595ac26d1"
+    },
+    "public": {
+      "data.csv": "997907c6b1d5a92bd51712aa0f4c2e80",
+      "sample_submission.csv": "a284c7a5ea7ef8a3fd225072219ab38e"
+    }
+  },
+  "proteingym-dms/PSAE_PICP2_Tsuboyama_2023_1PSE": {
+    "private": {
+      "answers.csv": "6f378182c27a042ee8a11ff04d1f4273"
+    },
+    "public": {
+      "data.csv": "106e6e41dbca73bc1550e83c70e2ab6d",
+      "sample_submission.csv": "b7b885b6ff71a4ab2cc4404f12211835"
+    }
+  },
+  "proteingym-dms/Q8EG35_SHEON_Campbell_2022_indels": {
+    "private": {
+      "answers.csv": "de35e030414c01cf606faba000add696"
+    },
+    "public": {
+      "data.csv": "6ec429439eeb507253de31277436dee1",
+      "sample_submission.csv": "9bd6b69bc25715ec09563ae55004428a"
+    }
+  },
+  "proteingym-dms/SBI_STAAM_Tsuboyama_2023_2JVG": {
+    "private": {
+      "answers.csv": "988c488d70202605e211b552515a0d46"
+    },
+    "public": {
+      "data.csv": "4af00fdae75ebaefa905d100e3f6570d",
+      "sample_submission.csv": "47c67c082e570861019ddafdb6a1683f"
+    }
+  },
+  "proteingym-dms/SPIKE_SARS2_Starr_2020_binding": {
+    "private": {
+      "answers.csv": "9f8e3a96fb7a9a99c7dac655d8d83628"
+    },
+    "public": {
+      "data.csv": "7f30dac717a8fbeb2bdf27cf2dd6b322",
+      "sample_submission.csv": "d2bb4bfb71ea930cfec4492d1e5c4cf0"
+    }
+  }
+}
