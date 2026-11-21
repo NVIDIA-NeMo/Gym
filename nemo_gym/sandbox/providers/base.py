@@ -610,6 +610,10 @@ class SupportsSandboxSnapshot(Protocol):
     A provider must keep the name a snapshot is taken with and return it from ``list_snapshots``. A caller finds
     its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
     other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
+
+    What a snapshot keeps depends on the provider. A provider whose snapshots save memory and running processes, so
+    that a sandbox created from one continues them, sets the class attribute ``snapshot_keeps_processes = True``;
+    read it with ``getattr(provider, "snapshot_keeps_processes", False)``. Otherwise a snapshot keeps files only.
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
