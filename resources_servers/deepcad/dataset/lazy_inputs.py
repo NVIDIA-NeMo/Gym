@@ -23,6 +23,10 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 
+class UnconfirmedReferenceFailure(RuntimeError):
+    """One reference failure observed; another render must confirm it."""
+
+
 class ReferenceRenderTimeout(RuntimeError):
     """Reference exceeded the render budget; quarantined, not proven invalid."""
 
@@ -47,7 +51,10 @@ class LazyRenderConfig(BaseModel, extra="forbid"):
     )
     reference_execution_timeout_s: int = Field(default=60, ge=1, le=600)
     reference_catalog: str | None = None
+    reference_catalog_root: str | None = None
+    warm_start_cache: bool = False
     max_reference_replacements: int = Field(default=8, ge=0, le=64)
+    allow_partial_operation_replacements: bool = False
     operation_hint_probability: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False)
 
 
@@ -94,11 +101,10 @@ def _confirm_failure(target: Path, detail: dict[str, Any], config: LazyRenderCon
     temporary = pending.with_suffix(".building")
     temporary.write_text(json.dumps({"identity": identity, "detail": detail}))
     temporary.replace(pending)
-    raise RuntimeError(f"Unconfirmed reference failure; retry in a fresh renderer: {detail['reason']}")
+    raise UnconfirmedReferenceFailure(f"Unconfirmed reference failure; retry in a fresh renderer: {detail['reason']}")
 
 
-def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
-    lazy = example["deepcad_lazy"]
+def cache_target(lazy: dict[str, Any]) -> Path:
     config = LazyRenderConfig.model_validate(lazy["config"])
     record = lazy["record"]
     # Rendering settings and source identity determine the immutable cache key.
@@ -112,7 +118,10 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
             "legacy_rows_root",
             "cache_root",
             "reference_catalog",
+            "reference_catalog_root",
+            "warm_start_cache",
             "max_reference_replacements",
+            "allow_partial_operation_replacements",
         }
     )
     if record.get("source_kind") != "cad_corpus":
@@ -138,8 +147,18 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
         ).encode()
     ).hexdigest()
     root = Path(config.cache_root).expanduser()
+    if config.warm_start_cache:
+        root = root / key[:2]
+    return root / (key + ".json")
+
+
+def _materialize_one(example: dict[str, Any], *, cache_only: bool = False) -> dict[str, Any]:
+    lazy = example["deepcad_lazy"]
+    config = LazyRenderConfig.model_validate(lazy["config"])
+    record = lazy["record"]
+    target = cache_target(lazy)
+    root, key = target.parent, target.stem
     root.mkdir(parents=True, exist_ok=True)
-    target = root / (key + ".json")
     with (root / (key + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         rejected = target.with_suffix(".rejected.json")
@@ -159,11 +178,12 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
         timed_out = root / f"{key}.timeout-{config.timeout_s}.json"
         if timed_out.exists() and not target.exists():
             detail = json.loads(timed_out.read_text())
-            if detail.get("confirmation_count") == 2:
-                raise ReferenceRenderTimeout(detail["reason"])
+            raise ReferenceRenderTimeout(detail["reason"])
         if target.exists():
             row = json.loads(target.read_text())
         else:
+            if cache_only:
+                raise FileNotFoundError(f"Prompt cache entry missing: {target}")
             legacy = Path(config.legacy_rows_root) / (record["id"] + ".json") if config.legacy_rows_root else None
             if (
                 legacy
@@ -178,7 +198,9 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                 row = json.loads(legacy.read_text())
                 validate_row(row, record)
             else:
-                with tempfile.TemporaryDirectory(prefix="render-", dir=root) as work:
+                with tempfile.TemporaryDirectory(
+                    prefix="render-", dir=None if config.warm_start_cache else root
+                ) as work:
                     request = Path(work) / "request.json"
                     result = Path(work) / "row.json"
                     request.write_text(json.dumps(lazy))
@@ -214,10 +236,7 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                             "source_sha256": record["source_sha256"],
                             "timeout_s": config.timeout_s,
                             "status": "render_timeout_unverified",
-                            "confirmation_key": "renderer_timeout",
                         }
-                        _confirm_failure(target, detail, config)
-                        detail["status"] = "render_timeout_confirmed"
                         temporary = timed_out.with_suffix(".building")
                         temporary.write_text(json.dumps(detail))
                         temporary.replace(timed_out)
@@ -245,6 +264,19 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
 
                         detail = json.loads(failure.read_text())
                         detail.update(asset_id=record.get("asset_id"), source_sha256=record["source_sha256"])
+                        # A budget overrun is sufficient to replace a slow reference;
+                        # it is not evidence that the CAD program is invalid.
+                        if (
+                            detail.get("confirmation_key") == "reference_execution_timeout"
+                            and record.get("source_kind") == "cad_corpus"
+                            and config.reference_catalog
+                        ):
+                            detail.update(status="render_timeout_unverified", timeout_s=config.timeout_s)
+                            temporary = timed_out.with_suffix(".building")
+                            temporary.write_text(json.dumps(detail))
+                            temporary.replace(timed_out)
+                            logger.warning("Quarantined reference execution timeout: %s", detail)
+                            raise ReferenceRenderTimeout(detail["reason"])
                         if detail.get("confirmation_key"):
                             _confirm_failure(target, detail, config)
                         temporary = rejected.with_suffix(".building")
@@ -255,12 +287,14 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                     if process.returncode:
                         raise RuntimeError(f"DeepCAD input render failed for {record['id']}: {process.stderr[-2000:]}")
                     row = json.loads(result.read_text())
-            validate_row(row, record)
+        validate_row(row, record)
+        if config.warm_start_cache:
+            _validate_reference(config, record)
+        if not target.exists():
             temporary = target.with_suffix(".building")
             temporary.write_text(json.dumps(row) + "\n")
             temporary.replace(target)
             target.with_suffix(".failure.json").unlink(missing_ok=True)
-        validate_row(row, record)
     resolved = deepcopy(example)
     resolved.pop("deepcad_lazy")
     resolved.update(row)
@@ -275,7 +309,57 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
-def materialize_one(example: dict[str, Any]) -> dict[str, Any]:
+def _validate_reference(config: LazyRenderConfig, record: dict[str, Any]) -> None:
+    root = Path(config.dataset_root).resolve()
+    step = (root / record["reference_step"]).resolve()
+    if not step.is_relative_to(root):
+        raise ValueError("Reference STEP must remain inside dataset_root")
+    if record.get("source_kind") == "cad_corpus":
+        if not step.is_relative_to(root / "references"):
+            raise ValueError("Corpus reference STEP must remain inside references")
+        expected = json.loads(step.with_suffix(".json").read_text())["step_sha256"]
+    else:
+        expected = record["reference_step_sha256"]
+    with step.open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != expected:
+            raise ValueError(f"Reference STEP checksum mismatch: {step}")
+
+
+def materialize_one(example: dict[str, Any], *, cache_only: bool = False) -> dict[str, Any]:
+    lazy = example["deepcad_lazy"]
+    config = LazyRenderConfig.model_validate(lazy["config"])
+    if not config.warm_start_cache:
+        if cache_only:
+            raise ValueError("Cache verification requires warm_start_cache")
+        return _materialize_replacing(example)
+    target = cache_target(lazy)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # A change of replacement policy or budget must allow the original to be retried.
+    policy = [
+        config.reference_catalog,
+        config.reference_catalog_root,
+        config.max_reference_replacements,
+        config.allow_partial_operation_replacements,
+        config.timeout_s,
+        config.renderer_python,
+    ]
+    digest = hashlib.sha256(json.dumps(policy).encode()).hexdigest()
+    choice = target.with_suffix(f".{digest}.resolved.json")
+    with choice.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if choice.exists():
+            pinned = json.loads(choice.read_text())
+            current = deepcopy(example)
+            current["deepcad_lazy"]["record"] = pinned["record"]
+            resolved = _materialize_one(current, cache_only=cache_only)
+            resolved["verifier_metadata"].update(pinned["metadata"])
+            return resolved
+        if cache_only:
+            return _materialize_one(example, cache_only=True)
+        return _materialize_replacing(example, choice)
+
+
+def _materialize_replacing(example: dict[str, Any], choice: Path | None = None) -> dict[str, Any]:
     """Replace invalid or render-budget-exceeding references; propagate other outages."""
     from resources_servers.deepcad.dataset.corpus_inputs import ReferenceRejected
 
@@ -293,6 +377,30 @@ def materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                     replaced_reference_asset_ids=rejected,
                     reference_replacement_reasons=replacement_reasons,
                 )
+                required = set(original["record"].get("reference_operations", []))
+                retained = required & set(current["deepcad_lazy"]["record"].get("reference_operations", []))
+                if required - retained:
+                    resolved["verifier_metadata"]["reference_operation_fallback"] = {
+                        "required_operations": sorted(required),
+                        "retained_operations": sorted(retained),
+                        "missing_operations": sorted(required - retained),
+                    }
+                if choice is not None:
+                    fields = (
+                        "requested_task_id",
+                        "replaced_reference_asset_ids",
+                        "reference_replacement_reasons",
+                        "reference_operation_fallback",
+                    )
+                    pinned = {
+                        "record": current["deepcad_lazy"]["record"],
+                        "metadata": {
+                            k: resolved["verifier_metadata"][k] for k in fields if k in resolved["verifier_metadata"]
+                        },
+                    }
+                    temporary = choice.with_suffix(".building")
+                    temporary.write_text(json.dumps(pinned))
+                    temporary.replace(choice)
             return resolved
         except (ReferenceRejected, ReferenceRenderTimeout) as exc:
             if (
@@ -310,28 +418,38 @@ def materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                 attempt + 1,
                 exc,
             )
-            root = Path(config.dataset_root).resolve()
+            root = Path(config.reference_catalog_root or config.dataset_root).resolve()
             catalog = Path(config.reference_catalog).resolve()
-            if not catalog.is_relative_to(root):
-                raise ValueError("Reference replacement catalog must remain inside dataset_root")
+            if not (catalog.is_relative_to(Path(config.dataset_root).resolve()) and catalog.is_relative_to(root)):
+                raise ValueError(
+                    "Reference replacement catalog must remain inside dataset_root and the configured catalog root"
+                )
             key = hashlib.sha256((original["record"]["task_id"] + ":" + str(attempt)).encode()).hexdigest()
-            # Replacement must preserve the selected source and operation coverage.
+            # The default retains the source and every required operation.
             source = original["record"].get("dataset")
+            source_parameters = (source,)
             required_operations = json.dumps(sorted(set(original["record"].get("reference_operations", []))))
+            source_predicate = "status='selected' AND json_extract(row_json, '$.deepcad_lazy.record.dataset') IS ? "
             eligible = (
-                "status='selected' AND json_extract(row_json, '$.deepcad_lazy.record.dataset') IS ? "
-                "AND NOT EXISTS (SELECT 1 FROM json_each(?) AS required WHERE NOT EXISTS "
+                source_predicate + "AND NOT EXISTS (SELECT 1 FROM json_each(?) AS required WHERE NOT EXISTS "
                 "(SELECT 1 FROM json_each(json_extract(row_json, '$.deepcad_lazy.record.reference_operations')) "
                 "AS actual WHERE actual.value=required.value)) "
             )
             with sqlite3.connect(f"file:{catalog}?mode=ro", uri=True) as db:
+                # New catalogs expose an indexed source column; retain JSON-only catalog support.
+                if config.allow_partial_operation_replacements and any(
+                    column[1] == "dataset" for column in db.execute("PRAGMA table_info(assets)")
+                ):
+                    source_predicate = "dataset IS ? AND " + source_predicate
+                    eligible = "dataset IS ? AND " + eligible
+                    source_parameters = (source, source)
                 row = db.execute(
                     "SELECT row_json FROM assets WHERE "
                     + eligible
                     + "AND id>=? AND id NOT IN ("
                     + ",".join("?" for _ in rejected)
                     + ") ORDER BY id LIMIT 1",
-                    (source, required_operations, key, *rejected),
+                    (*source_parameters, required_operations, key, *rejected),
                 ).fetchone()
                 if row is None:
                     row = db.execute(
@@ -340,18 +458,37 @@ def materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                         + "AND id NOT IN ("
                         + ",".join("?" for _ in rejected)
                         + ") ORDER BY id LIMIT 1",
-                        (source, required_operations, *rejected),
+                        (*source_parameters, required_operations, *rejected),
                     ).fetchone()
+                if row is None and config.allow_partial_operation_replacements:
+                    row = db.execute(
+                        "SELECT row_json FROM assets WHERE "
+                        + source_predicate
+                        + "AND id NOT IN ("
+                        + ",".join("?" for _ in rejected)
+                        + ") ORDER BY (SELECT COUNT(DISTINCT required.value) FROM json_each(?) AS required "
+                        "WHERE EXISTS (SELECT 1 FROM "
+                        "json_each(json_extract(row_json, '$.deepcad_lazy.record.reference_operations')) AS actual "
+                        "WHERE actual.value=required.value)) DESC, CASE WHEN id>=? THEN 0 ELSE 1 END, id LIMIT 1",
+                        (*source_parameters, *rejected, required_operations, key),
+                    ).fetchone()
+                    if row is not None:
+                        replacement_record = json.loads(row[0])["deepcad_lazy"]["record"]
+                        missing = sorted(
+                            set(original["record"].get("reference_operations", []))
+                            - set(replacement_record.get("reference_operations", []))
+                        )
+                        logger.warning(
+                            "Using partial-operation reference replacement requested_task=%s source=%s asset=%s missing=%s",
+                            original["record"]["task_id"],
+                            source,
+                            replacement_record["asset_id"],
+                            missing,
+                        )
             if row is None:
                 raise
-            current = json.loads(row[0])
-            # The catalog supplies an asset, never the caller's agent routing.
-            current["task_source"] = example["task_source"]
-            current.pop("agent_ref", None)
-            if "agent_ref" in example:
-                current["agent_ref"] = deepcopy(example["agent_ref"])
-            # Keep the caller's view, hint and execution settings for the replacement.
-            current["deepcad_lazy"]["config"] = config.model_dump()
+            current = deepcopy(example)
+            current["deepcad_lazy"]["record"] = json.loads(row[0])["deepcad_lazy"]["record"]
     raise AssertionError("Unreachable reference replacement state")
 
 

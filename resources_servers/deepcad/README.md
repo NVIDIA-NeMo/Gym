@@ -172,10 +172,14 @@ Corpus reference programs require an explicit `reference_sandbox_image` and use
 `reference_sandbox_provider` (default: network-disabled Docker). Source and STEP
 checksums are checked before use. Reference operation hints use static source
 analysis, consistently with the operation bonus. Invalid or quarantined references
-can use bounded deterministic replacements from the pinned catalog; replacements
-must retain the selected source and reference operation coverage. A first renderer
-crash, timeout, or reference-process kill propagates as an outage. Quarantine needs
-two matching failures from fresh renderer attempts; success clears the pending
+can use bounded deterministic replacements from the pinned catalog. The default
+requires the selected source and all requested operations. Set
+`allow_partial_operation_replacements: true` to permit a same-source selected
+reference with the largest number of distinct matching operations after the
+exact-match candidates run out. The verifier metadata records missing operations
+in `reference_operation_fallback`. A render or execution timeout can trigger
+immediate bounded replacement. A process crash or kill needs two matching
+observations from fresh renderer attempts before quarantine; success clears the pending
 observation. SIGKILL/exit 137 is a possible memory-limit kill, not proof of OOM.
 Repeated failures are an operational heuristic; after repairing a shared runtime,
 remove the affected cache's `.failure.json` and confirmed rejection/timeout markers
@@ -184,6 +188,33 @@ Provider errors and unclassified OCC/export errors still stop the batch. Investi
 the logged asset first; if it is deterministically bad, exclude it from the input
 manifest and replacement catalog, then restart with fresh dataloader state (the
 sampler rejects changed manifests when restoring an old state).
+
+### Warm a prefix of ordered draws
+
+Use the same sampler JSON and prompt batch size as the consumer. Export to a
+new directory. The example exports 1,601,024 lightweight descriptors and warms
+the first 1,024. The optional overrides JSON supplies deployment settings such as
+`cache_root`, `renderer_python`, and `allow_partial_operation_replacements`.
+
+```sh
+module=resources_servers.deepcad.dataset.sampled_lazy
+python -m "$module" export --manifest train.jsonl --sampler-config sampler.json --overrides render.json --batch-size 64 --count 1601024 --output ordered
+python -m "$module" warm --output ordered --start 0 --count 1024 --workers 8
+```
+
+Consume `ordered/draws.jsonl` in order with shuffling and runtime resampling
+disabled. Repeated draws are intentional. Exported rows enable
+`warm_start_cache`. Use a persistent cache directory shared by warmers and
+consumers, a filesystem supporting interprocess locks and atomic rename, and the
+same immutable catalog, dataset, and render environment in both. Entries use
+two-character shards, render scratch follows `TMPDIR`, and resolved replacements
+are pinned. Ordinary lazy manifests continue to use their existing cache layout.
+
+The warm command publishes `warm-0-1024-ready.json` after a fresh process
+reads every prompt and verifies its reference STEP checksum with rendering
+disabled. Repeat `verify --output ordered --start 0 --count 1024` for a fresh
+check. Later draws render on demand. Use a new cache directory when refreshing
+the catalog or retrying a pinned replacement after repairing the renderer.
 
 `prepare_opencode.py` accepts validated lazy rows without rendering. It marks the
 harness in their configuration; materialization then adds the workspace prompt and

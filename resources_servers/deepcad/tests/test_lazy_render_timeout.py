@@ -82,20 +82,18 @@ def test_timeout_replacement_is_cached_and_identical_for_grpo(tmp_path, monkeypa
 
     monkeypatch.setattr(lazy_inputs.subprocess, "run", run)
     rows = [{**deepcopy(bad), "_rowidx": i} for i in range(16)]
-    with pytest.raises(RuntimeError, match="Unconfirmed reference failure"):
-        lazy_inputs.materialize_one(bad)
-    assert not list((tmp_path / "cache").glob("*.rejected.json"))
-    assert not list((tmp_path / "cache").glob("*.timeout-*.json"))
     lazy_inputs.materialize_examples(rows)
     again = lazy_inputs.materialize_one(bad)
-    assert calls == ["bad", "bad", "good"]
+    assert calls == ["bad", "good"]
     assert all(r["responses_create_params"] == again["responses_create_params"] for r in rows)
     assert [r["_rowidx"] for r in rows] == list(range(16))
     assert again["verifier_metadata"]["replaced_reference_asset_ids"] == ["bad"]
     assert again["verifier_metadata"]["reference_replacement_reasons"][0]["type"] == "ReferenceRenderTimeout"
     markers = list((tmp_path / "cache").glob("*.timeout-180.json"))
     assert len(markers) == 1
-    assert json.loads(markers[0].read_text())["status"] == "render_timeout_confirmed"
+    evidence = json.loads(markers[0].read_text())
+    assert evidence["status"] == "render_timeout_unverified"
+    assert "confirmation_count" not in evidence
     assert not list((tmp_path / "cache").glob("*.rejected.json"))
     assert "deepcad_lazy" in bad
 
@@ -105,8 +103,6 @@ def test_timeout_budget_change_allows_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(lazy_inputs.subprocess, "run", worker)
     for budget in (180, 181):
         bad["deepcad_lazy"]["config"]["timeout_s"] = budget
-        with pytest.raises(RuntimeError, match="Unconfirmed reference failure"):
-            lazy_inputs.materialize_one(bad)
         lazy_inputs.materialize_one(bad)
     assert len(list((tmp_path / "cache").glob("*.timeout-*.json"))) == 2
 
@@ -114,15 +110,17 @@ def test_timeout_budget_change_allows_retry(tmp_path, monkeypatch):
 def test_timeout_replacements_are_bounded(tmp_path, monkeypatch):
     bad, _ = setup_rows(tmp_path)
 
+    calls = []
+
     def timeout(argv, **kwargs):
+        calls.append(json.loads(Path(argv[-2]).read_text())["record"]["id"])
         raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
 
     monkeypatch.setattr(lazy_inputs.subprocess, "run", timeout)
-    bad["deepcad_lazy"]["config"]["max_reference_replacements"] = 0
-    with pytest.raises(RuntimeError, match="Unconfirmed reference failure"):
-        lazy_inputs.materialize_one(bad)
+    bad["deepcad_lazy"]["config"]["max_reference_replacements"] = 1
     with pytest.raises(lazy_inputs.ReferenceRenderTimeout):
         lazy_inputs.materialize_one(bad)
+    assert calls == ["bad", "good"]
 
 
 @pytest.mark.parametrize("kind", ["no_catalog", "deepcad", "outage"])
@@ -191,16 +189,13 @@ def test_render_non_segfault_crashes_are_not_silently_skipped(tmp_path, monkeypa
     assert not list((tmp_path / "cache").glob("*.rejected.json"))
 
 
-@pytest.mark.parametrize("failure", ["timeout", "segfault"])
-def test_one_time_renderer_failure_retries_original_asset(tmp_path, monkeypatch, failure):
+def test_one_time_segfault_retries_original_asset(tmp_path, monkeypatch):
     bad, _ = setup_rows(tmp_path)
     attempts = []
 
     def run(argv, **kwargs):
         attempts.append(Path(argv[-2]))
         if len(attempts) == 1:
-            if failure == "timeout":
-                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
             return SimpleNamespace(returncode=-11, stderr="VTK crashed once")
         return worker(argv, **{**kwargs, "recover": True})
 
@@ -265,15 +260,17 @@ def test_changed_failure_does_not_confirm_previous_crash(tmp_path, monkeypatch):
         raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
 
     monkeypatch.setattr(lazy_inputs.subprocess, "run", run)
-    for _ in range(2):
-        with pytest.raises(RuntimeError, match="Unconfirmed reference failure"):
-            lazy_inputs.materialize_one(bad)
+    with pytest.raises(RuntimeError, match="Unconfirmed reference failure"):
+        lazy_inputs.materialize_one(bad)
+    # The new timeout reaches replacement without confirming the prior segfault.
+    with pytest.raises(lazy_inputs.ReferenceRenderTimeout):
+        lazy_inputs.materialize_one(bad)
     assert not list((tmp_path / "cache").glob("*.rejected.json"))
-    assert not list((tmp_path / "cache").glob("*.timeout-*.json"))
+    marker = next((tmp_path / "cache").glob("*.timeout-*.json"))
+    assert "confirmation_count" not in json.loads(marker.read_text())
 
 
-@pytest.mark.parametrize("kind", ["segfault", "timeout"])
-def test_legacy_single_failure_marker_does_not_block_recovery(tmp_path, monkeypatch, kind):
+def test_legacy_single_segfault_marker_does_not_block_recovery(tmp_path, monkeypatch):
     bad, _ = setup_rows(tmp_path)
     monkeypatch.setattr(
         lazy_inputs.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=-11, stderr="crash once")
@@ -282,12 +279,12 @@ def test_legacy_single_failure_marker_does_not_block_recovery(tmp_path, monkeypa
         lazy_inputs.materialize_one(bad)
     pending = next((tmp_path / "cache").glob("*.failure.json"))
     key = pending.name.removesuffix(".failure.json")
-    marker = tmp_path / "cache" / (key + (".rejected.json" if kind == "segfault" else ".timeout-180.json"))
+    marker = tmp_path / "cache" / (key + ".rejected.json")
     marker.write_text(
         json.dumps(
             {
                 "reason": "old one-off failure",
-                "status": "segfault_quarantined" if kind == "segfault" else "render_timeout_unverified",
+                "status": "segfault_quarantined",
             }
         )
     )
@@ -307,3 +304,39 @@ def test_changed_renderer_does_not_confirm_prior_failure(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="Unconfirmed reference failure"):
             lazy_inputs.materialize_one(bad)
     assert not list((tmp_path / "cache").glob("*.rejected.json"))
+
+
+@pytest.mark.parametrize("execution_budget", [60, 61])
+def test_execution_timeout_replaces_on_first_observation(tmp_path, monkeypatch, execution_budget):
+    bad, _ = setup_rows(tmp_path)
+    bad["deepcad_lazy"]["config"]["reference_execution_timeout_s"] = execution_budget
+    calls = []
+
+    def run(argv, **kwargs):
+        record = json.loads(Path(argv[-2]).read_text())["record"]
+        calls.append(record["id"])
+        if record["id"] == "bad":
+            Path(argv[-1]).with_suffix(".rejected.json").write_text(
+                json.dumps(
+                    {
+                        "reason": "Reference program exceeded execution budget",
+                        "confirmation_key": "reference_execution_timeout",
+                    }
+                )
+            )
+            return SimpleNamespace(returncode=0)
+        return worker(argv, **kwargs)
+
+    monkeypatch.setattr(lazy_inputs.subprocess, "run", run)
+    rows = [{**deepcopy(bad), "_rowidx": i} for i in range(16)]
+    lazy_inputs.materialize_examples(rows)
+    again = lazy_inputs.materialize_one(bad)
+    assert calls == ["bad", "good"]
+    assert all(row["responses_create_params"] == again["responses_create_params"] for row in rows)
+    assert [row["_rowidx"] for row in rows] == list(range(16))
+    assert again["verifier_metadata"]["replaced_reference_asset_ids"] == ["bad"]
+    assert again["verifier_metadata"]["reference_replacement_reasons"][0]["type"] == "ReferenceRenderTimeout"
+    marker = next((tmp_path / "cache").glob("*.timeout-180.json"))
+    assert json.loads(marker.read_text())["status"] == "render_timeout_unverified"
+    assert not list((tmp_path / "cache").glob("*.rejected.json"))
+    assert not list((tmp_path / "cache").glob("*.failure.json"))
