@@ -493,13 +493,19 @@ gym eval run \
   the calls by the tool name alone, such as `finish`. Codex keeps about 12 KB of each tool result, so the model sees
   only the start and end of a long `fetch_web_page` result.
 - `extra_body` pins the Stirrup agent's temperature and top_p and limits each model call to 32,768 output tokens.
-- With `--model-type vllm_model` instead, Codex's requests go through `vllm_model`'s Responses-to-Chat conversion,
-  which by default refuses an image in a tool's output. Codex's `view_image` returns one, and on GDPVal the model
-  uses it to look at a chart or image it made, so the episode fails with a retryable `environment_server_failed`
-  and is not judged. For a model that reads images, add
-  `++policy_model.responses_api_models.vllm_model.inline_tool_output_images=true`, which sends the image to vLLM
-  inside the tool message; for a text-only model, `drop_unrepresentable_request_fields=true` puts a text placeholder
-  in its place. Set temperature and top_p with `sampling_overrides`, as for Pi.
+- To run Codex with `--model-type vllm_model`, replace **both** `openai_model` overrides at the end of the command
+  above. For a model that reads images, use these two lines to send the image in the tool message and keep the same
+  sampling settings and output limit.
+
+  ```bash
+      ++policy_model.responses_api_models.vllm_model.inline_tool_output_images=true \
+      '++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature: 1.0, top_p: 0.95, max_tokens: 32768}'
+  ```
+
+  For a text-only model, use `++policy_model.responses_api_models.vllm_model.drop_unrepresentable_request_fields=true`
+  as the first override to send a text placeholder. With both image settings off, the Responses-to-Chat conversion
+  rejects the image when Codex uses `view_image` to inspect a chart. The episode fails with a retryable
+  `environment_server_failed` and skips grading.
 - Codex checks `model_auto_compact_token_limit` after each reply that calls a tool, so the context can pass it by
   about a reply and its tool output before Codex compacts, and the compaction call reserves 32,768 tokens for its own
   reply. So keep the limit at about the window minus twice the output limit or lower: `codex.yaml` uses 196,608 for
