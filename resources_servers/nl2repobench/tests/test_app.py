@@ -14,6 +14,7 @@ from pytest import MonkeyPatch
 import resources_servers.nl2repobench.app as app_module
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, NgFailureEvent
+from nemo_gym.sandbox.providers.base import SandboxHandle
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.nl2repobench.app import (
@@ -1205,3 +1206,151 @@ async def test_only_the_no_internet_mode_tells_the_agent_there_is_no_internet(
     text, mode = uploads["/workspace/start.md"]
     assert text.startswith(spec.rstrip()) and text.rstrip().endswith(app_module.OFFLINE_SPEC_NOTICE)
     assert mode & 0o044 == 0o044
+
+
+# --- review: the session is read inside the lock; Docker outages; failed stops stay owned ------------------------
+
+
+async def test_a_verify_that_arrives_while_a_close_is_stopping_the_sandbox_is_masked_as_lost(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    stopping, finish_stop = asyncio.Event(), asyncio.Event()
+    collected: list[Any] = []
+
+    async def stop() -> None:
+        stopping.set()
+        await finish_stop.wait()  # the close yields here while it holds the session lock
+
+    async def collect(sandbox: Any, workdir: str = "/workspace") -> tuple:
+        collected.append(sandbox)
+        return b"tar-bytes", None
+
+    agent_sandbox.stop.side_effect = stop
+    monkeypatch.setattr(server, "_collect_workspace", collect)
+    close = ResourcesCloseSessionRequest(resources_session_id="test-session", episode_id=EpisodeId(rollout_id="r"))
+    closing = asyncio.create_task(server.close_resources_session(close))
+    await stopping.wait()
+
+    verifying = asyncio.create_task(server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request())))
+    await asyncio.sleep(0.05)
+    assert not verifying.done()  # verify waits for the lock; it has not looked at the table yet
+    finish_stop.set()
+    await closing
+    response = await verifying
+
+    assert response.mask_sample is True and response.failure_kind == "session_lost"
+    assert response.reward == 0.0
+    assert collected == []  # no collection through the stopped handle
+    assert create_sandbox.await_count == 1  # the agent sandbox only: no verifier was allocated
+
+
+def _docker_download_sandbox(monkeypatch: MonkeyPatch, tmp_path: Path, stderr: str) -> AsyncMock:
+    """An agent sandbox whose tar command succeeds and whose download goes through the real Docker provider's
+    download_file, with `docker cp` failing with `stderr`."""
+    from nemo_gym.sandbox.providers.docker import provider as docker_provider
+
+    monkeypatch.setattr(docker_provider, "_require_docker", lambda: "/usr/bin/docker")
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
+
+    async def run(argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None) -> tuple[int, str, str]:
+        return 1, "", stderr
+
+    monkeypatch.setattr(provider, "_run", run)
+    handle = SandboxHandle(
+        sandbox_id="nemo-gym-x",
+        provider_name="docker",
+        raw=docker_provider._DockerContainer(name="nemo-gym-x", image="img", shell="sh", env={}, published_ports=()),
+    )
+    sandbox = AsyncMock()
+    sandbox.serialize.return_value = {"sandbox_id": "nemo-gym-x"}
+    sandbox.exec.return_value = _exec_result(0)  # the tar command succeeded
+
+    async def download(remote: str, local: Path) -> None:
+        await provider.download_file(handle, remote, Path(local))
+
+    sandbox.download.side_effect = download
+    return sandbox
+
+
+async def test_a_docker_daemon_outage_during_the_download_masks_the_row_and_allocates_no_verifier(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = _docker_download_sandbox(
+        monkeypatch, tmp_path, "Cannot connect to the Docker daemon at unix:///var/run/docker.sock."
+    )
+    server._agent_sessions["test-session"].sandbox = agent_sandbox
+    # _seeded_server stubs _collect_workspace; these tests exercise the real one.
+    monkeypatch.setattr(server, "_collect_workspace", type(server)._collect_workspace.__get__(server))
+    verify_task_requests = create_sandbox.await_count
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.mask_sample is True and response.reward == 0.0
+    assert response.failure_kind == PROVIDER_UNAVAILABLE
+    assert create_sandbox.await_count == verify_task_requests  # no verifier sandbox allocated
+
+
+async def test_a_missing_archive_after_a_successful_tar_is_still_scored(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = _docker_download_sandbox(
+        monkeypatch,
+        tmp_path,
+        "Error response from daemon: Could not find the file /tmp/workspace.tar.gz in container nemo-gym-x",
+    )
+    server._agent_sessions["test-session"].sandbox = agent_sandbox
+    # _seeded_server stubs _collect_workspace; these tests exercise the real one.
+    monkeypatch.setattr(server, "_collect_workspace", type(server)._collect_workspace.__get__(server))
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert not getattr(response, "mask_sample", False)  # agent-caused: the row keeps its scored zero
+    assert response.reward == 0.0 and "docker cp download" in (response.verifier_error or "")
+    assert create_sandbox.await_count == 1
+
+
+@pytest.mark.parametrize("failing", ["upload", "serialize"])
+async def test_a_setup_failure_whose_stop_also_fails_is_stopped_at_shutdown(
+    task_assets: Path, monkeypatch: MonkeyPatch, failing: str
+) -> None:
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = _exec_result(0)
+    setattr(getattr(sandbox, failing), "side_effect", RuntimeError(f"{failing} failed"))
+    sandbox.stop.side_effect = [RuntimeError("provider down"), None]  # the first stop fails
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    with pytest.raises(RuntimeError, match=f"{failing} failed"):
+        await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+
+    assert server._agent_sessions == {}  # no session was published...
+    assert sandbox.stop.await_count == 1  # ...and the one stop failed, so nothing has stopped it yet
+    await server.shutdown()  # but the server still owns it
+    assert sandbox.stop.await_count == 2
+    assert server._unstopped_sandboxes == {}
+
+
+async def test_a_verifier_whose_first_stop_fails_keeps_its_score_and_is_stopped_at_shutdown(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    grading = _grading_sandbox()
+    grading.stop.side_effect = [RuntimeError("provider down"), None]
+    create_sandbox.side_effect = [grading]
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 1.0 and not getattr(response, "mask_sample", False)  # the score survives
+    assert grading.stop.await_count == 1
+    await server.shutdown()
+    assert grading.stop.await_count == 2  # the failed stop was retried
+    assert server._unstopped_sandboxes == {}

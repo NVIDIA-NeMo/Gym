@@ -722,6 +722,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             expected_task_count=self.config.expected_task_count,
         )
         self._agent_sessions: dict[str, AgentSandboxSession] = {}
+        # Sandboxes outside any session whose stop failed (a failed setup, a verifier's teardown): kept reachable so
+        # shutdown stops them again instead of leaving them to their TTL. Keyed by id(sandbox); (sandbox, task, phase).
+        self._unstopped_sandboxes: dict[int, tuple[AsyncSandbox, str, str]] = {}
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
@@ -1093,13 +1096,13 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         return app
 
     async def shutdown(self) -> None:
-        """Stop every agent sandbox still held, so a restart or stop does not leave them to their TTL."""
-        sessions, self._agent_sessions = list(self._agent_sessions.items()), {}
+        """Stop every sandbox still held (agent sessions, and any whose earlier stop failed), so a restart or stop does
+        not leave them to their TTL."""
+        sessions, self._agent_sessions = list(self._agent_sessions.values()), {}
+        pending, self._unstopped_sandboxes = list(self._unstopped_sandboxes.values()), {}
         await asyncio.gather(
-            *(
-                self._stop_sandbox(session.sandbox, task_id=session.task_id, phase="shutdown-agent")
-                for _, session in sessions
-            )
+            *(self._stop_sandbox(s.sandbox, task_id=s.task_id, phase="shutdown-agent") for s in sessions),
+            *(self._stop_sandbox(sandbox, task_id=tid, phase=f"shutdown-{phase}") for sandbox, tid, phase in pending),
         )
 
     def has_session_state(self, session_id: str) -> bool:
@@ -1142,10 +1145,14 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         self._agent_sessions.pop(session_id, None)
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
+        """Stop a sandbox this server started. A failed stop is not a release: the sandbox stays registered for shutdown."""
         try:
             await sandbox.stop()
         except Exception:
+            self._unstopped_sandboxes[id(sandbox)] = (sandbox, task_id, phase)
             print(f"Failed to stop NL2RepoBench {phase} sandbox for {task_id}: {format_exc()}", file=sys.stderr)
+        else:
+            self._unstopped_sandboxes.pop(id(sandbox), None)
 
     async def seed_session(
         self, request: Request, body: NL2RepoBenchSeedSessionRequest
@@ -1304,15 +1311,16 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         workspace_tar = b""
         workspace_collection_time_s = 0.0
 
-        # Kept in the table until a stop succeeds, so a failed teardown stays reachable for a later close or shutdown.
-        agent_session = self._agent_sessions.get(session_id)
-        if agent_session is None:
-            workspace_error = f"no agent session found for session {session_id!r}"
-            masked = lost_session_verification(workspace_error, failure_kind=SESSION_LOST)
-        else:
-            sandbox_handle = agent_session.sandbox_handle
-            # The same lock /close_session holds while it releases, so a close cannot interrupt the snapshot.
-            async with self.session_lock(session_id):
+        # The same lock /close_session holds while it releases, so a close cannot interrupt the snapshot, and the
+        # session is read inside it: a close that held the lock has finished by now, and its stopped sandbox is gone
+        # from the table. Kept in the table until a stop succeeds, so a failed teardown stays reachable for a retry.
+        async with self.session_lock(session_id):
+            agent_session = self._agent_sessions.get(session_id)
+            if agent_session is None:
+                workspace_error = f"no agent session found for session {session_id!r}"
+                masked = lost_session_verification(workspace_error, failure_kind=SESSION_LOST)
+            else:
+                sandbox_handle = agent_session.sandbox_handle
                 started = monotonic()
                 try:
                     if agent_session.task_id != current_task_id:
