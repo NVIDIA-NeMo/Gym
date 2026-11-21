@@ -18,10 +18,12 @@ Gym has more than one defence against connections that go silent. They fix diffe
 |---|---|---|
 | A Gym server to another Gym server, or any outgoing aiohttp connection, through a NAT or firewall | The device's idle-connection timer, which TCP keepalive probes reset | TCP keepalive, on by default: `global_aiohttp_tcp_keepalive_idle_seconds`, `_interval_seconds`, `_probes`. The same settings apply to connections Gym servers accept. |
 | A Gym model server to an endpoint behind AWS Global Accelerator (NVCF) | Global Accelerator's 340 s timer, which counts only application-layer bytes, so keepalive probes do not reset it | **This sidecar**: HTTP/2 PING frames count as application data. |
+| A Gym model server to a proxy in front of the endpoint, such as a hosted gateway whose own upstream call to the engine crosses Global Accelerator | The proxy's upstream connection: the proxy's wait for a silent engine reply times out, and PINGs from Gym never reach that hop | [`stream_upstream`](/model-server/vllm) on the model server: a streamed call keeps data flowing on the proxy's upstream hop. |
 
 If a request dies at almost exactly 340 seconds with `ServerDisconnectedError` against NVCF, you need the
-sidecar. If connections die much sooner, or somewhere that is not Global Accelerator, look at the TCP
-keepalive settings first.
+sidecar. If a proxy answers the request with an HTTP 500 after about 340 seconds instead, your connection
+to the proxy was fine and its own wait for the reply timed out: use `stream_upstream`. If connections die
+much sooner, or somewhere that is not Global Accelerator, look at the TCP keepalive settings first.
 
 ## How it works
 
