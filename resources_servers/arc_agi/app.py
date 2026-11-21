@@ -65,14 +65,17 @@ def _extract_assistant_text(body: BaseVerifyRequest) -> str:
 
 
 def _parse_grid(text: str) -> Optional[List[List[int]]]:
-    """expects format: \\boxed{[[1,2,3],[4,5,6]]}"""
-    boxed_pattern = r"\\boxed\{(\[\s*\[[\d\s,\[\]]+\]\s*\])\}"
+    """expects format: \\boxed{[[1,2,3],[4,5,6]]}
+
+    The last grid wins, so a corrected answer after a draft, or after the restated test input, is the one scored.
+    """
+    boxed_pattern = r"\\boxed\{\s*(\[\s*\[[\d\s,\[\]]+\]\s*\])\s*\}"
     boxed_matches = re.findall(boxed_pattern, text, re.DOTALL)
 
     if not boxed_matches:
         boxed_matches = re.findall(r"\[\s*\[[\d\s,\[\]]+\]\s*\]", text, re.DOTALL)
 
-    for match in boxed_matches:
+    for match in reversed(boxed_matches):
         try:
             cleaned = re.sub(r"\s+", "", match)
             grid = json.loads(cleaned)
