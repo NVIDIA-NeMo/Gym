@@ -13,15 +13,23 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 _PROVENANCE = {"consumed_by": ["provenance"]}
+# A phase of this category is graded by comparing its result with the solution's, whatever its test cases.
+QUERY_CATEGORY = "Query"
 
 
 class AmbiguityPoint(BaseModel):
-    """An annotated ambiguity: the term in the question and the SQL fragment that resolves it."""
+    """An annotated ambiguity: the term in the question and the SQL fragment that resolves it.
+
+    The fields are declared in the published rows' order, so ``model_dump(exclude_unset=True)`` writes a row's
+    ambiguities as the simulator's prompt shows them.
+    """
 
     model_config = ConfigDict(extra="allow")
 
     term: str
     sql_snippet: str
+    is_mask: bool | None = None
+    type: str | None = None
 
 
 class KnowledgeAmbiguity(AmbiguityPoint):
@@ -52,6 +60,7 @@ class FollowUp(BaseModel):
     sol_sql: list[str] = Field(min_length=1)
     conditions: Conditions = Field(default_factory=Conditions)
     test_cases: list[str] = Field(default_factory=list)
+    category: str = QUERY_CATEGORY
 
 
 class BirdInteractTask(BaseModel):
@@ -68,11 +77,12 @@ class BirdInteractTask(BaseModel):
     preprocess_sql: list[str] = Field(default_factory=list)
     test_cases: list[str] = Field(default_factory=list)
     conditions: Conditions = Field(default_factory=Conditions)
+    # Query or Management. A Management phase runs its custom test cases.
+    category: str = QUERY_CATEGORY
     # The question without its ambiguities. The simulator reads it when the row has it.
     query: str | None = None
     follow_up: FollowUp | None = None
     # Fields of the published rows that Gym does not read.
-    category: str | None = Field(default=None, json_schema_extra=_PROVENANCE)
     high_level: bool | None = Field(default=None, json_schema_extra=_PROVENANCE)
     external_knowledge: list[Any] = Field(default_factory=list, json_schema_extra=_PROVENANCE)
     # The reference harness resets its shared database with these. Each Gym session has its own sandbox.
@@ -83,9 +93,11 @@ class BirdInteractTask(BaseModel):
         """Critical and knowledge ambiguities: the questions the agent needs to resolve the task."""
         return len(self.user_query_ambiguity.critical_ambiguity) + len(self.knowledge_ambiguity)
 
-    def ambiguities(self) -> list[AmbiguityPoint]:
-        query = self.user_query_ambiguity
-        return [*query.critical_ambiguity, *query.non_critical_ambiguity, *self.knowledge_ambiguity]
+    def needs_custom_test_cases(self) -> bool:
+        """Whether a phase is graded by its custom test cases, as BIRD-Interact grades a phase that is not a query
+        and has them. Every other phase is graded by comparing its result with the solution's."""
+        phases = [self] if self.follow_up is None else [self, self.follow_up]
+        return any(phase.category != QUERY_CATEGORY and phase.test_cases for phase in phases)
 
 
 TaskData = BirdInteractTask
