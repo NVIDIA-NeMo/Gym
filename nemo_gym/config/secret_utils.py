@@ -15,7 +15,7 @@
 import re
 from typing import Any, List, NoReturn
 
-from omegaconf import DictConfig, ListConfig, open_dict
+from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf._utils import split_key
 from omegaconf.errors import GrammarParseError
 from omegaconf.grammar.gen.OmegaConfGrammarParser import OmegaConfGrammarParser
@@ -92,6 +92,27 @@ def looks_like_secret_key(key: object) -> bool:
     # OmegaConf allows non-string keys (ints, bools, enums), so match on their string form.
     lowered_key = str(key).lower()
     return any(substring in lowered_key for substring in _SECRET_KEY_SUBSTRINGS)
+
+
+def _secret_shaped_only_by_token(key: object) -> bool:
+    lowered_key = str(key).lower()
+    return {substring for substring in _SECRET_KEY_SUBSTRINGS if substring in lowered_key} == {"token"}
+
+
+def _is_token_count_or_flag(key: object, value: Any) -> bool:
+    """Whether a leaf is secret-shaped only through "token" and holds a number, bool or null.
+
+    `max_tokens`, `num_speculative_tokens` and the like are counts or flags, not credentials, and the
+    saved config must show them. A credential is a string, so any string (an interpolation included)
+    stays masked, as does a key that also matches another secret substring (`api_token_key`).
+    """
+    return _secret_shaped_only_by_token(key) and (value is None or isinstance(value, (bool, int, float)))
+
+
+# An override value that Hydra parses as an int, float, bool or null.
+_OVERRIDE_NON_STRING_SCALAR = re.compile(
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|true|false|null", re.IGNORECASE
+)
 
 
 # Narrower than _SECRET_KEY_SUBSTRINGS: key names whose values are credentials, for a config that clients still use
@@ -347,6 +368,49 @@ def mask_credentials(value: Any, under_credential_key: bool = False, in_headers:
     return copy(value)
 
 
+# A setting holding a credential, matched on its name lower-cased with `-`, `.`, spaces and case changes as `_`:
+# `exa_api_key`, `X-Api-Key`, `service_key`, `Authorization`, `auth`, `X-Session`, `X_TOKEN`, `my_service_pw`, but not
+# `max_tokens`, `author`, `reference_key` or `record_terminal_session`. A `..._key` counts only after a word that names
+# an account or a service, since other `..._key` settings (`metric_key`, `reference_key`) select what is measured.
+_CREDENTIAL_NAME = re.compile(
+    r"api_?key|secret|passw(or)?d|credential|private_?key|access_?key|cookie"
+    r"|(^|_)(token|pw|pwd|pass|bearer|o?auth)$|(^|_)o?auth(orization|entication)?(_|$)"
+    r"|(^|_)(service|client|signing|license|master|account|subscription|encryption|session|app)_key$"
+    r"|^(x_)?session(_id)?$"
+)
+
+
+def is_credential_name(name: object) -> bool:
+    """Whether a setting's name says it holds a credential; narrower than `looks_like_secret_key`, so it can decide
+    what a persisted identity redacts without hiding settings such as `max_tokens`."""
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name))
+    return bool(_CREDENTIAL_NAME.search(re.sub(r"[\s.\-]", "_", normalized).lower()))
+
+
+_URL_HEAD = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//")
+_URL_PARTS = re.compile(r"^(?P<authority>[^/?#]*)(?P<path>[^?#]*)")
+
+
+def url_without_credentials(value: str) -> str:
+    """`value` without the user info, query and fragment of the URL it is, so it can be recorded as a name.
+
+    A URL is one with a scheme, a protocol-relative `//host/...`, or a schemeless `user:password@host/...` (also
+    `TOKEN@host.example/...`). The user info runs to the authority's last `@`, since passwords are often pasted without
+    percent-encoding. Anything else, such as `org/benchmark@v3` or a model name, is returned as is.
+    """
+    head = _URL_HEAD.match(value)
+    rest = value[head.end() :] if head else value
+    parts = _URL_PARTS.match(rest)
+    userinfo, separator, host = parts["authority"].rpartition("@")
+    if not head:
+        if not separator:
+            return value
+        hostname, _, port = host.partition(":")
+        if not ("." in hostname or hostname == "localhost" or port or ":" in userinfo):
+            return value
+    return (head[0] if head else "") + host + parts["path"]
+
+
 def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
     """Mask `+key=value` / `++key=value` tokens whose key looks secret-shaped."""
     override_re = re.compile(r"^(\+{1,2})([^=]+)=(.*)$")
@@ -354,9 +418,13 @@ def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
     for token in tokens:
         match = override_re.match(token)
         if match:
-            prefix, key, _value = match.groups()
+            prefix, key, value = match.groups()
+            *parents, leaf = key.split(".")
             # Any secret-shaped segment, not only the leaf: `...harbor.secrets.JUDGE_AUTH` is a secret too.
-            if any(looks_like_secret_key(segment) for segment in key.split(".")):
+            secret_parent = any(looks_like_secret_key(segment) for segment in parents)
+            # Same rule as for a config leaf: a token count or flag stays visible.
+            visible_leaf = _secret_shaped_only_by_token(leaf) and _OVERRIDE_NON_STRING_SCALAR.fullmatch(value)
+            if secret_parent or (looks_like_secret_key(leaf) and not visible_leaf):
                 token = f"{prefix}{key}={MASKED_VALUE}"
         redacted.append(token)
     return redacted
@@ -397,7 +465,9 @@ def recursively_hide_secrets(dict_config: DictConfig) -> None:
                         elif isinstance(inner_v, str) and mask_url_passwords(inner_v) != inner_v:
                             v[index] = mask_url_passwords(inner_v)
             else:
-                if looks_like_secret_key(k):
+                # An interpolation is a string in the source config, whatever it resolves to.
+                interpolation = isinstance(node, DictConfig) and OmegaConf.is_interpolation(node, k)
+                if looks_like_secret_key(k) and (interpolation or not _is_token_count_or_flag(k, v)):
                     node[k] = MASKED_VALUE
                 elif isinstance(v, str) and mask_url_passwords(v) != v:
                     node[k] = mask_url_passwords(v)
@@ -425,7 +495,13 @@ def hide_secrets_in_container(data: Any) -> Any:
                     continue
                 capture_settings = root and key == "token_id_capture" and isinstance(value, dict)
                 credential_options = capture and key not in _CAPTURE_PUBLIC_FIELDS
-                child_secret = secret or credential_options or (looks_like_secret_key(key) and not capture_settings)
+                child_secret = (
+                    secret
+                    or credential_options
+                    or (
+                        looks_like_secret_key(key) and not capture_settings and not _is_token_count_or_flag(key, value)
+                    )
+                )
                 masked[key] = hide(value, child_secret, capture=capture_settings)
             return masked
         if isinstance(node, list):

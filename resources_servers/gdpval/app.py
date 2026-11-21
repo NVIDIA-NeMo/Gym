@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
+import anyio
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -104,9 +105,16 @@ from resources_servers.gdpval.task_sandbox import (
     GDPValSandboxConfig,
     collect_deliverables,
     missing_files,
+    stage_reference_files,
     start_task_sandbox,
 )
 from resources_servers.gdpval.tavily_search import TavilySearch, fetch_web_page, web_client
+from resources_servers.gdpval.web_guard import (
+    BLOCKED_MESSAGE,
+    DEFAULT_BLOCKED_WEB_PATTERNS,
+    WebGuard,
+    load_web_exclusions,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -128,6 +136,7 @@ def _is_invalid_judge_result(judge_result: Any) -> bool:
 
 
 _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_prompt.j2")
+_DEFAULT_WEB_EXCLUSIONS_FPATH = str(Path(__file__).parent / "search_exclusions.json")
 _DEFAULT_REFERENCE_ELO = 1000.0
 
 
@@ -363,8 +372,10 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_pdf_include_text: bool = True
     # Exact request-wide image cap for raster and PDF-overflow transports.
     judge_max_images_per_request: int = 450
-    # Include nested task inputs while leaving submission directories shallow.
-    judge_reference_files_recursive: bool = False
+    # Show the judges the task's input files. GDPval stores each one a directory down
+    # (reference_files/<hash>/<name>), so without recursion the judges see none of them.
+    # Submission directories stay shallow either way.
+    judge_reference_files_recursive: bool = True
     # Use the eval tree's prepared copies of the original benchmark inputs,
     # persisted from host downloads separately from model-authored submissions.
     # Enable only after validating those inputs during preparation.
@@ -447,6 +458,13 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # attempts at most, rotating keys on 401/403/429 and 5xx.
     tavily_api_key: Union[str, List[str]]
     tavily_max_sweeps: int = Field(default=1, ge=1)
+    # Case-insensitive regexes that web_search and fetch_web_page refuse in a query or URL and drop
+    # from search results, so the agent cannot look up GDPval's published answers. The current
+    # task's id is always added. An empty list leaves only the task id. See web_guard.py.
+    blocked_web_patterns: List[str] = Field(default_factory=lambda: list(DEFAULT_BLOCKED_WEB_PATTERNS))
+    # Sites web_search and fetch_web_page refuse outright, in the format of benchmarks/hle/search_exclusions.json.
+    # None uses search_exclusions.json beside this file (Hugging Face and the sites hosting GDPval submissions).
+    web_exclusions_fpath: Optional[str] = None
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
@@ -723,9 +741,14 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         self._judge_telemetry = JudgeTelemetrySink(self.config.judge_telemetry_output_dir)
         self._tavily = TavilySearch(api_keys=self.config.tavily_api_key, max_sweeps=self.config.tavily_max_sweeps)
+        self._web_domains, self._web_url_substrings = load_web_exclusions(
+            self.config.web_exclusions_fpath or _DEFAULT_WEB_EXCLUSIONS_FPATH
+        )
         if self.config.num_workers not in (None, 1):
             raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
+        # Sessions whose seed failed and whose sandbox did not stop; the session's close or the shutdown stops them.
+        self._failed_seeds: dict[str, _TaskSession] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
         self._claimed_directories: Dict[Tuple[str, str], str] = {}
         self._locks = ResourcesSessionLocks()
@@ -838,6 +861,15 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     )
                 request.session[SESSION_ID_KEY] = session_id
                 return await self._seed_response(session_id, session)
+            # A seed never replaces a failed seed's sandbox that still runs, so no sandbox is left without an owner,
+            # and only the failed seed's own episode and task may stop it.
+            failed_seed = self._failed_seeds.get(session_id)
+            if failed_seed is not None and (failed_seed.episode_id, failed_seed.task_id) != (
+                body.episode_id,
+                body.task_id,
+            ):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            await self._release_failed_seed(session_id)
             try:
                 task = TaskData.model_validate(body.task_data)
             except ValidationError as error:
@@ -860,8 +892,6 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     self.config.sandbox_provider,
                     self.config.sandbox_config,
                     task_id=task.task_id,
-                    reference_dir=reference_dir,
-                    reference_files=reference_files,
                     workdir=self._sandbox_workdir,
                 )
             except BaseException:
@@ -869,11 +899,17 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 shutil.rmtree(reference_dir, ignore_errors=True)
                 raise
             session = _TaskSession(body.episode_id, body.task_id, repeat, sandbox, reference_dir)
+            # The session holds the sandbox from here, so a failed upload or reply stops it on the same path.
             try:
+                await stage_reference_files(sandbox, reference_dir, reference_files, self._sandbox_workdir)
                 response = await self._seed_response(session_id, session)
             except BaseException:
                 self._claimed_directories.pop(directory, None)
-                await self._release(session)
+                try:
+                    await self._release(session)
+                except Exception:
+                    self._failed_seeds[session_id] = session
+                    LOGGER.exception("Failed to stop the sandbox of a failed GDPVal seed for session %s", session_id)
                 raise
             self._sessions[session_id] = session
             request.session[SESSION_ID_KEY] = session_id
@@ -908,6 +944,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         async with self._locks.locked(session_id):
             fenced_episode = self._fences.get(session_id)
+            failed_seed = self._failed_seeds.get(session_id)
+            if failed_seed is not None and failed_seed.episode_id != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            await self._release_failed_seed(session_id)
             if fenced_episode is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
@@ -929,7 +969,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if session.sandbox is not None:
             await session.sandbox.stop()
             session.sandbox = None
-        await asyncio.to_thread(shutil.rmtree, session.reference_dir, ignore_errors=True)
+        # Shielded like the stop, so a close that a disconnect cancels still removes the reference files and then,
+        # with no await left, its record and fence; otherwise a re-seed would find a record without a sandbox.
+        with anyio.CancelScope(shield=True):
+            await asyncio.to_thread(shutil.rmtree, session.reference_dir, ignore_errors=True)
 
     async def shutdown(self) -> None:
         for session_id, session in list(self._sessions.items()):
@@ -938,7 +981,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
             except Exception:
                 LOGGER.exception("Failed to stop the sandbox of GDPVal session %s", session_id)
         self._sessions.clear()
+        for session_id in list(self._failed_seeds):
+            try:
+                await self._release_failed_seed(session_id)
+            except Exception:
+                LOGGER.exception("Failed to stop the sandbox of failed GDPVal seed %s", session_id)
+        self._failed_seeds.clear()
         self._claimed_directories.clear()
+
+    async def _release_failed_seed(self, session_id: str) -> None:
+        """Stop the sandbox a failed seed of ``session_id`` left running; it stays tracked until its stop succeeds."""
+        session = self._failed_seeds.get(session_id)
+        if session is not None:
+            await self._release(session)
+            del self._failed_seeds[session_id]
 
     def _cached_deliverables_dir(self, body: GDPValVerifyRequest) -> str:
         directory = persisted_layout.repeat_dir(
@@ -972,12 +1028,27 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._get_session(request).finish_call = {"tool": "abandon_task_finish", **body.model_dump()}
         return body.reason
 
-    async def web_search(self, body: WebSearchRequest) -> str:
-        async with web_client() as client:
-            return await self._tavily.search(body.query, client)
+    def _web_guard(self, request: Request) -> WebGuard:
+        # A call outside a seeded session still gets the pattern guard, just without a task id.
+        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
+        return WebGuard(
+            self.config.blocked_web_patterns,
+            session.task_id.task_id if session else None,
+            self._web_domains,
+            self._web_url_substrings,
+        )
 
-    async def fetch_web_page(self, body: FetchWebPageRequest) -> str:
+    async def web_search(self, request: Request, body: WebSearchRequest) -> str:
+        guard = self._web_guard(request)
+        if guard.blocks(body.query):
+            return f"<error>{BLOCKED_MESSAGE}</error>"
         async with web_client() as client:
+            return await self._tavily.search(body.query, client, guard)
+
+    async def fetch_web_page(self, request: Request, body: FetchWebPageRequest) -> str:
+        guard = self._web_guard(request)
+        async with web_client() as client:
+            client.event_hooks["request"].append(guard.check_request)
             return await fetch_web_page(body.url, client)
 
     async def _collect_deliverables(self, session: _TaskSession) -> str:
