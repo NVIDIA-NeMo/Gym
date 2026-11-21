@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Terminal-Bench 4.1 with Hermes in place of mini-SWE: miniswe.yaml's target and server settings, with Hermes's 30
+# turns and 6 h runner raised to 500 turns and the tasks' 8-hour budget. Not AA settings; not comparable with mini-SWE.
+harbor_target: terminal_bench_4
+config_paths:
+- responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      max_turns: 500
+      sandbox_runner_timeout_seconds: 28800
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      # As miniswe.yaml: an episode's budget is capped at the slowest task's, and a harness install may take 900 s.
+      default_episode_timeout_seconds: ${oc.select:tb4_episode_timeout_sec,54000}
+      harness_setup_allowance_s: 900

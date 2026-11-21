@@ -102,6 +102,32 @@ measured zero. Infrastructure endings are retried or masked, never scored zero:
 a model-server error or transport failure, a sandbox or provider failure, a lost
 sandbox, and an episode that runs past its bound (`harbor:task_deadline`).
 
+### Other harnesses
+
+Each preset below runs the same tasks and Harbor server settings as `terminal_bench_4/miniswe`, with another harness in
+the task sandbox calling Gym's model server. Each harness ships with limits below the tasks' 8-hour agent budget, so
+its preset raises them (last column). These are not AA settings, and the scores are not comparable with mini-SWE's.
+Each preset is checked offline: it composes, and its manifest matches; no model or sandbox was run.
+
+| `--benchmark` | Harness | Shipped, then preset |
+| --- | --- | --- |
+| `terminal_bench_4/hermes` | `hermes_agent` | 30 turns, 6 h runner; 500 turns, 8 h |
+| `terminal_bench_4/opencode` | `opencode_agent` | 3 h `timeout`; 8 h |
+| `terminal_bench_4/nooa` | `nooa_agent`, sandboxed | 6 h worker ceiling; 8 h |
+| `terminal_bench_4/codex` | `codex_agent` | 10 min `timeout`; 8 h, plus 5 min stream idle and close limits |
+| `terminal_bench_4/claude_code` | `claude_code_agent` | calls Anthropic directly, 5 min, 30 turns, no CLI pin; policy model, CLI 2.1.108, 500 turns, 8 h |
+
+```sh
+gym eval run --benchmark terminal_bench_4/hermes --sandbox opensandbox \
+  --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
+  --output results/tb4/rollouts.jsonl --concurrency 8
+```
+
+`--benchmark terminal_bench_4/miniswe --agent-type <harness>` still swaps the harness, but it keeps the shipped limits.
+`hermes_agent` runs with `chat_template_kwargs_enabled: false`. For vLLM, set it back with
+`++hermes_agent.responses_api_agents.hermes_agent.chat_template_kwargs_enabled=true`.
+
 ### From the `/run` commands
 
 `terminal_bench_4/miniswe` keeps its name but no longer reads the `/run`

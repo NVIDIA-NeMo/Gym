@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Terminal-Bench 4.1 with NOOA in place of mini-SWE: miniswe.yaml's target and server settings, with NOOA's 6 h
+# worker ceiling raised to the tasks' 8-hour budget. Not AA settings; not comparable with mini-SWE.
+harbor_target: terminal_bench_4
+config_paths:
+- responses_api_agents/nooa_agent/configs/nooa_agent.yaml
+
+# As nooa_sandboxed.yaml: NOOA's own environment server would start beside Harbor's.
+nooa_environment_server: null
+
+nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      # nooa_sandboxed.yaml's settings, set on the instance itself: a Harbor preset cannot inherit its agent.
+      resources_server: null
+      nooa:
+        execution_mode: sandboxed
+      max_policy_calls: null
+      sandbox_runner_timeout_seconds: 28800
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      # As miniswe.yaml: an episode's budget is capped at the slowest task's, and a harness install may take 900 s.
+      default_episode_timeout_seconds: ${oc.select:tb4_episode_timeout_sec,54000}
+      harness_setup_allowance_s: 900
