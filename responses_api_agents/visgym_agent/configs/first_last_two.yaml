@@ -1,0 +1,28 @@
+# Merge after the ordinary agent config; requires Gym #3368 and token capture.
+# Set the request max_output_tokens to 8192 or less. This is not a launch recipe.
+visgym_agent:
+  responses_api_agents:
+    visgym_agent:
+      token_id_capture: true
+      return_transitions: false
+      max_steps: 20
+      context_history:
+        enabled: true
+        policy:
+          type: recency
+          config:
+            images:
+              enabled: true
+              protect_initial_context: true
+              keep_last_groups: 2
+            reasoning:
+              enabled: true
+              keep_first_block: true
+              keep_last_blocks: 2
+        schedule:
+          type: rolling_recency
+        guards:
+          max_total_tokens: 51200
+          reserved_generation_tokens: 8192
+        max_model_calls: 20
+        max_response_retries: 0
