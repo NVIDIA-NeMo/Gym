@@ -24,7 +24,8 @@ of the `test` split and downloads it at run time. Nothing from the dataset is co
 | `hle_diamond/opencode_search`, `hle_diamond/pi_search` | 728 | `prompts/opencode.yaml` | sandboxed code tools plus Tavily search (agent sessions) |
 | `hle_diamond/opencode_reference` | 728 | `prompts/opencode.yaml` | `opencode_search` on the reference sandbox image (upstream's Python 3.11.16 environment) under upstream's egress policy; needs the OpenSandbox provider (see Reference preset) |
 | `hle_diamond/opencode_full`, `hle_diamond/opencode_search_full` | 1000 (272 with an image) | `prompts/opencode.yaml`, baked at prepare time by `prepare_opencode_legacy.py` | deprecated: the OpenCode presets over the full set, images attached through `opencode run -f`, on `opencode_sandboxed_agent`; needs a vision-capable policy model |
-| `hle_diamond/opencode_hle_tools` | 728 | `prompts/opencode.yaml` | sandboxed code tools plus upstream's `web_search` and `web_fetch` behind its blocklist (`resources_servers/hle_web_tools`, Tavily backend; see Upstream web tools) (agent sessions) |
+| `hle_diamond/opencode_hle_tools` | 728 | `prompts/opencode.yaml` | upstream's with-tools protocol on every point Gym controls: `opencode_reference`'s agent, reference image and enforced egress with the Tavily tools replaced by upstream's `web_search` and `web_fetch` behind its blocklist (`resources_servers/hle_web_tools`, Tavily backend); needs the OpenSandbox provider; see Upstream web tools for the fidelity table |
+| `hle_diamond/opencode_hle_tools_full` | 1000 (272 with an image) | `prompts/opencode.yaml`, baked at prepare time by `prepare_opencode_legacy.py` | `opencode_hle_tools` over the full set on the same agent session: the comparable denominator for the published with-tools column; image rows reach the model through OpenCode's file attachment (Image questions through OpenCode); needs a vision-capable policy model and the OpenSandbox provider |
 | `hle_diamond/opencode_legacy_agent`, `hle_diamond/opencode_search_legacy_agent`, `hle_diamond/pi_legacy_agent`, `hle_diamond/pi_search_legacy_agent`, `hle_diamond/opencode_reference_legacy_agent` | 728 | `prompts/opencode.yaml` | deprecated: the text presets above as they ran before agent sessions, on `opencode_sandboxed_agent` / `pi_sandboxed_agent` |
 
 Two composable overrides live next to the presets and are not benchmarks (no dataset, not listed by
@@ -41,16 +42,17 @@ the default and the text subset is the variant. A `hle_diamond/text` run covers 
 **Text and full sandboxed presets.** `opencode`, `opencode_search`, `opencode_hle_tools`, `pi` and
 `pi_search` run the 728 text rows, as `benchmarks/hle`'s presets do, so with-tools numbers from them
 cover 728/1000 questions. They run `opencode_agent` and `pi_agent` in agent sessions (Sandboxed agents
-(with tools) > Agent sessions) with the shared settings of `benchmarks/hle`'s presets. `opencode_full` and
-`opencode_search_full` run all 1000 on the deprecated `opencode_sandboxed_agent`: that
-adapter uploads each `input_image` data URI of the user turn into the sandbox and attaches it with
-`opencode run -f`, so the image reaches the model call as an `image_url` part (Sandboxed agents (with
-tools) > Image questions through OpenCode). Agent sessions accept prompt images too, but no session
-preset covers the image rows yet, and the deprecated Pi adapter accepts `input_text` parts only, so
-no Pi preset covers them. The search presets and `opencode_hle_tools` are selectable
-with `--benchmark` but, exactly like `hle/opencode_search` and `hle/pi_search`, do not appear in
-`gym list benchmarks` because they extend another preset without redeclaring the dataset;
-`hle_diamond/opencode_reference` restates it (its header says why) and is listed.
+(with tools) > Agent sessions) with the shared settings of `benchmarks/hle`'s presets.
+`opencode_hle_tools_full` runs `opencode_hle_tools` over all 1000 rows on the same agent session: the
+`opencode_agent` session accepts the user turn's `input_image` parts, stages each decoded image into the
+sandbox and attaches it with `opencode run --file`, so the image reaches the model call as an `image_url`
+part (Sandboxed agents (with tools) > Image questions through OpenCode). `opencode_full` and
+`opencode_search_full` run all 1000 the same way on the deprecated `opencode_sandboxed_agent`. The
+deprecated Pi adapter accepts `input_text` parts only, so no Pi preset covers the image rows. The search
+presets and `opencode_hle_tools` are selectable with `--benchmark` but, exactly like `hle/opencode_search`
+and `hle/pi_search`, do not appear in `gym list benchmarks` because they extend another preset without
+redeclaring the dataset; `hle_diamond/opencode_reference` restates it (its header says why) and is listed,
+and `hle_diamond/opencode_hle_tools_full` declares its own dataset and is listed too.
 
 **Deprecated relay presets.** A preset named `*_legacy_agent` runs a deprecated sandboxed agent
 (`opencode_sandboxed_agent` or `pi_sandboxed_agent`) behind the `legacy_agent` relay and goes away
@@ -59,8 +61,8 @@ with the relay. `opencode_legacy_agent`, `opencode_search_legacy_agent`, `pi_leg
 before agent sessions, kept under the agent names of the presets that replace them; the two harnesses
 are configured differently, so do not compare their scores as one measurement (Agent sessions lists
 what changed). `opencode_full` and `opencode_search_full` keep their names and run the same deprecated
-`opencode_sandboxed_agent` behind the relay, because no session preset covers the image questions yet;
-they go away with the relay too.
+`opencode_sandboxed_agent` behind the relay over the full set; the session preset over the full set is
+`opencode_hle_tools_full`, and the two relay presets go away with the relay too.
 
 Dropped at prepare time: `rationale`, `author_name`, `canary`, `image_preview`, `rationale_image`.
 The `image` data URI appears only inside the materialized `input_image` block of the default set and
@@ -91,16 +93,16 @@ keeping the Gym paraphrase for consistency with the other HLE benchmarks loses t
   message, the placement upstream uses (upstream moves the instruction into the user role only for
   `o1` models; this benchmark always sends it as the system message). The braces are doubled in the
   file because `nemo_gym.data.prompt` fills `{placeholders}` with `str.format_map`; the rendered message
-  carries the single braces, and `tests/unit_tests/test_hle_diamond.py` asserts that the rendered
+  carries the single braces, and `resources_servers/equivalence_llm_judge/tests/test_hle_diamond.py` asserts that the rendered
   string and the prepared rows equal the upstream text. The default set bakes it into
   `responses_create_params.input` at prepare time (`nemo_gym.data.vision_input.build_image_input`); the
   text variant applies the same file at rollout time.
 - `prompts/opencode.yaml`: the same verbatim instruction folded after the question into the single
   user message the OpenCode and Pi adapters accept; the harnesses' native system prompts stay intact.
   The text presets apply it at rollout time; `prepare_opencode_legacy.py` bakes it into the full set for
-  `opencode_full` and `opencode_search_full` (the default set's file cannot
-  serve them: it carries the instruction as a system message, which the OpenCode adapter does not
-  forward). Two departures from
+  `opencode_hle_tools_full`, `opencode_full` and `opencode_search_full` (the default set's file cannot
+  serve them: it carries the instruction as a system message, which the relay adapter does not forward
+  and the session agent folds into OpenCode's instructions rather than the user turn). Two departures from
   upstream's placement are inherent to these harnesses and belong next to every with-tools number:
   the instruction arrives as user text rather than as the system message, and the harness's own
   system prompt (several thousand tokens for OpenCode) precedes it.
@@ -114,8 +116,9 @@ keeping the Gym paraphrase for consistency with the other HLE benchmarks loses t
 Image questions: upstream attaches the image as `image_url` with no `detail` setting (the provider
 default); Gym's shared builder requests `detail: high`, which changes image tiling and token counts
 on the 272 image rows for OpenAI-family models on the default set. Making `detail` configurable would
-be a change to `nemo_gym.data.vision_input`, not to this benchmark. On `opencode_full`
-and `opencode_search_full` the `detail` field never reaches the model: the adapter writes
+be a change to `nemo_gym.data.vision_input`, not to this benchmark. On `opencode_hle_tools_full`,
+`opencode_full` and `opencode_search_full` the `detail` field never reaches the model: the session agent
+(`nemo_gym.core.media.split_text_and_media` reads only the part's data URI) or the relay adapter writes
 the decoded image into the sandbox and OpenCode builds its own chat-completions request, whose `image_url` part
 carries only the URL, as upstream's does (Sandboxed agents (with tools) > Image questions through
 OpenCode).
@@ -154,8 +157,8 @@ and Pi build their own model calls inside the sandbox (a model-call capture of t
 showed no `reasoning_effort`, so the gateway default, medium, applied). How each preset requests
 high effort:
 
-- The agent-session presets (`opencode`, `opencode_search`, `opencode_hle_tools`, `opencode_reference`,
-  `pi`, `pi_search`): through the model server, not the preset. Neither session agent can put an effort on its harness's
+- The agent-session presets (`opencode`, `opencode_search`, `opencode_hle_tools`, `opencode_hle_tools_full`,
+  `opencode_reference`, `pi`, `pi_search`): through the model server, not the preset. Neither session agent can put an effort on its harness's
   calls (a session's `opencode_config` takes no model options, and `pi_agent`'s generated provider
   declares no `reasoning_effort` support, so Pi's `--thinking` level never leaves the sandbox), and
   both refuse a request `reasoning` field with 422, so `++responses_create_params.reasoning.effort` must
@@ -231,7 +234,11 @@ Judge request: the judge call carries no `max_output_tokens` and no reasoning pa
 (`judge_responses_create_params: {input: []}`), so the judge model runs at its default effort and its
 verdict is never truncated. Upstream caps the judge at `max_completion_tokens=4096`. The divergence is
 deliberate: a long reasoning trace from an o3-mini-class judge must not cut the verdict off and turn
-a graded row into a parsing failure.
+a graded row into a parsing failure. `opencode_hle_tools` (and `opencode_hle_tools_full`, which inherits its
+judge) is the exception: its judge runs as upstream's, `max_output_tokens: 4096` and a `question_extract_regex`
+that hands the judge the bare question rather than the question plus the folded answer-format instruction;
+on the full set's image rows the judge joins the text parts of the multimodal user turn before the regex
+applies (Sandboxed agents (with tools) > Upstream web tools).
 
 Headline metric: `mean/reward`, accuracy over every evaluated row. Additional metrics:
 
@@ -287,14 +294,14 @@ line. `--config <file>` does not: in this Gym version the CLI translates `--conf
 `--benchmark`, so a `--config` override merges first and silently loses every key the preset sets
 (`judge_model_server`; for the search presets also `network_access` and the environment note). Never
 pass `judge_openai.yaml` or `sandbox_docker_local.yaml` with `--config`;
-`tests/unit_tests/test_hle_diamond.py` composes the commands in this README through the CLI's own flag
+`resources_servers/equivalence_llm_judge/tests/test_hle_diamond.py` composes the commands in this README through the CLI's own flag
 translation to keep that true.
 
 ## Harness validation
 
 Model-free checks that have been run (commands below, from the repository root):
 
-- `tests/unit_tests/test_hle_diamond.py`: preparation against an in-memory arrow fixture (field set,
+- `resources_servers/equivalence_llm_judge/tests/test_hle_diamond.py`: preparation against an in-memory arrow fixture (field set,
   the `input_image` block, the text filter, fail-closed on a wrong row count / partition split /
   image count / duplicated id, `--limit` truncation after the text filter and above the corpus size,
   the `prepare_text.py` script form, no download on invalid arguments); the shipped prompt files
@@ -431,8 +438,9 @@ multipleChoice):
   `++hle_diamond_opencode_agent.responses_api_agents.opencode_agent.opencode_config.compaction.auto=false`
   and
   `++hle_diamond_opencode_agent.responses_api_agents.opencode_agent.opencode_config.agent.build.steps=400`
-  (`hle_diamond_opencode_reference_agent` on `opencode_reference`). Either can move scores. The
-  profile keeps these presets and `benchmarks/hle`'s alike, so a change there belongs in the profile.
+  (`hle_diamond_opencode_reference_agent` on `opencode_reference`, `opencode_hle_tools` and
+  `opencode_hle_tools_full`). Either can move scores. The profile keeps these presets and
+  `benchmarks/hle`'s alike, so a change there belongs in the profile.
 - Failed runs: a session run that stops at its output, context or time limit is graded on what it
   produced, as in `benchmarks/hle`. A harness crash (a nonzero exit, no result) is retried and then
   reported as a failed rollout, so it leaves the denominator; the relay presets'
@@ -446,7 +454,8 @@ multipleChoice):
   session's fresh config directory at every start unless the bundle is staged
   (`sandbox_plugin_dependencies_path`, opencode_agent README, Owner extensions); offline, the start
   stalls about 70 s before that install fails. Neither science image ships the bundle yet, so expect
-  that delay on every row of `opencode`, `opencode_search`, `opencode_hle_tools` and `opencode_reference`.
+  that delay on every row of `opencode`, `opencode_search`, `opencode_hle_tools`, `opencode_hle_tools_full`
+  and `opencode_reference`.
 - OpenCode's permissions on the session presets are opencode_agent's `permissions/default.yaml`:
   everything is allowed except listed bash commands (process killing, `rm -rf` of system paths, raw
   disk writes, git network commands and others). The sandboxed presets allowed every command and
@@ -499,8 +508,13 @@ Commands that were run from the repository root with `hf_token`, `policy_base_ur
 gym eval prepare --benchmark hle_diamond        # Wrote 1000 problems to benchmarks/hle_diamond/data/hle_diamond_benchmark.jsonl (272 with an image)
 gym eval prepare --benchmark hle_diamond/text   # Wrote 728 problems to benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl (skipped 272 image questions)
 gym eval prepare --benchmark hle_diamond/opencode_full  # Wrote 1000 problems to benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl (272 with an image)
-gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text, hle_diamond/opencode, hle_diamond/pi, hle_diamond/opencode_reference, hle_diamond/opencode_full, and the listed *_legacy_agent presets
+gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text, hle_diamond/opencode, hle_diamond/pi, hle_diamond/opencode_reference, hle_diamond/opencode_full, hle_diamond/opencode_hle_tools_full, and the listed *_legacy_agent presets
 ```
+
+`gym eval prepare --benchmark hle_diamond/opencode_hle_tools_full` prepares the same
+`hle_diamond_benchmark_opencode_full.jsonl` (same `prepare_script`); the 2026-11-18 pilot below ran the
+same composition through a dataset override before this file existed (Upstream web tools > Acknowledged Docker
+pilot, 2026-11-18).
 
 `cais/hle-diamond` is gated: request access on the dataset page and put the token in `env.yaml` as
 `hf_token`. When that key is absent, `prepare.py` passes `token=None` and `datasets` falls back to the
@@ -670,9 +684,12 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
   `entrypoint: [sleep, infinity]`, so container lifetime relies on the agent's cleanup. Check
   `docker ps -a --filter label=nemo-gym.sandbox` after every run.
 - The first run builds per-server `uv` virtual environments and needs PyPI access from the host.
-- The search presets and `opencode_hle_tools` additionally need `TAVILY_API_KEY`.
-- `hle_diamond/opencode_reference` is refused by this override until the run is acknowledged as
-  egress-unrestricted: without `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted` the
+- The search presets, `opencode_hle_tools` and `opencode_hle_tools_full` additionally need `TAVILY_API_KEY`;
+  `opencode_hle_tools_full` also needs a vision-capable policy model (`--benchmark hle_diamond/opencode_hle_tools_full`
+  in the acknowledged command below, otherwise unchanged).
+- `hle_diamond/opencode_reference`, `hle_diamond/opencode_hle_tools` and `hle_diamond/opencode_hle_tools_full`
+  (all three on the reference agent, which the override addresses by name) are
+  refused by this override until the run is acknowledged as egress-unrestricted: without `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted` the
   agent's `network_access` resolves to a refusal string and the agent server stops at start with
   `Input should be 'inherit', 'model_only' or 'model_and_tools' [... input_value='refused - ...']`
   (verified 2026-10-26; no rollout was written). With it the reference agent runs on local Docker
@@ -700,8 +717,8 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
 
 ### Reading sandboxed results
 
-- Agent-session rows (`opencode`, `opencode_search`, `opencode_hle_tools`, `pi`, `pi_search`,
-  `opencode_reference`) carry the agent's own `response.status` (`completed`, or `incomplete` at a limit), its observations in
+- Agent-session rows (`opencode`, `opencode_search`, `opencode_hle_tools`, `opencode_hle_tools_full`, `pi`,
+  `pi_search`, `opencode_reference`) carry the agent's own `response.status` (`completed`, or `incomplete` at a limit), its observations in
   `ng_agent_observations`, and `failure_kind` / `failure_reason` on an episode the Environment Server
   could not grade. Their aggregate carries the partition slices and `judgement_parsing_issue_rate`.
   The rest of this list describes the sandboxed-agent rows of the relay presets (`*_legacy_agent`,
@@ -832,7 +849,9 @@ every number:
 `hle_diamond/opencode_search` and `hle_diamond/pi_search` add Tavily search and page tools;
 `hle_diamond/opencode_hle_tools` adds upstream's own two web tools behind its blocklist (Upstream web
 tools below). These five run the 728 text rows with the verbatim HLE
-instructions in a single user message and one repeat; keep collection repeats at one. The published
+instructions in a single user message and one repeat; `hle_diamond/opencode_hle_tools_full` runs
+`opencode_hle_tools` over all 1000 rows, image rows included (Upstream web tools). Keep collection repeats
+at one. The published
 with-tools column was produced under upstream's
 `docs/evaluation-with-tools.md` protocol, from which these presets depart in concrete ways, so they
 support a **comparison, not a reproduction**, of that column:
@@ -842,7 +861,8 @@ support a **comparison, not a reproduction**, of that column:
 - Sandbox: the `gym-*-science` images carry Python 3.13 with SageMath and Lean/Mathlib preinstalled,
   and the environment note tells the model so; upstream requires Python 3.11.16 with pinned
   requirements and forbids specialist solvers, chess engines, OCR and other task libraries.
-  `opencode_reference.yaml` closes this one departure with the reference image (Reference preset).
+  `opencode_reference.yaml`, `opencode_hle_tools.yaml` and `opencode_hle_tools_full.yaml` close this departure
+  with the reference image (Reference preset).
 - Web tools (Tavily search presets): Tavily search and page tools with up to 200,000 cached page
   characters and 2,000-word scrolling, instead of exactly `web_search` (at most 20 results) and
   `web_fetch` (Markdown capped at 60,000 characters, no media). `opencode_hle_tools` serves exactly
@@ -852,9 +872,10 @@ support a **comparison, not a reproduction**, of that column:
   most 150 of the 220 excluded domains and the rest are enforced locally (see Search exclusions).
   `opencode_hle_tools` enforces all seven (Upstream web tools).
 - Rows: 728/1000 text rows on `opencode`, `opencode_search`, `opencode_hle_tools`, `pi` and
-  `pi_search`; all 1000 on `opencode_full` and `opencode_search_full`, whose image rows go through
-  OpenCode's file-attachment path rather than as a direct `image_url` input (see Image questions
-  through OpenCode below). The adapter lifts OpenCode's image limits so that all 272 images, the 26
+  `pi_search`; all 1000 on `opencode_hle_tools_full` (agent session) and on `opencode_full` and
+  `opencode_search_full` (relay), whose image rows go through OpenCode's file-attachment path rather
+  than as a direct `image_url` input (see Image questions through OpenCode below). Both harnesses lift
+  OpenCode's image limits so that all 272 images, the 26
   larger than 2000 px on a side included, are sent as the dataset's bytes, as upstream sends them; an
   endpoint with an image-size limit can still reject one (GPT-6 Astra rejects the 14950x2780 PNG of
   `66f1b940f8bb4425f74e4299`, which then scores 0, see Image questions through OpenCode). The
@@ -863,12 +884,15 @@ support a **comparison, not a reproduction**, of that column:
   (`opencode_hle_tools` included) and through OpenCode's own option on the full presets (see
   Prompting > Reasoning effort).
 
-State these departures next to every number collected with these presets.
+State these departures next to every number collected with these presets. `opencode_hle_tools` closes
+every departure Gym can close; its fidelity table (Upstream web tools) states, requirement by requirement,
+what it matches and what still cannot be matched.
 
 ### Agent sessions
 
 The text presets (`opencode`, `opencode_search`, `opencode_hle_tools`, `pi`, `pi_search`,
-`opencode_reference`) run `opencode_agent` or `pi_agent` through the benchmark's own Environment Server,
+`opencode_reference`) and the full-set `opencode_hle_tools_full` run `opencode_agent` or `pi_agent` through
+the benchmark's own Environment Server,
 `hle_diamond_equivalence_llm_judge_environment_server` (`single_agent_turn_legacy`), instead of the
 deprecated sandboxed agents behind a `legacy_agent` relay. Each episode seeds the judge resources
 server, opens an agent session, runs one activation with the prepared prompt, closes the session and
@@ -889,7 +913,7 @@ equal to `hle`'s apart from those two keys:
   `/usr/local/bin/opencode` at the digest its Dockerfile checks (`sandbox_executable_path`,
   `sandbox_executable_sha256`) and Pi the image's `/opt/node` and `/opt/pi` (`sandbox_runtime_dir: /opt`,
   `pi_version: 0.85.1`).
-- Search: the agent's `tool_servers` lists the Tavily server (`opencode_hle_tools`: the `hle_tools`
+- Search: the agent's `tool_servers` lists the Tavily server (`opencode_hle_tools`: the `web_tools`
   instance of `hle_web_tools`); the Environment Server seeds a session on that server for every
   episode and grants its MCP tools to the agent. The judge serves no tools, so it grants none of its
   own.
@@ -937,16 +961,15 @@ that the remaining ones can be measured one at a time:
   a local Docker host).
 
 What stays, and belongs next to every number: the OpenCode harness and its system prompt, the Tavily
-search and page tools in place of exactly `web_search` and `web_fetch` (the note names neither; the
-`hle_web_tools` server that provides exactly those two tools is its own preset, `opencode_hle_tools`,
-an `opencode_agent` session on the science image under the same egress policy (Upstream web tools),
-and running it on this preset's image is a follow-up change), the weaker leakage policy
-(Search exclusions), 728/1000 text rows, and the judge alias. The preset restates the dataset block
+search and page tools in place of exactly `web_search` and `web_fetch` (the note names neither;
+`opencode_hle_tools` extends this preset and swaps the Tavily tools for the `hle_web_tools` server that
+provides exactly those two tools, keeping this agent, image and egress policy (Upstream web tools)), the
+weaker leakage policy (Search exclusions), 728/1000 text rows, and the judge alias. The preset restates the dataset block
 because Gym's `_inherit_from` is a single-step rename (a chained `_inherit_from` leaves the agent
 without an entrypoint), which is also why it appears in `gym list benchmarks`; a test holds its agent
 equal to `opencode_search`'s apart from the image and the note.
 
-**OpenSandbox gate: open.** No OpenSandbox run of this preset or image exists; the only run is the
+**OpenSandbox gate: open.** No OpenSandbox run of this preset, of `opencode_hle_tools`, of `opencode_hle_tools_full` or of the image exists; the only run is the
 acknowledged local Docker pilot below, whose egress was not restricted. The reference image has been
 verified offline (`--network=none`) but not under a provider network policy.
 
@@ -1000,12 +1023,18 @@ these presets:
 
 ### Image questions through OpenCode
 
-`opencode_full` and `opencode_search_full` are the only sandboxed presets
-that cover the 272 image rows. The adapter (`responses_api_agents/opencode_sandboxed_agent/app.py`)
-reads the user turn's `input_image` parts, decodes each data URI on the host, uploads the bytes to
-`/tmp/nemo-gym-attachments/image-<n>.<ext>` in the sandbox and passes each path with `-f` to
-`opencode run`; the `input_text` part stays the query. Rows report the number of attached images in
-`opencode_attachment_count`. How OpenCode 1.17.11 then carries the image, by inspection of its source
+`opencode_hle_tools_full` (agent session), `opencode_full` and `opencode_search_full` (relay) are the
+sandboxed presets that cover the 272 image rows; both harnesses hand the image to OpenCode as a file.
+The session agent (`responses_api_agents/opencode_agent`, PR #4922) splits the one user message into
+text and media with `nemo_gym.core.media.split_text_and_media`, which decodes each `input_image` part's
+base64 data URI and reads nothing else of the part, writes the bytes to
+`/tmp/nemo-gym-media/<sha256>.<ext>` in the sandbox (`nemo_gym.sandbox.stage_media`) and passes each
+path with `--file` to `opencode run`; it declares image input on the Gym model and lifts OpenCode's
+image limits for the session (its README > session path). The relay adapter
+(`responses_api_agents/opencode_sandboxed_agent/app.py`) reads the same parts, uploads the bytes to
+`/tmp/nemo-gym-attachments/image-<n>.<ext>` and passes each path with `-f`; its rows report the
+number of attached images in `opencode_attachment_count`. In both the `input_text` part stays the
+query. How OpenCode 1.17.11 then carries the image, by inspection of its source
 at tag `v1.17.11` (`packages/opencode/src/cli/cmd/run.ts`, `session/prompt.ts`, `tool/read.ts`,
 `session/message-v2.ts`, `image/image.ts`) and confirmed by the 5-row capture smoke below:
 
@@ -1045,15 +1074,20 @@ at tag `v1.17.11` (`packages/opencode/src/cli/cmd/run.ts`, `session/prompt.ts`, 
 
 ### Upstream web tools (`opencode_hle_tools`)
 
-`hle_diamond/opencode_hle_tools` is `opencode_search` with the Tavily search and page tools replaced by
-[`resources_servers/hle_web_tools`](../../resources_servers/hle_web_tools/README.md), a tool server
+`hle_diamond/opencode_hle_tools` is `opencode_reference` with the Tavily search and page tools replaced
+by [`resources_servers/hle_web_tools`](../../resources_servers/hle_web_tools/README.md), a tool server
 that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
-`22ed3074b1e7b134bcbc09028d0ba320839b0655`) and is the only tool server of the preset:
+`22ed3074b1e7b134bcbc09028d0ba320839b0655` <!-- pragma: allowlist secret -->) and is the only tool server of the preset. It is the preset that
+follows upstream's protocol on every point Gym controls: the reference image (section 2), the enforced
+egress policy (section 1) and the two tools behind the blocklist (section 3). What it cannot match is in
+the fidelity table below. It runs the 728 text rows; `hle_diamond/opencode_hle_tools_full` is the same
+preset with only the dataset swapped for the full set, all 1000 questions with the 272 image rows, which is
+the denominator of the published with-tools column (Coverage below).
 
-- Exactly two tools over MCP, `web_search(query)` (URL, title and snippet of at most 20 results after
+- Exactly two tools over MCP, `web_search(query)` (URL, title and snippet of at most 20 results per call before
   filtering) and `web_fetch(url)` (main content as Markdown, capped at 60,000 characters with a
-  truncation indicator, no image, audio or video payloads, PDFs rendered as text). OpenCode names them
-  `hle_tools_web_search` and `hle_tools_web_fetch`; its own `webfetch` and `websearch` stay denied.
+  truncation indicator, no image, audio or video payloads; PDF rendering is Tavily's and unverified live). OpenCode
+  names them `web_tools_web_search` and `web_tools_web_fetch`; its own `webfetch` and `websearch` stay denied.
 - The upstream `docs/blocklist.json`, byte-exact (digest pinned in the server and checked at start),
   with **all seven rule families** enforced with the semantics the protocol describes, plus its query
   refusals (a blocked `site:` domain, a verbatim span of the question: 8 consecutive words, the
@@ -1062,44 +1096,133 @@ that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
   than served without the span rule; a session the sandbox seeds itself is not covered, see below),
   its fetch-URL checks after percent-decoding
   archive and proxy wrappers, its title-and-Markdown re-check of fetched and cached pages, and a log
-  line per blocked call naming the family and rule. This closes the four unenforced and one
-  approximated families of the `opencode_search` preset (Search exclusions below), which stays as the
-  Tavily-native comparison.
-- The environment note (the agent's `system_prompt`) tells the model that external information is
-  available only through `web_search` and `web_fetch`.
+  line per blocked call and dropped result naming the family and rule. This closes the four unenforced
+  and one approximated families of the `opencode_search` preset (Search exclusions below), which stays
+  as the Tavily-native comparison.
+- The environment note (the agent's `system_prompt`) is the reference preset's: internet disabled, no
+  downloads and no package installation, external information only through the two tools (named as the
+  model sees them), Python 3.11 with the twelve packages and nothing else. A test holds it to exactly
+  the pinned package list and to none of SageMath, Lean, `/opt/science` or Tavily.
 
-**Agent session.** The preset extends `opencode.yaml`, so it is an `opencode_agent` session like
-`opencode_search` (Agent sessions): the Environment Server seeds the `hle_tools` server for every
-episode with the row (`/seed_session` reads the question from `task_data`) and grants its MCP tools
-from the agent's `tool_servers`; the sandbox runs under `network_access: model_and_tools` and reaches
-the tool server by address (`absolute_ip_server_types` adds the Resources servers); `web_fetch` of a
-long page or PDF gets `mcp_tool_timeout_seconds: 300`; the effort travels on the model server's
-`extra_body` (Prompting > Reasoning effort); and the rows and aggregate are the session presets' (Reading
-sandboxed results). Run it as `opencode_search`, with `TAVILY_API_KEY` exported in the shell that
-starts the servers:
+**Agent session.** The preset extends `opencode_reference.yaml`, so its agent is the reference agent
+(`hle_diamond_opencode_reference_agent`, Reference preset): an `opencode_agent` session on the
+reference image (`OPENCODE_REFERENCE_SANDBOX_IMAGE`, default `gym-opencode-hle-reference:local`) under
+`network_access: model_and_tools`, with the Tavily resource removed (`tavily: null`) and `web_tools`
+granted instead. The Environment Server seeds the `web_tools` server for every episode with the row
+(`/seed_session` reads the question from `task_data`) and grants its MCP tools from the agent's
+`tool_servers`; the sandbox reaches the tool server by address (`absolute_ip_server_types` adds the
+Resources servers) while the judge resources server and, with `judge_openai.yaml`, the judge model pin
+`host: 127.0.0.1`, so the sandbox reaches exactly the model server's host and the tool server's;
+`web_fetch` of a long page or PDF gets `mcp_tool_timeout_seconds: 300`; the effort travels on the model
+server's `extra_body` (Prompting > Reasoning effort); and the rows and aggregate are the session presets'
+(Reading sandboxed results). The judge, on this preset only, runs as upstream's: `[question]` is the bare
+question (`question_extract_regex` cuts the folded instruction off) and the call is capped at
+`max_output_tokens: 4096` (Scoring). Run it with `TAVILY_API_KEY` exported in the shell that starts the
+servers; the `++count_missing_rollouts_as_zero=true` flag gives upstream's denominator (every row, a
+failed call counted as wrong; add `'++count_failure_classes_as_zero=[agent_run_error]'` when failures
+are routed to the sidecar) and `coverage/imputed` says how many rows it imputed:
 
 ```bash
-export TAVILY_API_KEY=...   # the hle_tools server's search and extraction backend
+export TAVILY_API_KEY=...   # the web_tools server's search and extraction backend
+export OPENCODE_REFERENCE_SANDBOX_IMAGE=gym-opencode-hle-reference:local   # the default
 gym eval run --benchmark hle_diamond/opencode_hle_tools --split benchmark --model-type litellm_model \
     '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' \
     --num-repeats 1 \
     ++policy_model_name=<gateway model id> \
     ++policy_model.responses_api_models.litellm_model.extra_body.reasoning_effort=high \
+    ++count_missing_rollouts_as_zero=true \
     ++observability_enabled=true ++model_call_capture_dir=/abs/path/model-calls \
     --output results/hle_diamond_opencode_hle_tools.jsonl
 ```
 
-A reproduction-grade run needs the OpenSandbox provider, which enforces the egress policy. For a
-workstation smoke, `sandbox_docker_local.yaml` composes with this preset as with `opencode_search`
-(Quickstart > Sandboxed presets on a local Docker host: the same raw `+config_paths` token, egress
-unrestricted, label the result).
+**Coverage: 1000 against 728.** The published numbers (lastexam.ai/blog/hle-diamond, "1,000 questions,
+reasoning high"; GPT-6 Astra 82.9 % with tools) divide by all 1000 questions, so a number from
+`opencode_hle_tools` covers 728/1000 and is not comparable with them. `hle_diamond/opencode_hle_tools_full`
+([`opencode_hle_tools_full.yaml`](opencode_hle_tools_full.yaml)) composes this preset and swaps only the
+reference agent's dataset for the full set that `prepare_opencode_legacy.py` writes
+(`hle_diamond_benchmark_opencode_full.jsonl`, `prompt_config: null`): one user message per row with the
+question and the folded instruction, plus an `input_image` block on the 272 image rows. Same agent,
+image, egress policy, tool server, note and judge (a test holds the two compositions equal apart from the
+dataset); it needs a vision-capable policy model, and the same command as above runs it with
+`--benchmark hle_diamond/opencode_hle_tools_full`. The image travels as described under Image questions
+through OpenCode: the session agent stages the decoded bytes and attaches them with `opencode run --file`,
+the dataset's `detail: high` is never read (upstream's `run_model_predictions.py` sends `image_url` with no
+`detail` either), and the judge sees the bare question because `question_extract_regex` applies to the
+joined text parts of the multimodal turn. The placement is not upstream's: OpenCode's Read tool puts two
+synthetic text parts, the image and the staged `/tmp/nemo-gym-media/<sha256>.<ext>` path ahead of the
+question text, where upstream sends one `[text, image_url]` user message (fidelity table, harness analogue). The 2026-11-18
+acknowledged Docker pilot below ran this composition over the 272 image rows and confirmed in every one of
+the 272 model-call captures that the first policy call carries one `image_url` part with the dataset's
+bytes and no `detail` key, as the 2026-10-26 relay run had for 272/272 rows (Sandboxed presets on a local
+Docker host). Report rows evaluated / 1000 next to the number as for every full run (Reporting a full run).
 
-Three residual differences from upstream's wrapper remain, and a with-tools number from this preset
-should state all three:
+A reproduction-grade run needs the OpenSandbox provider, which enforces the egress policy, in egress
+mode `dns+nft` (preflight: confirm the deployment's mode, and inside a sandbox that
+`python -c 'import requests; requests.get("https://example.com")'` fails while the `web_tools` MCP
+endpoint answers); keep `head_server_serve_credentials` unset. Like `opencode_reference`, this preset is
+refused by `sandbox_docker_local.yaml` unless `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted`
+is exported, and such a run is comparison infrastructure only (Quickstart > Sandboxed presets on a local
+Docker host).
+
+**Fidelity table.** One row per requirement of upstream's protocol and harness, sections 1 to 4 of
+`docs/evaluation-with-tools.md` and then everything else in `hle_eval/` that moves a with-tools number,
+all at upstream commit `22ed3074b1e7b134bcbc09028d0ba320839b0655`: <!-- pragma: allowlist secret -->
+
+| Upstream requirement (`docs/evaluation-with-tools.md` at `22ed3074b1e7b134bcbc09028d0ba320839b0655` <!-- pragma: allowlist secret -->, and `hle_eval/` at the same commit) | Status | Where, and why |
+| --- | --- | --- |
+| §1 Disable internet access from the code sandbox, including downloads and package installation | matched (OpenSandbox) | `network_access: model_and_tools` becomes a deny-all OpenSandbox network policy that allows the model server's host and the `web_tools` host; any other provider fails closed (`sandbox_docker_local.yaml` lifts it only behind `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS`, label the run). The image has no `curl`, `git` or Node; `pip` is present and has no network. Gate: the OpenSandbox server must run egress mode `dns+nft` (in `dns` mode a hard-coded IP bypasses the policy); that is a deployment setting, not Gym config, and no OpenSandbox run of this preset exists yet. |
+| §1 External information is available only through `web_search` and `web_fetch` | matched | `web_tools` is the only tool server; OpenCode's `webfetch`, `websearch` and `task` are denied. Residual: `/seed_session` is unauthenticated, so a sandbox can seed a fresh session and search without the span rule for the real question (NVIDIA-NeMo/Gym#5845); the blocklist families do not depend on the seed. |
+| §1 Network access for the evaluated model is separate from task internet access | matched | The sandbox reaches the model server's host and the `web_tools` host, nothing else: the judge resources server and the judge model pin `host: 127.0.0.1`, which wins over `absolute_ip_server_types`. OpenSandbox's policy is per host, so every port of those two hosts is open. |
+| §2 Python 3.11.16 with a shell | matched | The reference image: `python:3.11.16-slim-bookworm` at a pinned digest, `python --version` asserted at build, bash from the base image. |
+| §2 Install the pinned requirements (`docs/requirements-tools.txt`, twelve packages) | matched | `hle_reference_image/requirements-tools.txt` is byte-identical (SHA-256 `c1c626be…7068`), installed from a hashed lock with `pip check`; the test pins every version. Transitive versions are Gym's lock (upstream resolves them at install time, so theirs are unknowable). |
+| §2 No specialist solvers, chess engines, OCR tools or task libraries | matched | Only `ripgrep` is added; a test scans the Dockerfile and lock for forbidden tokens, and the offline verification found none. The OpenCode binary and its plugin files are harness-side, as upstream's vendor CLIs are. |
+| §2 (implicit) The model is told nothing beyond what the harness says | cannot match exactly | A two-sentence environment note is appended to OpenCode's instructions: internet disabled, the two tools by the names OpenCode shows (`web_tools_web_search`, `web_tools_web_fetch`), Python 3.11 and the twelve packages. It names nothing the image lacks (tested); state it next to every number. |
+| §3 Expose only `web_search(query)` and `web_fetch(url)` | matched | The MCP token lists exactly the two; the server refuses to start with any other set. OpenCode shows them as `<grant>_<tool>` (`web_tools_web_search`, `web_tools_web_fetch`); upstream states no naming requirement for its wrapper. |
+| §3 `web_search`: URLs, titles, snippets; at most 20 results per call before filtering | matched | Tavily `/search` with `max_results` 20 (bounded `le=20`), no answer, no page bodies, no images; survivors at most 20. |
+| §3 `web_fetch`: main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | matched | Tavily `/extract` in Markdown; cut at 60,000 with `[Content truncated at 60,000 characters; N characters omitted]`; a page of any length is served cut (no size refusal); `data:` URIs removed, `include_images: false`; `max_fetch_chars` cannot exceed 60,000. Unverified: PDF rendering is Tavily's and no live PDF fetch is recorded. |
+| §3 Load `docs/blocklist.json` | matched | Byte-exact copy (SHA-256 `3abaf35e…6575`), digest checked at start; all seven families present, unknown families rejected. |
+| §3 `domains`: exact hostnames and all their subdomains | matched | Host or `.`-suffix match after UTS #46/IDNA normalisation, on requested, returned, redirected and wrapped URLs and `site:` operands. |
+| §3 `url_prefixes`: URL prefixes, ignoring case, scheme and leading `www.` removed | matched | As written plus the canonical form; a prefix with a query also matches its `key=value` pairs in any order (a superset). |
+| §3 `serp_url_patterns`: raw search-engine result URLs | matched | Case-insensitive regexes on the scheme-less URL and its canonical forms, on fetch and result URLs. |
+| §3 `url_patterns`: case-insensitive regexes on queries, URLs, result titles/snippets, fetched titles/Markdown | matched | Applied to the query and its Unicode-folded readings, every URL candidate, result titles and snippets, the fetched title and the Markdown as served. |
+| §3 `patterns_case_sensitive`: the same checks, case-sensitive | matched | Compiled without flags; same surfaces. |
+| §3 `answer_title_patterns`: result titles only, also with trailing site names removed | matched | Only on search-result titles; the title and each cut before a trailing `\|`, `-`, `–`, `—`, `·`, `•`, `»`, `::` segment. |
+| §3 `answer_title_allow_hosts`: exempt from `answer_title_patterns` only | matched | Host or subdomain short-circuits the answer-title check only; every other family still applies. |
+| §3 `web_search`: check the query before the backend; filter every result by URL, title and snippet; refuse a blocked `site:` domain or a long verbatim span of the question | matched | Query check before the Tavily call; per-result filter; `site:` operands parsed to hostnames (a non-hostname operand is refused); span rule at 8 consecutive words (upstream states no length; the 8 is Gym's choice); a session without a seeded question fails closed. |
+| §3 `web_fetch`: check the URL before fetching, including blocked URLs inside proxy/archive links after percent-decoding; after fetching check title and Markdown; apply to cached responses too | matched | Breadth-first expansion through percent-decoding, WHATWG normalisation and archive/proxy wrappers before any fetch; the final URL, title and Markdown as served are checked on fresh fetches and on cache hits (a blocklist change evicts a cached page). |
+| §3 Log blocked calls and the matching rule for auditing | matched | Every refusal and every dropped result at WARNING with family, rule, where and a 200-character subject, emitted without `--verbose`. |
+| §4 Run each model through its provider's harness (Claude Code 2.1.278/2.1.280, Codex CLI 0.155.1, Gemini CLI 0.60.0, Muse Code 1.3.0) | cannot match | OpenCode 1.17.11 (binary digest checked in the sandbox and at image build) for every model, with OpenCode's own system prompt ahead of the instruction. The harness mapping below says what each row would take in Gym. |
+| `run_model_predictions.py`: `SYSTEM_PROMPT` verbatim | matched (text) / cannot match (placement) | The text is byte-exact (tested). Upstream sends it as the system message with the bare question as the user message; here it follows the question in one user message behind OpenCode's native prompt. Upstream's with-tools runs went through vendor CLIs whose prompt delivery is undocumented, so no placement is provably theirs; this one is stated. |
+| `run_judge_results.py`: `JUDGE_PROMPT`, structured `correct: yes\|no` | matched (criteria) / cannot match (parse) | `benchmarks/hle/prompts/judge.txt` carries the same criteria with three label renames (`Judgement:`, `Reasoning:`, `Confidence:`), upstream's `0|\%|` / `100|\%|` spelled `0%` / `100%`, and one blank line fewer; the verdict is the last `Judgement: yes\|no` label in free text, case-insensitive, not a schema-enforced field. |
+| Judge model `o3-mini-2025-01-31` | cannot match (snapshot) | Compose `judge_openai.yaml` (every documented run line does); `HLE_DIAMOND_JUDGE_MODEL` defaults to the gateway alias `azure/openai/o3-mini`, whose served snapshot is neither pinned nor echoed. Record alias and run date. Without the override the policy grades itself. |
+| Judge call: `max_completion_tokens=4096`, one user message, no system message; `[question]` is `question['question']` | matched (this preset) | `judge_responses_create_params.max_output_tokens: 4096`, `judge_system_message: ""`, and `question_extract_regex` cuts the folded instruction so the judge sees the bare question. A verdict cut off by the cap scores 0 as `no_verdict`, as upstream. |
+| `[response]` is the model's whole completion | harness analogue | The last assistant message of the OpenCode session (upstream does not say what text was judged for the CLI harnesses). |
+| Confidence extracted by the judge; calibration error reported | cannot match | Not computed; `reward` is the accuracy only. |
+| Accuracy over every question (`n` = all rows; a failed call counts as wrong); Wald 95 % half-width | matched (denominator) / own interval | The documented run line passes `++count_missing_rollouts_as_zero=true` (add `'++count_failure_classes_as_zero=[agent_run_error]'` with `++route_failures_to_sidecar=true`) and reports `coverage/imputed`; Gym's reward profile emits its own confidence interval, not upstream's Wald half-width. |
+| HLE-Diamond: 1,000 questions, 272 with an image | harness analogue (`opencode_hle_tools_full`, run 2026-11-18 on local Docker) / cannot match (`opencode_hle_tools`) | `opencode_hle_tools_full` runs all 1000 rows on this agent with the dataset's bytes and no `detail`, but not with upstream's `[text, image_url]` content: OpenCode routes the staged file through its Read tool, so the model's first message carries two synthetic text parts, the image and the staged path ahead of the question text (Image questions through OpenCode). A vision-capable policy model is required. `opencode_hle_tools` runs the 728 text rows: report 728/1000 next to every number from it. |
+| No temperature sent | matched | The preset and its chain set none; OpenCode forwards one only when the request carries it. On `vllm_model`, confirm `sampling_overrides` carry none. |
+| Output budget (no with-tools figure; `>= 8192` recommended for reasoning models) | matched where stated | 32,768 output tokens per call in a 229,376 context, 14,400 s run budget, OpenCode's default step cap and compaction. |
+| "All models are evaluated with reasoning high" | matched (OpenAI-style) / cannot assert (Claude via gateway) | `++policy_model.responses_api_models.<model>.extra_body.reasoning_effort=high` on the run line, verified in the model-call capture; Claude models through this gateway ignore the parameter. |
+| One prediction per question, no repeats | matched | `num_repeats: 1`, `--num-repeats 1`. |
+| Single judge pass; correct iff `yes` | matched | `check_twice_swap: false`, `use_per_record_regex: false`; the last label decides. |
+
+Harness mapping for §4, from the agents Gym has today:
+
+| Upstream harness | Gym status |
+| --- | --- |
+| Claude Code 2.1.278 / 2.1.280 | `responses_api_agents/claude_code_agent` pins an exact version but rejects `network_access: model_and_tools` and remote MCP tool grants, so it cannot carry `web_tools`: adapter change needed before a preset. |
+| Codex CLI 0.155.1 | `responses_api_agents/codex_agent` supports sandboxed sessions, MCP grants and `model_and_tools`; a preset needs the Codex runtime baked into the reference image (a restricted sandbox cannot download it) and a parsing smoke at 0.155.1, which is outside its tested version (0.144.4). |
+| Gemini CLI 0.60.0 | no Gym agent. |
+| Muse Code 1.3.0 | no Gym agent. |
+
+Two residual differences from upstream's wrapper remain in every row above, and a with-tools number from
+this preset should state both:
 
 - Backend: the protocol names no search or extraction provider, and this server uses Tavily (`/search`
   at `max_results: 20`, `search_depth: advanced`; `/extract` in Markdown). Which pages a query
-  surfaces, their ranking and the page-to-Markdown rendering are therefore Tavily's.
+  surfaces, their ranking and the page-to-Markdown rendering are therefore Tavily's, and a query longer
+  than 400 characters (Tavily's limit) is refused ("The query is longer than 400 characters.") before the blocklist check, a refusal
+  upstream's protocol does not have.
 - Sandbox-seeded sessions: `/seed_session` is unauthenticated and `network_access: model_and_tools`
   admits the tool-server host, so a process in the sandbox can `POST /seed_session` for a fresh
   session with a question of its choice and search from it without the span rule applying to the
@@ -1108,29 +1231,80 @@ should state all three:
   public config. Closing it needs an
   authenticated seed channel; tracking issue: NVIDIA-NeMo/Gym#5845. Until then the span rule binds a
   cooperative harness, not the sandboxed model.
-- Oversized pages: the protocol caps `web_fetch` output at 60,000 characters with a truncation
-  indicator, so upstream would serve the start of any page. This server checks the provider's whole
-  page before cutting it and refuses a page longer than `max_page_chars` (1,000,000 characters of
-  provider Markdown) unread, as `oversized_page`, rather than serve its first 60,000 characters. Long
-  PDFs (theses, books) can exceed that bound.
-
-Everything else that departs from upstream in this section (harness, sandbox image and Python version,
-text rows only, effort transmission, and on the Docker provider the open egress) still applies.
 
 **Pilot evidence, relay harness only.** The one pilot of this preset (2026-10-26, 5 text rows, GPT-6
 Astra, judge o3-mini, local Docker with host networking and `++use_absolute_ip=false`, egress
 unrestricted; comparison infrastructure only) ran the preset as it then was, `opencode_sandboxed_agent`
-behind the `legacy_agent` relay: exit 0, 5/5 rows scored (3 correct), 4/5 rows made tool calls, among
-them two `web_search` calls that returned 20 and 16 results with no Tavily error; all 14 captured
-OpenCode requests carried `reasoning_effort: high` (OpenCode's own option on that harness) and offered
-exactly `hle_tools_web_search` and `hle_tools_web_fetch` as MCP tools next to OpenCode's native file
-and shell tools. A manual `web_search` through the server's MCP endpoint, in a session seeded with a
+behind the `legacy_agent` relay on the science image: exit 0, 5/5 rows scored (3 correct), 4/5 rows made
+tool calls, among them two `web_search` calls that returned 20 and 16 results with no Tavily error; all 14
+captured OpenCode requests carried `reasoning_effort: high` (OpenCode's own option on that harness) and
+offered exactly `hle_tools_web_search` and `hle_tools_web_fetch` (the tool server was then named
+`hle_tools`; it is `web_tools` now) as MCP tools next to OpenCode's native
+file and shell tools. A manual `web_search` through the server's MCP endpoint, in a session seeded with a
 real question and quoting ten consecutive words of it, was refused with the span message and logged
 as `family=question_span rule='8 consecutive words of the question' where=query subject='8 words'`; a
 manual `web_fetch` of a Hugging Face dataset page was refused as a blocked site. The server-side
 checks hold on the session harness (the server's tests cover the episode seed and the MCP grant), but
-the two harnesses are configured differently (Agent sessions), so that pilot's 3/5 says nothing about
-this preset: no with-tools number is quoted for it until a pilot is rerun on the session harness.
+that pilot ran another harness on another image with open egress, so its 3/5 says nothing about this
+preset. The pilot below ran it as it now is on the session harness and the reference image, on local Docker
+with open egress; no OpenSandbox run exists.
+
+**Acknowledged Docker pilot, 2026-11-18** (the acknowledged command of Sandboxed presets on a local Docker
+host with `--model-type litellm_model`, GPT-6 Astra `azure/openai/gpt-6-astra` with `reasoning_effort: high`
+in the model server's `extra_body`, judge `azure/openai/o3-mini` through `judge_openai.yaml`, Docker
+`network: host`, run timeout 2,400 s and 120 OpenCode steps per row, one repeat, concurrency 16; label:
+local Docker; egress not restricted; comparison infrastructure only). `hle_diamond/opencode_hle_tools`
+over the 728 text rows: **624/728 = 85.7 %** (knowledge 325/381, reasoning 299/347), 728/728 scored, two
+rows at the timeout. The 272 image rows through the same composition with the dataset swapped for the
+`has_image` rows of the full set (what `opencode_hle_tools_full` declares): **203/272 = 74.6 %**
+(reasoning 125/153, knowledge 78/119), 272/272 scored after one `--resume` for a row whose OpenCode
+process exited; every first policy call carried the image as described above. Composed over all 1,000
+questions, two runs of one configuration: **827/1000 = 82.7 %** against the published 82.9 % for GPT-6
+Astra with tools (knowledge 403/500 = 80.6 %, reasoning 424/500 = 84.8 %). Captured tool calls were
+`hle_tools_web_search` and `hle_tools_web_fetch` plus OpenCode's native tools, no other web tool; the
+reference note was in every request, SageMath, Lean and `/opt/science` in none. 48 of the 1,000 rows end
+with the agent asking the user a question instead of an `Answer:` line, as an interactive coding agent
+does when it cannot verify; upstream's protocol adds no nudge and neither does this preset. One run, one
+repeat, no confidence interval, open egress: a comparison, not a reproduction (Reference preset >
+OpenSandbox gate).
+The pilot ran before the tool server was renamed from `hle_tools` to `web_tools`: the model saw the tools
+as `hle_tools_web_search` and `hle_tools_web_fetch`, and a refusal began "Refused by the HLE web-tool
+policy" (the local-Docker note names no tool). The names and the refusal text no longer mention the
+benchmark; nothing else changed, and the pilot was not rerun under the new names. A one-row run after
+the rename (2026-11-20, same composition) offered `web_tools_web_search` and `web_tools_web_fetch` in
+every policy request, with no `hle` string in any of them.
+
+**Judge settings, paired regrade, 2026-11-18** (`gym eval reverify` over the pilot's 1,000 saved rollouts:
+same completions, same row ids, same judge `azure/openai/o3-mini`, no policy call). Two judge settings
+differ from the ones this preset had on main before this change: `question_extract_regex` (the bare
+question) and `max_output_tokens: 4096`. The earlier settings are applied here to all 1,000 rows; the
+preset then covered the 728 text rows. Three passes:
+
+| Judge settings | Correct of 1,000 | Text | Image | Knowledge | Reasoning | `no_verdict` | Largest judge output |
+|---|---|---|---|---|---|---|---|
+| this preset, the pilot's own verdicts | 827 | 624/728 | 203/272 | 403/500 | 424/500 | 0 | 1,914 tokens |
+| this preset, regraded | 826 | 625/728 | 201/272 | 401/500 | 425/500 | 0 | 2,153 tokens |
+| earlier: whole user message, no cap | 824 | 623/728 | 201/272 | 402/500 | 422/500 | 18 | 4,702 tokens |
+
+Each pass made 999 judge calls; the remaining row has an empty final answer and scores 0 without one. The
+two passes under this preset's settings saw identical judge inputs and disagree on 7 rows (3 correct only
+in the regrade, 4 only in the pilot): one sample of o3-mini's run-to-run noise on this set, and the scale
+for reading the third row. The earlier settings differ from the pilot's verdicts on 13 rows (8 that they
+score 0 and the pilot 1, 5 the reverse) and from the regrade on 16 (9 and 7). Six of those 8, and of
+those 9, are the same rows with one cause: the judge read the answer-format instruction folded after the
+question (`prompts/opencode.yaml`; on the image rows, the prepared dataset) as part of `[question]`,
+replied in that format (`Answer: yes`, no `Judgement:` line) and was scored 0 as `no_verdict` on an
+answer it had called correct. All 18 `no_verdict` calls are that failure (6 `Answer: yes`, 9
+`Answer: no`, 3 `Answer: None`; the 12 without a yes score 0 in every pass); the bare question removes
+it, 0 of 999 in both passes. That leaves 7 and 10 differing rows, comparable to the 7 between the two
+same-settings passes; 5 rows differ from both of those passes (2 down, 3 up), each a borderline
+equivalence call under a normal `Judgement:` line, none decided on format. The cap changed no verdict:
+no judge call under this preset's settings came within 1,900 tokens of it and none ended incomplete. One
+uncapped call spent 4,702 tokens (4,480 of reasoning) on a row all three passes score correct, so a
+cut-off verdict is possible under the cap, as it is upstream, and was not observed. The earlier settings
+have one pass, so the 2- to 3-row difference in the totals is not itself significant; the `no_verdict`
+mechanism is. Every other OpenCode and Pi preset (session, full and legacy) leaves
+`question_extract_regex` unset and sends the judge the same folded message as the third row.
 
 ### Search exclusions
 

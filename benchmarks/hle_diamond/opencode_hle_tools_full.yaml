@@ -1,0 +1,59 @@
+# OpenCode preset with upstream's two web tools over ALL 1000 HLE-Diamond questions, the 272 image questions
+# included: opencode_hle_tools.yaml (the reference agent hle_diamond_opencode_reference_agent, an opencode_agent
+# session on the HLE-Diamond reference image under network_access model_and_tools, web_tools as the only tool
+# server, the judge as upstream runs it) with ONLY that agent's dataset swapped for the full set written by
+# prepare_opencode_legacy.py. The published HLE-Diamond with-tools numbers (lastexam.ai/blog/hle-diamond) are over
+# all 1000 questions, so a 728-row number from opencode_hle_tools is not comparable with them; this preset has the
+# comparable denominator. Everything else is opencode_hle_tools.yaml's: agent, image, tool server, egress policy,
+# environment note and judge settings (question_extract_regex, max_output_tokens 4096, judge on loopback); a test
+# holds the two agents equal apart from `datasets` and the rest of the composition equal.
+#
+# Dataset: benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl, prompt_config null. Each row's
+# responses_create_params carries one user message, the question plus the verbatim HLE instruction folded after it
+# (prompts/opencode.yaml, baked at prepare time), and on image rows an input_image block holding the image as a
+# base64 data URI. The text set's rollout-time prompt_config cannot carry the image rows, and the default set's
+# file cannot serve this harness (it bakes the instruction as a system message; opencode_agent folds a system
+# message into OpenCode's instructions, not into the user turn). Needs a vision-capable policy model.
+#
+# How an image row reaches the model, verified in code and in the 2026-11-18 local Docker pilot of this composition
+# (README > Upstream web tools; every first policy call of the 272 image rows carried the image, no `detail`):
+# - the collector applies a prompt_config only when the dataset sets one (nemo_gym/rollouts/rollout_collection.py,
+#   the `if prompt_cfg is not None` block), so a materialized row's responses_create_params travel untouched; the
+#   Environment Server posts them as the agent's request (environment_servers/single_agent_turn/app.py,
+#   _invoke_agent) and hands the judge the same params with the response (_verify_body), exactly as it does with a
+#   templated row of the text presets;
+# - opencode_agent's session path splits the user message into text and media (nemo_gym/core/media.py,
+#   split_text_and_media: an input_image part's image_url data URI is decoded and nothing else of the part is read),
+#   stages the decoded file into the sandbox and passes it with `opencode run --file`
+#   (responses_api_agents/opencode_agent/sandbox.py, stage_activation), declares image input on the Gym model and
+#   lifts OpenCode's image limits (app.py, declares_image_input; runtime.py, IMAGE_INPUT_MODEL_OPTIONS and
+#   UNRESTRICTED_IMAGE_ATTACHMENT), so the model's first call carries the dataset's bytes as an image_url part. The
+#   dataset's `detail: high` (nemo_gym.data.vision_input.build_image_input) is therefore never transmitted: OpenCode
+#   builds its own chat-completions request whose image_url carries only the URL, as upstream's
+#   run_model_predictions.py sends it (image_url with no detail);
+# - the judge reads [question] from the last user message, joining a multimodal turn's text parts
+#   (resources_servers/equivalence_llm_judge/app.py, _extract_question_text), then applies the inherited
+#   question_extract_regex, which cuts the folded instruction off: the bare question, as on opencode_hle_tools.
+#   The web_tools seed reads the row's `question` field (resources_servers/hle_web_tools/app.py, extract_question),
+#   which the full set carries like the text set.
+#
+# Unlike opencode_hle_tools.yaml and opencode_search.yaml, this file declares a dataset, so it is discovered by
+# `gym list benchmarks` (nemo_gym/environment/benchmarks.py lists every config with exactly one `type: benchmark`
+# dataset) as hle_diamond/opencode_hle_tools_full, like opencode_full.yaml; `--benchmark` selects it either way.
+# sandbox_docker_local.yaml overrides the agent by name, so it composes with this preset exactly as with
+# opencode_hle_tools: refused unless HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted is exported, and
+# such a run is comparison infrastructure only. Prepare the set with
+# `gym eval prepare --benchmark hle_diamond/opencode_hle_tools_full` (the same file as hle_diamond/opencode_full).
+config_paths:
+- benchmarks/hle_diamond/opencode_hle_tools.yaml
+hle_diamond_opencode_reference_agent:
+  responses_api_agents:
+    opencode_agent:
+      # A list replaces the inherited one wholesale, so this is the agent's only dataset.
+      datasets:
+      - name: hle_diamond_opencode_full
+        type: benchmark
+        jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/hle_diamond/prepare_opencode_legacy.py
+        num_repeats: 1

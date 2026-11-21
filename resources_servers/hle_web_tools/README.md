@@ -30,8 +30,8 @@ with a key derived from public config (`get_session_middleware_key`: the server 
 instance name), so they are not a secret that could tell the agent server's seed from the sandbox's.
 Closing this needs an authenticated seed channel, a secret the agent server holds and the sandbox never
 sees; until then the span rule is a check on a cooperative harness, not on the sandboxed model. Tracking
-issue: NVIDIA-NeMo/Gym#5845. The Diamond README lists this next to the backend and the oversized-page refusal
-under Sandboxed agents (with tools) > Upstream web tools, and all three belong next to any with-tools number
+issue: NVIDIA-NeMo/Gym#5845. The Diamond README lists this next to the backend
+under Sandboxed agents (with tools) > Upstream web tools, and both belong next to any with-tools number
 from that preset.
 
 ## Tools
@@ -39,11 +39,10 @@ from that preset.
 | Tool | Protocol | Here |
 | --- | --- | --- |
 | `web_search(query)` | URLs, titles and snippets; at most 20 results per call before filtering | Tavily `/search` with `max_results: 20`, `search_depth: advanced`, no generated answer, no page bodies, no images; every result is filtered by URL, title and snippet; the survivors (at most 20) are rendered as `[n] title / URL / Snippet`, a title longer than 1,000 characters cut with `…` (the text families still see the whole title) |
-| `web_fetch(url)` | main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | Tavily `/extract` with `format: markdown` (PDFs come back as text); `data:` URIs (base64 or percent-encoded, with or without a media type of at most 127 characters per type and subtype, and with up to 16 `name=value` media-type parameters, each name at most 127 characters and each value at most 256; a URI past these bounds is left in place) are replaced by `[data URI removed]` up to the first whitespace, quote, `)` or `>`, so a payload wrapped over several lines keeps its later lines; the Markdown is cut at `max_fetch_chars` (60,000) with `[Content truncated at 60,000 characters; N characters omitted]`; the `Title:` line above it (the provider's title, else the first heading) is cut at 1,000 characters with `…` |
+| `web_fetch(url)` | main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | Tavily `/extract` with `format: markdown` (PDF rendering is Tavily's, unverified live); `data:` URIs (base64 or percent-encoded, with or without a media type of at most 127 characters per type and subtype, and with up to 16 `name=value` media-type parameters, each name at most 127 characters and each value at most 256; a URI past these bounds is left in place) are replaced by `[data URI removed]` up to the first whitespace, quote, `)` or `>`, so a payload wrapped over several lines keeps its later lines; the Markdown is cut at `max_fetch_chars` (60,000) with `[Content truncated at 60,000 characters; N characters omitted]`; the `Title:` line above it (the provider's title, else the first heading) is cut at 1,000 characters with `…` |
 
 Tavily is the backend for both, a difference from upstream's wrapper next to the sandbox-seeded session
-residual above and the oversized-page refusal below (a page longer than `max_page_chars` is refused rather
-than served cut at 60,000 characters): the protocol does not name a search or extraction provider, so which
+residual above: the protocol does not name a search or extraction provider, so which
 pages a query surfaces, how they are ranked and how a page is turned into Markdown are Tavily's. The
 protocol's filtering, caps and refusals are all applied here, after Tavily returns. The provider is reached through Gym's shared aiohttp client
 (`nemo_gym.client.http_client.request`) rather than the `tavily-python` SDK: two JSON endpoints need no SDK,
@@ -155,33 +154,33 @@ Beyond the families, the protocol's own refusals:
   `whateverorigin.org`) are blocked outright by the `domains` family.
 - **Fetched responses** are checked after the fetch: the final URL the backend reports in
   `results[].url` (a redirect to a blocked host is refused when Tavily reports the post-redirect URL
-  there, which has not been verified against the live API), then the title and the content against
-  `url_patterns` and
-  `patterns_case_sensitive`. On a fresh fetch the content checked is the provider's whole page, before
-  any data URI is removed and before any cut, and then the sanitized Markdown as well; a match anywhere,
-  even past the 60,000 characters the model would read, refuses the page whole. That scan is bounded: a
-  page longer than `max_page_chars` (1,000,000) is refused unread with the family `oversized_page`, and
-  the page work (sanitizing, the heading fallback for the title, the content checks, and the rechecks on
-  a cache hit) runs in a pool of two worker processes started with `spawn`, not on the event loop. A
-  thread would not do: Python's `re` keeps the GIL for a whole scan, and one scan of an adversarial page
-  takes seconds (about 4 s for 1,000,000 characters of `抱抱脸` against the pinned blocklist). The pool is
-  created on the first page check and starts its workers on demand, up to two; each worker imports the
-  server module afresh, so it is about the size of the server process (about 240 MB here), and the first
-  fetch waits about 2 s for it. `web_search`'s checks of result URLs, titles and snippets still run on the
-  event loop: a provider title or snippet of 1,000,000 such characters would hold it about 4 s (whether
-  Tavily ever returns one that long is not verified). A refused page is never cached. The page cache
-  (`max_cached_pages`, keyed by requested URL) keeps the sanitized Markdown whole and runs the same
-  final-URL, title and content checks on a hit, so a policy that changes after a page was cached still
-  applies; those cache-hit rechecks see the sanitized cached Markdown, not the provider's raw page. A
-  page whose sanitized Markdown is longer than `max_cached_page_chars` is served but not cached.
+  there, which has not been verified against the live API), then the title and the Markdown against
+  `url_patterns` and `patterns_case_sensitive`. The Markdown checked is the Markdown served: the
+  provider's page with data URIs removed and cut at `max_fetch_chars` (60,000), as the protocol reads
+  ("check both the title and Markdown" of a response "capped at 60,000 characters"). A page is never
+  refused for its length: a page of any size is served cut, with the truncation indicator, and text past
+  the cut is neither served nor checked. That bounds the scan at the cap. The page work (sanitizing, the
+  heading fallback for the title, the cut, the content checks, and the rechecks on a cache hit) runs in a
+  pool of two worker processes started with `spawn`, not on the event loop. A thread would not do:
+  Python's `re` keeps the GIL for a whole scan, and the scan of an adversarial page takes about 0.25 s
+  (60,000 characters of `抱抱脸` against the pinned blocklist); the data-URI pass over the whole provider
+  page is linear. The pool is created on the first page check and starts its workers on demand, up to
+  two; each worker imports the server module afresh, so it is about the size of the server process (about
+  240 MB here), and the first fetch waits about 2 s for it. `web_search`'s checks of result URLs, titles
+  and snippets still run on the event loop: a provider title or snippet of 1,000,000 such characters would
+  hold it about 4 s (whether Tavily ever returns one that long is not verified). A refused page is never
+  cached. The page cache (`max_cached_pages`, keyed by requested URL) keeps the page as served and runs
+  the same final-URL, title and content checks on a hit, so a policy that changes after a page was cached
+  still applies.
 
-Every refused call is logged at WARNING with the tool, the session, the family, the rule, where it
-matched and the first 200 characters of the matched subject; every search result dropped by the filter
-is logged at INFO in the same form:
+Every refused call and every search result dropped by the filter is logged at WARNING with the tool,
+the session, the family, the rule, where it matched and the first 200 characters of the matched subject
+(the protocol's "log blocked calls and the matching rule for auditing"; WARNING because Python's
+last-resort handler emits it even where, as in Gym's server processes, no root logger is configured):
 
 ```text
 WARNING hle_web_tools blocked a web_search call (session 3f...): family=question_span rule='8 consecutive words of the question' where=query subject='8 words'
-INFO    hle_web_tools dropped a web_search result (session 3f...): family=domains rule='huggingface.co' where=result URL subject='https://huggingface.co/datasets/...'
+WARNING hle_web_tools dropped a web_search result (session 3f...): family=domains rule='huggingface.co' where=result URL subject='https://huggingface.co/datasets/...'
 ```
 
 The model reads a refusal that names the reason at the family level ("the source is a blocked site",
@@ -191,7 +190,7 @@ the rule text.
 ## Configuration
 
 ```yaml
-hle_tools:
+web_tools:
   resources_servers:
     hle_web_tools:
       entrypoint: app.py
@@ -209,11 +208,10 @@ hle_tools:
 | `question_field` | `question` | the seed-body field carrying the question |
 | `require_seeded_question` | `true` | refuse `web_search` from a session that was not seeded with a question; `false` serves it without the span rule |
 | `max_results` | 20 | results requested and returned per search (Tavily's and the protocol's cap) |
-| `max_fetch_chars` | 60,000 | the Markdown cap |
+| `max_fetch_chars` | 60,000 | the Markdown cap; a deployment may lower it, never raise it above the protocol's 60,000 |
 | `max_query_chars` | 400 | Tavily rejects longer queries |
 | `search_depth`, `extract_depth` | `advanced`, `basic` | Tavily depths |
-| `max_page_chars` | 1,000,000 | a fetched page longer than this (the provider's Markdown, before anything is removed or cut) is refused unread as `oversized_page` |
-| `max_cached_pages`, `max_cached_page_chars` | 128, 500,000 | the fetched-page cache: at most this many pages, and a page longer than this is served but not cached |
+| `max_cached_pages` | 128 | the fetched-page cache: at most this many pages, each held as served (cut at `max_fetch_chars`) |
 | `max_http_attempts`, `http_timeout_s` | 3, 60 | the retry budget per call and the timeout per attempt |
 | `tavily_base_url` | `https://api.tavily.com` | the Tavily API base URL, for a proxy or a stub |
 
@@ -225,7 +223,7 @@ serves a module-level `app`, which this module does not define, and the page cac
 page-check pool are per process, so each worker would fetch, scan and cache its own copy of a page. The server
 says so through `multiple_workers_unsupported_reason`, so a launch with `num_workers > 1` is refused before
 uvicorn starts, dry runs included (`<instance name> needs num_workers=1: ...`, for the Diamond preset
-`hle_tools needs num_workers=1: the module defines no module-level app for uvicorn workers, ...`).
+`web_tools needs num_workers=1: the module defines no module-level app for uvicorn workers, ...`).
 
 `verify` is a stub: this is a tool server. A preset pairs it through the agent's `tool_servers` and
 grades the rollout with its own `resources_server` (for HLE-Diamond, the equivalence judge). Should
@@ -234,11 +232,18 @@ grades the rollout with its own `resources_server` (for HLE-Diamond, the equival
 ## Use in a preset
 
 `benchmarks/hle_diamond/opencode_hle_tools.yaml` runs the OpenCode harness with this server as its only
-tool server: an `opencode_agent` session (it extends `opencode_search.yaml`'s base, `opencode.yaml`)
-whose Environment Server seeds this server for every episode with the task row and grants `web_search`
-and `web_fetch` to the agent over MCP from the agent's `tool_servers`; the sandbox reaches the server
-by address under `network_access: model_and_tools`. Live runs of that preset need `TAVILY_API_KEY` in
-the environment of the process that starts the servers; see that benchmark's README.
+tool server on upstream's sandbox: it extends `opencode_reference.yaml`, so the agent is the reference
+agent (`hle_diamond_opencode_reference_agent`) on the HLE-Diamond reference image (Python 3.11.16, the
+twelve pinned packages, a shell, OpenCode) under `network_access: model_and_tools`, with the Tavily
+resource removed and this server granted instead. Its Environment Server seeds this server for every
+episode with the task row and grants `web_search` and `web_fetch` to the agent over MCP from the agent's
+`tool_servers` (OpenCode shows them to the model as `web_tools_web_search` and `web_tools_web_fetch`);
+the sandbox reaches the server by address, while the preset pins the judge servers to loopback so the
+sandbox reaches exactly the model server and this one. `benchmarks/hle_diamond/opencode_hle_tools_full.yaml`
+is the same preset over all 1000 HLE-Diamond questions, the 272 image questions included (the dataset is
+the only difference; it needs a vision-capable policy model). Live runs of either preset need
+`TAVILY_API_KEY` in the environment of the process that starts the servers; see that benchmark's README,
+whose Upstream web tools section carries the fidelity table against upstream's protocol.
 
 ## Example data
 
@@ -268,8 +273,10 @@ pool, malformed provider bodies, including a 200 whose body is not JSON (a tool 
 spellings from review (expansion overflow, a fourth decoded form, backslash, whitespace and userinfo,
 canonical-form prefixes, archive.org variants) must be refused before the fetch while ordinary redirect and
 query URLs stay allowed; `site:` operands are parsed to hostnames; long URLs and a 100,000-character heading
-are handled within a second; a slow page check leaves the event loop free; data URIs are stripped on fresh and cached fetches without eating the prose
-after them; and a blocked span past every cut still refuses the page.
+are handled within a second; a page check leaves the event loop free (the test fails when the check runs
+inline); data URIs are stripped on fresh and cached fetches without eating the prose after them; a page of
+any length is served cut at the cap and checked as served, fresh and from the cache; dropped results are
+logged at WARNING; and `max_fetch_chars` cannot exceed the protocol's cap.
 
 ## Licensing
 
