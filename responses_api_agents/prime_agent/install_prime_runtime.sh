@@ -68,7 +68,7 @@ while [ "$#" -gt 0 ]; do
     echo "$2  $1" | sha256sum -c -
     shift 2
 done
-tar -xzf "$node_archive" -C "$staging" --strip-components=1
+tar --no-same-owner -xzf "$node_archive" -C "$staging" --strip-components=1
 # npm's cache and logs stay in the staging directory, out of the task's HOME. The package's optional postinstall only
 # pre-downloads tools that Prime Agent otherwise fetches on first use.
 HOME="$staging/.npm-home" npm_config_cache="$staging/.npm-cache" PATH="$staging/bin:$PATH" \
