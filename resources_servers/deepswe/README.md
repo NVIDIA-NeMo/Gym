@@ -92,6 +92,15 @@ gym env start \
   ++deepswe_opencode_agent.responses_api_agents.opencode_agent.sandbox_executable_sha256=<sha256>
 ```
 
+A deployment without such a mount can have the resources server copy the binary into each agent sandbox instead,
+with `agent_runtime_paths` (see [Run other harnesses](#run-other-harnesses)); the agent then pins the copy:
+
+```bash
+  ++deepswe_opencode_resources_server.resources_servers.deepswe.agent_runtime_paths.opencode=/path/to/opencode-linux-x64 \
+  ++deepswe_opencode_agent.responses_api_agents.opencode_agent.sandbox_executable_path=/tmp/nemo-gym-deepswe/opencode \
+  ++deepswe_opencode_agent.responses_api_agents.opencode_agent.sandbox_executable_sha256=<sha256>
+```
+
 The resources server keeps each episode session until the Environment Server closes it. A session that is never
 closed expires after the agent sandbox's `ttl_s`, and shutdown stops what is left. Verify grades a session once: an
 identical retry returns the same verdict, and a verify after close is masked as a lost session.
@@ -129,3 +138,55 @@ sandbox defaults to deny-all egress, and the OpenCode benchmark adds only the re
 policy. The trusted fresh verifier keeps the canonical container network stack because the current egress sidecar
 disables IPv6 loopback required by upstream test suites; verifier assets and the submitted patch are supplied only
 by the resources server.
+
+## Run other harnesses
+
+`benchmarks/deepswe/{hermes,nooa,openclaw,pi,codex}.yaml` are presets of the DeepSWE benchmark: the same tasks,
+resources server and verifier, with another harness in place of OpenCode. A preset is not a benchmark of its own and
+has no manifest; the resources server's `allowed_agents` (`configs/deepswe.yaml`) lists every preset's harness. Each
+preset binds its own resources server, agent and `single_agent_turn_legacy` Environment Server instances
+(`deepswe_<harness>_*`), narrows that resources server's `allowed_agents` to its harness, and lets the agent sandbox
+reach the policy model server's host (`sandbox_model_server`) and nothing else. Each harness keeps the three-hour agent
+budget and the 18,000-second episode bound of the OpenCode benchmark.
+
+Select a harness with its preset (`--benchmark deepswe/<harness>`), not with `--agent-type` on the OpenCode benchmark.
+These harnesses are session agents, which run only where a config binds them, and the preset also sets the harness's
+runtime, budget and concurrency for DeepSWE.
+
+The agent sandbox cannot download a harness runtime, so each config gets one in without network:
+
+| Config (`--benchmark`) | Runtime in the agent sandbox | What to provide |
+| --- | --- | --- |
+| `deepswe/opencode` | The OpenCode binary (`sandbox_executable_path`) | A mounted copy, or `agent_runtime_paths.opencode` (above) |
+| `deepswe/hermes` | Built by the Hermes agent server for the sandbox's platform and uploaded at seed | Nothing; the agent server needs network to build it once |
+| `deepswe/nooa` | Installed from an offline wheelhouse the controller prepares | `NOOA_SWE_RUNTIME_WHEELHOUSE`, built with the `manylinux_2_28` builder (see the file's header) |
+| `deepswe/openclaw`, `deepswe/pi`, `deepswe/codex` | Node and the harness package (`sandbox_runtime_dir`) | `DEEPSWE_OPENCLAW_RUNTIME`, `DEEPSWE_PI_RUNTIME`, `DEEPSWE_CODEX_RUNTIME` |
+
+`agent_runtime_paths` maps a name to a file or directory on the resources server's host. The resources server copies
+each into every agent sandbox, after ripgrep and before the agent session starts: a file to
+`/tmp/nemo-gym-deepswe/<name>` as an executable, a directory's contents into `/tmp/nemo-gym-deepswe/<name>/`. It packs
+a directory once at startup and sends it as one gzip tar, which the sandbox's `tar` unpacks. A name left unset (the
+environment variable is missing) or a path that does not exist stops the server at startup. The harness then checks
+what it finds there against its pinned version and refuses the seed otherwise.
+
+Build a Node runtime with the harness's own installer on an x86_64 Linux host with network, at the version the
+benchmark pins and at the path it will have in the sandbox:
+
+```bash
+bash responses_api_agents/openclaw_agent/install_openclaw_runtime.sh /tmp/nemo-gym-deepswe/openclaw 2026.6.11
+bash responses_api_agents/pi_agent/install_pi_runtime.sh /tmp/nemo-gym-deepswe/pi 0.80.2
+bash responses_api_agents/codex_agent/install_codex_runtime.sh /tmp/nemo-gym-deepswe/codex 0.144.4
+```
+
+The task images are Debian with glibc, so a runtime built on a glibc host runs there. One way to get such a host is
+a sandbox of a task image with network, from which the directory is downloaded. Each runtime is a few hundred
+megabytes, and every agent sandbox receives its copy, at most two uploads at a time per resources server; at high
+concurrency, a runtime mounted read-only into the sandboxes avoids that cost.
+
+```bash
+export DEEPSWE_PI_RUNTIME=/path/to/pi-runtime
+gym eval run --benchmark deepswe/pi --split benchmark \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --config responses_api_models/<model>/configs/<model>.yaml \
+  -o results/deepswe-pi/rollouts.jsonl ++use_absolute_ip=true
+```

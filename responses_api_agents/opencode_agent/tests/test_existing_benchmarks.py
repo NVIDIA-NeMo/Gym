@@ -158,7 +158,15 @@ def test_deepswe_runs_opencode_sessions_in_the_resources_sandbox(monkeypatch: py
     assert [(dataset.name, dataset.num_repeats) for dataset in settings.datasets] == [("deepswe_v1_1", 10)]
     resources = get_first_server_config_dict(config, "deepswe_opencode_resources_server")
     assert agent_config.resources_server.name == "deepswe_opencode_resources_server"
-    assert list(resources.allowed_agents) == ["opencode_agent"]
+    # DeepSWE has one manifest, so its resources server admits OpenCode and every harness preset's agent.
+    assert list(resources.allowed_agents) == [
+        "opencode_agent",
+        "hermes_agent",
+        "nooa_agent",
+        "openclaw_agent",
+        "pi_agent",
+        "codex_agent",
+    ]
     assert resources.enforce_agent_no_network is True
     assert resources.sandbox_model_server.name == agent_config.model_server.name
     environment = config.deepswe_environment_server.environment_servers

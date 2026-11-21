@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSWE with NOOA in place of OpenCode: the same resources server, no-network agent sandbox and fresh verifier as
+# opencode.yaml. NOOA runs whole in the task sandbox (execution_mode: sandboxed) from an offline wheelhouse that the
+# controller prepares, since the sandbox cannot download packages. The DeepSWE images have glibc 2.36, so the wheelhouse
+# can be built on manylinux_2_28, which has wheels for the current scipy and numpy (manylinux2014 builds them from
+# source):
+#
+#   python -m responses_api_agents.nooa_agent.offline_runtime --output "$NOOA_SWE_RUNTIME_WHEELHOUSE" \
+#     --target x86_64/gnu --builder-image quay.io/pypa/manylinux_2_28_x86_64:latest
+config_paths:
+  - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
+  - resources_servers/deepswe/configs/deepswe.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# NOOA calls the model server from inside the task sandbox.
+use_absolute_ip: true
+
+# This recipe binds its own environment instead of the generic NOOA environment.
+nooa_environment_server: null
+
+deepswe_nooa_resources_server:
+  _inherit_from: deepswe_resources_server
+  resources_servers:
+    deepswe:
+      allowed_agents: [nooa_agent]
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+
+deepswe_nooa_agent:
+  _inherit_from: nooa_agent
+  responses_api_agents:
+    nooa_agent:
+      resources_server:
+        type: resources_servers
+        name: deepswe_nooa_resources_server
+      nooa:
+        execution_mode: sandboxed
+      max_policy_calls: null
+      # Built on the controller before seeding; installation in the task sandbox performs no downloads.
+      runtime_wheelhouse: ${oc.env:NOOA_SWE_RUNTIME_WHEELHOUSE,null}
+      runtime_wheelhouse_required: true
+      # The three-hour DeepSWE agent budget.
+      sandbox_runner_timeout_seconds: 10800
+      datasets:
+        - name: deepswe_v1_1
+          type: benchmark
+          jsonl_fpath: benchmarks/deepswe/data/deepswe_benchmark.jsonl
+          prepare_script: benchmarks/deepswe/prepare.py
+          num_repeats: 10
+
+deepswe_nooa_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: deepswe_nooa_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: deepswe_nooa_agent
+      # NOOA's run (10800) plus seed, runtime installation and verification, within the agent sandbox's ttl_s (18000).
+      default_episode_timeout_seconds: 18000
