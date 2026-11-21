@@ -24,6 +24,7 @@ import posixpath
 import shlex
 import shutil
 import signal
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -42,8 +43,16 @@ from nemo_gym.sandbox.providers.base import (
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
+    SandboxUsageSample,
+    SandboxUsageUnavailable,
 )
 from nemo_gym.sandbox.providers.docker import pty as docker_pty
+from nemo_gym.sandbox.providers.usage import (
+    IN_SANDBOX_CGROUP_COMMAND,
+    cgroup_path,
+    cgroup_v2_sample,
+    parse_in_sandbox_cgroup,
+)
 from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 
 
@@ -208,6 +217,11 @@ class _DockerContainer:
     shell: str = "sh"
     env: dict[str, str] = field(default_factory=dict)
     published_ports: tuple[int, ...] = ()
+    # Full container id and host PID of its init, resolved by the first usage sample, and the container's cgroup
+    # directory on this host once a sample has read it there.
+    container_id: str | None = None
+    init_pid: int | None = None
+    cgroup_dir: Path | None = None
 
 
 def _normalize_image(image: str) -> str:
@@ -347,7 +361,7 @@ class DockerProvider:
     async def _run(
         self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
     ) -> tuple[int, str, str]:
-        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout."""
+        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout or cancellation."""
         async with self._semaphore:
             proc = await asyncio.create_subprocess_exec(
                 *argv,
@@ -359,6 +373,7 @@ class DockerProvider:
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
             except asyncio.CancelledError:
+                # A cancelled caller (such as a usage read past its deadline) must not leave the CLI running.
                 await kill_cancelled_command(proc)
                 raise
             except asyncio.TimeoutError as e:
@@ -945,6 +960,44 @@ class DockerProvider:
         )
         if code != 0 and not _is_missing_container(err):
             raise RuntimeError(f"docker rm -f failed (code={code}) for {inst.name!r}: {err.strip()}")
+
+    async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+        """The container's own cgroup v2 counters.
+
+        Read on this host when the daemon is local (the init's cgroup path names the container id), otherwise
+        from inside the container, which needs ``sh`` and ``cat`` in the image and cgroup v2 with a private
+        cgroup namespace (Docker's default on cgroup v2).
+        """
+        inst = handle.raw
+        if inst.cgroup_dir is not None:
+            # A container read on this host stays on this host: its cgroup is gone once the container exits.
+            sample = await asyncio.to_thread(cgroup_v2_sample, inst.cgroup_dir, scope="container")
+            if sample is None:
+                raise SandboxUsageUnavailable("sandbox_gone")
+            return (sample,)
+        if inst.container_id is None:
+            code, out, err = await self._run(
+                [self._binary, "inspect", "-f", "{{.Id}} {{.State.Pid}}", inst.name], timeout_s=30
+            )
+            if code != 0 and _is_missing_container(err):
+                raise SandboxUsageUnavailable("sandbox_gone")
+            parts = out.split()
+            if code != 0 or len(parts) != 2 or not parts[1].isdigit():
+                return ()
+            inst.container_id, inst.init_pid = parts[0], int(parts[1])
+        path = cgroup_path(inst.init_pid) if inst.init_pid else None
+        if path is not None and inst.container_id in path:
+            directory = Path("/sys/fs/cgroup") / path.lstrip("/")
+            sample = await asyncio.to_thread(cgroup_v2_sample, directory, scope="container")
+            if sample is not None:
+                inst.cgroup_dir = directory
+                return (sample,)
+        # From the root as root: the agent may have removed the workdir, and the image's user may not read cgroups.
+        result = await self.exec(handle, IN_SANDBOX_CGROUP_COMMAND, cwd="/", user="root", timeout_s=10)
+        if result.return_code != 0 or result.error_type is not None:
+            return ()
+        sample = parse_in_sandbox_cgroup(result.stdout or "", sampled_at=time.time())
+        return (sample,) if sample is not None else ()
 
     async def aclose(self) -> None:
         """Close the PTY sessions still open; the containers themselves belong to their handles."""

@@ -78,6 +78,8 @@ New provider implementations must follow this lifecycle and failure contract:
   changing the result; see [Failure observations](/observability/rollout-failures#recovered-failures).
 - Make `close()` safe to call from cleanup paths.
 - Use `aclose()` for provider-scoped resources such as SDK clients.
+- Implement `SupportsSandboxUsage.usage()` only from the runtime's own accounting, with the `scope` and
+  `peak_kind` that say what the values cover; return no sample rather than an estimate.
 
 OpenSandbox implements this contract. See [Required provider migrations](./index#required-provider-migrations)
 for the built-in providers that must adopt it in follow-up changes.

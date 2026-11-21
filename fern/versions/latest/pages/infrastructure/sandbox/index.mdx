@@ -369,6 +369,45 @@ sandbox = fake_sandbox()
 sandbox.provider.on_close.side_effect = RuntimeError("provider unreachable")
 ```
 
+## Measured CPU and Memory
+
+A sandbox started through `AsyncSandbox.start()` records its measured CPU and memory when its provider implements
+`SupportsSandboxUsage`: one sample right after create, one in `stop()` before close, and, for a process-tree
+measurement, one every `NEMO_GYM_SANDBOX_USAGE_SAMPLE_INTERVAL_SECONDS` (default 5; 0 disables periodic samples).
+`NEMO_GYM_SANDBOX_USAGE=0` disables sampling. A sandbox rebuilt with `connect()` records nothing; its creator does.
+
+After `stop()`, `sandbox.resource_usage` holds one summary per measured scope, and the `gym.sandbox.stop` span
+reports it as `nemo.gym.sandbox.usage.<scope>.<source>.<field>` attributes next to `nemo.gym.sandbox.id` and the
+rollout id, for every sandbox whatever stopped it.
+
+| Provider | Source | Scope |
+| --- | --- | --- |
+| Docker | the container's cgroup v2, on the host when the daemon is local, otherwise read from inside the container | `container` |
+
+Other providers, including OpenSandbox, report no usage yet.
+
+- `container` values are kernel counters for the sandbox's own cgroup; memory includes page cache.
+
+Totals come from the read in `stop()`. Each summary's `final_read` says whether that read measured it; when it did
+not, `cpu_usage_usec_total`, `cpu_usage_usec_delta` and `memory_peak_bytes` are empty rather than the create-time
+reading, and `unavailable_reason` says why (`final_read_timeout`, `final_read_failed`, `not_cgroup_root` or
+`sandbox_gone`).
+
+### Usage summaries and OpenSandbox resource telemetry
+
+These lifetime summaries are separate from the live resource records OpenSandbox exports through its
+`ResourceProvider` capability ([Sandbox resources](/observability/opentelemetry#sandbox-resources)):
+
+| | Usage summaries (`SupportsSandboxUsage`) | Resource telemetry (`ResourceProvider`) |
+| --- | --- | --- |
+| Providers | Docker | OpenSandbox |
+| Mechanism | Lifetime accounting: cumulative CPU and peak memory, read after create and before close | Allocation plus instantaneous CPU % and memory in use, every `NEMO_GYM_OTEL_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS` |
+| Output | `sandbox.resource_usage` and `gym.sandbox.stop` span attributes | `gym.sandbox.resource.*` spans and `gym.sandbox.*` gauges |
+| Needs an OTel exporter | No | Yes |
+
+Both are sampled only by the process that created the sandbox. They are expected to merge once one provider
+implements both.
+
 ## Image Rewrites
 
 Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.
