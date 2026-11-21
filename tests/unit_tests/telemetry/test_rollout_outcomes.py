@@ -332,6 +332,7 @@ async def _failed_points(tmp_path, monkeypatch, collected_metrics, input_extra, 
         "disable_aggregation": True,
         "disable_health_check": True,
         "num_samples_in_parallel": 1,
+        "dispatch_reservation_interval_s": 0.0,
     }
     config = rollout_collection.RolloutCollectionConfig(**{k: v for k, v in values.items() if k in fields})
 

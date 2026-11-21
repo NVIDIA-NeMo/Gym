@@ -16,6 +16,7 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, fields
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call
@@ -30,6 +31,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
+from pydantic import BaseModel, ConfigDict
 from pytest import MonkeyPatch
 from yarl import URL
 
@@ -56,6 +58,7 @@ from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_SERVER_QUEUE_TIMEOUT,
     EpisodeId,
     FailureBoundary,
     FailureEvent,
@@ -75,6 +78,10 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
+    AgentContext,
+    AgentContextArtifact,
     AgentSessionParticipant,
     AgentSessionRecord,
     BaseResourcesServerConfig,
@@ -89,6 +96,7 @@ from nemo_gym.server_runtime import (
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     ParticipantControlPlane,
+    RestoredAgentSession,
     RestoreRequest,
     RolloutIdRequiredError,
     SimpleResourcesServer,
@@ -103,6 +111,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentConfig,
     SimpleAgentLoopState,
     SimpleAgentRunRequest,
+    SimpleAgentSessionState,
     SimpleAgentVerifyRequest,
     _policy_request_timed_out,
 )
@@ -138,8 +147,8 @@ def _make_agent(
     return agent_type(config=config, server_client=server_client), server_client
 
 
-def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
-    response = MagicMock(status=status, cookies={}, ok=status < 400)
+def _mock_response(payload=None, *, status=200, content="", headers=None) -> MagicMock:
+    response = MagicMock(status=status, cookies={}, ok=status < 400, headers=headers or {})
     response.read = AsyncMock(return_value=json.dumps(payload or {}))
     response.content.read = AsyncMock(return_value=content.encode())
     return response
@@ -292,9 +301,10 @@ class TestApp:
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
 
+    @pytest.mark.parametrize("error_result", [False, True], ids=["result", "error-result"])
     @pytest.mark.parametrize("observability_enabled", [False, True])
     async def test_agent_session_uses_seeded_direct_http_tool_access(
-        self, monkeypatch: MonkeyPatch, observability_enabled: bool
+        self, monkeypatch: MonkeyPatch, observability_enabled: bool, error_result: bool
     ) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -350,7 +360,11 @@ class TestApp:
                 ),
             ]
         )
-        tool_response = _mock_response(content='{"city":"San Francisco","weather_description":"cold"}')
+        # A tool's error result is a 200 over direct HTTP, so only the header marks it.
+        tool_response = _mock_response(
+            content='{"city":"San Francisco","weather_description":"cold"}',
+            headers={TOOL_ERROR_HEADER: "true"} if error_result else {},
+        )
         tool_response.cookies = {"session_id": MagicMock(value="updated-resource-cookie")}
         direct_request = AsyncMock(return_value=tool_response)
         monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
@@ -405,7 +419,7 @@ class TestApp:
             url="http://resources:8000/get_weather",
             json={"city": "San Francisco"},
             cookies={"session_id": "seeded-resource-cookie"},
-            headers={"X-Scoped-Access": "token"},
+            headers={"X-Scoped-Access": "token", TOOL_CALL_ID_HEADER: "call-1"},
             _internal=True,
         )
         assert [item.kwargs["server_name"] for item in server_client.post.await_args_list] == ["model", "model"]
@@ -425,7 +439,9 @@ class TestApp:
             assert [record["kind"] for record in observations["records"]] == ["agent_invocation", "tool_call"]
             tool = observations["records"][1]
             assert tool["tool_name"] == "get_weather"
-            assert tool["status"] == "completed"
+            assert (tool["status"], tool["error_type"]) == (
+                ("failed", "tool_error") if error_result else ("completed", None)
+            )
             assert tool["invocation_id"] == observations["records"][0]["invocation_id"]
             assert observations["source"] == "simple_agent"
         else:
@@ -489,6 +505,95 @@ class TestApp:
         records = close.json()["agent_observations"]["records"]
         assert [record["invocation_id"] for record in records] == ["root", "activation-2"]
         assert [record["model_calls"][0]["response_id"] for record in records] == ["resp-1", "resp-2"]
+
+    async def test_a_session_activation_creates_its_episode_with_the_session_state(self) -> None:
+        """Subclasses that keep task context in the session state read it here; the sessionless path skips it."""
+        seen_states = []
+
+        class _StatefulAgent(SimpleAgent):
+            async def _create_session_episode(self, state, body, **kwargs):
+                seen_states.append(state)
+                return await super()._create_session_episode(state, body, **kwargs)
+
+        server, server_client = _make_agent(False, _StatefulAgent)
+        reply = {
+            "id": "resp-1",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "output": [
+                {
+                    "id": "msg-1",
+                    "content": [{"annotations": [], "text": "Done.", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+        }
+        server_client.post = AsyncMock(side_effect=lambda **kwargs: _mock_response(reply))
+        client = TestClient(server.setup_webserver())
+
+        assert client.post("/v1/responses", json={"input": "no session"}).status_code == 200
+        assert seen_states == []
+
+        episode_id = EpisodeId(rollout_id="rollout", attempt=0)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session", episode_id=episode_id, task_id=TaskId(taskset="example", task_id="0")
+        )
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/rollout/v1/responses", json={"input": "question?"}).status_code == 200
+
+        [state] = seen_states
+        assert state is server._session_state("agent-session")
+        assert server_client.post.await_count == 2
+
+    async def test_checkpoint_restore_rebuilds_typed_agent_context(self) -> None:
+        class FigureContext(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+
+            media: AgentContextArtifact
+            tag: str
+
+        @dataclass
+        class FigureState(SimpleAgentSessionState):
+            context: FigureContext | None = None
+
+        class FigureAgent(SimpleAgent):
+            agent_context_model = FigureContext
+
+            def _new_session_state(self, body: AgentSeedSessionRequest) -> FigureState:
+                state = super()._new_session_state(body)
+                inherited = {field.name: getattr(state, field.name) for field in fields(state)}
+                return FigureState(**inherited, context=self.parse_agent_context(body))
+
+        server, _ = _make_agent(False, FigureAgent)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout"),
+            task_id=TaskId(taskset="example", task_id="0"),
+            agent_context=AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}}),
+        )
+        client = TestClient(server.setup_webserver())
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        exported = (await server.export_agent_sessions(["agent-session"], checkpoint_id="c"))["agent-session"]
+        restored, _ = _make_agent(False, FigureAgent)
+        replacement = EpisodeId(rollout_id="rollout", attempt=1)
+
+        await restored.restore_agent_sessions(
+            [RestoredAgentSession(session_key="agent-session", episode_id=replacement, session=exported)]
+        )
+
+        state = restored._session_state("agent-session")
+        assert isinstance(state, FigureState)
+        assert state.request.agent_context == seed.agent_context
+        assert state.context == FigureContext(media=AgentContextArtifact(path="figs/1"), tag="figqa2")
+        assert state.request.episode_id == replacement
+        assert exported["request"]["agent_context"] == seed.agent_context.model_dump(mode="json")
+        assert exported["request"]["episode_id"] == seed.episode_id.model_dump(mode="json")
 
     async def test_agent_session_can_return_unresolved_tool_calls(self) -> None:
         config = SimpleAgentConfig(
@@ -1355,7 +1460,10 @@ class TestApp:
         config_cls = SimpleAgentWithCompactionConfig if with_compaction else SimpleAgentConfig
         request_cls = SimpleAgentWithCompactionRunRequest if with_compaction else SimpleAgentRunRequest
         client = MagicMock(spec=ServerClient)
-        client.global_config_dict = {"observability_enabled": False}
+        client.global_config_dict = {
+            "observability_enabled": False,
+            "token_id_capture": {"enabled": with_compaction},
+        }
         server = agent_cls(
             config=config_cls(
                 host="localhost",
@@ -1394,7 +1502,12 @@ class TestApp:
             return _mock_response(kwargs["json"] | {"reward": 0.0})
 
         client.post = AsyncMock(side_effect=post)
-        result = await server.run(request, request_cls(responses_create_params={"input": "question"}))
+        result = await server.run(
+            request,
+            request_cls.model_validate(
+                {"responses_create_params": {"input": "question"}, "_ng_rollout_id": "termination"}
+            ),
+        )
         saved = json.loads(result.model_dump_json())
         assert "ng_trajectory" not in saved
         assert saved["response"]["status"] == "incomplete"
@@ -2266,12 +2379,22 @@ class TestCheckpointAcrossModelCalls:
 @pytest.mark.parametrize("stage", ["verify", "return"])
 async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_trajectory(stage: str) -> None:
     trajectory = TrajectoryRecord(task_id="0", rollout_id="0-0").model_dump(mode="json")
+    closes: list[dict] = []
 
     async def post(*, url_path, **kwargs):
         if url_path == "/seed_session":
-            return _mock_response({})
+            return _mock_response(
+                {},
+                headers={
+                    "x-ng-checkpoint-verify": "replay",
+                    "x-ng-checkpoint-resources-session-id": "resources-session",
+                },
+            )
         if url_path.endswith("/v1/responses"):
             return _mock_response(_FINAL_RESPONSE | {"_ng_trajectory": trajectory})
+        if url_path == "/close_session":
+            closes.append(kwargs["json"])
+            return _mock_response({})
         return _mock_response(kwargs["json"] | {"reward": 1.0})
 
     def run_request(attempt: int) -> SimpleAgentRunRequest:
@@ -2298,6 +2421,7 @@ async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_traje
     participant.legacy_episodes.boundary = recording
     await server.run(MagicMock(cookies={}), run_request(0))
     [episode] = [state for state in boundaries if state["next"] == stage]
+    assert episode["resources_session_id"] == "resources-session"
 
     restored, restored_client = _make_agent(True)
     restored_participant = AgentSessionParticipant(restored)
@@ -2314,6 +2438,8 @@ async def test_a_legacy_run_restored_at_verify_or_return_still_reports_its_traje
     result = await restored.run(MagicMock(cookies={}), run_request(1))
 
     assert result.model_dump()["ng_trajectory"]["rollout_id"] == "0-0-a1"
+    assert [close["resources_session_id"] for close in closes] == ["resources-session", "resources-session"]
+    assert [close["episode_id"]["attempt"] for close in closes] == [0, 1]
 
 
 def _legacy_run_request(attempt: int) -> SimpleAgentRunRequest:
@@ -3085,8 +3211,9 @@ async def test_a_restored_session_s_direct_http_tool_calls_reach_the_restored_re
 
 
 @pytest.mark.parametrize("resources_verify_step_type, closes", [("replay", True), ("wait", False)])
+@pytest.mark.parametrize("resources_session_id", [None, "resources-session"])
 async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_checkpoint_does_not_wait_for(
-    resources_verify_step_type: str, closes: bool
+    resources_verify_step_type: str, closes: bool, resources_session_id: str | None
 ) -> None:
     server, server_client = _make_agent(False)
     server._checkpoint_participant = AgentSessionParticipant(server)
@@ -3097,6 +3224,8 @@ async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_
         if url_path == "/seed_session":
             response = _mock_response({})
             response.headers = {"x-ng-checkpoint-verify": resources_verify_step_type}
+            if resources_session_id is not None:
+                response.headers["x-ng-checkpoint-resources-session-id"] = resources_session_id
             response.cookies = {"session": MagicMock(value="resources-cookie")}
             return response
         if url_path.endswith("/v1/responses"):
@@ -3121,6 +3250,7 @@ async def test_a_legacy_run_closes_its_resources_session_after_a_verification_a_
         [close] = closes_seen
         assert close["cookies"] == {"session": "resources-cookie"}
         assert close["json"]["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
+        assert close["json"]["resources_session_id"] == (resources_session_id or "run:0-0")
         assert [path for path, _ in calls][-1] == "/close_session"
     else:
         assert closes_seen == []
@@ -3200,7 +3330,9 @@ _ATTEMPTS = {
 }
 
 
-def _model_attempt(outcome: str, *, operation_id: str = "final-call") -> FailureEvent:
+def _model_attempt(
+    outcome: str, *, operation_id: str = "final-call", queue: tuple[int, int] | None = None
+) -> FailureEvent:
     """One failed attempt of the model call ``operation_id`` as the policy model server's client reports it."""
     reason, exception_type, http_status = _ATTEMPTS[outcome]
     return FailureEvent(
@@ -3211,7 +3343,11 @@ def _model_attempt(outcome: str, *, operation_id: str = "final-call") -> Failure
         operation_id=operation_id,
         http_status=http_status,
         attempt_id=uuid4().hex,
-        details=ModelFailureDetails(request_upload_complete=True if outcome == "response_timeout" else None),
+        details=ModelFailureDetails(
+            request_upload_complete=True if outcome == "response_timeout" else None,
+            server_requests_waiting=queue[0] if queue is not None else None,
+            server_requests_running=queue[1] if queue is not None else None,
+        ),
         foreign_error=SdkErrorDetails(exception_type=exception_type, message="") if exception_type else None,
     )
 
@@ -3224,8 +3360,9 @@ def _policy_report(attempts: list[FailureEvent], *, ended_on: FailureEvent | Non
     )
 
 
-def _timed_out_report() -> FailureReport:
-    attempts = [_model_attempt("response_timeout") for _ in range(3)]
+def _timed_out_report(*queues: tuple[int, int] | None) -> FailureReport:
+    """Three timed-out attempts of the final call; ``queues`` gives each attempt's server queue reading."""
+    attempts = [_model_attempt("response_timeout", queue=queue) for queue in (queues or (None, None, None))]
     return _policy_report(attempts, ended_on=attempts[-1])
 
 
@@ -3403,6 +3540,72 @@ class TestFinalOnModelTimeout:
                 MagicMock(cookies={}),
                 SimpleAgentRunRequest.model_validate({"responses_create_params": {"input": "q"}}),
             )
+
+
+class TestServerQueueTimeout:
+    """A policy timeout on a model server that was queueing requests is the server's capacity, not the model."""
+
+    @pytest.mark.parametrize(
+        ("queues", "kind"),
+        [
+            pytest.param(
+                ((62, 1), (61, 1), (60, 1)), MODEL_SERVER_QUEUE_TIMEOUT, id="every-attempt-waited-in-the-queue"
+            ),
+            pytest.param(((0, 4), (0, 4), (0, 4)), MODEL_POLICY_RESPONSE_TIMEOUT, id="idle-server-slow-model"),
+            pytest.param(((62, 1), (0, 1), (60, 1)), MODEL_POLICY_RESPONSE_TIMEOUT, id="one-attempt-was-not-queued"),
+            pytest.param(((62, 1), None, (60, 1)), MODEL_POLICY_RESPONSE_TIMEOUT, id="one-attempt-has-no-reading"),
+            pytest.param((None, None, None), MODEL_POLICY_RESPONSE_TIMEOUT, id="no-readings"),
+        ],
+    )
+    async def test_only_a_timeout_queued_on_every_attempt_is_the_servers(self, queues, kind) -> None:
+        server, server_client = _timeout_agent()
+        server_client.post = AsyncMock(return_value=_failed_reply(_timed_out_report(*queues)))
+        request = MagicMock(session={}, path_params={}, cookies={})
+
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+        assert (raised.value.boundary, raised.value.failure_kind, raised.value.operation) == (
+            FailureBoundary.AGENT,
+            kind,
+            POLICY_TIMEOUT_OPERATION,
+        )
+
+    async def test_run_retries_a_queued_timeout_even_when_timeouts_count_as_zero(self) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=True)
+        assert server.config.outcome_policy.by_failure_kind[MODEL_POLICY_RESPONSE_TIMEOUT] == "count_as_zero"
+        queued = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=MODEL_SERVER_QUEUE_TIMEOUT,
+            failure_reason="Policy model request timed out on every attempt while the model server queued requests",
+            operation=POLICY_TIMEOUT_OPERATION,
+        )
+        route_failure = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=AGENT_ROUTE_FAILED,
+            failure_reason="Agent route failed",
+            operation="agent.responses",
+        )
+        route_failure.__cause__ = queued
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            assert url_path.endswith("/v1/responses"), "the rollout must not be verified"
+            return _failed_reply(failure_report_for(route_failure))
+
+        server_client.post = AsyncMock(side_effect=post)
+
+        # Not a final row: the failure travels on as a retryable error, so it is retried and never scored zero.
+        with pytest.raises(ClientResponseError) as raised:
+            await server.run(
+                MagicMock(cookies={}),
+                SimpleAgentRunRequest.model_validate({"responses_create_params": {"input": "q"}}),
+            )
+        assert (
+            FailureHeader.decode(raised.value.headers).events[queued.event_id].failure_kind
+            == MODEL_SERVER_QUEUE_TIMEOUT
+        )
 
 
 def _model_http_error(status: int) -> MagicMock:

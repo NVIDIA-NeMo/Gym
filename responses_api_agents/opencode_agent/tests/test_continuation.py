@@ -27,6 +27,7 @@ from nemo_gym.core import (
     NgFailureEvent,
     SandboxFailureDetails,
 )
+from nemo_gym.sandbox import SandboxStatus
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.snapshot import snapshot
@@ -401,7 +402,7 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
         request = start(client)
         state = agent._require_agent_session(request.agent_session_id)
         assert state.is_continuation
-        assert state.conversation_directory is None and state.activation_id is None
+        assert state.session.session_dir == state.persistent_directory and state.activation_id is None
         results = []
         for index, prompt in enumerate(("First version", "Correction: handle empty inputs"), 1):
             response = activate(client, index, prompt)
@@ -611,20 +612,35 @@ def test_single_turn_timeout_keeps_existing_opencode_error_classification():
 
 @pytest.mark.parametrize("prior_success", [False, True])
 @pytest.mark.parametrize("error_event", [False, True])
-def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, prior_success, error_event):
+@pytest.mark.parametrize(
+    "verify_after_agent_error,status_code",
+    [
+        (False, 400),
+        # The opt-in grades a rejected request, but an endpoint failure seen only in the stdout error event (the
+        # exported message has no error) stays an execution error, so the episode is retried.
+        (True, 400),
+        (True, 503),
+    ],
+)
+def test_opencode_error_during_timeout_fails_http_activation(
+    setup, tmp_path, prior_success, error_event, verify_after_agent_error, status_code
+):
     agent, sandbox = setup
+    agent.config.verify_after_agent_error = verify_after_agent_error
+    sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
     payloads = install_artifact_runner(sandbox, tmp_path)
     launch = sandbox.launch.side_effect
 
     async def interrupted(**kwargs):
         result = await launch(**kwargs)
         sandbox.files[f"{payloads[-1]['directory']}/stdout.jsonl"] = (
-            json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": 400}}})
+            json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": status_code}}})
             if error_event
             else ""
         )
         return result
 
+    graded = error_event and verify_after_agent_error and status_code == 400
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         request = start(client)
         if prior_success:
@@ -632,17 +648,24 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
         sandbox.launch.side_effect = interrupted
         sandbox.result.update(timed_out=True, return_code=-9)
         response = activate(client, 2 if prior_success else 1)
-        if error_event:
+        if graded:
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert (body["status"], body["error"]) == ("incomplete", None)
+            assert "OpenCode emitted an error event" in body["metadata"]["graded_agent_error"]
+        elif error_event:
             assert response.status_code == 502
             assert "OpenCode emitted an error event" in response.json()["detail"]
             assert (
-                '"name": "APIError"' in response.json()["detail"] and '"statusCode": 400' in response.json()["detail"]
+                '"name": "APIError"' in response.json()["detail"]
+                and f'"statusCode": {status_code}' in response.json()["detail"]
             )
+            assert "graded_agent_error" not in response.text
         else:
             assert response.status_code == 200 and response.json()["status"] == "incomplete"
         invocation = roots(close(client, request)["agent_observations"])[-1]
-        assert invocation["status"] == ("failed" if error_event else "incomplete")
-        assert invocation["error_type"] == ("server_error" if error_event else "timeout")
+        assert invocation["status"] == ("failed" if error_event and not graded else "incomplete")
+        assert invocation["error_type"] == ("timeout" if graded or not error_event else "server_error")
 
 
 @pytest.mark.parametrize(

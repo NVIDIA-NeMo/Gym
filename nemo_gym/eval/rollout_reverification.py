@@ -86,6 +86,7 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selected
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
@@ -733,9 +734,8 @@ def check_saved_patch_replay(
         )
 
 
-# Collection's stamps naming the Environment Server and its result type: kept on the re-verified row, never sent
-# to /verify.
-_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
+# Collection identity is retained for grouping and cache resume, never sent to /verify.
+_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY, RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME)
 
 
 def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: bool = False) -> Dict:
@@ -778,7 +778,17 @@ def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: boo
     # Preserve only verifier inputs, not rewards or failure bookkeeping. SciCode's /verify grades the accumulated
     # per-sub-step solutions an agent sent, which a masked row keeps (the response holds only the last step), with the
     # usage accounting that travels through the verifier.
-    for key in ("deliverables_dir", "reference_ids", "solutions", "token_usage_version", "step_usage"):
+    for key in (
+        "deliverables_dir",
+        "reference_ids",
+        "solutions",
+        "token_usage_version",
+        "step_usage",
+        # A verifier that grades a saved source again needs the source, its SHA256 and its binding.
+        "source_artifact",
+        "source_sha256",
+        "source_binding_sha256",
+    ):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     if forward_agent_evidence:
@@ -788,8 +798,8 @@ def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: boo
     if replay_patch:
         payload["saved_model_patch"] = saved_patch
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
-    # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
-    # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
+    # Outcome identity belongs to the collected attempt, not the materialized input.
+    # Keep it for aggregation and resume without sending it to /verify (see _IDENTITY_KEYS).
     for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
@@ -812,7 +822,7 @@ def _selected_rescoring_rows(store: RolloutStore) -> Iterator[Dict]:
     """Read answers on demand so a bounded re-score does not materialize the whole run."""
     for record in store.selected_records("success").values():
         row = record.read()
-        yield row | {
+        yield _project_reverification_row(row) | {
             _SOURCE_RUN_ID_KEY: store.manifest.run_id,
             _SOURCE_ANSWER_KEY: _rescoring_source_answer(row, store.manifest.run_id),
         }
@@ -962,9 +972,15 @@ def _run_verification_payloads(
             request_row = {
                 key: value
                 for key, value in row.items()
-                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY)
+                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY, AGENT_CONTEXT_KEY_NAME)
                 and key not in _IDENTITY_KEYS
             }
+            # Agent context belongs only to the agent, including when a flat row keeps it in task_data.
+            # Filter at the shared HTTP boundary so native and ATIF inputs preserve the same separation.
+            if isinstance(request_row.get("task_data"), dict):
+                request_row["task_data"] = {
+                    key: value for key, value in request_row["task_data"].items() if key != AGENT_CONTEXT_KEY_NAME
+                }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
             # settle_into_source the outcomes already answered are settled and its admission is withdrawn, so a
@@ -1307,7 +1323,8 @@ def _load_reverified_results(
         stamps_by_key, source_keys = _source_identity_stamps(identity_sources)
         for r in results:
             for key, value in stamps_by_key.get((r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]), {}).items():
-                r.setdefault(key, value)
+                if key != RUN_ID_KEY or _SOURCE_RUN_ID_KEY not in r:
+                    r.setdefault(key, value)
         unresolved = [
             (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
             for r in results
@@ -1372,7 +1389,10 @@ def validate_settle_source_snapshot(source: Path, raw: str) -> None:
 
 def _reverifiable_saved_result(row: Dict[str, Any]) -> bool:
     """Whether a selected saved result is graded again from its saved answer (``reverification_cause``)."""
-    from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+    from nemo_gym.eval.recovery.grading import (
+        reverification_cause,
+        saved_row_evidence,
+    )
 
     return reverification_cause(saved_row_evidence(row)) is not None
 
@@ -1409,7 +1429,7 @@ def bind_judge_failures(
     spent = set()
     for row in store.failures():
         identity = logical_rollout_id(row)
-        if row.get("_ng_failure_class") == "judge_failed" and store._state.failure_count(identity) >= cap:
+        if _is_judge_failure(row) and store._state.failure_count(identity) >= cap:
             if not skip_spent:
                 raise ConfigError(
                     f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
@@ -1424,7 +1444,7 @@ def bind_judge_failures(
         "failures": {
             logical_rollout_id(row): row
             for row in store.failures()
-            if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
+            if _is_judge_failure(row) and logical_rollout_id(row) not in spent
         }
         | saved_results,
         "saved_results": set(saved_results),

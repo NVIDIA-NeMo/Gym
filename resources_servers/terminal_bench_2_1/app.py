@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, contextmanager
@@ -53,6 +54,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -109,6 +111,11 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: Dict[str, Any]
 
     debug: bool = False
+    # Many task test.sh files run pytest under set -e, so failing tests end the script before it writes
+    # reward.txt. With this on, such a run (non-zero exit, no readable reward.txt, a pytest summary counting
+    # failures or errors) is graded 0 instead of left ungraded; exits without a pytest summary stay ungraded.
+    # Agentic IF masks a tb21 task result that is not completed, so there such a row becomes a scored 0.
+    score_pytest_failures_without_reward: bool = True
 
     outcome_policy: TerminalBench21OutcomePolicyConfig = Field(
         default_factory=TerminalBench21OutcomePolicyConfig,
@@ -151,6 +158,21 @@ def _verifier_failure_reason(cause: BaseException) -> str:
     return bounded_text(f"Verifier sandbox error: {detail}", _MAX_FAILURE_REASON_CHARS)
 
 
+# pytest's closing line, e.g. "==== 17 failed, 3 passed in 12.34s ====" or "== 1 error in 0.50s (0:00:00) ==".
+# pytest -q prints it without the "=" borders: "1 failed, 2 passed in 0.10s".
+_PYTEST_SUMMARY = re.compile(
+    r"^(?:=+ )?(?P<counts>\d+ \w+(?:, \d+ \w+)*|no tests ran) in [\d.]+s(?: \([^)\n]*\))?(?: =+)?[ \t]*$",
+    re.MULTILINE,
+)
+_TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def pytest_reported_failure(output: str) -> bool:
+    """Whether the last pytest summary line in ``output`` counts failed tests or errors."""
+    summaries = _PYTEST_SUMMARY.findall(_TERMINAL_ESCAPE.sub("", output).replace("\r", ""))
+    return bool(summaries) and re.search(r"\b\d+ (failed|errors?)\b", summaries[-1]) is not None
+
+
 class _VerifierDirError(RuntimeError):
     """/logs/verifier or an upload directory could not be created: the task state the model left behind."""
 
@@ -163,6 +185,8 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
     task_name: str
     test_output: str
+    # True when the reward came from pytest's summary because test.sh exited without a readable reward.txt.
+    reward_from_pytest_summary: bool = False
     golden_patch_output: Optional[str]
 
 
@@ -299,7 +323,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             record = self._session_id_to_state.setdefault(session_id, _ResourcesSessionState())
             if close_episode_id is not None:
                 if record.episode_id is not None and record.episode_id != close_episode_id:
-                    raise HTTPException(409, "episode_id does not match the resources session")
+                    raise ResourcesSessionConflictError("episode_id does not match the resources session")
                 record.episode_id = close_episode_id
                 # Mark the session as closing before waiting: a timed-out close must not leave a late allocation running.
                 record.closing = True
@@ -339,8 +363,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     async def _stop_session_sandbox(self, session_id: str) -> None:
         sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
-            async with asyncio.timeout(self.config.session_close_timeout_seconds):
-                await sandbox.stop()
+            await sandbox.stop(timeout_s=self.config.session_close_timeout_seconds)
             # Keep ownership when stop fails so close can retry.
             self._session_id_to_sandbox.pop(session_id, None)
 
@@ -473,12 +496,12 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         async with self._locked_resources_session(session_id) as session:
             if session.closing or self._shutting_down:
-                raise HTTPException(409, "Resources session is already closed")
+                raise ResourcesSessionConflictError("Resources session is already closed")
             if session.request is not None:
                 if session.request != body:
-                    raise HTTPException(409, "resources_session_id is already bound to a different request")
+                    raise ResourcesSessionConflictError("resources_session_id is already bound to a different request")
                 if session.response is None or session.verification_request is not None:
-                    raise HTTPException(409, "Resources session is no longer available for seeding")
+                    raise ResourcesSessionConflictError("Resources session is no longer available for seeding")
                 request.session[SESSION_ID_KEY] = session_id
                 return session.response
             session.request = body.model_copy(deep=True)
@@ -486,7 +509,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             try:
                 sandbox = await self._create_sandbox(task, session_id=session_id)
                 if session.closing:
-                    raise HTTPException(409, "Resources session closed during setup")
+                    raise ResourcesSessionConflictError("Resources session closed during setup")
                 working_directory = await sandbox.exec("pwd", timeout_s=30)
                 workdir = (working_directory.stdout or "").strip()
                 if working_directory.return_code != 0 or not Path(workdir).is_absolute():
@@ -502,7 +525,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     ),
                 )
                 if session.closing:
-                    raise HTTPException(409, "Resources session closed during setup")
+                    raise ResourcesSessionConflictError("Resources session closed during setup")
             except BaseException:
                 try:
                     await self._stop_session_sandbox(session_id)
@@ -582,14 +605,16 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if session_id in self._session_id_to_state:
             async with self._locked_resources_session(session_id) as session:
                 if session.closing or session.request is None or session.response is None:
-                    raise HTTPException(409, "Resources session is not available for verification")
+                    raise ResourcesSessionConflictError("Resources session is not available for verification")
                 try:
                     task = TerminalBench21SeedSessionRequest.model_validate(session.request.task_data)
                     if task != TerminalBench21SeedSessionRequest.model_validate(body.model_dump()):
-                        raise HTTPException(409, "Verification task does not match the seeded task")
+                        raise ResourcesSessionConflictError("Verification task does not match the seeded task")
                     if session.verification_request is not None:
                         if session.verification_request != body:
-                            raise HTTPException(409, "Verification request does not match the first request")
+                            raise ResourcesSessionConflictError(
+                                "Verification request does not match the first request"
+                            )
                         if session.verification_response is None:
                             # The verifier may have mutated the task before failing.
                             raise HTTPException(503, "Previous verification did not complete; retry the episode")
@@ -608,7 +633,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                                 "Failed to stop closing Terminal-Bench session %s after verification", session_id
                             )
         if not self.config.is_verifying_golden_patch and session_id not in self._session_id_to_sandbox:
-            raise HTTPException(409, "Resources session is unknown or closed")
+            raise ResourcesSessionConflictError("Resources session is unknown or closed")
         try:
             return await self._verify(request, body)
         finally:
@@ -647,8 +672,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 return await self._verify_sandbox(eval_sandbox, body, golden_patch_output=golden_patch_output)
             finally:
                 try:
-                    async with asyncio.timeout(self.config.session_close_timeout_seconds):
-                        await eval_sandbox.stop()
+                    await eval_sandbox.stop(timeout_s=self.config.session_close_timeout_seconds)
                 except Exception:
                     LOG.exception("Failed to stop Terminal-Bench golden-patch sandbox")
         return await self._verify_sandbox(self._session_id_to_sandbox[request.session[SESSION_ID_KEY]], body)
@@ -700,6 +724,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             print(f"Test output for {body.task_name}: {test_output}", file=stderr)
 
         evaluation_completed = False
+        reward_from_pytest_summary = False
         reward = 0.0
         if eval_result is not None:
             try:
@@ -720,6 +745,18 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             except Exception:
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
+                # test.sh exited without a readable reward.txt, typically because a failing pytest ended it under
+                # set -e before it wrote one. A failing pytest summary is a verdict on the model: grade 0. A timed-out
+                # run did not exit, so its partial output says nothing about the test run and it stays ungraded.
+                if (
+                    failure_cause is None
+                    and self.config.score_pytest_failures_without_reward
+                    and eval_result.return_code != 0
+                    and getattr(eval_result, "error_type", None) is None
+                    and pytest_reported_failure(test_output)
+                ):
+                    evaluation_completed = True
+                    reward_from_pytest_summary = True
 
         failure_reason: str | None = None
         counts_as_zero = False
@@ -758,6 +795,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             reward=reward,
             verification_time_taken=verification_time_taken,
             test_output=test_output,
+            reward_from_pytest_summary=reward_from_pytest_summary,
             golden_patch_output=golden_patch_output,
             mask_sample=failure_reason is not None and not counts_as_zero,
             failure_kind=failure_kind if failure_reason is not None else None,

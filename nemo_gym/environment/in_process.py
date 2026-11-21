@@ -63,7 +63,7 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
-from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
+from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config, read_jsonl_rows
 from nemo_gym.eval.eval_plan import EvalPlan
 from nemo_gym.rollouts.rollout_collection import (
     NG_ENVIRONMENT_SERVER_KEY,
@@ -72,9 +72,9 @@ from nemo_gym.rollouts.rollout_collection import (
 )
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.server_runtime.supervisor.server_supervisor import (
-    RunHelper,
     ServerSpinupTimeoutError,
     ServerStartFailedError,
+    ServerSupervisor,
 )
 from nemo_gym.telemetry.gym_metrics import record_rollout_completed, record_rollout_reward
 from nemo_gym.utils.decorators import experimental
@@ -244,10 +244,10 @@ def serve_benchmark(
         if not 0 < registry_port < 65536:
             raise ConfigError(f"registry_port must be a port number from 1 to 65535, got {registry_port!r}")
         initial = OmegaConf.merge(initial, {HEAD_SERVER_KEY_NAME: {"port": registry_port}})
-    helper = RunHelper()
+    supervisor = ServerSupervisor()
     try:
         with ignoring_command_line():
-            helper.start(
+            supervisor.start(
                 GlobalConfigDictParserConfig(
                     initial_global_config_dict=initial, skip_load_from_cli=True, skip_exporters=True
                 )
@@ -262,7 +262,7 @@ def serve_benchmark(
             )
         yield registry_server
     finally:
-        helper.shutdown()
+        supervisor.shutdown()
 
 
 def _checked_overrides(overrides: Optional[Mapping[str, Any]]) -> dict[str, Any]:
@@ -308,7 +308,7 @@ def _collated_rows(global_config_dict: DictConfig, output_dir: Path) -> list[dic
     collated = output_dir / "benchmark.jsonl"
     if not collated.exists():
         raise ConfigError(f"Collation did not produce {collated}")
-    return [json.loads(line) for line in collated.read_text().splitlines() if line.strip()]
+    return read_jsonl_rows(collated)
 
 
 class TaskRunner:

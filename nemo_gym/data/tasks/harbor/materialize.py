@@ -17,6 +17,7 @@ from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig
 from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 from nemo_gym.data.tasks.harbor.task import HarborTask, is_task_folder
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
@@ -69,6 +70,12 @@ class HarborTaskInput(BaseModel):
         task_data = fields.pop("task_data", {})
         if not isinstance(task_data, Mapping):
             return value  # Let the field validator report the malformed canonical container.
+        # Harbor prepares agent inputs from its task folder. The single_agent_turn row convenience
+        # has no consumer here; refuse it before it can be folded into unused task data.
+        if AGENT_CONTEXT_KEY_NAME in fields or AGENT_CONTEXT_KEY_NAME in task_data:
+            raise ValueError(
+                "Harbor does not accept row-level agent_context; configure agent inputs through the Harbor task"
+            )
         for key in fields.keys() & task_data.keys():
             if fields[key] != task_data[key]:
                 raise ValueError(f"Conflicting task field {key!r} inside and outside task_data")
