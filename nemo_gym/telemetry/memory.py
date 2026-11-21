@@ -57,6 +57,20 @@ class HostMemory:
     total_bytes: int
 
 
+@dataclass(frozen=True)
+class ProcessCpuTimes:
+    """CPU time one process has used since it started."""
+
+    user_seconds: float
+    system_seconds: float
+
+
+# A process is identified by its pid and start time (kernel clock ticks since boot, unaffected by wall-clock changes),
+# so a reused pid does not inherit an exited process's CPU time.
+ProcessKey = tuple[int, int]
+_CLOCK_TICKS = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+
+
 def process_tree_memory_supported() -> bool:
     """Return whether this host exposes Linux procfs memory accounting."""
     return sys.platform.startswith("linux") and Path("/proc/self").is_dir()
@@ -94,6 +108,117 @@ def collect_process_tree_memory(root_pid: int) -> ProcessTreeMemory:
         pss_bytes=pss_bytes if complete_pss else None,
         process_count=process_count,
     )
+
+
+def _stat_fields(pid: int) -> list[str]:
+    """The fields of ``/proc/<pid>/stat`` after the command name; raises ``FileNotFoundError`` once the pid is gone."""
+    with open(f"/proc/{pid}/stat") as stat_file:
+        stat = stat_file.read()
+    # The command name is parenthesized and may hold spaces or parentheses; the fields follow the last ")".
+    return stat[stat.rindex(")") + 2 :].split()
+
+
+def _read_process_cpu(pid: int) -> tuple[ProcessKey, ProcessCpuTimes] | None:
+    """One process's identity and CPU times from a single ``/proc/<pid>/stat`` read, or ``None`` if unreadable."""
+    try:
+        fields = _stat_fields(pid)
+        user_ticks, system_ticks, start_ticks = int(fields[11]), int(fields[12]), int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+    return (pid, start_ticks), ProcessCpuTimes(user_ticks / _CLOCK_TICKS, system_ticks / _CLOCK_TICKS)
+
+
+def collect_process_tree_cpu(root_pid: int) -> dict[ProcessKey, ProcessCpuTimes]:
+    """CPU time used so far by a root process and each of its live descendants (Linux procfs)."""
+    times: dict[ProcessKey, ProcessCpuTimes] = {}
+    for pid in _descendant_pids(root_pid):
+        process = _read_process_cpu(pid)
+        if process is not None:
+            times[process[0]] = process[1]
+    return times
+
+
+def process_has_exited(key: ProcessKey) -> bool:
+    """Whether the process ``key`` names is confirmed gone: its pid is free or now belongs to a later process.
+
+    An entry that cannot be read for another reason (permissions, I/O) is not proof of an exit, so it counts as running.
+    """
+    try:
+        start_ticks = int(_stat_fields(key[0])[19])
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+    return start_ticks != key[1]
+
+
+def next_cpu_baseline(
+    previous: dict[ProcessKey, ProcessCpuTimes],
+    current: dict[ProcessKey, ProcessCpuTimes],
+    has_exited: Callable[[ProcessKey], bool] = process_has_exited,
+) -> dict[ProcessKey, ProcessCpuTimes]:
+    """The baseline for the next sample: this sample's processes, plus earlier ones missing from it that still run.
+
+    A process can drop out of one walk (an unreadable ``children`` file, a race with a fork); keeping its baseline
+    means it is not counted again from zero when it reappears. Only a process that has exited is forgotten.
+    """
+    kept = {key: times for key, times in previous.items() if key not in current and not has_exited(key)}
+    return {**kept, **current}
+
+
+def cpu_time_since(
+    previous: dict[ProcessKey, ProcessCpuTimes], current: dict[ProcessKey, ProcessCpuTimes]
+) -> ProcessCpuTimes:
+    """CPU time the tree used between two samples: each live process's increase, all of it for a new process.
+
+    A process that exited since the previous sample loses the time it used after that sample, so the total is a
+    lower bound by at most one interval per exited process; it never goes down.
+    """
+    user = system = 0.0
+    for key, times in current.items():
+        before = previous.get(key, ProcessCpuTimes(0.0, 0.0))
+        user += max(0.0, times.user_seconds - before.user_seconds)
+        system += max(0.0, times.system_seconds - before.system_seconds)
+    return ProcessCpuTimes(user_seconds=user, system_seconds=system)
+
+
+def record_server_cpu(target: ServerMemoryTarget, used: ProcessCpuTimes) -> None:
+    """Add a server process tree's CPU time since the previous sample to ``gym.server.cpu.time``."""
+    from nemo_gym.telemetry.setup import get_telemetry
+
+    telemetry = get_telemetry()
+    if telemetry is None or not telemetry.is_exporting:
+        return
+    try:
+        counter = _get_instruments(telemetry.meter)["cpu_time"]
+        base_attributes = {"nemo.gym.server.name": target.name, "nemo.gym.server.type": target.server_type}
+        for mode, seconds in (("user", used.user_seconds), ("system", used.system_seconds)):
+            if seconds > 0:
+                counter.add(seconds, {**base_attributes, "cpu.mode": mode})
+    except Exception:
+        logger.debug("Failed to record Gym server CPU time", exc_info=True)
+
+
+def record_host_cpu_capacity() -> None:
+    """Record the host's logical and physical CPU counts and the CPUs this process may run on."""
+    from nemo_gym.telemetry.setup import get_telemetry
+
+    telemetry = get_telemetry()
+    if telemetry is None or not telemetry.is_exporting:
+        return
+    try:
+        instruments = _get_instruments(telemetry.meter)
+        logical = psutil.cpu_count(logical=True)
+        physical = psutil.cpu_count(logical=False)
+        if logical:
+            instruments["cpu_logical"].set(logical)
+        if physical:
+            instruments["cpu_physical"].set(physical)
+        # The supervisor's main-thread affinity; under Slurm or a container cpuset that is usually the allocation.
+        if hasattr(os, "sched_getaffinity"):
+            instruments["cpu_allowed"].set(len(os.sched_getaffinity(os.getpid())))
+    except Exception:
+        logger.debug("Failed to record host CPU capacity", exc_info=True)
 
 
 def record_server_memory(
@@ -156,11 +281,14 @@ class MemoryProfiler:
         *,
         collector: Callable[[int], ProcessTreeMemory] = collect_process_tree_memory,
         host_collector: Callable[[], HostMemory] = collect_host_memory,
+        cpu_collector: Callable[[int], dict[ProcessKey, ProcessCpuTimes]] = collect_process_tree_cpu,
     ) -> None:
         self._targets = targets
         self._interval_seconds = interval_seconds
         self._collector = collector
         self._host_collector = host_collector
+        self._cpu_collector = cpu_collector
+        self._cpu_seen: dict[str, dict[ProcessKey, ProcessCpuTimes]] = {}
         self._peaks: dict[tuple[str, str], int] = {}
         self._host_peaks: dict[str, int] = {}
         self._stop = threading.Event()
@@ -172,12 +300,20 @@ class MemoryProfiler:
             record_host_memory(self._host_collector(), self._host_peaks)
         except Exception:
             logger.debug("Failed to sample host memory", exc_info=True)
+        record_host_cpu_capacity()
         for target in self._targets:
             try:
                 memory = self._collector(target.pid)
                 record_server_memory(target, memory, self._peaks)
             except Exception:
                 logger.debug(f"Failed to sample memory for {target.name}", exc_info=True)
+            try:
+                current = self._cpu_collector(target.pid)
+                previous = self._cpu_seen.get(target.name, {})
+                record_server_cpu(target, cpu_time_since(previous, current))
+                self._cpu_seen[target.name] = next_cpu_baseline(previous, current)
+            except Exception:
+                logger.debug(f"Failed to sample CPU time for {target.name}", exc_info=True)
 
     def start(self) -> None:
         """Start background sampling after recording an initial sample."""
@@ -289,6 +425,26 @@ def _get_instruments(meter) -> dict:
                 name="gym.host.memory.total",
                 unit="By",
                 description="Total host memory.",
+            ),
+            "cpu_time": meter.create_counter(
+                name="gym.server.cpu.time",
+                unit="s",
+                description="CPU time used by a Gym server and its descendants, by cpu.mode.",
+            ),
+            "cpu_logical": meter.create_gauge(
+                name="gym.host.cpu.logical",
+                unit="{cpu}",
+                description="Logical CPUs on the host.",
+            ),
+            "cpu_physical": meter.create_gauge(
+                name="gym.host.cpu.physical",
+                unit="{cpu}",
+                description="Physical CPU cores on the host.",
+            ),
+            "cpu_allowed": meter.create_gauge(
+                name="gym.host.cpu.allowed",
+                unit="{cpu}",
+                description="CPUs the Gym supervisor's main thread may run on (its CPU affinity).",
             ),
             "host_sampled_peak": meter.create_gauge(
                 name="gym.host.memory.sampled_peak",
