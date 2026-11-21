@@ -164,6 +164,9 @@ class EnrootCreateConfig:
     sqsh_cache_dir: str | None = None
     rw: bool = True
     remap_root: bool = False
+    # None preserves the site's Enroot default (and any inherited setting).
+    # Set False for evaluation sandboxes that must not mount the user's home.
+    mount_home: bool | None = None
     # Clear the Docker ENTRYPOINT before launching the init so images with a
     # non-shell entrypoint (e.g. ENTRYPOINT ["python"]) don't wrap the init
     # command and exit immediately. Set to False only when the image entrypoint
@@ -351,6 +354,8 @@ class EnrootProvider:
             # defaults this to "no"; we always force it on.
             "ENROOT_UNSHARE_PID": "yes",
         }
+        if cfg.mount_home is not None:
+            self._enroot_env["ENROOT_MOUNT_HOME"] = "yes" if cfg.mount_home else "no"
         # Serializes concurrent imports of the same image within this process.
         self._import_locks: dict[str, asyncio.Lock] = {}
 
@@ -505,7 +510,7 @@ class EnrootProvider:
             argv.append("--rw")
         if self._create_config.remap_root:
             argv.append("--root")
-        argv += ["-m", f"{staging_dir}:{mount_point}"]
+        argv += ["-m", f"{staging_dir}:{mount_point}:none:bind,x-create=dir"]
         for mount in self._exec_config.default_mounts:
             argv += ["-m", mount]
         for mount in extra_mounts:
