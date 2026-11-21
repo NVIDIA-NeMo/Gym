@@ -7,8 +7,8 @@ top-level and ``verifier_metadata`` as task.py's ``VerifierMetadata``, whose fie
 places carry) only that container holds. Agentic rows (``prepare.py --setting agentic``) also carry a
 ``video_binding`` for a sandboxed video agent, which is not part of this package; its ``source`` is only a path
 here. ``annotation_warnings`` is preparation provenance (``duplicate_option_text``), outside model inputs.
-``VideoMCQATaskData`` is the shared shape that VideoMME-v2 uses; ``TaskData`` adds the four-choice, ungrouped rule
-the VideoMME-v1/LVBench verifier enforces.
+``VideoMCQATaskData`` is the shared shape that VideoMME-v2 uses; ``TaskData``, the rows of this server (a VideoMME-v1,
+LVBench or question-set cohort), has no VideoMME-v2 level or group. VideoMME-v1 and LVBench add their four choices.
 """
 
 from pathlib import PurePosixPath
@@ -57,6 +57,8 @@ class VideoMCQATaskData(BaseModel):
     setting: Literal["single_turn", "agentic"]
     expected_answer: str = Field(json_schema_extra=_NESTED)
     option_count: int = Field(ge=2, le=len(LABELS), json_schema_extra=_NESTED)
+    question: NestedText
+    options: list[Text] = Field(min_length=2, max_length=len(LABELS), json_schema_extra=_NESTED)
     dataset_source: NestedText
     dataset_revision: str = Field(pattern=r"^[0-9a-f]{40}$", json_schema_extra=_NESTED)
     video_id: NestedText
@@ -71,16 +73,18 @@ class VideoMCQATaskData(BaseModel):
     def answer_and_binding(self) -> Self:
         if self.expected_answer not in tuple(LABELS[: self.option_count]):
             raise ValueError("expected_answer must be one available uppercase choice label")
+        if len(self.options) != self.option_count:
+            raise ValueError("options must hold one text per choice, in label order")
         if self.setting == "agentic" and self.video_binding is None:
             raise ValueError("An agentic row needs the video_binding its agent reads")
         return self
 
 
 class TaskData(VideoMCQATaskData):
-    """VideoMME-v1 and LVBench: four choices and no VideoMME-v2 level or group."""
+    """Rows of a VideoMME-v1, LVBench or question-set cohort: no VideoMME-v2 level or group."""
 
     @model_validator(mode="after")
-    def four_ungrouped_choices(self) -> Self:
-        if self.option_count != 4 or self.level is not None or self.group_id is not None:
-            raise ValueError("VideoMME-v1/LVBench require four choices and no v2 group or level")
+    def ungrouped(self) -> Self:
+        if self.level is not None or self.group_id is not None:
+            raise ValueError("VideoMME-v1/LVBench and question sets have no v2 group or level")
         return self
