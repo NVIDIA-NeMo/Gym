@@ -519,6 +519,10 @@ Example output: "My final verdict is different [[A!=B]]"."""
             library_reward, extracted_answer = await self._verify_answer_with_library_async(
                 expected_answer, boxed_answer
             )
+        # A successful format capture is still an extracted answer when the
+        # symbolic parser declines it; majority metrics must not count it as missing.
+        if extracted_answer is None:
+            extracted_answer = answer
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
         judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, answer)

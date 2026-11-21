@@ -288,6 +288,10 @@ class TestApp:
             result = await server.verify(request)
             assert result.answer_format_valid is True
             assert result.reward == judge_reward
+            assert result.extracted_answer == answer
+            metrics = server.compute_metrics([[result.model_dump()]])
+            assert metrics["majority@1/judge_accuracy"] == 100.0 * judge_reward
+            assert metrics["majority@1/no_answer"] == 0.0
             judge.assert_awaited_once_with("Compute", "0.5", answer)
             if answer == " 4 ":
                 library.assert_awaited_once_with("0.5", r"\boxed{ 4 }")
