@@ -1284,7 +1284,7 @@ def test_mcp_session_tokens_ride_as_bearer_tokens_with_mcp_bearer_token() -> Non
 
     server, _ = make_server()
     server.config.mcp_bearer_token = True
-    token = mcp_session_token_serializer(server.get_session_secret()).dumps({"sid": "s", "episode": "r-a1"})
+    token = mcp_session_token_serializer(server.session_secret).dumps({"sid": "s", "episode": "r-a1"})
 
     def claims(*headers: tuple[bytes, bytes]) -> Any:
         return server._mcp_token_claims({"headers": list(headers)})

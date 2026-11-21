@@ -56,7 +56,7 @@ from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
     mcp_session_token_serializer,
     normalize_tool_name,
 )
-from nemo_gym.server_runtime.base_server import SimpleServer  # noqa: E402
+from nemo_gym.server_runtime.base_server import SimpleServer, run_session_secret  # noqa: E402
 from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
     bind_route,
@@ -692,18 +692,32 @@ def test_an_advertised_name_the_config_takes_names_an_mcp_grant(name: str):
     assert list(grant.connection.headers) == ["Authorization"]
 
 
-def test_bearer_tokens_need_a_session_secret():
+def test_bearer_tokens_are_signed_with_a_secret_made_for_the_run():
     """Code that reads a bearer token could sign one for another session with the server's public session middleware
-    key, so an endpoint that hands out bearer tokens starts only when the server signs them with a secret."""
-    public = SessionScoped(
-        config=BaseResourcesServerConfig(
-            host="", port=0, entrypoint="", name="store", expose_tools_over_mcp=True, mcp_bearer_token=True
-        ),
-        server_client=MagicMock(spec=ServerClient),
+    key, so a server that hands out bearer tokens signs them with a secret made for the run, from its config alone. An
+    override of get_session_secret() that returns the public key keeps the endpoint from starting."""
+    import itsdangerous
+
+    config = BaseResourcesServerConfig(
+        host="", port=0, entrypoint="", name="store", expose_tools_over_mcp=True, mcp_bearer_token=True
     )
+    store = SessionScoped(config=config, server_client=MagicMock(spec=ServerClient))
+    app = store.setup_webserver()
+    maybe_auto_expose(store, app)
+    with TestClient(app) as client:
+        token = client.post("/seed_session", json={}).json()["mcp"]["headers"]["Authorization"].removeprefix("Bearer ")
+    assert "sid" in mcp_session_token_serializer(run_session_secret("store")).loads(token)
+    with pytest.raises(itsdangerous.BadSignature):
+        mcp_session_token_serializer(store.get_session_middleware_key()).loads(token)
+
+    class PublicKey(SessionScoped):
+        def get_session_secret(self) -> str:
+            return self.get_session_middleware_key()
+
+    public = PublicKey(config=config, server_client=MagicMock(spec=ServerClient))
     app = public.setup_webserver()
     with pytest.raises(
-        ValueError, match=r"^'store' sets mcp_bearer_token .* Override SessionScoped\.get_session_secret\(\) to return"
+        ValueError, match=r"^'store' sets mcp_bearer_token .* PublicKey\.get_session_secret\(\) must return a secret"
     ):
         maybe_auto_expose(public, app)
     assert "/mcp" not in {getattr(r, "path", None) for r in app.routes}

@@ -30,9 +30,10 @@ tools by overriding ``mcp_allowed_tools_for_session(seed_body)``; the token mint
 read calls (a harness in a sandbox), two config options make it an ordinary one: ``mcp_server_name``
 is the name clients list it under, and ``mcp_bearer_token`` hands out the token as ``Authorization:
 Bearer``, requires it for tools/list, answers a tool outside the token's grant as an unknown tool,
-and words its errors without naming the framework or the tool's route. Exposure with
-``mcp_bearer_token`` refuses to start unless the server overrides ``get_session_secret()``: the
-default key is public, so code that reads one token could sign another session's.
+and words its errors without naming the framework or the tool's route. With ``mcp_bearer_token``
+the server signs its sessions with a secret made for the run (``SimpleServer.get_session_secret``),
+since code that reads one token could otherwise sign another session's with the public default key;
+exposure refuses to start if an override of ``get_session_secret()`` returns that public key.
 
 Dispatch is direct: the route's handler runs exactly once per MCP call, invoked with a fabricated
 ``Request`` whose ``.session`` is materialized directly — no middleware, no routing, no second app
@@ -865,7 +866,7 @@ def _make_mcp_server(
 
 def session_token_serializer(server: Any) -> URLSafeSerializer:
     """The serializer that signs and verifies this server's MCP session tokens."""
-    return mcp_session_token_serializer(server.get_session_secret())
+    return mcp_session_token_serializer(server.session_secret)
 
 
 def maybe_auto_expose(server: Any, app: FastAPI) -> Optional[dict[str, MCPTool]]:
@@ -899,12 +900,13 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
     token_header = session_token_header(server)
     # With bearer tokens, only a session learns which tools exist, and only its own, and errors name no framework.
     bearer = token_header == "Authorization"
-    if bearer and server.get_session_secret() == server.get_session_middleware_key():
+    if bearer and server.session_secret == server.get_session_middleware_key():
         # Bearer tokens go to code that can read them. Anyone can compute the session middleware key from the
         # server's class and name, and the default cookie name shows it, so that code could sign any session's token.
         raise ValueError(
             f"{server.config.name!r} sets mcp_bearer_token but signs its MCP session tokens with its public session "
-            f"middleware key. Override {type(server).__name__}.get_session_secret() to return a secret."
+            f"middleware key: {type(server).__name__}.get_session_secret() must return a secret, as its default does "
+            "with mcp_bearer_token."
         )
 
     serializer = session_token_serializer(server)

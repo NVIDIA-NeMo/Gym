@@ -170,8 +170,8 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
         f"{NEMO_GYM_MCP_SESSION_TOKEN_HEADER}, and require one for tools/list too, which then lists only the "
         "session's tools; a tool outside the session's grant is answered as an unknown tool, and errors name no "
         "framework. For clients that pass the seed's MCP headers as given, as the environment server's MCP grants "
-        "do. Needs expose_tools_over_mcp, and a server that overrides get_session_secret(): the server refuses to "
-        "start when the tokens it hands out are signed with its public session middleware key",
+        "do. Needs expose_tools_over_mcp. The server then signs its sessions with a secret made for the run, which "
+        "every worker shares (SimpleServer.get_session_secret)",
     )
     session_close_retry_window_seconds: float = Field(
         default=300,
@@ -1077,7 +1077,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if text is None:
             return None
         if self._mcp_token_serializer is None:
-            self._mcp_token_serializer = mcp_session_token_serializer(self.get_session_secret())
+            self._mcp_token_serializer = mcp_session_token_serializer(self.session_secret)
         payload = mcp_session_token_payload(self._mcp_token_serializer, text)
         if not isinstance(payload, dict) or not isinstance(payload.get("sid"), str):
             return None
