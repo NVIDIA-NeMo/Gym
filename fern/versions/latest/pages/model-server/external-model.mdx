@@ -1,0 +1,50 @@
+---
+title: "External Token Inference"
+description: "Train with token-ID completions from an externally managed deployment."
+position: 9
+---
+
+Use `external_model` for an external `/v1/completions` endpoint that accepts token-ID prompts and returns exact generated token IDs and log probabilities. This adapter supports CoreWeave Dedicated Inference without starting inference workers in Gym. Deployment creation, weight export, hot-load, and the training barrier belong to the caller.
+
+## Configuration
+
+Load `responses_api_models/external_model/configs/external_model_for_training.yaml` with your environment and set:
+
+```yaml
+policy_base_url: https://inference.example.com/v1
+policy_model_name: deployed-model
+policy_tokenizer_path: /shared/tokenizer
+policy_max_model_len: 32768
+policy_api_key_file: /run/secrets/inference-key
+policy_served_identity_file: /shared/hotload/served_identity
+```
+
+The tokenizer must already exist locally and match the trainer and deployment, including special tokens and chat template. The model server installs `transformers` for tokenizer rendering; it needs no local inference runtime. Set `policy_api_key_file: null` for an endpoint without authentication. The model server reads the key file at request time; pass its path rather than a credential in a logged Hydra config or Ray actor setting. Existing `policy_api_key` settings are unused by this adapter.
+
+The model-specific settings live under `policy_model.responses_api_models.external_model`. Optional `chat_template_kwargs` configures rendering. `seeds` defaults to `true`: requests without a seed receive a random seed, and explicit seeds are preserved. Sampling supports temperature, top-p, presence/frequency penalties, and stop strings. Requested generation length is capped to the remaining context. A full context ends the trajectory with a length stop.
+
+## Checkpoint identity and update barrier
+
+Before the first rollout, publish a nonempty text file containing the identity confirmed on every serving replica. Each generation request reads this file and sends the identity as `nvext.cache_salt`. Identities longer than 128 characters or containing `@`, `/`, `\`, or NUL use their SHA-256 hex digest, matching cwtrain's cache-salt convention.
+
+For each weight update, finish current rollouts, pause generation, remove the identity file, update every replica, and wait for every replica to report READY on the same checkpoint. Then atomically replace the file with that checkpoint's unique identity and resume sampling. Keep sampling paused and the file absent after failed, partial, or timed-out updates. Never reuse an identity for different weights. The driver and all Gym model servers must see the same shared file. Gym refuses requests if it cannot read a nonempty identity, and discards a response if the identity changed while generation was in flight. The caller must enforce the barrier; the file alone does not coordinate replicas or concurrent training jobs.
+
+## Exact training tokens
+
+The first turn uses the local tokenizer's chat template. Later turns retain the preceding assistant message's exact prompt and generated token IDs, including EOS and tool-call tokens, and tokenize only the new template suffix. A length-truncated assistant turn is closed before the next turn. Templates that rewrite the preceding rendered history are refused. This path requires an EOS-delimited template whose suffix can be appended independently, as in Nemotron 3 ChatML templates; validate the actual tokenizer before training.
+
+The endpoint must return exactly one completion, `usage.prompt_tokens` equal to the submitted prompt length, and aligned `choices[0].logprobs.tokens` and `token_logprobs` arrays. Each token must use `token_id:<integer>`, and each log probability must be finite. Stop/EOS tokens returned by the endpoint remain in the training metadata. Missing metadata is an error; Gym does not retokenize generated text or invent log probabilities. Responses output carries `prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`, so the caller can validate trajectory prefixes before constructing loss masks.
+
+## Supported tools and limits
+
+Tool parsing supports the Qwen3-coder XML form used by Nemotron 3:
+
+```text
+<tool_call><function=search><parameter=query>example</parameter></function></tool_call>
+```
+
+String parameters remain strings; other parameter types are decoded as JSON when possible. Multiple complete function blocks can produce multiple calls. Configure this adapter only for models using that format. It does not parse JSON tool envelopes, nested XML, or arbitrary model-specific formats. A length-truncated response remains a length stop and does not execute tool calls. Malformed blocks remain model output and may fail the task. A complete parsed call keeps the text before the first tool block as content; trailing prose is omitted from chat content, while its exact tokens remain in training metadata.
+
+Only text inputs, one completion per request, and automatic tool choice are supported. Images, audio, structured response formats, top-k/min-p/logit-bias sampling, assistant continuation, streaming, Responses-native forwarding, external token staging, and generation-cut controls are unsupported. This adapter does not provide tool-schema enforcement or deployment hot-load APIs.
+
+The conversion and XML parser are adapted from the Apache-2.0 [inference-cookbook source at commit 41f991f](https://github.com/coreweave/inference-cookbook/tree/41f991fef0d45430d20cfd8bc142c4bfc5070369/libs/cwtrain). The NeMo-RL integration is tracked in [NVIDIA-NeMo/RL#4964](https://github.com/NVIDIA-NeMo/RL/issues/4964).

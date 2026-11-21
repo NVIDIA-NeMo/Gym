@@ -1,0 +1,12 @@
+policy_model:
+  responses_api_models:
+    external_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      model: ${policy_model_name}
+      tokenizer_path: ${policy_tokenizer_path}
+      max_model_len: ${policy_max_model_len}
+      cache_salt_file: ${policy_served_identity_file}
+      api_key_file: ${policy_api_key_file}
+      return_token_id_information: true
+      uses_reasoning_parser: true
