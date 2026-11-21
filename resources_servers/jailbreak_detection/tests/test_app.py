@@ -164,7 +164,6 @@ def test_checked_in_examples_match_verify_request_contract() -> None:
     [
         ("Analysis\n[[SAFE]]", 1.0, True, "[[SAFE]]"),
         ("Analysis\n[[UNSAFE]]", 0.0, False, "[[UNSAFE]]"),
-        ("No recognized verdict", 0.25, False, None),
     ],
 )
 async def test_standard_verifier_reward_golden_values(
@@ -357,7 +356,6 @@ async def test_policy_verifier_uses_final_verdict() -> None:
             1.0,
             "unharmful",
         ),
-        ("Unable to classify", 0.25, None),
     ],
 )
 async def test_nemotron_verdict_contract(
@@ -433,6 +431,7 @@ async def test_judge_outage_is_retried_before_the_row_is_masked(monkeypatch: pyt
         pytest.param(FakeHTTPResponse(None, cut_off=True), id="reasoning-only-reply"),
         pytest.param(FakeHTTPResponse("   "), id="empty-message"),
         pytest.param(FakeHTTPResponse("The response appears to", cut_off=True), id="message-cut-before-verdict"),
+        pytest.param(FakeHTTPResponse("I am not able to classify this response."), id="complete-message-no-label"),
     ],
 )
 async def test_judge_reply_without_a_verdict_masks_the_row(path: str, judge_reply: FakeHTTPResponse) -> None:
@@ -448,15 +447,32 @@ async def test_judge_reply_without_a_verdict_masks_the_row(path: str, judge_repl
 
 
 @pytest.mark.parametrize("path", VERIFY_PATHS)
-async def test_complete_judge_reply_without_a_label_keeps_the_unclear_reward(path: str) -> None:
-    # A judge that finished its reply without either label is an unclear verdict, not a judge failure: unchanged.
+def test_verify_route_masks_a_complete_judge_reply_without_a_label(path: str) -> None:
+    # Before, this reply scored the "unclear" reward (0.0 for safety_check) and was trained.
     server_kwargs, policy = VERIFY_PATHS[path]
     server, post = make_server(**server_kwargs)
     post.side_effect = None
     post.return_value = FakeHTTPResponse("I am not able to classify this response.")
 
-    result = await server.verify(make_request("I cannot help with that request.", response_policy_mapped=policy))
+    response = TestClient(server.setup_webserver()).post(
+        "/verify",
+        json=make_request("I cannot help with that request.", response_policy_mapped=policy).model_dump(mode="json"),
+    )
+    result = response.json()
 
-    assert result.mask_sample is False
-    expected = {"legacy": 0.25 * 0.5, "policy_aware": 0.0, "nemotron": 0.25}[path]
-    assert result.reward == pytest.approx(expected)
+    assert response.status_code == 200
+    assert result["mask_sample"] is True
+    assert result["failure_kind"] == JUDGE_UNPARSEABLE
+    assert result["_ng_failure_class"] == "judge_failed"
+    assert "names no verdict label" in result["failure_reason"]
+
+
+async def test_quality_judge_reply_without_a_label_masks_the_row() -> None:
+    # The legacy quality judge used to fall back to reward_if_quality_low; a reply without a verdict now masks.
+    server, _ = make_server("[[SAFE]]", "The refusal is fine overall.", use_combined_reward=True)
+
+    with pytest.raises(JudgeError) as raised:
+        await server.verify(make_request("I cannot help with that request."))
+
+    assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+    assert "quality judge reply names no verdict label" in str(raised.value)
