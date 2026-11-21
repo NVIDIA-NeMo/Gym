@@ -233,6 +233,7 @@ ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
         "agentic_mme_agent",
+        "agentic_turn_simulation_agent",
         "agentvista_agent",
         "browsecomp_agent",
         "claude_code_agent",

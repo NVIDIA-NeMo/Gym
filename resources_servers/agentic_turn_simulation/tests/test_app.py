@@ -37,7 +37,6 @@ from resources_servers.agentic_turn_simulation.app import (
     AgenticTurnSimulationRunRequest,
     AgenticTurnSimulationVerifyRequest,
     SimulateToolCallRequest,
-    _Session,
 )
 from resources_servers.agentic_turn_simulation.harnesses import HARNESSES
 from resources_servers.agentic_turn_simulation.harnesses.sandbox import (
@@ -61,6 +60,7 @@ from resources_servers.agentic_turn_simulation.tests.support import (
     req,
     script,
 )
+from resources_servers.agentic_turn_simulation.turns import TurnSession, TurnSimulation
 
 
 CONFIG_PATH = Path(__file__).parents[1] / "configs" / "agentic_turn_simulation.yaml"
@@ -105,7 +105,7 @@ def _rcp(input_: Any = None, tools: list[dict[str, Any]] | None = None) -> NeMoG
     )
 
 
-async def _seed(server: AgenticTurnSimulationResourcesServer, session_id: str = "s1", **kw: Any) -> _Session:
+async def _seed(server: AgenticTurnSimulationResourcesServer, session_id: str = "s1", **kw: Any) -> TurnSession:
     await server.seed_session(
         req(session_id),
         AgenticTurnSimulationRunRequest(responses_create_params=_rcp(**kw), verifier_metadata=SANDBOX_METADATA),
@@ -188,12 +188,12 @@ def _verify_body(
 class TestSetup:
     def test_concurrency_limits_and_simulator_prompt(self) -> None:
         server = make_server()
-        assert isinstance(server._simulator_semaphore, asyncio.Semaphore)
-        assert server._simulator_semaphore._value == 64 and server._judge_semaphore._value == 32
-        assert server._simulator_prompts["generic"] == load_prompt("tool-simulator-generic.md")  # the default's
+        assert isinstance(server._turns._simulator_semaphore, asyncio.Semaphore)
+        assert server._turns._simulator_semaphore._value == 64 and server._turns._judge_semaphore._value == 32
+        assert server._turns._simulator_prompts["generic"] == load_prompt("tool-simulator-generic.md")  # the default's
         unlimited = make_server(tool_simulator_max_concurrency=None, judge_max_concurrency=0)
-        assert isinstance(unlimited._simulator_semaphore, nullcontext)
-        assert isinstance(unlimited._judge_semaphore, nullcontext)
+        assert isinstance(unlimited._turns._simulator_semaphore, nullcontext)
+        assert isinstance(unlimited._turns._judge_semaphore, nullcontext)
 
     def test_shipped_config_validates(self) -> None:
         raw = yaml.safe_load(CONFIG_PATH.read_text())
@@ -265,10 +265,10 @@ class TestSeedSession:
 
     async def test_stale_sessions_are_evicted(self) -> None:
         server = make_server(session_ttl_seconds=60)
-        server._sessions["old"] = _Session(
+        server._sessions["old"] = TurnSession(
             SANDBOX, [], KNOWN_TOOLS, SandboxWorkspace(), created=time.monotonic() - 3600
         )
-        server._sessions["recent"] = _Session(SANDBOX, [], KNOWN_TOOLS, SandboxWorkspace())
+        server._sessions["recent"] = TurnSession(SANDBOX, [], KNOWN_TOOLS, SandboxWorkspace())
         await _seed(server, "new")
         assert set(server._sessions) == {"recent", "new"}
 
@@ -330,7 +330,7 @@ class TestSimulateExact:
         server = make_server()
         state = await _seed(server)
         crash = AsyncMock(side_effect=ValueError("boom"))
-        with patch.object(AgenticTurnSimulationResourcesServer, "_answer", crash):
+        with patch.object(TurnSimulation, "_answer", crash):
             out = await server.simulate_tool_call(req(), _sim("bash", command="ls"))
         assert (out.source, out.output) == ("failed", simulator_failure("ValueError: boom"))
         assert state.answered_by == {"failed": 1}
@@ -507,7 +507,9 @@ class TestSimulateWithLLM:
         held = []
 
         async def post(*, server_name: str, url_path: str, json: dict[str, Any], **_: Any) -> MagicMock:
-            held.append((server_name, server._simulator_semaphore._value, server._judge_semaphore._value))
+            held.append(
+                (server_name, server._turns._simulator_semaphore._value, server._turns._judge_semaphore._value)
+            )
             return chat(BASH_OK) if server_name == "simulator" else judge_reply(VERDICT)
 
         server.server_client.post = AsyncMock(side_effect=post)
