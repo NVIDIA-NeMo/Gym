@@ -1,0 +1,3 @@
+-e nemo-gym[dev] @ ../../
+# Scoring needs no extra dependencies. prepare_longbench.py also needs
+# `transformers` to measure prompt length.
