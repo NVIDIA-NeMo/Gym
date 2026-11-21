@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
 from fastapi.testclient import TestClient
-from pytest import approx, fixture
+from pytest import approx, fixture, mark, raises
 
 from nemo_gym.client import SESSION_ID_KEY
 from resources_servers.tavily_search import app as tavily_search_app
@@ -34,7 +34,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.verification import JudgeError
 from resources_servers.tavily_search.app import (
+    _JUDGE_VERDICT_RE,
     FindInPageRequest,
     ScrollPageRequest,
     TavilySearchRequest,
@@ -418,3 +420,87 @@ class TestApp:
         assert list(
             orjson.loads((tmp_path / f"session_id_metrics.{os.getppid()}.{os.getpid()}.json").read_bytes())
         ) == ["abcd"]
+
+    # ---- judge verdict parsing (markdown emphasis) ----
+
+    @mark.parametrize(
+        "grading_response, expected",
+        [
+            # Plain form the prompt asks for still parses.
+            ("correct: yes", "yes"),
+            ("correct: no", "no"),
+            # Markdown-bold label and/or value (hosted claude-sonnet-4-5 judge emits these).
+            ("**correct:** yes", "yes"),
+            ("**correct:** no", "no"),
+            ("**correct**: yes", "yes"),
+            ("correct: **yes**", "yes"),
+            ("*correct:* yes", "yes"),
+            # Case-insensitive, like the sibling search-judge parsers.
+            ("Correct: Yes", "yes"),
+            # The task-2 rollout shape: bold labels throughout, verdict after the reasoning block.
+            (
+                "**extracted_final_answer:** China\n\n**reasoning:** matches the gold answer\n\n"
+                "**correct:** yes\n\n**confidence:** 100",
+                "yes",
+            ),
+        ],
+    )
+    def test_judge_verdict_regex_accepts_markdown(self, grading_response: str, expected: str) -> None:
+        match = _JUDGE_VERDICT_RE.search(grading_response)
+        assert match is not None
+        assert match.group(1).lower() == expected
+
+    @mark.parametrize(
+        "grading_response",
+        [
+            # Near-miss: an extracted_final_answer value of "yes" with no `correct:` verdict must NOT
+            # be read as the verdict (the label must be the `correct` field).
+            "**extracted_final_answer:** yes",
+            "extracted_final_answer: yes",
+            # `correct` inside `incorrect` is not the verdict label.
+            "incorrect: yes",
+            # No verdict at all.
+            "I could not determine whether the answer matches.",
+            # Value must be exactly yes/no.
+            "correct: maybe",
+        ],
+    )
+    def test_judge_verdict_regex_rejects_non_verdicts(self, grading_response: str) -> None:
+        assert _JUDGE_VERDICT_RE.search(grading_response) is None
+
+    async def _verify_with_judge_text(
+        self, config: TavilySearchResourcesServerConfig, judge_text: str
+    ) -> TavilySearchResourcesServer:
+        """Run verify() with a mocked judge that returns ``judge_text`` and return the response."""
+        server_client = MagicMock(spec=ServerClient)
+        server = TavilySearchResourcesServer(config=config, server_client=server_client)
+
+        post_mock = MagicMock()
+        post_mock.json = AsyncMock(return_value=self._create_judge_response(judge_text))
+        post_mock.read = AsyncMock(return_value=orjson.dumps(post_mock.json.return_value))
+        server_client.post = AsyncMock(return_value=post_mock)
+
+        req = TavilySearchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._create_model_response("The answer is China."),
+            ground_truth="People's Republic of China",
+            question="What country has Beijing as its capital?",
+        )
+        return await server.verify(self._create_dummy_request(), req)
+
+    async def test_verify_accepts_bold_correct_verdict(self, config: TavilySearchResourcesServerConfig) -> None:
+        """Task-2 repro: bold-labelled judge verdict scores the correct answer reward 1, not a silent 0."""
+        judge_text = (
+            "**extracted_final_answer:** China\n\n**reasoning:** 'China' is the common name for the "
+            "People's Republic of China\n\n**correct:** yes\n\n**confidence:** 100"
+        )
+        res = await self._verify_with_judge_text(config, judge_text)
+        assert res.reward == approx(1.0)
+        assert res.extracted_final_answer == "yes"
+
+    async def test_verify_raises_judge_failure_on_unparseable_verdict(
+        self, config: TavilySearchResourcesServerConfig
+    ) -> None:
+        """A judge reply with no parseable verdict is an unusable grade (judge_failed), not a wrong answer."""
+        with raises(JudgeError):
+            await self._verify_with_judge_text(config, "I am unable to produce a verdict for this response.")
