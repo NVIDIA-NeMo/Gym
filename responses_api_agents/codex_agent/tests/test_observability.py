@@ -6,9 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
+from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, resolve_terminal, stamp_lineage
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation, transcript_to_atif
+from responses_api_agents.codex_agent.app import parse_exec_jsonl
 from responses_api_agents.codex_agent.observability import (
+    CodexOutputUnavailable,
     parse_codex_observations,
+    parse_codex_output,
     parse_codex_usage,
     read_codex_observations,
 )
@@ -486,3 +490,344 @@ def test_native_prompt_images_are_preserved() -> None:
     assert observed[1]["image_url"] == content[1]["image_url"]
     assert observed[1]["detail"] == "high"
     assert not bundle.gaps
+
+
+def _session(*payloads: dict, extra: list[dict] | None = None) -> str:
+    """A Codex session record: its header, the given ``response_item`` payloads in order, then ``extra`` records."""
+    records = [
+        {"type": "session_meta", "payload": {"id": "session-1", "cli_version": "0.144.4"}},
+        {"type": "turn_context", "payload": {"turn_id": "turn-1"}},
+        *({"type": "response_item", "payload": payload} for payload in payloads),
+        *(extra or []),
+    ]
+    return "\n".join(json.dumps(record) for record in records)
+
+
+def _call(call_id: str, name: str, arguments: dict | str, **fields: object) -> dict:
+    text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+    return {"type": "function_call", "call_id": call_id, "name": name, "arguments": text, **fields}
+
+
+def _result(call_id: str, output: object, kind: str = "function_call_output") -> dict:
+    return {"type": kind, "call_id": call_id, "output": output}
+
+
+def _user(text: str) -> dict:
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+
+def _shape(items) -> list[tuple]:
+    return [(item.type, getattr(item, "call_id", None)) for item in items]
+
+
+def test_output_keeps_the_models_command_arguments_and_ids_verbatim() -> None:
+    """The CLI shows `/bin/bash -lc ...` with only the command; the record has what the model sent."""
+    arguments = '{"cmd":"sed -n \'1,120p\' "$SKILLS/demo/SKILL.md"","workdir":"/workspace","yield_time_ms":10000}'
+    transcript = _session(
+        _user("task"),
+        _call("call_9f3", "exec_command", arguments),
+        _result("call_9f3", "Chunk ID: a\nProcess exited with code 0\nOutput:\nskill text"),
+    )
+    call, result = parse_codex_output(transcript)
+    assert (call.type, call.name, call.call_id) == ("function_call", "exec_command", "call_9f3")
+    assert call.arguments == arguments
+    assert result.output == "Chunk ID: a\nProcess exited with code 0\nOutput:\nskill text"
+
+
+def test_output_keeps_parallel_calls_in_model_order_and_write_stdin() -> None:
+    """Both calls of a parallel pair precede their results, which arrive in completion order; a command that keeps
+    running is polled with write_stdin, which the CLI merges into the first command's result."""
+    transcript = _session(
+        _user("task"),
+        _call("slow", "exec_command", {"cmd": "sleep 5 && echo slow", "yield_time_ms": 1000}),
+        _call("fast", "exec_command", {"cmd": "echo fast"}),
+        _result("fast", "Process exited with code 0\nOutput:\nfast"),
+        _result("slow", "Process running with session ID 7\nOutput:\n"),
+        _call("poll", "write_stdin", {"session_id": 7, "chars": "", "yield_time_ms": 30000}),
+        _result("poll", "Process exited with code 0\nOutput:\nslow"),
+    )
+    items = parse_codex_output(transcript)
+    assert _shape(items) == [
+        ("function_call", "slow"),
+        ("function_call", "fast"),
+        ("function_call_output", "fast"),
+        ("function_call_output", "slow"),
+        ("function_call", "poll"),
+        ("function_call_output", "poll"),
+    ]
+    assert json.loads(items[0].arguments) == {"cmd": "sleep 5 && echo slow", "yield_time_ms": 1000}
+    assert items[4].name == "write_stdin"
+
+
+def test_output_keeps_each_plan_update_and_mcp_namespace() -> None:
+    transcript = _session(
+        _call("plan-1", "update_plan", {"plan": [{"step": "read", "status": "in_progress"}]}),
+        _result("plan-1", "Plan updated"),
+        _call("mcp-1", "search_docs", {"query": "pdf"}, namespace="mcp__gym_docs__"),
+        _result("mcp-1", "hit"),
+        _call("plan-2", "update_plan", {"plan": [{"step": "read", "status": "completed"}]}),
+        _result("plan-2", "Plan updated"),
+    )
+    items = parse_codex_output(transcript)
+    assert [item.name for item in items if item.type == "function_call"] == [
+        "update_plan",
+        "search_docs",
+        "update_plan",
+    ]
+    assert items[2].namespace == "mcp__gym_docs__"
+    assert items[0].namespace is None
+
+
+def test_output_keeps_a_free_form_patch_call() -> None:
+    patch = "*** Begin Patch\n*** Add File: notes.txt\n+hello\n*** End Patch"
+    transcript = _session(
+        {"type": "custom_tool_call", "call_id": "patch-1", "name": "apply_patch", "input": patch},
+        _result("patch-1", "Success. Updated the following files:\nA notes.txt\n", "custom_tool_call_output"),
+    )
+    call, result = parse_codex_output(transcript)
+    assert (call.type, call.name, call.input) == ("custom_tool_call", "apply_patch", patch)
+    assert (result.type, result.call_id, result.output.splitlines()[0]) == (
+        "custom_tool_call_output",
+        "patch-1",
+        "Success. Updated the following files:",
+    )
+
+
+def test_output_reads_a_content_item_result_as_text() -> None:
+    items = [
+        {"type": "input_text", "text": "viewing"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+    ]
+    transcript = _session(_call("view-1", "view_image", {"path": "/workspace/plot.png"}), _result("view-1", items))
+    assert parse_codex_output(transcript)[1].output == "viewing\n[image]"
+
+
+def test_output_keeps_what_the_model_said_and_not_what_it_was_told() -> None:
+    transcript = _session(
+        _user("task"),
+        {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "instructions"}]},
+        {"type": "reasoning", "summary": [], "encrypted_content": "opaque"},
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "check the file"}]},
+        {"type": "reasoning", "summary": [], "content": [{"type": "text", "text": "then run it"}]},
+        _call("c1", "exec_command", {"cmd": "ls"}),
+        _result("c1", "a"),
+        {
+            "type": "message",
+            "role": "assistant",
+            "id": "msg_served",
+            "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "Done."}],
+        },
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Without an ID."}]},
+        extra=[{"type": "event_msg", "payload": {"type": "token_count", "info": None}}],
+    )
+    reasoning, content_reasoning, call, result, answer, anonymous = parse_codex_output(transcript)
+    assert [item.type for item in (reasoning, content_reasoning, call, result, answer, anonymous)] == [
+        "reasoning",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "message",
+        "message",
+    ]
+    assert reasoning.summary[0].text == "check the file" and reasoning.encrypted_content is None
+    assert content_reasoning.content[0].text == "then run it"
+    assert (answer.id, answer.phase, answer.content[0].text) == ("msg_served", "final_answer", "Done.")
+    assert anonymous.id and anonymous.content[0].text == "Without an ID."
+
+
+@pytest.mark.parametrize(
+    ("action", "arguments"),
+    [
+        (
+            {"type": "search", "query": "Gym", "queries": ["Gym", "NeMo Gym"]},
+            {"action_type": "search", "query": "Gym", "queries": ["Gym", "NeMo Gym"]},
+        ),
+        (
+            {"type": "open_page", "url": "https://example.com"},
+            {"action_type": "open_page", "url": "https://example.com"},
+        ),
+        (
+            {"type": "find_in_page", "url": "https://example.com", "pattern": "Gym"},
+            {"action_type": "find_in_page", "url": "https://example.com"},
+        ),
+        (None, {"action_type": ""}),
+    ],
+    ids=["search", "open-page", "find-in-page", "no-action"],
+)
+def test_output_turns_a_web_search_into_the_call_harbor_exports_with_no_result(action, arguments) -> None:
+    """Harbor's own Codex agent exports a web search as ``web_search_call`` with ``action_type``: a grader reads that
+    name and argument to tell a search from a page open."""
+    transcript = _session({"type": "web_search_call", "id": "ws-1", "status": "completed", "action": action})
+    call, result = parse_codex_output(transcript)
+    assert (call.name, call.call_id, json.loads(call.arguments)) == ("web_search_call", "ws-1", arguments)
+    assert (result.call_id, result.output) == ("ws-1", "")
+
+
+def test_a_call_without_its_result_stays_open() -> None:
+    """The run was stopped while the tool ran: the record has the call and nothing more."""
+    items = parse_codex_output(_session(_call("long", "exec_command", {"cmd": "sleep 1000"})))
+    assert _shape(items) == [("function_call", "long")]
+
+
+@pytest.mark.parametrize(
+    ("transcript", "reason"),
+    [
+        (None, "unavailable"),
+        ("", "no model output"),
+        (_session(_user("task")), "no model output"),
+        ("not json", "not JSON"),
+        ("[]", "not an object"),
+        (json.dumps({"type": "renamed", "payload": {}}), "unsupported session record"),
+        (_session({"type": "ghost_snapshot"}), "unsupported session item 'ghost_snapshot'"),
+        (_session(_call("c1", "t", {}), _call("c1", "t", {})), "call c1 is made more than once"),
+        (_session(_result("c404", "x")), "matches no open call"),
+        (_session(_call("c1", "t", {}), _result("c1", "x"), _result("c1", "y")), "matches no open call"),
+        (_session(_call("c1", "t", {}), _result("c1", [{"type": "input_file"}])), "unsupported content item"),
+        (_session(_call("c1", "t", {}), _result("c1", 7)), "neither text nor content items"),
+        (_session({"type": "function_call", "call_id": "c1", "name": "t"}), "lacks its call_id, name or arguments"),
+        (_session(_call("c1", "", {}), _result("c1", "x")), "lacks its call_id, name or arguments"),
+        (_session(_call("c1", "  ", {})), "lacks its call_id, name or arguments"),
+        (_session(_call(" ", "t", {})), "lacks its call_id, name or arguments"),
+        (
+            _session({"type": "custom_tool_call", "call_id": "c1", "name": "", "input": "text"}),
+            "lacks its call_id, name or input",
+        ),
+        (_session({"type": "message", "role": "assistant", "content": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "reasoning", "summary": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "reasoning", "summary": [], "content": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "web_search_call", "id": "ws-1", "action": "search"}), "action that is not an object"),
+        (json.dumps({"type": ["response_item"], "payload": {}}), "unexpected shape: TypeError"),
+        (
+            _session({"type": "message", "role": "assistant", "content": [{"type": "input_image"}]}),
+            "unsupported content part",
+        ),
+        (_session(_call("c1", "t", {})) + "\n" + _session(_call("c2", "t", {})), "several sessions"),
+    ],
+)
+def test_output_is_unavailable_where_the_record_would_misstate_or_break_the_run(transcript, reason) -> None:
+    with pytest.raises(CodexOutputUnavailable, match=reason):
+        parse_codex_output(transcript)
+
+
+def test_a_record_nested_too_deeply_to_decode_is_unavailable() -> None:
+    """The decoder raises RecursionError, not ValueError, for a valid record nested past the recursion limit."""
+    with pytest.raises(CodexOutputUnavailable, match="not JSON"):
+        parse_codex_output("[" * 100_000 + "]" * 100_000)
+
+
+@pytest.mark.parametrize("search_id", [None, "", "  ", ["ws-1"], 7])
+def test_a_web_search_without_a_usable_id_is_given_one_the_export_accepts(search_id) -> None:
+    transcript = _session({"type": "web_search_call", "id": search_id, "action": {"type": "search"}})
+    call, result = parse_codex_output(transcript)
+    assert call.call_id == result.call_id == "ws_0"
+    transcript_to_atif(
+        "task",
+        [item.model_dump(mode="json") for item in (call, result)],
+        session_id="s",
+        agent_name="codex_agent",
+        agent_version="test",
+    )
+
+
+def _paths(node: object, prefix: tuple = ()):
+    """Every path to a value inside nested dicts and lists, the node itself first."""
+    yield prefix
+    for key, child in node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ():
+        yield from _paths(child, (*prefix, key))
+
+
+def _replaced(node: object, path: tuple, value: object) -> object:
+    if not path:
+        return value
+    copy = dict(node) if isinstance(node, dict) else list(node)
+    copy[path[0]] = _replaced(node[path[0]], path[1:], value)
+    return copy
+
+
+def test_a_record_of_any_shape_is_either_unavailable_or_output_the_export_accepts() -> None:
+    """Replace each value of each record, in a session that holds every kind of item the mapping reads, with a value
+    of another shape. The agent catches only CodexOutputUnavailable, so nothing else may escape; and output that is
+    returned is what the Harbor Environment Server exports, so it must convert, or the server masks the turn."""
+    records = [
+        json.loads(line)
+        for line in _session(
+            _user("task"),
+            {
+                "type": "reasoning",
+                "id": "rs-1",
+                "summary": [{"type": "summary_text", "text": "plan"}],
+                "content": [{"type": "text", "text": "think"}],
+            },
+            _call("c1", "exec_command", {"cmd": "ls"}, id="fc-1", namespace="ns"),
+            _result("c1", "a"),
+            {"type": "custom_tool_call", "id": "ctc-1", "call_id": "c2", "name": "apply_patch", "input": "patch"},
+            _result("c2", [{"type": "input_text", "text": "ok"}], "custom_tool_call_output"),
+            {"type": "web_search_call", "id": "ws-1", "action": {"type": "search"}},
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg-1",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Done."}],
+            },
+        ).split("\n")
+    ]
+    unavailable = exported = 0
+    for index, record in enumerate(records):
+        for path in _paths(record):
+            for value in ([], {}, 5, None, "", " ", ["a"], [[]], {"a": 1}):
+                mutated = [*records[:index], _replaced(record, path, value), *records[index + 1 :]]
+                try:
+                    output = parse_codex_output("\n".join(json.dumps(r) for r in mutated))
+                except CodexOutputUnavailable:
+                    unavailable += 1
+                    continue
+                transcript_to_atif(
+                    "task",
+                    [item.model_dump(mode="json") for item in output],
+                    session_id="s",
+                    agent_name="codex_agent",
+                    agent_version="test",
+                )
+                exported += 1
+    assert unavailable > 100 and exported > 100
+
+
+def test_output_joins_the_models_captured_call_where_the_cli_display_cannot() -> None:
+    """Training credits a rollout to the captured model call its last model-authored item names, by the call's ID and
+    content. A run stopped on a tool call matched nothing in the CLI's display: another ID, another command."""
+    arguments = json.dumps({"cmd": "sed -n '1,120p' SKILL.md", "workdir": "/workspace"})
+    captured = TokenEntry(
+        capture_key="rollout",
+        model_call_id="call-1",
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3, 4],
+        generation_log_probs=[-0.1, -0.1],
+        output_items=[
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_abc",
+                "name": "exec_command",
+                "arguments": arguments,
+                "status": "completed",
+            }
+        ],
+        token_item_index=0,
+    )
+    stamp_lineage(captured, None, parent_resolution=ParentResolutionStatus.ROOT)
+    stopped_on_the_call = _session(_call("call_abc", "exec_command", arguments))
+    from_record = [item.model_dump(mode="json") for item in parse_codex_output(stopped_on_the_call)]
+    command = {
+        "id": "item_0",
+        "type": "command_execution",
+        "command": "/bin/bash -lc \"sed -n '1,120p' SKILL.md\"",
+        "status": "in_progress",
+    }
+    from_events, _ = parse_exec_jsonl(json.dumps({"type": "item.started", "item": command}), include_partial=True)
+    from_events = [item.model_dump(mode="json") for item in from_events]
+
+    joined = resolve_terminal([captured], {"id": "response", "output": from_record})
+    assert (joined.model_call_id, joined.method) == ("call-1", "item_id")
+    assert resolve_terminal([captured], {"id": "response", "output": from_events}).model_call_id is None

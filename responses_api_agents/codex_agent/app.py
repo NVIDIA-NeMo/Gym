@@ -94,8 +94,10 @@ from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, Observa
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
+    CodexOutputUnavailable,
     associate_codex_compaction_calls,
     parse_codex_observations,
+    parse_codex_output,
     parse_codex_usage,
     read_codex_observations,
 )
@@ -114,6 +116,7 @@ from responses_api_agents.codex_agent.transport import rate_limit_proxy
 LOG = logging.getLogger(__name__)
 _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
+_EXECUTED_FORM_GAP = "tool_calls_in_executed_form"
 _PROVIDER_ERROR = "provider_error"
 _OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
 # Characters of Codex stderr kept in the error of an activation that never started a turn.
@@ -362,6 +365,10 @@ def parse_exec_jsonl(
     message inside ``<think>`` tags (mirroring the Claude Code agent). The pinned CLI defaults absent
     backend cache/reasoning counters to zero, so only positive integers establish measured details;
     otherwise ``cached_input_tokens`` and ``reasoning_tokens`` are None.
+
+    The tool items show each tool as the command Codex executed, not as the model called it. A sandbox session builds
+    its output from Codex's session record instead (``parse_codex_output``) and uses this one for the usage, the
+    errors, and the output only when that record cannot stand in.
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
@@ -1262,6 +1269,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
             structured_reasoning=True,
             include_partial=True,
         )
+        # The CLI's events show each tool as the command Codex executed (a shell-wrapped string, without the model's
+        # other arguments, merged results, display IDs). The session record holds what the model called, so the
+        # output comes from it, and from the events only when it cannot stand in.
+        executed_form_gap = None
+        try:
+            output = parse_codex_output(state.native_transcript)
+        except CodexOutputUnavailable as exc:
+            if any(getattr(item, "type", None) == "function_call" for item in output):
+                executed_form_gap = ObservationGap(code=_EXECUTED_FORM_GAP, detail=str(exc))
+                # The exported trajectory carries no mark of this, so the server log says it next to the gap.
+                LOG.warning("Codex tool calls are kept in the executed form the CLI shows: %s", exc)
         error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (
@@ -1350,6 +1368,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable"),
+            *([executed_form_gap] if executed_form_gap else []),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
             *(
