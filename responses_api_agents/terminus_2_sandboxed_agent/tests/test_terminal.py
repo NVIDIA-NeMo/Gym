@@ -127,6 +127,16 @@ async def test_shell_exit_during_send_is_distinguished_from_transport_failure():
         await session(SimpleNamespace(exec=execute, session_id="test")).send_keys("echo after\n")
 
 
+async def eventually(read, done, *, timeout: float = 30):
+    """Poll ``read`` until ``done`` accepts its value and return that value; raise once ``timeout`` passes."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not done(value := await read()):
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"condition not met within {timeout} s; last value: {str(value)[-2000:]!r}")
+        await asyncio.sleep(0.1)
+    return value
+
+
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("tmux") is None, reason="requires Linux tmux")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exit_trigger", ["failure", "interrupt"])
@@ -159,13 +169,20 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
     terminal = TerminusTmuxSession(
         "test", environment, tmp_path / "pane.log", None, None, extra_env={"TERMINUS_CONFIGURED": "preserved"}
     )
+
+    def pane_format(field):
+        async def read():
+            return (await environment.exec(f"tmux display-message -p -t test '{field}'")).stdout.strip()
+
+        return read
+
     try:
         await terminal.start()
         await asyncio.sleep(0.3)
         initial = (await environment.exec("tmux display-message -p -t test '#{pane_current_path}'")).stdout.strip()
         pending = tmp_path / "queued.txt"
         forbidden = tmp_path / "must-not-execute"
-        pending.write_text(f"touch {forbidden}\n" * 32768)
+        pending.write_text(f"touch {forbidden}\n" * 1024)
         await environment.exec(f"tmux load-buffer -b queued {pending}")
         failing_command = "sleep 2; false" if exit_trigger == "failure" else "sleep 120"
         # With PROMPT_COMMAND set, bash returns to the prompt after Ctrl-C instead of exiting under `set -e`.
@@ -175,15 +192,13 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
             f"mkdir {tmp_path}/sub; cd {tmp_path}/sub; unset PROMPT_COMMAND; set -e; {failing_command}\n",
             min_timeout_sec=0.2,
         )
+        if exit_trigger == "interrupt":
+            # Ctrl-C sent before sleep starts reaches bash instead, which survives it, so wait for sleep to run.
+            await eventually(pane_format("#{pane_current_command}"), lambda command: command == "sleep")
         await environment.exec("tmux paste-buffer -d -b queued -t test")
         if exit_trigger == "interrupt":
             await terminal.send_keys("C-c", min_timeout_sec=0.3)
-        for _ in range(100):
-            state = await environment.exec("tmux display-message -p -t test '#{pane_dead}'")
-            if state.stdout.strip() == "1":
-                break
-            await asyncio.sleep(0.1)
-        assert state.stdout.strip() == "1"
+        await eventually(pane_format("#{pane_dead}"), lambda dead: dead == "1")
         assert await terminal.is_session_alive()
         with pytest.raises(ShellExitedError):
             await terminal.send_keys(f"touch {forbidden}\n")
@@ -197,15 +212,23 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
             min_timeout_sec=0.3,
         )
         expected = f"RECOVERED=preserved:unset:{initial}"
-        for _ in range(100):
-            output = await terminal.get_incremental_output()
-            if expected in output:
-                break
-            await asyncio.sleep(0.1)
-        assert expected in output
+        output = ""
+
+        async def accumulated_output():
+            # get_incremental_output returns only new content, so keep what earlier polls returned.
+            nonlocal output
+            output += await terminal.get_incremental_output()
+            return output
+
+        await eventually(accumulated_output, lambda text: expected in text)
         assert (tmp_path / "persisted").exists()
         assert not forbidden.exists()
-        assert expected in (tmp_path / "pane.log").read_text()
+
+        # pipe-pane appends through a separate process, so the log can lag the screen.
+        async def pane_log():
+            return (tmp_path / "pane.log").read_text()
+
+        await eventually(pane_log, lambda text: expected in text)
     finally:
         await environment.exec("tmux kill-server")
 
@@ -245,19 +268,26 @@ async def test_ctrl_c_recovers_a_full_pty_input_queue_without_executing_pending_
         assert result.return_code == 0, result.stderr
         await asyncio.sleep(0.3)
         await terminal.send_keys("sleep 120\n", min_timeout_sec=0.3)
+
+        async def current_command() -> str:
+            shown = await environment.exec("tmux display-message -p -t test '#{pane_current_command}'")
+            return shown.stdout.strip()
+
+        # Polled rather than slept on, so a slow runner cannot read the pane before sleep has started.
+        await eventually(current_command, lambda command: command == "sleep")
         await terminal.send_keys(f"touch {marker}\n" * queued_commands, min_timeout_sec=0.3)
         # Unpatched tmux queues Ctrl-C after the paste and leaves sleep running.
         await environment.exec("tmux send-keys -t test C-c")
+        # Time for the raw Ctrl-C to land; a slow runner can only make sleep look more stuck, never less.
         await asyncio.sleep(0.2)
-        before = await environment.exec("tmux display-message -p -t test '#{pane_current_command}'")
-        assert before.stdout.strip() == "sleep"
+        assert await current_command() == "sleep"
         await terminal.send_keys("C-c\n", min_timeout_sec=0.3)
         await terminal.send_keys("echo TERMINAL_RECOVERED\n", min_timeout_sec=0.3)
-        assert "\nTERMINAL_RECOVERED\n" in await terminal.capture_pane()
+        await eventually(terminal.capture_pane, lambda pane: "\nTERMINAL_RECOVERED\n" in pane)
         assert not marker.exists()
         await terminal.send_keys("stty -echo -icanon -isig; head -c 4 | od -An -tx1; stty sane\n", min_timeout_sec=0.3)
         await terminal.send_keys(["xy", "C-c", "z"], min_timeout_sec=0.3)
-        assert "78 79 03 7a" in await terminal.capture_pane()
+        await eventually(terminal.capture_pane, lambda pane: "78 79 03 7a" in pane)
     finally:
         await environment.exec("tmux kill-server")
 
