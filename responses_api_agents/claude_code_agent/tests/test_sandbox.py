@@ -324,6 +324,7 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
         sandbox_id="sandbox-actual",
         session=SimpleNamespace(
             session_dir="/tmp/session",
+            root_dir="/tmp/session",
             workdir="/app",
             cleanup={"timed_out": timed_out, "return_code": code, "cleanup_confirmed": True},
             artifacts=None,
@@ -360,6 +361,7 @@ async def test_artifact_capture_reads_separate_stdout_and_process_info(monkeypat
         runtime="/runtime",
         session=SimpleNamespace(
             session_dir="/tmp/session",
+            root_dir="/tmp/session",
             sandbox=SimpleNamespace(exec=AsyncMock(return_value=result(code=1))),
             read_output_log=AsyncMock(return_value='{"type":"result","subtype":"error_fake"}'),
         ),
@@ -454,6 +456,7 @@ async def test_close_joins_captured_observations_during_parsing(monkeypatch, par
         runtime="/runtime",
         session=SimpleNamespace(
             session_dir="/tmp/session",
+            root_dir="/tmp/session",
             workdir="/app",
             artifacts=artifacts,
             cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
@@ -500,7 +503,7 @@ async def test_sandbox_honors_task_timeout_and_server_ceiling(monkeypatch, metad
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
-        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+        session=SimpleNamespace(session_dir="/tmp/session", root_dir="/tmp/session", workdir="/app", cleanup=None),
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
@@ -587,7 +590,11 @@ async def test_empty_sandbox_output_uses_local_padding(monkeypatch):
         request=seed(),
         runtime="/runtime",
         session=SimpleNamespace(
-            session_dir="/tmp/session", workdir="/app", artifacts=None, cleanup={"timed_out": False, "return_code": 0}
+            session_dir="/tmp/session",
+            root_dir="/tmp/session",
+            workdir="/app",
+            artifacts=None,
+            cleanup={"timed_out": False, "return_code": 0},
         ),
     )
     monkeypatch.setattr(
@@ -608,7 +615,7 @@ async def test_sandbox_only_receives_direct_credentials_without_gym_model_server
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
-        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+        session=SimpleNamespace(session_dir="/tmp/session", root_dir="/tmp/session", workdir="/app", cleanup=None),
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
@@ -633,6 +640,7 @@ async def test_cancelled_activation_reports_sandbox_outcome(monkeypatch, timed_o
         runtime="/runtime",
         session=SimpleNamespace(
             session_dir="/tmp/session",
+            root_dir="/tmp/session",
             workdir="/app",
             artifacts=adapter.ClaudeCodeArtifacts(""),
             cleanup={"timed_out": timed_out, "return_code": 143},
@@ -661,7 +669,9 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
 
     remote = SimpleNamespace(upload=upload)
     state = adapter.ClaudeCodeSandboxSession(
-        request=seed(), runtime="/runtime", session=SimpleNamespace(session_dir="/tmp/session", sandbox=remote)
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", root_dir="/tmp/session", sandbox=remote),
     )
     payload = {
         "command": ["/runtime/claude"],
@@ -783,3 +793,97 @@ async def test_close_distinguishes_borrowed_release_from_confirmed_termination(c
     remote.disconnect.assert_awaited_once()
     assert close.cleanup_confirmed is confirmed
     assert close.model_dump(mode="json")["cleanup_confirmed"] is confirmed
+
+
+def test_continuation_capability_and_resume_flags():
+    instance = agent()
+    capabilities = instance._agent_continuation_capabilities()
+    assert capabilities.mode == "resume_harness_session"
+    assert {"trajectory", "timing"} <= set(capabilities.observations)
+    command = instance._build_command("m", "Next step", session=["--resume", "abc"])
+    # The session flag precedes the end of options, so the instruction stays the prompt.
+    assert command[-4:] == ["--resume", "abc", "--", "Next step"]
+    assert "--resume" not in instance._build_command("m", "Only step")
+
+
+@pytest.mark.asyncio
+async def test_continuation_activations_resume_one_conversation_in_the_session_root(monkeypatch):
+    """Activation 1 starts a Claude Code session with a fixed id; activation 2 resumes it, in a fresh activation
+    directory, with the configuration and transcripts still under the session root."""
+    instance = agent(anthropic_base_url="https://model.example")
+    request = seed().model_copy(update={"continuation": {"mode": "resume_harness_session"}})
+    begun, made = [], []
+
+    class Session(SimpleNamespace):
+        root_dir = "/tmp/session"
+
+        async def begin_activation(self, *, session_dir, timeout):
+            begun.append(session_dir)
+            self.session_dir = session_dir
+
+    session = Session(
+        session_dir="/tmp/session",
+        workdir="/app",
+        cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
+        artifacts=None,
+        sandbox=SimpleNamespace(exec=AsyncMock(side_effect=lambda command, **_: made.append(command) or result())),
+    )
+    state = adapter.ClaudeCodeSandboxSession(
+        request=request, runtime="/runtime", session=session, claude_session_id="fixed-id"
+    )
+    events = json.dumps({"type": "result", "subtype": "success", "is_error": False, "usage": {"input_tokens": 1}})
+    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(events))
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    for activation_id, text in ((1, "Write the statement."), (2, "Your statement was rejected; revise it.")):
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": text}])
+        instance._validate_agent_activation(state, body)
+        await instance._activate_agent_session_state(state, body, activation_id=activation_id)
+    first, second = (call.args[0] for call in execute.await_args_list)
+    assert first["command"][-4:] == ["--session-id", "fixed-id", "--", "Write the statement."]
+    assert second["command"][-4:] == ["--resume", "fixed-id", "--", "Your statement was rejected; revise it."]
+    assert first["env"]["CLAUDE_CONFIG_DIR"] == second["env"]["CLAUDE_CONFIG_DIR"] == "/tmp/session/config"
+    assert begun == ["/tmp/session/activation-1", "/tmp/session/activation-2"]
+    assert made == ["mkdir -p -- /tmp/session/activation-1", "mkdir -p -- /tmp/session/activation-2"]
+    # A later activation cannot swap the session's system prompt.
+    changed = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "system", "content": "Other"}, {"role": "user", "content": "Again."}]
+    )
+    with pytest.raises(HTTPException, match="system prompt"):
+        instance._validate_agent_activation(state, changed)
+
+
+@pytest.mark.asyncio
+async def test_seed_gives_a_continuation_session_a_claude_session_id(monkeypatch):
+    instance = agent(sandbox_executable_path="/bin/claude", sandbox_executable_sha256="a" * 64)
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), sandbox_id="sandbox-1")
+    monkeypatch.setattr(app, "create_provider", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
+    monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
+    one = await instance._seed_agent_session_state(seed())
+    continued = await instance._seed_agent_session_state(
+        seed().model_copy(update={"continuation": {"mode": "resume_harness_session"}})
+    )
+    assert one.claude_session_id is None and len(continued.claude_session_id) == 36
+
+
+@pytest.mark.asyncio
+async def test_responses_routes_a_continued_session_to_its_next_activation(monkeypatch):
+    """The environment server sends each step of a continued episode to /v1/responses with the activation index;
+    the session's later activations must reach the continuation path, not the single-activation one."""
+    instance = agent()
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed().model_copy(update={"continuation": {"mode": "resume_harness_session"}}),
+        runtime="/runtime",
+        session=SimpleNamespace(),
+        claude_session_id="fixed-id",
+    )
+    activated = AsyncMock(return_value="next activation")
+    agent_class = type(instance)  # a pydantic model: patch the class
+    monkeypatch.setattr(agent_class, "_agent_session_id_from_request", lambda self, request: "s1")
+    monkeypatch.setattr(agent_class, "_require_agent_session", lambda self, session_id: state)
+    monkeypatch.setattr(agent_class, "activate_agent_session", activated)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Try again."}])
+    request = SimpleNamespace(path_params={"rollout_id": "0-0"})
+    assert await instance.responses(request, body) == "next activation"
+    activated.assert_awaited_once_with(request, body)
+    assert state.task is None  # the single-activation path was not taken
