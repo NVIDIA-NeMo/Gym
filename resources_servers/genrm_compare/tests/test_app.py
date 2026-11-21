@@ -37,6 +37,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.app import (
     GROUP_ATTEMPT_KEY_NAME,
@@ -476,7 +477,15 @@ class TestGenRMCompareResourcesServer:
                     tools=[],
                     parallel_tool_calls=True,
                     tool_choice="auto",
-                    output=[],
+                    output=[
+                        {
+                            "id": f"message_{rollout_index}",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": f"answer_{rollout_index}", "annotations": []}],
+                        }
+                    ],
                     object="response",
                 ),
                 task_index=11,
@@ -490,8 +499,11 @@ class TestGenRMCompareResourcesServer:
 
         assert [result.reward for result in results] == [30.0, 10.0, 20.0]
         run_compare.assert_awaited_once()
-        response_ids = [response_obj["id"] for response_obj in run_compare.await_args.kwargs["response_objs"]]
-        assert response_ids == ["resp_0", "resp_1", "resp_2"]
+        answer_texts = [
+            response_obj["output"][1]["content"][0]["text"]
+            for response_obj in run_compare.await_args.kwargs["response_objs"]
+        ]
+        assert answer_texts == ["answer_0", "answer_1", "answer_2"]
 
     async def test_identical_duplicate_attaches_to_existing_rollout_slot(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -641,7 +653,7 @@ class TestGenRMCompareResourcesServer:
         assert duplicate.reward == 1.0
         run_compare.assert_awaited_once()
         cohort = next(iter(server._verify_cohorts.values()))
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_new_group_attempt_is_isolated_from_completed_cohort(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -690,7 +702,7 @@ class TestGenRMCompareResourcesServer:
         assert [result.reward for result in first_attempt] == [1.0, 2.0]
         assert [result.reward for result in replacement_attempt] == [3.0, 4.0]
         assert run_compare.await_count == 2
-        assert len(server._verify_cohorts) == 2
+        assert list(server._verify_cohorts) == ["group_id::completed-group::group_attempt::1"]
 
     async def test_partial_old_attempt_does_not_mix_with_completed_replacement(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -714,6 +726,7 @@ class TestGenRMCompareResourcesServer:
             )
         )
         await asyncio.sleep(0)
+        old_cohort = next(iter(server._verify_cohorts.values()))
         replacement = await asyncio.gather(
             server.verify(
                 request_with_session(),
@@ -741,14 +754,13 @@ class TestGenRMCompareResourcesServer:
 
         assert [result.reward for result in replacement] == [3.0, 4.0]
         assert [result.group_attempt for result in replacement] == [1, 1]
-        assert len(server._verify_cohorts) == 2
+        assert len(server._verify_cohorts) == 1
         assert len(old_result) == 1
         assert isinstance(old_result[0], HTTPException)
         assert old_result[0].status_code == 503
         assert "superseded by attempt 1" in str(old_result[0].detail)
-        old_cohort = next(cohort for cohort in server._verify_cohorts.values() if cohort.group_attempt == 0)
         assert old_cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in old_cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in old_cohort.members.values())
 
     async def test_late_older_group_attempt_is_rejected(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -844,6 +856,112 @@ class TestGenRMCompareResourcesServer:
         first_waiter.cancel()
         await asyncio.gather(first_waiter, return_exceptions=True)
 
+    @pytest.mark.parametrize("attempt", [0, 1])
+    async def test_group_rejects_changed_length_coefficients(self, config, attempt):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        first = self._verify_request(0, group_id="immutable")
+        waiter = asyncio.create_task(server.verify(request_with_session(), first))
+        await asyncio.sleep(0)
+        different = self._verify_request(1, group_id="immutable", group_attempt=attempt).model_copy(
+            update={"group_answer_length_penalty_coeff": 0.12}
+        )
+        try:
+            with pytest.raises(HTTPException, match="length coefficients") as error:
+                await server.verify(request_with_session(), different)
+            assert error.value.status_code == 409
+        finally:
+            await server.aclose()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+    @pytest.mark.parametrize("mode", ["rollout_cohort", "fixed_baseline"])
+    async def test_verify_applies_group_coefficients_to_rewards(self, config, mode):
+        config = config.model_copy(
+            update={
+                "comparison_mode": mode,
+                "num_rollouts_per_prompt": 2,
+                "group_answer_length_penalty_coeff": 0.06,
+            }
+        )
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5) * 2 + (-1.0,) * 3 + (0.0, 0.0))
+
+        def request(group, index, coefficient):
+            body = self._verify_request(index, group_id=group)
+            body.responses_create_params.metadata = {"baseline_response": "baseline"}
+            body.response.output = [
+                NeMoGymResponseOutputMessage(
+                    id=f"message-{index}",
+                    status="completed",
+                    role="assistant",
+                    content=[NeMoGymResponseOutputText(text=("long " * 40) if index else "short")],
+                )
+            ]
+            return body.model_copy(update={"group_answer_length_penalty_coeff": coefficient})
+
+        zero_short, zero_long, adjusted_short, adjusted_long = await asyncio.gather(
+            *(
+                server.verify(request_with_session(), request(group, index, coefficient))
+                for group, coefficient in (("zero", 0.0), ("adjusted", 0.2))
+                for index in range(2)
+            )
+        )
+        assert zero_short.reward_length_adjustment == zero_long.reward_length_adjustment == 0
+        assert zero_short.group_answer_length_penalty_coeff == zero_long.group_answer_length_penalty_coeff == 0
+        assert server._latest_group_attempts["zero"].prompt_digest.endswith(":length_coefficients:0.0:0.0")
+        assert adjusted_short.reward > adjusted_long.reward
+        assert (
+            adjusted_short.group_answer_length_penalty_coeff == adjusted_long.group_answer_length_penalty_coeff == 0.2
+        )
+
+    async def test_verify_applies_group_reasoning_coefficient(self, config):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 2, "group_reasoning_length_penalty_coeff": 0.06})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5) * 2 + (-1.0,) * 3 + (0.0, 0.0))
+
+        def request(group, index, coefficient):
+            body = self._verify_request(index, group_id=group)
+            body.response.output = [
+                NeMoGymResponseReasoningItem(
+                    id=f"reasoning-{index}",
+                    summary=[NeMoGymSummary(text=("think " * 40) if index else "think", type="summary_text")],
+                ),
+                NeMoGymResponseOutputMessage(
+                    id=f"message-{index}",
+                    status="completed",
+                    role="assistant",
+                    content=[NeMoGymResponseOutputText(text="same answer")],
+                ),
+            ]
+            return body.model_copy(update={"group_reasoning_length_penalty_coeff": coefficient})
+
+        zero_short, zero_long, adjusted_short, adjusted_long = await asyncio.gather(
+            *(
+                server.verify(request_with_session(), request(group, index, coefficient))
+                for group, coefficient in (("zero", 0.0), ("adjusted", 0.2))
+                for index in range(2)
+            )
+        )
+        assert zero_short.reward_length_adjustment == zero_long.reward_length_adjustment == 0
+        assert adjusted_short.reward > adjusted_long.reward
+        assert adjusted_long.group_reasoning_length_penalty_coeff == 0.2
+        assert adjusted_long.group_answer_length_penalty_coeff == 0.0
+        with pytest.raises(HTTPException, match="length coefficients"):
+            await server.verify(request_with_session(), request("adjusted", 0, 0.3))
+
+    async def test_singleton_cohort_rejects_overrides_and_keeps_static_reward(self, config):
+        config = config.model_copy(update={"num_rollouts_per_prompt": 1})
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        body = self._verify_request(0)
+        result = await server.verify(request_with_session(), body)
+        assert result.reward == config.default_score
+        assert "group_answer_length_penalty_coeff" not in result.model_dump()
+        explicit_zero = body.model_copy(update={"group_answer_length_penalty_coeff": 0.0})
+        with pytest.raises(HTTPException, match="at least two trainable rollouts") as error:
+            await server.verify(request_with_session(), explicit_zero)
+        assert error.value.status_code == 422
+        server.server_client.post.assert_not_called()
+
     async def test_prompt_mismatch_in_group_attempt_is_rejected(self, config):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
@@ -885,7 +1003,7 @@ class TestGenRMCompareResourcesServer:
         assert server._verify_cohorts[cohort.key] is cohort
         assert cohort.phase == "failed"
         assert cohort.collection_timeout_task is None
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_disconnected_waiter_does_not_retire_logical_cohort(self, config):
         config = config.model_copy(
@@ -905,7 +1023,7 @@ class TestGenRMCompareResourcesServer:
 
         assert cohort.phase == "collecting"
         assert len(cohort.members) == 1
-        assert all(member.body is not None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is not None and not member.waiters for member in cohort.members.values())
 
     async def test_evaluation_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -925,35 +1043,51 @@ class TestGenRMCompareResourcesServer:
         )
         cohort = next(iter(server._verify_cohorts.values()))
         assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
-    async def test_input_materialization_failure_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
+    async def test_input_materialization_failure_releases_legacy_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
-        run_compare = AsyncMock()
+        run_compare = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
         monkeypatch.setattr(server, "_collect_comparisons", run_compare)
         monkeypatch.setattr(server, "_response_digest", lambda response: response.id)
+
+        first = asyncio.create_task(server.verify(request_with_session(), self._verify_request(0, task_index=26)))
+        await asyncio.sleep(0)
+        cohort = next(iter(server._verify_cohorts.values()))
+        assert list(cohort.members) == [0]
+        assert len(cohort.members[0].waiters) == 1 and not first.done()
+        convert = server._comparison_response
 
         def fail_model_dump(*args, **kwargs):
             raise ValueError("response conversion failed")
 
-        monkeypatch.setattr(NeMoGymResponse, "model_dump", fail_model_dump)
-        results = await asyncio.gather(
-            server.verify(request_with_session(), self._verify_request(0, task_index=26)),
-            server.verify(request_with_session(), self._verify_request(1, task_index=26)),
-            return_exceptions=True,
-        )
-
-        assert all(
-            isinstance(result, HTTPException)
-            and result.status_code == 503
-            and "response conversion failed" in str(result.detail)
-            for result in results
-        )
+        monkeypatch.setattr(server, "_comparison_response", fail_model_dump)
+        with pytest.raises(HTTPException) as error:
+            await server.verify(request_with_session(), self._verify_request(1, task_index=26))
+        assert error.value.status_code == 503 and "response conversion failed" in error.value.detail
+        with pytest.raises(HTTPException) as error:
+            await asyncio.wait_for(first, 0.5)
+        assert error.value.status_code == 503 and "fresh _ng_group_id" in error.value.detail
         run_compare.assert_not_awaited()
-        cohort = next(iter(server._verify_cohorts.values()))
-        assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert cohort.phase == "failed" and list(cohort.members) == [0]
+        assert cohort.collection_timeout_task is None
+        assert all(not member.waiters and member.response_obj is None for member in cohort.members.values())
+
+        monkeypatch.setattr(server, "_comparison_response", convert)
+        with pytest.raises(HTTPException) as error:
+            await server.verify(request_with_session(), self._verify_request(1, task_index=26))
+        assert error.value.status_code == 503
+        recovered = await asyncio.gather(
+            *(
+                server.verify(
+                    request_with_session(), self._verify_request(i, task_index=26, group_id="fresh-conversion")
+                )
+                for i in range(2)
+            )
+        )
+        assert [result.reward for result in recovered] == [1.0, 2.0]
+        run_compare.assert_awaited_once()
 
     async def test_evaluation_cancellation_releases_every_waiter(self, config, monkeypatch: MonkeyPatch):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -984,7 +1118,7 @@ class TestGenRMCompareResourcesServer:
             for result in results
         )
         assert cohort.phase == "failed"
-        assert all(member.body is None and not member.waiters for member in cohort.members.values())
+        assert all(member.response_obj is None and not member.waiters for member in cohort.members.values())
 
     async def test_server_instances_do_not_share_cohorts(self, config):
         config = config.model_copy(update={"num_rollouts_per_prompt": 2})
@@ -1077,6 +1211,12 @@ class TestFixedBaseline:
             ),
             rollout_index=0,
         )
+
+        override = request.model_copy(update={"group_answer_length_penalty_coeff": 0.2})
+        with pytest.raises(HTTPException, match="at least two trainable rollouts") as error:
+            await server.verify(request_with_session(), override)
+        assert error.value.status_code == 422
+        server._run_single_comparison.assert_not_awaited()
 
         result = await server.verify(request_with_session(), request)
 
@@ -1211,6 +1351,124 @@ class TestRunSingleComparison:
     def _get_sent_body(self, mock_server_client):
         call_kwargs = mock_server_client.post.call_args.kwargs
         return call_kwargs["json"]
+
+    async def test_verify_sends_the_image_in_conversation_order(self):
+        server, client = self._make_server()
+        server.config.num_rollouts_per_prompt = 2
+        messages = [
+            {
+                "role": "assistant",
+                "type": "message",
+                "content": [
+                    {"type": "input_text", "text": "Send a picture."},
+                    {"type": "input_image", "image_url": "https://example.invalid/reference.png", "detail": "auto"},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Here it is: "},
+                    {"type": "input_image", "image_url": "https://example.invalid/image.png", "detail": "auto"},
+                    {"type": "input_text", "text": "What do you see?"},
+                ],
+            },
+        ]
+        params = NeMoGymResponseCreateParamsNonStreaming(input=messages)
+        await asyncio.gather(
+            *(
+                server.verify(
+                    request_with_session(),
+                    TestGenRMCompareResourcesServer._verify_request(index, group_id="image").model_copy(
+                        update={"responses_create_params": params}
+                    ),
+                )
+                for index in range(2)
+            )
+        )
+        sent = self._get_sent_body(client)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
+        converted = converter.responses_to_chat_completion_create_params(sent).messages
+        assert converted[0]["role"] == "assistant"
+        assert converted[0]["content"] == "Send a picture."
+        assert converted[1]["role"] == "user"
+        assert converted[1]["content"] == [
+            {"type": "text", "text": "Here it is: "},
+            {"type": "image_url", "image_url": {"url": "https://example.invalid/image.png", "detail": "auto"}},
+            {"type": "text", "text": "What do you see?"},
+        ]
+
+    def test_user_media_message_normalizes_output_text(self):
+        image = {"type": "input_image", "image_url": "https://example.invalid/image.png", "detail": "auto"}
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "output_text", "text": "See this:"},
+                    image,
+                    {"type": "output_text"},
+                ],
+            }
+        ]
+        assert _input_to_conversation_history(messages) == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "See this:"},
+                    image,
+                    {"type": "input_text", "text": ""},
+                ],
+            }
+        ]
+
+    @pytest.mark.parametrize("use_principle", [False, True])
+    async def test_verify_uses_selected_rubric(self, use_principle):
+        server, client = self._make_server(use_principle=use_principle)
+        server.config.score_source = "rubric_mean"
+        server.config.default_rubric_ids = (1,)
+        server.config.num_rollouts_per_prompt = 2
+        answer = {
+            "rubric_evaluations": [{"rubric_id": 2 if use_principle else 1, "score_1": 5, "score_2": 5, "ranking": 3}],
+            "overall": {"score_1": 2, "score_2": 5, "ranking": 6},
+        }
+        client.post.return_value = self._http_response(self._make_response_obj(json.dumps(answer)))
+
+        requests = [
+            TestGenRMCompareResourcesServer._verify_request(index, group_id="rubric").model_copy(
+                update={"principle": "Be concise.", "expected_rubric_ids": (2,)}
+            )
+            for index in range(2)
+        ]
+        if not use_principle:
+            # The preprocessed row and the original row have the same effective rubric.
+            requests[1] = requests[1].model_copy(update={"principle": None, "expected_rubric_ids": (1,)})
+        results = await asyncio.gather(*(server.verify(request_with_session(), request) for request in requests))
+
+        metadata = self._get_sent_body(client).metadata
+        assert metadata.get("principle") == ("Be concise." if use_principle else None)
+        assert all(result.genrm_rubric_parse_failure_rate_per_group == 0 for result in results)
+        assert all(result.reward_score_raw == 5.0 for result in results)
+
+    @pytest.mark.parametrize("use_principle", [False, True])
+    async def test_compare_uses_selected_rubric(self, use_principle):
+        server, client = self._make_server(use_principle=use_principle)
+        server.config.score_source = "rubric_mean"
+        server.config.default_rubric_ids = (1,)
+        server.config.genrm_parse_retry_sleep_s = 0
+        answer = {
+            "rubric_evaluations": [{"rubric_id": 2 if use_principle else 1, "score_1": 5, "score_2": 1, "ranking": 2}],
+            "overall": {"score_1": 1, "score_2": 5, "ranking": 6},
+        }
+        client.post.return_value = self._http_response(self._make_response_obj(json.dumps(answer)))
+        result = await server.compare(
+            GenRMCompareRequest(
+                conversation_history=[{"role": "user", "content": "hello"}],
+                response_objs=[self._make_response_obj("a"), self._make_response_obj("b")],
+                principle="Be concise.",
+                expected_rubric_ids=(2,),
+            )
+        )
+        assert result.metrics["genrm_rubric_parse_failure_rate_per_group"] == 0
+        assert {item["score_1"] for item in result.comparison_results} == {5.0}
 
     def test_responses_passed_via_metadata_not_input(self):
         """response_1 and response_2 are sent in metadata, not appended to input."""

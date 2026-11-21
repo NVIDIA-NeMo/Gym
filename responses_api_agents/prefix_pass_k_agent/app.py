@@ -43,7 +43,8 @@ from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import Request
-from pydantic import ConfigDict, Field
+from omegaconf import OmegaConf
+from pydantic import ConfigDict, Field, field_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -52,12 +53,30 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
+    GIT_WORKTREE_COMMIT_REJECTED,
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_REQUEST_FAILED,
+    FailureBoundary,
+    FailureClass,
+    FailureClassificationConfig,
+    FailureReportRow,
+    NgFailureEvent,
+    OutcomeAction,
+    OutcomeDecision,
+    StageOutcomePolicyConfig,
+    StagePolicyConfig,
+    agent_route_failure,
+    choose_stage_outcome,
+    failure_report_for,
+    observe_failure,
+)
 from nemo_gym.failure_kinds import AGENT_RUN_ERROR, TRANSPORT_PEER_DROP
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox import AsyncSandbox, create_provider, sandbox_failure
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -260,9 +279,61 @@ def tool_call_commands(tool_calls: Optional[List[Dict[str, Any]]]) -> List[tuple
     return pairs
 
 
+def _default_commit_outcome_policy() -> StageOutcomePolicyConfig:
+    """Count Git rejection as zero; leave execution failures ungraded without retrying commits."""
+    shared = StageOutcomePolicyConfig()
+    return StageOutcomePolicyConfig(
+        classification={
+            "by_stage": {"verification": {"by_failure_kind": {GIT_WORKTREE_COMMIT_REJECTED: FailureClass.MODEL}}}
+        },
+        by_stage={
+            stage: StagePolicyConfig(
+                default_action=OutcomeAction.FAIL,
+                by_failure_kind=dict.fromkeys(rules.by_failure_kind, OutcomeAction.FAIL)
+                | {GIT_WORKTREE_COMMIT_REJECTED: OutcomeAction.COUNT_AS_ZERO},
+                by_status_code=dict.fromkeys(rules.by_status_code, OutcomeAction.FAIL),
+                by_failure_class=dict.fromkeys(rules.by_failure_class, OutcomeAction.FAIL),
+            )
+            for stage, rules in shared.by_stage.items()
+        },
+    )
+
+
 class PrefixPassKAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=_default_commit_outcome_policy)
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def retain_commit_policy_defaults(cls, value: object) -> object:
+        """Merge partial overrides over commit-specific action and classification defaults."""
+        defaults = _default_commit_outcome_policy()
+        merged = StageOutcomePolicyConfig.overlay(defaults, value)
+        if isinstance(merged, dict):
+            classification = merged.get("classification", {})
+            if isinstance(classification, FailureClassificationConfig):
+                classification = classification.model_dump(mode="json", exclude_unset=True)
+            if isinstance(classification, dict):
+                merged["classification"] = OmegaConf.to_container(
+                    OmegaConf.merge(defaults.classification.model_dump(mode="json"), classification)
+                )
+        return merged
+
+    @field_validator("outcome_policy")
+    @classmethod
+    def require_supported_commit_actions(cls, policy: StageOutcomePolicyConfig) -> StageOutcomePolicyConfig:
+        """Reject actions the commit boundary cannot execute, including retry."""
+        for rules in [policy.default_policy, *policy.by_stage.values()]:
+            actions = {
+                rules.default_action,
+                *rules.by_failure_kind.values(),
+                *rules.by_status_code.values(),
+                *rules.by_failure_class.values(),
+            }
+            if actions - {OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO}:
+                raise ValueError("Prefix pass@K commit policy supports only fail and count_as_zero")
+        return policy
 
     # Must match the wire the captured traces were shaped on (see the base-model
     # server). backticks: a fenced command in the assistant text, XML-ish
@@ -538,23 +609,84 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
         return git_state(result.stdout or "", base_commit)
 
     async def _commit_worktree(self, sandbox: AsyncSandbox) -> None:
-        """Commit whatever `git add -A` picks up -- it honours .gitignore, as the
-        working-tree extraction the decisive turns were located with did -- so a
-        committed-only collector scores the working tree."""
+        """Commit staged and untracked changes, preserving typed provider failures as causes."""
         try:
             result = await sandbox.exec(
                 "git add -A && git -c commit.gpgsign=false commit -q --no-verify --allow-empty "
                 "-m 'prefix pass@K: working tree'",
                 timeout_s=300,
             )
-        except Exception:
-            print("prefix_pass_k: worktree commit failed", format_exc(), file=sys.stderr)
-            return
-        if result.return_code != 0:
-            print(
-                f"prefix_pass_k: worktree commit exited {result.return_code}: {(result.stdout or '')[-500:]}",
-                file=sys.stderr,
+        except NgFailureEvent:
+            raise
+        except Exception as exc:
+            kind = PROVIDER_IO_TIMEOUT if isinstance(exc, TimeoutError) else PROVIDER_REQUEST_FAILED
+            if isinstance(exc, (ConnectionError, ClientConnectionError)):
+                kind = TRANSPORT_PEER_DROP
+            raise sandbox_failure(
+                operation="exec",
+                failure_kind=kind,
+                reason=f"worktree commit failed: {type(exc).__name__}: {exc}"[:500],
+                cause=exc,
+            ) from exc
+        if result.error_type is not None:
+            raise sandbox_failure(
+                operation="exec",
+                failure_kind=PROVIDER_IO_TIMEOUT if result.error_type == "timeout" else PROVIDER_REQUEST_FAILED,
+                reason=f"worktree commit failed (error={result.error_type}): {result.stderr or result.stdout or 'no details'}"[
+                    :500
+                ],
+                provider_status_reason=result.error_type,
             )
+        if result.return_code != 0:
+            raise NgFailureEvent(
+                boundary=FailureBoundary.AGENT,
+                failure_kind=GIT_WORKTREE_COMMIT_REJECTED,
+                failure_reason=f"worktree commit rejected (exit={result.return_code}): "
+                f"{result.stderr or result.stdout or 'no details'}"[:500],
+                operation="agent.git_worktree_commit",
+                stage="verification",
+            )
+
+    def _commit_failure_outcome(self, failure: NgFailureEvent, stats: Dict[str, Any]) -> OutcomeDecision:
+        """Select and persist the commit decision without replacing the originating failure evidence."""
+        stage = failure.stage or "verification"
+        decision = choose_stage_outcome(
+            failure_kind=failure.failure_kind,
+            http_status=failure.http_status,
+            stage=stage,
+            config=self.config.outcome_policy,
+        )
+        observed = failure
+        if failure.operation != "agent.git_worktree_commit" or failure.boundary != FailureBoundary.AGENT:
+            observed = agent_route_failure(failure, operation="agent.git_worktree_commit", stage=stage)
+            observed.__cause__ = failure
+        observe_failure(observed)
+        stats.update(
+            failure_outcome_action=decision.action,
+            failure_outcome_attribution=decision.attribution,
+            failure_kind=failure.failure_kind,
+            failure_reason=failure.failure_reason,
+            **FailureReportRow.fields(failure_report_for(observed)),
+        )
+        if failure.failure_kind != GIT_WORKTREE_COMMIT_REJECTED:
+            stats["exec_errors"] = 1
+        return decision
+
+    async def _prepare_worktree(
+        self, sandbox: AsyncSandbox, initial_head: Optional[str], stats: Dict[str, Any]
+    ) -> OutcomeDecision | None:
+        """Capture the candidate patch and stop grading-side Git mutations after a failed commit."""
+        if self.config.record_git_state:
+            stats.update(await self._git_state(sandbox, initial_head))
+        stats["worktree_patch"] = await self._worktree_patch(sandbox, initial_head)
+        if self.config.commit_worktree:
+            try:
+                await self._commit_worktree(sandbox)
+            except NgFailureEvent as exc:
+                return self._commit_failure_outcome(exc, stats)
+        if self.config.uncommit_worktree:
+            await self._uncommit_worktree(sandbox, initial_head)
+        return None
 
     async def _worktree_patch(self, sandbox: AsyncSandbox, base: Optional[str]) -> Optional[str]:
         """Everything the rollout changed since `base` -- commits, staged and
@@ -857,18 +989,9 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
 
             stats = self._session_id_to_stats.setdefault(session_key, {})
             aborted = stats.get("exec_errors", 0) > 0
+            commit_decision = None
             if not aborted:
-                # Skipped on an aborted attempt: its sandbox just failed to run a command.
-                if self.config.record_git_state:
-                    stats.update(await self._git_state(sandbox, initial_head))
-                # The full change set, before any grading-side git steps: re-grading the
-                # rollout later, under a different collector, needs neither model nor sandbox.
-                stats["worktree_patch"] = await self._worktree_patch(sandbox, initial_head)
-                if self.config.commit_worktree:
-                    await self._commit_worktree(sandbox)
-                if self.config.uncommit_worktree:
-                    # After record_git_state, so the diagnostic still shows what the model did.
-                    await self._uncommit_worktree(sandbox, initial_head)
+                commit_decision = await self._prepare_worktree(sandbox, initial_head, stats)
 
             verify_request = PrefixPassKVerifyRequest.model_validate(body.model_dump() | {"response": response})
             try:
@@ -882,17 +1005,23 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(verify_response)
                 verify_json = await get_response_json(verify_response)
             except Exception:
-                if not aborted:
+                if not (aborted or commit_decision is not None):
                     raise
                 print("prefix_pass_k: verify failed on an aborted attempt", format_exc(), file=sys.stderr)
                 verify_json = verify_request.model_dump()
 
             stats = self._session_id_to_stats.pop(session_key, {})
-            if aborted:
+            if commit_decision is not None:
+                verify_json = verify_json | {
+                    "reward": 0.0,
+                    "mask_sample": commit_decision.action == OutcomeAction.FAIL,
+                }
+            elif aborted:
                 # The infrastructure failed, not the candidate: whatever the verifier saw is
                 # not a measurement of it, so the sample is masked out of pass@k.
                 verify_json = verify_json | {"reward": 0.0, "mask_sample": True}
-            return PrefixPassKVerifyResponse.model_validate(verify_json | stats)
+            result = FailureReportRow.merged_into(verify_json | stats, FailureReportRow.report(verify_json))
+            return PrefixPassKVerifyResponse.model_validate(result)
         finally:
             # Whatever ended the attempt -- a model or verifier error, a cancelled
             # rollout -- the session is forgotten and its sandbox stopped.

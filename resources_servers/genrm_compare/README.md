@@ -146,6 +146,7 @@ for the input format, explicit group IDs, and recovery limits.
 | `num_judges_per_comparison` | int | `1` | Number of judge passes per pair (for majority voting) |
 | `use_principle` | bool | `false` | Enable principle-based comparison |
 | `default_principle` | string | *(see config)* | Default principle when none provided in request |
+| `default_rubric_ids` | list of integers or null | `null` | Expected IDs for the judge’s built-in rubric when `use_principle` is `false` |
 | `aggregator_method` | string | `"simple_tiebreaker"` | Score aggregation method |
 | `score_source` | string | `"overall"` | Use the GenRM overall score (`"overall"`) or the equal-weight mean of rubric scores (`"rubric_mean"`) |
 | `reasoning_bonus` | float | `0.0` | Bonus for shortest reasoning among top performers |
@@ -162,8 +163,8 @@ for the input format, explicit group IDs, and recovery limits.
 | `cohort_collection_timeout_s` | float | `1800` | Deadline to collect all group members |
 | `cohort_evaluation_timeout_s` | float | `1800` | Overall judging deadline after collection |
 | `judge_request_timeout_s` | float | `1800` | Per-request deadline, including connection retries |
-| `cohort_result_ttl_s` | float or null | `3600` | Terminal-record retention; null disables time expiry, but the count cap still applies |
-| `max_terminal_cohorts` | int | `4096` | Maximum number of retained terminal groups |
+| `cohort_result_ttl_s` | float or null | `3600` | Retention time for results and finished-group attempt records; null disables time expiry only |
+| `max_terminal_cohorts` | int | `4096` | Count limit applied separately to results and finished-group attempt records |
 
 ### Fixed-baseline and rubric-mean scoring
 
@@ -171,13 +172,15 @@ Set `comparison_mode: fixed_baseline` to compare each rollout with the reference
 `responses_create_params.metadata.baseline_response`. Set `num_rollouts_per_prompt` to the actual
 rollouts per group and admit all members concurrently; a singleton still calls the judge.
 
-Set `score_source: rubric_mean` to use equal-weight rubric scores. Each task row must provide a
-top-level `expected_rubric_ids` list, and the prompt or principle must define the rubrics.
-All group members must share the same baseline and rubric ID set; ID order does not matter.
+For `score_source: rubric_mean`, provide `expected_rubric_ids` per row or configure
+`default_rubric_ids` with `use_principle: false`. The configured IDs must match the judge’s built-in
+rubric and replace row IDs for every agent sharing the verifier. Group members must share the same
+baseline and effective rubric IDs, in any order.
 
 These options work independently or together. Defaults use rollout-cohort comparisons and overall
-scores. `/compare` ignores `comparison_mode` and always compares the submitted responses with each
-other; it still requires `expected_rubric_ids` when using rubric scoring.
+scores. `/compare` ignores `comparison_mode` and compares the submitted responses with each other.
+For `rubric_mean`, it uses `default_rubric_ids` when configured and `use_principle` is `false`.
+Otherwise, the caller supplies `expected_rubric_ids`.
 
 For example, with `expected_rubric_ids: [1, 2]`, the judge must return:
 
@@ -324,6 +327,9 @@ Successful legacy groups are removed; failed legacy groups reject reuse and requ
 group ID for replacement. The caller coordinates replacements; an HTTP 200 masked failure does not
 automatically trigger an RL retry.
 
+The verifier forwards user images and videos in order and keeps text from other message roles.
+Use a judge that supports the media in your prompts.
+
 ## GenRM Comparison Groups
 
 The `genrm_compare` resources server compares several answers to one prompt using a generative reward
@@ -341,9 +347,16 @@ whether to replace a failed attempt. The server does not generate answers or sch
 | `_ng_group_id` | Required for safe replacement attempts and replay. Unique across runs and prompt occurrences. |
 | `_ng_group_attempt` | Nonnegative integer shared by every member of an attempt; defaults to zero. |
 | `_ng_rollout_index` | Required member slot from zero through `num_rollouts_per_prompt - 1`. |
+| `group_answer_length_penalty_coeff` | Optional nonnegative, finite answer length coefficient for `/verify`. |
+| `group_reasoning_length_penalty_coeff` | Optional nonnegative, finite reasoning length coefficient for `/verify`. |
 
-All members must carry the same prompt and principle. Responses echo these coordinates; group attempt
-numbers and other private metadata are excluded from reward metrics. Shared judge calls run outside any
+Overrides require at least two trainable rollouts. Omitted coefficients use server defaults, and
+explicit zero disables that penalty. Members and retries of an explicit group must agree on both
+effective values (HTTP 409 on mismatch). Successful override requests echo both applied values.
+Replays with overrides return HTTP 409 if the saved result lacks the requested pair.
+
+All members must carry the same prompt and effective principle. Responses echo these coordinates.
+Reward metrics exclude group attempt numbers and other private metadata. Shared judge calls run outside any
 individual member's token capture context. This also drops the arriving member's OpenTelemetry parent;
 judge spans are separate traces until cohort-level tracing is implemented.
 
@@ -505,13 +518,25 @@ this.
 ### Replacement attempts and retention
 
 To replace a group, the caller increments `_ng_group_attempt` for **every** member and dispatches the entire
-group. Newer attempts retire active older ones. An older judge task cannot publish rewards into a newer
-attempt. An individual rollout's retry counter does not advance this shared group attempt.
+group. Newer attempts retire active older ones. If Gym still remembers the prior attempt, it also removes
+that attempt's saved result. An older judge task cannot publish rewards into a newer attempt. An individual
+rollout's retry counter does not advance this shared group attempt.
 
 Run the resources server with one HTTP worker. State is process-local. Completed explicit-ID groups and
 failed groups retain compact response digests, rewards when completed, and failure/attempt information;
 full answer bodies and waiters are released. Retention is bounded by `cohort_result_ttl_s` and `max_terminal_cohorts`,
 except for groups an open session still needs during a partial-rollout checkpoint (see below).
+
+Results expire from completion time. Time-based retention of the newest-attempt record also starts at
+completion. Retries for a retained, finished attempt with matching prompt and principle refresh its attempt
+record, even when the answer conflicts or the attempt failed. They do not extend the result's lifetime.
+If Gym still remembers an attempt but its result has been evicted, another request for that attempt receives 409 immediately.
+Recover by dispatching a complete group with a higher shared `_ng_group_attempt`.
+
+Cleanup visits finished groups only. Active groups keep their attempt records and do not count toward
+`max_terminal_cohorts`. Results and finished-group attempt records are capped separately. An exact retry
+can still replay a retained result after its attempt record is evicted; superseded results are removed
+when a newer attempt is accepted while the prior attempt is tracked.
 
 The count cap can evict state before the TTL. After eviction or restart, replay and stale-attempt detection
 are no longer guaranteed. The caller must enforce accepted attempt identity across those boundaries and
@@ -528,7 +553,9 @@ its member's outcome, the reward or the judge failure that callers record as a m
 reinstalls that finished group. The replay then gets the recorded outcome without another judge call. A
 group still collecting or evaluating exports nothing, and its members rebuild it by replaying, as before. Each saved
 response digest names how the response was serialized; a restore refuses digests saved under a scheme it
-does not know rather than refusing every replay.
+does not know rather than refusing every replay. New answers use `orjson-sorted-sha256`. Checkpoints that saved
+the previous `json-ascii-sha256` digests still restore: those members are compared under their saved scheme, so
+an exact replay gets its outcome and a changed answer is refused, and later checkpoints keep that scheme.
 
 While a checkpoint is open, a finished evaluation holds its rewards or judge failure until resume, so no
 member records an outcome after this server exported. If a restored member's session is retired before it
@@ -538,7 +565,17 @@ re-form the group under the same attempt.
 
 A finished group that a member with an open session may still need is kept past `cohort_result_ttl_s` and
 beyond `max_terminal_cohorts`, so pruning cannot evict an outcome a later checkpoint must export or
-a replay must return. It becomes an ordinary tombstone once those members close their sessions or are retired.
+a replay must return. Its attempt record is kept too, so the group still refuses older attempts. Each time
+pruning keeps either record, that record's retention restarts. A kept record does not count toward
+`max_terminal_cohorts`, so it cannot evict another group's record. Each prune checks the longest-kept record
+again, and a record becomes an ordinary tombstone once its members have closed their sessions or been retired.
+A newer attempt of the group still removes it, because the caller has replaced the whole group.
+Restored groups join the same retention order as other finished groups. After a restore, a member of a superseded
+group therefore has no saved outcome. If the newer attempt's result was restored too, its replay is refused as
+superseded (409). Otherwise its replay re-forms the old attempt. If every member of the old attempt replays before
+a member of the newer attempt arrives, the old attempt is judged again and its members get new outcomes, which
+the caller discards because it replaced the group. If only some members replay, the old attempt fails after
+`cohort_collection_timeout_s` (503), or when the newer attempt supersedes it.
 
 Only groups with an explicit `_ng_group_id` are exported. A member that is started over from its input while
 its restored group still holds continued members gets a conflicting response for its slot; the controller

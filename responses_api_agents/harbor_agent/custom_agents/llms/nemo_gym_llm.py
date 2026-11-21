@@ -435,9 +435,10 @@ class NemoGymLLM(BaseLLM):
         prompt_tokens = usage.get("prompt_tokens", 0) or 0
         completion_tokens = usage.get("completion_tokens", 0) or 0
         prompt_tokens_details = usage.get("prompt_tokens_details") or {}
-        cache_tokens = (
-            prompt_tokens_details.get("cached_tokens", 0) if isinstance(prompt_tokens_details, dict) else 0
-        ) or 0
+        cached = prompt_tokens_details.get("cached_tokens") if isinstance(prompt_tokens_details, dict) else None
+        # Harbor's UsageInfo.cache_tokens is a required int, so a count the backend did not report reaches
+        # Harbor's totals as 0; Gym cannot keep it unknown here.
+        cache_tokens = cached or 0
 
         return UsageInfo(
             prompt_tokens=int(prompt_tokens),

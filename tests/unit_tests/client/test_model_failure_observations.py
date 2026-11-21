@@ -605,3 +605,210 @@ async def test_a_failed_error_body_read_selects_the_attempt_that_returned_it(mon
         assert list(report.events) == [remote.event_id], "no local attempt is added beside it"
     else:
         assert len(report.events) == 1
+
+
+def _vllm_metrics(waiting: float, running: float) -> str:
+    """A vLLM /metrics page as Prometheus text, with one engine."""
+    return (
+        "# HELP vllm:num_requests_waiting Number of requests waiting to be processed.\n"
+        f'vllm:num_requests_waiting{{engine="0",model_name="m"}} {waiting}\n'
+        "# HELP vllm:num_requests_running Number of requests in model execution batches.\n"
+        f'vllm:num_requests_running{{engine="0",model_name="m"}} {running}\n'
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "metrics", "expected"),
+    [
+        pytest.param(True, (62.0, 1.0), (62, 1), id="queued-server"),
+        pytest.param(True, (0.0, 4.0), (0, 4), id="an-empty-queue-is-recorded-too"),
+        pytest.param(True, None, (None, None), id="no-metrics-page"),
+        pytest.param(False, (62.0, 1.0), (None, None), id="not-requested"),
+    ],
+)
+async def test_a_response_timeout_records_the_servers_queue_when_asked(monkeypatch, record, metrics, expected):
+    metrics_reads = 0
+
+    async def responses(request):
+        await asyncio.sleep(0.5)
+        return web.json_response({})
+
+    async def metrics_page(request):
+        nonlocal metrics_reads
+        metrics_reads += 1
+        return web.Response(text=_vllm_metrics(*metrics))
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", responses)
+    if metrics is not None:
+        app.router.add_get("/metrics", metrics_page)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("/v1")),
+            max_num_tries=1,
+            request_timeout_seconds=0.1,
+            record_server_queue=record,
+        )
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(TimeoutError) as caught:
+                await model._request(method="POST", url=str(server.make_url("/v1/responses")), json={"model": "m"})
+            report = log.reply_report(caught.value)
+
+    [attempt] = report.events.values()
+    assert report.failure_id == attempt.event_id
+    assert attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+    assert attempt.details.request_upload_complete is True
+    assert (attempt.details.server_requests_waiting, attempt.details.server_requests_running) == expected
+    assert metrics_reads == (1 if record and metrics is not None else 0)
+
+
+def test_the_queue_counts_read_only_the_exact_gauges():
+    metrics = (
+        "# TYPE vllm:num_requests_waiting gauge\n"
+        'vllm:num_requests_waiting{engine="0",model_name="m"} 3.0\n'
+        'vllm:num_requests_waiting_by_reason{engine="0",reason="capacity"} 2.0\n'
+        'vllm:num_requests_waiting_by_reason{engine="0",reason="deferred"} 5.0\n'
+        'vllm:num_requests_waiting{engine="1",model_name="m"} 4.0 1730000000000\n'
+        "vllm:num_requests_running 2.0\n"
+        'vllm:num_requests_running_total{engine="0"} 9.0\n'
+    )
+    assert openai_client._vllm_queue_counts(metrics) == (7, 2)
+    assert openai_client._vllm_queue_counts('vllm:num_requests_waiting_by_reason{reason="x"} 2.0\n') is None
+
+
+QUEUES = [(5, 1), (0, 2), (7, 3), (9, 4), (1, 1), (2, 2)]
+
+
+async def _timeouts_then(monkeypatch, queues, answers_after: int, connection_retries: int):
+    """One model call whose first ``answers_after`` attempts time out; each timeout reads the next of ``queues``."""
+    reads = iter(queues)
+    sent = 0
+
+    async def responses(request):
+        nonlocal sent
+        sent += 1
+        if sent > answers_after:
+            return web.json_response({})
+        await asyncio.sleep(5)
+        return web.json_response({})
+
+    async def metrics_page(request):
+        return web.Response(text=_vllm_metrics(*next(reads)))
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", responses)
+    app.router.add_get("/metrics", metrics_page)
+    server = TestServer(app)
+    await server.start_server()
+    session = aiohttp.ClientSession()
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(
+        api_key="test",
+        base_url=str(server.make_url("/v1")),
+        max_connection_retries=connection_retries,
+        request_timeout_seconds=0.1,
+        record_server_queue=True,
+    )
+    try:
+        with RequestFailureLog.capture() as log:
+            try:
+                response = await model._request(
+                    method="POST", url=str(server.make_url("/v1/responses")), json={"model": "m"}
+                )
+                outcome = response
+            except Exception as error:
+                outcome = error
+            return outcome, log
+    finally:
+        await session.close()
+        await server.close()
+
+
+def _queue_of(event) -> tuple[int | None, int | None]:
+    return event.details.server_requests_waiting, event.details.server_requests_running
+
+
+async def test_each_timeout_the_transport_recovered_from_records_its_own_queue(monkeypatch):
+    outcome, log = await _timeouts_then(monkeypatch, [(5, 1), (0, 2), (7, 3)], answers_after=2, connection_retries=5)
+    assert not isinstance(outcome, Exception)
+    attempts = list(log.report.events.values())
+    assert [_queue_of(event) for event in sorted(attempts, key=lambda event: event.attempt_id)] == [(5, 1), (0, 2)]
+    assert {event.failure_reason for event in attempts} == {MODEL_RESPONSE_TIMEOUT_REASON}
+    assert len({event.operation_id for event in attempts}) == 1
+
+
+async def test_the_failure_that_ends_the_call_is_the_last_timeout_with_its_queue(monkeypatch):
+    outcome, log = await _timeouts_then(monkeypatch, QUEUES, answers_after=99, connection_retries=3)
+    assert isinstance(outcome, TimeoutError)
+    report = log.reply_report(outcome)
+    attempts = sorted(report.events.values(), key=lambda event: event.attempt_id)
+    assert len(attempts) >= 2
+    assert [_queue_of(event) for event in attempts] == QUEUES[: len(attempts)]
+    assert report.failure_id == attempts[-1].event_id, "the call ends on its last attempt, with that attempt's reading"
+    assert outcome.__cause__ is not None and outcome.__cause__.event_id == attempts[-1].event_id
+
+
+async def test_cancelling_a_call_cancels_its_pending_queue_reads(monkeypatch):
+    cancelled = []
+    started = asyncio.Event()
+
+    async def hanging_queue(metrics_url):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(metrics_url)
+            raise
+
+    async def never_answers(request):
+        await asyncio.sleep(30)
+        return web.json_response({})
+
+    monkeypatch.setattr(openai_client, "_server_queue", hanging_queue)
+    app = web.Application()
+    app.router.add_post("/v1/responses", never_answers)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("/v1")),
+            max_connection_retries=3,
+            request_timeout_seconds=0.1,
+            record_server_queue=True,
+        )
+        call = asyncio.create_task(
+            model._request(method="POST", url=str(server.make_url("/v1/responses")), json={"model": "m"})
+        )
+        await asyncio.wait_for(started.wait(), 5)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+    await asyncio.sleep(0)
+    assert len(cancelled) == 1
+
+
+async def test_a_failed_metrics_read_releases_its_pool_connection(monkeypatch):
+    """A non-200 /metrics reply with a body larger than the read buffer must not keep its connection."""
+    healthy = "vllm:num_requests_waiting 3\nvllm:num_requests_running 5\n"
+    replies = iter([web.Response(status=503, body=b"x" * (1 << 20)), web.Response(status=200, text=healthy)])
+
+    async def metrics(_request):
+        return next(replies)
+
+    app = web.Application()
+    app.router.add_get("/metrics", metrics)
+    async with (
+        TestServer(app) as server,
+        aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1, limit_per_host=1)) as session,
+    ):
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        url = str(server.make_url("/metrics"))
+        assert await openai_client._server_queue(url) is None
+        # With the only pool slot still held, this read would wait for a connection until its timeout.
+        assert await openai_client._server_queue(url) == (3, 5)

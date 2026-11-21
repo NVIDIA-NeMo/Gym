@@ -22,13 +22,13 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.decision import (
     ACKNOWLEDGE_JUDGE_JOBS_FLAGS,
-    JUDGE_JOB_ACK_JOURNAL_NAME,
     RecoveryAction,
     failed_judge_jobs_blocking,
     failed_judge_jobs_stop,
 )
+from nemo_gym.eval.recovery.evidence import JUDGE_JOB_ACK_JOURNAL_NAME
 from nemo_gym.orchestration.submit import inspect_recovery, recover
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import (
@@ -76,9 +76,9 @@ def test_the_guard_stops_without_an_acknowledgement_and_names_the_way_on(tmp_pat
 
 
 def test_an_acknowledgement_lets_exactly_one_more_job_queue_and_is_journaled(tmp_path, judge_slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm as slurm_module
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 
-    monkeypatch.setattr(slurm_module.getpass, "getuser", lambda: "operator-a")
+    monkeypatch.setattr(slurm_chain.getpass, "getuser", lambda: "operator-a")
     job_dir = _blocked_run(tmp_path, judge_slurm_bin)
 
     out = recover(
@@ -225,8 +225,11 @@ def test_the_command_refuses_a_bad_combination_before_doing_anything(monkeypatch
 @pytest.mark.parametrize("inspect_only", [False, True])
 def test_the_command_passes_the_stripped_reason_to_recovery_and_inspect(monkeypatch, capsys, inspect_only):
     from nemo_gym.cli.main import _eval_resubmit, build_parser
+    from nemo_gym.eval.recovery.decision import (
+        RecoveryDecision,
+        RecoveryOutcome,
+    )
     from nemo_gym.orchestration import submit
-    from nemo_gym.orchestration.recovery import RecoveryDecision, RecoveryOutcome
 
     seen = {}
 
@@ -294,7 +297,8 @@ def test_the_verdict_names_the_block_and_the_acknowledgement_before_and_after_a_
 
 
 def test_the_verdict_of_a_block_without_a_job_id_offers_no_acknowledgement():
-    from nemo_gym.orchestration.recovery import IdentityState, RecoveryDecision, operator_verdict
+    from nemo_gym.eval.recovery.decision import IdentityState, RecoveryDecision
+    from nemo_gym.eval.recovery.gate import operator_verdict
 
     stop = failed_judge_jobs_stop([None, "12"], "reverification")
     decision = RecoveryDecision(
@@ -319,7 +323,7 @@ def test_the_command_prints_one_verdict_in_the_json_the_gate_and_stderr(
     tmp_path, judge_slurm_bin, capsys, inspect_only
 ):
     from nemo_gym.cli.main import _eval_resubmit, build_parser
-    from nemo_gym.orchestration.recovery import operator_verdict_line
+    from nemo_gym.eval.recovery.gate import operator_verdict_line
 
     job_dir = _blocked_run(tmp_path, judge_slurm_bin)
     argv = ["eval", "resubmit", *_handle(job_dir), "--recover"]

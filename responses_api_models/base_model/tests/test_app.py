@@ -27,8 +27,11 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from nemo_gym.client import ServerClient
 
 
 def _load(name: str, path: Path):
@@ -188,6 +191,106 @@ class TestParseBashToolCall:
         assert BM.parse_bash_tool_calls("I think the fix is to edit foo.py") == []
 
 
+class TestParseToolCalls:
+    """The generic parser, for tool sets other than `bash` (here AutomationBench's)."""
+
+    NAMES = ("api_search", "api_fetch", "base64_encode")
+
+    def test_calls_to_any_listed_tool_are_kept_in_order(self):
+        raw = (
+            '[{"name": "api_search", "arguments": {"query": "gmail send"}}, '
+            '{"function": {"name": "api_fetch", "arguments": "{\\"method\\": \\"GET\\", \\"url\\": \\"https://x\\"}"}}]'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "gmail send"}},
+            {"name": "api_fetch", "arguments": {"method": "GET", "url": "https://x"}},
+        ]
+
+    def test_arguments_pass_through_unchanged(self):
+        # Nested objects and empty objects are the tool's business, not the parser's.
+        raw = (
+            '[{"name": "api_fetch", "arguments": {"method": "POST", "url": "u", "params": {}, "body": {"a": [1, 2]}}}]'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES)[0]["arguments"] == {
+            "method": "POST",
+            "url": "u",
+            "params": {},
+            "body": {"a": [1, 2]},
+        }
+
+    def test_unlisted_tool_is_dropped(self):
+        raw = '[{"name": "bash", "arguments": {"command": "ls"}}, {"name": "api_search", "arguments": {"query": "q"}}]'
+        assert [c["name"] for c in BM.parse_tool_calls(raw, self.NAMES)] == ["api_search"]
+
+    def test_non_object_arguments_are_dropped(self):
+        assert BM.parse_tool_calls('[{"name": "api_search", "arguments": "not json"}]', self.NAMES) == []
+
+    def test_truncated_inside_a_string_fails(self):
+        assert BM.parse_tool_calls('[{"name": "api_fetch", "arguments": {"url": "https://x', self.NAMES) == []
+
+    def test_calls_completed_before_a_cut_are_kept(self):
+        raw = (
+            '[{"function": {"name": "api_search", "arguments": "{\\"query\\": \\"a\\"}"}}, '
+            '{"name": "api_fetch", "arguments": {"url": "u"}}, '
+            '{"function": {"name": "api_fetch", "arguments": "{\\"url\\": \\"trunc'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}},
+            {"name": "api_fetch", "arguments": {"url": "u"}},
+        ]
+
+    def test_a_cut_inside_the_first_call_still_fails(self):
+        assert BM.parse_tool_calls('[{"name": "api_fetch", "arguments": {"url": "tr', self.NAMES) == []
+
+    FIRST = '{"name": "api_search", "arguments": {"query": "a"}}'
+
+    @pytest.mark.parametrize(
+        "cut",
+        [
+            '{"name"',  # after a key
+            '{"name": "api_fetch", "arguments": ',  # after a colon
+            '{"name": "api_search", "arguments": {"query": "b", "exact": tr',  # inside a literal
+            '{"name": "api_search", "arguments": {"query": "b"',  # after a value: arguments may be partial
+            '{"name": "api_search", "arguments": {"query": "b", "limit": 10',  # inside a number
+        ],
+    )
+    def test_a_truncated_generation_keeps_only_its_completed_calls(self, cut):
+        raw = f"[{self.FIRST}, {cut}"
+        assert BM.parse_tool_calls(raw, self.NAMES, truncated=True) == [
+            {"name": "api_search", "arguments": {"query": "a"}}
+        ]
+
+    @pytest.mark.parametrize("tail", ["", "\nTool result: [", " and then"])
+    def test_a_cut_on_or_after_the_closing_bracket_keeps_the_whole_batch(self, tail):
+        raw = f"[{self.FIRST}, {self.FIRST}]{tail}"
+        assert (
+            BM.parse_tool_calls(raw, self.NAMES, truncated=True)
+            == [{"name": "api_search", "arguments": {"query": "a"}}] * 2
+        )
+
+    def test_an_unclosed_array_the_model_stopped_on_is_kept_whole(self):
+        # Not truncated: the model stopped, so brackets it left open are closed as before.
+        raw = f'[{self.FIRST}, {{"name": "api_search", "arguments": {{"query": "b"}}'
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}},
+            {"name": "api_search", "arguments": {"query": "b"}},
+        ]
+
+    def test_an_unparseable_close_falls_back_to_the_completed_calls(self):
+        assert BM.parse_tool_calls(f'[{self.FIRST}, {{"name"', self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}}
+        ]
+
+    def test_bash_parser_stays_strict_about_cuts(self):
+        raw = '[{"name": "bash", "arguments": {"command": "ls"}}, {"name": "bash", "arguments": {"command": "ca'
+        assert BM.parse_bash_tool_calls(raw) == []
+
+    def test_cap_applies(self):
+        raw = "[" + ", ".join(f'{{"name": "api_search", "arguments": {{"query": "q{i}"}}}}' for i in range(6)) + "]"
+        assert len(BM.parse_tool_calls(raw, self.NAMES)) == 3
+        assert len(BM.parse_tool_calls(raw, self.NAMES, max_calls=6)) == 6
+
+
 class TestCloseJsonPrefix:
     def test_cuts_at_first_complete_value(self):
         assert BM.close_json_prefix("[1, 2] trailing [3]") == "[1, 2]"
@@ -217,7 +320,9 @@ class TestClientSideStop:
         cfg = dict(
             wire=wire, tool_definitions_json=None, extra_body={}, openai_model="m", max_tokens=1024, temperature=0.6
         )
-        object.__setattr__(server, "config", type("C", (), cfg | dict(top_p=None, debug=False))())
+        object.__setattr__(
+            server, "config", type("C", (), cfg | dict(top_p=None, debug=False, render_assistant_text=False))()
+        )
         server._steer, server._primer, server._prefill = defaults["steer"], defaults["primer"], defaults["prefill"]
         server._stop = list(defaults["stop"])
         server._semaphore = asyncio.Semaphore(1)
@@ -254,7 +359,7 @@ class TestFunctionCallingWire:
     def _server(self, **overrides):
         # Build the prompt without constructing the web server: mirror
         # model_post_init's wire resolution on a bare object.
-        cfg = dict(wire="function_calling", tool_definitions_json=self.TOOLS) | overrides
+        cfg = dict(wire="function_calling", tool_definitions_json=self.TOOLS, render_assistant_text=False) | overrides
         defaults = BM.WIRE_DEFAULTS[cfg["wire"]]
         server = BM.BaseModelServer.__new__(BM.BaseModelServer)
         object.__setattr__(server, "config", type("C", (), cfg)())
@@ -284,6 +389,27 @@ class TestFunctionCallingWire:
         assert rendered.startswith("\nAssistant (tool call): [")
         assert "ignored prose" not in rendered
 
+    def test_assistant_text_renders_before_its_calls_when_enabled(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        message = {"role": "assistant", "content": " Found it; now edit. ", "tool_calls": calls}
+        assert BM.render_transcript([message], assistant_text=True) == (
+            "\nAssistant: Found it; now edit." + BM.render_transcript([message])
+        )
+
+    def test_assistant_text_flag_skips_turns_without_text(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        for content in (None, "", "  \n", [{"type": "output_text", "text": ""}]):
+            message = {"role": "assistant", "content": content, "tool_calls": calls}
+            assert BM.render_transcript([message], assistant_text=True) == BM.render_transcript([message])
+
+    def test_assistant_text_flag_leaves_the_primer_on_the_tool_call_line(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "look", "tool_calls": calls}]
+        prompt = self._server(render_assistant_text=True).build_prompt(messages)
+        assert "\nAssistant: look\nAssistant (tool call): [" in prompt
+        assert prompt.endswith(BM.BASH_TOOL_STEER + "\nAssistant (tool call): " + '[{"')
+        assert "look" not in self._server().build_prompt(messages)
+
     def test_tool_calls_render_in_litellm_key_order(self):
         # The reference bridge rendered calls as mini re-sent them, i.e. after
         # litellm's re-serialization -- not in the order the trace stores.
@@ -292,3 +418,173 @@ class TestFunctionCallingWire:
             '\nAssistant (tool call): [{"function": {"arguments": "{\\"command\\": \\"ls\\"}", "name": "bash"}, '
             '"id": "c", "type": "function"}]'
         )
+
+    def test_tool_names_select_the_generic_parser(self):
+        raw = '[{"name": "api_search", "arguments": {"query": "q"}}, {"name": "bash", "arguments": {"command": "ls"}}]'
+        generic = self._server(tool_names=["api_search"], max_tool_calls_per_turn=8)
+        assert generic._parse_calls(raw) == [{"name": "api_search", "arguments": {"query": "q"}}]
+        # Unset, the wire stays mini-swe-agent's: bash only.
+        bash_only = self._server(tool_names=None, max_tool_calls_per_turn=3)
+        assert bash_only._parse_calls(raw) == [{"name": "bash", "arguments": {"command": "ls"}}]
+
+    def test_truncation_reaches_the_generic_parser(self):
+        raw = '[{"name": "api_search", "arguments": {"query": "a"}}, {"name": "api_search", "arguments": {"query": "b"'
+        server = self._server(tool_names=["api_search"], max_tool_calls_per_turn=8)
+        assert len(server._parse_calls(raw)) == 2
+        assert server._parse_calls(raw, truncated=True) == [{"name": "api_search", "arguments": {"query": "a"}}]
+
+
+@pytest.fixture
+def configured_server(monkeypatch):
+    """Construct a configured model with a mocked completion transport."""
+    backend = SimpleNamespace(create_completion=AsyncMock())
+    create_client = MagicMock(return_value=backend)
+    monkeypatch.setattr(BM, "NeMoGymAsyncOpenAI", create_client)
+
+    def create(**overrides):
+        """Initialize the real server and capture its outgoing backend requests."""
+        config = BM.BaseModelServerConfig(
+            host="127.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            name="model",
+            openai_base_url="http://127.0.0.1:9000/v1",
+            openai_api_key="test-key",
+            openai_model="base",
+            max_tokens=64,
+            temperature=0.6,
+            top_p=0.8,
+            max_concurrent_requests=2,
+            extra_body={"seed": 42},
+            **overrides,
+        )
+        server = BM.BaseModelServer(config=config, server_client=MagicMock(spec=ServerClient))
+        create_client.assert_called_once_with(base_url=config.openai_base_url, api_key=config.openai_api_key)
+        assert server._semaphore._value == 2
+        return server, backend
+
+    return create
+
+
+@pytest.mark.parametrize("api", ["responses", "chat_completions"])
+@pytest.mark.parametrize("wire", ["backticks", "function_calling"])
+@pytest.mark.parametrize("finish", ["stop", "length"])
+def test_configured_model_adapters(configured_server, api, wire, finish):
+    """Exercise initialization, sampling, typed output, tool calls, usage and truncation."""
+    server, backend = configured_server(wire=wire)
+    generated = "ls\n```" if wire == "backticks" else 'name": "bash", "arguments": {"command": "ls"}}]'
+    backend.create_completion.return_value = {
+        "choices": [{"text": generated, "finish_reason": finish}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    }
+    messages = [{"role": "user", "content": "task"}]
+    if api == "responses":
+        body = BM.NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {
+                "input": messages,
+                "temperature": 0.0,
+                "top_p": 0.4,
+                "max_output_tokens": 23,
+            }
+        )
+    else:
+        body = BM.NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {
+                "model": "requested-model",
+                "messages": messages,
+                "temperature": 0.0,
+                "top_p": 0.4,
+                "max_tokens": 23,
+            }
+        )
+    result = asyncio.run(getattr(server, api)(body))
+    expected = {"model": "base", "max_tokens": 23, "temperature": 0.0, "top_p": 0.4, "seed": 42}
+    defaults = BM.WIRE_DEFAULTS[wire]
+    expected["prompt"] = "\nUser: task" + defaults["steer"] + defaults["primer"] + defaults["prefill"]
+    if wire == "backticks":
+        expected["stop"] = list(BM.DEFAULT_STOP)
+    backend.create_completion.assert_awaited_once_with(**expected)
+    assert result.model == "base"
+    if api == "responses":
+        assert (result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens) == (11, 7, 18)
+        assert result.status == ("incomplete" if finish == "length" else "completed")
+        if finish == "length":
+            assert result.incomplete_details.reason == "max_output_tokens"
+        else:
+            assert result.incomplete_details is None
+        if wire == "function_calling":
+            assert (result.output[0].type, result.output[0].name) == ("function_call", "bash")
+            assert json.loads(result.output[0].arguments) == {"command": "ls"}
+            assert result.output[0].call_id
+        else:
+            assert result.output[0].content[0].text == BM.DEFAULT_PREFILL + generated
+    else:
+        assert (result.usage.prompt_tokens, result.usage.completion_tokens, result.usage.total_tokens) == (11, 7, 18)
+        choice = result.choices[0]
+        assert choice.finish_reason == ("tool_calls" if wire == "function_calling" else finish)
+        if wire == "function_calling":
+            call = choice.message.tool_calls[0]
+            assert call.function.name == "bash"
+            assert json.loads(call.function.arguments) == {"command": "ls"}
+            assert call.id and choice.message.content is None
+        else:
+            assert choice.message.content == BM.DEFAULT_PREFILL + generated
+
+
+def test_configured_wire_overrides_and_sampling_defaults(configured_server):
+    """Explicit stops and custom prompt fields override function-calling defaults."""
+    server, backend = configured_server(
+        wire="function_calling",
+        steer="STEER",
+        primer="PRIMER",
+        prefill="PREFILL",
+        stop=["HALT"],
+        tool_definitions_json="TOOLS",
+    )
+    backend.create_completion.return_value = {"choices": [{"text": "plain reply", "finish_reason": "stop"}]}
+    result = asyncio.run(
+        server.responses(
+            BM.NeMoGymResponseCreateParamsNonStreaming.model_validate(
+                {
+                    "input": [{"role": "user", "content": "task"}],
+                }
+            )
+        )
+    )
+    backend.create_completion.assert_awaited_once_with(
+        model="base",
+        prompt="\nTool definitions:\nTOOLS\n\n\nUser: taskSTEERPRIMERPREFILL",
+        max_tokens=64,
+        temperature=0.6,
+        top_p=0.8,
+        seed=42,
+        stop=["HALT"],
+    )
+    assert result.output[0].content[0].text == "PREFILLplain reply"
+    assert (result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "module_name,worker", [("base_model_worker", True), ("__mp_main__", True), ("base_model_regular", False)]
+)
+def test_multiworker_import_exports_app(monkeypatch, module_name, worker):
+    """Import the entrypoint as a worker and expose its FastAPI application."""
+    from fastapi import FastAPI
+
+    from nemo_gym.models import SimpleResponsesAPIModel
+    from nemo_gym.utils import server_process
+
+    app = FastAPI()
+    start = MagicMock(return_value=app)
+    monkeypatch.setenv(server_process.IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "0")
+    monkeypatch.setenv(
+        server_process.IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, "responses_api_models/base_model/app.py"
+    )
+    monkeypatch.setattr(SimpleResponsesAPIModel, "run_webserver", start)
+    worker_module = _load(module_name, Path(__file__).parent.parent / "app.py")
+    if worker and module_name != "__mp_main__":
+        assert worker_module.app is app
+        start.assert_called_once_with()
+    else:
+        assert not hasattr(worker_module, "app")
+        start.assert_not_called()
