@@ -28,7 +28,10 @@ def server(tmp_path):
             dataset="unused",
             image_folder=str(tmp_path),
             output_root=str(tmp_path),
-            verifier_timeout=1,
+            # Generous, so a slow runner never turns a judge run into an unintended timeout. The timeout case
+            # bounds only the run it means to time out. The timeout is part of the receipt identity, so it
+            # cannot change between attempts.
+            verifier_timeout=60,
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -95,7 +98,14 @@ async def test_same_saved_answer_recovers_then_survives_restart(server, monkeypa
         processes.append(process)
         return process
 
+    wait_for = asyncio.wait_for
+
+    async def first_attempt_times_out(awaitable, timeout):
+        return await wait_for(awaitable, 1 if len(calls) == 1 else timeout)
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", worker)
+    if failure == "timeout":
+        monkeypatch.setattr(asyncio, "wait_for", first_attempt_times_out)
     verify = judge_failsafe(server.verify)
     if failure == "cancel":
         task = asyncio.create_task(verify(body))
@@ -111,6 +121,13 @@ async def test_same_saved_answer_recovers_then_survives_restart(server, monkeypa
         assert failed["mask_sample"] and failed["failure_kind"] == "judge_failed"
         assert failed["response"] == body.response.model_dump(mode="json")
         assert ".failed-" in failed["failure_reason"]
+        expected_cause = {
+            "provider": "judge unavailable",
+            "timeout": "TimeoutError",
+            "exit": "exited 7",
+            "invalid_json": "JSONDecodeError",
+        }[failure]
+        assert expected_cause in failed["failure_reason"]
     assert processes[0].returncode is not None
     assert server._inflight == {}
     root = Path(server.config.output_root) / "verification"
