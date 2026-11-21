@@ -895,12 +895,18 @@ Kimi-K2.6 vLLM engine with its vision tower as the single judge
 copy of the weights instead of `moonshotai/Kimi-K2.6`.
 
 ```bash
-gym eval run --benchmark gdpval --model-type vllm_model \
+gym eval run --model-type vllm_model \
+    --config benchmarks/gdpval/config.yaml \
     --config resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml \
     --split benchmark --output results/gdpval_kimi_judge.jsonl \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
     ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
 ```
+
+Pass the benchmark config with `--config` before the overlay, as above, not with `--benchmark gdpval`. `gym eval run`
+loads `--config` files before `--benchmark` files, so with `--benchmark gdpval` the benchmark's `judge_panel`,
+`judge_model_server` and `judge_pdf_max_pages` replace the overlay's: the frontier panel grades, and the Kimi engine
+starts but is not used. The same holds for the other judge overlays in `resources_servers/gdpval/configs/`.
 
 The same page-cap notes apply as for MiniMax-M3. The benchmark's four OpenAI
 judge proxies start idle; drop them with `~<name>` if you want a clean run.
