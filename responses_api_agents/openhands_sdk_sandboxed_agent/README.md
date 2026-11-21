@@ -40,10 +40,19 @@ sandbox and answers `/verify`, and a `model_server`.
   its `OPENHANDS_INSTALLED` marker, and a failed upload, raises a typed `openhands.setup` failure. The row is never
   sent to `/verify`: a harness that never started has not attempted the task, and an untouched workspace would score
   as a 0.
-- **A run that started is graded on what it left.** A runner that times out or errors after starting still goes to
-  `/verify`, which sees the partial workspace.
-- **Teardown always runs.** The sandbox is stopped in a shielded `finally`, so a verify error or a cancelled request
-  does not leave it to its TTL.
+- **An unconfirmed launch is not graded either.** A provider error or exception while launching the runner (or while
+  running it in the foreground mode), or a detached launch whose pid file never appears, raises `openhands.execute`
+  and skips `/verify`.
+- **A run that started is graded on what it left.** A confirmed runner that times out or errors still goes to
+  `/verify`, which sees the partial workspace. Before anything is collected, the runner's process group, session
+  and tmux server are stopped and confirmed gone, so nothing writes or calls the model after the deadline. A partial
+  snapshot without metrics reports no usage instead of zero.
+- **The seeded workdir and the request's reasoning effort are used.** The runner starts in the workdir the resources
+  server seeded (nested workdirs included), and a `reasoning.effort` in the request wins over `reasoning_effort` in
+  the config.
+- **Teardown always runs.** The stop and the removal of the sandbox handle are one operation that a verify error or
+  a cancelled request cannot interrupt. The handle is dropped only after the stop succeeded; a failed stop keeps it,
+  and the shutdown retries every handle still held.
 
 ## Configuration
 
