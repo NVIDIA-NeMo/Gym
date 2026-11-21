@@ -427,6 +427,28 @@ class TestComputePassMajorityMetrics:
         # pass@1[avg-of-2]/no_answer: Task 0: avg(0,0)=0, Task 1: avg(1,1)=1. Mean = 50%
         assert m["pass@1[avg-of-2]/no_answer"] == pytest.approx(50.0)
 
+    def test_pass_at_k_no_answer_needs_all_k_answers_missing(self) -> None:
+        """pass@k/no_answer counts a task only when all k of its rollouts have no answer, so it falls with k."""
+        tasks = [
+            # Task 0: one of four rollouts unanswered
+            [
+                {"reward": 1.0, "extracted_answer": "A"},
+                {"reward": 0.0, "extracted_answer": None},
+                {"reward": 1.0, "extracted_answer": "A"},
+                {"reward": 0.0, "extracted_answer": "B"},
+            ],
+            # Task 1: every rollout unanswered
+            [{"reward": 0.0, "extracted_answer": None}] * 4,
+        ]
+        m, _, _, _ = compute_pass_majority_metrics(tasks, answer_key="extracted_answer")
+
+        # Task 0: chance that k random rollouts out of 4 are all unanswered = C(1, k) / C(4, k). Task 1: always 1.
+        assert m["pass@1/no_answer"] == pytest.approx(100.0 * (1 / 4 + 1) / 2)
+        assert m["pass@2/no_answer"] == pytest.approx(50.0)
+        assert m["pass@4/no_answer"] == pytest.approx(50.0)
+        # Accuracy keeps its usual pass@k: task 0 has two of four correct.
+        assert m["pass@2/accuracy"] == pytest.approx(100.0 * (1 - 1 / 6) / 2)
+
     def test_std_dev_across_runs(self) -> None:
         """Variance statistics are flat keys matching AIME format."""
         tasks = [
