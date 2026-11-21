@@ -745,11 +745,13 @@ async def test_stop_before_launch_closes_without_starting_a_worker(agent, state,
         with pytest.raises(RuntimeError, match="exited without output"):
             await state.task
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
+        # The stop request fenced the launch, and the receipt says so.
         assert json.loads((directory / "cleanup.json").read_text()) == {
             "cleanup_confirmed": True,
             "error": None,
             "return_code": None,
             "timed_out": False,
+            "stopped": True,
         }
         await agent._close_agent_session_state(state)
         state.session.sandbox.disconnect.assert_awaited_once()
