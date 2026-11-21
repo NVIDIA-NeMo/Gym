@@ -1152,7 +1152,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             if is_handled_episode_failure(error) and episode.failure is None:
                 episode.failure = error
         if not _is_json(output):
-            status, is_error = 500, True
+            status, is_error, ends_activation = 500, True, False
             output = {"detail": f"Tool {name!r} returned a value that is not JSON, such as NaN or Infinity"}
         record(output)
         return _ToolOutcome(status=status, output=output, is_error=is_error, ends_activation=ends_activation)

@@ -4202,7 +4202,7 @@ class TestContinuationSessions:
         trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
         assert [invocation.activation_id for invocation in trajectory.invocations] == [1, 2]
         assert [turn.activation_id for turn in trajectory.turns] == [1, 2]
-        # Each invocation keeps only its own activation's input and output, so the payload grows linearly.
+        # Each invocation keeps only its activation's input and output; each turn's question keeps the whole prefix.
         assert [
             [_drop_nulls(item.model_dump(mode="json")).get("content") for item in invocation.conversation]
             for invocation in trajectory.invocations
@@ -4278,3 +4278,178 @@ class TestContinuationSessions:
         assert _make_agent(False, _Kept)[0]._agent_continuation_capabilities() is not None
         replaced, _ = _make_agent(False, _Replaced)
         assert _seed_continuation(TestClient(replaced.setup_webserver())).status_code == 422
+
+    @pytest.mark.parametrize("execute_tools", [True, False])
+    async def test_a_call_cut_off_before_its_tools_ran_is_not_sent_to_the_next_activation(
+        self, execute_tools: bool
+    ) -> None:
+        """With execute_tools on, a call without its output is not valid input. With it off, the Environment Server
+        sends the outputs in the next activation, so the call stays."""
+        server, server_client = _make_agent(False)
+        server.config.execute_tools = execute_tools
+        cut_off = _mock_response(
+            {
+                "id": "resp-1",
+                "created_at": 1.0,
+                "model": "model",
+                "object": "response",
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [
+                    {
+                        "id": "fc-1",
+                        "call_id": "call-1",
+                        "name": "lookup",
+                        "arguments": "{",
+                        "type": "function_call",
+                        "status": "completed",
+                    }
+                ],
+            }
+        )
+        server_client.post = AsyncMock(side_effect=[cut_off, _message_response("resp-2")])
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(client)
+
+        client.post("/v1/responses", json={"input": "first?"}, headers={AGENT_ACTIVATION_HEADER: "1"})
+        second = client.post("/v1/responses", json={"input": "second?"}, headers={AGENT_ACTIVATION_HEADER: "2"})
+
+        assert second.status_code == 200
+        sent = server_client.post.await_args_list[1].kwargs["json"].model_dump(mode="json")["input"]
+        assert [item.get("type") for item in sent] == (
+            ["message", "message"] if execute_tools else ["message", "function_call", "message"]
+        )
+
+    async def test_a_close_during_an_activation_records_it_as_incomplete(self) -> None:
+        """An Environment Server ends a turn at its deadline by closing the session while the activation runs."""
+        server, server_client = _make_agent(False)
+        model_called = asyncio.Event()
+
+        async def blocked_model(**_: Any) -> MagicMock:
+            model_called.set()
+            await asyncio.Event().wait()
+
+        server_client.post = AsyncMock(side_effect=blocked_model)
+        session_id = {"agent_session_id": "agent-session", "episode_id": {"rollout_id": "rollout", "attempt": 0}}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False),
+            base_url="http://agent",
+        ) as http:
+            seed = AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+                continuation={"observations": ["trajectory", "timing"]},
+            )
+            assert (await http.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))).status_code == 200
+            activation = asyncio.create_task(
+                http.post("/v1/responses", json={"input": "first?"}, headers={AGENT_ACTIVATION_HEADER: "1"})
+            )
+            await asyncio.wait_for(model_called.wait(), 5)
+            close = await asyncio.wait_for(http.post("/v1/agent_sessions/close", json=session_id), 10)
+            # In process, the cancelled activation's request raises CancelledError instead of returning a reply.
+            (cancelled,) = await asyncio.wait_for(asyncio.gather(activation, return_exceptions=True), 10)
+
+        assert isinstance(cancelled, asyncio.CancelledError)
+        assert close.status_code == 200, close.text
+        trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
+        assert [(i.invocation_id, i.status, i.error_type) for i in trajectory.invocations] == [
+            ("root", "incomplete", "CancelledError")
+        ]
+        assert ("agent_activation_interrupted", "root") in {(gap.code, gap.invocation_id) for gap in trajectory.gaps}
+
+    async def test_an_activation_without_new_input_is_refused(self) -> None:
+        server, server_client = _make_agent(False)
+        server_client.post = AsyncMock(return_value=_message_response("resp-1"))
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(client)
+
+        refused = client.post("/v1/responses", json={"input": []}, headers={AGENT_ACTIVATION_HEADER: "1"})
+
+        assert refused.status_code == 422 and "requires new input" in refused.json()["detail"]
+        assert server_client.post.await_count == 0
+
+    async def test_the_model_server_cookie_holds_while_a_later_reply_sets_none(self) -> None:
+        server, server_client = _make_agent(False)
+        first = _message_response("resp-1")
+        first.cookies = {"model_session": MagicMock(value="model-cookie")}
+        server_client.post = AsyncMock(side_effect=[first, _message_response("resp-2"), _message_response("resp-3")])
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(client)
+
+        for index in (1, 2, 3):
+            client.post("/v1/responses", json={"input": "next?"}, headers={AGENT_ACTIVATION_HEADER: str(index)})
+
+        assert [call.kwargs["cookies"] for call in server_client.post.await_args_list[1:]] == [
+            {"model_session": "model-cookie"}
+        ] * 2
+
+    async def test_tool_cookies_and_evidence_carry_from_one_activation_to_the_next(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """The tools' cookies reach the next activation, and close returns the tool calls and observation records of
+        every activation."""
+        server, server_client = _make_agent(False)
+
+        def tool_call_reply(response_id: str) -> MagicMock:
+            return _mock_response(
+                {
+                    "id": response_id,
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": [
+                        {
+                            "id": f"fc-{response_id}",
+                            "call_id": f"call-{response_id}",
+                            "name": "lookup",
+                            "arguments": "{}",
+                            "type": "function_call",
+                            "status": "completed",
+                        }
+                    ],
+                }
+            )
+
+        server_client.post = AsyncMock(
+            side_effect=[
+                tool_call_reply("resp-1"),
+                _message_response("resp-2"),
+                tool_call_reply("resp-3"),
+                _message_response("resp-4"),
+            ]
+        )
+        tool_reply = _mock_response(content='"found"')
+        tool_reply.cookies = {"resources_session": MagicMock(value="resources-cookie")}
+        direct_request = AsyncMock(return_value=tool_reply)
+        monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(
+            client,
+            tool_accesses=[DirectHTTPToolAccess(name="env.direct_http", required=True, base_url="http://env:8000")],
+        )
+        for index, text in enumerate(("first?", "second?"), start=1):
+            reply = client.post("/v1/responses", json={"input": text}, headers={AGENT_ACTIVATION_HEADER: str(index)})
+            assert reply.status_code == 200
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "agent-session", "episode_id": {"rollout_id": "rollout", "attempt": 0}},
+        )
+
+        assert [call.kwargs["cookies"] for call in direct_request.await_args_list] == [
+            {},
+            {"resources_session": "resources-cookie"},
+        ]
+        trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
+        assert [call.tool_call_id for call in trajectory.tool_calls] == ["call-resp-1", "call-resp-3"]
+        records = AgentObservationBundle.model_validate(close.json()["agent_observations"]).records
+        assert [record.tool_call_id for record in records if record.kind == "tool_call"] == [
+            "call-resp-1",
+            "call-resp-3",
+        ]
