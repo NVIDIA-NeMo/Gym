@@ -272,6 +272,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 | Component | License | Vendored at | Upstream |
 |-----------|---------|-------------|---------|
+| VIALS | MIT (original); Apache-2.0 (NVIDIA integration modifications) | `benchmarks/vials/harbor/task-template/tests/upstream.py`; adapted preparation and task prompts in `benchmarks/vials/` | https://github.com/Handshake-AI-Research/VIALS |
 | VisualWebArena reference evaluator | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/webarena_browser/reference_evaluation/visualwebarena_evaluation.py`; original root license and notices in [SOURCE_LICENSE](resources_servers/webarena_browser/reference_evaluation/SOURCE_LICENSE), pinned revision, hash, file mapping and modifications in [PROVENANCE.md](resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md) | [Immutable original-source provenance](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices) |
 | Vision2Code | Apache-2.0 | `resources_servers/vision2code/` (adapted scoring, prompts, and image metrics; see [NOTICE](resources_servers/vision2code/NOTICE)) | https://github.com/image2code/vision2code |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
@@ -291,6 +292,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | Molmo2 | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`NATIVE_COORDS_PATTERN`, `NATIVE_ID_XY_PATTERN`, `NATIVE_FRAME_GROUP_PATTERN` and the frame-group branch of `_parse_native_markup`, from `coord_regex`, `points_regex`, `frame_regex` and `extract_multi_image_points` in upstream `olmo/preprocessing/point_formatter.py`) | https://github.com/allenai/molmo2 |
 | HLE with-tools blocklist | MIT (vendored unmodified) | `resources_servers/hle_web_tools/blocklist.json` (upstream `docs/blocklist.json` at revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`, byte-for-byte; its SHA-256 is pinned in `app.py` and verified at server start) | https://github.com/centerforaisafety/hle |
 
+- VIALS: pinned at upstream revision `002a0d25031f02a760da5d14f2c29bbd26eb06e4`. Judge prompts, verdict parsing, and answer extraction are preserved in `benchmarks/vials/harbor/task-template/tests/upstream.py`. Gym's Harbor environment server runs the VIALS judge in a separate verifier container. The MIT license is reproduced in `benchmarks/vials/UPSTREAM_LICENSE`. Tasks are prepared from the separately licensed CC-BY-4.0 dataset revision `9657bf84c6f6e470e1c31123afe3f9152c3655bd`, with individual image sources listed in `benchmarks/vials/attributions.csv`.
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
 - Provenance & list of NVIDIA modifications: `resources_servers/toolsandbox/tool_sandbox/VENDORING.md`

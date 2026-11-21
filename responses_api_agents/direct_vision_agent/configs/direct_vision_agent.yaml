@@ -1,0 +1,15 @@
+direct_vision_agent:
+  responses_api_agents:
+    direct_vision_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      input_path: /task/input.json
+      answer_path: /task/answer.txt
+      artifacts_dir: /logs/artifacts
+      max_output_tokens: 32768
+      temperature: 1.0
+      top_p: 1.0
+      chat_template_kwargs: null
+      request_timeout_sec: 14400
