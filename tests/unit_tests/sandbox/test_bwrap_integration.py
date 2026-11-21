@@ -118,6 +118,30 @@ async def test_real_bwrap_isolation(provider: BwrapProvider, tmp_path: Path) -> 
     assert not inst.root.exists()
 
 
+async def test_kill_commands_cannot_reach_processes_outside_the_exec(provider: BwrapProvider) -> None:
+    # The property the provider exists for: an agent's pkill or kill -9 -1 stays inside its exec's pid namespace.
+    # The pattern is built in the shell, so the exec's own `sh -c` argv does not match it.
+    host = subprocess.Popen(["sleep", "61.7777"])
+    sandbox = await AsyncSandbox(provider).start(SandboxSpec(workdir="/workspace"))
+    try:
+        result = await sandbox.exec(
+            'm="61.$((7776 + 1))"; sleep "$m" & inner=$!; '
+            'until pgrep -f "sleep $m" > /dev/null; do sleep 0.05; done; '
+            'pkill -f "sleep $m"; wait "$inner"; echo "inner $?"; '
+            "kill -9 -1; echo survived",
+            timeout_s=30,
+        )
+        # pkill found the exec's own sleep (TERM: 128 + 15) and kill -9 -1 spared the calling shell ...
+        assert result.stdout.splitlines() == ["inner 143", "survived"], (result.stdout, result.stderr)
+        # ... but neither reached the host's sleep with the same command line, nor this test process.
+        assert host.poll() is None
+        assert (await sandbox.exec("true")).return_code == 0
+    finally:
+        host.kill()
+        host.wait()
+        await sandbox.stop()
+
+
 async def _wait_for(predicate, timeout: float = 10.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while not predicate():

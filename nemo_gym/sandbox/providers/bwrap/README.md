@@ -164,8 +164,26 @@ process's own filesystem.
 - **No background services** survive an exec (`SupportsSandboxBackgroundServices` is
   not implemented), and there are no endpoints or PTYs.
 - **Isolation.** All sandboxes share the Gym process's uid and host. Isolation relies
-  on the namespaces, the read-only binds and `--cap-drop ALL`. With `network: host`,
-  sandboxed code can reach every service the Gym process can.
+  on the namespaces, the read-only binds and `--cap-drop ALL`.
+- **One exec is one pid namespace.** The pid namespace keeps a sandboxed command away from processes
+  outside its exec: the Gym servers, other sandboxes, other execs. Within one exec, everything
+  shares it. When a harness runs inside the sandbox as one long exec (a Codex episode), the tool
+  commands it starts can signal it: `kill -9 -1` or `pkill -f codex` from a tool still ends the
+  harness, and only the exec's init (bwrap) and the calling shell are spared. Gym's harness supervisor
+  ignores stop signals it did not request, and codex_agent's `tool_pid_namespace` runs tool commands
+  in a nested pid namespace; see
+  [Tool commands versus the harness](../../../../responses_api_agents/codex_agent/README.md#tool-commands-versus-the-harness).
+- **`network: host` is not an isolation boundary.** The sandbox shares the host's network
+  namespace, loopback included, so sandboxed code can reach every service the Gym process can,
+  including host-local control planes. With Ray enabled, the head Gym starts (`ray.init()` or
+  `ray start --head`) serves its dashboard and Jobs API on `127.0.0.1:8265` without
+  authentication: sandboxed code can submit a Ray job, which runs as the Gym uid outside every
+  namespace. Use `network: none` for code that needs no network, and keep untrusted code away from
+  hosts that run a Ray head.
+- **No resource limits.** The provider sets no cgroup or rlimit bounds. A fork bomb or a memory
+  blow-up in an exec counts against the same uid and the same job cgroup as the Gym server, so it
+  can stop the server from starting threads or get it OOM-killed before the exec timeout fires.
+  Bound a task's commands yourself (`prlimit` or `ulimit` in the command) when that matters.
 
 ## Slurm / pyxis notes (measured on a GB300 cluster, bwrap 0.11.2, a CUDA task image)
 
