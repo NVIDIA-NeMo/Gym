@@ -41,7 +41,8 @@ class FakeSandbox:
     stdout_rejoin: Callable[[str], str] | None = None
     execs: list[dict] = field(default_factory=list)
     uploads: list[str] = field(default_factory=list)
-    # Files the oracle's answer write left, by absolute path (resolved against the exec's cwd).
+    # Files the oracle left, by absolute path: the answer write's (resolved against the exec's cwd), and oracle.txt
+    # and exit-code.txt under /logs/agent.
     files: dict[str, str] = field(default_factory=dict)
     disconnected: bool = False
 
@@ -69,6 +70,13 @@ class FakeSandbox:
         return result
 
     async def _exec(self, command, cwd):
+        if command == CLEAR_LOGS:
+            for path in (module.SOLVE_LOG, module.EXIT_CODE_LOG):
+                self.files.pop(path, None)
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+        if command.startswith("printf %s ") and command.endswith(f" > {module.EXIT_CODE_LOG}"):
+            self.files[module.EXIT_CODE_LOG] = command.split()[2]
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
         if command == "test -f /solution/solve.sh":
             return SandboxExecResult(stdout="", stderr="", return_code=0 if self.solution else 1)
         if command == "test -f /solution/answer.md":
@@ -94,6 +102,8 @@ class FakeSandbox:
         if "solve.sh" in command:
             # solve.sh output is redirected to a file in the sandbox, so the exec itself carries only the
             # exit code and the provider's own error type.
+            if self.log_present:
+                self.files[module.SOLVE_LOG] = (self.result.stdout or "") + (self.result.stderr or "")
             return SandboxExecResult(
                 stdout="", stderr="", return_code=self.result.return_code, error_type=self.result.error_type
             )
@@ -168,6 +178,9 @@ def seed_body(
 
 RESPONSES_BODY = {"input": [{"role": "user", "content": "Create hello.txt"}]}
 
+# What every turn runs first, as root: an earlier turn's oracle.txt and exit-code.txt go.
+CLEAR_LOGS = "rm -f -- /logs/agent/oracle.txt /logs/agent/exit-code.txt"
+
 
 def solve_run(sandbox: FakeSandbox) -> dict:
     return next(call for call in sandbox.execs if "bash /solution/solve.sh" in call["command"])
@@ -191,8 +204,10 @@ def test_oracle_runs_the_solution_the_server_placed_in_the_borrowed_sandbox(monk
     assert payload["usage"]["input_tokens_details"]["cached_tokens"] == 0
     # The oracle uploads nothing: the environment server put /solution in place before the session opened.
     assert sandbox.uploads == []
+    # An earlier turn's oracle.txt and exit-code.txt go first, as root, before anything else in the sandbox.
+    assert (sandbox.execs[0]["command"], sandbox.execs[0]["user"]) == (CLEAR_LOGS, TRANSFER_USER)
     # It looks for the script as the task user, where Harbor's oracle copies the solution.
-    probe = sandbox.execs[0]
+    probe = sandbox.execs[1]
     assert (probe["command"], probe["user"]) == ("test -f /solution/solve.sh", "runner")
     run = solve_run(sandbox)
     # The portable short form (`--signal=` fails on BusyBox), guarded so a missing wrapper exits 127 before
@@ -248,8 +263,13 @@ def test_task_without_solution_is_unvalidated_not_failed(monkeypatch):
     assert payload["metadata"] == {"oracle": "unvalidated"}
     assert "solve.sh" in payload["output"][0]["content"][0]["text"]
     assert "answer.md" in payload["output"][0]["content"][0]["text"]
-    # Only the two probes ran: no log folder was prepared, nothing was read, executed or uploaded.
-    assert [call["command"] for call in sandbox.execs] == ["test -f /solution/solve.sh", "test -f /solution/answer.md"]
+    # Only the earlier turn's logs were cleared and the two probes ran: no log folder was prepared, nothing was read,
+    # executed or uploaded.
+    assert [call["command"] for call in sandbox.execs] == [
+        CLEAR_LOGS,
+        "test -f /solution/solve.sh",
+        "test -f /solution/answer.md",
+    ]
     assert sandbox.uploads == []
 
 
@@ -267,6 +287,7 @@ def test_answer_md_is_written_to_the_workdir_and_submitted_as_the_response(monke
     assert payload["output"][0]["content"][0]["text"] == "it's 72\n"
     calls = [(call["command"], call["cwd"], call["user"]) for call in sandbox.execs]
     assert calls == [
+        (CLEAR_LOGS, "/", TRANSFER_USER),
         ("test -f /solution/solve.sh", "/", "runner"),
         ("test -f /solution/answer.md", "/", "runner"),
         # The read is base64 text decoded on the host, never the exec's raw stdout (`cat`).
@@ -440,7 +461,8 @@ def test_sandbox_default_user_runs_the_solution_when_the_task_names_none(monkeyp
     client = TestClient(agent.setup_webserver())
     assert client.post("/v1/agent_sessions", json=seed_body(user=None)).status_code == 200
     assert client.post("/v1/responses", json=RESPONSES_BODY).json()["metadata"]["oracle"] == "solved"
-    assert sandbox.execs[0]["user"] is None and solve_run(sandbox)["user"] is None
+    probe = next(call for call in sandbox.execs if call["command"] == "test -f /solution/solve.sh")
+    assert probe["user"] is None and solve_run(sandbox)["user"] is None
 
 
 def test_no_solution_env_means_only_the_oracle_default(monkeypatch):
@@ -504,6 +526,105 @@ def test_solution_exiting_127_itself_is_a_solution_failure(monkeypatch):
     assert payload["metadata"]["oracle"] == "failed"
     assert "oracle_error_type" not in payload["metadata"]
     assert "foo: not found" in payload["output"][0]["content"][0]["text"]
+
+
+def test_a_failed_solution_leaves_its_exit_code_beside_oracle_txt_as_harbors_oracle_does(monkeypatch):
+    """Harbor 0.22.0's oracle writes `str(return_code)` to exit-code.txt in the trial's agent folder (/logs/agent in
+    the environment) after a non-zero solve.sh, and no trajectory.json. A verifier that falls back to oracle.txt and
+    exit-code.txt when no coding-agent records exist reads that pair."""
+    sandbox = FakeSandbox(result=SandboxExecResult(stdout="half done\n", stderr="boom", return_code=2))
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"] == {"oracle": "failed", "oracle_return_code": "2"}
+    # The bare number, no newline, as root once solve.sh has returned.
+    assert sandbox.files == {module.SOLVE_LOG: "half done\nboom", module.EXIT_CODE_LOG: "2"}
+    commands = [call["command"] for call in sandbox.execs]
+    write = commands.index("printf %s 2 > /logs/agent/exit-code.txt")
+    assert commands.index(solve_run(sandbox)["command"]) < write
+    assert sandbox.execs[write]["user"] == TRANSFER_USER
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        SandboxExecResult(stdout="Done!\n", stderr="", return_code=0),
+        # The provider lost the exec (Harbor's exec raises on its own timeout): no exit code was reported.
+        SandboxExecResult(stdout="", stderr="", return_code=137, error_type="timeout"),
+    ],
+    ids=["solved", "provider_error"],
+)
+def test_no_exit_code_txt_without_a_non_zero_exit_the_sandbox_reported(monkeypatch, result):
+    sandbox = FakeSandbox(result=result)
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    assert client.post("/v1/responses", json=RESPONSES_BODY).status_code == 200
+
+    assert module.EXIT_CODE_LOG not in sandbox.files
+    assert not any(call["command"].startswith("printf") for call in sandbox.execs)
+
+
+def test_each_turn_on_a_sandbox_shows_only_its_own_oracle_txt_and_exit_code(monkeypatch):
+    """A multi-step task runs one oracle session per step on the same sandbox, and the environment server keeps a
+    harness's own /logs/agent files between turns, where Harbor empties the folder before every step. Each turn
+    removes what the previous one left, so a step that succeeds, or has no solution, never shows an earlier failure."""
+    sandbox = FakeSandbox(result=SandboxExecResult(stdout="", stderr="step 1 broke", return_code=3))
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    app = agent.setup_webserver()
+
+    def turn(number: int) -> dict:
+        # One session per turn, as the environment server opens for each step, closed before the next.
+        client = TestClient(app)
+        session = f"ag-{number}"
+        assert client.post("/v1/agent_sessions", json=seed_body(session=session)).status_code == 200
+        payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+        close = {"agent_session_id": session, "episode_id": {"rollout_id": "r1", "attempt": 0}}
+        assert client.post("/v1/agent_sessions/close", json=close).status_code == 200
+        return payload["metadata"]
+
+    assert turn(1)["oracle"] == "failed"
+    assert sandbox.files == {module.SOLVE_LOG: "step 1 broke", module.EXIT_CODE_LOG: "3"}
+
+    sandbox.result = SandboxExecResult(stdout="step 2 ok\n", stderr="", return_code=0)
+    assert turn(2)["oracle"] == "solved"
+    assert sandbox.files == {module.SOLVE_LOG: "step 2 ok\n"}
+
+    sandbox.result = SandboxExecResult(stdout="", stderr="step 3 broke", return_code=4)
+    assert turn(3)["oracle"] == "failed"
+    assert sandbox.files[module.EXIT_CODE_LOG] == "4"
+
+    # A step without a solution runs nothing: the previous step's output and exit code are gone all the same.
+    sandbox.solution = False
+    assert turn(4)["oracle"] == "unvalidated"
+    assert sandbox.files == {}
+    assert [call["command"] for call in sandbox.execs].count(CLEAR_LOGS) == 4
+
+
+@pytest.mark.parametrize("refused", [CLEAR_LOGS, "printf %s 2 > /logs/agent/exit-code.txt"], ids=["clear", "write"])
+def test_a_log_file_the_sandbox_refuses_is_warned_about_and_the_turn_still_reported(monkeypatch, caplog, refused):
+    class Refusing(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
+            result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
+            if command == refused:
+                return SandboxExecResult(stdout="", stderr="Read-only file system", return_code=1)
+            return result
+
+    sandbox = Refusing(result=SandboxExecResult(stdout="", stderr="boom", return_code=2))
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    with caplog.at_level("WARNING", logger=module.__name__):
+        payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"] == {"oracle": "failed", "oracle_return_code": "2"}
+    (warning,) = [record.getMessage() for record in caplog.records if record.name == module.__name__]
+    assert warning.startswith("hello: episode r1: could not") and "Read-only file system" in warning
 
 
 def test_seed_requires_sandbox_access(monkeypatch):
@@ -596,8 +717,10 @@ def test_provider_error_in_the_probe_is_not_scored(monkeypatch):
 
     class Lost(FakeSandbox):
         async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
-            await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
-            return SandboxExecResult(stdout="", stderr="container gone", return_code=1, error_type="sandbox")
+            result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
+            if command == "test -f /solution/solve.sh":
+                return SandboxExecResult(stdout="", stderr="container gone", return_code=1, error_type="sandbox")
+            return result
 
     sandbox = Lost()
     agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
@@ -605,7 +728,7 @@ def test_provider_error_in_the_probe_is_not_scored(monkeypatch):
     assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
     response = client.post("/v1/responses", json=RESPONSES_BODY)
     assert response.status_code == 500, response.text
-    assert [call["command"] for call in sandbox.execs] == ["test -f /solution/solve.sh"]
+    assert [call["command"] for call in sandbox.execs] == [CLEAR_LOGS, "test -f /solution/solve.sh"]
 
 
 def test_provider_error_in_the_log_dir_setup_is_not_scored_either(monkeypatch):
@@ -628,10 +751,10 @@ def test_provider_error_in_the_log_dir_setup_is_not_scored_either(monkeypatch):
     # The probe found the solution, the log-directory preparation ran as root and was the step that failed, and
     # nothing ran after it: no fallback to the default user (the failure is the provider's, not a refused root
     # switch) and no solve.sh.
-    assert sandbox.execs[0]["command"] == "test -f /solution/solve.sh"
-    assert sandbox.execs[1]["command"].startswith(f"mkdir -p {module.SOLVE_LOG_DIR}")
-    assert sandbox.execs[1]["user"] == TRANSFER_USER
-    assert len(sandbox.execs) == 2
+    assert [call["command"] for call in sandbox.execs[:2]] == [CLEAR_LOGS, "test -f /solution/solve.sh"]
+    assert sandbox.execs[2]["command"].startswith(f"mkdir -p {module.SOLVE_LOG_DIR}")
+    assert sandbox.execs[2]["user"] == TRANSFER_USER
+    assert len(sandbox.execs) == 3
 
 
 def test_verbose_logging_traces_the_solve_run_at_debug_level_only(monkeypatch, caplog):

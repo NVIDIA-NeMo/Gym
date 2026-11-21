@@ -30,6 +30,12 @@ from nemo_gym.sandbox import SandboxExecResult
 TRAJECTORY = b'{"schema_version": "ATIF-v1.7"}\n'
 
 
+def shared_session(task, sandbox, workdir: str, *, oracle: bool = False) -> SimpleNamespace:
+    """What ``_run_verifier`` reads of a single-step session verified in the agent's own sandbox; ``oracle`` is
+    whether the harness is the Harbor oracle (``HarborSession.solution_for_oracle``)."""
+    return SimpleNamespace(task=task, sandbox=sandbox, workdir=workdir, entrypoint=None, solution_for_oracle=oracle)
+
+
 class LocalSandbox:
     """Run production transfer and verifier commands on a pytest-owned filesystem tree."""
 
@@ -94,9 +100,7 @@ async def test_linked_verifier_roots_cannot_preserve_planted_success(tmp_path, m
         f"  bash {shlex.quote(str(tests / 'helper.sh'))}\nelse\n  echo 0\nfi "
         f"> {shlex.quote(str(logs / 'verifier' / 'reward.txt'))}\n"
     )
-    outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
-    )
+    outcome = await server._run_verifier(shared_session(task, LocalSandbox(), str(root)), TRAJECTORY)
     assert outcome["reward"] == 0
     assert not outcome.get("mask_sample", False)
     assert not tests.is_symlink() and not logs.is_symlink() and not (logs / "verifier").is_symlink()
@@ -147,9 +151,7 @@ async def test_the_shared_verifier_keeps_declared_sidecar_inputs_alone_and_remov
             f"> {reward}\n"
         )
 
-    outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
-    )
+    outcome = await server._run_verifier(shared_session(task, LocalSandbox(), str(root)), TRAJECTORY)
 
     assert not outcome.get("mask_sample", False), outcome
     if left_behind == "declared_input":
@@ -161,13 +163,16 @@ async def test_the_shared_verifier_keeps_declared_sidecar_inputs_alone_and_remov
     await server.shutdown()
 
 
-async def separate_verification(tmp_path, monkeypatch, verifier_tree, artifacts: list[str]) -> dict:
+async def separate_verification(
+    tmp_path, monkeypatch, verifier_tree, artifacts: list[str], *, oracle: bool = False
+) -> dict:
     """One separate-mode verification on the pytest-owned tree, with real shell and tar on both sides.
 
     The agent's sandbox and the fresh verifier sandbox are the same host tree: every artifact is collected
     from it, stopping the agent's sandbox empties the tree (the verifier starts fresh, as its own sandbox
     would), and the restores bring back what the agent left, planted files included, the way they would into
     a real verifier sandbox. ``artifacts`` are host paths under the tree; the trusted ``test.sh`` writes reward 0.
+    ``oracle`` is whether the harness is the Harbor oracle.
     """
     root, logs, tests = verifier_tree
 
@@ -204,6 +209,7 @@ async def separate_verification(tmp_path, monkeypatch, verifier_tree, artifacts:
         sandbox=agent,
         workdir=str(root),
         entrypoint=None,
+        solution_for_oracle=oracle,
         session_id="r1",
         service=lambda name: agent,
         stop_main=agent.stop,
@@ -321,6 +327,73 @@ async def test_an_artifact_that_reaches_the_tests_or_the_verifier_outputs_is_col
     assert staged.is_file() if shape in ("verifier_file", "file_through_link") else staged.is_dir()
 
 
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+@pytest.mark.parametrize("oracle", [True, False], ids=["oracle", "coding_agent"])
+async def test_the_oracles_shared_verifier_sees_harbors_oracle_logs_and_no_transcript(
+    tmp_path, monkeypatch, verifier_tree, oracle
+):
+    """Harbor's oracle writes no trajectory.json (``SUPPORTS_ATIF`` is false), so a verifier that branches on whether
+    coding-agent records exist (falling back to oracle.txt and exit-code.txt only without them) must find none
+    for an oracle run. test.sh records what it sees under /logs/agent: the oracle's two files alone, while any other
+    harness's verifier also finds the server's transcript. Gym keeps the transcript beside the verifier logs either
+    way.
+    """
+    root, logs, tests = verifier_tree
+    agent_logs = logs / "agent"
+    agent_logs.mkdir(parents=True)
+    (agent_logs / "oracle.txt").write_text("solve.sh output\n")
+    (agent_logs / "exit-code.txt").write_text("1")
+    # Whatever sat at the reserved path before the verification goes, for every harness.
+    (agent_logs / "trajectory.json").write_text('{"planted": true}')
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    seen = shlex.quote(str(logs / "verifier" / "agent-files.txt"))
+    transcript = shlex.quote(str(agent_logs / "trajectory.json"))
+    reward = shlex.quote(str(logs / "verifier" / "reward.txt"))
+    (task.path / "tests" / "test.sh").write_text(
+        f"#!/bin/bash\nls -1 {shlex.quote(str(agent_logs))} > {seen}\n"
+        f"if test -f {transcript}; then echo 1; else echo 0; fi > {reward}\n"
+    )
+
+    outcome = await server._run_verifier(shared_session(task, LocalSandbox(), str(root), oracle=oracle), TRAJECTORY)
+
+    assert not outcome.get("mask_sample", False), outcome
+    verifier_logs = Path(outcome["verifier_logs_dir"])
+    if oracle:
+        assert outcome["reward"] == 0
+        assert (verifier_logs / "agent-files.txt").read_text() == "exit-code.txt\noracle.txt\n"
+        assert not (agent_logs / "trajectory.json").exists()
+    else:
+        assert outcome["reward"] == 1
+        assert (verifier_logs / "agent-files.txt").read_text() == "exit-code.txt\noracle.txt\ntrajectory.json\n"
+        assert (agent_logs / "trajectory.json").read_bytes() == TRAJECTORY
+    assert (agent_logs / "exit-code.txt").read_text() == "1"
+    assert (verifier_logs / "trajectory.json").read_bytes() == TRAJECTORY
+    await server.shutdown()
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+@pytest.mark.parametrize("oracle", [True, False], ids=["oracle", "coding_agent"])
+async def test_the_oracles_separate_verifier_gets_its_collected_logs_and_no_transcript(
+    tmp_path, monkeypatch, verifier_tree, oracle
+):
+    """Harbor's separate verifier sees /logs/agent only through ``artifacts``: for the oracle, oracle.txt and
+    exit-code.txt as the oracle left them, and no transcript, since the oracle writes none."""
+    _, logs, _ = verifier_tree
+    agent_logs = logs / "agent"
+    agent_logs.mkdir(parents=True)
+    (agent_logs / "oracle.txt").write_text("solve.sh output\n")
+    (agent_logs / "exit-code.txt").write_text("1")
+
+    outcome = await separate_verification(tmp_path, monkeypatch, verifier_tree, [str(agent_logs)], oracle=oracle)
+
+    assert outcome["reward"] == 0 and not outcome.get("mask_sample", False), outcome
+    assert outcome["verifier_mode"] == "separate"
+    expected = ["exit-code.txt", "oracle.txt"] if oracle else ["exit-code.txt", "oracle.txt", "trajectory.json"]
+    assert sorted(path.name for path in agent_logs.iterdir()) == expected
+    assert (agent_logs / "exit-code.txt").read_text() == "1"
+    assert (Path(outcome["verifier_logs_dir"]) / "trajectory.json").read_bytes() == TRAJECTORY
+
+
 @pytest.mark.parametrize("literal", ["9" * 400, "NaN"], ids=["overflow", "nan"])
 async def test_non_finite_numeric_reward_is_measured_zero(tmp_path, monkeypatch, literal):
     """An integer too large for a float and a JSON NaN are both numbers that cannot be a score."""
@@ -343,9 +416,7 @@ async def test_unsafe_diagnostic_link_does_not_mask_valid_reward(tmp_path, monke
         f"ln -s {shlex.quote(str(outside))} {shlex.quote(str(logs / 'verifier/diagnostic-link'))}\n"
         "echo useful-output\n"
     )
-    outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
-    )
+    outcome = await server._run_verifier(shared_session(task, LocalSandbox(), str(root)), TRAJECTORY)
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     artifacts = Path(outcome["verifier_logs_dir"])
     assert not (artifacts / "diagnostic-link").exists()
@@ -381,9 +452,7 @@ async def test_optional_diagnostic_transfer_failure_preserves_score(tmp_path, mo
         await download(source, target)
 
     monkeypatch.setattr(sandbox, "download", fail_diagnostics)
-    outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=sandbox, workdir="/app", entrypoint=None), TRAJECTORY
-    )
+    outcome = await server._run_verifier(shared_session(task, sandbox, "/app"), TRAJECTORY)
     assert calls == 2
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     await server.shutdown()
@@ -398,9 +467,7 @@ async def test_unsafe_reward_link_still_masks_transfer_failure(tmp_path, monkeyp
     (task.path / "tests/test.sh").write_text(
         f"ln -s {shlex.quote(str(outside))} {shlex.quote(str(logs / 'verifier/reward.txt'))}\n"
     )
-    outcome = await server._run_verifier(
-        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
-    )
+    outcome = await server._run_verifier(shared_session(task, LocalSandbox(), str(root)), TRAJECTORY)
     assert outcome["reward"] == 0 and outcome["mask_sample"] is True
     assert not list(server._artifacts_dir.rglob("reward.txt"))
     await server.shutdown()
@@ -471,9 +538,7 @@ async def test_verifier_logs_preserve_directory_permissions_after_transfers(
     try:
         expected = server._artifacts_dir / "ordinary-directory"
         expected.mkdir()
-        outcome = await server._run_verifier(
-            SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
-        )
+        outcome = await server._run_verifier(shared_session(task, LocalSandbox(), str(root)), TRAJECTORY)
     finally:
         os.umask(previous_umask)
         await server.shutdown()
@@ -534,9 +599,7 @@ async def test_test_sh_alone_is_made_executable_as_root_and_the_package_modes_st
     sandbox = Recording()
     previous_umask = os.umask(0o077)
     try:
-        outcome = await server._run_verifier(
-            SimpleNamespace(task=task, sandbox=sandbox, workdir=str(root), entrypoint=None), TRAJECTORY
-        )
+        outcome = await server._run_verifier(shared_session(task, sandbox, str(root)), TRAJECTORY)
     finally:
         os.umask(previous_umask)
         await server.shutdown()
