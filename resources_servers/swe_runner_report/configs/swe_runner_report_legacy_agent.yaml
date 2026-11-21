@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Resources server for SWE tasks graded by their own test-runner report (see the README). Each row names its image.
+swe_runner_report_resources_server:
+  resources_servers:
+    swe_runner_report:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # Disk logs are opt-in; set an output directory to retain task/attempt logs.
+      verification_log_dir: null
+      evaluation_timeout: 2400
+      is_verifying_golden_patch: false
+      apply_anti_cheating: true
+
+      sandbox_provider: sandbox
+      enforce_agent_no_network: false
+      sandbox_model_server: null
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swe-runner-report
+
+# Golden-patch validation: grade each row's own patch. A row whose golden patch does not resolve is a broken row.
+swe_runner_report_golden_patch_resources_server:
+  resources_servers:
+    swe_runner_report:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      verification_log_dir: null
+      evaluation_timeout: 2400
+      is_verifying_golden_patch: true
+
+      sandbox_provider: sandbox
+      enforce_agent_no_network: false
+      sandbox_model_server: null
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 16384
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swe-runner-report-golden-patch
