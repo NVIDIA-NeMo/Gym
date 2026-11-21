@@ -199,6 +199,20 @@ class CaptureStore:
         for marker in self._root.glob(pattern):
             marker.unlink(missing_ok=True)
 
+    def clear_pending_for(self, rollout_ids: set[str]) -> None:
+        """Remove every pending marker of these rollouts with one directory scan.
+
+        A marker is `<rollout_id>.<token><suffix>` with a dot-free token, so the rollout id is the name before its
+        last dot. One scan keeps clearing a resumed run linear in the directory size, not rows times files.
+        """
+        if not rollout_ids:
+            return
+        for rollout_id in rollout_ids:
+            _validate_rollout_id(rollout_id)
+        for marker in self._root.glob(f"*{_PENDING_SUFFIX}"):
+            if marker.name[: -len(_PENDING_SUFFIX)].rpartition(".")[0] in rollout_ids:
+                marker.unlink(missing_ok=True)
+
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
         """Append one exchange and fsync (durable across a killed box).
 
