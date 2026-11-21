@@ -169,6 +169,12 @@ _TESTED_OUTCOME_VERSION = "1.17.11"
 # Error classification of OpenCode 2 (its errors translated by opencode2.store) is validated on this release.
 _TESTED_OPENCODE2_OUTCOME_VERSION = OPENCODE_V2_VERSION
 _API_ERROR = "APIError"
+# Runs of the read-only check of a restored session's files when the provider could not run it, and the wait
+# before the second (doubled for the third).
+_RESTORED_CHECK_ATTEMPTS = 3
+_RESTORED_CHECK_RETRY_DELAY_S = 2.0
+# A relaunch needs at least this much of the activation's budget; with less, the stopped launch is the last.
+_MIN_RELAUNCH_BUDGET_S = 1.0
 _CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
 
 
@@ -1365,14 +1371,28 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             root = session.root_dir
             files = (f"{state.runtime}/opencode", f"{root}/{HARNESS_RUNNER_FILE}", f"{root}/{REPROMPT_SCRIPT.name}")
             # A sandbox a restore just forked can refuse its first command; this check only reads.
-            present = await exec_idempotent(
-                sandbox,
-                " && ".join(f"[ -e {quote(path)} ]" for path in files),
-                what="OpenCode restored session check",
-                cwd="/",
-                timeout_s=self.config.session_close_timeout_seconds,
-            )
-            if present.return_code != 0 or present.error_type:
+            check = " && ".join(f"[ -e {quote(path)} ]" for path in files)
+            for attempt in range(1, _RESTORED_CHECK_ATTEMPTS + 1):
+                present = await exec_idempotent(
+                    sandbox,
+                    check,
+                    what="OpenCode restored session check",
+                    cwd="/",
+                    timeout_s=self.config.session_close_timeout_seconds,
+                )
+                if present.error_type is None or attempt == _RESTORED_CHECK_ATTEMPTS:
+                    break
+                LOG.warning(
+                    "OpenCode restored session check did not run (attempt %d/%d): %s",
+                    attempt,
+                    _RESTORED_CHECK_ATTEMPTS,
+                    present.error_type,
+                )
+                await asyncio.sleep(_RESTORED_CHECK_RETRY_DELAY_S * attempt)
+            if present.error_type is not None:
+                # The check did not run, which says nothing about the files: fail this re-bind, do not install.
+                self._check_sandbox_setup(check, present)
+            if present.return_code != 0:
                 LOG.warning("Restored OpenCode session %s lacks its runtime or files; installing them again", root)
                 command = _sandbox_prepare_command(
                     access.workdir, root, state.runtime, export_dir=self.config.export_dir
@@ -1941,7 +1961,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 agent_session_id=state.request.agent_session_id,
                 agent_observations=state.observations
                 or AgentObservationBundle(
-                    source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
+                    schema_version="2.0", source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
                 ),
                 trajectory=state.trajectory
                 if state.is_continuation or self.config.return_session_trajectory
@@ -2384,13 +2404,30 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         A launch whose pause or continue failed was stopped; the next launch reprompts the saved conversation, and so
         does the first launch of a restored session that had started one. Each launch has what is left of the
         activation's budget, not counting time paused for checkpoints. A launch that reprompts the conversation
-        attaches no media: the saved user message already holds the prompt's files.
+        attaches no media: the saved user message already holds the prompt's files. When a launch was stopped and no
+        budget is left, nothing is relaunched: the reply is built from that launch, as for a harness at its deadline.
         """
         close_timeout = self.config.session_close_timeout_seconds
         clock = _PauseClock(activation)
         while True:
             interrupted = 0
             if state.launch_count > 0:
+                stopped = state.session.cleanup
+                if (
+                    stopped is not None
+                    and deadline is not None
+                    and deadline + clock.paused_s - monotonic() < _MIN_RELAUNCH_BUDGET_S
+                ):
+                    # The budget ran out between the stop and the relaunch. Preparing a relaunch would discard
+                    # what the stopped launch produced and then raise: end here as a harness at its deadline does.
+                    LOG.warning(
+                        "OpenCode session %s has no budget left to relaunch after launch %d was stopped; "
+                        "reporting a timeout with that launch's output",
+                        state.request.agent_session_id,
+                        state.launch_count,
+                    )
+                    state.session.cleanup = {**stopped, "timed_out": True}
+                    return
                 await state.prepare_launch(state.launch_count + 1, timeout=close_timeout)
                 launch_payload, interrupted = await self._relaunch_payload(state, payload, prompt=prompt)
             else:

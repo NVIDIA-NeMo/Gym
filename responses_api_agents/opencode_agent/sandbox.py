@@ -278,7 +278,14 @@ class OpenCodeSandboxSession(AgentSessionState):
         assert self.checkpointed and launch > 1
         directory = f"{self.persistent_directory}/launch-{launch}"
         await self.session.begin_activation(session_dir=directory, timeout=timeout)
-        result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
+        # Safe to run twice, and a sandbox a restore just forked can refuse its first command.
+        result = await exec_idempotent(
+            self.session.sandbox,
+            f"mkdir -p -- {quote(directory)}",
+            what="OpenCode launch directory preparation",
+            cwd="/",
+            timeout_s=timeout,
+        )
         if result.error_type == "timeout":
             raise TimeoutError("OpenCode launch directory preparation timed out")
         if result.return_code != 0 or result.error_type:
@@ -311,15 +318,16 @@ class OpenCodeSandboxSession(AgentSessionState):
                         error,
                     )
                     await asyncio.sleep(_CONVERSATION_READ_RETRY_DELAY_S * attempt)
-            try:
-                await asyncio.to_thread(
-                    snapshot,
-                    Path(directory) / "opencode.db",
-                    Path(directory),
-                    harness_session_id=None,
-                    previous_message_ids=(),
+
+            def export() -> dict[str, JsonValue]:
+                # Off the event loop as a whole: the export and its decoding grow with the conversation.
+                snapshot(
+                    Path(directory) / "opencode.db", Path(directory), harness_session_id=None, previous_message_ids=()
                 )
                 return json.loads((Path(directory) / "export.json").read_text())
+
+            try:
+                return await asyncio.to_thread(export)
             except NoRootSessionError:
                 LOG.info("OpenCode had saved no conversation yet in %s", self.persistent_directory)
                 return None
