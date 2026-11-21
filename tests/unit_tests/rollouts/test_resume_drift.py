@@ -116,6 +116,26 @@ def test_operational_drift_resumes_lists_the_keys_and_records_them(tmp_path: Pat
     assert any(all(key in str(w.message) for key in named) for w in caught)
 
 
+def test_provider_address_change_resumes_and_records_the_new_address_key(tmp_path: Path) -> None:
+    """A provider moving to another node preserves the run and records transport drift."""
+    endpoint = (
+        "harbor_agent_general.responses_api_agents.harbor_agent_general."
+        "harbor_agent.kwargs.opencode_config.providers.vllm.settings.baseURL"
+    )
+    original = merged(BASE, {endpoint: "http://192.0.2.1:8000/v1"})
+    path, materialized = saved_run(tmp_path, original)
+    saved = RunManifest.model_validate_json(path.read_text())
+    current = current_manifest(tmp_path, merged(original, {endpoint: "http://192.0.2.2:8000/v1"}))
+
+    with pytest.warns(UserWarning, match="operational configuration drift"):
+        resumed = validate_resume(path, current, materialized)
+
+    assert resumed.run_id == saved.run_id
+    assert resumed.identity_overridden is False
+    entry = json.loads(resume_drift_path_for(path).read_text())
+    assert entry["operational_keys"] == [f"servers.{endpoint}"]
+
+
 @pytest.mark.parametrize(
     "drift",
     [
