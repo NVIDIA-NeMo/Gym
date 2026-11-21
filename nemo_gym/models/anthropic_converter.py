@@ -388,6 +388,10 @@ class AnthropicConverter:
                 pending_parts.append({"type": "input_text", "text": block.get("text", "")})
             elif block_type == "image":
                 pending_parts.append(self._anthropic_image_to_input_part(block))
+            elif block_type == "tool_addition":
+                # A tool made available mid-conversation; the converted request declares every tool from the start.
+                name = (block.get("tool") or {}).get("name")
+                pending_parts.append({"type": "input_text", "text": f"[tool loaded: {name}]"})
             elif block_type == "tool_use":
                 flush_message()
                 items.append(
@@ -453,6 +457,14 @@ class AnthropicConverter:
     def _anthropic_tool_result_content(self, content: Any) -> Any:
         if isinstance(content, str):
             return content
+        # A tool search result names the tools it loaded (Anthropic's `tool_reference` blocks). The converted request
+        # declares every tool as a function from the start, so the reference becomes a note naming the tool.
+        content = [
+            {"type": "text", "text": f"[tool loaded: {block.get('tool_name')}]"}
+            if block.get("type") == "tool_reference"
+            else block
+            for block in content
+        ]
         if all(block.get("type") == "text" for block in content):
             return "\n".join(block.get("text", "") for block in content)
 
