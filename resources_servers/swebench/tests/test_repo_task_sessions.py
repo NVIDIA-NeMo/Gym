@@ -505,6 +505,90 @@ async def test_a_restore_continues_in_a_fork_and_captures_against_the_saved_base
     )
 
 
+async def test_a_restore_forks_the_agent_sandbox_with_the_restoring_job_s_egress_rule(
+    case: Case, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """The saved rule allows the host of the model server that ran when the checkpoint was taken."""
+    model_url = {"now": "http://10.0.0.1:8000"}
+    for module in (f"resources_servers.{case.name}.app", "resources_servers.swebench.repo_task_sessions"):
+        monkeypatch.setattr(f"{module}.resolve_provider_config", lambda *_: {"opensandbox": {}})
+    monkeypatch.setattr("resources_servers.swebench.repo_task_sessions.get_global_config_dict", lambda: {})
+    monkeypatch.setattr("resources_servers.swebench.agent_network.resolve_provider_config", lambda *_: ["opensandbox"])
+    monkeypatch.setattr("resources_servers.swebench.agent_network.get_server_url", lambda _: model_url["now"])
+
+    class RecordingProvider(FakeSnapshotProvider):
+        """Keeps the egress rule each sandbox was created with."""
+
+        def __init__(self) -> None:
+            super().__init__(git_results)
+            self.rules: dict[str, Any] = {}
+
+        async def create(self, spec: Any) -> Any:
+            handle = await super().create(spec)
+            self.rules[handle.sandbox_id] = spec.provider_options.get("network_policy")
+            return handle
+
+        async def create_from_snapshot(self, snapshot_id: str, spec: Any) -> Any:
+            handle = await super().create_from_snapshot(snapshot_id, spec)
+            self.rules[handle.sandbox_id] = spec.provider_options.get("network_policy")
+            return handle
+
+    def allowing(host: str) -> dict[str, Any]:
+        return {"defaultAction": "deny", "egress": [{"action": "allow", "target": host}]}
+
+    provider = RecordingProvider()
+    config = checkpointing_config(tmp_path / "state")
+    blocked = {
+        "enforce_agent_no_network": True,
+        "sandbox_model_server": {"type": "responses_api_models", "name": "policy_model"},
+    }
+    async with http(make_server(case, provider, config, **blocked)) as client:
+        await seed(client, episode_seed(case))
+        for operation, body in (
+            ("prepare", control("c1")),
+            ("commit", control("c1", checkpoint_dir=str(tmp_path / "ckpt"))),
+            ("resume", control("c1")),
+        ):
+            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
+            assert reply.status_code == 200, reply.text
+    [seeded] = provider.rules
+    assert provider.rules[seeded] == allowing("10.0.0.1")
+
+    # The job is resubmitted on other nodes: its model server has another host.
+    model_url["now"] = "http://10.0.0.2:8000"
+    async with http(make_server(case, provider, config, **blocked)) as client:
+        reply = await client.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=control("r1", checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]),
+            headers=AUTH,
+        )
+        assert reply.status_code == 200, reply.text
+
+    [fork] = [sandbox_id for sandbox_id in provider.rules if sandbox_id != seeded]
+    assert provider.boxes[fork]["from_snapshot"] is not None
+    assert provider.rules[fork] == allowing("10.0.0.2"), "the fork can reach the model server that now runs"
+
+
+async def test_the_seed_s_first_commands_are_bounded(case: Case, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """``exec_idempotent`` sets no limit of its own: without one a sandbox that never answers holds the seed."""
+    budgets: dict[str, Any] = {}
+    real = importlib.import_module("nemo_gym.agents.utils.setup_retry").exec_idempotent
+
+    async def recording(sandbox: Any, command: str, **kwargs: Any) -> SandboxExecResult:
+        budgets[kwargs["what"]] = kwargs.get("timeout_s")
+        return await real(sandbox, command, **kwargs)
+
+    for module in (f"resources_servers.{case.name}.app", "resources_servers.swebench.repo_task_sessions"):
+        if hasattr(importlib.import_module(module), "exec_idempotent"):
+            monkeypatch.setattr(f"{module}.exec_idempotent", recording)
+    server = make_server(case, FakeSnapshotProvider(git_results), checkpointing_config(tmp_path))
+    async with http(server) as client:
+        await seed(client, episode_seed(case))
+
+    assert f"{case.name}: listing pristine untracked files" in budgets
+    assert set(budgets.values()) == {180}, budgets
+
+
 async def test_an_agent_s_own_run_still_seeds_with_the_flat_row(case: Case, graders: FakeSandboxProvider) -> None:
     provider = FakeSnapshotProvider(git_results)
     server = make_server(case, provider, {})
@@ -594,7 +678,10 @@ async def test_a_scrub_that_fails_is_best_effort_unless_required(case: Case, tmp
 
 
 def _no_retry_delay(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setattr("nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock()))
+    # Only the wait between attempts is replaced; the retry's deadline keeps the real ``asyncio.timeout``.
+    monkeypatch.setattr(
+        "nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock(), timeout=asyncio.timeout)
+    )
 
 
 async def test_a_seed_retries_setup_reads_a_new_sandbox_could_not_run(

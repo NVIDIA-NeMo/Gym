@@ -349,7 +349,7 @@ class TestAntiCheating:
 
 
 class _ShellSandbox:
-    async def exec(self, command: str, timeout_s=None):
+    async def exec(self, command: str, timeout_s=None, **_):
         proc = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
         return SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, return_code=proc.returncode, error_type=None)
 

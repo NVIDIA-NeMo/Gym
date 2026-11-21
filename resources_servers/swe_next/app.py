@@ -80,6 +80,7 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.repo_task_sessions import (
+    SETUP_COMMAND_TIMEOUT_S,
     RepoTaskSessionFields,
     RepoTaskSessionResourcesServer,
     loaded_capture,
@@ -106,6 +107,7 @@ async def hide_grading_artifacts(sandbox: AsyncSandbox, workdir: str) -> None:
         f"cd {shlex.quote(workdir)} && rm -rf {targets} "
         "&& if grep -qs r2e_tests run_tests.sh; then rm -f run_tests.sh; fi",
         what="swe_next: hiding grading artifacts",
+        timeout_s=SETUP_COMMAND_TIMEOUT_S,
     )
     if result.error_type is not None or result.return_code != 0:
         raise RuntimeError(f"Failed to hide grading artifacts in {workdir}")
@@ -252,7 +254,10 @@ class SWENextResourcesServer(RepoTaskSessionResourcesServer):
         await sandbox.start(spec)
         # The first command in a new sandbox, which can refuse it for a few seconds; the link is safe to make twice.
         result = await exec_idempotent(
-            sandbox, f"ln -sfn /workspace {shlex.quote(body.workdir)}", what="swe_next: linking the workdir"
+            sandbox,
+            f"ln -sfn /workspace {shlex.quote(body.workdir)}",
+            what="swe_next: linking the workdir",
+            timeout_s=SETUP_COMMAND_TIMEOUT_S,
         )
         if result.error_type is not None or result.return_code != 0:
             raise RuntimeError("Failed to create the SWE-Next working-directory link")
@@ -324,7 +329,10 @@ class SWENextResourcesServer(RepoTaskSessionResourcesServer):
         )
         # A new sandbox can refuse its first commands for a few seconds; this read is safe to repeat.
         head = await exec_idempotent(
-            sandbox, f"git -C {shlex.quote(body.workdir)} rev-parse HEAD", what="swe_next: reading HEAD"
+            sandbox,
+            f"git -C {shlex.quote(body.workdir)} rev-parse HEAD",
+            what="swe_next: reading HEAD",
+            timeout_s=SETUP_COMMAND_TIMEOUT_S,
         )
         if head.error_type is not None or head.return_code != 0 or not (head.stdout or "").strip():
             raise RuntimeError("SWE-Next seed did not produce a base commit")

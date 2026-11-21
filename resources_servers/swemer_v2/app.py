@@ -74,6 +74,7 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.repo_task_sessions import (
+    SETUP_COMMAND_TIMEOUT_S,
     RepoTaskSessionFields,
     RepoTaskSessionResourcesServer,
     loaded_capture,
@@ -238,7 +239,10 @@ class SwemerV2ResourcesServer(RepoTaskSessionResourcesServer):
         """
         # The first command in a new sandbox, which can refuse it for a few seconds; it only reads.
         precheck = await exec_idempotent(
-            sandbox, f"git -C {shlex.quote(workdir)} rev-parse --git-dir", what="swemer_v2: checking for a repository"
+            sandbox,
+            f"git -C {shlex.quote(workdir)} rev-parse --git-dir",
+            what="swemer_v2: checking for a repository",
+            timeout_s=SETUP_COMMAND_TIMEOUT_S,
         )
         if getattr(precheck, "error_type", None) is not None:
             # Not an answer: initialising here would commit a snapshot on top of a repository that may exist.
@@ -298,7 +302,10 @@ class SwemerV2ResourcesServer(RepoTaskSessionResourcesServer):
 
         # A new sandbox can refuse its first commands for a few seconds; this read is safe to repeat.
         head_result = await exec_idempotent(
-            sandbox, f"git -C {shlex.quote(body.workdir)} rev-parse HEAD", what="swemer_v2: reading HEAD"
+            sandbox,
+            f"git -C {shlex.quote(body.workdir)} rev-parse HEAD",
+            what="swemer_v2: reading HEAD",
+            timeout_s=SETUP_COMMAND_TIMEOUT_S,
         )
         if (
             head_result.error_type is not None

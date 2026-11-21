@@ -54,7 +54,7 @@ def _scrub_outcome(result: Any) -> tuple[str | None, str | None]:
 
     ``failure``: a ref or the reflog may still reach commits after the base (the command failed, the script skipped
     the repository, or it counted commits that are no ancestor of the base). ``residue``: the refs are gone but
-    ``git gc`` did not prune, so those commits remain as objects no name reaches.
+    ``git gc`` did not prune, so those commits remain as objects the agent can still list and read.
     """
     if getattr(result, "error_type", None) is not None:
         return f"the command did not complete ({result.error_type})", None
@@ -78,9 +78,10 @@ async def apply_anti_cheat_setup(
     sandbox to the agent; with ``required`` it raises :class:`AntiCheatSetupError` instead, so the seed fails and the
     rollout is retried rather than run against a history that holds the answer.
 
-    With ``required``, a scrub that ran but skipped the repository, printed no summary, or left refs to later commits
-    also raises. A ``git gc`` failure after the refs are gone is logged: no name reaches those commits. It is tried
-    again only when an earlier attempt raised, because that attempt's gc may still be running.
+    With ``required``, a scrub that ran but skipped the repository, printed no summary, left refs to later commits,
+    or removed the refs without pruning (``git gc`` failed) also raises: commits no name reaches are still objects
+    the agent can list and read. A failed gc is tried again only when an earlier attempt raised, because that
+    attempt's gc may still be running.
     """
     remote_fpath = f"{workdir.rstrip('/')}/anti_cheat_setup.sh"
     delay = ANTI_CHEAT_RETRY_DELAY_S
@@ -124,8 +125,7 @@ async def apply_anti_cheat_setup(
             await asyncio.sleep(delay)
             delay *= 2
             continue
-        if failure is not None and required:
+        if required:
             raise AntiCheatSetupError(message)
-        # Also a required scrub whose refs are gone but whose gc failed: no name reaches the commits.
         print(f"[{log_prefix}] {message} (non-fatal)", file=sys.stderr)
         return
