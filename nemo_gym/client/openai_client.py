@@ -74,7 +74,8 @@ RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [404, 408, 500]
 # 429 is usually a transient rate limit. Match only these spent-key codes/types;
 # generic "quota exceeded" wording is used by per-minute limits that recover.
 PERMANENT_QUOTA_CODES = ("budget_exceeded", "insufficient_quota")
-PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_error")
+PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token")
+AUTH_BACKEND_FAILURE_MARKERS = ("error querying the database", "connection slots", "too many clients")
 # A provider that says it is busy is waited out on a time budget, not a count of tries.
 WAIT_OUT_ERROR_CODES = (429, 503)
 # The most of an error answer's body kept for a retry decision and on the final error: enough for the JSON error
@@ -358,13 +359,23 @@ def _error_body_is_context_overflow(content: bytes | str) -> bool:
     return CONTEXT_LENGTH_EXCEEDED_ERROR_CODE in {token.lower() for token in _parsed_error_codes(content)}
 
 
+def _error_body_has_auth_backend_failure(content: bytes | str) -> bool:
+    """Recognise temporary authentication database errors returned as HTTP 401/403 (#3945)."""
+    lowered = _decode_error_text(content).lower()
+    return any(marker in lowered for marker in AUTH_BACKEND_FAILURE_MARKERS)
+
+
 def _error_body_is_permanent_auth(content: bytes | str) -> bool:
     """True when a 401/403 body is a revoked or invalid key, not a one-off denial."""
     codes = {token.lower() for token in _parsed_error_codes(content)}
     if any(code in codes for code in PERMANENT_AUTH_CODES):
         return True
     lowered = _decode_error_text(content).lower()
-    return "invalid api key" in lowered or "incorrect api key" in lowered
+    if "invalid api key" in lowered or "incorrect api key" in lowered:
+        return True
+    # The generic authentication_error type is permanent unless the provider explicitly
+    # identifies a temporary database failure. Specific invalid-key markers win above.
+    return "authentication_error" in codes and not _error_body_has_auth_backend_failure(content)
 
 
 class PermanentEndpointError(ClientResponseError):
@@ -757,10 +768,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 return failure
 
             response._ng_observe_body_failure = observe_body_failure
+            auth_retry_body = None
+            auth_failure = None
             if response.status in (401, 403):
-                failure = observe_http_failure(response)
-                body = await _read_error_body(response, failure)
+                auth_failure = observe_http_failure(response)
+                body = await _read_error_body(response, auth_failure)
                 permanent_auth = _error_body_is_permanent_auth(body)
+                backend_failure = _error_body_has_auth_backend_failure(body)
                 content = _bounded_error_body(body)
                 del body
                 if permanent_auth:
@@ -768,18 +782,22 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                         operation_id=operation_id,
                         outcome="failed",
                         final_attempt_id=f"{operation_id}-{tries}",
-                        failure_id=failure.event_id if failure else None,
+                        failure_id=auth_failure.event_id if auth_failure else None,
                     )
-                    self._trip_permanent_error(response.status, content, request_kwargs.get("url"), failure)
-                observe_terminal(
-                    operation_id=operation_id,
-                    outcome="failed",
-                    final_attempt_id=f"{operation_id}-{tries}",
-                    failure_id=failure.event_id if failure is not None else None,
-                )
-                return response
+                    self._trip_permanent_error(response.status, content, request_kwargs.get("url"), auth_failure)
+                if not backend_failure:
+                    observe_terminal(
+                        operation_id=operation_id,
+                        outcome="failed",
+                        final_attempt_id=f"{operation_id}-{tries}",
+                        failure_id=auth_failure.event_id if auth_failure else None,
+                    )
+                    return response
+                # The body was already read for classification. Reuse it in the bounded
+                # retry path and keep this HTTP attempt's failure record exactly once.
+                auth_retry_body = content
 
-            if response.status not in RETRY_ERROR_CODES:
+            if response.status not in RETRY_ERROR_CODES and auth_retry_body is None:
                 if response.status >= 400:
                     # The caller raises or handles it; the status is still this call's last observed attempt.
                     failure = observe_http_failure(response)
@@ -795,12 +813,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
             # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
-            last_failure = observe_http_failure(response)
-            body = await _read_error_body(response, last_failure)
-            permanent_quota = response.status == 429 and _error_body_is_permanent_quota(body)
-            context_overflow = _error_body_is_context_overflow(body)
-            content = _bounded_error_body(body)
-            del body
+            last_failure = auth_failure if auth_retry_body is not None else observe_http_failure(response)
+            if auth_retry_body is not None:
+                content = auth_retry_body
+                permanent_quota = False
+                context_overflow = _error_body_is_context_overflow(content)
+            else:
+                body = await _read_error_body(response, last_failure)
+                permanent_quota = response.status == 429 and _error_body_is_permanent_quota(body)
+                context_overflow = _error_body_is_context_overflow(body)
+                content = _bounded_error_body(body)
+                del body
             if permanent_quota:
                 observe_terminal(
                     operation_id=operation_id,
@@ -855,7 +878,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 )
                 await _raise_exhausted(response, content, last_failure)
 
-            kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
+            kind = (
+                "auth_backend"
+                if auth_retry_body is not None
+                else ("rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error")
+            )
             print(
                 f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} wait_s={wait:.1f} error_msg={content.decode('utf-8', errors='replace')[:200]}]",
                 flush=True,
