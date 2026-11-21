@@ -16,7 +16,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import Field, JsonValue, model_validator
+from pydantic import AliasChoices, Field, JsonValue, model_validator
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -88,7 +88,11 @@ class QwenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     # Route id Qwen Code sends as the model name. The Gym model server serves its configured model.
     model: str
-    qwen_version: str = Field(default=QWEN_VERSION, pattern=r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+    qwen_code_version: str = Field(
+        default=QWEN_VERSION,
+        validation_alias=AliasChoices("qwen_code_version", "qwen_version"),
+        pattern=r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$",
+    )
     concurrency: int = Field(default=32, gt=0)
     # Seconds per activation, children included, enforced by the sandbox's process supervisor.
     timeout: float = Field(default=3600, gt=0, allow_inf_nan=False)
@@ -246,7 +250,7 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         state = QwenSession(
-            version=self.config.qwen_version,
+            version=self.config.qwen_code_version,
             request=body,
             provider_name=provider.name,
             sandbox_id=sandbox.sandbox_id,

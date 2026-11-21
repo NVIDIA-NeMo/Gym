@@ -149,7 +149,6 @@ def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[st
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
-    harbor_version: str | None = None
     harbor_ray_task_num_cpus: float = Field(default=0.25, ge=0)
     # Preserve cwd-based paths and stable resumable jobs for existing callers.
     harbor_resolve_paths_from_gym_root: bool = False

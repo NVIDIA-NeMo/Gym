@@ -74,7 +74,9 @@ Forks and teammates keep the root model.
 
 ## Runtime and sandbox setup
 
-Session setup installs a private Node.js 22.23.2 and `@qwen-code/qwen-code@0.25.1` (npm, `--ignore-scripts`) under
+Set `qwen_code_version` to pin the Qwen Code CLI or use `qwen_code_version: "latest"` to resolve npm's latest release at startup. Existing configs can still use `qwen_version`. The `model` setting selects the inference model.
+
+By default, session setup installs a private Node.js 22.23.2 and `@qwen-code/qwen-code@0.25.1` (npm, `--ignore-scripts`) under
 `/tmp/nemo-gym-qwen-runtime-0.25.1-node-22.23.2`, checks the version Qwen Code reports, and reuses a runtime that
 already reports it. The agent server downloads the official Node.js build for the sandbox's architecture once into
 its asset cache, checks the SHA-256 pinned in `sandbox.py`, and uploads it; the sandbox checks it again. Qwen Code runs

@@ -42,7 +42,7 @@ _NPM = {
     "droid_agent": ("droid_version", "@factory/cli"),
     "kimi_code_agent": ("kimi_version", "@moonshot-ai/kimi-code"),
     "kilocode_agent": ("kilo_version", "@kilocode/cli"),
-    "qwen_code_agent": ("qwen_version", "@qwen-code/qwen-code"),
+    "qwen_code_agent": ("qwen_code_version", "@qwen-code/qwen-code"),
 }
 _SOURCE = {
     "nooa_agent": (
@@ -54,8 +54,6 @@ _SOURCE = {
 }
 _PYTHON = {
     "crewai_agent": ("crewai_version", ("crewai",)),
-    "harbor_agent": ("harbor_version", ("harbor",)),
-    "harbor_agent_general": ("harbor_version", ("harbor",)),
     "langchain_deepagents_agent": ("deepagents_version", ("deepagents",)),
     "langgraph_agent": ("langgraph_version", ("langgraph",)),
     "mini_swe_agent": ("mini_swe_version", ("mini-swe-agent",)),
@@ -118,6 +116,8 @@ def resolve_harness_version(agent: str, config: DictConfig) -> str | None:
     """Resolve latest in the adapter's installer field before serializing worker configs."""
     agent, config = harness_version_target(agent, config)
     field = _version_field(agent)
+    if agent == "qwen_code_agent" and field not in config:
+        field = "qwen_version"  # Input spelling used by older Gym configs.
     if field is None or (requested := config.get(field)) is None:
         return None
     if config.get("harness_repo") and agent not in _SOURCE and agent not in ("hermes_agent", "hermes_sandboxed_agent"):

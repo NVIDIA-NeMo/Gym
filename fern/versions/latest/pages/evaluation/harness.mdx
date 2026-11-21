@@ -49,12 +49,12 @@ OpenClaw and Pi use npm's `latest` tag. OpenCode and Hermes use the release mark
 
 | Installer | Version fields | What `latest` selects |
 | --- | --- | --- |
-| npm | `claude_code_version`, `cline_version`, `codex_version`, `copilot_version`, `droid_version`, `kilo_version`, `kimi_version`, `qwen_version` | The package's latest distribution tag |
+| npm | `claude_code_version`, `cline_version`, `codex_version`, `copilot_version`, `droid_version`, `kilo_version`, `kimi_version`, `qwen_code_version` | The package's latest distribution tag |
 | Release binary | `goose_version`, `prime_agent_version`, `pool_version` | The publisher's current release |
-| Python package | `crewai_version`, `deepagents_version`, `harbor_version` (also Terminus 2), `langgraph_version`, `mini_swe_version`, `nemo_fabric_version`, `openhands_version`, `stirrup_version`, `verifiers_version` | The current PyPI version. OpenHands installs the same version of its SDK and tools. |
+| Python package | `crewai_version`, `deepagents_version`, `harbor_version` (Terminus 2 only), `langgraph_version`, `mini_swe_version`, `nemo_fabric_version`, `openhands_version`, `stirrup_version`, `verifiers_version` | The current PyPI version. OpenHands installs the same version of its SDK and tools. |
 | Git checkout | `nooa_version`, `simple_strands_version`, `tau2_version` | The current commit of the repository's default branch. For these harnesses, `harness_repo` can name a fork, and a full SHA selects an exact commit. |
 
-Python package overrides use a version-specific component environment. If the selected package conflicts with Gym's requirements, its environment setup reports the conflict. Harbor's package version controls the Harbor engine. Harbor's agent configuration still controls a harness launched inside Harbor. Gym-native agents ship with the installed Gym revision. A legacy adapter that uses a prebuilt Pi or Hermes runtime requires a matching runtime in the task image.
+Python package overrides use a version-specific component environment. If the selected package conflicts with Gym's requirements, its environment setup reports the conflict. Gym-native agents ship with the installed Gym revision. A legacy adapter that uses a prebuilt Pi or Hermes runtime requires a matching runtime in the task image.
 
 ## The composed instance is renamed
 
