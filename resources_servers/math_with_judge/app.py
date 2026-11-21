@@ -30,6 +30,8 @@ from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
+    VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -45,7 +47,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.telemetry import MeteredSemaphore, resources_operation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import call_judge, normalize_math_judge_verdict
+from nemo_gym.verification import JudgeError, call_judge, normalize_math_judge_verdict
 
 
 class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
@@ -70,8 +72,8 @@ class LibraryJudgeMathVerifyRequest(LibraryJudgeMathRunRequest, BaseVerifyReques
 class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
-    # The verdict the reply gave, `[[A=B]]` or `[[A!=B]]`, or `judge_parsing_error` when it gave none. A reply without
-    # a verdict still scores as unequal, and the saved label lets recovery re-judge it instead of keeping that zero.
+    # The verdict the reply gave, `[[A=B]]` or `[[A!=B]]`. A reply without one raises JudgeError, which masks the row;
+    # `judge_parsing_error` appears only on rows saved by earlier versions, which recovery re-judges.
     # Servers that parse their own verdict (physics_judge, math_with_autograder, ugphysics_judge) build this model
     # without a label. Recovery reads a saved null label as a judge that gave no verdict, so an unset label is left
     # out and their evaluations are saved as before the field existed.
@@ -325,6 +327,13 @@ def _prepare_format_tolerant_response(response: str) -> str:
     return _repair_final_unclosed_box(_normalize_unicode_digits(response))
 
 
+class LibraryVerifierError(Exception):
+    """math-verify gave no result: it raised or timed out, or its process crashed or ran past its deadline.
+
+    The verifier failed, not the answer, so a grade that rests on math-verify alone is masked instead of scored 0.
+    """
+
+
 def _run_math_verify(
     library_verifier: Any, expected_answer: str, generated_answer: str
 ) -> tuple[float, Optional[str]]:
@@ -359,9 +368,10 @@ def _run_math_verify(
 
     # It's possible to emit a TimeoutException and that wouldn't be caught since
     # it actually subclasses from BaseException and math-verify itself does not
-    # catch it.
-    except (Exception, TimeoutException):
-        return 0.0, None
+    # catch it. An unparseable expected answer raises ValueError. Either way the
+    # library gave no grade, which is not the same as grading the answer wrong.
+    except (Exception, TimeoutException) as error:
+        raise LibraryVerifierError(f"math-verify raised {type(error).__name__}: {str(error)[:500]}") from error
 
 
 def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, result_connection: Any) -> None:
@@ -375,7 +385,12 @@ def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, 
         ),
     )
     try:
-        result_connection.send(_run_math_verify(library_verifier, expected_answer, generated_answer))
+        try:
+            result: Any = _run_math_verify(library_verifier, expected_answer, generated_answer)
+        except LibraryVerifierError as error:
+            # Sent like a result, so the parent can tell a failed verification from a wrong answer.
+            result = LibraryVerifierError(str(error))
+        result_connection.send(result)
     finally:
         result_connection.close()
 
@@ -447,9 +462,22 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
-            body.question, body.expected_answer, combined_response
-        )
+        try:
+            reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
+                body.question, body.expected_answer, combined_response
+            )
+        except LibraryVerifierError as error:
+            # math-verify failed and no judge graded the answer in its place: the zero would not be a measurement.
+            return LibraryJudgeMathVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                extracted_answer=None,
+                library_reward=0.0,
+                judge_evaluations=None,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=str(error),
+            )
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
@@ -482,9 +510,15 @@ Example output: "My final verdict is different [[A!=B]]"."""
         if answer_candidate is None or not answer_candidate.strip():
             return 0.0, None, 0.0, None
 
-        library_reward, extracted_answer = await self._verify_answer_with_library_async(
-            expected_answer, verification_response
-        )
+        try:
+            library_reward, extracted_answer = await self._verify_answer_with_library_async(
+                expected_answer, verification_response, raise_on_failure=True
+            )
+        except LibraryVerifierError:
+            if not self.config.should_use_judge:
+                raise
+            # The judge grades the answer in math-verify's place.
+            library_reward, extracted_answer = 0.0, None
         if not self.config.should_use_judge or library_reward > 0.5:
             return library_reward, extracted_answer, library_reward, None
 
@@ -519,8 +553,21 @@ Example output: "My final verdict is different [[A!=B]]"."""
         return s
 
     async def _verify_answer_with_library_async(
-        self, expected_answer: str, generated_answer: str
+        self, expected_answer: str, generated_answer: str, *, raise_on_failure: bool = False
     ) -> tuple[float, Optional[str]]:
+        """Grade with math-verify in a child process.
+
+        A failed verification (``LibraryVerifierError``) raises with ``raise_on_failure``, which this server's own
+        grading sets; otherwise it scores 0.0, as subclasses that grade with their own ``_verify_answer`` expect.
+        """
+        try:
+            return await self._grade_with_library(expected_answer, generated_answer)
+        except LibraryVerifierError:
+            if raise_on_failure:
+                raise
+            return 0.0, None
+
+    async def _grade_with_library(self, expected_answer: str, generated_answer: str) -> tuple[float, Optional[str]]:
         async with resources_operation(
             self._library_verifier_semaphore, operation="verify", executor="subprocess"
         ) as operation:
@@ -546,6 +593,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
     async def _wait_for_library_verifier_process(
         process: Any, result_connection: Any, timeout_seconds: float, *, operation: Optional[Any] = None
     ) -> tuple[float, Optional[str]]:
+        """Return the child's grade; raise ``LibraryVerifierError`` if it timed out, crashed or reported a failure."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
         try:
@@ -563,18 +611,21 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     process.join(timeout=0)
                     if operation is not None:
                         operation.outcome = "timeout"
-                    return 0.0, None
+                    raise LibraryVerifierError(f"math-verify did not finish within {timeout_seconds} s")
                 await asyncio.sleep(min(0.05, remaining))
 
             process.join(timeout=0)
             if process.exitcode != 0 or not result_connection.poll():
                 if operation is not None:
                     operation.outcome = "crashed"
-                return 0.0, None
+                raise LibraryVerifierError(f"math-verify process exited with code {process.exitcode} and no result")
             try:
-                return result_connection.recv()
+                result = result_connection.recv()
             except EOFError:
-                return 0.0, None
+                raise LibraryVerifierError("math-verify process closed its pipe without a result") from None
+            if isinstance(result, LibraryVerifierError):
+                raise result
+            return result
         finally:
             with contextlib.suppress(OSError, AssertionError):
                 if process.is_alive():
@@ -635,14 +686,21 @@ Example output: "My final verdict is different [[A!=B]]"."""
             json=responses_create_params,
             response_model=NeMoGymResponse,
         )
-        # Currently, for all the cases in which the response from the LLM judge
-        # does not conform to the expected format, the judge's evaluation is
-        # treated as if the answers are not equal.  This may not be ideal, but it
-        # is intended to minimize the number of failures for verify requests.
-        # The evaluation records that it found no verdict, so the zero is not mistaken for a grade.
-        verdict_label = self.JUDGE_PARSING_ERROR_LABEL
-        last_output = judge_response.output[-1]
-        last_content = last_output.content[-1] if last_output.type == "message" else None
+        # A reply cut at the judge's own output limit, or one that names no verdict (only reasoning, a refusal, or
+        # text without a label), is no grade: the judge failed, not the answer. JudgeError makes judge_failsafe mask
+        # the row as judge_unparseable, and recovery re-judges it from the saved answer.
+        if judge_response.status == "incomplete" or judge_response.incomplete_details is not None:
+            reason = judge_response.incomplete_details.reason if judge_response.incomplete_details else None
+            raise JudgeError(
+                f"math judge reply was cut off ({reason or 'incomplete'})", failure_kind=JUDGE_UNPARSEABLE
+            )
+        verdict_label = None
+        last_output = judge_response.output[-1] if judge_response.output else None
+        last_content = (
+            last_output.content[-1]
+            if last_output is not None and last_output.type == "message" and last_output.content
+            else None
+        )
         if last_content is not None and last_content.type == "output_text":
             output_text = normalize_math_judge_verdict(last_content.text)
             equal_choice_position = output_text.rfind(self.JUDGE_EQUAL_LABEL)
@@ -653,6 +711,14 @@ Example output: "My final verdict is different [[A!=B]]"."""
                     if equal_choice_position > not_equal_choice_position
                     else self.JUDGE_NOT_EQUAL_LABEL
                 )
+        if verdict_label is None:
+            reply = (
+                last_content.text[-500:] if last_content is not None and last_content.type == "output_text" else None
+            )
+            raise JudgeError(
+                f"math judge reply names neither {self.JUDGE_EQUAL_LABEL} nor {self.JUDGE_NOT_EQUAL_LABEL}: {reply!r}",
+                failure_kind=JUDGE_UNPARSEABLE,
+            )
         judge_evaluation = JudgeEvaluation(
             responses_create_params=responses_create_params, response=judge_response, verdict_label=verdict_label
         )
