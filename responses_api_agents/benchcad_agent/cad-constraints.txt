@@ -1,0 +1,2 @@
+# Upstream overrides nlopt's numpy>=2 metadata; CadQuery 2.3 needs numpy 1.x.
+numpy==1.26.4
