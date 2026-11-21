@@ -28,9 +28,10 @@ Other row fields (dataset labels, ids) are allowed and carried into the verify r
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class RubricCriterion(BaseModel):
@@ -76,11 +77,30 @@ class TaskData(BaseModel):
         description="boxed: the final answer needs a non-empty \\boxed{}; free: judged on the whole final answer. Defaults to the server's default_answer_format.",
         json_schema_extra={"consumed_by": ["verify"]},
     )
+    answer_format_regex: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Full-match final-answer contract with a named 'answer' capture; overrides boxed/free selection.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
     rubric: Optional[list[RubricCriterion]] = Field(
         default=None,
         description="Makes this a rubric row: the judge marks every criterion and the server sums the points.",
         json_schema_extra={"consumed_by": ["verify"]},
     )
+
+    @field_validator("answer_format_regex")
+    @classmethod
+    def validate_answer_format_regex(cls, value: str | None) -> str | None:
+        """Reject malformed contracts before a row can be graded."""
+        if value is not None:
+            try:
+                pattern = re.compile(value)
+            except re.error as exc:
+                raise ValueError("Invalid answer_format_regex") from exc
+            if "answer" not in pattern.groupindex:
+                raise ValueError("answer_format_regex requires a named 'answer' capture")
+        return value
 
     @model_validator(mode="after")
     def _row_is_gradable(self) -> TaskData:

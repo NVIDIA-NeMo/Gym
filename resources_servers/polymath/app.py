@@ -39,6 +39,8 @@ import math
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
+from pydantic import Field
+
 from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
@@ -58,6 +60,8 @@ class PolyMathResourcesServerConfig(LibraryJudgeMathResourcesServerConfig):
 
 
 class PolyMathVerifyRequest(LibraryJudgeMathVerifyRequest):
+    answer_format_regex: None = Field(default=None, exclude=True)
+
     # Per-row metadata that PolyMath's metrics consume. Both fields are
     # optional so the server can still verify rows without them (e.g.
     # the math_with_judge example data, which has neither).
