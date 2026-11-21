@@ -13,6 +13,9 @@ seed, verify, close, fences and expiry it keeps as they are:
   and a verify after the restore grades the patch the checkpoint saved instead of capturing it again;
 - a release deletes the snapshots of checkpoints the controller no longer keeps.
 
+What a snapshot holds depends on the provider: always the sandbox's files, and its running processes too when the
+provider's ``snapshot_keeps_processes`` says so (a VM memory snapshot).
+
 With checkpointing on, a server exports its sessions only when its sandbox provider can snapshot; otherwise it runs
 ``restart_only``, and its episodes start over after a crash. A server whose grader needs something a snapshot of its
 provider does not keep, such as processes the agent started, declares ``checkpoint_mode = "restart_only"`` itself.
