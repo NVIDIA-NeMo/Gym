@@ -42,8 +42,8 @@ config's ``mcp_server_name`` and ``mcp_bearer_token`` the MCP endpoint too. A sa
 server, so the server guards it: seeding, closing, verification, metrics, the reverify mode, the app
 catalog, the task state and the tool routes answer callers other than this node and ``trusted_networks``
 as routes that do not exist (404), before reading their bodies, which leaves sandboxes the MCP endpoint,
-the file API and their exposure's routes, and no generated docs are served; and session cookies and MCP tokens are signed with a per-process secret
-(``get_session_secret``) instead of Gym's key, which anyone can derive from the server's name. With
+the file API and their exposure's routes, and no generated docs are served; and session cookies and MCP tokens are signed with a secret made for
+the run (``signs_sessions_with_run_secret``) instead of Gym's key, which anyone can derive from the server's name. With
 ``sandbox_config.block_internet`` a sandbox reaches nothing else: OpenSandbox's egress policy refuses
 every outbound connection except to this server and the model servers.
 """
@@ -784,16 +784,18 @@ class _SandboxEpisode(_Episode):
 
 class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
     config: OfficeEnvSandboxResourcesServerConfig
+    # A sandbox can reach this server, so its session cookies and MCP tokens are signed with a secret made for the run
+    # (Gym's run_session_secret), not with the key anyone can derive from the server's name.
+    signs_sessions_with_run_secret = True
     # Episodes by file API token, a lock per episode for the awaits on its sandbox (kept while a request holds or awaits
     # it, so a closed episode, or an ID never seeded, leaves none), whether shutdown has begun, the lent sandboxes
-    # (made at the first lend: _lending), and what get_session_secret and _require_gym_caller read.
+    # (made at the first lend: _lending), and what _require_gym_caller reads.
     _tokens: dict[str, str] = PrivateAttr(default_factory=dict)
     _locks: weakref.WeakValueDictionary[str, asyncio.Lock] = PrivateAttr(default_factory=weakref.WeakValueDictionary)
     _shutting_down: bool = PrivateAttr(default=False)
     _lent: LentSandboxes | None = PrivateAttr(default=None)
     _seeding: asyncio.Semaphore = PrivateAttr(default_factory=lambda: asyncio.Semaphore(1))  # a seed's turn
     _seeds_queued: int = PrivateAttr(default=0)  # seeds waiting for or taking their turn
-    _session_secret: str | None = PrivateAttr(default=None)
     _node_addresses: frozenset[str] = PrivateAttr(default=frozenset())
     _own_addresses: bool = PrivateAttr(default=False)
     _trusted_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = PrivateAttr(default=())
@@ -803,8 +805,6 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         if self.config.num_workers not in (None, 1):
             raise ValueError("OfficeEnv sandbox episodes are process-local and require num_workers=1")
         _show_seed_lines()
-        # One process holds every episode, so one secret signs all of its sessions.
-        self._session_secret = token_urlsafe(32)
         self._node_addresses = node_addresses()
         self._own_addresses = binds_only_own_addresses()
         if not self._own_addresses:
@@ -813,11 +813,6 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
                 "addresses: only loopback, the hostname's addresses and trusted_networks reach Gym's routes"
             )
         self._trusted_networks = tuple(ipaddress.ip_network(network) for network in self.config.trusted_networks)
-
-    def get_session_secret(self) -> str:
-        """The key that signs session cookies and MCP tokens: a per-process secret, since a sandbox can reach this
-        server and Gym's name-derived key is one anyone can compute."""
-        return self._session_secret or super().get_session_secret()
 
     def get_session_cookie_name(self) -> str:
         """A sandbox's calls get the session cookie too (``curl -v`` shows it), so its name says nothing of the

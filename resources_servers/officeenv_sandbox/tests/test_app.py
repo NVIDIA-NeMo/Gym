@@ -60,6 +60,7 @@ from nemo_gym.server_runtime import (
     sandbox_lending,
 )
 from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
+from nemo_gym.server_runtime.base_server import run_session_secret
 from resources_servers.officeenv.app import (
     OfficeEnvResourcesServer,
     OfficeEnvResourcesServerConfig,
@@ -2529,7 +2530,7 @@ def test_in_sandbox_mode_a_token_signed_with_the_servers_name_is_refused(sandbox
     with mcp_client(server) as local, mcp_client(server, client=SANDBOX) as remote:
         seeded = local.post("/seed_session", json=seed_body())
         grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
-        claims = mcp_session_token_serializer(server.get_session_secret()).loads(grant)
+        claims = mcp_session_token_serializer(server.session_secret).loads(grant)
         # What code in a sandbox could sign: the episode's session with every tool.
         forged = mcp_session_token_serializer(server.get_session_middleware_key()).dumps({**claims, "tools": None})
         call = {"name": "user_complete_task", "arguments": {"answer": "done"}}
@@ -2537,11 +2538,13 @@ def test_in_sandbox_mode_a_token_signed_with_the_servers_name_is_refused(sandbox
         assert refused["isError"] is True and "Invalid Gym MCP session token" in json.dumps(refused)
 
 
-def test_sandbox_mode_signs_with_a_per_process_secret_and_names_its_cookie_neutrally(sandboxes) -> None:
+def test_sandbox_mode_signs_with_a_run_secret_and_names_its_cookie_neutrally(sandboxes) -> None:
     server = make_server()
     named_key = f"{type(server).__name__}___{SERVER_NAME}"
     assert server.get_session_middleware_key() == named_key  # appears in logs and error text
-    assert server.get_session_secret() not in (named_key, make_server().get_session_secret())
+    # Gym's secret for this server and run, which its workers would share; another name has its own
+    assert server.session_secret == run_session_secret(SERVER_NAME) != named_key
+    assert make_server(name="officeenv_sandbox_pi_resources_server").session_secret != server.session_secret
     # a sandbox's calls get the cookie too, so its name says nothing of the environment, and stays unique: here beside
     # a harness's copy of the server in the same run
     cookie = server.get_session_cookie_name()
