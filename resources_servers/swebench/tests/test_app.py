@@ -12,16 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import base64
 import hashlib
 import json
+import logging
 import shutil
 import subprocess
+from collections.abc import Coroutine
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -31,6 +35,8 @@ from swebench.harness.run_evaluation import make_test_spec
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox.testing import FakeSandboxProvider, fake_sandbox
+from resources_servers.swebench import swebench_patches
 from resources_servers.swebench.app import (
     DockerContainer,
     SwebenchResourcesServer,
@@ -627,6 +633,121 @@ class _FakeEvalSandbox:
 
     async def stop(self) -> None:
         pass
+
+
+class _BlockingEvalProvider(FakeSandboxProvider):
+    """A sandbox provider whose evaluation script runs until it is cancelled, and whose close awaits before it finishes.
+
+    The verification sandbox is a real `AsyncSandbox` on this provider, so its stop is shielded and bounded as in
+    production.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.eval_started = asyncio.Event()
+        self.close_started = asyncio.Event()
+
+        async def on_close() -> None:
+            self.close_started.set()
+            # A close that finishes without awaiting would pass even when the cancellation reached it.
+            await anyio.sleep(0.01)
+
+        self.on_close.side_effect = on_close
+
+    async def exec(self, handle: SandboxHandle, command: str, **kwargs: Any) -> SandboxExecResult:
+        if command != EVAL_SCRIPT_COMMAND:
+            return await super().exec(handle, command, **kwargs)
+        self.eval_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable: the evaluation script runs until it is cancelled")
+
+
+def assert_log_files_closed(log_files: list[tuple[logging.Logger, logging.FileHandler]]) -> None:
+    assert log_files, "run_instance opened no log file"
+    for logger, handler in log_files:
+        assert handler.stream is None, f"{handler.baseFilename} is still open"
+        assert handler not in logger.handlers
+
+
+class TestRunInstanceCleanup:
+    """`run_instance` stops its sandbox and closes its log file on every path, and never hides a cancellation."""
+
+    def _start(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, provider: _BlockingEvalProvider
+    ) -> tuple[Coroutine[Any, Any, dict], list[tuple[logging.Logger, logging.FileHandler]]]:
+        monkeypatch.chdir(tmp_path)  # run_instance writes its logs under the working directory
+        log_files = []
+        setup_logger = swebench_patches.setup_logger
+
+        def recording_setup_logger(*args: Any, **kwargs: Any) -> logging.Logger:
+            logger = setup_logger(*args, **kwargs)
+            log_files.extend((logger, h) for h in logger.handlers if isinstance(h, logging.FileHandler))
+            return logger
+
+        monkeypatch.setattr(swebench_patches, "setup_logger", recording_setup_logger)
+        test_spec = make_server()._make_test_spec(SWEBenchVerifyRequest.model_validate(CHART_ROW))
+        container = DockerContainer(id="run-id", instance_id=test_spec.instance_id)
+        container._inner_container = fake_sandbox(provider=provider)
+        verify = run_instance(
+            test_spec=test_spec,
+            pred={"instance_id": test_spec.instance_id, "model_patch": "diff --git a/src/a.js b/src/a.js\n"},
+            rm_image=False,
+            force_rebuild=False,
+            client=container,
+            run_id="run-id",
+        )
+        return verify, log_files
+
+    async def test_task_cancel_propagates(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        provider = _BlockingEvalProvider()
+        verify, log_files = self._start(monkeypatch, tmp_path, provider)
+        task = asyncio.create_task(verify)
+        await asyncio.wait_for(provider.eval_started.wait(), timeout=30)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert provider.closed == ["fake-1"]
+        assert_log_files_closed(log_files)
+
+    async def test_cancel_scope_raises_after_stopping_the_sandbox_and_closing_the_log_file(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # A client that disconnects cancels its request's cancel scope. The shielded stop finishes, so nothing after
+        # it raises the cancellation again: run_instance has to let the first one through, not return a result.
+        provider = _BlockingEvalProvider()
+        verify, log_files = self._start(monkeypatch, tmp_path, provider)
+
+        async def cancel_once_started(scope: anyio.CancelScope) -> None:
+            with anyio.fail_after(30):
+                await provider.eval_started.wait()
+            scope.cancel()
+
+        with anyio.CancelScope() as scope:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(cancel_once_started, scope)
+                await verify
+            pytest.fail("run_instance returned after its cancel scope was cancelled")
+
+        assert scope.cancelled_caught
+        assert provider.closed == ["fake-1"]
+        assert_log_files_closed(log_files)
+
+    async def test_a_second_cancel_during_the_stop_still_closes_the_log_file(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The stop's shield holds off an anyio cancel scope, not a second task cancel, so cleanup raises.
+        provider = _BlockingEvalProvider()
+        verify, log_files = self._start(monkeypatch, tmp_path, provider)
+        task = asyncio.create_task(verify)
+        await asyncio.wait_for(provider.eval_started.wait(), timeout=30)
+        task.cancel()
+        await asyncio.wait_for(provider.close_started.wait(), timeout=30)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert_log_files_closed(log_files)
 
 
 class TestFailureOnlyGrading:

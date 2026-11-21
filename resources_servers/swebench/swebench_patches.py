@@ -273,17 +273,20 @@ async def run_instance(
         # cleanup_container(client, container, logger)
         #
         # Modified code:
-        await container.cleanup()
-
-        if rm_image:
-            remove_image(client, test_spec.instance_image_key, logger)
-        close_logger(logger)
-        return {
-            "completed": eval_completed,
-            "resolved": report.get(instance_id, {}).get("resolved", False),
-            "patch_apply_failed": patch_apply_failed,
-            "error": error,
-        }
+        # The result is returned after this block, never from it: a return in `finally` would swallow a cancellation.
+        # The logger is closed in an inner `finally`, so it is closed even when cleanup raises.
+        try:
+            await container.cleanup()
+            if rm_image:
+                remove_image(client, test_spec.instance_image_key, logger)
+        finally:
+            close_logger(logger)
+    return {
+        "completed": eval_completed,
+        "resolved": report.get(instance_id, {}).get("resolved", False),
+        "patch_apply_failed": patch_apply_failed,
+        "error": error,
+    }
 
 
 ########################################
