@@ -12,19 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
+import pytest
 from pytest import approx, fixture
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.abstention.app import (
     AbstentionConfig,
     AbstentionServer,
@@ -118,8 +122,9 @@ class TestParseJudgeGrade:
     def test_letter_in_text(self) -> None:
         assert parse_judge_grade("The grade is A based on analysis") == "A"
 
-    def test_fallback_to_b(self) -> None:
-        assert parse_judge_grade("no clear grade here") == "B"
+    def test_no_grade_is_none(self) -> None:
+        assert parse_judge_grade("no clear grade here") is None
+        assert parse_judge_grade("") is None
 
     def test_whitespace_handling(self) -> None:
         assert parse_judge_grade("  C  ") == "C"
@@ -139,7 +144,7 @@ class TestParseJudgeGrade:
 
     def test_article_a_is_not_a_grade(self) -> None:
         assert parse_judge_grade("A careful reading shows the prediction is INCORRECT") == "B"
-        assert parse_judge_grade("Made a guess without evidence") == "B"
+        assert parse_judge_grade("Made a guess without evidence") is None
 
 
 class TestExtractTextFromResponse:
@@ -406,3 +411,47 @@ class TestAbstentionServer:
         result = await server.verify(request)
         assert result.extracted_answer == "The capital of France is Paris"
         assert result.reward == approx(1.0)
+
+    async def test_verify_masks_a_judge_reply_without_a_grade(self, config: AbstentionConfig) -> None:
+        # Before, a reply without a grade fell back to B (INCORRECT) and the row was trained at 0.
+        server_mock = MagicMock(spec=ServerClient)
+        server = AbstentionServer(config=config, server_client=server_mock)
+        response_mock = AsyncMock()
+        response_mock.read = AsyncMock(
+            return_value=orjson.dumps(self._make_judge_response("I need more context to decide."))
+        )
+        server_mock.post = AsyncMock(return_value=response_mock)
+        request = AbstentionVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response("The answer is \\boxed{Paris}"),
+            question="What is the capital of France?",
+            answer="Paris",
+        )
+
+        with pytest.raises(JudgeError) as raised:
+            await server.verify(request)
+        assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+
+        # Served through judge_failsafe, as the base server serves /verify: a masked row.
+        result = json.loads((await judge_failsafe(server.verify)(body=request)).body)
+        assert result["mask_sample"] is True
+        assert result["failure_kind"] == JUDGE_UNPARSEABLE
+        assert result["_ng_failure_class"] == "judge_failed"
+
+    async def test_verify_empty_answer_stays_trained_at_zero(self, config: AbstentionConfig) -> None:
+        # The model's own failure: scored INCORRECT without a judge call, and not masked.
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock()
+        server = AbstentionServer(config=config, server_client=server_mock)
+        request = AbstentionVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response("<think>reasoning that never reached an answer</think>"),
+            question="What is the capital of France?",
+            answer="Paris",
+        )
+
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.verdict == "incorrect"
+        assert result.mask_sample is False
+        server_mock.post.assert_not_awaited()

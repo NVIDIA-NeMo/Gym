@@ -38,6 +38,7 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -226,12 +227,12 @@ _GRADE_LABEL = re.compile(r"\b(NOT_ATTEMPTED|INCORRECT|CORRECT)\b")
 _LABEL_TO_GRADE = {"CORRECT": "A", "INCORRECT": "B", "NOT_ATTEMPTED": "C"}
 
 
-def parse_judge_grade(judge_text: str) -> str:
+def parse_judge_grade(judge_text: str) -> str | None:
     """Parse the single-letter grade (A/B/C) from the judge's response.
 
     Accepted, in order: the bare letter; a last or first line that starts with the letter ("C", "C: NOT_ATTEMPTED",
     "(A)"); a stated grade ("The grade is A"); the last label word (CORRECT, INCORRECT, NOT_ATTEMPTED). Anything else
-    falls back to "B" (INCORRECT).
+    has no grade: None.
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C"):
@@ -251,7 +252,7 @@ def parse_judge_grade(judge_text: str) -> str:
     if labels:
         return _LABEL_TO_GRADE[labels[-1]]
 
-    return "B"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +372,12 @@ class AbstentionServer(SimpleResourcesServer):
                 raise JudgeError("empty judge response")
 
             grade = parse_judge_grade(judge_text)
+            if grade is None:
+                # A reply without a grade is the judge's failure, not the policy's: mask the row rather than score
+                # it INCORRECT.
+                raise JudgeError(
+                    f"judge reply has no A/B/C grade: {judge_text[-500:]!r}", failure_kind=JUDGE_UNPARSEABLE
+                )
             if grade == "A":
                 verdict = "correct"
                 reward = self.config.correct_reward
