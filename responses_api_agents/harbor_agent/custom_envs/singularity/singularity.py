@@ -24,6 +24,7 @@ import asyncio.subprocess
 import fcntl
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -258,6 +259,9 @@ class SingularityEnvironment(BaseEnvironment):
         Uses port reservation with retry logic to handle race conditions where
         another process might grab the port between reservation and binding.
         """
+        # A cancelled earlier start() may have left its container running
+        await self._terminate_server_process()
+
         # Create staging directory for file transfers (done once, outside retry loop)
         self._staging_dir = Path(tempfile.mkdtemp(prefix="singularity_staging_"))
         self._staging_dir.chmod(0o755)
@@ -388,6 +392,8 @@ class SingularityEnvironment(BaseEnvironment):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                # Own process group, so stop() can kill helpers that are reparented to init
+                start_new_session=True,
             )
 
             # Start background task to stream server output
@@ -439,7 +445,8 @@ class SingularityEnvironment(BaseEnvironment):
             if server_ready:
                 return
 
-            # Clean up failed attempt before retry
+            # Clean up failed attempt before retry, including its container if it is still starting
+            await self._terminate_server_process()
             if self._http_client:
                 await self._http_client.aclose()
                 self._http_client = None
@@ -592,8 +599,7 @@ class SingularityEnvironment(BaseEnvironment):
                     )
                     # Set flag BEFORE killing so exec() can check it
                     self._memory_limit_exceeded = error_msg
-                    # Kill the Singularity process - it will clean up internal processes
-                    self._server_process.kill()
+                    self._kill_server_group()
                     # Don't raise here - let exec() detect the error and raise properly
                     return
 
@@ -638,6 +644,18 @@ class SingularityEnvironment(BaseEnvironment):
             except asyncio.CancelledError:
                 pass
 
+        await self._terminate_server_process()
+
+        # Cleanup staging directory
+        if self._staging_dir and self._staging_dir.exists():
+            shutil.rmtree(self._staging_dir, ignore_errors=True)
+
+        # Note: We don't delete .sif files as they can be reused
+        if delete:
+            self.logger.debug(f"Singularity image preserved at {self._sif_path} for reuse")
+
+    async def _terminate_server_process(self) -> None:
+        """Terminate the server process and its children, and stop streaming its output."""
         # Terminate server process and its children
         # Singularity with --containall should propagate signals to internal processes
         if self._server_process and self._server_process.returncode is None:
@@ -664,6 +682,11 @@ class SingularityEnvironment(BaseEnvironment):
             except Exception:
                 pass
 
+        # Also when the leader already exited: its group can still hold helpers reparented to init,
+        # e.g. Apptainer's FUSE mount daemons (squashfuse_ll, fuse-overlayfs), which `pkill -P` misses
+        if self._server_process:
+            self._kill_server_group()
+
         # Cancel stream task if running
         if hasattr(self, "_stream_task") and self._stream_task:
             self._stream_task.cancel()
@@ -672,13 +695,12 @@ class SingularityEnvironment(BaseEnvironment):
             except asyncio.CancelledError:
                 pass
 
-        # Cleanup staging directory
-        if self._staging_dir and self._staging_dir.exists():
-            shutil.rmtree(self._staging_dir, ignore_errors=True)
-
-        # Note: We don't delete .sif files as they can be reused
-        if delete:
-            self.logger.debug(f"Singularity image preserved at {self._sif_path} for reuse")
+    def _kill_server_group(self) -> None:
+        """SIGKILL the server's process group (pgid == pid, see start_new_session)."""
+        try:
+            os.killpg(self._server_process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
 
     async def exec(
         self,
