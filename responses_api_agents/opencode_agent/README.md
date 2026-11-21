@@ -307,7 +307,8 @@ sessions refuse `reasoning_effort`, `interleaved_reasoning_field`, `output_token
   terminal assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is
   in `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
   harness runner started OpenCode (not its own exit 125, 126 or 127), the required Gym MCP tools connected
-  and were confirmed, a model step ran or OpenCode ran until its time limit, the run's output was captured, its last error is not a transient model-endpoint
+  and were confirmed, a model step ran or OpenCode ran until its time limit, the run's output was captured,
+  neither the last assistant turn's error nor an error event OpenCode printed is a transient model-endpoint
   failure (a retryable API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers
   a command. A model error OpenCode reported itself (an API error or context overflow on a completed turn)
   is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment Server's

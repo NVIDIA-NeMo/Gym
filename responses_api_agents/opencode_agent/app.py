@@ -111,7 +111,11 @@ from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,
     parse_opencode_session,
 )
-from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
+from responses_api_agents.opencode_agent.continuation import (
+    OpenCodeRunOutcome,
+    classify_opencode_run,
+    opencode_error_event_error,
+)
 from responses_api_agents.opencode_agent.opencode2 import LABEL_FILE as OPENCODE2_LABEL_FILE
 from responses_api_agents.opencode_agent.opencode2 import PLUGIN_DIRECTORY as OPENCODE2_PLUGIN_DIRECTORY
 from responses_api_agents.opencode_agent.opencode2 import PLUGIN_SOURCE as OPENCODE2_PLUGIN_SOURCE
@@ -697,9 +701,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Sandbox sessions: return a failed run (a nonzero exit, an error on the last assistant turn, no
     # terminal assistant result) as a gradable `failed` response, as Harbor grades after any agent exit,
     # when the supervisor confirmed cleanup, the runner started OpenCode, any required Gym MCP tools
-    # connected and were confirmed, a model step ran, the run's output was captured, its last error is not a transient model-endpoint failure,
-    # and the sandbox still runs and answers a command. A model error OpenCode reported itself keeps its
-    # classified cause for the outcome policy instead. Anything else stays an execution error.
+    # connected and were confirmed, a model step ran, the run's output was captured, neither the last assistant
+    # turn's error nor an error event OpenCode printed is a transient model-endpoint failure, and the sandbox
+    # still runs and answers a command. A model error OpenCode reported itself keeps its classified cause for
+    # the outcome policy instead. Anything else stays an execution error.
     verify_after_agent_error: bool = False
 
     @model_validator(mode="after")
@@ -2348,12 +2353,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             and output_captured
             and self.config.verify_after_agent_error
         ):
-            last_error = native_result.get("error")
             graded_error = await self._gradable_agent_error(
                 state,
                 error,
                 result=result,
-                last_error=last_error,
+                # A timed-out continuation can carry the endpoint failure only in an error event on stdout, with
+                # none on the exported message: the endpoint check reads both.
+                model_errors=(native_result.get("error"), opencode_error_event_error(state.activation_log)),
                 # Required tools never confirmed are a setup failure whatever else ended the run.
                 mcp_failed=mcp_failed or bool(mcp_unconfirmed),
                 answered=model_called,
@@ -2497,7 +2503,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         error: str,
         *,
         result: Optional[dict[str, Any]],
-        last_error: object,
+        model_errors: tuple[object, ...],
         mcp_failed: bool,
         answered: bool,
     ) -> Optional[str]:
@@ -2505,7 +2511,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
         The supervisor's confirmed cleanup means OpenCode ended. A setup failure (the runner did not start
         OpenCode, required Gym MCP tools did not connect or were never confirmed, or OpenCode ended before
-        any model step ran, ``answered``, short of its time limit), a transient model-endpoint failure, or a
+        any model step ran, ``answered``, short of its time limit), a transient model-endpoint failure in any
+        of ``model_errors`` (the last assistant message's error and the first error event on stdout), or a
         sandbox that no longer runs or answers keeps the run an execution error, so the episode is retried
         rather than graded.
         """
@@ -2521,7 +2528,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         ):
             LOG.warning("OpenCode failed in setup; not grading it: %s", detail)
             return None
-        if _is_model_endpoint_failure(last_error):
+        if any(_is_model_endpoint_failure(model_error) for model_error in model_errors):
             LOG.warning("OpenCode failed on a model endpoint error; not grading it: %s", detail)
             return None
         sandbox = state.session.sandbox
