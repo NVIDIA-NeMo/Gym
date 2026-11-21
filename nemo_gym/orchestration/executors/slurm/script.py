@@ -68,6 +68,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
 )
+from nemo_gym.orchestration.executors.slurm.driver_worker import render_driver_worker
 from nemo_gym.orchestration.executors.slurm.lustre_md_stats import (
     DRIVER_END,
     END,
@@ -915,7 +916,7 @@ _gym_run_driver() {{
 _gym_run_driver"""
 
 
-def _render_watched_driver(driver: str, services: list[str]) -> str:
+def _render_watched_driver(driver: str, services: list[str], *, supervise: bool = False) -> str:
     """The driver step, ended with TERM if a service it depends on exits first.
 
     A dead service would otherwise leave the driver retrying it until the walltime. The job exits
@@ -926,13 +927,29 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
     longer ends the driver: the exports do not use it, and a requeue would reload the model for nothing.
     The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
     """
-    if not services:
+    if not services and not supervise:
         return driver
     checks = "\n".join(
         f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
         for name in services
     )
-    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
+    rendered = (
+        _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
+        if services
+        else f'{driver} &\n_gym_driver_pid=$!\nwait "$_gym_driver_pid"'
+    )
+    if supervise:
+        signal_setup = """_gym_cancel_driver() {
+    trap '' TERM INT
+    kill -"$1" "$_gym_driver_pid" 2>/dev/null || true
+    wait "$_gym_driver_pid"
+    exit $?
+}
+trap '_gym_cancel_driver TERM' TERM
+trap '_gym_cancel_driver INT' INT"""
+        rendered = rendered.replace("_gym_driver_pid=$!", "_gym_driver_pid=$!\n" + signal_setup)
+        rendered += '\n_gym_worker_rc=$?\ntrap - TERM INT\n(exit "$_gym_worker_rc")'
+    return rendered
 
 
 def _render_lustre_md_stats_start(compute: SlurmComputeConfig, remote_bench_dir: Path, total_nodes: int) -> str:
@@ -1370,9 +1387,10 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
+    driver_step_name = ' --job-name="$GYM_DRIVER_STEP_NAME"' if config.driver.supervise else ""
     driver_srun = (
         f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
-        f" --account={shlex.quote(compute.account)} --container-image={shlex.quote(config.driver.container)} "
+        f"{driver_step_name} --account={shlex.quote(compute.account)} --container-image={shlex.quote(config.driver.container)} "
         f"--output={log_path(DRIVER_STEP, _RUNTIME_JOB_ID)} {entrypoint}"
     )
     if resume and benchmark.command is None:
@@ -1420,11 +1438,15 @@ def build_sbatch_script(
         else ""
     )
     md_stats = compute.lustre_md_stats
+    worker_prelude = ""
+    if config.driver.supervise:
+        worker_prelude, driver_srun = render_driver_worker(driver_srun, remote_bench_dir)
     driver_command = (
         marker_definition
         + (f"{gym_cmd}\n" if gym_cmd else "")
         + (f"_gym_md_stats {SERVICES_READY}\n" if md_stats else "")
-        + _render_watched_driver(driver_srun, watched)
+        + (f"{worker_prelude}\n" if worker_prelude else "")
+        + _render_watched_driver(driver_srun, watched, supervise=config.driver.supervise)
         + (f"\n_gym_md_stats {DRIVER_END}" if md_stats else "")
     )
     if resume:

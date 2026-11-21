@@ -149,6 +149,7 @@ The driver runs the benchmarks against the services.
 | Field | Default | Description |
 | --- | --- | --- |
 | `container` | `python:3.12` | Image the driver runs in. |
+| `supervise` | `false` | Slurm only: run the driver under an owned worker that confirms local-process and driver-step cleanup before returning. See [Driver supervision](#driver-supervision). |
 | `gym_install` | `null` | `repo` (default `https://github.com/NVIDIA-NeMo/gym`) and `ref` (required; a git tag or commit). When set, the driver installs Gym from that checkout into a fresh virtual environment, with `uv`, before running. When unset, the image must already contain Gym. The install includes the `ray` extra, which `gym` needs to start a server that declares `ray_enabled = True`. |
 | `policy_model` | `null` | Name of a service to use as the policy model. See [Policy wiring](#policy-wiring). |
 | `policy_host` | `localhost` | Host used in the injected `policy_base_url`. Use an address routable from elsewhere when an agent runs remotely, for example `${oc.env:HEAD_NODE_IP}`, which is resolved when the driver runs. |
@@ -156,6 +157,38 @@ The driver runs the benchmarks against the services.
 | `benchmarks` | required | Mapping from benchmark name to its [run config](#benchmarks). |
 | `env` | `{}` | Environment for the driver. See [env values](#env-values). |
 | `mounts` | `[]` | Extra bind mounts for the driver. The benchmark's own job directory is always mounted at the same path. |
+
+### Driver supervision
+
+Set `driver.supervise: true` to have the Slurm renderer own the driver's lifetime.
+The batch host needs Linux with readable `/proc`, `python3`, `bash`, and the Slurm
+client commands. The submitting NeMo Gym embeds the worker in the job script;
+the batch host does not need an installed NeMo Gym package, and the driver may
+use a different pinned NeMo Gym revision.
+
+The worker executes the driver once. It forwards cancellation, reaps local
+descendants even when they start another session, and cancels and drains only
+the driver step carrying this invocation's unique name. Shared policy and judge
+steps stay under the enclosing job's ownership. The existing service watches
+wait for the worker before returning. A failed scheduler query or unconfirmed
+cleanup makes the worker fail with exit code 70.
+
+Each invocation writes `logs/driver-worker.<job-id>.<step-name>.json` in the
+benchmark directory. Its `cleanup_confirmed` field describes process and step
+cleanup, not evaluation completeness. A missing or unfinished receipt does not
+confirm cleanup. The enclosing scheduler still owns cleanup if the worker is
+killed outright or its node is lost. Driver logs and rollout artifacts keep
+their existing locations.
+
+Supervision does not retry, set `GYM_RESUBMIT`, or reset rollout attempt budgets.
+Use the existing [resumable-run and recovery workflow](/orchestration/how-to/resumable-runs)
+for continuation. Kubernetes currently rejects this option.
+
+Compatible benchmarks can compose several `config_paths` into one collector.
+Multiple entries under `driver.benchmarks` still submit separate jobs. Driver
+supervision is a lifecycle component, not a shared-allocation suite launcher;
+a controller for incompatible driver revisions must still own shared serving,
+admission, ports and allocation placement.
 
 ### Policy wiring
 

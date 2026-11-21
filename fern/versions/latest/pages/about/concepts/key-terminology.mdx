@@ -62,6 +62,12 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
 
+### Orchestration
+
+| Term | Definition |
+| --- | --- |
+| **Driver supervision** | Owning a driver invocation until its local descendants and scheduler step have stopped, without deciding whether its evaluation should retry. |
+
 ### Sessions
 
 Resources servers and agent servers keep per-episode state in sessions. Use these names in code, docstrings, error messages, tests, and docs, and do not add synonyms. See [Resources Server APIs](/environment-tutorials/resources-server-apis) and [Add or Update a Harness](/agent-server/add-or-update-a-harness).

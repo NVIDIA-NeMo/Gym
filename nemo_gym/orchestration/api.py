@@ -598,6 +598,8 @@ class GymInstallConfig(_StrictModel):
 class DriverConfig(_HostEnvRefs, _StrictModel):
     container: str = "python:3.12"
     gym_install: GymInstallConfig | None = None
+    # Opt-in Slurm step ownership: execute once and confirm cleanup before the worker exits.
+    supervise: bool = False
     # Name of a service in `services:` to use as the policy model. When set, injects
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
@@ -622,6 +624,13 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+
+    @model_serializer(mode="wrap")
+    def _omit_disabled_supervision(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if not self.supervise:
+            data.pop("supervise", None)
+        return data
 
     @field_validator("env")
     @classmethod
@@ -720,6 +729,8 @@ class SubmitConfig(_StrictModel):
 
         sole_compute = next(iter(compute_names))
         compute = self.compute[sole_compute]
+        if self.driver.supervise and not isinstance(compute, SlurmComputeConfig):
+            raise ValueError("driver.supervise requires Slurm step ownership; Kubernetes is not supported")
         if isinstance(compute, SlurmComputeConfig):
             total_nodes = sum(p.nodes for p in compute.node_pools.values())
             pool_names = set(compute.node_pools)
