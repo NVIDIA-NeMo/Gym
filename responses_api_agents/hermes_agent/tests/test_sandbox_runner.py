@@ -810,3 +810,26 @@ def test_compression_auxiliary_uses_its_own_route_when_the_payload_has_one(tmp_p
         _run(_payload(server.base_url, compression_model_base_url=compression_url), tmp_path)
     config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
     assert config["auxiliary"]["compression"]["base_url"] == compression_url
+
+
+def test_gzip_registers_a_shared_model_route_once(tmp_path, restore_process_globals, monkeypatch):
+    installed_urls = []
+    monkeypatch.setattr("responses_api_agents.hermes_agent.request_gzip.install_request_gzip", installed_urls.append)
+
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, gzip_requests_enabled=True), tmp_path)
+
+    assert installed_urls == [server.base_url]
+
+
+def test_gzip_registers_primary_and_auxiliary_model_routes(tmp_path, restore_process_globals, monkeypatch):
+    installed_urls = []
+    monkeypatch.setattr("responses_api_agents.hermes_agent.request_gzip.install_request_gzip", installed_urls.append)
+    compression_url = "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
+
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(
+            _payload(server.base_url, compression_model_base_url=compression_url, gzip_requests_enabled=True), tmp_path
+        )
+
+    assert installed_urls == [server.base_url, compression_url]

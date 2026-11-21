@@ -922,6 +922,36 @@ Duplicate config paths:
         reference = OmegaConf.select(server_config, "model_server")
         return reference if isinstance(reference, DictConfig) else None
 
+    def raise_on_invalid_gzip_configuration(self, global_config_dict: DictConfig) -> None:
+        """Require gzip to be configured on a supported agent pointing to a model server."""
+        boolean = TypeAdapter(bool)
+        supported_agent_types = {"codex_agent", "hermes_agent", "opencode_agent", "pi_agent"}
+        key = "gzip_requests_enabled"
+        errors: List[str] = []
+        for agent in self._agent_instances(global_config_dict):
+            if key not in agent.server_config:
+                continue
+            setting = f"{agent.name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent.agent_type}.{key}"
+            if agent.agent_type not in supported_agent_types:
+                errors.append(f"'{setting}' is not supported by this agent type. Remove the setting.")
+                continue
+            try:
+                gzip_enabled = boolean.validate_python(agent.server_config[key])
+            except ValidationError:
+                errors.append(f"'{setting}' must be a boolean or a value accepted as a boolean.")
+                continue
+            if not gzip_enabled:
+                continue
+
+            reference = self._model_server_reference(agent.server_config)
+            if reference is None or reference.get("type") != MODEL_SERVER_TYPE_KEY_NAME:
+                errors.append(
+                    f"{setting}=true requires a model_server reference to a NeMo Gym model server "
+                    f"of type '{MODEL_SERVER_TYPE_KEY_NAME}'."
+                )
+        if errors:
+            raise ConfigError("Invalid gzip configuration:\n" + "\n".join(errors))
+
     def raise_on_unsupported_model_pairings(self, global_config_dict: DictConfig) -> None:
         """Reject resource/model bindings that explicitly disallow the selected model adapter.
 
@@ -1973,6 +2003,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             probe_ports=not parse_config.offline,
             host_by_server_type=host_by_server_type,
         )
+        self.raise_on_invalid_gzip_configuration(global_config_dict)
 
         with open_dict(global_config_dict):
             # Head server defaults, filled per key so a config may pin just one.

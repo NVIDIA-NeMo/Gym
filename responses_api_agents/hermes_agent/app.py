@@ -323,6 +323,7 @@ def _split_input_to_user_and_history(input_items) -> tuple[str | list[dict[str, 
 
 
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     model: Optional[str] = None
@@ -741,6 +742,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             # A restricted tool list would otherwise hide the tools this episode was granted.
             enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
         payload = {
+            "gzip_requests_enabled": self.config.gzip_requests_enabled,
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
             "config_yaml": self._build_config(mcp_accesses),
@@ -1018,6 +1020,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
     ) -> NeMoGymResponse:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Hermes requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         from run_agent import AIAgent  # from hermes-agent on path  # pyright: ignore[reportMissingImports]
 
         if (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY) is not None:
@@ -1215,6 +1221,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("Use the agent session responses and close routes")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Hermes requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(422, "Hermes /run requires resources_server; use Environment Server /run for sessions")
         async with self.sem:

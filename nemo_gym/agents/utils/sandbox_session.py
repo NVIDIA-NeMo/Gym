@@ -43,6 +43,7 @@ HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
 # could not be started. Any other status is the CLI's own.
 HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
+REQUEST_GZIP_SCRIPT = Path(__file__).with_name("request_gzip.mjs")
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 

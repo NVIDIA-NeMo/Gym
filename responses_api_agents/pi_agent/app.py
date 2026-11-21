@@ -35,6 +35,7 @@ from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    REQUEST_GZIP_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -644,6 +645,7 @@ class PiMCPServerConfig(BaseModel):
 
 
 class PiAgentConfig(BaseResponsesAPIAgentConfig):
+    gzip_requests_enabled: bool = False
     # Only the direct /run compatibility path calls Resources. Sandbox sessions
     # receive SandboxAccess from EnvironmentServer instead.
     resources_server: Optional[ResourcesServerRef] = None
@@ -1032,6 +1034,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         if self.config.enable_tools:
             files[runtime_guards_extension] = Path(__file__).with_name(runtime_guards_extension)
         files["outcome.mjs"] = Path(__file__).with_name("outcome.mjs")
+        if self.config.gzip_requests_enabled:
+            files["request_gzip.mjs"] = REQUEST_GZIP_SCRIPT
+            files["request_gzip_extension.mjs"] = Path(__file__).with_name("request_gzip_extension.mjs")
         mcp_servers, unusable_grant_gaps = self._session_mcp_servers(state.request)
         mcp_extension = []
         mcp_env = {}
@@ -1070,6 +1075,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         ]
         if not self.config.enable_tools:
             command.append("--no-builtin-tools")
+        if self.config.gzip_requests_enabled:
+            command += ["--extension", f"{state.session.session_dir}/request_gzip_extension.mjs"]
         if self.config.thinking:
             command += ["--thinking", self.config.thinking]
         if system:
@@ -1479,6 +1486,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
     ) -> AgentEpisode:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -1605,6 +1616,10 @@ class PiAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("Pi sessions require EnvironmentServer /run")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(
+                422, "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+            )
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

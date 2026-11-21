@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
+    REQUEST_GZIP_SCRIPT,
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
@@ -366,6 +367,11 @@ class OpenCodeSandboxSession(AgentSessionState):
                 TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{self.session.session_dir}/{TASK_ENVIRONMENT_PLUGIN_FILE}"
             )
         directory = self.session.session_dir
+        if payload.get("gzip_requests_enabled"):
+            await self.session.sandbox.upload(REQUEST_GZIP_SCRIPT, f"{directory}/request_gzip.mjs")
+            await self.session.sandbox.upload(
+                Path(__file__).with_name("request_gzip_plugin.mjs"), f"{directory}/request_gzip_plugin.mjs"
+            )
         if payload.get("mcp_grants") is not None:
             if not self.opencode2:
                 await self.session.sandbox.upload(

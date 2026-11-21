@@ -290,6 +290,40 @@ def staged_attachments(sandbox, payload) -> list[bytes]:
     return [sandbox.files[arg[1:]] for arg in payload["command"] if arg.startswith("@")]
 
 
+def test_gzip_rejects_local_execution_before_calling_resources(setup):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = True
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert (
+            response.json()["detail"]
+            == "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert (
+            run.json()["detail"]
+            == "Pi requires an agent session for gzip. Set gzip_requests_enabled=false to run locally."
+        )
+    agent.server_client.post.assert_not_called()
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("gzip_enabled", [False, True])
+def test_gzip_helpers_and_extension_are_staged_only_when_enabled(setup, gzip_enabled):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = gzip_enabled
+    with TestClient(agent.setup_webserver()) as client:
+        payload = activate_over_http(sandbox, client, [{"role": "user", "content": "Fix the code"}])
+
+    directory = sandbox.directory
+    assert (f"{directory}/request_gzip.mjs" in sandbox.files) is gzip_enabled
+    assert (f"{directory}/request_gzip_extension.mjs" in sandbox.files) is gzip_enabled
+    assert (f"{directory}/request_gzip_extension.mjs" in payload["command"]) is gzip_enabled
+
+
 def test_session_attaches_prompt_images_and_declares_image_input(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
