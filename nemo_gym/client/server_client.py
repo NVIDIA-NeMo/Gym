@@ -42,12 +42,14 @@ from nemo_gym.config.config_types import (
 )
 from nemo_gym.config.global_config import (
     HEAD_SERVER_KEY_NAME,
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     get_first_server_config_dict,
     get_global_config_dict,
 )
 from nemo_gym.core.correlation import TRACEPARENT_PATTERN, CorrelationContext, encode
 from nemo_gym.core.episode_context import (
+    CALLER_SERVER_HEADER,
     VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
     current_verifier_invocation_id,
@@ -247,6 +249,9 @@ class ServerClient(BaseModel):
                     **(kwargs.get("headers") or {}),
                     VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
                 }
+            caller_server = getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
+            if caller_server:
+                kwargs["headers"] = {**(kwargs.get("headers") or {}), CALLER_SERVER_HEADER: caller_server}
 
         if server_entry is not None and (
             "responses_api_models" in server_entry or "responses_api_agents" in server_entry
