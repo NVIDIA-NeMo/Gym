@@ -36,8 +36,10 @@ from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 from nemo_gym.data.tasks.harbor.hub import HubError, RegistryDataset, RegistryTask, declares_recorded_fetch
 from nemo_gym.data.tasks.harbor.manifest import Manifest, dataset_files_digest, dataset_toml_digest
 from nemo_gym.data.tasks.harbor.prepare import PulledDataset, entry_folder, prepare_target, pull_dataset
+from nemo_gym.data.tasks.harbor.task import load_task
 from nemo_gym.data.tasks.harbor.task_data import load_task_data_schema
 from tests.unit_tests.data.tasks.harbor.test_harbor_tasks import (
+    HELLO_TOML,
     commit_repo,
     registry_dataset,
     registry_repo,  # noqa: F401
@@ -126,7 +128,7 @@ class TestSourceKey:
         assert read_dataset_config(folder).is_empty
 
     def test_committed_entries_declare_their_sources(self):
-        """The two committed entries pin the datasets their READMEs describe; TB4 also carries one task override."""
+        """The two committed entries pin the datasets their READMEs describe; TB4 also carries three task overrides."""
         from nemo_gym import PARENT_DIR
 
         tb4 = read_dataset_config(PARENT_DIR / "environments" / "harbor" / "terminal_bench_4")
@@ -137,15 +139,45 @@ class TestSourceKey:
             "7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"  # pragma: allowlist secret
         )
         assert tb21.model_copy(update={"source": None}).is_empty
-        # The test sharding the legacy TB4 benchmark's server sets for this task, in the agent's sandbox and the
-        # separate verifier's, and nothing else.
+        # The test sharding the legacy TB4 benchmark's server sets for nextjs-performance, in the agent's sandbox and
+        # the separate verifier's, and two verifiers' network restriction moved from [verifier.environment] to
+        # [verifier] (see the test below); nothing else.
         assert tb4.model_copy(update={"source": None, "tasks": {}}).is_empty
+        moved = GymTaskOverride(verifier={"network_mode": "no-network", "environment": {"network_mode": "public"}})
         assert tb4.tasks == {
             "nextjs-performance": GymTaskOverride(
                 environment={"env": {"CIRCLE_NODE_TOTAL": "3"}},
                 verifier={"environment": {"env": {"CIRCLE_NODE_TOTAL": "3"}}},
             ),
+            "batched-eval-parity": moved,
+            "lake-temp-glm": moved,
         }
+
+    @pytest.mark.parametrize("name", ["lake-temp-glm", "batched-eval-parity"])
+    def test_the_terminal_bench_4_entry_sets_two_verifier_restrictions_on_verifier(self, tmp_path, name):
+        """These two TB4 tasks deny their separate verifier all egress on `[verifier.environment]` (`allow_internet =
+        false`), where the loader refuses a network restriction. The committed entry sets the restriction on
+        `[verifier]`, which the loader applies to the separate verifier's sandbox, so the task loads with a verifier
+        that still has no network, in its own image."""
+        from nemo_gym import PARENT_DIR
+
+        toml = (
+            HELLO_TOML.replace(
+                "[verifier]\ntimeout_sec = 120.0", '[verifier]\ntimeout_sec = 120.0\nenvironment_mode = "separate"'
+            ).replace("[environment]\n", '[environment]\ndocker_image = "ubuntu:24.04"\n')
+            + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\nallow_internet = false\n'
+        )
+        with pytest.raises(HarborTaskError, match="verifier.environment network restrictions are not supported yet"):
+            load_task(write_task(tmp_path / "bare" / name, toml=toml))
+        dataset = tmp_path / "terminal_bench_4"
+        dataset.mkdir()
+        entry = PARENT_DIR / "environments" / "harbor" / "terminal_bench_4" / "dataset.toml"
+        (dataset / "dataset.toml").write_text(entry.read_text())
+        task = load_task(write_task(dataset / name, toml=toml))
+        verifier = task.config.verifier
+        assert not task.config.is_shared_verifier
+        assert (verifier.network_mode, verifier.allowed_hosts) == ("no-network", None)
+        assert (verifier.environment.network_mode, verifier.environment.docker_image) == ("public", "org/verifier:1")
 
     def test_the_terminal_bench_science_entry_pins_its_digest_and_overrides_only_verifiers(self):
         """The entry runs the packages the resources server's preset pins and changes only verifier settings: three
