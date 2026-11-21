@@ -511,6 +511,49 @@ def test_first_expiry_before_launch_can_start_next_activation(setup, tmp_path, s
         assert receipt["cleanup_confirmed"]
 
 
+@pytest.mark.parametrize("stage", ["prepare", "queue", "upload"])
+async def test_activation_keeps_its_budget_when_the_loop_clock_runs_ahead(setup, tmp_path, monkeypatch, stage):
+    """uvloop's clock runs ahead of time.monotonic() once a macOS host has slept; a slow step keeps its budget."""
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "time", lambda clock=loop.time: clock() + 86_400)
+    run, upload = sandbox.exec.side_effect, sandbox.upload
+
+    async def slow_exec(command, **kwargs):
+        if stage == "prepare" and command.startswith("mkdir") and "/activation-1" in command:
+            await asyncio.sleep(0.05)
+        return await run(command, **kwargs)
+
+    async def slow_upload(source, destination):
+        if stage == "upload" and destination.endswith("process_supervisor.sh"):
+            await asyncio.sleep(0.05)
+        await upload(source, destination)
+
+    request = Request(
+        {"type": "http", "session": {}, "headers": [(AGENT_ACTIVATION_HEADER.encode(), b"1")], "path_params": {}}
+    )
+    body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
+    await agent.seed_agent_session(request, body)
+    sandbox.exec.side_effect, sandbox.upload = slow_exec, slow_upload
+    if stage == "queue":
+        # The only worker slot frees 50 ms after the activation asks for it.
+        agent.sem = asyncio.Semaphore(0)
+        acquire = agent.sem.acquire
+
+        async def queued():
+            loop.call_later(0.05, agent.sem.release)
+            return await acquire()
+
+        agent.sem.acquire = queued
+    response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert response.status == "completed"
+    sandbox.launch.assert_awaited_once()
+    await agent.close_agent_session(
+        request, AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
+    )
+
+
 def test_expired_later_activation_keeps_prior_status_and_no_duplicate_turns(setup, tmp_path):
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)
