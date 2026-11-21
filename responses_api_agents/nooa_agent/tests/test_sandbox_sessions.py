@@ -289,6 +289,17 @@ async def test_active_shared_session_retries_unknown_cleanup_before_cancelling_p
     sandbox.stop.assert_not_awaited()
 
 
+async def test_seed_keeps_the_trace_segment_out_of_the_sandbox_model_url(setup, monkeypatch) -> None:
+    # The runner appends /ng-rollout/<id>/v1/... itself; a trace segment before it is refused as out of order.
+    monkeypatch.setattr(
+        "nemo_gym.client.server_client.trace_context_path_segment",
+        lambda: "/ng-trace/00-" + "1" * 32 + "-" + "2" * 16 + "-01",
+    )
+    instance, sandbox, staging, connect = setup
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    assert instance._require_agent_session("session").runner.model_base_url == "http://model:8000"
+
+
 async def test_seed_wires_resolved_endpoint_runtime_and_limits_into_one_runner(setup) -> None:
     instance, sandbox, staging, connect = setup
     instance.config.sandbox_runner_timeout_seconds = 1234

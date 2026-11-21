@@ -111,7 +111,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         else:
             if body.sandbox_access is None:
                 raise HTTPException(422, "Sandboxed NOOA requires Resources-provided sandbox_access")
-            model_base_url = self.resolve_model_base_url(self.config.model_server.name).removesuffix("/v1")
+            # The runner prefixes every call path with its rollout segment, so the base URL carries no trace segment.
+            model_base_url = self.resolve_model_base_url(
+                self.config.model_server.name, trace_context=False
+            ).removesuffix("/v1")
             connection = body.sandbox_access.connection
             provider = create_provider(
                 resolve_provider_config(connection.provider_config_ref, self.server_client.global_config_dict)
