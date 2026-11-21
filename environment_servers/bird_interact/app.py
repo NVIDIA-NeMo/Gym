@@ -83,7 +83,7 @@ from environment_servers.bird_interact.simulator import (
     read_reply,
     response_generator_prompt,
 )
-from environment_servers.bird_interact.task_input import BirdInteractTask, custom_test_cases
+from environment_servers.bird_interact.task_input import QUERY_CATEGORY, BirdInteractTask, FollowUp
 from nemo_gym import PARENT_DIR
 from nemo_gym.agents import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.client import get_response_json, raise_for_status
@@ -388,6 +388,23 @@ def _command_scripts(command: str, request: dict[str, Any]) -> int:
 def _shown(entry: dict[str, Any]) -> dict[str, Any]:
     """A knowledge-base entry as the ADK shows it to an agent: without its type and its children's ids."""
     return {key: entry[key] for key in KNOWLEDGE_VISIBLE_FIELDS if key in entry}
+
+
+def _ambiguity_count(task: BirdInteractTask) -> int:
+    """Critical and knowledge ambiguities: the questions the agent needs to resolve the task."""
+    return len(task.user_query_ambiguity.critical_ambiguity) + len(task.knowledge_ambiguity)
+
+
+def custom_test_cases(phase: BirdInteractTask | FollowUp) -> list[str]:
+    """The test cases that grade a phase, as BIRD-Interact grades it: a phase that is not a query runs its own. A
+    query, or a phase with none, is graded by comparing its result with the solution's, so it gets an empty list."""
+    return [] if phase.category == QUERY_CATEGORY else phase.test_cases
+
+
+def _needs_custom_test_cases(task: BirdInteractTask) -> bool:
+    """Whether a phase is graded by its custom test cases (see ``custom_test_cases``)."""
+    phases = [task] if task.follow_up is None else [task, task.follow_up]
+    return any(custom_test_cases(phase) for phase in phases)
 
 
 def _submission_reply(submission: _Submission, *, budget: float | None) -> str:
@@ -744,7 +761,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 f"Task {task.instance_id} has no sol_sql. The public BIRD-Interact releases withhold the ground truth; "
                 "merge it into the rows before running."
             )
-        if self.config.database_engine == "sqlite" and task.needs_custom_test_cases():
+        if self.config.database_engine == "sqlite" and _needs_custom_test_cases(task):
             raise _refused(
                 f"Task {task.instance_id} is graded by its custom test cases (a phase of a category other than "
                 "Query), which this server runs on PostgreSQL only."
@@ -757,10 +774,12 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             raise _failure(error, stage="seed", terminal=False, name_error_type=True) from error
         question_budget, coin_budget = None, None
         if self.config.mode == "c_interact":
-            question_budget = task.ambiguity_count + self.config.question_patience
+            question_budget = _ambiguity_count(task) + self.config.question_patience
         else:
             coin_budget = (
-                _BASE_COIN_BUDGET + self.config.action_costs["ask"] * task.ambiguity_count + self.config.coin_patience
+                _BASE_COIN_BUDGET
+                + self.config.action_costs["ask"] * _ambiguity_count(task)
+                + self.config.coin_patience
             )
         episode = BirdInteractEpisode(
             request=request,
