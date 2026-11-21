@@ -53,6 +53,7 @@ _SANDBOX_PYTHON = _HERMES_RUNTIME.python
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
 _SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
+_SANDBOX_LENGTH_TRANSCRIPT = f"{_SANDBOX_RUNTIME_DIR}/length_transcript.py"
 
 
 class HarnessProcessInfo(BaseModel):
@@ -99,6 +100,7 @@ class HermesSandboxSession(AgentSessionState):
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         await self.session.sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
+        await self.session.sandbox.upload(Path(__file__).with_name("length_transcript.py"), _SANDBOX_LENGTH_TRANSCRIPT)
 
     async def upload_json(self, name: str, payload: dict[str, JsonValue]) -> None:
         """Write a Hermes input under the session directory using file transfer."""

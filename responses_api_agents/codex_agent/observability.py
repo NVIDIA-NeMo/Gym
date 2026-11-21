@@ -17,6 +17,7 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
@@ -47,6 +48,7 @@ _COMPACTION_PREFIX = (
 
 
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)
+_OUTPUT = TypeAdapter(list[NeMoGymResponseOutputItem])
 LOG = logging.getLogger(__name__)
 TESTED_CODEX_VERSION = "0.144.4"
 # Codex writes U+2028 and similar unescaped inside JSON strings, so str.splitlines() would cut a record in two.
@@ -172,6 +174,58 @@ def _child_status(transcript: str) -> Literal["completed", "incomplete", "unknow
         except (ValueError, TypeError, KeyError, AttributeError):
             continue
     return status
+
+
+def codex_response_output(observations: AgentObservationBundle) -> list[NeMoGymResponseOutputItem]:
+    """Export the session's authored items and tool results, never CLI execution summaries."""
+    if any(
+        gap.code in {"agent_artifact_unavailable", "agent_artifact_record_unparseable"} for gap in observations.gaps
+    ):
+        raise ValueError("Codex session transcript is unavailable or contains unsupported records")
+    invocations = [
+        record
+        for record in observations.records
+        if isinstance(record, AgentInvocation) and record.parent_invocation_id is None
+    ]
+    if len(invocations) != 1:
+        raise ValueError("Expected one root Codex session invocation")
+    if not invocations[0].conversation:
+        raise ValueError("Codex session transcript contains no response items")
+    return _OUTPUT.validate_python(
+        [
+            item.model_dump(mode="json", exclude_unset=True)
+            for item in invocations[0].conversation
+            if getattr(item, "role", None) not in {"user", "system", "developer"}
+        ]
+    )
+
+
+def _session_item(item: dict) -> dict:
+    """Represent Codex's statusless assistant text as canonical request input."""
+    item = dict(item)
+    if item.get("type") != "message" or item.get("role") != "assistant":
+        return item
+    if isinstance(item.get("id"), str) and item.get("status") in {"in_progress", "completed", "incomplete"}:
+        return item
+    # Codex 0.144.4's persisted Message has no status; output_item.done can precede
+    # response.incomplete. Preserve text without inventing an API completion status.
+    if (item.get("id") is not None and not isinstance(item["id"], str)) or item.get("status") is not None:
+        raise ValueError("Codex assistant message has an unsupported API envelope")
+    # Pinned Codex Message fields only. Its internal turn metadata is explicitly
+    # excluded by the transcript export contract below; other fields must not be
+    # silently discarded by the canonical request-input model.
+    if set(item) - {"type", "role", "content", "phase", "id", "status", "internal_chat_message_metadata_passthrough"}:
+        raise ValueError("Codex assistant message has unsupported native metadata")
+    content = []
+    for part in item["content"]:
+        if isinstance(part, dict) and part.get("type") == "output_text":
+            if set(part) - {"type", "text", "annotations"} or part.get("annotations") not in (None, []):
+                raise ValueError("Codex assistant output metadata cannot be represented as request input")
+            part = {"type": "input_text", "text": part["text"]}
+        content.append(part)
+    item.pop("status", None)
+    item["content"] = content
+    return item
 
 
 def parse_codex_observations(
@@ -322,7 +376,7 @@ def _parse_codex_transcript(
                 if event.get("type") not in {"session_meta", "turn_context", "compacted", "world_state"}:
                     raise ValueError("unsupported Codex session record type")
                 continue
-            item = dict(event["payload"])
+            item = _session_item(event["payload"])
             item.pop("internal_chat_message_metadata_passthrough", None)
             parsed = _ITEM.validate_python(item)
             conversation.append(parsed)

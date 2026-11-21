@@ -72,6 +72,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
@@ -95,6 +96,7 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     associate_codex_compaction_calls,
+    codex_response_output,
     parse_codex_observations,
     parse_codex_usage,
     read_codex_observations,
@@ -1445,6 +1447,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     error = f"Codex attached {image_count} of {len(media)} prompt images"
                     invocation.status = "failed"
         else:
+            gaps.append(ObservationGap(code="agent_artifact_unavailable"))
             gaps.append(ObservationGap(code="compaction_observations_unavailable"))
             gaps.append(ObservationGap(code=_MODEL_CALL_JOIN_GAP, detail="CLI events omit model response IDs"))
             tools = []
@@ -1554,6 +1557,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise failure
         if error and not reported_model_error:
             raise HTTPException(502, f"Codex execution failed: {error}")
+        output = self._response_output(output, state.observations)
         terminal = next((event for _, event in reversed(events) if event.get("type") == "turn.failed"), {})
         if state.model_attempts:
             terminal = {**terminal, "upstream_attempt": state.model_attempts[-1]}
@@ -1941,6 +1945,21 @@ class CodexAgent(SimpleResponsesAPIAgent):
             entry["tool_timeout_sec"] = float(self.config.mcp_tool_timeout_seconds)
         return entry
 
+    def _response_output(
+        self, cli_output: list[Any], observations: AgentObservationBundle | None
+    ) -> list[NeMoGymResponseOutputItem]:
+        if not self._token_id_capture_enabled():
+            return cli_output
+        if observations is not None:
+            try:
+                output = codex_response_output(observations)
+                if cli_output and not output:
+                    raise ValueError("Codex session transcript omitted the CLI's output")
+                return output
+            except ValueError as error:
+                raise HTTPException(502, "Codex training output requires a complete session transcript") from error
+        raise HTTPException(502, "Codex training output requires a complete session transcript")
+
     async def _create_response(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -1975,11 +1994,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
             timeout=timeout,
         )
         output_items, usage = parse_exec_jsonl(stdout)
+        output_items = self._response_output(output_items, observations)
 
         if usage.get("errors"):
             LOG.warning("codex reported errors: %s", usage["errors"])
 
-        if not any(
+        if not self._token_id_capture_enabled() and not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
             for item in output_items
         ):

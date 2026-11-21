@@ -118,6 +118,7 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         agent_ref = {"name": self.config.agent_server.name}
         if response.failure is not None:
             failure = {
+                "mask_sample": True,
                 "_ng_failure_class": response.failure.failure_kind or ENVIRONMENT_SERVER_FAILED,
                 "_ng_failure_kind": response.failure.failure_kind,
                 "_ng_failure_terminal": response.failure.terminal,

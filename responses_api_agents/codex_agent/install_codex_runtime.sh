@@ -27,6 +27,39 @@ else
   exit 1
 fi
 
+download_artifact() {
+  local url=$1 destination=$2 partial="${2}.partial.$$"
+  local attempt remaining attempt_timeout connect_timeout status=1
+  for attempt in 1 2 3 4; do
+    remaining=$((download_deadline - SECONDS))
+    if (( remaining <= 0 )); then
+      rm -f -- "$partial"
+      return 124
+    fi
+    attempt_timeout=$remaining
+    connect_timeout=$attempt_timeout
+    if (( connect_timeout > 10 )); then connect_timeout=10; fi
+    rm -f -- "$partial"
+    if curl -fsSL --retry 0 --connect-timeout "$connect_timeout" --max-time "$attempt_timeout" \
+      "$url" -o "$partial"; then
+      if (( SECONDS >= download_deadline )); then
+        rm -f -- "$partial"
+        return 124
+      fi
+      mv -f -- "$partial" "$destination"
+      return 0
+    else
+      status=$?
+    fi
+    rm -f -- "$partial"
+    if (( attempt == 4 )); then return "$status"; fi
+    remaining=$((download_deadline - SECONDS))
+    if (( remaining <= 0 )); then return 124; fi
+    if (( remaining > 2 )); then sleep 2; else sleep "$remaining"; fi
+  done
+  return "$status"
+}
+
 install_packages() {
   [ "$(id -u)" = 0 ] || { echo "Codex in the task sandbox requires $*: preinstall them or use a root image." >&2; exit 1; }
   if command -v apk >/dev/null 2>&1; then
@@ -66,8 +99,9 @@ if [ ! -f "$runtime/ready" ]; then
   fi
   cd "$runtime"
   archive="node-v${node_version}-${platform}.tar.gz"
-  curl -fsSL --retry 3 "${node_dist}/${archive}" -o "$archive"
-  curl -fsSL --retry 3 "${node_dist}/SHASUMS256.txt" -o SHASUMS256.txt
+  download_deadline=$((SECONDS + 180))
+  download_artifact "${node_dist}/${archive}" "$archive"
+  download_artifact "${node_dist}/SHASUMS256.txt" SHASUMS256.txt
   awk -v archive="$archive" '$2 == archive' SHASUMS256.txt | sha256sum -c -
   mkdir -p node
   tar -xzf "$archive" --strip-components=1 -C node
@@ -95,7 +129,37 @@ if [ ! -f "$runtime/ready" ]; then
   "$runtime/node/bin/node" --version
   PATH="$runtime/node/bin:$PATH" "$runtime/node/bin/node" \
     "$runtime/node/lib/node_modules/npm/bin/npm-cli.js" install \
-    --prefix "$runtime/codex" --no-audit --no-fund "@openai/codex@${codex_version}"
+    --prefix "$runtime/codex" --no-audit --no-fund --include=optional --save-exact "@openai/codex@${codex_version}"
+  # npm tolerates optional-package failures. Require this sandbox's binary before marking the runtime ready.
+  native_package="@openai/codex-linux-${arch}"
+  native_spec=$("$runtime/node/bin/node" - \
+    "$runtime/codex/node_modules/@openai/codex/package.json" "$codex_version" "$native_package" <<'NODE'
+const fs = require("node:fs");
+const [metadataPath, version, nativePackage] = process.argv.slice(2);
+const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+if (metadata.name !== "@openai/codex" || metadata.version !== version) {
+  throw new Error("Pinned Codex package metadata mismatch");
+}
+const dependencies = metadata.optionalDependencies;
+if (dependencies !== undefined &&
+    (dependencies === null || typeof dependencies !== "object" || Array.isArray(dependencies))) {
+  throw new Error("Pinned Codex optional dependency metadata is invalid");
+}
+if (dependencies && Object.prototype.hasOwnProperty.call(dependencies, nativePackage)) {
+  const spec = dependencies[nativePackage];
+  if (typeof spec !== "string" || spec.length === 0 || /[\r\n\0]/.test(spec)) {
+    throw new Error("Pinned Codex native dependency metadata is invalid");
+  }
+  process.stdout.write(`${nativePackage}@${spec}`);
+}
+NODE
+  )
+  # Releases bundling vendor binaries have no selected optional dependency; keep their version-probe fallback.
+  if [ -n "$native_spec" ]; then
+    PATH="$runtime/node/bin:$PATH" "$runtime/node/bin/node" \
+      "$runtime/node/lib/node_modules/npm/bin/npm-cli.js" install \
+      --prefix "$runtime/codex" --no-audit --no-fund --include=optional --save-prod --save-exact "$native_spec"
+  fi
 fi
 actual=$("$runtime/node/bin/node" "$runtime/codex/node_modules/@openai/codex/bin/codex.js" --version)
 [ "$actual" = "codex-cli $codex_version" ] || { echo "Codex version mismatch: $actual" >&2; exit 1; }
