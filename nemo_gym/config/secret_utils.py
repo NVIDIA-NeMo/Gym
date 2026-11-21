@@ -53,6 +53,7 @@ _CAPTURE_PUBLIC_FIELDS = frozenset(
         "rebuild_response",
         "parent_resolution",
         "allow_system_suffix",
+        "record_last_output_item",
         "allow_unresolved_continuations",
         "delta_records",
         "mask_incomplete_when_attributed",

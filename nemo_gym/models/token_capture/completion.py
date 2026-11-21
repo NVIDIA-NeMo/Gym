@@ -66,6 +66,23 @@ def completion_items(response: dict[str, Any]) -> list[dict]:
     return strip_token_fields(response_to_output_items(response))[0]
 
 
+def detector_items(response: dict[str, Any]) -> list[dict]:
+    """Describe served output for output detectors, with a Chat reply's think blocks lifted into reasoning.
+
+    A detector that flags a think tag in a message then reads only the answer, as it does for the same
+    generation served as a Responses reply by a model server that parses reasoning.
+    """
+    if not isinstance(response.get("choices"), list):
+        return completion_items(response)
+    converter = ChatCompletionsConverter(return_token_id_information=False)
+    items = [
+        output.model_dump(mode="json")
+        for choice in response["choices"]
+        for output in converter.postprocess_assistant_message_dict(choice["message"])
+    ]
+    return strip_token_fields(items)[0]
+
+
 def completion_metadata(response: dict[str, Any]) -> tuple[CompletionStatus, str | None]:
     """Read existing dialect completion fields; never infer success from absence."""
     choices = response.get("choices")

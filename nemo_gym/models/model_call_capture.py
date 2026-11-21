@@ -784,6 +784,7 @@ class _CaptureMiddleware:
         external_staging: bool = False,
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
         allow_system_suffix: bool = False,
+        record_last_output_item: bool = False,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -807,6 +808,7 @@ class _CaptureMiddleware:
         self._external_staging = external_staging
         self._parent_resolution_mode = parent_resolution_mode
         self._allow_system_suffix = allow_system_suffix
+        self._record_last_output_item = record_last_output_item
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -955,6 +957,7 @@ class _CaptureMiddleware:
                 external_staging=self._external_staging,
                 parent_resolution_mode=self._parent_resolution_mode,
                 allow_system_suffix=self._allow_system_suffix,
+                record_last_output_item=self._record_last_output_item,
                 admitted_at=time.time(),
                 agent_instance=agent_instance,
                 model_ref=self._model_ref,
@@ -1281,6 +1284,9 @@ def install_model_call_capture(
         ),
         allow_system_suffix=(
             capture_settings.token_id_capture.allow_system_suffix if capture_settings is not None else False
+        ),
+        record_last_output_item=(
+            capture_settings.token_id_capture.record_last_output_item if capture_settings is not None else False
         ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
