@@ -47,6 +47,7 @@ gym env start --resources-server my_benchmark --model-type inference_provider
 | `api_key` | Provider API key | Required |
 | `model` | Model identifier (provider-specific format) | Required |
 | `uses_reasoning_parser` | Parse `<think>` tags and `reasoning_content` fields | `false` |
+| `uses_interleaved_reasoning` | Replay parsed assistant reasoning in `reasoning_content` and `reasoning` fields | `true` |
 | `num_concurrent_requests` | Max concurrent requests to provider | `1000` |
 | `extra_body` | Additional parameters merged into every request body | `{}` |
 

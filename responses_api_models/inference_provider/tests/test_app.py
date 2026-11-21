@@ -92,15 +92,18 @@ class TestSanity:
         assert server.config.base_url == "https://api.example.com/v1"
         assert server.config.num_concurrent_requests == 1000
         assert server.config.uses_reasoning_parser is False
+        assert server.config.uses_interleaved_reasoning is True
 
     async def test_server_with_custom_config(self) -> None:
         server = _make_server(
             num_concurrent_requests=500,
             uses_reasoning_parser=True,
+            uses_interleaved_reasoning=False,
             extra_body={"frequency_penalty": 0.5},
         )
         assert server.config.num_concurrent_requests == 500
         assert server.config.uses_reasoning_parser is True
+        assert server.config.uses_interleaved_reasoning is False
         assert server.config.extra_body == {"frequency_penalty": 0.5}
 
     async def test_correlate_via_user_field_defaults_to_false(self) -> None:
@@ -368,6 +371,94 @@ class TestInferenceProvider:
         assistant_msg = called_kwargs["messages"][1]
         assert "<think>" not in assistant_msg["content"]
         assert assistant_msg["content"] == "The answer is 42."
+
+    async def test_reasoning_parser_replays_interleaved_reasoning(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(uses_reasoning_parser=True)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response(content="Next step")
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "Continue"},
+                    {"role": "assistant", "content": "<think>Keep the plan in mind.</think>Done"},
+                ]
+            },
+        )
+        assert response.status_code == 200
+        assistant_msg = called_kwargs["messages"][1]
+        assert assistant_msg["content"] == "Done"
+        assert assistant_msg["reasoning_content"] == "Keep the plan in mind."
+        assert assistant_msg["reasoning"] == "Keep the plan in mind."
+
+    async def test_reasoning_parser_can_disable_interleaved_reasoning(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(uses_reasoning_parser=True, uses_interleaved_reasoning=False)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response(content="Next step")
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "assistant", "content": "<think>Plan</think>Done"}]},
+        )
+        assert response.status_code == 200
+        assistant_msg = called_kwargs["messages"][0]
+        assert assistant_msg == {"role": "assistant", "content": "Done"}
+
+    async def test_reasoning_parser_replays_reasoning_from_list_content(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(uses_reasoning_parser=True)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response(content="Next step")
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "<think>Plan</think>"},
+                            {"type": "text", "text": "Done"},
+                        ],
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 200
+        assistant_msg = called_kwargs["messages"][0]
+        assert assistant_msg["content"] == [{"type": "text", "text": ""}, {"type": "text", "text": "Done"}]
+        assert assistant_msg["reasoning_content"] == "Plan"
+        assert assistant_msg["reasoning"] == "Plan"
 
     async def test_reasoning_parser_wraps_reasoning_content_in_response(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(uses_reasoning_parser=True)
