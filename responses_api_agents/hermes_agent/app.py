@@ -73,6 +73,7 @@ from nemo_gym.core import (
     UnsupportedContentError,
 )
 from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.rollouts import ModelUsageCapture
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -1230,6 +1231,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             cookies = seed_resp.cookies
 
             rollout_id = self.rollout_id_from_run(body)
+            # /run pairings (relayed by legacy_agent) own their lifecycle here, outside single_agent_turn.
+            usage_capture = (
+                await ModelUsageCapture.start(self.server_client.global_config_dict, rollout_id=rollout_id)
+                if rollout_id is not None
+                else None
+            )
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
                 url_path=self.url_path_for_run("/v1/responses", body),
@@ -1246,6 +1253,13 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
             )
 
+            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
+            if usage_capture is not None:
+                gym_resp.usage = await usage_capture.usage()
+                agent_resp_json["usage"] = (
+                    gym_resp.usage.model_dump(mode="json") if gym_resp.usage is not None else None
+                )
+
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
@@ -1255,7 +1269,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(verify_resp)
             verify_json = await get_response_json(verify_resp)
 
-            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
             turns = sum(
                 1
                 for item in gym_resp.output
@@ -1276,7 +1289,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
             if observations is not None:
                 result["ng_agent_observations"] = observations.model_dump(mode="json")
-            return HermesAgentVerifyResponse.model_validate(result)
+            verify_response = HermesAgentVerifyResponse.model_validate(result)
+            # Verifiers may rewrite the response; usage still belongs to the agent execution.
+            verify_response.response.usage = gym_resp.usage
+            return verify_response
 
 
 if __name__ == "__main__":

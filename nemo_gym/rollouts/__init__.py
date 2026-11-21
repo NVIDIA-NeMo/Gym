@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         read_available_model_call_records,
         read_model_call_records,
     )
+    from nemo_gym.rollouts.model_usage import ModelUsageCapture
     from nemo_gym.rollouts.rollout_collection import (
         AGENT_REQUEST_FAILED_FAILURE_CLASS,
         ENVIRONMENT_SERVER_FAILURE_CLASS,
@@ -65,6 +66,7 @@ _PUBLIC_API = {
     "ELAPSED_S_KEY": "health.timeouts",
     "ENVIRONMENT_SERVER_FAILURE_CLASS": "rollout_collection",
     "IncompleteEvaluationError": "rollout_recovery",
+    "ModelUsageCapture": "model_usage",
     "NG_ENVIRONMENT_SERVER_KEY": "rollout_collection",
     "NG_RESULT_TYPE_KEY": "rollout_collection",
     "NG_TERMINAL_KEY": "rollout_collection",

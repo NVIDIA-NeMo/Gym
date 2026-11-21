@@ -156,6 +156,12 @@ system message and ignored request `temperature`. It now combines the prompts an
 the request temperature, just like sandbox execution. These changes can affect scores.
 Remove unsupported fields that older versions silently ignored.
 
+With Model Server capture enabled, Hermes `/run` supplies provider-reported `response.usage`, including when called through `legacy_agent` as in `hermes_reasoning_gym`. It counts the current agent execution after Resources seeding and before verification, excluding prior captures and judge calls. Session-based pairings through the [single-agent-turn Environment Server](../../environment_servers/single_agent_turn/README.md) get the same accounting there; other Environment Servers, such as `harbor`, keep Hermes-reported usage.
+
+Set `observability_enabled: true` and an absolute `model_call_capture_dir` shared by the Model Server and the server owning the lifecycle (Hermes for its `/run` route, or the Environment Server for session-based pairings). `/run` requests need Gym rollout identity, which `gym eval run` supplies. Counts include only exchanges routed through that rollout's Model Server URL. Enabled lifecycle capture replaces Hermes-reported usage, including with `null` when capture or usage is missing or incomplete. Training token-ID capture alone does not enable model-call accounting or observed quality checks.
+
+Direct `/v1/responses` calls, capture-disabled runs, and `/run` requests without rollout identity retain Hermes-reported usage. Input uses its cache-inclusive `prompt_tokens`; output uses `completion_tokens`, which includes reasoning. Cached/reasoning details are passed through when present. Missing Hermes totals remain `null`, and numeric zero is preserved. These counters cover the calls accumulated by pinned Hermes: they can omit summary, compression or delegated calls, and missing provider usage can leave zero or partial totals. Its Chat Completions normalizer reads reasoning tokens only from Responses-style details, so with Chat Completions it reports reasoning and cached-token details as 0 even when they are unknown. Hermes-reported usage does not replace model-call evidence for rollout quality checks.
+
 ## Runtime and model requirements
 
 Sandbox sessions live in the memory of the worker that seeded them. With several agent workers, session routing sends each session's requests to the worker that seeded it. Calling the agent's `/run` directly keeps no session.

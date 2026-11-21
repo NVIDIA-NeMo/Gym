@@ -4,8 +4,9 @@
 """Resources-backed single-agent environment server."""
 
 import asyncio
+import dataclasses
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -55,6 +56,7 @@ from nemo_gym.core import (
     rebuild_failure,
 )
 from nemo_gym.metrics import add_perf_metrics
+from nemo_gym.rollouts import ModelUsageCapture
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     BaseEnvironmentServer,
@@ -262,9 +264,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 f"{name} tool session", lambda name=name: self._close_tool_session(request, handles, name)
             )
         closed_agent: list[AgentCloseSessionResponse] = []
+        usage_capture: ModelUsageCapture | None = None
 
         async def close_agent() -> None:
             closed_agent.append(await self._close_agent(request, handles))
+
+        async def start_usage_capture() -> None:
+            # Count the agent's model calls from Agent session creation, after the Resources and tool seeds.
+            nonlocal usage_capture
+            usage_capture = await self._start_usage_capture(request)
 
         # Register the agent cleanup before seeding the agent,
         # so cancellation can close a remotely created session even if its reply is lost;
@@ -283,6 +291,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     request,
                     handles,
                     register_agent_cleanup=lambda: cleanup.register_cleanup("agent session", close_agent),
+                    before_agent_seed=start_usage_capture,
                 )
             stage = "invoke_agent"
         elif continuation and stage in ("invoke_agent", "close_agent"):
@@ -290,6 +299,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             # Re-seeding is idempotent, so a checkpoint need not wait for it, and a crash during it re-seeds again.
             async with self.checkpoint_step(request, "replay"):
                 await self.reseed_after_restore(request, handles)
+
+        if usage_capture is None and stage in ("invoke_agent", "close_agent"):
+            # A continuation resumes an agent that may have made model calls under the replaced attempt's
+            # capture key, so enabled capture reports unknown usage instead of a partial total.
+            started = await self._start_usage_capture(request)
+            usage_capture = dataclasses.replace(started, store=None) if started is not None else None
 
         if stage == "invoke_agent":
             await self.checkpoint_boundary(request, {"next": "invoke_agent", "handles": handles.model_dump()})
@@ -331,6 +346,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     await agent_cleanup.close()
                     close = closed_agent[-1]
                 except Exception as error:
+                    if usage_capture is not None:
+                        # Cleanup has not confirmed the end of model activity.
+                        agent_response = agent_response.model_copy(update={"usage": None})
                     raise dependency_failure(
                         error,
                         stage="cleanup",
@@ -338,6 +356,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     ) from error
             observations = close.agent_observations
             trajectory = close.trajectory
+            if usage_capture is not None:
+                agent_response = agent_response.model_copy(update={"usage": await usage_capture.usage()})
             stage = "verify"
 
         def dumped_observations() -> dict | None:
@@ -403,6 +423,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if skipped_reward is None:
                 async with self.checkpoint_step(request, handles.resources_verify_step_type):
                     verification = await self._verify(request, handles, agent_response, observations, trajectory)
+                # The verifier may rewrite the response; the agent's accounted usage stays.
+                verification = verification.model_copy(
+                    update={"response": verification.response.model_copy(update={"usage": agent_response.usage})}
+                )
             else:
                 # The flag marks the fixed reward, so anything reading the result can tell it from a measured one.
                 verification = SingleAgentTurnResult.model_validate(
@@ -441,23 +465,32 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ),
         )
 
+    async def _start_usage_capture(self, request: SingleAgentTurnRequest) -> ModelUsageCapture | None:
+        return await ModelUsageCapture.start(
+            self.server_client.global_config_dict, rollout_id=request.episode_id.capture_key
+        )
+
     async def seed_episode_sessions(
         self,
         request: SingleAgentTurnRequest,
         handles: "SessionHandles",
         *,
         register_agent_cleanup: Callable[[], CleanupHandle] | None = None,
+        before_agent_seed: Callable[[], Awaitable[None]] | None = None,
     ) -> CleanupHandle | None:
         """Seed the episode's resources and tool server sessions, then its agent session with what they lent.
 
         ``register_agent_cleanup`` runs before the agent seed, so a lost agent seed reply is still closed;
-        its result is returned.
+        its result is returned. ``before_agent_seed`` is awaited after the Resources and tool server seeds,
+        before the agent seed.
         An episode whose agent holds resources MCP grants restarts after a crash
         unless the agent borrows a sandbox the resources seed lent and re-binds them;
         one that grants a tool server's MCP tools always does.
         """
         seed = await self._seed_resources(request, handles)
         tool_accesses = await self._seed_tool_servers(request, handles)
+        if before_agent_seed is not None:
+            await before_agent_seed()
         registered = register_agent_cleanup() if register_agent_cleanup is not None else None
         await self._seed_agent(request, handles, seed, tool_accesses)
         return registered
