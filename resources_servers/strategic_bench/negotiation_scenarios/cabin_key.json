@@ -1,0 +1,46 @@
+{
+    "agent1_role": "Host",
+    "agent2_role": "Guest",
+    "generic": "This negotiation is between two coworkers, one of whom has reserved a short-term rental cabin for a weekend trip but can\u2019t use it, and the other who might take it over. The host prepaid in advance under a non-refundable policy, yet the cabin is exactly what the guest friend has been wanting to book. If they can agree on cost, the guest will take it.",
+    "agent1_specific": " You reserved a cozy mountain cabin about a week ago through a vacation rental website. The cabin is usually priced at $220 per night, but you were able to grab a special two-night weekend deal for $350 total after monitoring rates for a while. You were really excited about the purchase since you had been planning a relaxing getaway for months, and you locked it in quickly when you saw the discounted offer. Unfortunately, your work schedule has suddenly changed, and you got assigned an important project requiring your presence that exact weekend. You checked the rental platform hoping to cancel or modify the reservation, but the property carried a strict \u201cno cancellation, no refund\u201d policy because of the discounted rate. At this point, the money you spent is completely non-refundable, and the booking is sitting unused. Luckily, when you mentioned it, your coworker expressed interest because they\u2019ve been wanting to stay in a cabin like that for ages. Your hope is to recover as much of your original spending as you can by transferring the booking directly to them, but you may need to negotiate to find a fair price.",
+    "agent2_specific": " Your coworker recently booked a cozy mountain cabin for a relaxing weekend trip, but now it seems they won\u2019t be able to use it. They\u2019ve offered it to you instead, which immediately caught your interest because you\u2019ve actually been searching for a getaway spot fitting this exact description: cozy, with a fireplace, right near hiking trails, and available on your only free weekend this month. The cabin was reserved through a popular rental platform where policies are strict, meaning no refunds are given if something changes. You know your coworker already paid the full amount upfront, so if you take it, you\u2019d essentially be covering their cost. That said, you\u2019re not obligated to accept the exact price they paid, and naturally you\u2019d prefer to spend less if possible. The total was not cheap, and while you can afford it, you\u2019ve been careful with your money lately and prefer to negotiate a fair deal. Your main goal is to secure this cabin, since it really does meet your needs perfectly, but you want to land at a price that feels like you\u2019re getting reasonable value.",
+    "eval": [
+        "1. Based on the following conversation, did the coworkers reach an agreement about the cabin booking? Answer with YES or NO.",
+        "2. Based on the following conversation, if the coworkers did not reach an agreement, why not? Answer with the reason or N/A if they did reach an agreement.",
+        "3. Based on the following conversation, how much money is the cabin reservation valued at now? Answer with a number between 150-500, without any other text.",
+        "4. Based on the following conversation, other than the payment amount, are there any additional terms or conditions included in the arrangement?"
+    ],
+    "agent1_rewards": [
+        "(lambda: (     (val := llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,         what was the final agreed-upon price the Guest will pay the Host for the cabin?          Answer with a number between 0-350 or N/A, without any other text\"\"\"     )) and (         (m := re.search(r\"\\d+(?:\\.\\d+)?\", val))         and float(m.group()) / 350     ) or 0 ))()",
+        "(lambda: (     1 if re.search(r\"\\bYES\\b\", llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          did the Host avoid losing the entire $350 (i.e., did they recover at least some amount from the Guest)?          Answer with YES, NO, or N/A only.\"\"\"     ), flags=re.IGNORECASE) else 0 ))()",
+        "(lambda: (     1 if re.search(r\"\\bYES\\b\", llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          did the Host recover the full $350 they originally spent?          Answer with YES, NO, or N/A only.\"\"\"     ), flags=re.IGNORECASE) else 0 ))()",
+        "(lambda: (     1 if re.search(r\"\\bYES\\b\", llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          did the Host maintain a positive relationship with the Guest after the negotiation?          Answer with YES, NO, or N/A only.\"\"\"     ), flags=re.IGNORECASE) else 0 ))()",
+        "(lambda: (     1 if re.search(r\"\\bYES\\b\", llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          was the transfer of the cabin booking completed successfully (i.e., will the Guest actually get to use the cabin under the Host\u2019s reservation)?          Answer with YES, NO, or N/A only.\"\"\"     ), flags=re.IGNORECASE) else 0 ))()"
+    ],
+    "agent2_rewards": [
+        "[ (lambda: (     (val := llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          what was the final agreed price the Guest paid for the cabin transfer?          Answer with a number between 0-350 or N/A, without any other text\"\"\"     )) and (         (m := re.search(r\"\\d+(?:\\.\\d+)?\", val))         and 1 - (float(m.group()) / 350)     ) or 0 ))() ]",
+        "(lambda: (     1 if re.search(r\"\\bYES\\b\", llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          did the Guest successfully secure the cabin booking for the desired weekend?          Answer with YES, NO, or N/A only.\"\"\"     ), flags=re.IGNORECASE) else 0 ))(),",
+        "(lambda: (     1 if re.search(r\"\\bYES\\b\", llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          did the Guest feel they received reasonable value for the price negotiated?          Answer with YES, NO, or N/A only.\"\"\"     ), flags=re.IGNORECASE) else 0 ))(),",
+        "(lambda: (     1 if re.search(r\"\\bYES\\b\", llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          did the Guest maintain a positive relationship with the Host after the negotiation?          Answer with YES, NO, or N/A only.\"\"\"     ), flags=re.IGNORECASE) else 0 ))(),",
+        "(lambda: (     1 if re.search(r\"\\bYES\\b\", llm(         f\"\"\"{CONTEXT} Based on the above conversation and subsequent evaluation,          was the transfer process smooth and without complications for the Guest?          Answer with YES, NO, or N/A only.\"\"\"     ), flags=re.IGNORECASE) else 0 ))(),"
+    ],
+    "reached_agreement_q": "Based on the following conversation, did Host and Guest reach an agreement? Answer with YES or NO.",
+    "overview": "This negotiation is between two coworkers, one of whom has reserved a short-term rental cabin for a weekend trip but can\u2019t use it, and the other who might take it over. The host prepaid in advance under a non-refundable policy, yet the cabin is exactly what the guest friend has been wanting to book. If they can agree on cost, the guest will take it.",
+    "learning_objectives": "The learning objectives for this case are to develop an understanding of how objective standards of fairness can guide negotiations toward outcomes that are both reasonable and mutually acceptable. Students will learn how to identify and apply relevant benchmarks\u2014such as market comparisons, industry norms, or performance data\u2014in order to justify their positions and assess the legitimacy of the other side\u2019s proposals. By practicing how to use these standards effectively, students will strengthen their ability to frame arguments persuasively while also appearing fair and credible, which can foster trust and cooperation in the negotiation process. Additionally, the case highlights how neglecting fairness standards and relying solely on positional bargaining can lead to power struggles, stalemates, and potential harm to relationships. A further objective is to explore the role of personal relationships, such as friendships, in shaping negotiation behavior and outcomes. Students should recognize how relationships may create unique pressures or alter expectations, requiring them to balance fairness, personal values, and relational dynamics to reach agreements that are both effective and sustainable. ",
+    "categories": "Anchoring, BATNA, Criteria, Emotions, Joint Gains, Relationships, ZOPA",
+    "title": "Passing the Cabin Key: A Weekend Getaway Deal",
+    "truncated_title": "cabin_key",
+    "new_categories": [
+        "empathy",
+        "standard of fairness",
+        "relationships",
+        "credibility",
+        "value creation"
+    ],
+    "themes": [
+        "Personal Relationships & Emotion",
+        "Trust, Fairness & Communication",
+        "Funding & Financial Pressure"
+    ],
+    "oneline": "A negotiation between two coworkers over a fair price for transferring a prepaid, non-refundable cabin reservation."
+}
