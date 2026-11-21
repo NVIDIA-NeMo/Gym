@@ -521,6 +521,8 @@ def test_judge_transport_failure_recovery_preserves_receipts_and_review_budget(
     work = next((kwargs["directory"] / "judges").iterdir())
     original = {path: path.read_bytes() for path in work.glob("attempt*.*")}
     assert len(list(work.glob("attempt*.json"))) == failed_invocations
+    for path in work.glob("attempt*.json"):
+        assert read(path).get("terminal", False) == (status in (401, 404))
     if not body_complete:
         for path in work.glob("attempt*.json"):
             receipt = read(path)
