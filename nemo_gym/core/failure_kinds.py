@@ -274,7 +274,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
 # The trial gate names these from what a saved row shows, never from a producer's report: a scored-zero answer the
 # benchmark's rule scored without a grade (cut off with a cutoff signal, empty, or malformed), a model server's 5xx
 # reply whatever kind the failure names, another model's 4xx rejection, and the policy's request the model server
-# rejected because its output budget alone exceeds the context window or because a parameter carries a value the
+# rejected because its output budget alone fills the context window or because a parameter carries a value the
 # deployment does not support (setups the deployment cannot serve, not the model's outcome). They are registered here
 # so their names are shared, and kept out of ``FAILURE_KINDS`` so no producer can emit one (``require_failure_kind``
 # refuses them).

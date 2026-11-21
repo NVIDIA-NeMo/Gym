@@ -5847,7 +5847,8 @@ _WINDOW_32768 = json.dumps(
             ),
             ("invalid_output_token_parameter",) * 2,
         ),
-        ({"max_tokens": 32768}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        ({"max_tokens": 32768}, _WINDOW_32768, ("invalid_output_token_parameter",) * 2),
+        ({"max_tokens": 32767}, _WINDOW_32768, ("context_length_exceeded",) * 2),
         ({}, _WINDOW_32768, ("context_length_exceeded",) * 2),
         (
             {"max_tokens": 40000},
@@ -5862,6 +5863,7 @@ _WINDOW_32768 = json.dumps(
         "max-model-len",
         "vllm-0.27-max-total-tokens",
         "budget-equal-to-window",
+        "budget-below-window",
         "no-budget",
         "no-window-named",
     ],
@@ -5874,7 +5876,7 @@ async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
     error_content: str,
     categories: tuple[str, str],
 ) -> None:
-    """No prompt fits a budget larger than the whole window the engine names, so the budget is at fault. The budget
+    """No prompt fits a budget as large as the whole window the engine names, so the budget is at fault. The budget
     is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens."""
     monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
     monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
@@ -9876,7 +9878,7 @@ def test_request_timeout_reaches_every_engine_client(request_timeout_seconds) ->
 #
 # A run served at a window smaller than the benchmark's output budget gets a length refusal on every call. With
 # ``refit_output_budget_to_window`` (on by default) the server retries such a call once with the budget lowered to
-# what the window leaves after the prompt. Only a budget that alone exceeds the window is lowered.
+# what the window leaves after the prompt. Only a budget that alone fills the window is lowered.
 # ──────────────────────────────────────────────────────────────────────────────
 
 _REFIT_WINDOW = 8192
@@ -10473,12 +10475,15 @@ async def test_a_budget_within_the_window_keeps_the_overflow_refusal(
 
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
 @mark.parametrize(
-    ("budget", "refitted"), [(131072, True), (8193, True), (8192, False)], ids=["131072", "8193", "8192"]
+    ("budget", "refitted"),
+    [(131072, True), (8193, True), (8192, True), (8191, False)],
+    ids=["131072", "8193", "8192", "8191"],
 )
-async def test_only_a_budget_over_the_window_is_refitted(
+async def test_only_a_budget_that_fills_the_window_is_refitted(
     monkeypatch: MonkeyPatch, use_completions_api: bool, budget: int, refitted: bool
 ) -> None:
-    """The boundary is the one ``invalid_output_token_parameter`` uses: a budget larger than the whole window."""
+    """The boundary is the one ``invalid_output_token_parameter`` uses: a budget at least the whole window, which
+    leaves no token for any prompt."""
     model = _refit_model(monkeypatch, use_completions_api)
     message = (
         f"This model's maximum context length is 8192 tokens. However, you requested {budget + 100} tokens "
@@ -10503,6 +10508,46 @@ async def test_only_a_budget_over_the_window_is_refitted(
         assert execution["error_category"] == "context_length_exceeded"
         assert "applied_max_tokens" not in execution
         assert "output_budget_refit" not in execution
+
+
+# How vLLM 0.29 refuses a budget equal to its window: the budget leaves no input token, and the refusal states the
+# prompt in characters, not tokens.
+_REFIT_BUDGET_FILLS_WINDOW_V029 = (
+    "This model's maximum context length is 8192 tokens. However, you requested 8192 output tokens and your prompt "
+    "contains 102 characters (more than 0 characters, which is the upper bound for 0 input tokens). Please reduce "
+    "the length of the input prompt or the number of requested output tokens. (parameter=input_text, value=102)"
+)
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+async def test_a_budget_equal_to_the_window_is_refitted_by_default_from_a_tokenize_count(
+    monkeypatch: MonkeyPatch, use_completions_api: bool
+) -> None:
+    """An output budget set to the whole context window (``max_output_tokens: ${.context_window}`` at the served
+    length) is refused on every call; it is refitted like a budget over the window, counting the prompt with
+    /tokenize since the refusal states it in characters."""
+    model = _refit_model(monkeypatch, use_completions_api)
+    client = _refit_engine(
+        _engine_bad_request_error(_REFIT_BUDGET_FILLS_WINDOW_V029), _refit_served(use_completions_api)
+    )
+    model._clients = [client]
+    request = _refit_request()
+
+    result = await model.chat_completions(request, _refit_body({"max_tokens": _REFIT_WINDOW}))
+
+    assert result.choices[0].finish_reason == "stop"
+    assert [call["max_tokens"] for call in _generation_calls(client, use_completions_api)] == [
+        _REFIT_WINDOW,
+        _REFIT_APPLIED,
+    ]
+    client.create_tokenize.assert_awaited_once()
+    execution = request.state.nemo_gym_model_execution
+    assert execution["output_budget_refit"] == {
+        "requested_max_tokens": _REFIT_WINDOW,
+        "window": _REFIT_WINDOW,
+        "applied_max_tokens": _REFIT_APPLIED,
+    }
+    assert "error_category" not in execution
 
 
 # The body a baseline received for every policy call when its reasoning effort was not one the deployment serves.
