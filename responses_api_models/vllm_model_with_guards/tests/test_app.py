@@ -171,3 +171,73 @@ async def test_identical_custom_tool_calls_end_the_conversation() -> None:
 
     assert "same tool call" in result.choices[0].message.content
     upstream.assert_not_awaited()
+
+
+async def test_custom_tool_inputs_are_compared_byte_for_byte() -> None:
+    """Free-form custom input is not JSON: "1" and " 1 " are different inputs, so the guard must not stop on them."""
+    result, upstream = await _chat(
+        _custom_messages(("apply_patch", "1"), ("apply_patch", " 1 ")), guard_identical_tool_calls=2
+    )
+
+    assert result.choices[0].message.content == "from the engine"
+    upstream.assert_awaited_once()
+
+
+async def test_identical_raw_custom_inputs_still_end_the_conversation() -> None:
+    result, upstream = await _chat(
+        _custom_messages(("apply_patch", " 1 "), ("apply_patch", " 1 ")), guard_identical_tool_calls=2
+    )
+
+    assert "same tool call" in result.choices[0].message.content
+    upstream.assert_not_awaited()
+
+
+async def test_function_arguments_are_still_compared_as_json() -> None:
+    """Function arguments keep their JSON normalization: key order and whitespace do not make a call different."""
+    messages = [{"role": "user", "content": "go"}]
+    for i, arguments in enumerate(('{"a": 1, "b": 2}', '{ "b": 2,  "a": 1 }')):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": f"c{i}", "type": "function", "function": {"name": "bash", "arguments": arguments}}
+                ],
+            }
+        )
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": "ok"})
+
+    result, upstream = await _chat(messages, guard_identical_tool_calls=2)
+
+    assert "same tool call" in result.choices[0].message.content
+    upstream.assert_not_awaited()
+
+
+async def test_parallel_calls_mixing_function_and_custom_keep_their_order() -> None:
+    def turn(i: int, calls: list[dict]) -> list[dict]:
+        return [
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "tool", "tool_call_id": f"t{i}", "content": "ok"},
+        ]
+
+    function_call = {"id": "f", "type": "function", "function": {"name": "bash", "arguments": '{"command": "ls"}'}}
+    custom_call = {"id": "c", "type": "custom", "custom": {"name": "apply_patch", "input": "x"}}
+    # the same two calls in a different order are a different signature, so the conversation is progressing
+    messages = [
+        {"role": "user", "content": "go"},
+        *turn(0, [function_call, custom_call]),
+        *turn(1, [custom_call, function_call]),
+    ]
+    result, upstream = await _chat(messages, guard_identical_tool_calls=2)
+    assert result.choices[0].message.content == "from the engine"
+    upstream.assert_awaited_once()
+
+    # the same two calls in the same order are a loop
+    messages = [
+        {"role": "user", "content": "go"},
+        *turn(0, [function_call, custom_call]),
+        *turn(1, [function_call, custom_call]),
+    ]
+    result, upstream = await _chat(messages, guard_identical_tool_calls=2)
+    assert "same tool call" in result.choices[0].message.content
+    upstream.assert_not_awaited()

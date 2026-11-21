@@ -50,8 +50,13 @@ def _tool_call_signature(message: Dict[str, Any]) -> Optional[tuple]:
         # A function call carries its name and JSON arguments; a custom tool call its name and free-form input.
         # Reading only "function" would give every custom call the same (None, null) signature, and a conversation
         # that is making progress with differing custom calls would be stopped as a loop.
-        payload = call.get("function") or call.get("custom") or {}
-        arguments = payload.get("arguments", payload.get("input"))
+        custom = None if call.get("function") else call.get("custom")
+        if custom is not None:
+            # Free-form input is not JSON: "1" and " 1 " are different inputs, so the raw string is the key.
+            parts.append((call.get("type"), custom.get("name"), custom.get("input")))
+            continue
+        payload = call.get("function") or {}
+        arguments = payload.get("arguments")
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)

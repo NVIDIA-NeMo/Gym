@@ -38,7 +38,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import BaseModel, ConfigDict, Field, FilePath
+from pydantic import BaseModel, ConfigDict, Field, FilePath, model_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -594,6 +594,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_max_context_window: int
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
+    # For sandboxes with no egress: refuse to start unless the OpenCode runtime is supplied (preinstalled_opencode, or
+    # both remote_opencode_install_script_path and remote_opencode_binary_path), so a run never reaches the installer's
+    # download fallback and fails there, after the sandbox is already seeded, before its first model call.
+    require_opencode_runtime: bool = False
     execution_failure_reward_zero: bool = False
     # Opt-in mode gives setup and agent execution separate sandbox_timeout budgets.
     report_agent_sandbox_oom: bool = False
@@ -668,6 +672,19 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     wall_grace_s: float = 60.0
 
     debug: bool = False
+
+    @model_validator(mode="after")
+    def _runtime_is_supplied_when_required(self) -> "OpenCodeSandboxedAgentConfig":
+        supplied = self.preinstalled_opencode or (
+            self.remote_opencode_install_script_path and self.remote_opencode_binary_path
+        )
+        if self.require_opencode_runtime and not supplied:
+            raise ValueError(
+                "require_opencode_runtime is set but no OpenCode runtime is configured: set preinstalled_opencode, or "
+                "both remote_opencode_install_script_path and remote_opencode_binary_path, to a pinned runtime the sandbox "
+                "can read. Nothing is downloaded when this option is set."
+            )
+        return self
 
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
@@ -841,6 +858,38 @@ async def _read_stuck_marker(sandbox: Any) -> Optional[str]:
     except Exception:
         print("Reading the stuck marker failed", format_exc(), file=sys.stderr)
         return None
+
+
+def _opencode_launcher(sessions_file: str) -> str:
+    """The prefix of an `opencode run`: the run starts in a session of its own and records the session id in
+    `sessions_file`, so the wall deadline can kill the run together with every tool process it started. The process
+    that calls setsid is the session leader, so its pid is the session id: no `ps` is needed to record it."""
+    return f"setsid -w sh -c 'echo $$ >> {sessions_file}; exec \"$@\"' _"
+
+
+def _quiesce_command(sessions_file: str, pattern: str = "[o]pencode run") -> str:
+    """Kill every recorded session and any leftover `opencode run`, and print QUIESCED only when none is left.
+
+    Each recorded session is a process group `setsid` made, so the shell builtin `kill` reaches it and its children
+    even in an image without procps; `pkill` and `pgrep` additionally catch leftovers outside the group when the
+    image has them. Without them the group check alone decides, so nothing is ever reported stopped unchecked. The
+    bracketed pattern does not match this command's own text. Each pass kills, then checks; a process that survives
+    all passes means no QUIESCED."""
+    have_pgrep = "command -v pgrep >/dev/null 2>&1"
+    have_pkill = "command -v pkill >/dev/null 2>&1"
+    return (
+        f"files={sessions_file}; alive=1; "
+        # No recorded session and no pgrep: nothing could show that the run is gone, so never confirm.
+        f'if [ ! -s "$files" ] && ! {have_pgrep}; then exit 3; fi; '
+        "for i in 1 2 3 4 5; do "
+        'if [ -f "$files" ]; then for sid in $(cat "$files"); do kill -KILL -- "-$sid" 2>/dev/null; '
+        f'{have_pkill} && pkill -KILL -s "$sid" 2>/dev/null; done; fi; '
+        f"{have_pkill} && pkill -KILL -f '{pattern}' 2>/dev/null; sleep 0.2; alive=0; "
+        'if [ -f "$files" ]; then for sid in $(cat "$files"); do kill -0 -- "-$sid" 2>/dev/null && alive=1; '
+        f'{have_pgrep} && pgrep -s "$sid" >/dev/null 2>&1 && alive=1; done; fi; '
+        f"{have_pgrep} && pgrep -f '{pattern}' >/dev/null 2>&1 && alive=1; "
+        '[ "$alive" = 0 ] && break; sleep 1; done; [ "$alive" = 0 ] && echo QUIESCED'
+    )
 
 
 class _CombinedExecResult:
@@ -1345,6 +1394,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         env["NEMO_GYM_OPENCODE_PROVIDER_ID"] = self.config.opencode_provider_id
         return env
 
+    @staticmethod
+    async def _quiesce_opencode(sandbox: Any, sessions_file: str) -> None:
+        """Stop the rollout's OpenCode runs and everything they started; fail the row, ungraded, unless that is confirmed."""
+        reason = ""
+        try:
+            result = await asyncio.wait_for(sandbox.exec(command=_quiesce_command(sessions_file), timeout_s=60), 90)
+            if (
+                getattr(result, "return_code", None) == 0
+                and getattr(result, "error_type", None) is None
+                and "QUIESCED" in (getattr(result, "stdout", "") or "")
+            ):
+                return
+            reason = f"no confirmation (rc={getattr(result, 'return_code', None)}, error_type={getattr(result, 'error_type', None)})"
+        except Exception as error:
+            reason = f"{type(error).__name__}: {error}"
+        raise NgFailureEvent(
+            boundary="harness",
+            failure_kind=AGENT_ROUTE_FAILED,
+            operation="opencode.quiesce",
+            stage="agent",
+            failure_reason=f"OpenCode could not be confirmed stopped after the wall deadline: {reason}",
+        )
+
     async def _nudge_idle_turns(
         self,
         *,
@@ -1355,6 +1427,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         run_flags: str,
         session_env: Optional[Dict[str, str]],
         deadline: float,
+        sessions_file: Optional[str] = None,
     ) -> tuple[Any, int]:
         """Continue the session per ``idle_nudge`` while its last assistant turn made no tool call.
 
@@ -1429,6 +1502,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             resume = (
                 f"export PATH=$HOME/.opencode/bin:$PATH && {UNSET_PROXY_ENV} "
                 f"&& printf '%s' {quote(nudge)} | OPENCODE_CONFIG_CONTENT={quote(json.dumps(config))} {env_suffix} "
+                f"{_opencode_launcher(sessions_file) + ' ' if sessions_file else ''}"
                 f"opencode run --session {quote(session_id)} {run_flags} "
                 f'&& echo "OpenCode run finished"'
             )
@@ -1695,6 +1769,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             f"NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))}"
         )
         run_env_str = f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str}"
+        # Every `opencode run` of this rollout (the first launch and each idle-nudge resume) starts in a session of its
+        # own and records it here, so a deadline kills the run with every tool process it started and confirms it.
+        sessions_file = f"/tmp/nemo-gym-opencode-sessions-{uuid4().hex}"
+        launcher = _opencode_launcher(sessions_file)
 
         # Query delivery. argv is the default and preserves today's behaviour exactly; stdin is
         # opt-in (see `opencode_query_via_stdin`).
@@ -1740,7 +1818,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # Task images can carry builder proxy settings that OpenCode (Bun) honours: see UNSET_PROXY_ENV.
         agent_command = f"""
         {UNSET_PROXY_ENV} && {query_seed_str}{required_mcp_str} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} {run_env_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
+            {launcher} opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
         && echo "OpenCode run finished"
         """
         if self.config.report_agent_sandbox_oom:
@@ -1793,6 +1871,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     run_flags=f"{opencode_debug_str} {opencode_thinking_str}",
                     session_env=dict(xdg_env) or None,
                     deadline=run_started + self.config.sandbox_timeout,
+                    sessions_file=sessions_file,
                 )
                 phase["stuck"] = phase["result"].stuck
 
@@ -1811,13 +1890,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     f"OpenCode agent phase passed sandbox_timeout ({self.config.sandbox_timeout:g} s); stopping it",
                     file=sys.stderr,
                 )
-                try:
-                    await asyncio.wait_for(
-                        sandbox.exec(command="pkill -KILL -f 'opencode run' >/dev/null 2>&1; true", timeout_s=60),
-                        timeout=90,
-                    )
-                except Exception:
-                    print("Could not stop OpenCode after the wall deadline", format_exc(), file=sys.stderr)
+                # Nothing is exported or graded until the run and its tool processes are confirmed gone: a child still
+                # writing /workspace would change what is collected, and a model call would go on after the deadline.
+                await self._quiesce_opencode(sandbox, sessions_file)
         except NgFailureEvent as exc:
             if not (
                 self.config.report_agent_sandbox_oom

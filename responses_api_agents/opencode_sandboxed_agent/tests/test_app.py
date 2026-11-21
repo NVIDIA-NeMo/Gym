@@ -23,6 +23,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -3561,6 +3562,8 @@ async def test_agent_phase_is_cut_off_at_sandbox_timeout(tmp_path: Path, monkeyp
         ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
         if "opencode run" in command and "pkill" not in command:
             await asyncio.sleep(3600)  # hangs, as the 14 h rollouts did
+        if "QUIESCED" in command:  # the quiesce step: every session and leftover run killed, and confirmed
+            return ok("QUIESCED")
         if "session list" in command:
             return ok('[{"id": "ses_main"}]')
         if "opencode export" in command:
@@ -3592,7 +3595,10 @@ async def test_agent_phase_is_cut_off_at_sandbox_timeout(tmp_path: Path, monkeyp
     )
     row = server._sandbox_id_to_run_result[""]
     assert row["opencode_wall_exceeded"] is True and row["opencode_finished"] is False
-    assert any("pkill -KILL -f 'opencode run'" in c for c in commands)
+    quiesce = next(i for i, c in enumerate(commands) if "QUIESCED" in c)
+    export = next(i for i, c in enumerate(commands) if "opencode export" in c)
+    assert quiesce < export  # nothing is exported until the run and its tool processes are confirmed gone
+    assert "pkill -KILL -s" in commands[quiesce] and "pgrep -s" in commands[quiesce]
     assert row["opencode_tokens"]["main"]["input"] == 10  # exported after the cut-off
 
 
@@ -3715,6 +3721,11 @@ async def test_resume_runs_with_the_environment_of_the_first_launch(tmp_path: Pa
     for value in shared:
         assert value in first, value
         assert value in resume, value
+    # both launches start in a session of their own and record it in the same file, so a deadline can kill all of them
+    first_file = re.search(r"echo \$\$ >> (\S+);", first)
+    resume_file = re.search(r"echo \$\$ >> (\S+);", resume)
+    assert first_file and resume_file and first_file.group(1) == resume_file.group(1)
+    assert "setsid -w sh -c" in first and "setsid -w sh -c" in resume
 
 
 @mark.parametrize(
@@ -3753,3 +3764,205 @@ async def test_a_resume_that_times_out_keeps_its_partial_work_path() -> None:
     result, nudges = await nudge._run(nudge._server(1), sandbox, nudge.FIRST)
 
     assert nudges == 1 and result.error_type == "timeout"  # returned as a result, not raised
+
+
+class TestOpenCodeRuntimeConfig:
+    """The shipped nl2repobench preset carries no private runtime, and offline setups fail at startup without one."""
+
+    def _config(self, **updates: Any) -> OpenCodeSandboxedAgentConfig:
+        return TestOpenCodeSandboxedAgent()._create_config().model_copy(update=updates, deep=True)
+
+    def _build(self, **fields: Any) -> OpenCodeSandboxedAgentConfig:
+        base = TestOpenCodeSandboxedAgent()._create_config().model_dump()
+        return OpenCodeSandboxedAgentConfig.model_validate(base | fields)
+
+    def test_the_shipped_preset_references_no_private_runtime(self) -> None:
+        import yaml
+
+        path = Path(__file__).resolve().parents[3] / "benchmarks/nl2repobench/opencode.yaml"
+        text = path.read_text()
+        agent = yaml.safe_load(text)["nl2repobench_opencode_sandboxed_agent"]["responses_api_agents"][
+            "opencode_sandboxed_agent"
+        ]
+
+        assert "/mnt/s3-data" not in text
+        # with the fields unset the agent downloads the installer, which is what open-egress modes need
+        assert not agent.get("remote_opencode_install_script_path")
+        assert not agent.get("remote_opencode_binary_path")
+        assert not agent.get("preinstalled_opencode")
+        assert not agent.get("require_opencode_runtime")
+
+    def test_offline_setup_without_a_runtime_fails_at_startup(self) -> None:
+        with raises(ValueError, match="no OpenCode runtime is configured"):
+            self._build(require_opencode_runtime=True)
+        with raises(ValueError, match="no OpenCode runtime is configured"):
+            self._build(require_opencode_runtime=True, remote_opencode_binary_path="/opt/opencode")  # script missing
+
+    @mark.parametrize(
+        "fields",
+        [
+            {"preinstalled_opencode": True},
+            {"remote_opencode_install_script_path": "/opt/install.sh", "remote_opencode_binary_path": "/opt/opencode"},
+        ],
+    )
+    def test_a_configured_runtime_satisfies_the_requirement(self, fields: dict) -> None:
+        assert self._build(require_opencode_runtime=True, **fields).require_opencode_runtime is True
+
+    def test_the_default_still_allows_the_installer_download_and_cached_runtimes(self) -> None:
+        assert self._build().require_opencode_runtime is False
+        cached = self._build(
+            remote_opencode_install_script_path="/mnt/cache/install.sh",
+            remote_opencode_binary_path="/mnt/cache/opencode",
+        )
+        assert cached.remote_opencode_binary_path == "/mnt/cache/opencode"
+
+
+def _wall_deadline_world(tmp_path: Path, monkeypatch: MonkeyPatch, quiesce_reply: Any):
+    """A rollout whose run hangs past its deadline; `quiesce_reply(command)` answers the quiesce exec."""
+    commands: List[str] = []
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        if "QUIESCED" in command:
+            reply = quiesce_reply(command)
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+        if "opencode run" in command:
+            await asyncio.sleep(3600)
+        return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_)
+    sandbox.download = AsyncMock()
+    config = (
+        TestOpenCodeSandboxedAgent()
+        ._create_config()
+        .model_copy(update={"artifacts_dir": str(tmp_path), "sandbox_timeout": 0.2, "wall_grace_s": 0.0})
+    )
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+    request = MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"})
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}])
+    return server, request, body, commands
+
+
+@mark.parametrize(
+    "reply",
+    [
+        SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),  # ran, but no confirmation
+        SimpleNamespace(stdout="QUIESCED", stderr="", return_code=1, error_type=None),
+        SimpleNamespace(stdout="QUIESCED", stderr="", return_code=0, error_type="sandbox"),
+        RuntimeError("the exec failed"),
+    ],
+    ids=["no_marker", "nonzero_exit", "provider_error_type", "exec_raised"],
+)
+async def test_unconfirmed_cleanup_after_the_wall_deadline_is_an_ungraded_failure(
+    tmp_path: Path, monkeypatch: MonkeyPatch, reply: Any
+) -> None:
+    server, request, body, commands = _wall_deadline_world(tmp_path, monkeypatch, lambda command: reply)
+
+    with raises(NgFailureEvent) as caught:
+        await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+
+    assert caught.value.operation == "opencode.quiesce"
+    assert caught.value.failure_kind == "agent_route_failed"
+    # nothing was exported or snapshotted after the failed cleanup, and no row was recorded for /verify
+    assert not any("opencode export" in c or "session list" in c for c in commands)
+    assert server._sandbox_id_to_run_result == {}
+
+
+async def test_confirmed_cleanup_after_the_wall_deadline_lets_the_run_be_graded(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ok = SimpleNamespace(stdout="QUIESCED", stderr="", return_code=0, error_type=None)
+    server, request, body, commands = _wall_deadline_world(tmp_path, monkeypatch, lambda command: ok)
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+
+    # the export is unavailable in this stub, so the row is built from what is there; the point is the order and no raise
+    try:
+        await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+    except NgFailureEvent as error:
+        assert error.operation != "opencode.quiesce"
+    quiesce = next(i for i, c in enumerate(commands) if "QUIESCED" in c)
+    # the collection steps run, and only after the cleanup was confirmed
+    assert any("session list" in c for c in commands[quiesce + 1 :])
+
+
+@mark.skipif(not all(shutil.which(tool) for tool in ("setsid", "bash", "sleep", "cat")), reason="needs setsid")
+async def test_the_quiesce_step_works_without_procps_and_never_confirms_unchecked(tmp_path: Path) -> None:
+    """An image without pkill and pgrep (a slim Python image): the process group is still stopped and checked with the
+    shell builtin kill, so QUIESCED is printed only for a group that is gone."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("sleep", "cat", "setsid", "bash", "sh"):
+        if shutil.which(tool):
+            (bin_dir / tool).symlink_to(shutil.which(tool))
+    env = {"PATH": str(bin_dir)}  # no pkill, no pgrep, no ps
+    sessions_file = str(tmp_path / "sessions")
+    written = tmp_path / "workspace-output"
+    run = (
+        f"{app_module._opencode_launcher(sessions_file)} bash -c "
+        f"'(while true; do echo x >> {written}; sleep 0.05; done) & exec sleep 60'"
+    )
+    process = await asyncio.create_subprocess_exec("bash", "-c", run, env=env)
+    try:
+        for _ in range(100):
+            if written.exists() and written.stat().st_size:
+                break
+            await asyncio.sleep(0.05)
+        assert written.stat().st_size, "the tool child never started"
+
+        quiesce = await asyncio.create_subprocess_exec(
+            "bash", "-c", app_module._quiesce_command(sessions_file), stdout=asyncio.subprocess.PIPE, env=env
+        )
+        stdout, _ = await asyncio.wait_for(quiesce.communicate(), timeout=30)
+        assert b"QUIESCED" in stdout
+
+        size = written.stat().st_size
+        await asyncio.sleep(0.5)
+        assert written.stat().st_size == size  # the group was really stopped, not just reported stopped
+        assert await asyncio.wait_for(process.wait(), timeout=5) is not None
+    finally:
+        if process.returncode is None:
+            process.kill()
+
+
+@mark.skipif(
+    not all(shutil.which(tool) for tool in ("setsid", "ps", "pkill", "pgrep", "bash")),
+    reason="needs procps and setsid",
+)
+async def test_the_quiesce_step_stops_a_tool_child_that_keeps_writing(tmp_path: Path) -> None:
+    """A real process-group test: a run's child (as a shell tool would start) stops writing once the run is quiesced."""
+    sessions_file = str(tmp_path / "sessions")
+    marker = f"nemo-test-{uuid.uuid4().hex}"
+    written = tmp_path / "workspace-output"
+    # `exec -a` gives the run a name only this test uses, so the leftover-run kill never touches another process
+    run = (
+        f"{app_module._opencode_launcher(sessions_file)} bash -c "
+        f"'(while true; do echo x >> {written}; sleep 0.05; done) & exec -a \"{marker} run\" sleep 60'"
+    )
+    process = await asyncio.create_subprocess_exec("bash", "-c", run)
+    try:
+        for _ in range(100):
+            if written.exists() and written.stat().st_size:
+                break
+            await asyncio.sleep(0.05)
+        assert written.stat().st_size, "the tool child never started"
+        assert Path(sessions_file).read_text().split(), "the run did not record its session"
+
+        pattern = f"[n]emo-test-{marker.split('-')[-1]} run"
+        quiesce = await asyncio.create_subprocess_exec(
+            "bash", "-c", app_module._quiesce_command(sessions_file, pattern), stdout=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(quiesce.communicate(), timeout=30)
+        assert b"QUIESCED" in stdout
+
+        size = written.stat().st_size
+        await asyncio.sleep(0.5)
+        assert written.stat().st_size == size  # no write after the quiesce
+        assert await asyncio.wait_for(process.wait(), timeout=5) is not None  # the launcher returned: the run is gone
+    finally:
+        if process.returncode is None:
+            process.kill()

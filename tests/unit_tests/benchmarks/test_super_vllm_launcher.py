@@ -289,6 +289,14 @@ getent() { printf '10.0.0.1 node0\n'; }
             [c[c.index("--nodelist=node%d" % n)] for n, c in enumerate(calls[:4])],
             [f"--nodelist=node{n}" for n in range(4)],
         )
+        # Node 0 must hold a real warm cache; the headless ranks may hold only compiled artifacts, so only they may be empty.
+        dump_args = [c[c.index("dump") + 1 :] for c in calls[:4]]
+        self.assertNotIn("--allow-empty", dump_args[0])
+        for args in dump_args[1:]:
+            self.assertEqual([a for a in args if a != "--allow-empty"][0], "--output")
+            self.assertIn("--allow-empty", args)
+            self.assertEqual(len(args), 3)  # --output PATH --allow-empty, nothing else
+        self.assertNotIn("dump", calls[4])  # the install step
 
     def test_mooncake_storage_modes_and_cleanup(self) -> None:
         """Execute generated setup with stub services; SSD work requires explicit opt-in."""

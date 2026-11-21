@@ -1195,6 +1195,10 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
             (( node_index != 0 && node_index != $NUM_PREFILL_NODES )); then
             dump_args+=(--allow-empty)
         fi
+        # A headless rank of one multi-node engine has compiled artifacts but may hold no autotuning JSON; node 0 must.
+        if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]] && (( node_index != 0 )); then
+            dump_args+=(--allow-empty)
+        fi
         srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
             --nodelist="\${nodes[node_index]}" --container-name="\$worker_container" \
             --container-writable --no-container-mount-home --container-workdir=/ \

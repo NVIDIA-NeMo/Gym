@@ -107,20 +107,14 @@ nl2repobench_opencode_sandboxed_agent:
           IMPORTANT: YOU SHOULD NEVER ASK FOR HUMAN RESPONSE.
           To finish the interaction, reply with exactly TASK_COMPLETE.
 
-      # The agent sandbox denies all egress except the policy model host
-      # (enforce_agent_no_network: true), so the default `curl
-      # https://opencode.ai/install` fallback fails (confirmed via a live
-      # run: "curl: (6) Could not resolve host: opencode.ai" on 100% of
-      # rollouts). Reuse the same pre-staged, network-free OpenCode binary as
-      # the other opencode benchmarks. (A prior E2BIG failure on this same
-      # install path — "fork/exec /usr/bin/bash: argument list too long" —
-      # turned out to be caused by NL2RepoBench's much larger prompts
-      # (15KB-375KB vs a few KB for other benchmarks) being inlined into the
-      # exec command, not by this install method; fixed in
-      # responses_api_agents/opencode_sandboxed_agent/app.py by uploading the
-      # query to a file instead.)
-      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
-      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+      # The OpenCode runtime. By default the agent downloads the installer from opencode.ai, which works in the modes
+      # with open egress (official, block_target, block_target_v2). The no_internet_preinstalled mode has no egress, so
+      # there the operator supplies a pinned runtime the sandbox can read, and asks the agent to refuse to start without
+      # it (nothing is downloaded, and a missing runtime fails here, not after the sandbox is seeded):
+      #   ++nl2repobench_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.require_opencode_runtime=true
+      #   ++...opencode_sandboxed_agent.remote_opencode_install_script_path=<path to install.sh in the sandbox>
+      #   ++...opencode_sandboxed_agent.remote_opencode_binary_path=<path to the opencode binary in the sandbox>
+      # (or preinstalled_opencode=true for an image that already has opencode on PATH). See benchmarks/nl2repobench/README.md.
 
       resources_server:
         type: resources_servers

@@ -32,6 +32,19 @@ Four targets ship vendored inside pip or setuptools in their images (six, tenaci
 
 On vahid_1016 tasks the guard identifiers come from the clone URL in `test_commands.json`; upstream tasks have no clone URL, so `block_target_v2` falls back to the task id there (the egress deny rules still apply).
 
+## OpenCode runtime in the sandbox
+`opencode.yaml` sets no runtime paths, so the OpenCode agent downloads the installer from `opencode.ai`. That works in the modes with open egress (`official`, `block_target`, `block_target_v2`) and needs no staging.
+
+`no_internet_preinstalled` has no egress, so supply a pinned runtime the sandbox can read and make the agent refuse to start without it, so nothing is downloaded and a missing runtime fails at startup, before any sandbox is seeded or model called:
+
+```
+++nl2repobench_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.require_opencode_runtime=true
+++nl2repobench_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.remote_opencode_install_script_path=<install.sh path in the sandbox>
+++nl2repobench_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.remote_opencode_binary_path=<opencode binary path in the sandbox>
+```
+
+Use `preinstalled_opencode=true` instead of the two paths for an image that already has `opencode` on `PATH`. A deployment that sets the two paths without `require_opencode_runtime` (a cached runtime on an open-egress mode) works as before.
+
 ## Long runs: client timeout
 Leave `global_aiohttp_client_timeout_s` unset (the default: no total or read limit on the shared aiohttp client). The shared client also carries each whole-rollout `/run` call through the `legacy_agent` relay, which here lasts up to the 28800 s episode deadline (21600 s agent budget, then export, collection and grading), so a global limit below that cuts off healthy runs. A model call is already bounded by the agent itself (`opencode_model_call_timeout` for OpenCode, `model_call_timeout_s` for OpenHands). Set the option only to bound a peer that accepts a connection and never answers, and then to more than 28800 s, for example `+global_aiohttp_client_timeout_s=32400`.
 
