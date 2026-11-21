@@ -253,3 +253,23 @@ def test_response_fields_are_minimal_and_gate_the_patch():
     }
     assert cap.response_fields(include_patch=True)["model_patch"] == "x" * 10
     assert PatchCapture.static("p", "worktree", "golden").response_fields(True)["patch_source"] == "golden"
+
+
+@pytest.mark.parametrize("mode", ["worktree", "committed"])
+async def test_bounded_capture_ignores_oversized_diagnostic_diff(mode):
+    sb = _FakeSandbox(
+        listing=_listing(("fix", C2, 1, 1), head=C2),
+        committed_diff="ok" if mode == "committed" else "too big",
+        worktree_diff="ok" if mode == "worktree" else "too big",
+    )
+    cap = await capture_model_patch(sb, "/testbed", BASE, mode=mode, max_patch_bytes=2)
+    assert cap.patch == "ok" and cap.warnings
+
+
+@pytest.mark.parametrize("mode", ["worktree", "committed"])
+async def test_bounded_capture_rejects_oversized_selected_diff(mode):
+    from resources_servers.swebench.patch_capture import PatchSizeError
+
+    sb = _FakeSandbox(listing=_listing(("fix", C2, 1, 1), head=C2), committed_diff="too big", worktree_diff="too big")
+    with pytest.raises(PatchSizeError):
+        await capture_model_patch(sb, "/testbed", BASE, mode=mode, max_patch_bytes=2)

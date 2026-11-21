@@ -74,7 +74,11 @@ def _server(monkeypatch: MonkeyPatch) -> tuple[SWEGymResourcesServer, list[Magic
     monkeypatch.setattr(
         swe_gym_app,
         "capture_model_patch",
-        AsyncMock(return_value=PatchCapture.static("diff --git a/x b/x\n", "worktree", "worktree")),
+        AsyncMock(
+            return_value=PatchCapture.static(
+                "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n", "worktree", "worktree"
+            )
+        ),
     )
     monkeypatch.setattr(
         swe_gym_app, "run_verification", AsyncMock(return_value=VerificationResult(True, True, True, {}, "ok"))
@@ -116,7 +120,7 @@ def test_episode_session_hands_over_the_task_sandbox_grades_it_and_closes(monkey
         verified = client.post("/verify", json=_VERIFY)
         assert verified.status_code == 200, verified.text
         assert verified.json()["reward"] == 1.0
-        assert verified.json()["model_patch"] == "diff --git a/x b/x\n"
+        assert verified.json()["model_patch"] == "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n"
         sandboxes[0].stop.assert_awaited_once()
         repeated = client.post("/verify", json=_VERIFY)
         assert repeated.status_code == 200 and repeated.json()["model_patch"] == verified.json()["model_patch"]
