@@ -64,6 +64,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
@@ -101,8 +102,18 @@ def sanitize_generation(generation: str) -> str:
     return json.loads(s)
 
 
+def final_answer_only(text: str) -> str:
+    """Keep text after the last thinking block; unfinished thinking has no answer."""
+    closing = text.rfind("</think>")
+    answer = text[closing + len("</think>") :] if closing >= 0 else text
+    return "" if "<think>" in answer else answer
+
+
 class ArenaJudgeConfig(BaseResourcesServerConfig):
     """Arena Hard v2 pairwise-judge server config."""
+
+    # Verification uses only the saved response, task fields and judge configuration.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
     judge_model_server: ModelServerRef
     # The judge is called via /v1/chat/completions; this is the endpoint
@@ -135,6 +146,7 @@ class ArenaJudgeConfig(BaseResourcesServerConfig):
     # produce generations with lone UTF-8 surrogate halves or NULs that
     # break the judge's HTTP layer; enable to scrub those before judging.
     sanitize_generations: bool = False
+    strip_thinking: bool = False
 
 
 class ArenaJudgeRunRequest(BaseRunRequest):
@@ -207,6 +219,9 @@ class ArenaJudgeServer(SimpleResourcesServer):
         candidate_answer = self._extract_response_output_text(body.response)
         question = body.question or ""
         baseline_answer = body.baseline_answer or ""
+        if self.config.strip_thinking:
+            candidate_answer = final_answer_only(candidate_answer)
+            baseline_answer = final_answer_only(baseline_answer)
         if self.config.sanitize_generations:
             candidate_answer = sanitize_generation(candidate_answer)
             baseline_answer = sanitize_generation(baseline_answer)
@@ -291,6 +306,8 @@ class ArenaJudgeServer(SimpleResourcesServer):
             response_model=NeMoGymChatCompletion,
         )
         text = self._extract_chat_completion_text(judge_response)
+        if self.config.strip_thinking:
+            text = final_answer_only(text)
         verdict = self._parse_verdict(text)
         if verdict is not None:
             record_parsed_judge_verdict()
