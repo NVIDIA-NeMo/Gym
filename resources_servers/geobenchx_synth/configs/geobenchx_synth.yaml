@@ -1,0 +1,55 @@
+# Synthetic GeoBenchX-style tasks over OpenStreetMap, Microsoft building
+# footprints, and the USDA Cropland Data Layer, scored on the final answer.
+#
+# Build the data first (see README). Set in env.yaml:
+#   geobenchx_upstream_python: /path/to/envs/geobenchx/bin/python
+#   geobenchx_upstream_src: /path/to/GeoBenchX            # contains geobenchx/tools.py
+#   geobenchx_synth_geodata: /path/to/GeoData             # from prepare/build_catalog.py
+#   geobenchx_synth_tasks: /path/to/tasks                 # from prepare/generate.py
+#   geobenchx_scratch: /path/to/scratch
+geobenchx_synth_resources_server:
+  resources_servers:
+    geobenchx_synth:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Synthetic multistep GIS tool-use tasks with outcome rewards; whole states held out.
+      upstream_python: ${geobenchx_upstream_python}
+      upstream_src: ${geobenchx_upstream_src}
+      geo_data_path: ${geobenchx_synth_geodata}
+      scratch_path: ${geobenchx_scratch}
+      num_tool_workers: 16
+      tool_timeout_s: 300
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: ${geobenchx_synth_tasks}/train.jsonl
+        # Built locally, never committed. OpenStreetMap-derived values are under ODbL 1.0,
+        # which is not yet an accepted license value.
+        license: TBD
+      - name: heldout
+        type: validation
+        jsonl_fpath: ${geobenchx_synth_tasks}/heldout.jsonl
+        # Built locally, never committed. OpenStreetMap-derived values are under ODbL 1.0,
+        # which is not yet an accepted license value.
+        license: TBD
+
+geobenchx_synth_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 25
+      resources_server:
+        type: resources_servers
+        name: geobenchx_synth_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+geobenchx_synth_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: geobenchx_synth_simple_agent

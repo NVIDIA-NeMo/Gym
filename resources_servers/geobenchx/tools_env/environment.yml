@@ -1,0 +1,28 @@
+# Interpreter for the real upstream GeoBenchX tools (tool_backend: upstream).
+# GDAL's Python bindings are not pip-installable, so this is a conda env kept
+# separate from the server's uv venv. Versions match the early-2025 stack the
+# upstream tools were written against: newer matplotlib rejects the legend
+# keywords make_choropleth_map passes, and plotly 7 removed the
+# density_mapbox that make_heatmap uses.
+#
+#   mamba env create -p /path/to/envs/geobenchx -f environment.yml
+name: geobenchx-tools
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - gdal=3.10.3
+  - geopandas=1.0.1
+  - rasterio=1.4.3
+  - shapely=2.0.7
+  - pyogrio=0.11.0
+  - pyproj=3.7.2
+  - matplotlib=3.10.0
+  - pandas=2.2.3
+  - numpy=2.2.6
+  - scipy=1.17.1
+  - contextily=1.7.1
+  - plotly=5.24.1
+  - python-dotenv=1.2.4
+  - langchain-core=1.6.10
+  - langgraph=1.2.15
