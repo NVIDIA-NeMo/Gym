@@ -7,6 +7,7 @@ import pytest
 
 from environment_servers.swe_together.judge_evidence import aggregate_judge_evidence, collect_judge_evidence
 from nemo_gym.agents import AgentCloseSessionResponse
+from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts.harness_capabilities import inspect_record
 from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.trajectory import AgentObservationBundle, ModelCallRef, TrajectoryRecord
@@ -266,6 +267,66 @@ async def test_missing_close_retains_captured_calls_and_original_failure(tmp_pat
     assert all(verification[key] == value for key, value in original.items())
     provenance = verification["judge_evidence_provenance"]
     assert provenance["judge_session_id"] is None and provenance["receipt_artifact"] is None
+
+
+async def test_drained_judge_capture_drops_its_claims_file(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("child", "first")
+    store.record("child", exchange("first", "first"))
+    store.clear_pending("child", "first")
+    verification = {"judge_capture_episode": "child", "judge_close": receipt("first").model_dump(mode="json")}
+
+    result = await collect_judge_evidence(
+        parent(), verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+
+    assert [call.model_call_id for call in result.model_calls] == ["first"]
+    assert "judge_capture_incomplete" not in {gap.code for gap in result.gaps}
+    assert not store.claims_path_for("child").exists()
+    assert store.path_for("child").exists()
+
+
+async def test_a_judge_call_admitted_during_the_read_keeps_its_claim(tmp_path, monkeypatch):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("child", "first")
+    store.record("child", exchange("first", "first"))
+    store.clear_pending("child", "first")
+    read_available = CaptureStore.read_available
+
+    def admit_then_read(self, rollout_id):
+        # The drain already returned; a later call must still not be deleted with the settled ones.
+        self.mark_pending(rollout_id, "second")
+        return read_available(self, rollout_id)
+
+    monkeypatch.setattr(CaptureStore, "read_available", admit_then_read)
+    verification = {"judge_capture_episode": "child", "judge_close": receipt("first").model_dump(mode="json")}
+
+    result = await collect_judge_evidence(
+        parent(), verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+
+    assert store.has_pending("child") is True
+    assert "judge_capture_incomplete" in {gap.code for gap in result.gaps}
+
+
+async def test_judge_claims_that_cannot_be_checked_count_as_incomplete(tmp_path, monkeypatch):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("child", "first")
+    store.record("child", exchange("first", "first"))
+    store.clear_pending("child", "first")
+
+    def read_only(*_args):
+        raise PermissionError("read-only claims file")
+
+    monkeypatch.setattr(CaptureStore, "delete_claims_if_settled", read_only)
+    verification = {"judge_capture_episode": "child", "judge_close": receipt("first").model_dump(mode="json")}
+
+    result = await collect_judge_evidence(
+        parent(), verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+
+    assert [call.model_call_id for call in result.model_calls] == ["first"]
+    assert "judge_capture_incomplete" in {gap.code for gap in result.gaps}
 
 
 @pytest.mark.parametrize("placement", ["middle", "last", "only"])

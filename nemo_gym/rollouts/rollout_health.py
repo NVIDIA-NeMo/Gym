@@ -977,7 +977,7 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
         return
     # Lazy: the capture store pulls in the model-server stack, which health workers do not need.
     from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
-    from nemo_gym.models.model_call_capture import _PENDING_SUFFIX, CaptureStore
+    from nemo_gym.models.model_call_capture import CaptureStore, _pending_marker_rollout_id
     from nemo_gym.rollouts.model_calls import read_available_model_call_records
 
     listings = []
@@ -991,10 +991,8 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
                 stacklevel=2,
             )
             continue
-        # A claimed write is named `<rollout id>.<call token>.capture.pending`; the token has no dot.
-        pending = {
-            name.removesuffix(_PENDING_SUFFIX).rsplit(".", 1)[0] for name in names if name.endswith(_PENDING_SUFFIX)
-        }
+        # Earlier Gym versions claimed each write with its own pending marker.
+        pending = {rollout_id for name in names if (rollout_id := _pending_marker_rollout_id(name)) is not None}
         listings.append((CaptureStore(directory, create=False), names, pending))
     for row in rows:
         calls = None
@@ -1002,7 +1000,11 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
             try:
                 rollout_id = maybe_rollout_id_from_run_body(row)
                 for store, names, pending in listings:
-                    if rollout_id in pending or store.incomplete_path_for(rollout_id).name in names:
+                    if (
+                        rollout_id in pending
+                        or store.incomplete_path_for(rollout_id).name in names
+                        or (store.claims_path_for(rollout_id).name in names and store.has_pending(rollout_id))
+                    ):
                         break
                     if store.path_for(rollout_id).name in names:
                         records, unreadable = read_available_model_call_records(store, rollout_id)

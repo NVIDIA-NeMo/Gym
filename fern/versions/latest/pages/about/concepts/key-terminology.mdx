@@ -88,7 +88,7 @@ Other features use some of these words in their own senses and keep them:
 - **Receipt:** the process supervisor's termination and cleanup receipts, export receipts, capture receipts, and `agentic_if`'s plugin and hook receipts.
 - **Tombstone:** the tombstones of `gdpval`'s journal and `genrm_compare`'s cohorts.
 - **Fence:** token capture fences a retired rollout until it is deleted, and the process supervisor fences a delayed harness launch.
-- **Claim:** MCP token claims (`MCPTokenClaims`) and the supervisor's `launch.claim` file.
+- **Claim:** MCP token claims (`MCPTokenClaims`), the supervisor's `launch.claim` file, and model-call capture claims, which a model server takes in `<rollout_id>.capture.claims` before forwarding a call and releases once the call's record is written.
 - **Terminal:** the checkpoint stack's terminal step.
 - **Expire:** `SandboxSession.expire()` ends a harness as if its time limit had passed.
 
