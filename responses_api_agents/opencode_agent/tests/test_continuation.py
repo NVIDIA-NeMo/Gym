@@ -597,6 +597,27 @@ def test_timeout_opencode_error_overrides_partial_assistant(previous, assistant,
         assert outcome.status == "incomplete" and outcome.error_type == "timeout"
 
 
+@pytest.mark.parametrize("continuation", [False, True])
+@pytest.mark.parametrize("aborted_step", ["last", "earlier"])
+def test_only_the_last_step_aborted_at_the_time_limit_is_the_timeout(continuation, aborted_step):
+    aborted = {"name": "MessageAbortedError", "data": {"message": "Step interrupted", "type": "aborted"}}
+    steps = [{"info": {"role": "assistant", "finish": "tool-calls"}, "parts": []} for _ in range(2)]
+    steps[-1 if aborted_step == "last" else 0]["info"].update(finish="error", error=aborted)
+    outcome = classify_opencode_run(
+        {"messages": steps},
+        cleanup={"return_code": 0, "error": None, "timed_out": True, "cleanup_confirmed": True},
+        previous_session_id="opencode-session",
+        session_id="opencode-session",
+        stdout="",
+        continuation=continuation,
+    )
+    if aborted_step == "last":
+        assert (outcome.status, outcome.error_type, outcome.error) == ("incomplete", "timeout", None)
+    else:
+        # An abort the run continued past was not caused by the stop at the time limit.
+        assert outcome.status == "failed" and "MessageAbortedError" in outcome.error
+
+
 def test_single_turn_timeout_keeps_existing_opencode_error_classification():
     outcome = classify_opencode_run(
         {"messages": [{"info": {"role": "assistant"}, "parts": []}]},

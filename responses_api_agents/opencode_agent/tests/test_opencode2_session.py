@@ -292,6 +292,40 @@ async def test_exports_use_opencode_2_session_export(opencode2, tmp_path):
     assert positional(exported)[:3] == [f"{RUNTIME}/opencode", "/exports", "root"]
 
 
+@pytest.mark.parametrize("timed_out", [True, False])
+def test_the_step_the_time_limit_interrupted_is_scored_as_a_timeout(opencode2, tmp_path, timed_out):
+    """OpenCode 2 saves the step running at the time limit as aborted; the run is returned as timed out, not failed."""
+    agent, sandbox = opencode2
+    export = json.loads(sandbox.events)
+    export["messages"][-1]["info"].update(
+        finish="error",
+        error={"name": "MessageAbortedError", "data": {"message": "Step interrupted", "type": "aborted"}},
+    )
+    sandbox.events = json.dumps(export)
+    sandbox.result["timed_out"] = timed_out
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        if timed_out:
+            assert result.status_code == 200
+            assert result.json()["status"] == "incomplete" and result.json()["error"] is None
+            # The work done before the time limit is returned for verification.
+            assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
+        else:
+            # Without Gym's stop, an aborted step is still a failure.
+            assert result.status_code == 502 and "MessageAbortedError" in result.json()["detail"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    invocation = next(
+        record
+        for record in closed.json()["agent_observations"]["records"]
+        if record["kind"] == "agent_invocation" and record.get("parent_invocation_id") is None
+    )
+    assert (invocation["status"], invocation["error_type"]) == (
+        ("incomplete", "timeout") if timed_out else ("failed", "server_error")
+    )
+
+
 def test_an_import_uses_session_import_into_the_task_workdir(opencode2, tmp_path):
     agent, sandbox = opencode2
     agent.config.session_import_path = "/staged/session.json"
