@@ -83,6 +83,13 @@ _MANYLINUX_LEVELS = (40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 28, 17)
 _BUILDS: dict[Path, asyncio.Task[None]] = {}
 
 
+class UnsupportedSandboxPlatformError(RuntimeError):
+    """No sandbox Python runtime exists for the sandbox's operating system, architecture or C library.
+
+    The platform comes from the sandbox image, so installing again on a new sandbox fails the same way.
+    """
+
+
 @dataclass(frozen=True)
 class SandboxPlatform:
     """The sandbox's CPU architecture and C library, which select the Python build and the wheels."""
@@ -100,12 +107,18 @@ class SandboxPlatform:
         minor = 17 if self.glibc_minor is None else self.glibc_minor
         level = next((level for level in _MANYLINUX_LEVELS if level <= minor), None)
         if level is None:
-            raise RuntimeError(f"The sandbox's glibc 2.{minor} is older than 2.17, which the sandbox Python needs")
+            raise UnsupportedSandboxPlatformError(
+                f"The sandbox's glibc 2.{minor} is older than 2.17, which the sandbox Python needs"
+            )
         return f"{self.arch}-manylinux_2_{level}"
 
 
 async def probe_sandbox_platform(sandbox: AsyncSandbox) -> SandboxPlatform:
-    """Ask the sandbox for its kernel, machine and C library."""
+    """Ask the sandbox for its kernel, machine and C library.
+
+    Raises ``UnsupportedSandboxPlatformError`` for a kernel or machine no runtime is built for, and
+    ``RuntimeError`` when the probe itself fails.
+    """
     result = await sandbox.exec(_PLATFORM_PROBE, cwd="/", timeout_s=30)
     lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if result.return_code != 0 or result.error_type is not None or len(lines) < 3:
@@ -115,7 +128,7 @@ async def probe_sandbox_platform(sandbox: AsyncSandbox) -> SandboxPlatform:
     system, machine, libc = lines[:3]
     arch = _MACHINES.get(machine)
     if system != "Linux" or arch is None:
-        raise RuntimeError(f"No sandbox Python runtime is available for {system} on {machine}")
+        raise UnsupportedSandboxPlatformError(f"No sandbox Python runtime is available for {system} on {machine}")
     if libc == "musl":
         return SandboxPlatform(arch=arch, libc="musl")
     versions = re.findall(r"\b2\.(\d+)\b", libc)
@@ -185,7 +198,7 @@ async def _python_archive(platform: SandboxPlatform) -> Path:
     """The pinned python-build-standalone archive for ``platform``, checked against its published SHA-256."""
     expected = _PYTHON_SHA256.get(f"{platform.arch}/{platform.libc}")
     if expected is None:
-        raise RuntimeError(f"No pinned Python build for {platform.arch}/{platform.libc}")
+        raise UnsupportedSandboxPlatformError(f"No pinned Python build for {platform.arch}/{platform.libc}")
     name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=PYTHON_VERSION, arch=platform.arch, libc=platform.libc)
     url = f"{(os.environ.get('UV_PYTHON_INSTALL_MIRROR') or _PYTHON_DOWNLOADS).rstrip('/')}/{_PYTHON_RELEASE}/{name}"
     # A host that cannot download it can be given the file here.
@@ -317,12 +330,16 @@ class SandboxPythonRuntime:
         """Build the runtime for the sandbox's platform on this host if needed, then upload and publish it.
 
         ``timeout_s`` bounds the whole installation, including a build that another seed started. Raises
-        ``RuntimeError`` when the platform is unsupported, the host build or download fails, or the runtime fails
-        its import check in the sandbox, and ``TimeoutError`` when ``timeout_s`` runs out.
+        ``UnsupportedSandboxPlatformError`` when no runtime exists for the sandbox's platform, which a seed should
+        refuse, since a new sandbox from the same image fails the same way. Raises ``RuntimeError`` when the
+        platform probe, the host build or download fails, or the runtime fails its import check in the sandbox,
+        and ``TimeoutError`` when ``timeout_s`` runs out.
         """
         try:
             async with asyncio.timeout(timeout_s):
                 platform = await probe_sandbox_platform(sandbox)
+                # Reject an old glibc before a host download failure can hide the unsupported platform.
+                _ = platform.wheel_platform
                 python_archive = await _python_archive(platform)
                 site_packages_archive = await self._site_packages_archive(platform)
                 setup = f"{self.directory}/.setup-{uuid4().hex}"
