@@ -564,6 +564,17 @@ Replace `opencode` with `openclaw` for OpenClaw.
 - Change a harness setting with `++gdpval_opencode_agent.responses_api_agents.opencode_agent.<key>=<value>` or
   `++gdpval_openclaw_agent.responses_api_agents.openclaw_agent.<key>=<value>`.
 
+`benchmarks/gdpval/nooa.yaml` runs [NOOA](../../responses_api_agents/nooa_agent/README.md) in the task sandbox the
+resources server lends it (`gym eval prepare --benchmark gdpval/nooa`, then `gym eval run --benchmark gdpval/nooa`).
+NOOA calls the task tools as methods in its Python cell, such as `await self.finish(reason=..., paths=[...])`, through
+the resources server's HTTP routes.
+
+- NOOA's own task instruction ends a run with `return_result(TaskResult(...))`, which submits no files. The rows
+  therefore use `prompts/nooa.yaml`: `prompts/harness-neutral.yaml` plus one sentence that names `self.finish` and says
+  to call it before `return_result`. A run that ends with `return_result` alone is judged as an empty submission.
+- As for the other harnesses, the prompt and the harness differ from the certified Stirrup setup, so these are not
+  AA v2 scores.
+
 `benchmarks/gdpval/openhands.yaml` runs [OpenHands](../../responses_api_agents/openhands_agent/README.md) (the
 OpenHands Software Agent SDK) the same way:
 
