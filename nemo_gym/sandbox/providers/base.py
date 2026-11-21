@@ -523,6 +523,24 @@ class SupportsSandboxServiceOptions(Protocol):
     ) -> dict[str, Any]: ...
 
 
+# The provider config key an operator sets to ``true`` to let a provider start privileged sandboxes.
+PRIVILEGED_SETTING = "allow_privileged"
+
+
+@runtime_checkable
+class SupportsSandboxPrivileged(Protocol):
+    """Optional privileged sandboxes, for a Compose service that declares ``privileged: true``.
+
+    A privileged sandbox has every Linux capability and the host's devices, so its root is root on the host. A
+    provider that implements this starts one only when the operator set ``allow_privileged: true``
+    (``PRIVILEGED_SETTING``) in the provider's config. ``privileged_options`` returns the ``provider_options`` that
+    start one sandbox privileged, and raises ``ValueError`` naming that setting when the config does not allow it.
+    The Compose adapter applies them to the declaring service's sandbox alone, never to its volume helpers or seeds.
+    """
+
+    def privileged_options(self) -> dict[str, Any]: ...
+
+
 @runtime_checkable
 class SupportsSandboxPullPolicy(Protocol):
     """Optional per-sandbox image pull policy: ``always``, ``missing`` or ``never`` (Compose's ``pull_policy``).

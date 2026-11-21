@@ -570,7 +570,7 @@ class TestPrepare:
             assert recorded_inputs(folder, f"hb__{digest}") == task_inputs_digest(folder / "a")
 
     SEPARATE = TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
-    PRIVILEGED = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    privileged: true\n"
+    DEVICES = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    devices: [/dev/fuse]\n"
 
     def write_separate(self, folder: Path, name: str, *, setup: str = "#!/bin/sh\necho ok\n", compose=None) -> Path:
         extra = {"tools/setup.sh": setup}
@@ -590,7 +590,7 @@ class TestPrepare:
         from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
-        self.write_separate(folder, "a", compose=self.PRIVILEGED)
+        self.write_separate(folder, "a", compose=self.DEVICES)
         self.write_separate(folder, "b", setup="#!/bin/sh\necho b\n")
         (folder / "b" / "tests" / "test.sh").chmod(0o700)
         write_base_record(folder)
@@ -598,7 +598,7 @@ class TestPrepare:
         assert harbor_hash(folder / "b" / "tests") == tests_digest
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(tool="docker"))
         assert [t.task_id for t in prepared.tasks] == ["b"]
-        assert list(prepared.skipped) == ["a"] and "privileged" in prepared.skipped["a"]
+        assert list(prepared.skipped) == ["a"] and "devices" in prepared.skipped["a"]
         assert "same Harbor environment id" not in prepared.skipped["a"]
         record = read_built_images(folder)[tests_digest]
         assert record["tasks"] == ["b"] and prepared.tasks[0].verifier_image == f"hb__{tests_digest}-verifier"

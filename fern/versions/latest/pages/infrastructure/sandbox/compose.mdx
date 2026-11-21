@@ -211,6 +211,12 @@ The deployed server may report a mount capacity larger than the sandbox memory
 limit; the mount capacity does not grant additional memory.
 The metadata key is deployment configuration, not built into the adapter.
 
+`privileged: true` requires `SupportsSandboxPrivileged` and the operator's
+`allow_privileged: true` in that provider's config. The adapter checks both before
+it creates any sandbox, then adds the provider's privileged options to the declaring
+service's own sandbox only, never to the shared-volume helper, a copy-up seed or
+another service. The Docker provider implements it; OpenSandbox does not.
+
 Volumes require `SupportsSandboxSharedStorage`. Configure OpenSandbox with
 `shared_storage={"host_path": "/mnt/shared/compose", "metadata": {}}`, using a path
 backed by storage shared across sandbox nodes and allowed by the server. Metadata

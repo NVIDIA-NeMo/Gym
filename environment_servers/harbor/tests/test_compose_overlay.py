@@ -889,8 +889,12 @@ class TestSeedPrecheck:
         ("text", "reason"),
         [
             (
+                "services:\n  memory:\n    devices: [/dev/fuse]\n",
+                "Service 'memory': unsupported Compose fields ['devices']",
+            ),
+            (
                 "services:\n  memory:\n    privileged: true\n",
-                "Service 'memory': unsupported Compose fields ['privileged']",
+                "service 'memory' privileged is not supported by the opensandbox sandbox provider",
             ),
             (
                 "services:\n  memory:\n    volumes: ['{outside}/conf:/etc/memory']\n",
@@ -911,7 +915,14 @@ class TestSeedPrecheck:
                 "'memory', so the sidecar takes no host entries",
             ),
         ],
-        ids=["field", "foreign-bind-source", "relative-bind-source", "no-services", "extra-hosts-on-non-root-sidecar"],
+        ids=[
+            "field",
+            "privileged-on-opensandbox",
+            "foreign-bind-source",
+            "relative-bind-source",
+            "no-services",
+            "extra-hosts-on-non-root-sidecar",
+        ],
     )
     async def test_an_overlay_the_deployment_cannot_run_is_refused_terminally_before_any_group(
         self, tmp_path, monkeypatch, text, reason
@@ -945,6 +956,46 @@ class TestSeedPrecheck:
             sandbox_provider="opensandbox",
         )
         assert set(skipped) == {"hello"} and failure_reason.endswith(skipped["hello"]), skipped
+
+    @pytest.mark.parametrize("allowed", [False, True])
+    async def test_a_privileged_service_runs_only_where_the_docker_block_allows_it(
+        self, tmp_path, monkeypatch, allowed
+    ):
+        """A main that runs its own Docker daemon declares `privileged: true`. The seed reads the block's own `allow_privileged`: without it
+        the episode is refused terminally naming the setting, before any group, as prepare skips the task; with it
+        the group receives main privileged and the sidecar not."""
+        server, task, _, compose, documents = overlay_server(tmp_path, monkeypatch)
+        extra = tmp_path / "overlay" / "privileged.yaml"
+        extra.write_text("services:\n  main:\n    privileged: true\n")
+        server.config.compose_overlay = HarborComposeOverlay(files=[*server.config.compose_overlay.files, extra])
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict",
+            lambda: {"sandbox": {"docker": {"allow_privileged": allowed}}},
+        )
+
+        response = await run_episode(server, task)
+
+        if allowed:
+            (document,) = documents
+            assert document["services"]["main"]["privileged"] is True
+            assert "privileged" not in document["services"]["memory"]
+            return
+        assert response.result is None and response.failure.stage == "seed" and response.failure.terminal
+        assert (
+            "service 'main' privileged: true needs `allow_privileged: true` in the docker sandbox provider config"
+            in response.failure.failure_reason
+        )
+        assert documents == [] and not compose.stopped and not server._sandboxes and not server._sessions
+        skipped: dict[str, str] = {}
+        record_compose_images(
+            [task],
+            task.path.parent,
+            skipped=skipped,
+            overlay=server.config.compose_overlay,
+            sandbox_provider="docker",
+            allow_privileged=False,
+        )
+        assert response.failure.failure_reason.endswith(skipped["hello"]), skipped
 
     async def test_an_overlay_that_resets_a_service_the_tasks_hooks_name_is_refused_as_prepare_refuses_it(
         self, tmp_path, monkeypatch

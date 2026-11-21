@@ -1266,8 +1266,8 @@ class TestPrepare:
         ("text", "reason"),
         [
             (
-                "services:\n  api:\n    image: a\n    privileged: true\n",
-                "Service 'api': unsupported Compose fields ['privileged']",
+                "services:\n  api:\n    image: a\n    devices: [/dev/fuse]\n",
+                "Service 'api': unsupported Compose fields ['devices']",
             ),
             (
                 "services:\n  api:\n    image: a\nsecrets:\n  k:\n    file: ./k\n",
@@ -1314,11 +1314,11 @@ class TestPrepare:
         # Without overlay files the task's own file is named alone, as before.
         own: dict[str, str] = {}
         bad_task = load_task(
-            write_task(root, "own", compose="services:\n  api:\n    image: a\n    privileged: true\n")
+            write_task(root, "own", compose="services:\n  api:\n    image: a\n    devices: [/dev/fuse]\n")
         )
         record_compose_images([bad_task], root, skipped=own)
         assert own == {
-            "own": "own: environment/docker-compose.yaml: Service 'api': unsupported Compose fields ['privileged']"
+            "own": "own: environment/docker-compose.yaml: Service 'api': unsupported Compose fields ['devices']"
         }
 
     def test_an_overlay_that_resets_a_service_the_tasks_hooks_name_is_skipped_with_the_reason(self, tmp_path):

@@ -7,6 +7,7 @@ names. With M28 the check is ``check_task_compose_fields``, whose first step is 
 a skipped task."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ TASK_SERVER_IMAGE = "harborframework/harbor-index:cybergym-task-server@sha256:" 
 
 # The three hub shapes D_TESTS reproduced: featurebench 265e447753be, rh-swe-bench 0884ee3e43b7, harbor-index 9d8c77f891ab.
 # M28 gives ``deploy``, ``extra_hosts`` and ``platform`` their meaning, so only featurebench's ``count: all`` is
-# still refused, in the check's own words; a key no provider starts (``privileged``) is the allow-list's refusal.
+# still refused, in the check's own words; a key no provider starts (``devices``) is the allow-list's refusal.
 FEATUREBENCH = """services:
   main:
     deploy:
@@ -95,7 +96,7 @@ PULL_POLICIES = """services:
 """
 SIDECAR_CACHE = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  cache:\n    image: redis:7-alpine\n"
 SIDECAR_BUILD = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  api:\n    image: org/api:1\n    build: .\n"
-PRIVILEGED = "services:\n  main:\n    privileged: true\n"
+DEVICES = "services:\n  main:\n    devices: [/dev/fuse]\n"
 
 
 class StubRegistry:
@@ -316,6 +317,114 @@ class TestCheckTaskComposeFields:
 
         assert checked["services"]["model"]["deploy"]["resources"]["reservations"] == {"gpus": 1}
         assert check_task_compose_fields(task, json.loads(json.dumps(checked)), gpu_provider="opensandbox") == checked
+
+
+# A Docker-in-Docker task without a data volume: main runs its own Docker daemon, so it is privileged.
+DIND = "services:\n  main:\n    privileged: true\n    environment:\n      DOCKER_HOST: unix:///var/run/docker.sock\n"
+NOT_ALLOWED = (
+    "service 'main' privileged: true needs `allow_privileged: true` in the docker sandbox provider config, which the "
+    "operator sets to accept that a privileged container's root is root on the host"
+)
+
+
+class TestPrivilegedServices:
+    """A service may declare ``privileged: true``; the deployment runs it only on a provider that can start privileged
+    sandboxes and whose config sets ``allow_privileged: true``. Otherwise prepare (and ``gym dataset validate``)
+    leaves the task out, naming the setting or the provider, instead of every seed failing."""
+
+    def load(self, tmp_path, compose=DIND, toml=None):
+        task = write_task(tmp_path, "dind", compose=compose)
+        if toml is not None:
+            (task / "task.toml").write_text(toml)
+        image_configs.record_base_images(tmp_path)
+        (loaded,) = discover_tasks(tmp_path)
+        return loaded, load_compose_document(loaded)
+
+    def test_runs_where_the_provider_config_allows_it_and_is_left_to_seed_when_unknown(self, tmp_path):
+        task, document = self.load(tmp_path)
+        checked = check_task_compose_fields(task, document, provider="docker", allow_privileged=True)
+        main = checked["services"]["main"]
+        assert main["privileged"] is True and main["environment"] == {"DOCKER_HOST": "unix:///var/run/docker.sock"}
+        # No provider block named, or its setting not read: the seed and the adapter decide, against the live one.
+        for kwargs in ({}, {"provider": "docker"}):
+            assert check_task_compose_fields(task, load_compose_document(task), **kwargs) == checked
+
+    @pytest.mark.parametrize(
+        ("provider", "allow_privileged", "reason"),
+        [
+            ("docker", False, NOT_ALLOWED),
+            ("opensandbox", True, "service 'main' privileged is not supported by the opensandbox sandbox provider"),
+            ("opensandbox", None, "service 'main' privileged is not supported by the opensandbox sandbox provider"),
+        ],
+    )
+    def test_is_refused_naming_the_setting_or_the_provider(self, tmp_path, provider, allow_privileged, reason):
+        task, document = self.load(tmp_path)
+        with pytest.raises(ImageConfigError) as info:
+            check_task_compose_fields(task, document, provider=provider, allow_privileged=allow_privileged)
+        assert str(info.value) == f"dind: environment/docker-compose.yaml: {reason}"
+
+    def test_a_service_on_the_gpu_block_is_checked_against_that_blocks_provider_and_setting(self, tmp_path):
+        """A sidecar that reserves GPUs runs on the GPU block, and so does every service of a task that declares
+        GPUs; each is checked against that block, as the service options are."""
+        sidecar = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  model:\n    image: org/model:1\n"
+            "    privileged: true\n    deploy:\n      resources:\n        reservations:\n"
+            "          devices:\n            - capabilities: [gpu]\n              count: 1\n"
+        )
+        task, document = self.load(tmp_path / "sidecar", compose=sidecar)
+        with pytest.raises(ImageConfigError, match="service 'model' privileged is not supported by the opensandbox"):
+            check_task_compose_fields(
+                task, document, provider="docker", allow_privileged=True, gpu_provider="opensandbox"
+            )
+        with pytest.raises(ImageConfigError, match=r"service 'model' privileged: true needs `allow_privileged: true`"):
+            check_task_compose_fields(
+                task,
+                load_compose_document(task),
+                allow_privileged=True,
+                gpu_provider="docker",
+                gpu_allow_privileged=False,
+            )
+        check_task_compose_fields(
+            task, load_compose_document(task), provider="opensandbox", gpu_provider="docker", gpu_allow_privileged=True
+        )
+        gpu_task, document = self.load(
+            tmp_path / "gpu-task", toml='schema_version = "1.4"\n\n[environment]\ngpus = 1\n'
+        )
+        # The task's own block allows it; the GPU block, where every service of this task runs, does not.
+        with pytest.raises(ImageConfigError, match=re.escape(NOT_ALLOWED)):
+            check_task_compose_fields(
+                gpu_task,
+                document,
+                provider="docker",
+                allow_privileged=True,
+                gpu_provider="docker",
+                gpu_allow_privileged=False,
+            )
+        check_task_compose_fields(
+            gpu_task,
+            load_compose_document(gpu_task),
+            provider="opensandbox",
+            gpu_provider="docker",
+            gpu_allow_privileged=True,
+        )
+
+    def test_prepare_leaves_the_task_out_without_the_opt_in_and_keeps_it_with_it(self, tmp_path):
+        folder = tmp_path / "ds"
+        folder.mkdir()
+        write_task(folder, "dind", compose=DIND)
+        write_task(folder, "good", compose=GOOD)
+        build = BuildOptions(enabled=False)
+
+        refused = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=build, sandbox_provider="docker", allow_privileged=False
+        )
+        allowed = prepare_target(
+            str(folder), output_root=tmp_path / "out", build=build, sandbox_provider="docker", allow_privileged=True
+        )
+
+        assert [task.task_id for task in refused.tasks] == ["good"]
+        assert refused.skipped == {"dind": f"dind: environment/docker-compose.yaml: {NOT_ALLOWED}"}
+        assert [task.task_id for task in allowed.tasks] == ["dind", "good"] and not allowed.skipped
 
 
 class TestRestatedMainBuild:
@@ -545,7 +654,7 @@ class TestPrepareChecksTheFieldsBeforeBuilding:
 
         folder = tmp_path / "ds"
         folder.mkdir()
-        bad = write_task(folder, "privileged", compose=PRIVILEGED, dockerfile=BUILD_DOCKERFILE)
+        bad = write_task(folder, "devices", compose=DEVICES, dockerfile=BUILD_DOCKERFILE)
         fine = write_task(folder, "fine", compose=PULL_POLICIES, dockerfile=BUILD_DOCKERFILE)
         write_task(folder, "good", compose=GOOD)
         tool = FakeTool("docker", fail=str(bad / "environment"))
@@ -562,8 +671,8 @@ class TestPrepareChecksTheFieldsBeforeBuilding:
         assert [task.task_id for task in prepared.tasks] == ["fine", "good"]
         assert len(prepared.rows_path.read_text().splitlines()) == 2
         expected = {
-            "privileged": "privileged: environment/docker-compose.yaml: "
-            "Service 'main': unsupported Compose fields ['privileged']"
+            "devices": "devices: environment/docker-compose.yaml: "
+            "Service 'main': unsupported Compose fields ['devices']"
         }
         assert prepared.skipped == expected
         assert json.loads((tmp_path / "out" / "ds" / "skipped.json").read_text()) == expected
@@ -632,13 +741,13 @@ class TestPrepareChecksTheFieldsBeforeBuilding:
     def test_with_builds_disabled_the_field_is_still_the_reason(self, tmp_path):
         folder = tmp_path / "ds"
         folder.mkdir()
-        write_task(folder, "privileged", compose=PRIVILEGED, dockerfile=BUILD_DOCKERFILE)
+        write_task(folder, "devices", compose=DEVICES, dockerfile=BUILD_DOCKERFILE)
         write_task(folder, "good", compose=GOOD)
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
         assert [task.task_id for task in prepared.tasks] == ["good"]
         assert prepared.skipped == {
-            "privileged": "privileged: environment/docker-compose.yaml: "
-            "Service 'main': unsupported Compose fields ['privileged']"
+            "devices": "devices: environment/docker-compose.yaml: "
+            "Service 'main': unsupported Compose fields ['devices']"
         }
 
 
@@ -684,7 +793,7 @@ class TestPrepareReportsRefusedFieldsPerTask:
         """M28 gives ``extra_hosts`` (rh-swe-bench) and ``platform`` with ``deploy`` limits (harbor-index) their
         meaning, so those tasks prepare; featurebench's ``count: all`` and a key no provider starts are each a
         skipped task with the field named, as an unloadable task is, not a seed failure of every episode.
-        featurebench and privileged carry a stale built-image record: the record does not put a refused task in
+        featurebench and devices carry a stale built-image record: the record does not put a refused task in
         the rows."""
         folder = tmp_path / "ds"
         folder.mkdir()
@@ -693,7 +802,7 @@ class TestPrepareReportsRefusedFieldsPerTask:
             folder, write_task(folder, "rh-swe-bench", compose=RH_SWE_BENCH, dockerfile=BUILD_DOCKERFILE)
         )
         write_task(folder, "harbor-index", compose=HARBOR_INDEX, dockerfile=None, docker_image=AGENT_IMAGE)
-        record_built(folder, write_task(folder, "privileged", compose=PRIVILEGED, dockerfile=BUILD_DOCKERFILE))
+        record_built(folder, write_task(folder, "devices", compose=DEVICES, dockerfile=BUILD_DOCKERFILE))
         good = record_built(folder, write_task(folder, "good", compose=PULL_POLICIES, dockerfile=BUILD_DOCKERFILE))
 
         prepared = prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
@@ -703,13 +812,13 @@ class TestPrepareReportsRefusedFieldsPerTask:
         assert set(prepared.images) == {"org/api:1", good, swe, AGENT_IMAGE, TASK_SERVER_IMAGE}
         skipped = json.loads((tmp_path / "out" / "ds" / "skipped.json").read_text())
         assert skipped == prepared.skipped
-        assert set(skipped) == {"featurebench", "privileged"}
+        assert set(skipped) == {"featurebench", "devices"}
         assert skipped["featurebench"].startswith(
             "featurebench: environment/docker-compose.yaml: deploy.resources.reservations.devices"
         )
         assert "count: all is not supported" in skipped["featurebench"]
-        assert skipped["privileged"] == (
-            "privileged: environment/docker-compose.yaml: Service 'main': unsupported Compose fields ['privileged']"
+        assert skipped["devices"] == (
+            "devices: environment/docker-compose.yaml: Service 'main': unsupported Compose fields ['devices']"
         )
         rows = prepared.rows_path.read_text().splitlines()
         assert len(rows) == 3 and '"good"' in rows[0]
@@ -722,12 +831,12 @@ class TestPrepareReportsRefusedFieldsPerTask:
     def test_a_dataset_with_no_task_left_fails_after_writing_the_reasons(self, tmp_path):
         folder = tmp_path / "ds"
         folder.mkdir()
-        write_task(folder, "only", compose=PRIVILEGED)
+        write_task(folder, "only", compose=DEVICES)
         with pytest.raises(ValueError, match="No runnable task left"):
             prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False))
         skipped = json.loads((tmp_path / "out" / "ds" / "skipped.json").read_text())
         assert skipped == {
-            "only": "only: environment/docker-compose.yaml: Service 'main': unsupported Compose fields ['privileged']"
+            "only": "only: environment/docker-compose.yaml: Service 'main': unsupported Compose fields ['devices']"
         }
 
     def test_a_refused_field_does_not_hide_a_task_the_selection_left_out(self, tmp_path):

@@ -1504,10 +1504,10 @@ async def test_unsupported_fields_are_refused_with_the_shared_message_before_cre
     document = {
         "services": {
             "main": {"image": "a"},
-            "task-server": {"image": "b", "platform": "linux/amd64", "logging": {}, "privileged": True},
+            "task-server": {"image": "b", "platform": "linux/amd64", "logging": {}, "devices": ["/dev/fuse"]},
         }
     }
-    expected = "Service 'task-server': unsupported Compose fields ['logging', 'privileged']"
+    expected = "Service 'task-server': unsupported Compose fields ['devices', 'logging']"
     assert unsupported_compose_fields(document) == [expected]
     group = make_compose(provider, document)
     with pytest.raises(NotImplementedError, match=re.escape(expected)):
@@ -2961,3 +2961,119 @@ async def test_the_verdict_survives_a_service_whose_sandbox_ended_before_its_log
         "Compose service 'seed' exited (7); its command log could not be read "
         "(RuntimeError: Sandbox 89472b25 has ended (OOMKilled))"
     )
+
+
+class PrivilegedProvider(RecordingProvider):
+    """A recording provider that starts privileged sandboxes when its config allows them, as the Docker provider."""
+
+    def __init__(self, *, allow_privileged):
+        super().__init__("cpu", 1)
+        self.allow_privileged = allow_privileged
+
+    def privileged_options(self):
+        if not self.allow_privileged:
+            raise ValueError("privileged: true needs `allow_privileged: true` in the cpu sandbox provider config")
+        return {"run_args": ["--privileged"]}
+
+
+# A main service that runs its own Docker daemon, which needs a privileged container.
+DIND_MAIN = {"image": "img", "privileged": True, "environment": {"DOCKER_HOST": "unix:///var/run/docker.sock"}}
+
+
+@pytest.mark.asyncio
+async def test_privileged_needs_a_provider_that_starts_privileged_sandboxes():
+    provider = ShellProvider()
+    group = make_compose(provider, {"services": {"main": dict(DIND_MAIN)}})
+    with pytest.raises(
+        NotImplementedError,
+        match=re.escape("Service 'main': privileged is not supported by the test sandbox provider"),
+    ):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_privileged_without_the_operators_opt_in_is_refused_before_any_sandbox():
+    provider = PrivilegedProvider(allow_privileged=False)
+    group = make_compose(provider, {"services": {"main": dict(DIND_MAIN)}})
+    with pytest.raises(ValueError, match=re.escape("Service 'main': privileged: true needs `allow_privileged: true`")):
+        await group.start()
+    assert not provider.created
+
+
+@pytest.mark.asyncio
+async def test_only_the_declaring_services_own_sandbox_is_privileged():
+    """The volume init helper and the copy-up seed (a sandbox of main's own spec, which keeps main's other provider
+    options) are never privileged, nor is a service that does not declare it; main keeps its caller's options."""
+    from nemo_gym.sandbox.providers.base import SandboxSpec
+
+    provider = PrivilegedProvider(allow_privileged=True)
+    document = {
+        "services": {
+            "main": {
+                **DIND_MAIN,
+                "volumes": [{"type": "volume", "source": "docker-data", "target": "/var/lib/docker"}],
+            },
+            "side": {"image": "side"},
+        },
+        "volumes": {"docker-data": {}},
+    }
+    async with make_compose(
+        provider,
+        document,
+        default_command=["sleep", "1"],
+        poll_interval_s=0.01,
+        service_specs={"main": SandboxSpec(ttl_s=30, provider_options={"run_args": ["--init"]})},
+    ):
+        helper, seed, main, side = provider.created
+        assert (helper.image, seed.image, main.image, side.image) == ("alpine:3.22", "img", "img", "side")
+        assert "run_args" not in helper.provider_options
+        assert seed.provider_options["run_args"] == ["--init"]
+        assert main.provider_options["run_args"] == ["--init", "--privileged"]
+        assert main.env == {"DOCKER_HOST": "unix:///var/run/docker.sock"}
+        assert "run_args" not in side.provider_options
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow_privileged", [True, False])
+async def test_docker_runs_the_declaring_container_privileged_only_with_allow_privileged(
+    monkeypatch, allow_privileged
+):
+    """Through the Docker provider itself: with ``allow_privileged: true`` main's ``docker run`` carries
+    ``--privileged`` and the sidecar's does not; without it no container is run. Docker has no sandbox networking
+    here, so the stub adds it and stops the group once both containers exist."""
+    from nemo_gym.sandbox.providers.docker import provider as docker_provider
+
+    class NetworkedDocker(docker_provider.DockerProvider):
+        def validate_networking(self):
+            pass
+
+        async def network_address(self, handle):
+            raise RuntimeError("stop once the containers exist")
+
+        async def set_hosts(self, handle, hosts):
+            pass
+
+    calls = []
+
+    async def run(argv, *, timeout_s, stdin=None):
+        calls.append(argv)
+        return (0, docker_provider.READY_PROBE_EXPECTED, "") if argv[1] == "exec" else (0, "", "")
+
+    monkeypatch.setattr(docker_provider, "_require_docker", lambda: "/usr/bin/docker")
+    provider = NetworkedDocker(exec={"exec_shell": "sh"}, allow_privileged=allow_privileged)
+    monkeypatch.setattr(provider, "_run", run)
+    group = make_compose(
+        provider, {"services": {"main": dict(DIND_MAIN), "side": {"image": "side"}}}, default_command=["sleep", "1"]
+    )
+    if not allow_privileged:
+        with pytest.raises(ValueError, match="needs `allow_privileged: true` in the docker sandbox provider config"):
+            await group.start()
+        assert calls == []
+        return
+    with pytest.raises(RuntimeError, match="stop once the containers exist"):
+        await group.start()
+    runs = {argv[argv.index("--entrypoint") + 2]: argv for argv in calls if argv[1] == "run"}
+    assert set(runs) == {"img", "side"}
+    assert runs["img"].count("--privileged") == 1 and "--privileged" not in runs["side"]
+    assert "DOCKER_HOST=unix:///var/run/docker.sock" in runs["img"]
