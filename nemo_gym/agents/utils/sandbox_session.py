@@ -3,6 +3,7 @@
 """Supervised harness activations over one retained sandbox connection."""
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -16,13 +17,16 @@ from typing import Literal, NotRequired, TypedDict, cast
 from pydantic import TypeAdapter
 
 from nemo_gym.agents.utils.supervisor_client import (
+    CLEANUP_RECEIPT_FILE,
     CONTINUE_REQUEST_FILE,
     DEFAULT_PAUSE_TIMEOUT,
     EXPIRE_REQUEST_FILE,
+    LAUNCH_CLAIM_FILE,
     OUTPUT_LOG_FILE,
     PAUSE_REQUEST_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
+    SUPERVISOR_PID_FILE,
     SUPERVISOR_SCRIPT,
     CleanupReceipt,
     PauseAcknowledgement,
@@ -54,6 +58,14 @@ HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
 # could not be started. Any other status is the CLI's own.
 HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
+# A receipt wait gives up after this many consecutive failed polls that also span this many seconds: a sandbox being
+# snapshotted, or a gateway restart, refuses commands for a while.
+_RECEIPT_POLL_FAILURES = 5
+_RECEIPT_POLL_FAILURE_S = 60.0
+# Continue requests ``adopt`` sends for the pause a restored launch holds; the request is safe to repeat.
+_ADOPT_CONTINUE_ATTEMPTS = 3
+# Each receipt poll is one command of at most this many seconds; a longer one could outlive a provider's stream limit.
+_RECEIPT_POLL_WINDOW_S = 50.0
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -138,7 +150,7 @@ class SandboxSessionCheckpoint(TypedDict):
     """What ``SandboxSession.rebind`` needs to rebind a session to a sandbox restored from a snapshot.
 
     ``pause_seq`` and ``supervisor_identity`` are there while the launch's supervisor holds a confirmed pause: on a
-    sandbox whose snapshot keeps its processes, that launch can still be running after the restore.
+    sandbox whose snapshot keeps its processes, ``adopt`` can take that launch over after the restore.
     """
 
     session_root: str
@@ -188,7 +200,8 @@ class SandboxSession[Artifacts]:
     a sandbox whose snapshot keeps its processes, nothing is signalled: the harness keeps running
     while the checkpoint holds its model calls. Directories under ``root_dir`` survive a snapshot
     of a borrowed sandbox; ``checkpoint_state`` and ``rebind`` connect a session to the sandbox a
-    restore forks from that snapshot.
+    restore forks from that snapshot, and when the snapshot also kept the supervisor holding a pause,
+    ``adopt`` takes its launch over.
     """
 
     sandbox: AsyncSandbox
@@ -228,6 +241,9 @@ class SandboxSession[Artifacts]:
     _pause_seq: int = field(default=0, init=False)
     _continue_seq: int = field(default=0, init=False)
     _continued_seq: int = field(default=0, init=False)
+    # Serializes pause and continue requests: a pause asked for while ``adopt`` continues a restored pause waits for
+    # that continue, so it takes the next number instead of reading the restored pause's acknowledgement.
+    _control: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
     # The supervisor that confirmed pause ``_held_seq``, as ``PID.START``.
     _held_identity: str | None = field(default=None, init=False)
     _held_seq: int = field(default=0, init=False)
@@ -272,7 +288,8 @@ class SandboxSession[Artifacts]:
         ``begin_activation`` and a fresh launch directory under ``root_dir`` before the next ``execute``;
         ``state["launch_started"]`` says whether the harness had already started, for an adapter that continues
         the harness's saved conversation. When it kept the processes too, a launch whose supervisor held a
-        confirmed pause (``state["pause_seq"]``) may still run in ``sandbox``.
+        confirmed pause (``state["pause_seq"]``) may still run: check it with ``check_restored``, then take it
+        over with ``adopt``, or end it with ``abandon_launch`` before a relaunch.
         """
         state = _CHECKPOINT_STATE.validate_python(state, strict=True)
         session = cls(
@@ -372,25 +389,25 @@ class SandboxSession[Artifacts]:
         # Register both hooks before yielding, so close can fence preparation too.
         self._collect = collect
         self._stage_task = asyncio.create_task(self._stage(stage_activation))
-        try:
+
+        async def launch() -> asyncio.Task[SandboxExecResult]:
             async with asyncio.timeout_at(deadline):
                 command = await asyncio.shield(self._stage_task)
             if self._expire_requested:
                 await self._request_expiry(timeout=close_timeout)
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
-            if deadline is not None:
-                timeout = min(timeout, deadline - monotonic())
+            remaining = timeout if deadline is None else min(timeout, deadline - monotonic())
             # The supervisor counts whole centiseconds; less than one cannot run the harness.
-            if timeout < 0.01:
+            if remaining < 0.01:
                 raise TimeoutError(f"{self.harness} activation deadline expired before launch")
             cleanup_timeout, provider_timeout = supervision_timeouts(
-                timeout=timeout, close_timeout=close_timeout, pause_allowance=pause_allowance_s
+                timeout=remaining, close_timeout=close_timeout, pause_allowance=pause_allowance_s
             )
-            launch = supervised_launch_command(
+            command_line = supervised_launch_command(
                 session_dir=self.session_dir,
                 command=command.argv,
-                timeout=timeout,
+                timeout=remaining,
                 cleanup_timeout=cleanup_timeout,
                 pausable=self.pausable,
                 # One pause may use the whole allowance; a longer one ends the harness (see the supervisor).
@@ -398,13 +415,171 @@ class SandboxSession[Artifacts]:
                 pause_mode=self.pause_mode,
             )
             self.launch_started = True
-            self._exec_task = asyncio.create_task(
-                self.sandbox.exec(
-                    launch,
-                    cwd=self.workdir,
-                    timeout_s=provider_timeout,
-                )
+            return asyncio.create_task(self._exec_launch(command_line, provider_timeout=provider_timeout))
+
+        return await self._run_launch(launch, close_timeout=close_timeout)
+
+    async def _exec_launch(self, command_line: str, *, provider_timeout: float) -> SandboxExecResult:
+        """Run the supervised launch; if its connection is lost after the supervisor started, wait for its receipt.
+
+        The supervisor runs on in the sandbox whatever happens to the command that started it, and writes the cleanup
+        receipt on every exit path it controls, so the receipt answers for the launch as ``adopt`` does after a
+        restore. A launch whose supervisor never started still fails at once: no receipt would ever come.
+        """
+        launched_at = monotonic()
+        try:
+            return await self.sandbox.exec(command_line, cwd=self.workdir, timeout_s=provider_timeout)
+        except Exception as error:
+            # A provider-confirmed OOM kill took the whole sandbox: nothing is left there to ask or to wait for.
+            oom_killed = (
+                isinstance(error, NgFailureEvent)
+                and error.boundary == "sandbox"
+                and error.failure_kind == PROVIDER_OOM_KILLED
             )
+            if oom_killed or not await self._supervisor_started():
+                raise
+            LOG.warning("%s launch connection lost (%s); waiting for its cleanup receipt", self.harness, error)
+            return await self._wait_for_receipt(
+                deadline=launched_at + provider_timeout, window_s=_RECEIPT_POLL_WINDOW_S
+            )
+
+    async def _supervisor_started(self) -> bool:
+        """Whether the launch's supervisor claimed the launch; False when the sandbox cannot say."""
+        claim = quote(f"{self.session_dir}/{LAUNCH_CLAIM_FILE}")
+        pid = quote(f"{self.session_dir}/{SUPERVISOR_PID_FILE}")
+        try:
+            probe = await self.sandbox.exec(f"[ -e {pid} ] || [ -e {claim} ]", cwd=self.workdir, timeout_s=30)
+        except Exception:
+            LOG.warning("%s could not check whether its supervisor started", self.harness, exc_info=True)
+            return False
+        return probe.return_code == 0 and not probe.error_type
+
+    async def adopt(
+        self,
+        *,
+        pause_seq: int,
+        collect: Callable[[], Awaitable[Artifacts]],
+        timeout: float,
+        close_timeout: float,
+        pause_allowance_s: float = 0.0,
+        poll_window_s: float = _RECEIPT_POLL_WINDOW_S,
+    ) -> Artifacts:
+        """Take over a launch that ran on through a restore, as ``execute`` would have finished it.
+
+        After ``rebind`` to a sandbox whose snapshot kept its processes, and a ``check_restored`` that found the
+        launch's supervisor holding pause ``pause_seq``: continue that pause, then wait for the supervisor's
+        cleanup receipt and collect, as ``execute`` does. The process that started the launch is gone with the
+        crashed agent server, so the wait polls for the receipt in commands of at most ``poll_window_s`` seconds;
+        a command left waiting longer could outlive a provider's stream limit. ``timeout`` bounds the wait like
+        the launch's own, plus the supervisor's cleanup phases and ``pause_allowance_s``. Later checkpoints pause
+        the same supervisor, from ``pause_seq + 1``.
+        """
+        if not self.pausable:
+            raise RuntimeError(f"{self.harness} sandbox session was not launched pausable")
+        if self.closing or self._stage_task is not None:
+            raise RuntimeError(f"{self.harness} sandbox session is closing or already activated")
+        self._collect = collect
+        # Nothing to stage: the launch is already running.
+        staged: asyncio.Future[SandboxCommand] = asyncio.get_running_loop().create_future()
+        staged.set_result(SandboxCommand(argv=[]))
+        self._stage_task = staged
+
+        async def launch() -> asyncio.Task[SandboxExecResult]:
+            self.launch_started = True
+            if self._expire_requested:
+                # Requested before the take-over: the supervisor honours the marker once the pause is continued.
+                await self._request_expiry(timeout=close_timeout)
+            self._pause_seq = pause_seq
+            self._continue_seq = self._continued_seq = pause_seq - 1
+            continued = HarnessPauseResult(status="unconfirmed")
+            # One hold of the lock for every attempt, so no pause is requested between two of them.
+            async with self._control:
+                for attempt in range(1, _ADOPT_CONTINUE_ATTEMPTS + 1):
+                    try:
+                        continued = await self._continue(timeout=DEFAULT_PAUSE_TIMEOUT)
+                    except Exception as error:
+                        continued = HarnessPauseResult(
+                            status="unconfirmed", error=f"continue request failed: {error!r}"
+                        )
+                    if continued.status != "unconfirmed":
+                        break
+                    LOG.warning(
+                        "%s restored launch continue attempt %d/%d failed: %s",
+                        self.harness,
+                        attempt,
+                        _ADOPT_CONTINUE_ATTEMPTS,
+                        continued.error,
+                    )
+            if continued.status == "unconfirmed":
+                raise RuntimeError(f"{self.harness} restored launch did not continue: {continued.error}")
+            _, provider_timeout = supervision_timeouts(
+                timeout=timeout, close_timeout=close_timeout, pause_allowance=pause_allowance_s
+            )
+            return asyncio.create_task(
+                self._wait_for_receipt(deadline=monotonic() + provider_timeout, window_s=poll_window_s)
+            )
+
+        return await self._run_launch(launch, close_timeout=close_timeout)
+
+    async def _wait_for_receipt(self, *, deadline: float, window_s: float) -> SandboxExecResult:
+        """Poll for the launch's cleanup receipt until ``deadline``.
+
+        The result's code is the launch command's: 0 when the receipt confirms the cleanup, whatever the harness
+        returned, and 1 otherwise.
+        """
+        receipt = quote(f"{self.session_dir}/{CLEANUP_RECEIPT_FILE}")
+        failures = 0
+        failing_since = 0.0
+        while (window := min(window_s, deadline - monotonic())) > 0:
+            asked = monotonic()
+            try:
+                result = await self.sandbox.exec(
+                    f"for _ in $(seq 1 {max(1, int(window))}); do "
+                    f"[ -f {receipt} ] && {{ cat {receipt}; exit 0; }}; sleep 1; done; exit 3",
+                    cwd=self.workdir,
+                    timeout_s=window + 10,
+                )
+            except Exception as error:
+                # A poll whose command raised (a dropped connection) is one failed poll, not the end of the wait.
+                result = SandboxExecResult(stdout=None, stderr=repr(error), return_code=-1, error_type="poll_failed")
+            if result.return_code == 0 and not result.error_type:
+                try:
+                    confirmed = json.loads(result.stdout or "{}").get("cleanup_confirmed") is True
+                except (ValueError, AttributeError):
+                    confirmed = False
+                # As the launch command ends: 0 once the supervisor confirmed the cleanup.
+                return SandboxExecResult(stdout="", stderr=None, return_code=0 if confirmed else 1)
+            if result.return_code != 3 or result.error_type:
+                if self._pause_seq > self._continued_seq:
+                    failures = 0  # A checkpoint holds the harness: the sandbox may be in the middle of a snapshot.
+                else:
+                    failures += 1
+                    if failures == 1:
+                        failing_since = asked
+                    if failures >= _RECEIPT_POLL_FAILURES and monotonic() - failing_since >= _RECEIPT_POLL_FAILURE_S:
+                        return SandboxExecResult(
+                            stdout=None,
+                            stderr=result.stderr,
+                            return_code=-1,
+                            error_type=result.error_type or "failed",
+                        )
+                if failures <= 1:
+                    LOG.warning(
+                        "%s receipt poll failed (%s); retrying", self.harness, result.error_type or result.stderr
+                    )
+                await asyncio.sleep(1)
+            else:
+                failures = 0
+                if monotonic() - asked < 1:
+                    await asyncio.sleep(1)  # A poll that could not wait (no seq in the image) must not spin.
+        return SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type="timeout")
+
+    async def _run_launch(
+        self, launch: Callable[[], Awaitable[asyncio.Task[SandboxExecResult]]], *, close_timeout: float
+    ) -> Artifacts:
+        """Wait for the launch ``launch`` starts, then finish it: stop, collect, release; artifacts survive errors."""
+        try:
+            self._exec_task = await launch()
             try:
                 result = await asyncio.shield(self._exec_task)
             except NgFailureEvent as error:
@@ -488,6 +663,10 @@ class SandboxSession[Artifacts]:
         """
         if not self.pausable:
             raise RuntimeError(f"{self.harness} sandbox session was not launched pausable")
+        async with self._control:
+            return await self._pause(timeout=timeout)
+
+    async def _pause(self, *, timeout: float) -> HarnessPauseResult:
         if self.cleanup is not None or self.sandbox_stopped or self.closing:
             return HarnessPauseResult(status="finished")
         stage = self._stage_task
@@ -534,6 +713,10 @@ class SandboxSession[Artifacts]:
 
     async def continue_harness(self, *, timeout: float = DEFAULT_PAUSE_TIMEOUT) -> HarnessPauseResult:
         """Continue a harness ``pause_harness`` paused; ``confirmed`` at once when nothing is paused."""
+        async with self._control:
+            return await self._continue(timeout=timeout)
+
+    async def _continue(self, *, timeout: float) -> HarnessPauseResult:
         if self.cleanup is not None or self.sandbox_stopped or self.closing:
             return HarnessPauseResult(status="finished")
         if self._continued_seq >= self._pause_seq:
