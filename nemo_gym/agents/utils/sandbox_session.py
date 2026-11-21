@@ -141,12 +141,14 @@ class HarnessPauseResult:
     ``confirmed``: every process the supervisor reached is paused (or running again), or no launch had started,
     and the launch will honour the request when it starts. ``finished``: the harness had already ended; its cleanup
     receipt answers instead. ``unconfirmed``: the supervisor did not confirm in time or reported ``error``.
-    ``pids`` are the processes a pause stopped.
+    ``pids`` are the processes a pause stopped. ``acknowledged`` says the supervisor answered this request: its
+    answer stays in the acknowledgement file, so sending the same request again reads the same answer.
     """
 
     status: Literal["confirmed", "finished", "unconfirmed"]
     pids: tuple[int, ...] = ()
     error: str | None = None
+    acknowledged: bool = False
 
     @property
     def confirmed(self) -> bool:
@@ -792,4 +794,5 @@ def _pause_result(
         status="confirmed" if acknowledgement["confirmed"] else "unconfirmed",
         pids=tuple(acknowledgement["pids"]),
         error=acknowledgement["error"],
+        acknowledged=True,
     )

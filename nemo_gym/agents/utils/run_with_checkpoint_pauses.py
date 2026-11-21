@@ -78,8 +78,8 @@ async def run_with_checkpoint_pauses[T](
     Model calls wait at the model server and are not affected.
 
     A pause or continue request that fails in transport is repeated after a delay, with the same sequence number,
-    so the supervisor serves it once. If the pause is still not confirmed, or the continue fails
-    ``CONTINUE_ATTEMPTS`` times, the harness is stopped: the supervisor sends TERM and, after the cleanup grace
+    so the supervisor serves it once. If the pause is still not confirmed, or the continue is refused by the
+    supervisor or fails ``CONTINUE_ATTEMPTS`` times, the harness is stopped: the supervisor sends TERM and, after the cleanup grace
     period, KILL to what is left, so a harness that ignores TERM costs the whole grace period. The activation
     parks after a pause failure, and ``LaunchStopped`` tells the adapter to launch again. A supervisor that died
     during this stop, leaving a receipt the provider had to prove (``receipt_missing``), counts as stopped too. A
@@ -95,7 +95,8 @@ async def run_with_checkpoint_pauses[T](
     try:
         while True:
             parking = asyncio.ensure_future(activation.wait_park_requested())
-            # A park request that ends with an error as the launch ends is cancelled unread below.
+            # A park request can fail, with its session closing, while this call is being cancelled: it is then
+            # done, so nothing below cancels or reads it.
             parking.add_done_callback(_retrieve_exception)
             await asyncio.wait({launched, parking}, return_when=asyncio.FIRST_COMPLETED)
             if launched.done():
@@ -174,6 +175,9 @@ async def _continue(session: SandboxSession[Any]) -> bool:
         LOG.warning(
             "%s harness continue attempt %d/%d failed: %s", session.harness, attempt, CONTINUE_ATTEMPTS, result.error
         )
+        if result.acknowledged:
+            # The supervisor tried and refused. The same request would read that same answer again.
+            return False
         if attempt < CONTINUE_ATTEMPTS:
             await _retry_delay(attempt)
     return False

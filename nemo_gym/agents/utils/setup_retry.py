@@ -10,6 +10,7 @@ is idempotent (a read, a ``mkdir -p``, an install that skips what is present) re
 
 import asyncio
 import logging
+from time import monotonic
 
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -31,18 +32,22 @@ async def exec_idempotent(
 ) -> SandboxExecResult:
     """Run ``command``, retrying when ``sandbox.exec`` raises; a returned result, any exit code, ends the retries.
 
-    ``cwd``, ``env`` and ``timeout_s`` are passed to ``sandbox.exec``. The delay doubles after each failed attempt
-    (2 s, then 4 s). The last error is raised once ``attempts`` run out.
+    ``cwd`` and ``env`` are passed to ``sandbox.exec``. ``timeout_s`` is the budget of all attempts and the waits
+    between them together: each attempt gets what is left of it, and once it is spent the last error is raised. The
+    wait doubles after each failed attempt (2 s, then 4 s). The last error is also raised once ``attempts`` run out.
 
     Use only for commands that are safe to run twice, and at the same time: the error can arrive after the command
     started, so a retry may begin while the first attempt is still running in the sandbox.
     """
+    deadline = None if timeout_s is None else monotonic() + timeout_s
     for attempt in range(1, attempts + 1):
+        remaining = None if deadline is None else deadline - monotonic()
         try:
-            return await sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_s)
+            return await sandbox.exec(command, cwd=cwd, env=env, timeout_s=remaining)
         except Exception as error:
-            if attempt == attempts:
+            wait = delay_s * 2 ** (attempt - 1)
+            if attempt == attempts or (deadline is not None and monotonic() + wait >= deadline):
                 raise
             LOG.warning("%s failed (attempt %d/%d): %r; retrying", what, attempt, attempts, error)
-            await asyncio.sleep(delay_s * 2 ** (attempt - 1))
+            await asyncio.sleep(wait)
     raise AssertionError("unreachable")  # pragma: no cover

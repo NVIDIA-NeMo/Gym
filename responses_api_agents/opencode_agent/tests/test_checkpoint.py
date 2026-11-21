@@ -43,7 +43,13 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    TaskId,
+)
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_runtime import RestoredAgentSession
 from nemo_gym.trajectory import (
@@ -1135,8 +1141,9 @@ def _restored(
 ) -> tuple[OpenCodeAgent, OpenCodeSandboxSession, Any]:
     agent = OpenCodeAgent.model_construct(
         config=OpenCodeAgentConfig.model_construct(
-            session_close_timeout_seconds=1,
-            sandbox_install_timeout_seconds=1,
+            # Long enough for a retried command's wait: a command's timeout is the budget of all its attempts.
+            session_close_timeout_seconds=30,
+            sandbox_install_timeout_seconds=30,
             export_dir="/exports",
             sandbox_path_prefix=[],
             **config,
@@ -1595,3 +1602,92 @@ def test_sessions_the_agent_cannot_capture_restart() -> None:
     assert restarts(importing, borrowed)
     # The relaunch that reprompts a saved conversation speaks OpenCode 1's server API and reads its store.
     assert restarts(opencode2, borrowed)
+
+
+# -- review of the recovery paths ------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("failures", [1, 3])
+async def test_a_re_bind_does_not_install_when_the_check_of_its_files_could_not_run(
+    monkeypatch: pytest.MonkeyPatch, failures: int
+) -> None:
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app._RESTORED_CHECK_RETRY_DELAY_S", 0)
+    sandbox = MagicMock(sandbox_id="fork")
+    not_run = SandboxExecResult(stdout=None, stderr="stream closed", return_code=-1, error_type="transport")
+    present = SandboxExecResult(stdout="", stderr="", return_code=0)
+    sandbox.exec = AsyncMock(side_effect=[not_run] * failures + [present])
+    sandbox.disconnect = AsyncMock()
+    agent, state, body = _restored(monkeypatch, sandbox)
+    session = SimpleNamespace(root_dir="/sessions/s")
+    monkeypatch.setattr(SandboxSession, "rebind", staticmethod(lambda *_, **__: session))
+
+    if failures < 3:
+        # The check ran on a later attempt and found the files: nothing is installed.
+        assert await agent._rebind_restored_agent_session_state(state, body) is state
+        assert sandbox.exec.await_count == failures + 1 and state.session is session
+        sandbox.disconnect.assert_not_awaited()
+    else:
+        # A check that never ran is not a missing runtime: the re-bind fails and its seed is tried again.
+        with pytest.raises(NgFailureEvent):
+            await agent._rebind_restored_agent_session_state(state, body)
+        assert sandbox.exec.await_count == 3 and state.session is None
+        sandbox.disconnect.assert_awaited_once()
+    sandbox.upload.assert_not_called()
+
+
+async def test_a_restored_session_closed_before_its_re_bind_without_evidence_reports_a_2_0_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, state, _ = _restored(monkeypatch, MagicMock())
+
+    closed = await agent._close_agent_session_state(state)
+
+    assert closed.agent_observations.schema_version == "2.0"
+    assert [gap.code for gap in closed.agent_observations.gaps] == ["agent_activation_interrupted"]
+
+
+async def test_a_launch_directory_is_prepared_again_when_the_sandbox_refuses_the_first_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock()))
+    _, state, _ = _stopped_session(monkeypatch)
+    made = SandboxExecResult(stdout="", stderr="", return_code=0)
+    state.session.begin_activation = AsyncMock()
+    state.session.sandbox = SimpleNamespace(exec=AsyncMock(side_effect=[ConnectionError("502 Bad Gateway"), made]))
+
+    await state.prepare_launch(2, timeout=30)
+
+    state.session.begin_activation.assert_awaited_once()
+    calls = state.session.sandbox.exec.await_args_list
+    assert [call.args for call in calls] == [("mkdir -p -- /sessions/s/launch-2",)] * 2
+
+
+async def test_a_stopped_launch_with_no_budget_left_is_reported_as_timed_out_and_not_relaunched() -> None:
+    agent = OpenCodeAgent.model_construct(
+        config=OpenCodeAgentConfig.model_construct(
+            session_close_timeout_seconds=1, checkpoint_pause_allowance_seconds=0
+        )
+    )
+    stopped = {"cleanup_confirmed": True, "return_code": 143, "error": None, "timed_out": False, "stopped": True}
+    session = SimpleNamespace(cleanup=stopped, artifacts='{"messages": []}', session_dir="/s/launch-1")
+    state = SimpleNamespace(
+        launch_count=1,
+        launch_records=[],
+        session=session,
+        request=SimpleNamespace(agent_session_id="a"),
+        prepare_launch=AsyncMock(),
+        inspect_conversation=AsyncMock(),
+        execute=AsyncMock(),
+    )
+
+    # The activation's deadline passed while the launch was being stopped.
+    await agent._run_launches(
+        state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() - 1
+    )
+
+    # Preparing a relaunch would discard the stopped launch's output: it stays, under a receipt that says timeout.
+    state.prepare_launch.assert_not_awaited()
+    state.inspect_conversation.assert_not_awaited()
+    state.execute.assert_not_awaited()
+    assert session.cleanup == {**stopped, "timed_out": True}
+    assert session.artifacts == '{"messages": []}' and state.launch_count == 1

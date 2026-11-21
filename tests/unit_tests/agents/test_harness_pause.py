@@ -6,7 +6,6 @@ From the bash supervisor up to ``run_with_checkpoint_pauses``.
 """
 
 import asyncio
-import gc
 import json
 import os
 import re
@@ -1062,6 +1061,20 @@ async def test_a_continue_that_keeps_failing_stops_the_harness_after_the_checkpo
     assert len(activation.boundaries) == 1
 
 
+async def test_a_continue_the_supervisor_refused_is_not_sent_again() -> None:
+    refused = HarnessPauseResult(status="unconfirmed", error="A paused process did not continue", acknowledged=True)
+    session = FakeSession(continues=[refused] * CONTINUE_ATTEMPTS)
+    activation = FakeActivation()
+    running = _run(session, activation)
+    activation.park.set()
+    await asyncio.wait_for(activation.parked.wait(), 5)
+    activation.resume.set()
+    result = await asyncio.wait_for(running, 5)
+    assert isinstance(result, LaunchStopped)
+    # The same request would read the same answer from the acknowledgement file: one continue, then the stop.
+    assert session.events == ["pause", "continue", "stop"]
+
+
 async def test_a_harness_that_finished_as_the_park_arrived_keeps_its_result() -> None:
     session = FakeSession(pauses=[HarnessPauseResult(status="finished")])
     activation = FakeActivation()
@@ -1082,29 +1095,39 @@ async def test_a_launch_that_ends_first_never_pauses() -> None:
     assert session.events == []
 
 
-async def test_a_park_request_that_fails_as_the_launch_ends_is_not_reported_as_never_retrieved() -> None:
-    class RetiredAsTheLaunchEnds(FakeActivation):
-        async def wait_park_requested(self) -> None:
-            await session.done.wait()
-            raise StaleAttemptError("retired")
+async def test_a_park_request_that_fails_as_its_activation_is_cancelled_has_its_exception_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RetiredWhenClosed(FakeActivation):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = asyncio.Event()
 
-    session, activation = FakeSession(), RetiredAsTheLaunchEnds()
-    reported: list[str] = []
-    loop = asyncio.get_running_loop()
-    loop.set_exception_handler(lambda loop, context: reported.append(context["message"]))
-    try:
-        running = _run(session, activation)
-        for _ in range(3):
-            await asyncio.sleep(0)
-        # One event ends the launch and fails the park request in the same turn of the loop.
-        session.done.set()
-        assert await asyncio.wait_for(running, 5) == LaunchFinished("result")
-        del running
-        gc.collect()
+        async def wait_park_requested(self) -> None:
+            await self.closed.wait()
+            raise StaleAttemptError("agent session is closing")
+
+    created: list[asyncio.Future] = []
+
+    def ensure_future(awaitable):
+        created.append(asyncio.ensure_future(awaitable))
+        return created[-1]
+
+    monkeypatch.setattr(checkpoint_pauses, "asyncio", AsyncioWith(ensure_future=ensure_future))
+    session, activation = FakeSession(), RetiredWhenClosed()
+    running = _run(session, activation)
+    for _ in range(3):
         await asyncio.sleep(0)
-    finally:
-        loop.set_exception_handler(None)
-    assert reported == []
+    # A close cancels the activation and retires its session in the same turn of the loop.
+    running.cancel()
+    activation.closed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(running, 5)
+    parking = created[1]
+    assert parking.done() and not parking.cancelled()
+    # A finished task nobody cancels or reads is logged as "Task exception was never retrieved" when collected.
+    assert not parking._log_traceback
+    assert isinstance(parking.exception(), StaleAttemptError)
 
 
 async def test_cancelling_a_parked_activation_stops_its_launch() -> None:
@@ -1348,11 +1371,14 @@ async def test_a_pause_keeps_its_number_until_a_continue_is_confirmed(
     monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_continue", answering("continue"))
     session = _session(tmp_path)
 
-    assert (await session.pause_harness()).status == "unconfirmed"
+    unanswered = await session.pause_harness()
+    assert unanswered.status == "unconfirmed" and not unanswered.acknowledged
     refused = await session.pause_harness()
-    assert refused.status == "unconfirmed" and refused.error == refusal
+    # An answer of the supervisor, as opposed to no answer: a caller need not send the same request again.
+    assert refused.status == "unconfirmed" and refused.error == refusal and refused.acknowledged
     assert (await session.pause_harness()).confirmed
-    assert (await session.continue_harness()).status == "unconfirmed"
+    unanswered = await session.continue_harness()
+    assert unanswered.status == "unconfirmed" and not unanswered.acknowledged
     assert (await session.continue_harness()).confirmed
     assert (await session.pause_harness()).confirmed
     assert requests == [("pause", 1)] * 3 + [("continue", 1)] * 2 + [("pause", 2)]
