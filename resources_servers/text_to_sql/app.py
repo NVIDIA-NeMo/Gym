@@ -406,12 +406,12 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
         # Extract text from judge response
         text = _extract_judge_response_text(judge_response)
 
-        # Check text for verdict labels
+        # The prompt asks for the verdict last; an earlier label may be quoted from the answer.
         if text:
-            eq_pos = text.find(equal_label)
-            neq_pos = text.find(not_equal_label)
+            eq_pos = text.rfind(equal_label)
+            neq_pos = text.rfind(not_equal_label)
 
-            if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
+            if eq_pos > neq_pos:
                 verdict_label = equal_label
                 is_equal = True
             elif neq_pos >= 0:
