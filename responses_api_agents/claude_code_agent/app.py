@@ -38,6 +38,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentContinuationCapabilities,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
@@ -296,8 +297,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_active: bool = False,
+        session: list[str] | None = None,
     ) -> list[str]:
         """Construct the ``claude`` CLI argv from config.
+
+        ``session`` is a continuation session's ``--session-id <id>`` (first activation) or ``--resume <id>``
+        (each later one), so every activation of the session works in one Claude Code conversation.
 
         ``--bare`` is only passed when ``config.bare`` is True; it skips hooks, LSP, plugin sync,
         attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md auto-discovery
@@ -343,6 +348,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
         if self.config.max_turns is not None:
             cmd += ["--max-turns", str(self.config.max_turns)]
+        if session:
+            cmd += session
         cmd += ["--", instruction]
         return cmd
 
@@ -693,6 +700,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 harness="Claude Code",
                 owns_sandbox=owns_sandbox,
             ),
+            claude_session_id=str(uuid4()) if body.continuation is not None else None,
         )
         try:
             async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
@@ -786,7 +794,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         prompt: str,
         system: str | None,
     ) -> NeMoGymResponse:
-        directory = state.session.session_dir
+        # Claude Code's configuration and transcripts live in the session root, which a continuation keeps across
+        # activations; for a one-activation session the root is the session directory.
+        directory = state.session.root_dir
         base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         env = {
@@ -814,8 +824,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             async with self.sem:
                 mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
                 skills_path = self._configured_skills_path()
+                session = None
+                if state.claude_session_id is not None:
+                    flag = "--session-id" if (state.activation_id or 1) == 1 else "--resume"
+                    session = [flag, state.claude_session_id]
                 command = self._build_command(
-                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path), session=session
                 )
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
@@ -896,6 +910,36 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             raise failure
         return response
 
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
+        # A sandbox session resumes its Claude Code conversation (`--resume`) in each later activation. The
+        # observations are the session's cumulative transcripts, from which rollout collection builds the trajectory.
+        return AgentContinuationCapabilities(observations=["trajectory", "timing", "harness_tool_calls", "compaction"])
+
+    def _continuation_close_timeout(self) -> float:
+        return self.config.session_close_timeout_seconds
+
+    def _validate_agent_activation(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> None:
+        assert isinstance(state, ClaudeCodeSandboxSession)
+        self._validate_sandbox_request(body)
+        _, system = self._conversation_input(body)
+        if state.activation_request is not None and system != self._conversation_input(state.activation_request)[1]:
+            raise HTTPException(422, "Claude continuation cannot replace the session's system prompt")
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
+    ) -> NeMoGymResponse:
+        """Run one activation of a continuation session: the first starts the Claude Code session, each later one
+        resumes it with the new input as the next user turn, in the same sandbox and working directory."""
+        assert isinstance(state, ClaudeCodeSandboxSession)
+        prompt, system = self._conversation_input(body)
+        if state.activation_request is None:
+            state.activation_request = body.model_copy(deep=True)
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        await state.prepare_activation(activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds))
+        return await self._sandbox_response(state, body, prompt=prompt, system=system)
+
     async def responses(
         self,
         request: Request,
@@ -905,6 +949,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if session_id is not None:
             state = self._require_agent_session(session_id)
             assert isinstance(state, ClaudeCodeSandboxSession)
+            if state.is_continuation:
+                # Each step of a continued episode is the next indexed activation of the one Claude Code session.
+                return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise AgentSessionConflictError("Claude activation does not match the seeded session and rollout")
             if state.session.closing:

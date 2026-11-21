@@ -35,7 +35,9 @@ def runner_command(tmp_path: Path, code: str) -> list[str]:
     state = adapter.ClaudeCodeSandboxSession(
         request=seed(),
         runtime="/runtime",
-        session=SimpleNamespace(session_dir=str(tmp_path), sandbox=SimpleNamespace(upload=upload)),
+        session=SimpleNamespace(
+            session_dir=str(tmp_path), root_dir=str(tmp_path), sandbox=SimpleNamespace(upload=upload)
+        ),
     )
     payload = {
         "command": [sys.executable, str(child)],
