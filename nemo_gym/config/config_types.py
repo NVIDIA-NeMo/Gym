@@ -711,6 +711,9 @@ class BenchmarkDatasetConfig(BaseModel):
 class BaseServerConfig(BaseModel):
     host: str
     port: int
+    sandbox_url: str | None = Field(
+        default=None, description="HTTP(S) base URL this service advertises to sandboxed clients."
+    )
     num_workers: Optional[int] = None
     # Overrides the top-level `uvicorn_reuse_port` for this server when set.
     uvicorn_reuse_port: Optional[bool] = None

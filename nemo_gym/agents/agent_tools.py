@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from nemo_gym.client.http_client import get_response_json, raise_for_status
+from nemo_gym.client.sandbox_routes import sandbox_service_url
 from nemo_gym.client.server_client import ServerClient, get_server_url
 from nemo_gym.config.config_types import ResourcesServerRef
 from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR
@@ -31,9 +32,11 @@ from nemo_gym.utils.network_policy import reachable_host as _reachable_host
 from nemo_gym.utils.network_policy import restricted_network_policy as restricted_network_policy
 
 
-def sandbox_server_url(name: str, *, require_reachable: bool = False) -> str:
+def sandbox_server_url(
+    name: str, *, require_reachable: bool = False, global_config: Mapping[str, object] | None = None
+) -> str:
     """Preserve inherited networking; reject loopback binds for remote sandboxes."""
-    base = get_server_url(name).rstrip("/")
+    base = sandbox_service_url(name, global_config=global_config) or get_server_url(name).rstrip("/")
     parsed = urlsplit(base)
     if require_reachable:
         _reachable_host(base)
@@ -56,6 +59,9 @@ async def seed_mcp_servers(
 ) -> dict[str, dict[str, object]]:
     """Seed host-side tools; pass only per-session MCP authentication into the sandbox."""
     entries = {}
+    global_config = getattr(client, "global_config_dict", None)
+    if not isinstance(global_config, Mapping):
+        global_config = None
     for server in servers:
         seeded = await client.post(
             server_name=server.name, url_path="/seed_session", json=body.model_dump(), cookies=cookies
@@ -65,7 +71,7 @@ async def seed_mcp_servers(
         if not isinstance(metadata, dict) or not metadata.get("headers"):
             raise ValueError(f"Tool server {server.name} must expose authenticated MCP tools")
         entries[server.name] = {
-            "url": sandbox_server_url(server.name, require_reachable=require_reachable)
+            "url": sandbox_server_url(server.name, require_reachable=require_reachable, global_config=global_config)
             + "/"
             + metadata.get("url_path", "/mcp").lstrip("/"),
             "headers": metadata["headers"],
