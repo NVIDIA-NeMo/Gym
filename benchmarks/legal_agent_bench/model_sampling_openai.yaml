@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Compose with an openai_model policy server; sampling stays out of task rows.
+policy_model:
+  responses_api_models:
+    openai_model:
+      extra_body:
+        temperature: ${lab.policy_temperature}
+        top_p: ${lab.policy_top_p}
