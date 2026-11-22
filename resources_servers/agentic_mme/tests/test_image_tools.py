@@ -12,6 +12,7 @@ from resources_servers.agentic_mme.image_tools import (
     IMAGE_TOOLS,
     MAX_MODEL_IMAGE_PIXELS,
     ImageWorkspace,
+    InputImageError,
     function_schema,
     image_data_url,
     model_image_url,
@@ -128,6 +129,48 @@ def test_load_and_isolation(workspace) -> None:
 def test_input_access_restricted(url) -> None:
     with pytest.raises((ValueError, OSError)):
         ImageWorkspace().load(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["/etc/passwd", "data:image/png;base64,broken", "data:image/png;base64," + base64.b64encode(b"x" * 64).decode()],
+    ids=["not_a_data_url", "bad_base64", "not_an_image"],
+)
+def test_refused_inputs_are_input_image_errors(url) -> None:
+    with pytest.raises(InputImageError):
+        ImageWorkspace().load(url)
+
+
+@pytest.mark.parametrize("max_pixels", [16_000_000, 64_000_000])
+def test_encoded_size_limit_follows_the_pixel_limit(max_pixels) -> None:
+    # Any encoding of an RGB image at the pixel limit fits: a 50 Mpx photo inlined as PNG (over 48 MB of
+    # image data, past the former fixed 64,000,000-character cap) loads when max_pixels allows 50 Mpx.
+    assert ImageWorkspace(max_pixels=max_pixels).max_input_bytes >= 3 * max_pixels
+    workspace = ImageWorkspace(max_pixels=1)
+    encoded = "A" * ((workspace.max_input_bytes + 8) * 4 // 3)
+    with pytest.raises(InputImageError, match="MB encoded"):
+        workspace.load("data:image/png;base64," + encoded)  # refused before decoding
+
+
+def test_oversized_input_is_refused_with_its_size() -> None:
+    with pytest.raises(InputImageError, match="input image 40x10: image dimensions exceed"):
+        ImageWorkspace(max_pixels=100).load(image_data_url(Image.new("RGB", (40, 10), "red")))
+
+
+@pytest.mark.parametrize("encoding", ["PNG", "JPEG"])
+def test_oversized_input_is_downscaled_when_enabled(encoding) -> None:
+    stream = BytesIO()
+    Image.new("RGB", (400, 100), "red").save(stream, format=encoding)
+    mime = encoding.lower()
+    workspace = ImageWorkspace(max_pixels=10_000, downscale_inputs=True)
+    workspace.load(f"data:image/{mime};base64," + base64.b64encode(stream.getvalue()).decode())
+    assert workspace.get(0).size == (200, 50)
+    assert workspace.downscaled_inputs == [((400, 100), (200, 50))]
+    assert workspace.total_pixels == 10_000
+    # Inputs within the limit are kept as they are.
+    workspace.max_total_pixels = 100_000
+    workspace.load(image_data_url(Image.new("RGB", (20, 10), "blue")))
+    assert workspace.get(1).size == (20, 10) and len(workspace.downscaled_inputs) == 1
 
 
 def test_image_limit_refuses_the_next_image(workspace) -> None:
