@@ -70,7 +70,12 @@ class AsyncioWith:
 
 
 def _start(
-    tmp_path: Path, *command: str, timeout: str = "30", options: tuple[str, ...] = (), pause_mode: str = "stop"
+    tmp_path: Path,
+    *command: str,
+    timeout: str = "30",
+    options: tuple[str, ...] = (),
+    pause_mode: str = "stop",
+    env: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     return subprocess.Popen(
         # Cleanup phases end early when the harness does; the limit only matters on a busy node.
@@ -81,6 +86,7 @@ def _start(
         + ["--continue-file", str(tmp_path / CONTINUE_REQUEST_FILE), "--continued", str(tmp_path / CONTINUED_FILE)]
         + ["--pause-mode", pause_mode, *options, "--", *command],
         cwd=tmp_path,
+        env=None if env is None else {**os.environ, **env},
         # Not pipes: a service the harness left running would hold them open.
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -247,6 +253,30 @@ def test_a_continued_pause_written_before_the_launch_is_acknowledged_and_not_ser
             "mode": "stop",
             "identity": None,
         }
+    finally:
+        _finish(process)
+
+
+@linux_only
+def test_an_identity_variable_in_the_sandbox_environment_is_not_taken_for_the_supervisor_s(tmp_path: Path) -> None:
+    _request(tmp_path / PAUSE_REQUEST_FILE, 3)
+    _request(tmp_path / CONTINUE_REQUEST_FILE, 3)
+    # Named like the supervisor's own variable, with characters that would break the acknowledgement's JSON.
+    process = _start(
+        tmp_path, "bash", "-c", "touch ready; until [ -e finish ]; do sleep 0.02; done", env={"identity": 'a"b\nc'}
+    )
+    try:
+        _wait_for(lambda: (tmp_path / "ready").exists())
+        # The acknowledgement written before the supervisor has an identity names none.
+        assert json.loads((tmp_path / CONTINUED_FILE).read_text())["identity"] is None
+        # A later one names the supervisor itself.
+        _request(tmp_path / PAUSE_REQUEST_FILE, 4)
+        paused = _acknowledgement(tmp_path / PAUSED_FILE, 4)
+        assert _is_identity_of_a_live_process(paused["identity"])
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 4)
+        _acknowledgement(tmp_path / CONTINUED_FILE, 4)
+        (tmp_path / "finish").touch()
+        process.wait(timeout=15)
     finally:
         _finish(process)
 
@@ -786,6 +816,59 @@ async def test_a_request_the_supervisor_never_answers_times_out(tmp_path: Path) 
     assert (outcome, acknowledgement) == ("timeout", None)
 
 
+async def test_a_pause_of_a_sent_launch_waits_for_its_claim_and_returns_the_acknowledgement(tmp_path: Path) -> None:
+    acknowledgement = {"seq": 3, "confirmed": True, "pids": [], "error": None, "mode": "hold", "identity": "7.100"}
+
+    async def start_supervisor() -> None:
+        await asyncio.sleep(0.3)
+        (tmp_path / "launch.claim").symlink_to("launch")
+        await asyncio.sleep(0.1)
+        (tmp_path / PAUSED_FILE).write_text(json.dumps(acknowledgement))
+
+    starting = asyncio.create_task(start_supervisor())
+    outcome, answer = await request_pause(
+        LocalSandbox(), session_dir=str(tmp_path), workdir=None, seq=3, timeout=10, launch_sent=True
+    )
+    await starting
+    assert outcome == "acknowledged" and answer == acknowledgement
+
+
+async def test_a_pause_of_a_sent_launch_that_never_claims_is_not_launched_only_after_the_bound(tmp_path: Path) -> None:
+    started = time.monotonic()
+    outcome, answer = await request_pause(
+        LocalSandbox(), session_dir=str(tmp_path), workdir=None, seq=1, timeout=0.5, launch_sent=True
+    )
+    assert (outcome, answer) == ("not_launched", None)
+    assert time.monotonic() - started >= 0.4, "the request waited for the launch instead of answering at once"
+    assert (tmp_path / PAUSE_REQUEST_FILE).read_text() == "1"
+
+
+async def test_a_pause_of_a_sent_launch_that_claims_but_never_answers_times_out(tmp_path: Path) -> None:
+    async def claim() -> None:
+        await asyncio.sleep(0.2)
+        (tmp_path / "launch.claim").symlink_to("launch")
+
+    claiming = asyncio.create_task(claim())
+    outcome, answer = await request_pause(
+        LocalSandbox(), session_dir=str(tmp_path), workdir=None, seq=1, timeout=0.6, launch_sent=True
+    )
+    await claiming
+    assert (outcome, answer) == ("timeout", None)
+
+
+async def test_a_pause_of_a_sent_launch_that_a_stop_fences_meanwhile_is_finished(tmp_path: Path) -> None:
+    async def fence() -> None:
+        await asyncio.sleep(0.2)
+        (tmp_path / "launch.claim").symlink_to("stop")
+
+    fencing = asyncio.create_task(fence())
+    outcome, answer = await request_pause(
+        LocalSandbox(), session_dir=str(tmp_path), workdir=None, seq=1, timeout=10, launch_sent=True
+    )
+    await fencing
+    assert (outcome, answer) == ("finished", None)
+
+
 def _ticking_stage(session_dir: Path):
     async def stage() -> SandboxCommand:
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -905,6 +988,61 @@ async def test_a_hold_session_keeps_its_harness_running_and_records_the_pause_it
         assert session.cleanup is not None
         assert session.cleanup["stopped"] is False and session.cleanup["timed_out"] is False
     finally:
+        await _end_launch(running, launch_dir)
+
+
+class DelayedLaunchSandbox(LocalSandbox):
+    """Holds the launch command back until ``release`` is set, as a provider slow to start a command does."""
+
+    def __init__(self) -> None:
+        self.launch_received = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def exec(self, command, **kwargs):
+        if "--pause-file" in command:
+            self.launch_received.set()
+            await self.release.wait()
+        return await super().exec(command, **kwargs)
+
+
+@linux_only
+async def test_a_hold_pause_of_a_delayed_launch_is_unconfirmed_and_the_stop_fences_the_launch(tmp_path: Path) -> None:
+    sandbox = DelayedLaunchSandbox()
+    launch_dir = tmp_path / "launch-1"
+    session = SandboxSession(
+        sandbox=sandbox,  # type: ignore[arg-type]
+        session_dir=str(launch_dir),
+        workdir=str(tmp_path),
+        harness="test",
+        pausable=True,
+        pause_mode="hold",
+    )
+    running = asyncio.create_task(
+        session.execute(
+            stage_activation=_ticking_stage(launch_dir),
+            collect=AsyncMock(return_value="artifacts"),
+            timeout=30,
+            close_timeout=3,
+        )
+    )
+    try:
+        async with asyncio.timeout(15):
+            await sandbox.launch_received.wait()
+        # The launch command was sent, and nothing has claimed the launch when the pause's bound ends.
+        paused = await session.pause_harness(timeout=0.5)
+        assert paused.status == "unconfirmed" and not paused.acknowledged, paused
+        assert not (launch_dir / "launch.claim").is_symlink()
+        state = session.checkpoint_state()
+        assert state["launch_started"] is True and "pause_seq" not in state and "supervisor_identity" not in state
+        # What a caller does with an unconfirmed pause: the stop wins the claim, so the launch can no longer start.
+        await session.stop_harness(timeout=10)
+        assert os.readlink(launch_dir / "launch.claim") == "stop"
+        sandbox.release.set()
+        await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), 30)
+        assert not (launch_dir / "ready").exists() and not (launch_dir / "ticks").exists()
+        assert not (launch_dir / PAUSED_FILE).exists()
+    finally:
+        sandbox.release.set()
         await _end_launch(running, launch_dir)
 
 
@@ -1799,7 +1937,7 @@ async def test_a_pause_keeps_its_number_until_a_continue_is_confirmed(
     requests: list[tuple[str, int]] = []
 
     def answering(kind: str):
-        async def request(sandbox, *, session_dir, workdir, seq, timeout):
+        async def request(sandbox, *, session_dir, workdir, seq, timeout, launch_sent=False):
             requests.append((kind, seq))
             return answers[kind].pop(0)
 
@@ -1828,7 +1966,7 @@ def _scripted_requests(monkeypatch: pytest.MonkeyPatch, answers: dict[str, list]
     requests: list[tuple[str, int]] = []
 
     def answering(kind: str):
-        async def request(sandbox, *, session_dir, workdir, seq, timeout):
+        async def request(sandbox, *, session_dir, workdir, seq, timeout, launch_sent=False):
             requests.append((kind, seq))
             return answers[kind].pop(0)
 
@@ -1843,31 +1981,68 @@ def _ack(seq: int, confirmed: bool = True, **fields) -> tuple:
     return ("acknowledged", {"seq": seq, "confirmed": confirmed, "pids": [], "error": None, **fields})
 
 
-async def test_a_pause_that_found_no_supervisor_yet_is_asked_again_once_the_launch_command_was_sent(
+async def test_a_pause_after_the_launch_command_was_sent_is_recorded_with_the_supervisor_that_answers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     named = {"mode": "hold", "identity": "7.100"}
-    answers = {
-        "pause": [("not_launched", None), _ack(1, **named), ("not_launched", None), ("not_launched", None)],
-        "continue": [_ack(1, **named)],
-    }
-    requests = _scripted_requests(monkeypatch, answers)
+    requests = _scripted_requests(monkeypatch, {"pause": [_ack(1, **named)], "continue": [_ack(1, **named)]})
     session = _session(tmp_path, pause_mode="hold")
     session.launch_started = True
 
-    # The launch command is on its way: its supervisor reads the request as it starts, and the second answer names it.
+    # The launch command is on its way: the one request waits for its supervisor, whose answer names it.
     paused = await session.pause_harness()
     assert paused.confirmed and paused.identity == "7.100"
     state = session.checkpoint_state()
     assert state["pause_seq"] == 1 and state["supervisor_identity"] == "7.100"
-    assert requests == [("pause", 1), ("pause", 1)]
-
+    assert requests == [("pause", 1)]
     assert (await session.continue_harness()).confirmed
-    # A supervisor that still has not started: confirmed, as before, with nothing to find again after a restore.
-    unnamed = await session.pause_harness()
-    assert unnamed.confirmed and unnamed.identity is None
     assert "pause_seq" not in session.checkpoint_state()
-    assert requests[3:] == [("pause", 2), ("pause", 2)]
+
+
+async def test_a_hold_pause_of_a_sent_launch_whose_supervisor_did_not_start_is_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests = _scripted_requests(monkeypatch, {"pause": [("not_launched", None)], "continue": []})
+    session = _session(tmp_path, pause_mode="hold")
+    session.launch_started = True
+
+    # The supervisor could still start before a snapshot that keeps processes, holding a pause nothing names.
+    paused = await session.pause_harness()
+    assert paused.status == "unconfirmed" and not paused.acknowledged
+    assert paused.error is not None and "supervisor did not start" in paused.error
+    state = session.checkpoint_state()
+    assert "pause_seq" not in state and "supervisor_identity" not in state
+    assert requests == [("pause", 1)]
+
+
+async def test_a_stop_pause_of_a_sent_launch_whose_supervisor_did_not_start_is_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests = _scripted_requests(monkeypatch, {"pause": [("not_launched", None)], "continue": []})
+    session = _session(tmp_path)
+    session.launch_started = True
+
+    # The snapshot keeps no processes: the launch reads the request when it starts, as before any launch.
+    paused = await session.pause_harness()
+    assert paused.confirmed and paused.identity is None
+    assert requests == [("pause", 1)]
+
+
+async def test_the_session_tells_the_request_whether_its_launch_command_was_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[bool] = []
+
+    async def request(sandbox, *, session_dir, workdir, seq, timeout, launch_sent=False):
+        sent.append(launch_sent)
+        return ("not_launched", None)
+
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_pause", request)
+    session = _session(tmp_path)
+    await session.pause_harness()
+    session.launch_started = True
+    await session.pause_harness()
+    assert sent == [False, True]
 
 
 async def test_a_pause_before_the_launch_command_is_not_asked_again(

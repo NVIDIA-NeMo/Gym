@@ -545,17 +545,25 @@ class SandboxSession[Artifacts]:
                 return HarnessPauseResult(status="unconfirmed", error="the launch is still staging its files")
         if self._pause_seq <= self._continued_seq:
             self._pause_seq = self._continued_seq + 1
+        # Once the launch command was sent, its supervisor reads this request as it starts and holds the launch: the
+        # request waits for that supervisor's acknowledgement, which names it, so the pause is recorded with the
+        # supervisor that holds it.
         outcome, acknowledgement = await request_pause(
-            self.sandbox, session_dir=self.session_dir, workdir=self.workdir, seq=self._pause_seq, timeout=timeout
+            self.sandbox,
+            session_dir=self.session_dir,
+            workdir=self.workdir,
+            seq=self._pause_seq,
+            timeout=timeout,
+            launch_sent=self.launch_started,
         )
-        if outcome == "not_launched" and self.launch_started:
-            # The launch command was already sent: its supervisor reads this request as it starts and holds the
-            # launch. Ask once more for its acknowledgement, which names it, so the pause is recorded with the
-            # supervisor that holds it. The request is the same one, so repeating it changes nothing.
-            outcome, acknowledgement = await request_pause(
-                self.sandbox, session_dir=self.session_dir, workdir=self.workdir, seq=self._pause_seq, timeout=timeout
+        if outcome == "not_launched" and self.launch_started and self.pause_mode == "hold":
+            # The supervisor can still start before the snapshot, which keeps processes: it would then hold a pause
+            # that no checkpoint state names. Unconfirmed, so the caller stops this launch, which fences it.
+            result = HarnessPauseResult(
+                status="unconfirmed", error="the launch command was sent, but its supervisor did not start in time"
             )
-        result = _pause_result(outcome, acknowledgement)
+        else:
+            result = _pause_result(outcome, acknowledgement)
         if result.confirmed and result.identity is not None:
             self._held_seq, self._held_identity = self._pause_seq, result.identity
         if result.confirmed and self.launch_started and self._parked_polls is None:

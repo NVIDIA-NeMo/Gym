@@ -60,7 +60,9 @@ On a provider whose snapshot keeps the sandbox's processes (`capabilities.snapsh
 acknowledges a pause without signalling anything: the harness keeps running, its next model call waits at the
 checkpoint (the model server holds calls while a checkpoint is open), and the time the pause is held does not count
 against the harness timeout. Each acknowledgement names the supervisor (`identity`, `PID.START`), and
-`SandboxSession.checkpoint_state()` records it with the pause it holds.
+`SandboxSession.checkpoint_state()` records it with the pause it holds. A pause requested after the launch command
+was sent waits for that launch's supervisor to answer; if none has started when the pause's timeout ends, the pause
+is unconfirmed in hold mode, so the launch is stopped instead of being snapshotted with a pause nothing names.
 
 ## Resume after a crash
 

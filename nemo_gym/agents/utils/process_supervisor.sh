@@ -236,6 +236,9 @@ stop_signal() {
 
 # How a pause treats the processes it reaches: stop sends STOP and CONT, hold sends nothing (see the header).
 pause_mode=stop
+# Named in every acknowledgement once the supervisor has claimed the launch; empty until then, whatever the
+# environment holds under this name.
+identity=
 
 write_receipt() {
     local foreign=
