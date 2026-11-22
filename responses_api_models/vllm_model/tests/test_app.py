@@ -9387,6 +9387,27 @@ class TestCodexRequests:
             ],
         }
 
+    @mark.parametrize("drop_hosted_tools", [False, True])
+    def test_codex_web_search_is_refused_unless_hosted_tools_are_dropped(self, drop_hosted_tools: bool) -> None:
+        # Codex with web_search = "live" offers the hosted search tool, which no chat backend can run.
+        server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True, drop_hosted_tools=drop_hosted_tools)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "Done.", "reasoning": "Thought."})
+        )
+        body = self._codex_body([self.USER])
+        body["tools"] = [*body["tools"], {"type": "web_search", "external_web_access": True}]
+
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json=body)
+
+        if drop_hosted_tools:
+            assert response.status_code == 200
+            sent_tools = client.create_chat_completion.await_args.kwargs["tools"]
+            assert [tool["function"]["name"] for tool in sent_tools] == ["shell_command"]
+        else:
+            assert response.status_code == 422
+            assert "'web_search' has no Chat Completions conversion" in response.json()["detail"]
+            client.create_chat_completion.assert_not_awaited()
+
     def test_slow_codex_turn_streams_keepalives_until_the_completion_returns(self) -> None:
         server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True, stream_keepalive_s=0.02)
 

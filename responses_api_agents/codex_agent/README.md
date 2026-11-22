@@ -412,7 +412,7 @@ The agent runs `codex exec --json` as an async subprocess for each request. Code
 
 Codex talks to the model via the OpenAI Responses API over SSE (`wire_api = "chat"` was removed from Codex). This means it can connect to OpenAI directly, to any endpoint implementing the streaming Responses API, or — via the agent's `model_server` ref — to any NeMo Gym model server, since every Gym model server serves the streaming Responses dialect by sanitizing the request (extra bookkeeping fields, `namespace` tool specs are flattened to plain functions) and re-emitting its complete response as a synthesized SSE stream (see `nemo_gym/models/responses_streaming.py`).
 
-Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search, and the multi-agent tool (`features`). Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
+Each request gets a fresh `CODEX_HOME` with a generated `config.toml` that pins a Gym-owned model provider (no `codex login` needed — the `openai_api_key` config value is handed to the subprocess as `OPENAI_API_KEY`, the provider's `env_key`), sets `approval_policy = "never"`, and disables everything that would make a rollout depend on ambient host state or phone home: analytics, update checks, on-disk history, server-side web search (unless `web_search` turns it on), and the multi-agent tool (`features`). Session persistence is disabled via `--ephemeral`. The `CODEX_HOME` and scratch working directory are removed after the run, so rollouts cannot contaminate one another.
 
 For legacy callers, Codex is auto-installed lazily on the first local invocation via npm or a local Node.js binary if not already on PATH.
 
@@ -443,6 +443,7 @@ codex_agent:
       features:
         multi_agent: false
         code_mode: false
+      web_search: disabled
 ```
 
 - `concurrency`: max simultaneous `run()` calls
@@ -461,12 +462,31 @@ codex_agent:
 - `request_max_retries`, `stream_max_retries`: the provider's resends of a request that fails before its stream starts, and reconnects after a stream drops. `null` (the default) leaves Codex's own defaults. Unlike `extra_config`, they also apply to sandbox sessions
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
 - `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tool shapes Gym's typed Responses path cannot express. A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only when the model server relays Codex's requests unchanged. Unlike `extra_config`, it also applies to sandbox sessions
+- `web_search`: Codex's `web_search` setting: `disabled` (the default), `cached`, `indexed` or `live`; Harbor's Codex agent exposes the same setting as `web_search` (`disabled`, `cached` or `live`). Any mode but `disabled` needs a model server that relays to a provider that runs web search; see [Web search](#web-search). Unlike `extra_config`, it also applies to sandbox sessions
 - `sandbox_logs_dir`: sandbox sessions only. After Codex stops, copy its session rollouts (`CODEX_HOME/sessions/**/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions` before the session directory is removed, as Harbor does with `/logs/agent`. Default `null` (not copied)
 - `tool_pid_namespace`, `tool_pid_namespace_bwrap_path`: task-sandbox sessions only (ignored on the local `/run` path). Run Codex's tool commands in a nested bwrap pid namespace; see [Tool commands versus the harness](#tool-commands-versus-the-harness). The bwrap path defaults to the bwrap sandbox provider's `bwrap_path` and must be an executable on the agent host
 - `failure_artifacts_dir`: task-sandbox sessions only. An agent-host directory where a failed activation (or one whose supervisor left no receipt) keeps the session's supervisor and Codex logs and a `failure.json` before the sandbox is released. Default `null` (off)
 - `mcp_tool_timeout_seconds`: per-call timeout for Gym MCP tools, written as `tool_timeout_sec`; a call that runs longer returns an error to the model. At most `timeout`. `null` leaves the pinned CLI's default of 300 seconds
 
 For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
+
+### Web search
+
+With `web_search` set to `cached`, `indexed` or `live`, Codex offers the model its hosted `web_search` tool. The model
+provider runs the search, not Codex, so live search needs a model server that relays Codex's requests to a Responses
+API that executes the tool, such as `openai_model` pointed at OpenAI. Such a server forwards the tool's options
+(`external_web_access`, `indexed_web_access`, `search_content_types` and the rest) and returns the provider's
+`web_search_call` items unchanged. A model server that converts requests to Chat Completions, such as `vllm_model`,
+cannot run the tool and refuses the request with a 422 that names it; set `drop_hosted_tools: true` on that server to
+drop the tool instead, which leaves the model without search.
+
+- Codex 0.144.4 to 0.155.1 serve `cached` as `live` under `danger-full-access`, which sandbox sessions require. `indexed`
+  limits live fetches to indexed pages.
+- The search runs at the provider, so `network_access` and the sandbox's network policy do not limit it.
+- The response records each search as a `web_search` function call whose argument is the query (the URL when the model
+  opens a page), followed by an empty output. Session observations record a `web_search` tool call, and the Harbor
+  Environment Server's `trajectory.json` has a `web_search` tool call step. Harbor's own Codex transcript names that
+  step `web_search_call`.
 
 ## Gym MCP tools
 

@@ -59,8 +59,10 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        # Convert before waiting for a slot, so a request the conversion refuses fails at once (HTTP 422)
+        # instead of after a queue wait that has already opened a keepalive stream.
+        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
         async with self._semaphore:
-            chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
             chat_completion_params_dict = chat_completion_create_params.model_dump(exclude_unset=True)
             chat_completion_params_dict["model"] = self.config.openai_model
             chat_completion_response = await self._client.chat.completions.create(**chat_completion_params_dict)

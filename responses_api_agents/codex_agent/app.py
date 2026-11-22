@@ -684,6 +684,12 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # applies its own default; that is how a launch with no Gym config (such as Harbor's) runs. Unlike
     # extra_config, this also applies to sandbox sessions.
     features: dict[str, Optional[bool]] = Field(default_factory=lambda: {"multi_agent": False, "code_mode": False})
+    # Codex's `web_search` setting. "disabled" offers the model no search tool. The other modes offer Codex's
+    # hosted web_search tool, which the model provider runs, so the model server must relay requests to a
+    # Responses API that executes it; a server that converts to Chat Completions refuses them with 422. Under
+    # danger-full-access the pinned CLIs serve "cached" as "live". Unlike extra_config, this also applies to
+    # sandbox sessions.
+    web_search: Literal["disabled", "cached", "indexed", "live"] = "disabled"
     # Sandbox sessions, which run without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with
     # per-call token counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session
     # directory is removed. Point it at a directory the resources server collects, such as /logs/agent for
@@ -1708,8 +1714,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         The base config pins a Gym-owned model provider (bypassing Codex's login flow), disables
         everything that would make a rollout depend on ambient host state or phone home (analytics,
-        update checks, on-disk history), and turns off the tools a Gym-served model cannot execute
-        (server-side web search, multi-agent). ``extra_config`` is deep-merged on top; the
+        update checks, on-disk history), and by default turns off the tools a Gym-served model cannot
+        execute (server-side web search, multi-agent). ``extra_config`` is deep-merged on top; the
         per-rollout Gym MCP entries are applied last so they win name collisions.
         """
         # By default multi_agent and code_mode are off: they add tool shapes (namespace fan-out,
@@ -1720,7 +1726,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "model_provider": "gym",
             "approval_policy": "never",
             "sandbox_mode": self.config.sandbox_mode,
-            "web_search": "disabled",
+            "web_search": self.config.web_search,
             "check_for_update_on_startup": False,
             "analytics": {"enabled": False},
             "history": {"persistence": "none"},

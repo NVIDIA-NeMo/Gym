@@ -610,6 +610,37 @@ class TestApp:
         assert res.status_code == 200
         assert called_args["input"][1] == reasoning
 
+    async def test_codex_web_search_tool_and_calls_relay_unchanged(self) -> None:
+        # The Codex CLI with web_search = "live": OpenAI runs the search and returns a web_search_call item,
+        # which Codex replays in its next request.
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        tool = {"type": "web_search", "external_web_access": True, "search_content_types": ["text", "image"]}
+        search_call = {
+            "id": "ws_1",
+            "type": "web_search_call",
+            "status": "completed",
+            "action": {"type": "search", "query": "nemo gym install", "queries": ["nemo gym install"]},
+        }
+        sent = []
+
+        async def mock_create_response(**kwargs):
+            sent.append(kwargs)
+            return {**_response_data(), "output": [search_call, *_response_data()["output"]], "tools": [tool]}
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=mock_create_response)
+        user = {"role": "user", "content": "How do I install NeMo Gym?", "type": "message"}
+
+        first = client.post("/v1/responses", json={"input": [user], "tools": [tool], "stream": True})
+        events = [json.loads(line[len("data: ") :]) for line in first.text.splitlines() if line.startswith("data: ")]
+        second = client.post("/v1/responses", json={"input": [user, search_call], "tools": [tool], "stream": True})
+
+        assert first.status_code == second.status_code == 200
+        assert [call["tools"] for call in sent] == [[tool], [tool]]
+        assert events[1] == {"type": "response.output_item.done", "output_index": 0, "item": search_call}
+        assert sent[1]["input"][1] == search_call
+
     @pytest.mark.parametrize("replacement, expected_effort", [("minimal", "minimal"), ("low", "low"), (None, "none")])
     async def test_responses_reasoning_effort_none_replacement_is_configurable(
         self, replacement, expected_effort
