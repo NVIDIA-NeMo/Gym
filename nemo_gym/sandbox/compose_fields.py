@@ -5,7 +5,7 @@
 
 The field allow-list of the sandbox Compose adapter and its message per offending key, the
 normalisation of deploy resources, devices and gpus, restart, pull_policy, platform, extra_hosts,
-hooks, networks and the provider service options, and check_compose_fields, which runs them all
+hooks, networks, privileged and the provider service options, and check_compose_fields, which runs them all
 over a document and is a fixed point of its own output. The two Compose scalar and environment
 shape helpers, the memory size parser and the interpolation error class live here because the
 field checks, the resolver and the interpolation code in nemo_gym.data.tasks.harbor.compose_variables
@@ -101,6 +101,10 @@ SUPPORTED_SERVICE_FIELDS = frozenset(
         "ulimits",
         "sysctls",
         "security_opt",
+        # Started only on a provider that implements providers.base.SupportsSandboxPrivileged and whose config sets
+        # allow_privileged: true; prepare checks the deployment (data.tasks.harbor.image_configs), the adapter the
+        # live provider.
+        "privileged",
     }
 )
 
@@ -515,6 +519,16 @@ def normalize_ports(service_name: str, value: Any) -> list[dict[str, Any]]:
     return out
 
 
+def normalize_privileged(service_name: str, value: Any) -> bool:
+    """``privileged`` as a boolean: YAML's ``true`` or ``false``, or the string interpolation leaves of one
+    (``${PRIVILEGED:-true}`` resolves to ``"true"``)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+        return value.strip().lower() == "true"
+    raise ComposeFieldError("privileged", f"service {service_name!r} privileged must be true or false, got {value!r}")
+
+
 def normalize_service_options(service_name: str, service: dict) -> dict[str, Any]:
     """``tmpfs``, ``ulimits``, ``sysctls`` and ``security_opt`` in one shape each: a list of mounts, a mapping of
     name to an integer or ``{soft, hard}``, a mapping of key to string, and a list of options."""
@@ -635,17 +649,19 @@ def check_compose_fields(
 
     The one field check: prepare runs it per task (``nemo_gym.data.tasks.harbor.image_configs.check_task_compose_fields``)
     and the adapter again at start. A key outside the allow-list (:func:`unsupported_compose_fields`: a sidecar
-    ``build:``, ``privileged``, ``logging``, ...) is an :class:`UnsupportedComposeFieldError` before any value is
+    ``build:``, ``devices``, ``logging``, ...) is an :class:`UnsupportedComposeFieldError` before any value is
     read. Mutates and returns ``document``, and applied to its own output returns it unchanged: the server normalizes
     once and the adapter again, from the written file. ``deploy`` is normalized (see :func:`normalize_deploy`);
     ``restart`` is validated and kept (recorded by the adapter, the group restarts nothing); ``pull_policy``
     becomes ``always``, ``missing`` or ``never``; ``platform`` must match ``platform``, the one the deployment
     runs (see :func:`deployment_platform`); ``networks`` (top level and per service) and ``extra_hosts`` take
     their mapping forms; ``post_start`` hooks are checked; ``ports`` take their long syntax, with the group's
-    endpoint rules applied (see :func:`normalize_ports`); ``tmpfs``, ``ulimits``, ``sysctls`` and
-    ``security_opt`` are normalized and, when ``provider`` is given, each must be in ``service_option_fields``
-    (the provider's ``SERVICE_OPTION_FIELDS``) or the error names the field and the provider. A sidecar that
-    reserves GPUs through ``deploy.resources`` is checked against ``gpu_provider`` and
+    endpoint rules applied (see :func:`normalize_ports`); ``privileged: true`` stays and ``privileged: false``,
+    Compose's default spelled out, is dropped (whether the deployment may start a privileged service is the
+    operator's ``allow_privileged``, which the caller and the adapter check, not this function); ``tmpfs``,
+    ``ulimits``, ``sysctls`` and ``security_opt`` are normalized and, when ``provider`` is given, each must be in
+    ``service_option_fields`` (the provider's ``SERVICE_OPTION_FIELDS``) or the error names the field and the
+    provider. A sidecar that reserves GPUs through ``deploy.resources`` is checked against ``gpu_provider`` and
     ``gpu_service_option_fields`` instead when ``gpu_provider`` is given, since that is the provider it runs on
     (``main`` follows the task, not its ``deploy`` block). Without a provider name the capability check is left
     to the adapter, which runs it against the live provider of each service before any sandbox.
@@ -693,6 +709,11 @@ def check_compose_fields(
             service["post_start"] = normalize_hooks(name, service["post_start"])
         if "ports" in service:
             service["ports"] = normalize_ports(name, service["ports"])
+        if "privileged" in service:
+            if normalize_privileged(name, service["privileged"]):
+                service["privileged"] = True
+            else:
+                del service["privileged"]
         options = normalize_service_options(name, service)
         checked_against, supported = provider, service_option_fields
         if gpu_provider is not None and name != "main" and service_gpus(service):

@@ -142,7 +142,11 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.config import SandboxConfig
     from nemo_gym.sandbox.failures import sandbox_failure
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
-    from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
+    from nemo_gym.sandbox.providers.base import (
+        ORPHAN_REAP_TIMEOUT_S,
+        PRIVILEGED_SETTING,
+        sandbox_credentials_rejected,
+    )
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
     from nemo_gym.sandbox.providers.e2b.provider import E2BProvider
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
@@ -187,6 +191,7 @@ _PUBLIC_API = {
     "MEDIA_DIRECTORY": "utils",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
+    "PRIVILEGED_SETTING": "providers.base",
     "SandboxAccess": "access",
     "SandboxConfig": "config",
     "SandboxProbeError": "transfer",

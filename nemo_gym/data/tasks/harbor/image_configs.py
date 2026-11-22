@@ -88,7 +88,11 @@ from nemo_gym.sandbox.compose_fields import (
     service_gpus,
 )
 from nemo_gym.sandbox.compose_volumes import ComposeVolumeError
-from nemo_gym.sandbox.providers.registry import provider_execs_as_any_user, provider_service_option_fields
+from nemo_gym.sandbox.providers.registry import (
+    provider_execs_as_any_user,
+    provider_service_option_fields,
+    provider_supports_privileged,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -658,6 +662,8 @@ def check_task_compose_fields(
     gpu_provider: str | None = None,
     platform: str = DEFAULT_PLATFORM,
     overlay: HarborComposeOverlay | None = None,
+    allow_privileged: bool | None = None,
+    gpu_allow_privileged: bool | None = None,
 ) -> dict[str, Any]:
     """Give the service fields of a task's Compose document their meaning for a sandbox group; mutates ``document``.
 
@@ -670,7 +676,10 @@ def check_task_compose_fields(
     ``gpu_provider`` are sandbox provider names (such as ``opensandbox``) of the task's block and of the
     ``gpu_sandbox_provider`` block; each service is checked against the one it runs on, as the server routes
     it: the task's services run on ``gpu_provider`` when ``task.toml`` declares GPUs, and a sidecar that
-    reserves GPUs through ``deploy.resources`` runs there as well. Anything else raises
+    reserves GPUs through ``deploy.resources`` runs there as well. A service that declares ``privileged: true``
+    needs a provider that can start privileged sandboxes and whose config sets ``allow_privileged: true``:
+    ``allow_privileged`` and ``gpu_allow_privileged`` are that setting of each block (``None``: not known here, the
+    adapter checks the live provider). Anything else raises
     :class:`ImageConfigError` naming the task, the file and the field, so prepare leaves the task out before a
     sandbox starts; with the job-level ``overlay`` the document came from, the file named is the task's merged with
     the overlay files (:func:`compose_source`), since the service or the field may be theirs. Without a provider
@@ -691,11 +700,11 @@ def check_task_compose_fields(
         if reason is not None:
             raise _compose_field_error(task, ComposeFieldError("build", reason), overlay)
     if gpu_provider is not None and task_declares_gpus(task):
-        provider = gpu_provider
+        provider, allow_privileged = gpu_provider, gpu_allow_privileged
     fields = provider_service_option_fields(provider) if provider is not None else None
     gpu_fields = provider_service_option_fields(gpu_provider) if gpu_provider is not None else None
     try:
-        return check_compose_fields(
+        check_compose_fields(
             document,
             platform=platform,
             provider=provider,
@@ -703,8 +712,52 @@ def check_task_compose_fields(
             gpu_provider=gpu_provider,
             gpu_service_option_fields=gpu_fields,
         )
+        _check_privileged_services(
+            document,
+            provider=provider,
+            allow_privileged=allow_privileged,
+            gpu_provider=gpu_provider,
+            gpu_allow_privileged=gpu_allow_privileged,
+        )
     except ComposeFieldError as exc:
         raise _compose_field_error(task, exc, overlay) from exc
+    return document
+
+
+def _check_privileged_services(
+    document: dict[str, Any],
+    *,
+    provider: str | None,
+    allow_privileged: bool | None,
+    gpu_provider: str | None,
+    gpu_allow_privileged: bool | None,
+) -> None:
+    """Every service of a checked ``document`` that declares ``privileged: true`` must run on a provider that can
+    start privileged sandboxes (:func:`provider_supports_privileged`) and whose config allows them, routed as
+    :func:`check_compose_fields` routes the service options: a sidecar that reserves GPUs to ``gpu_provider``. A
+    provider of ``None`` leaves the check to the adapter, an ``allow_privileged`` of ``None`` the opt-in. Raises
+    :class:`ComposeFieldError` naming the service, the provider and the setting."""
+    services = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return
+    for name, service in services.items():
+        if not isinstance(service, dict) or not service.get("privileged"):
+            continue
+        checked, allowed = provider, allow_privileged
+        if gpu_provider is not None and name != MAIN_SERVICE and service_gpus(service):
+            checked, allowed = gpu_provider, gpu_allow_privileged
+        if checked is None:
+            continue
+        if not provider_supports_privileged(checked):
+            raise ComposeFieldError(
+                "privileged", f"service {name!r} privileged is not supported by the {checked} sandbox provider"
+            )
+        if allowed is False:
+            raise ComposeFieldError(
+                "privileged",
+                f"service {name!r} privileged: true needs `allow_privileged: true` in the {checked} sandbox provider "
+                "config, which the operator sets to accept that a privileged container's root is root on the host",
+            )
 
 
 def dockerfile_base_images(folder: Path, *, select: Callable[[str], bool] | None = None) -> dict[str, list[str]]:
@@ -839,6 +892,8 @@ def record_compose_images(
     shared_storage: bool | None = None,
     gpu_shared_storage: bool | None = None,
     overlay: HarborComposeOverlay | None = None,
+    allow_privileged: bool | None = None,
+    gpu_allow_privileged: bool | None = None,
 ) -> Path | None:
     """Write ``compose-images.json`` in ``folder`` for the Compose tasks among ``tasks``.
 
@@ -847,7 +902,8 @@ def record_compose_images(
     tasks', and a plain image task's own image too, since the group starts it as ``main``. Each Compose document's service fields are
     checked on the way (see :func:`check_task_compose_fields`), with ``sandbox_provider`` and
     ``gpu_sandbox_provider`` naming the providers of the ``sandbox:`` and ``gpu_sandbox_provider`` blocks for the
-    capability check and ``compose_platform`` the deployment's, which a service's ``platform`` must match;
+    capability check, ``allow_privileged`` and ``gpu_allow_privileged`` their ``allow_privileged`` setting for a
+    ``privileged: true`` service, and ``compose_platform`` the deployment's, which a service's ``platform`` must match;
     ``platform`` is the one the images are recorded for, as :func:`record_image_configs` takes it (the built images'
     ``builds.platform``). Each document's ``volumes`` are planned next (see :func:`plan_task_compose_volumes`), with
     ``volume_sources`` standing for the deployment's external volumes; a task that declares GPUs, and a GPU-reserving
@@ -886,6 +942,8 @@ def record_compose_images(
                 gpu_provider=gpu_sandbox_provider,
                 platform=compose_platform,
                 overlay=overlay,
+                allow_privileged=allow_privileged,
+                gpu_allow_privileged=gpu_allow_privileged,
             )
             plan_task_compose_volumes(
                 task,

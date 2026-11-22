@@ -35,7 +35,7 @@ from collections.abc import Callable, Mapping
 from importlib.metadata import EntryPoint, entry_points
 from typing import Any, TypeAlias
 
-from nemo_gym.sandbox.providers.base import SandboxProvider
+from nemo_gym.sandbox.providers.base import SandboxProvider, SupportsSandboxPrivileged
 
 
 LOGGER = logging.getLogger(__name__)
@@ -142,6 +142,15 @@ def provider_execs_as_any_user(name: str) -> bool:
     decide it by provider name without instantiating the provider. A provider without the attribute does not.
     """
     return getattr(get_provider_class(name), "EXEC_AS_ANY_USER", False) is True
+
+
+def provider_supports_privileged(name: str) -> bool:
+    """Whether provider ``name`` can start privileged sandboxes (``SupportsSandboxPrivileged``).
+
+    Read from the provider class, so prepare can check a task against the deployment's provider without
+    instantiating it. Whether a deployment allows them is its config's ``allow_privileged``.
+    """
+    return issubclass(get_provider_class(name), SupportsSandboxPrivileged)
 
 
 def list_providers() -> list[str]:

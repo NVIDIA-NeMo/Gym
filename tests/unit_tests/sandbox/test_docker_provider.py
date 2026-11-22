@@ -1158,3 +1158,28 @@ def test_service_options_and_pull_policy_become_run_flags(fake_binary: str) -> N
     assert provider.pull_policy_options("always") == {"run_args": ["--pull", "always"]}
     with pytest.raises(ValueError, match="always, missing or never"):
         provider.pull_policy_options("Always")
+
+
+async def test_privileged_sandboxes_need_the_operators_allow_privileged(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off by default; ``allow_privileged: true`` lets a sandbox that asks for it run with ``--privileged`` and
+    makes no other sandbox privileged (the ``run_args: [--privileged]`` workaround made every one so)."""
+    from nemo_gym.sandbox.providers.registry import provider_supports_privileged
+
+    assert provider_supports_privileged("docker") and not provider_supports_privileged("opensandbox")
+    with pytest.raises(ValueError, match=r"needs `allow_privileged: true` in the docker sandbox provider config"):
+        docker_provider.DockerProvider(exec={"exec_shell": "sh"}).privileged_options()
+    with pytest.raises(TypeError, match="allow_privileged must be true or false"):
+        docker_provider.DockerProvider(allow_privileged="true")
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        return (0, docker_provider.READY_PROBE_EXPECTED, "") if "exec" in argv else (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder, allow_privileged=True)
+    options = provider.privileged_options()
+    assert options == {"run_args": ["--privileged"]}
+    await provider.create(SandboxSpec(image="ubuntu:22.04"))
+    await provider.create(SandboxSpec(image="ubuntu:22.04", provider_options=options))
+    plain, privileged = [call["argv"] for call in rec.calls if call["argv"][1] == "run"]
+    assert "--privileged" not in plain and privileged.count("--privileged") == 1

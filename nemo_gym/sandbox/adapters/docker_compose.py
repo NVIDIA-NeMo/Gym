@@ -9,9 +9,11 @@ before provisioning services. Service fields get their meaning from
 sizes each service's sandbox, ``restart`` and ``pull_policy`` are recorded (and
 the pull policy applied where the provider can), ``networks`` scope which
 services see each other by name, ``extra_hosts`` add hostnames, ``post_start``
-hooks run once the service is up, and ``tmpfs``, ``ulimits``, ``sysctls`` and
+hooks run once the service is up, ``tmpfs``, ``ulimits``, ``sysctls`` and
 ``security_opt`` need a provider that implements
-``SupportsSandboxServiceOptions``. A service may run on its own provider
+``SupportsSandboxServiceOptions``, and ``privileged: true`` one that implements
+``SupportsSandboxPrivileged`` with ``allow_privileged: true`` in its config,
+applied to that service's sandbox alone. A service may run on its own provider
 (``service_providers``), the way a GPU sidecar lands on a GPU deployment, and
 then resolves its external volumes through that provider's own mapping
 (``service_volume_sources``).
@@ -50,6 +52,7 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxEndpoint,
     SupportsSandboxNetwork,
     SupportsSandboxPortForwarding,
+    SupportsSandboxPrivileged,
     SupportsSandboxPullPolicy,
     SupportsSandboxRuntimeRequirements,
     SupportsSandboxServiceOptions,
@@ -161,6 +164,9 @@ class AsyncSandboxCompose:
         self.restart_policies: dict[str, str] = {}
         self.pull_policies: dict[str, str] = {}
         self._service_options: dict[str, dict[str, Any]] = {}
+        # Kept apart from ``_service_options``, which the copy-up seed inherits: only the service's own sandbox is
+        # created privileged.
+        self._privileged_options: dict[str, dict[str, Any]] = {}
         self.compose_file = Path(compose_file).resolve() if compose_file is not None else None
         self.document: dict[str, Any] = {}
         self.service_specs = dict(service_specs or {})
@@ -278,6 +284,16 @@ class AsyncSandboxCompose:
                     sysctls=declared_options.get("sysctls"),
                     security_opt=tuple(declared_options.get("security_opt", ())),
                 )
+            if service.get("privileged"):
+                if not isinstance(provider, SupportsSandboxPrivileged):
+                    raise NotImplementedError(
+                        f"Service {name!r}: privileged is not supported by the {_provider_name(provider)} sandbox "
+                        "provider"
+                    )
+                try:
+                    self._privileged_options[name] = provider.privileged_options()
+                except ValueError as error:
+                    raise ValueError(f"Service {name!r}: {error}") from error
             if "pull_policy" in service:
                 policy = service["pull_policy"]
                 self.pull_policies[name] = policy
@@ -985,6 +1001,13 @@ class AsyncSandboxCompose:
                     # Image setup owns directory creation, including its permissions. Do not let the provider
                     # or our bootstrap create the final WORKDIR as root before a Dockerfile's RUN lines.
                     creation_spec = replace(spec, workdir=None) if name in self.service_setup else spec
+                    if name in self._privileged_options:
+                        creation_spec = replace(
+                            creation_spec,
+                            provider_options=_merge_provider_options(
+                                creation_spec.provider_options, self._privileged_options[name]
+                            ),
+                        )
                     self.services[name] = AsyncSandbox(provider, creation_spec, owns_provider=False)
                     await self.services[name].start(span_attributes=resource_requests.get(name))
                     if name not in self.service_setup:

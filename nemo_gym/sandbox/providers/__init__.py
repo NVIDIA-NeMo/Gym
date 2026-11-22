@@ -15,6 +15,7 @@
 """Sandbox provider registry."""
 
 from nemo_gym.sandbox.providers.base import (
+    PRIVILEGED_SETTING,
     ConnectableProvider,
     ExecResult,
     SandboxCapabilities,
@@ -48,6 +49,7 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
     SupportsSandboxPortForwarding,
+    SupportsSandboxPrivileged,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     SupportsSandboxPullPolicy,
@@ -65,11 +67,13 @@ from nemo_gym.sandbox.providers.registry import (
     list_providers,
     provider_execs_as_any_user,
     provider_service_option_fields,
+    provider_supports_privileged,
     register_provider,
 )
 
 
 __all__ = [
+    "PRIVILEGED_SETTING",
     "ConnectableProvider",
     "ExecResult",
     "SandboxCreateError",
@@ -104,6 +108,7 @@ __all__ = [
     "SupportsSandboxParkedPolling",
     "SupportsSandboxPauseResume",
     "SupportsSandboxPortForwarding",
+    "SupportsSandboxPrivileged",
     "SupportsSandboxPullPolicy",
     "SupportsSandboxRuntimeRequirements",
     "SupportsSandboxServiceOptions",
@@ -117,6 +122,7 @@ __all__ = [
     "list_providers",
     "provider_execs_as_any_user",
     "provider_service_option_fields",
+    "provider_supports_privileged",
     "register_provider",
     "clamp_resource_requests",
 ]
