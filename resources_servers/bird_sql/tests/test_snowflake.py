@@ -10,6 +10,8 @@ tests need only ``sqlglot``. The ``snowflake`` engine (a real account) is tested
 import asyncio
 import importlib.util
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -197,6 +199,55 @@ def test_errors_are_split_into_query_faults_and_engine_failures(make_error, outc
     else:
         with pytest.raises(TimeoutError if outcome == "timeout" else type(engine.error)):
             execute_snowflake(engine, DB_ID, 'SELECT "x" FROM "t"', [])
+
+
+class _SlowConnectEngine:
+    """A Snowflake engine whose ``connect`` takes ``connect_s``; counts executed queries and overlapping workers."""
+
+    tables = {DB_ID: {"t": frozenset({"x"})}}
+
+    def __init__(self, connect_s):
+        self.connect_s, self.executed, self.active, self.most_active = connect_s, 0, 0, 0
+        self.lock = threading.Lock()
+
+    def connect(self, db_id):
+        with self.lock:
+            self.active += 1
+            self.most_active = max(self.most_active, self.active)
+        time.sleep(self.connect_s)
+        return self
+
+    def cursor(self):
+        return self
+
+    def execute(self, sql):
+        self.executed += 1
+
+    def close(self):
+        with self.lock:
+            self.active -= 1
+
+    def fetch_all(self, cur):
+        return [(1,)]
+
+    def interrupt(self, conn):
+        pass
+
+
+@requires_fakesnow
+@pytest.mark.asyncio
+async def test_a_timeout_while_connecting_holds_the_slot_and_runs_nothing():
+    # The timeout can fire while connect() is still running. The worker must not run the query once connected, and
+    # the semaphore slot stays held until the worker stops, so no more queries run at once than the semaphore allows.
+    from resources_servers.bird_sql.eval_utils import execute_snowflake_async
+
+    engine, sem = _SlowConnectEngine(connect_s=0.5), asyncio.Semaphore(1)
+    sql = 'SELECT "x" FROM "t"'
+    results = await asyncio.gather(
+        *(execute_snowflake_async(engine, DB_ID, sql, sem, timeout_s=0.1) for _ in range(3))
+    )
+    assert results == [None, None, None]
+    assert (engine.executed, engine.most_active, engine.active) == (0, 1, 0)
 
 
 @requires_fakesnow
