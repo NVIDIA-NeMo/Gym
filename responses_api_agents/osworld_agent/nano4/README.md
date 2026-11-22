@@ -2,7 +2,7 @@
 
 This optional adapter consumes a separately supplied prompt-format producer and runs Nano4 through Gym's existing OSWorld task loop. It keeps the producer's system prompt, tool schema, observation feedback and action-block image history together, while selecting the coordinate consumer independently. It does not change the v3 or Super 3.5 adapters or their defaults.
 
-The direct-library entrypoint requires the shared `model_protocol_agent` runner and Python-suite execution support in [PR #5101](https://github.com/NVIDIA-NeMo/Gym/pull/5101). This package does not duplicate that PR's implementation. Until the dependency lands, registration reports an actionable error.
+The direct-library entrypoint requires the shared `model_protocol_agent` runner and Python-suite execution support merged in [PR #5101](https://github.com/NVIDIA-NeMo/Gym/pull/5101). This package does not duplicate that implementation. Registration checks for those interfaces and reports an actionable error when used with an older runtime.
 
 ## Configuration
 
@@ -42,10 +42,12 @@ Grid and pixel coordinates overlap. The unlabelled fallback is a configured prio
 
 Projection occurs immediately before PyAutoGUI calls in the guest, so ordinary variables, arithmetic, functions, loops, aliases, explicit from-imports and screenshot assignments work. Relative movement and cursor-only operations retain their PyAutoGUI behavior. The adapter records each source value, chosen space, ambiguity, screenshot size and projected value in `nemotron_v4_coordinate_projection`; raw controller output is retained. This audit describes projection before the device call, not task success.
 
-The compatible consumer includes the rejected response and concrete parser error on a retry. Guest execution errors arrive through execution feedback. A task with completed verification keeps its original score, including zero; model failures are not infrastructure retry candidates.
+The compatible consumer retries against the original accepted history and current observation, adding only the latest short parser correction. Parser error text is limited to 512 characters; an output-token-limit failure gets a concise request for a complete action. Rejected responses and unfinished reasoning are not replayed or accumulated in subsequent requests. Callers can retain the original responses in their transport logs. The strict `reference_unit` consumer keeps its original retry behavior without added correction messages. Guest execution errors arrive through execution feedback. A task with completed verification keeps its original score, including zero; model failures are not infrastructure retry candidates.
 
 ## Validation scope
 
 Pure device-boundary tests run without a producer checkout. Set `OSWORLD_V4_PROMPT_FORMAT_REPO` to the pinned local checkout to exercise its full serializer and feedback integration. A controlled replay of saved model responses additionally checks the parser/compiler acceptance boundary. Passing compilation does not prove a correctly grounded click.
 
 The originating implementation was exercised on three real OSWorld desktop tasks and both unit and grid1000 actions. All20 Python commands returned success; all13 pointer projections were inspected (9 unit, 4 grid1000), and no run-owned desktop remained. These are runtime smoke checks, not a full-suite accuracy claim. The final package's test and dependency status is recorded in the PR description.
+
+The bounded retry behavior was subsequently exercised on 37 real OSWorld/AgentENV tasks with the same qualified runtime. A live audit of four output-token-limit cases covered 20 model calls: accepted conversation prefixes remained unchanged, and every retry contained at most one correction message. This validates the retry request contract; it does not establish a full-suite accuracy improvement.

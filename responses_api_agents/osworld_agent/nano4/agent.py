@@ -324,8 +324,8 @@ class Nano4Agent:
             payload["top_p"] = self.top_p
         errors = []
         for attempt in range(self.parse_retries):
-            # Keep the previous attempt budget without introducing an unowned
-            # correction prompt into the reference conversation format.
+            # Failed generations are not accepted history. Retry against the
+            # same observation instead of accumulating unfinished reasoning.
             response = self.call_llm(payload, self.model)
             try:
                 action = parse_action(
@@ -338,18 +338,20 @@ class Nano4Agent:
             except (ValueError, SyntaxError, TypeError) as exc:
                 errors.append({"attempt": attempt + 1, "error": str(exc)})
                 if self.parse_error_feedback and attempt + 1 < self.parse_retries:
-                    rejected = (
-                        response
-                        if isinstance(response, str)
-                        else json.dumps(response, ensure_ascii=False, default=str)
+                    error_text = str(exc)[:512]
+                    feedback = (
+                        "The previous response reached the output token limit without producing an executable action. "
+                        "That response was not executed. Return one concise, complete tool call using the current "
+                        "screenshot; do not repeat the failed reasoning."
+                        if "finish_reason='length'" in str(exc)
+                        else f"The previous response was not executed. Parser error: {error_text}. Return one valid "
+                        "tool call. For exec_py prefer normalized [0,1] x/y; if you intend grid1000 or screenshot "
+                        "pixels, declare '# coordinate_space: grid1000' or '# coordinate_space: pixel' in the code. "
+                        f"Screenshot size is {self.screen_size[0]}x{self.screen_size[1]}."
                     )
                     payload["messages"] = [
-                        *payload["messages"],
-                        {"role": "assistant", "content": rejected},
-                        {
-                            "role": "user",
-                            "content": f"The previous response was not executed. Parser error: {exc}. Return one valid tool call. For exec_py prefer normalized [0,1] x/y; if you intend grid1000 or screenshot pixels, declare '# coordinate_space: grid1000' or '# coordinate_space: pixel' in the code. Screenshot size is {self.screen_size[0]}x{self.screen_size[1]}.",
-                        },
+                        *messages,
+                        {"role": "user", "content": feedback},
                     ]
         else:
             return (

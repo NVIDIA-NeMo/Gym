@@ -149,7 +149,65 @@ class Step1500Coordinates(unittest.TestCase):
         self.assertEqual(info["parse_attempts"], 2)
         self.assertNotEqual(messages[0], messages[1])
         self.assertIn("Expected the reference", messages[1][-1]["content"])
-        self.assertEqual(messages[1][-2]["content"], "missing tool")
+        self.assertEqual(messages[1][:-1], messages[0])
+        self.assertEqual(len(messages[1]), 2)
+
+    @unittest.skipUnless(os.environ.get("OSWORLD_V4_PROMPT_FORMAT_REPO"), "External producer integration fixture")
+    def test_length_retries_preserve_observation_without_replaying_failed_thinking(self):
+        agent = Nano4Agent("fixture", 100, reference_root=self.reference.root, coordinate_policy=STEP1500_COORDINATES)
+        original = [{"role": "user", "content": "current screenshot and accepted history"}]
+        requests = []
+
+        def model(payload, _model):
+            requests.append(copy.deepcopy(payload["messages"]))
+            if len(requests) < 4:
+                return {"content": None, "reasoning": "unfinished-loop" * 5000, "finish_reason": "length"}
+            return self.reference.converter.tool_call_xml("computer.wait", {})
+
+        agent.messages = lambda *_args: (original, {})
+        agent.call_llm = model
+        _, actions, info = agent.predict("fixture", {})
+        self.assertEqual(actions, ["WAIT"])
+        self.assertEqual(info["parse_attempts"], 4)
+        self.assertEqual(len(info["previous_parse_errors"]), 3)
+        self.assertEqual([len(value) for value in requests], [1, 2, 2, 2])
+        self.assertEqual(original, [{"role": "user", "content": "current screenshot and accepted history"}])
+        for value in requests[1:]:
+            self.assertEqual(value[:-1], original)
+            self.assertIn("output token limit", value[-1]["content"])
+            self.assertNotIn("unfinished-loop", value[-1]["content"])
+            self.assertLess(len(value[-1]["content"]), 1024)
+
+    @unittest.skipUnless(os.environ.get("OSWORLD_V4_PROMPT_FORMAT_REPO"), "External producer integration fixture")
+    def test_parser_error_feedback_is_bounded_and_strict_profile_can_repeat_unchanged(self):
+        for compatible in [False, True]:
+            with self.subTest(compatible=compatible):
+                agent = Nano4Agent(
+                    "fixture",
+                    100,
+                    reference_root=self.reference.root,
+                    coordinate_policy=STEP1500_COORDINATES if compatible else "reference_unit",
+                )
+                requests = []
+
+                def model(payload, _model):
+                    requests.append(copy.deepcopy(payload["messages"]))
+                    if len(requests) == 1:
+                        return {
+                            "tool_calls": [{"function": {"name": "z" * 10000, "arguments": "{}"}}],
+                            "finish_reason": "tool_calls",
+                        }
+                    return self.reference.converter.tool_call_xml("computer.wait", {})
+
+                agent.messages = lambda *_args: ([{"role": "user", "content": "fixture"}], {})
+                agent.call_llm = model
+                _, actions, _ = agent.predict("fixture", {})
+                self.assertEqual(actions, ["WAIT"])
+                if compatible:
+                    self.assertLess(len(requests[1][-1]["content"]), 1024)
+                    self.assertIn("Tool is not in the pinned reference schema", requests[1][-1]["content"])
+                else:
+                    self.assertEqual(requests[0], requests[1])
 
     @unittest.skipUnless(os.environ.get("OSWORLD_V4_PROMPT_FORMAT_REPO"), "External producer integration fixture")
     def test_actual_device_audit_survives_feedback_without_changing_command_identity(self):
