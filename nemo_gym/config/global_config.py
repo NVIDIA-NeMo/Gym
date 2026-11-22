@@ -273,6 +273,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",
+        "legal_agent_bench_native",
         "kilocode_agent",
         "langchain_deepagents_agent",
         "kimi_code_agent",

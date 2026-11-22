@@ -3,6 +3,8 @@
 
 """Deprecated local episode entry point; new configurations use agent sessions."""
 
+from contextlib import nullcontext
+
 from fastapi import HTTPException, Request
 
 from nemo_gym.agents import AgentSessionConflictError, verification_failure_fields
@@ -28,6 +30,14 @@ class OpenCodeLegacyAgent(OpenCodeAgent):
             raise AgentSessionConflictError("OpenCode sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(422, "Local OpenCode /run requires resources_server")
+        participant = self.checkpoint_participant
+        # Nothing of a local run is in a checkpoint: with checkpointing on it is a restart.
+        async with (
+            participant.restart_call(self.rollout_id_from_run(body)) if participant is not None else nullcontext()
+        ):
+            return await self._run_locally(request, body)
+
+    async def _run_locally(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
 
