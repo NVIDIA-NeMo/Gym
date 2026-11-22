@@ -431,6 +431,25 @@ class TestDbHandleSpark:
         assert "  - `dirty`:\n      data_type: STRING" in context  # fell back to string when loaded
         assert "- `school`.`notes`.`student_id` = `school`.`students`.`student_id`" in context
 
+    def test_table_names_spark_cannot_hold_are_rendered_as_loaded(self, tmp_path):
+        db_path = tmp_path / "shop" / "shop.sqlite"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE `Sales Team` (team_id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute(
+            "CREATE TABLE `voice-actors` (team_id INTEGER, FOREIGN KEY (team_id) REFERENCES `Sales Team`(team_id))"
+        )
+        conn.execute("INSERT INTO `Sales Team` VALUES (1, 'Alice')")
+        conn.commit()
+
+        handle = build_db_values.DbHandle(conn.cursor(), tmp_path, dialect="spark", db_id="shop")
+        context = handle.sql_context_for_question("Which team?")
+        conn.close()
+
+        assert "- `shop`.`Sales_Team`:" in context and "- `shop`.`voice_actors`:" in context
+        assert "- `shop`.`voice_actors`.`team_id` = `shop`.`Sales_Team`.`team_id`" in context
+        assert "Sales Team" not in context and "voice-actors" not in context
+
 
 @pytest.mark.skipif(
     not all(importlib.util.find_spec(m) for m in ("bm25s", "nltk", "pandas", "psycopg")),

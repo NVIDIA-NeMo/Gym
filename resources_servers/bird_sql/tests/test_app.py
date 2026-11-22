@@ -915,6 +915,24 @@ def _java_available() -> bool:
         return False
 
 
+class TestSparkTableNames:
+    def test_sanitizes_and_keeps_ordinary_names(self):
+        from resources_servers.bird_sql.setup_bird_spark import spark_table_names
+
+        assert spark_table_names("shop", ["t", "Sales Team", "voice-actors"]) == {
+            "t": "t",
+            "Sales Team": "Sales_Team",
+            "voice-actors": "voice_actors",
+        }
+
+    @pytest.mark.parametrize("pair", [["Sales Team", "Sales_Team"], ["Sales Team", "sales_team"], ["a-b", "a b"]])
+    def test_two_tables_loading_as_one_name_are_refused(self, pair):
+        from resources_servers.bird_sql.setup_bird_spark import spark_table_names
+
+        with pytest.raises(ValueError, match="table-name collision in 'shop'"):
+            spark_table_names("shop", pair)
+
+
 requires_spark = pytest.mark.skipif(
     importlib.util.find_spec("pyspark") is None
     or importlib.util.find_spec("sqlglot") is None
