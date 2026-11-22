@@ -389,9 +389,11 @@ def snowflake_rejection(
 
     try:
         tokens = sqlglot.tokenize(sql, read="snowflake")
-        statements = [s for s in sqlglot.parse(sql, read="snowflake") if s is not None]
+        parsed = sqlglot.parse(sql, read="snowflake")
     except sqlglot.errors.SqlglotError:
         return "unparsable"
+    # A comment after the last semicolon (`SELECT 1; -- why`) parses as a Semicolon node: no statement.
+    statements = [s for s in parsed if s is not None and not isinstance(s, exp.Semicolon)]
     if len(statements) != 1 or not isinstance(statements[0], exp.Query):
         return "not_a_single_query"
     cte_names = {cte.alias.upper() for cte in statements[0].find_all(exp.CTE)}  # `WITH total(x) AS ...` is no call
@@ -467,9 +469,10 @@ def snowflake_rejection(
         | _FLATTEN_COLUMNS
     )
     for join in tree.find_all(exp.Join):
+        # A USING name is a column of both join inputs: a catalog column, or a column a CTE or derived table outputs.
         for name in join.args.get("using") or []:
             ident = name.this if isinstance(name, exp.Column) else name
-            if (ident.name if ident.quoted else ident.name.upper()) not in catalog_columns:
+            if (ident.name if ident.quoted else ident.name.upper()) not in columns:
                 return f"unknown_column:{ident.name}"
     for column in tree.find_all(exp.Column):
         if isinstance(column.this, exp.Star):

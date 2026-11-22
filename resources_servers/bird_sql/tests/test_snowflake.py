@@ -254,6 +254,15 @@ _TABLES = {
         ("SELECT (", "unparsable"),
         ('SELECT COUNT(*) FROM "t" JOIN "Mixed Case" USING ("n")', None),
         ('SELECT COUNT(*) FROM "t" JOIN "Mixed Case" USING (n)', "unknown_column:N"),  # USING names fold too
+        # A USING name a CTE outputs is fine (Snowflake runs this).
+        (
+            'WITH a AS (SELECT "x" AS k FROM "t"), b AS (SELECT "n" AS k FROM "Mixed Case") SELECT k FROM a JOIN b USING (k)',
+            None,
+        ),
+        # A comment after the last semicolon is no second statement (Snowflake runs these); a second statement is.
+        ('SELECT "x" FROM "t"; -- the x values', None),
+        ('SELECT "x" FROM "t"; /* note */', None),
+        ('SELECT "x" FROM "t"; -- why\nDELETE FROM "t"', "not_a_single_query"),
         ('SELECT "n" AS N2 FROM "Mixed Case" WHERE n2 > 0', None),  # a select alias, unqualified
         ('SELECT m."n" AS N2 FROM "Mixed Case" m WHERE m.n2 > 0', "unknown_column:M.N2"),  # but not table-qualified
         ('SELECT s.k FROM (SELECT "n" AS k FROM "Mixed Case") AS s', None),  # a derived table's column is fine
