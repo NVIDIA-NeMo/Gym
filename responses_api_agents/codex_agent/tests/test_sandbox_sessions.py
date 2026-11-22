@@ -44,6 +44,7 @@ from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxStatus, SandboxTransferError, SandboxUnavailableError
 from responses_api_agents.codex_agent.app import (
     _SANDBOX_SESSION_KEY,
+    SANDBOX_PROVIDER_KEY_ENV,
     CodexAgent,
     CodexAgentConfig,
     _model_endpoint_error,
@@ -1806,7 +1807,7 @@ def test_instructions_and_text_parts_reach_codex_without_other_provider_credenti
         config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
         assert config["developer_instructions"] == "config instruction\n\nrequest instruction\n\ninput instruction"
         assert payload["prompt"] == "task"
-        assert payload["env"]["OPENAI_API_KEY"] == "gym"
+        assert payload["env"][SANDBOX_PROVIDER_KEY_ENV] == "gym"
         assert "must-not-copy" not in json.dumps(sandbox.files)
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         conversation = closed.json()["agent_observations"]["records"][0]["conversation"]
@@ -3474,11 +3475,60 @@ def test_sandbox_environment_inheritance_is_opt_in(setup, inherit) -> None:
         payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
     assert payload["inherit_env"] is inherit
-    # HOME and the XDG directories come from the sandbox either way; only CODEX_HOME is private.
+    # HOME and the XDG directories come from the sandbox either way; only CODEX_HOME and the provider key are private.
     assert payload["env"] == {
         "CODEX_HOME": f"{sandbox.directory}/home/.codex",
-        "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+        SANDBOX_PROVIDER_KEY_ENV: "gym",  # pragma: allowlist secret
     }
+    assert payload["task_env"] == {}
+
+
+def test_task_environment_reaches_codex_under_gym_private_variables(setup, monkeypatch) -> None:
+    agent, sandbox = setup
+    # The agent host's environment is never the task's.
+    monkeypatch.setenv("HOST_ONLY_SECRET", "host-value")
+    monkeypatch.setenv("OPENAI_API_KEY", "host-openai-key")  # pragma: allowlist secret
+    request = seed()
+    request.sandbox_access.env = {
+        "OPENAI_API_KEY": "task-key",  # pragma: allowlist secret
+        "OPENAI_BASE_URL": "https://task-endpoint.example/v1",
+        "GYM_MODEL": "task-model",
+        "HOME": "/home/task",
+        "NO_PROXY": "internal.example",
+        # Gym's own variables and Codex's own configuration never come from the task.
+        SANDBOX_PROVIDER_KEY_ENV: "task-override",
+        "NEMO_GYM_SUPERVISOR": "task-marker",
+        "CODEX_HOME": "/task/codex-home",
+        "CODEX_ACCESS_TOKEN": "task-identity-token",
+        "CODEX_EXEC_SERVER_URL": "ws://exec.example",
+    }
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert payload["task_env"] == {
+        "OPENAI_API_KEY": "task-key",  # pragma: allowlist secret
+        "OPENAI_BASE_URL": "https://task-endpoint.example/v1",
+        "GYM_MODEL": "task-model",
+        "HOME": "/home/task",
+        "NO_PROXY": "internal.example",
+    }
+    # The launcher applies `env` after `task_env`.
+    assert payload["env"] == {
+        "CODEX_HOME": f"{sandbox.directory}/home/.codex",
+        SANDBOX_PROVIDER_KEY_ENV: "gym",  # pragma: allowlist secret
+    }
+    provider = config["model_providers"]["gym"]
+    # The Gym provider reads its key from the Gym variable and keeps the Gym model server's address.
+    assert provider["env_key"] == SANDBOX_PROVIDER_KEY_ENV
+    assert provider["base_url"].startswith("http://model.example:9000/")
+    assert config["model_provider"] == "gym"
+    staged = json.dumps(sandbox.files)
+    assert "host-value" not in staged
+    assert "host-openai-key" not in staged
 
 
 @pytest.mark.parametrize("status", [400, 401, 429, 503])

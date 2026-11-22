@@ -4,6 +4,7 @@
 
 import base64
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -287,6 +288,63 @@ def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
         200,
     ]
     assert json.loads(launched.stdout) == {"type": "turn.completed", "result": "done"}
+
+
+LOOPBACK = "127.0.0.1,localhost"
+
+
+@pytest.mark.parametrize(
+    ("inherit_env", "sandbox_env", "task_env", "expected"),
+    [
+        # Nothing set anywhere.
+        (False, {}, {}, (LOOPBACK, LOOPBACK)),
+        # One spelling from the task: tools reading either one keep its entries.
+        (False, {}, {"NO_PROXY": "internal.example"}, (f"{LOOPBACK},internal.example",) * 2),
+        (False, {}, {"no_proxy": "internal.example"}, (f"{LOOPBACK},internal.example",) * 2),
+        # Each spelling keeps its own entries.
+        (
+            False,
+            {},
+            {"NO_PROXY": "a.example", "no_proxy": "b.example"},
+            (f"{LOOPBACK},a.example", f"{LOOPBACK},b.example"),
+        ),
+        # The sandbox's own, which only inherit_env passes, and the task's over it.
+        (True, {"no_proxy": "sandbox.example"}, {}, (f"{LOOPBACK},sandbox.example",) * 2),
+        (False, {"no_proxy": "sandbox.example"}, {}, (LOOPBACK, LOOPBACK)),
+        (True, {"no_proxy": "sandbox.example"}, {"no_proxy": "task.example"}, (f"{LOOPBACK},task.example",) * 2),
+    ],
+)
+def test_proxies_never_carry_codex_calls_to_the_loopback_forwarder(
+    tmp_path, inherit_env, sandbox_env, task_env, expected
+):
+    proxies = {"HTTP_PROXY": "http://proxy.example:3128", "http_proxy": "http://proxy.example:3128"}
+    proxies["ALL_PROXY"] = "socks5://proxy.example:1080"
+    fake = tmp_path / "fake_codex.mjs"
+    names = ["NO_PROXY", "no_proxy", *proxies]
+    fake.write_text(f"console.log(JSON.stringify({json.dumps(names)}.map((name) => process.env[name] ?? null)));\n")
+    params = {
+        "directory": str(tmp_path),
+        "cwd": str(tmp_path),
+        "command": [shutil.which("node"), str(fake)],
+        "timeout": 5,
+        # The forwarder listens without contacting this address until Codex calls it.
+        "model_base_url": "http://model.example:9000/v1",
+        "invocation_id": "invocation",
+        "inherit_env": inherit_env,
+        "task_env": task_env | proxies,
+        "env": {"CODEX_HOME": str(tmp_path / ".codex")},
+    }
+    (tmp_path / "input.json").write_text(json.dumps(params))
+    launched = subprocess.run(
+        ["node", str(LAUNCHER), str(tmp_path / "input.json")],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env={"PATH": os.environ["PATH"], **sandbox_env},
+    )
+    assert launched.returncode == 0, launched.stderr
+    # Codex and its tools still see the task's proxies, for everything but the forwarder.
+    assert json.loads(launched.stdout) == [*expected, *proxies.values()]
 
 
 @pytest.mark.parametrize("fault", ["timeout", "truncated_chunk", "truncated_length"])
