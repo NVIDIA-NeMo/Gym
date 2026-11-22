@@ -64,6 +64,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollouts.rollout_collection import (
+    NG_FAILURE_JUDGE_ERROR_KEY,
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
@@ -2052,7 +2053,15 @@ class RolloutReverificationHelper(BaseModel):
                     serialized = orjson.dumps(result)
                     failure_counts[failure_class] += 1
                     # Every dropped rollout says so as it happens, as in rollout collection.
-                    detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                    # A verify reply from judge_failsafe carries its reason in failure_reason and the judge
+                    # error key; the collection wrapper's _ng_failure_message and error keys are not set on it.
+                    detail = str(
+                        result.get("_ng_failure_message")
+                        or result.get("error")
+                        or result.get("failure_reason")
+                        or result.get(NG_FAILURE_JUDGE_ERROR_KEY)
+                        or ""
+                    )[:200]
                     tqdm.write(
                         "🚨 [rollout_reverification] rollout dropped from the score: "
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "

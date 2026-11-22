@@ -2738,6 +2738,43 @@ class TestRolloutReverificationRunFromConfig:
         assert returned[0]["reward"] == 1.0
 
     @pytest.mark.parametrize(
+        "judge_failure",
+        [
+            pytest.param(
+                {
+                    "failure_reason": "judge call 6 returned no usable reply",
+                    "_ng_failure_judge_error": "judge call 6 returned no usable reply",
+                },
+                id="judge_failsafe_row",
+            ),
+            pytest.param(
+                {"_ng_failure_judge_error": "judge call 6 returned no usable reply"},
+                id="judge_error_only",
+            ),
+        ],
+    )
+    async def test_dropped_judge_failure_log_line_shows_the_failure_reason(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+        judge_failure: dict,
+    ) -> None:
+        """A row whose verify comes back from judge_failsafe carries its reason in failure_reason and
+        _ng_failure_judge_error, not _ng_failure_message or error. The dropped-rollout line must still show it."""
+        row = self._make_row("agent_a", task=0)
+        result = {"reward": 0.0, "mask_sample": True, NG_FAILURE_CLASS_KEY: "judge_failed"} | judge_failure
+        self._patch_common(monkeypatch, [(row, result)])
+        config = self._make_config(tmp_path, disable_aggregation=True)
+
+        await RolloutReverificationHelper().run_from_config(config)
+
+        [failed] = self._read_jsonl(tmp_path / "output_failures.jsonl")
+        assert failed[NG_FAILURE_CLASS_KEY] == "judge_failed"
+        [line] = [line for line in capsys.readouterr().out.splitlines() if "rollout dropped from the score" in line]
+        assert line.endswith("class=judge_failed error=judge call 6 returned no usable reply")
+
+    @pytest.mark.parametrize(
         ("include_failure_class", "reported_failure_class", "expected_failure_class"),
         [
             (False, None, "kill_shaped"),
