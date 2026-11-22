@@ -1,0 +1,42 @@
+# Agentic Video-MME (2,700 questions over 900 videos, w/o subtitles): OpenCode answers each question in a sandbox that
+# the videomme_v1 resources server lends with the row's video, with the frame tools watch_video and view_image
+# (resources_servers/videomme_v1/configs/videomme_v1_agentic.yaml). The rows ask in the benchmark's letter wording, so a
+# judge model reads the chosen option (llm_extraction_v1).
+# Data: prepare.py downloads the authors' annotation (videomme/test-00000-of-00001.parquet of lmms-lab/Video-MME at a
+# pinned revision) and binds each question to its video in videomme_v1_agentic_source_dir by the SHA-256 in that
+# directory's FILES.sha256; videos stay in its video/ (videomme_v1_agentic_video_dir, where this host reads them).
+# Needs the sandbox image built from resources_servers/video_mcqa/sandbox_image (VIDEO_MCQA_SANDBOX_IMAGE) and
+# OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY.
+config_paths:
+  - resources_servers/videomme_v1/configs/videomme_v1_agentic.yaml
+  - resources_servers/videomme_v1/configs/videomme_v1_agentic_llm_extraction.yaml
+
+videomme_v1_agentic_source_dir: null
+videomme_v1_agentic_video_dir: ${videomme_v1_agentic_source_dir}/video
+videomme_v1_agentic_cohort_manifest: benchmarks/videomme_v1_agentic/data/videomme_v1_agentic_cohort.json
+videomme_v1_agentic_video_roots:
+  - ${videomme_v1_agentic_video_dir}
+prepare_script_args:
+  source_dir: ${videomme_v1_agentic_source_dir}
+  video_dir: ${videomme_v1_agentic_video_dir}
+
+# The judge: gpt-6.1-sol at max reasoning effort; override the endpoint, key and model together.
+judge_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+judge_api_key: ${oc.env:JUDGE_API_KEY,${oc.env:INFERENCE_API_KEY,dummy}}
+judge_model_name: ${oc.env:JUDGE_MODEL,openai/openai/gpt-6.1-sol}
+videomme_v1_agentic:
+  resources_servers:
+    videomme_v1:
+      judge_chat_completion_create_params:
+        messages: []
+        reasoning_effort: max
+
+videomme_v1_agentic_opencode:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+      - name: videomme_v1_agentic
+        type: benchmark
+        jsonl_fpath: benchmarks/videomme_v1_agentic/data/videomme_v1_agentic_benchmark.jsonl
+        prepare_script: benchmarks/videomme_v1_agentic/prepare.py
+        num_repeats: 1

@@ -38,6 +38,7 @@ BEHAVIOR_CHANGING_ENV = {
     "SKIP": "ruff",
     "NEMO_GYM_EXTRA_ROOTS": "/tmp/external-gym",
     "NEMO_GYM_CONFIG_DICT": '{"search_dir": "/tmp/external-gym"}',
+    "NEMO_GYM_CONFIG_DICT_FILE": "/tmp/external-gym/config.yaml",
     "NEMO_GYM_ALLOW_PRERELEASE": "true",
     "PYTHONPATH": "/tmp/python",
     "PYTHONSAFEPATH": "1",
@@ -70,7 +71,13 @@ def _environment_after_sanitizing(stage: str) -> dict[str, str]:
         ("lint", {"SKIP"}),
         (
             "core",
-            {"GYM_CI_DEV_VENV_DIR", "NEMO_GYM_EXTRA_ROOTS", "NEMO_GYM_CONFIG_DICT", "PYTHONPATH"},
+            {
+                "GYM_CI_DEV_VENV_DIR",
+                "NEMO_GYM_EXTRA_ROOTS",
+                "NEMO_GYM_CONFIG_DICT",
+                "NEMO_GYM_CONFIG_DICT_FILE",
+                "PYTHONPATH",
+            },
         ),
         (
             "server",
@@ -78,6 +85,7 @@ def _environment_after_sanitizing(stage: str) -> dict[str, str]:
                 "GYM_CI_DEV_VENV_DIR",
                 "NEMO_GYM_EXTRA_ROOTS",
                 "NEMO_GYM_CONFIG_DICT",
+                "NEMO_GYM_CONFIG_DICT_FILE",
                 "NEMO_GYM_ALLOW_PRERELEASE",
                 "PYTHONPATH",
                 "PYTHONSAFEPATH",
@@ -94,6 +102,21 @@ def test_ci_stage_removes_only_its_behavior_changing_environment(stage: str, rem
     for name, value in BEHAVIOR_CHANGING_ENV.items():
         if name not in removed:
             assert sanitized[name] == value
+
+
+@pytest.mark.parametrize("stage", ["core", "server"])
+def test_ci_stage_leaves_no_inherited_config(stage: str, tmp_path: Path) -> None:
+    env = os.environ | {
+        "NEMO_GYM_CONFIG_DICT": "sentinel: inherited",
+        # A file that does not exist: reading it would raise.
+        "NEMO_GYM_CONFIG_DICT_FILE": str(tmp_path / "inherited.yaml"),
+    }
+    read_config = "from nemo_gym.config.global_config import maybe_get_global_config_dict as read; print(read())"
+    command = f'source "{SANITIZER}"; gym_ci_sanitize_environment "{stage}"; "{sys.executable}" -c "{read_config}"'
+
+    result = subprocess.run(["bash", "-c", command], check=True, capture_output=True, text=True, env=env)
+
+    assert result.stdout.strip() == "None"
 
 
 def test_ci_environment_sanitizer_rejects_unknown_stage() -> None:

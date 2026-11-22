@@ -6,7 +6,7 @@ name = "gym-resources-servers-videomme-v2"
 version = "0.0.0"
 requires-python = ">=3.13.18"
 dependencies = [
-    "nemo-gym[dev]",
+    "nemo-gym[dev,sandbox]",
 ]
 
 [tool.uv]

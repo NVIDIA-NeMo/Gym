@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
@@ -46,8 +48,12 @@ from nemo_gym.models.token_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
     STAGING_SCHEMA_VERSION,
+    PackedFloat32Values,
+    PackedTokenIds,
+    compute_chain_hash,
     compute_extras_digest,
     compute_staging_digest,
+    hash_token_ids,
 )
 
 
@@ -87,6 +93,15 @@ class OutputValidationItem(TypedDict, total=False):
 
 # Only the explicit local builder supplies this identity; it is never a wire field.
 _BUILD_STAGING_DIGEST = object()
+
+
+@dataclass(frozen=True, repr=False)
+class _BuildTokenHashes:
+    prefix_token_ids: tuple[int, ...]
+    parent_chain_hash: str | None
+    token_ids: PackedTokenIds
+    token_mask: PackedFloat32Values
+    logprobs: PackedFloat32Values
 
 
 def staging_key(capture_key: str, model_call_id: str) -> str:
@@ -335,15 +350,25 @@ class StagedCallBaseSnapshot(_RolloutIdAlias, _DigestWireModel):
             raise ValueError("a child staged call must use token_in mode")
         if self.delta_len == 0:
             raise ValueError("a staged call delta must contain at least one token")
-        if any(token_id < 0 for token_id in self.token_ids_delta):
-            raise ValueError("token_ids_delta must be non-negative")
-        if any(mask not in (0.0, 1.0) for mask in self.token_mask_delta):
-            raise ValueError("token_mask_delta must contain only 0.0 or 1.0")
-        if any(
-            mask == 0.0 and log_prob != 0.0
-            for mask, log_prob in zip(self.token_mask_delta, self.generation_log_probs_delta)
-        ):
-            raise ValueError("prompt-carry log probabilities must be 0.0")
+        digest_tokens: Sequence[int] = self.token_ids_delta
+        digest_mask: Sequence[float] = self.token_mask_delta
+        digest_logprobs: Sequence[float] = self.generation_log_probs_delta
+        if isinstance(info.context, _BuildTokenHashes):
+            if len(info.context.prefix_token_ids) != self.prev_len:
+                raise ValueError("local hash prefix length does not match prev_len")
+            packed = info.context.token_ids
+            if not packed.matches(self.token_ids_delta):
+                packed = PackedTokenIds(self.token_ids_delta)
+            self.chain_hash = compute_chain_hash(info.context.parent_chain_hash, packed)
+            self.cumulative_hash = hash_token_ids(packed.prepend(info.context.prefix_token_ids))
+            digest_tokens = packed
+            if info.context.token_mask.matches(self.token_mask_delta):
+                digest_mask = info.context.token_mask
+            if info.context.logprobs.matches(self.generation_log_probs_delta):
+                digest_logprobs = info.context.logprobs
+            if not isinstance(self, StagedCallRecord):
+                raise ValueError("Deriving extras requires a local staged record")
+            self.extras_digest = compute_extras_digest(self.extras)
         actual_digest = compute_staging_digest(
             schema_version=self.schema_version,
             digest_version=self.digest_version,
@@ -356,14 +381,14 @@ class StagedCallBaseSnapshot(_RolloutIdAlias, _DigestWireModel):
             delta_len=self.delta_len,
             cum_len=self.cum_len,
             weight_version=self.weight_version,
-            token_ids_delta=self.token_ids_delta,
-            token_mask_delta=self.token_mask_delta,
-            generation_log_probs_delta=self.generation_log_probs_delta,
+            token_ids_delta=digest_tokens,
+            token_mask_delta=digest_mask,
+            generation_log_probs_delta=digest_logprobs,
             extras_digest=self.extras_digest,
             chain_hash=self.chain_hash,
             cumulative_hash=self.cumulative_hash,
         )
-        if info.context is _BUILD_STAGING_DIGEST:
+        if info.context is _BUILD_STAGING_DIGEST or isinstance(info.context, _BuildTokenHashes):
             # Construction-time assignment requires a mutable model without validate_assignment.
             self.digest = actual_digest
         elif self.digest != actual_digest:
@@ -436,8 +461,59 @@ class StagedCallRecord(StagedCallBaseSnapshot):
             context=_BUILD_STAGING_DIGEST,
         )
 
+    @classmethod
+    def from_token_components(
+        cls,
+        *,
+        admission: CaptureAdmission,
+        weight_version: int,
+        prefix_token_ids: list[int],
+        token_ids_delta: list[int],
+        token_mask_delta: list[float],
+        generation_log_probs_delta: list[float],
+        extras: dict[str, Any] | None,
+    ) -> Self:
+        """Build a local prefix record, packing its token delta once for all hashes.
+
+        The context only derives hashes after normal field validation. It never
+        accepts a supplied digest or disables wire integrity verification.
+        """
+        # Pack the caller's raw IDs before Pydantic, which would convert int subclasses to plain ints.
+        packed_tokens = PackedTokenIds(token_ids_delta)
+        packed_mask = PackedFloat32Values(token_mask_delta, field="token_mask_delta")
+        packed_logprobs = PackedFloat32Values(generation_log_probs_delta, field="generation_log_probs_delta")
+        return cls.model_validate(
+            {
+                "capture_key": admission.capture_key,
+                "model_call_id": admission.model_call_id,
+                "parent_call_id": admission.parent_call_id,
+                "mode": admission.mode,
+                "prev_len": admission.prev_len,
+                "delta_len": len(packed_tokens),
+                "cum_len": admission.prev_len + len(packed_tokens),
+                "weight_version": weight_version,
+                "token_ids_delta": packed_tokens[:],
+                "token_mask_delta": packed_mask[:],
+                "generation_log_probs_delta": packed_logprobs[:],
+                "extras": extras,
+                "extras_digest": EMPTY_EXTRAS_DIGEST,
+                "chain_hash": "0" * 64,
+                "cumulative_hash": "0" * 64,
+                "digest": "0" * 64,
+            },
+            context=_BuildTokenHashes(
+                tuple(prefix_token_ids),
+                admission.parent_chain_hash,
+                packed_tokens,
+                packed_mask,
+                packed_logprobs,
+            ),
+        )
+
     @model_validator(mode="after")
-    def _validate_extras_integrity(self) -> Self:
+    def _validate_extras_integrity(self, info: ValidationInfo) -> Self:
+        if isinstance(info.context, _BuildTokenHashes):
+            return self
         actual_extras_digest = compute_extras_digest(self.extras)
         if self.extras_digest != actual_extras_digest:
             raise ValueError("extras_digest does not match extras")
