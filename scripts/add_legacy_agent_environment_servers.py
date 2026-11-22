@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 
 """Declare a legacy-agent environment server beside every bound agent instance.
 
@@ -11,7 +12,8 @@ A second server in front of it would make agent-routed rows ambiguous.
 
 An environment server can reference several agents, such as a user and an assistant.
 It references an agent through any field whose value has `type: responses_api_agents`,
-and through `agent_server`, whose type may be left out.
+and through `agent_server`, whose type may be left out, or the typed reference in each
+`(agent, weight)` pair in `agent_server_pool`.
 
 A server is named after the environment stem rather than the agent, so swapping the agent leaves
 the name alone.
@@ -228,13 +230,22 @@ def agent_references(server: dict) -> list[tuple[str, str]]:
 
     Matches `environment_server_agent_refs` in `nemo_gym/config/global_config.py`.
     """
-    return [
+    references = [
         (field, value["name"])
         for field, value in server.items()
         if isinstance(value, dict)
         and value.get("name")
         and (value.get("type") == AGENT_SERVER_TYPE or (field == AGENT_SERVER and value.get("type") is None))
     ]
+    pool = server.get("agent_server_pool")
+    if isinstance(pool, list):
+        references.extend(
+            (f"agent_server_pool[{index}][0]", value["name"])
+            for index, entry in enumerate(pool)
+            if isinstance(entry, list) and len(entry) == 2
+            if isinstance(value := entry[0], dict) and value.get("type") == AGENT_SERVER_TYPE and value.get("name")
+        )
+    return references
 
 
 def fronted_agents(document: dict) -> set[str]:

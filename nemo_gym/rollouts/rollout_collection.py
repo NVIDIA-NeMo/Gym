@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -5999,10 +6000,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     f"{environment_server_name!r} resources server {configured_resources!r}"
                 )
 
-            if configured_agent is not None:
+            pool = environment_config.get("agent_server_pool")
+            paired_agents = [configured_agent] if configured_agent is not None else []
+            if isinstance(pool, ListConfig):
+                paired_agents = [entry[0]["name"] for entry in pool]
+            for agent_name in paired_agents:
                 environment_pairings.append(
                     {
-                        AGENT_REF_KEY_NAME: {"name": configured_agent},
+                        AGENT_REF_KEY_NAME: {"name": agent_name},
                         TASK_SOURCE_KEY_NAME: configured_resources,
                         # A materialized row's taskset names the dataset entry that declares it, which the
                         # pairing guard checks the agent against (see ``_dataset_admitted_agents``).

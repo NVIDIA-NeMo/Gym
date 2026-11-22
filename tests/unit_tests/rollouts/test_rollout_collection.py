@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18444,3 +18445,54 @@ def test_an_episode_request_carries_a_rollout_that_skips_token_capture(
     assert request.skip_token_capture is bool(episode_setting)
     # The model leaves the setting out when it is false, so a request that does not skip is unchanged.
     assert ("skip_token_capture" in request.model_dump()) is bool(episode_setting)
+
+
+@pytest.mark.parametrize(
+    ("pool_names", "allowed_agents", "override", "accepted"),
+    [
+        (["hermes", "pi"], ["hermes_agent"], False, False),
+        (["hermes", "pi"], ["hermes_agent", "pi_agent"], False, True),
+        (["pi"], ["pi_agent"], False, True),
+        (["hermes", "pi"], ["hermes_agent"], True, True),
+    ],
+    ids=["reject-forbidden-member", "accept-compatible-pool", "ignore-unused-fallback", "explicit-override"],
+)
+def test_environment_pool_checks_every_verifier_pairing(
+    pool_names: list[str], allowed_agents: list[str], override: bool, accepted: bool
+) -> None:
+    config = _environment_server_config()
+    config["pi"] = {"responses_api_agents": {"pi_agent": {"resources_server": None}}}
+    config.hermes.responses_api_agents.hermes_agent.resources_server = None
+    config.swe.resources_servers.swebench_pro.allowed_agents = allowed_agents
+    config["allow_unsupported_pairing"] = override
+    config.environment.environment_servers.single_agent.agent_server_pool = [
+        [{"type": "responses_api_agents", "name": name}, 1] for name in pool_names
+    ]
+    row = {NG_ENVIRONMENT_SERVER_KEY: "environment", "task_id": {"taskset": "swe", "task_id": "task"}}
+
+    expected = nullcontext() if accepted else pytest.raises(ValueError, match="pi_agent.*their task_source")
+    with expected:
+        RolloutCollectionHelper._validate_environment_servers([row], config)
+
+
+@pytest.mark.parametrize("taskset", ["tb21", "other"])
+def test_environment_pool_checks_the_dispatched_tasksets_allowed_agents(taskset: str) -> None:
+    config = TestDatasetAdmittedAgentsAtDispatch._config(
+        "hermes_agent", ["hermes_agent"], pi={"responses_api_agents": {"pi_agent": {}}}
+    )
+    config.harbor_tb21_agent.responses_api_agents.hermes_agent.datasets.append(
+        {"name": "other", "type": "benchmark", "verified": False, "jsonl_fpath": "other.jsonl"}
+    )
+    config.harbor_tb21_environment.environment_servers.harbor.agent_server_pool = [
+        [{"type": "responses_api_agents", "name": "harbor_tb21_agent"}, 1],
+        [{"type": "responses_api_agents", "name": "pi"}, 1],
+    ]
+    row = TestDatasetAdmittedAgentsAtDispatch._materialized(taskset)
+
+    expected = (
+        pytest.raises(ValueError, match="'pi' run 'pi_agent'.*dataset 'tb21' admits only: hermes_agent")
+        if taskset == "tb21"
+        else nullcontext()
+    )
+    with expected:
+        RolloutCollectionHelper._validate_environment_servers([row], config)

@@ -1,18 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 
 """Resources-backed single-agent environment server."""
 
 import asyncio
+import hashlib
+import json
 import logging
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
 from uuid import uuid4
+from warnings import warn
 
 from aiohttp import ClientConnectorError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, TypeAdapter, ValidationError, model_validator
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
@@ -106,6 +110,7 @@ class SessionHandles(BaseModel):
     resources_session_id: str
     resources_cookies: dict[str, str] = Field(default_factory=dict)
     agent_session_id: str
+    agent_server_name: str | None = None
     agent_cookies: dict[str, str] = Field(default_factory=dict)
     # Whether a checkpoint may replay the resources server's /verify, as its seed reply reported.
     resources_verify_step_type: StepType = "wait"
@@ -133,6 +138,8 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     resources_server: ResourcesServerRef
     agent_server: AgentServerRef
+    agent_server_pool: list[tuple[AgentServerRef, StrictInt]] | None = Field(default=None, min_length=1)
+    agent_routing_key: Literal["task", "task_rollout"] = "task_rollout"
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
     # Resources servers, such as a search server, whose MCP tools every episode grants the agent besides its own
@@ -145,6 +152,18 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     skip_verification: bool | None = None
     skip_verification_reward: float | None = None
 
+    @model_validator(mode="after")
+    def validate_agent_pool(self) -> "SingleAgentTurnEnvironmentServerConfig":
+        """Bind one verifier and validate the ordered routing destinations and integer weights."""
+        pool = self.agent_server_pool
+        if pool is None:
+            return self
+        if len({agent.name for agent, _ in pool}) != len(pool):
+            raise ValueError("agent_server_pool must contain distinct server names")
+        if any(weight < 0 for _, weight in pool) or not any(weight for _, weight in pool):
+            raise ValueError("agent_server_pool weights must be nonnegative with at least one positive weight")
+        return self
+
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
     """Run one agent turn followed by Resources verification and cleanup."""
@@ -155,11 +174,41 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     applies_model_sampling = True
     response_model = SingleAgentTurnResponse
 
+    def agent_server_for(self, request: SingleAgentTurnRequest) -> str:
+        """Map a stable task/rollout hash into weighted buckets, excluding retry attempts."""
+        pool = self.config.agent_server_pool
+        if pool is None:
+            return self.config.agent_server.name
+        key = ["agent-route-v1", request.task.task_id.taskset, request.task.task_id.task_id]
+        if self.config.agent_routing_key == "task_rollout":
+            key.append(request.episode_id.rollout_id)
+        digest = hashlib.sha256(json.dumps(key, ensure_ascii=False, separators=(",", ":")).encode()).digest()
+        bucket = int.from_bytes(digest, "big") % sum(weight for _, weight in pool)
+        for agent, weight in pool:
+            if bucket < weight:
+                return agent.name
+            bucket -= weight
+        raise AssertionError("Validated routing weights must select a harness")
+
+    def _agent_server_name(self, request: SingleAgentTurnRequest, handles: SessionHandles) -> str:
+        # Persist the route before seeding: recovery must reuse and close the original agent session.
+        if handles.agent_server_name is None:
+            if self.config.agent_server_pool is None:
+                return self.config.agent_server.name
+            handles.agent_server_name = self.agent_server_for(request)
+        return handles.agent_server_name
+
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         # Fail at startup, not on the first episode, when a tool server cannot serve its tools.
-        for name in self.tool_server_names:
-            self._check_tool_server(name, self.config.resources_server.name)
+        agents = (
+            [agent for agent, weight in self.config.agent_server_pool if weight]
+            if self.config.agent_server_pool
+            else [self.config.agent_server]
+        )
+        for agent in agents:
+            for name in self._tool_servers_for(agent.name):
+                self._check_tool_server(name, self.config.resources_server.name)
 
     def _check_tool_server(self, name: str, resources_server_name: str) -> None:
         server = f"Environment Server {self.config.name!r}"
@@ -182,11 +231,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     @property
     def tool_server_names(self) -> list[str]:
         """The tool servers each episode seeds and grants: this server's own setting, or else its agent's."""
+        return self._tool_servers_for(self.config.agent_server.name)
+
+    def _tool_servers_for(self, agent_server_name: str) -> list[str]:
         servers = self.config.tool_servers
         if servers is None:
             agent_config = get_first_server_config_dict(
                 self.server_client.global_config_dict,
-                self.config.agent_server.name,
+                agent_server_name,
             )
             raw = agent_config.get("tool_servers") or []
             servers = TypeAdapter(list[ResourcesServerRef]).validate_python(
@@ -202,7 +254,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         The resources server owns scoring, task-specific weighting, and headline metric selection.
         """
         metrics = AggregateMetrics()
-        if self._skipped_verification_reward() is None:
+        if self.config.agent_server_pool is None:
+            skip_aggregation = self._skipped_verification_reward() is not None
+        else:
+            skip_aggregation = any(row.get("verification_skipped", False) for row in body.verify_responses)
+        if skip_aggregation and self.config.agent_server_pool is not None:
+            warn(
+                "Skipping benchmark aggregate metrics because skip_verification=True applies to this batch; "
+                "mixed measured and fixed-reward pool results are not aggregated.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        if not skip_aggregation:
             # Keep benchmark evidence (including response.usage) intact. The reserved
             # performance summary is reduced here once, independently of resources server filtering.
             benchmark_body = body.model_copy(
@@ -235,8 +298,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         handles = (
             SessionHandles.model_validate(continuation["handles"])
             if "handles" in continuation
-            else SessionHandles.new(self.tool_server_names)
+            else SessionHandles.new(self._tool_servers_for(self.agent_server_for(request)))
         )
+        agent_server_name = self._agent_server_name(request, handles)
+        LOGGER.info("Agent route rollout=%s server=%s", request.episode_id.rollout_id, agent_server_name)
         agent_response = (
             NeMoGymResponse.model_validate(continuation["response"]) if continuation.get("response") else None
         )
@@ -359,7 +424,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 if cause is None and "failure_report" in extra and not unselected:
                     action = OutcomeAction.FAIL
                 elif cause is not None and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
-                    action = self._timeout_action(action)
+                    action = self._timeout_action(action, agent_server_name)
                 elif cause is not None and cause.failure_kind == MODEL_REQUEST_ERROR and cause.http_status is None:
                     # An enclosing HTTP 500 is not a provider verdict or evidence of an unexecuted request.
                     action = action if self._model_request_not_sent(agent_response) else OutcomeAction.FAIL
@@ -399,7 +464,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     "trajectory": dumped_trajectory(),
                 },
             )
-            skipped_reward = self._skipped_verification_reward()
+            skipped_reward = self._skipped_verification_reward(agent_server_name=agent_server_name)
             if skipped_reward is None:
                 async with self.checkpoint_step(request, handles.resources_verify_step_type):
                     verification = await self._verify(request, handles, agent_response, observations, trajectory)
@@ -437,7 +502,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             failure_report=final_zero_report,
             task_id=request.task.task_id,
             result=verification.model_copy(
-                update={NG_AGENT_OBSERVATIONS_KEY: observations, NG_TRAJECTORY_KEY: trajectory}
+                update={
+                    NG_AGENT_OBSERVATIONS_KEY: observations,
+                    NG_TRAJECTORY_KEY: trajectory,
+                    **({"ng_agent_server": agent_server_name} if self.config.agent_server_pool is not None else {}),
+                }
             ),
         )
 
@@ -611,7 +680,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         try:
             agent_create_http_response = await self.server_client.post(
-                server_name=self.config.agent_server.name,
+                server_name=self._agent_server_name(request, handles),
                 url_path="/v1/agent_sessions",
                 json=AgentSeedSessionRequest(
                     agent_session_id=handles.agent_session_id,
@@ -655,9 +724,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 update={"input": [*input_items, NeMoGymEasyInputMessage(role="user", content=handles.observation)]}
             )
         try:
+            agent_server_name = self._agent_server_name(request, handles)
             agent_http_response = await self.server_client.post(
-                server_name=self.config.agent_server.name,
-                url_path=self._agent_responses_path(request),
+                server_name=agent_server_name,
+                url_path=self._agent_responses_path(request, agent_server_name=agent_server_name),
                 json=params,
                 cookies=handles.agent_cookies,
                 # The episode's only activation.
@@ -686,7 +756,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         self, request: SingleAgentTurnRequest, handles: "SessionHandles"
     ) -> AgentCloseSessionResponse:
         close_http_response = await self.server_client.post(
-            server_name=self.config.agent_server.name,
+            server_name=self._agent_server_name(request, handles),
             url_path="/v1/agent_sessions/close",
             json=AgentCloseSessionRequest(
                 agent_session_id=handles.agent_session_id,
@@ -854,12 +924,12 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             for event in attempts
         )
 
-    def _timeout_action(self, fallback: OutcomeAction) -> OutcomeAction:
+    def _timeout_action(self, fallback: OutcomeAction, agent_server_name: str) -> OutcomeAction:
         """Keep the migrated agent's explicit timeout rule unless the environment overrides policy."""
         policy = self.config.agent_outcome_policy
         if MODEL_POLICY_RESPONSE_TIMEOUT in policy.by_failure_kind or "default_action" in policy.model_fields_set:
             return fallback
-        agent = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
+        agent = get_first_server_config_dict(self.server_client.global_config_dict, agent_server_name)
         rules = (agent.get("outcome_policy") or {}).get("by_failure_kind") or {}
         if MODEL_POLICY_RESPONSE_TIMEOUT in rules:
             return OutcomeAction(rules[MODEL_POLICY_RESPONSE_TIMEOUT])
@@ -872,15 +942,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         # The migrated SimpleAgent /run boundary defaults confirmed timeouts to retry.
         return OutcomeAction((agent.get("outcome_policy") or {}).get("default_action", OutcomeAction.RETRY))
 
-    def _skipped_verification_reward(self) -> float | None:
+    def _skipped_verification_reward(self, *, agent_server_name: str | None = None) -> float | None:
         """The fixed reward that replaces /verify, or None to verify.
 
-        This server's own setting wins; otherwise the bound agent's applies.
+        This server's own setting wins; otherwise the selected agent's applies.
         The agent's raw values are parsed as the agent's own config parses them, so a string "false" stays false.
         """
         agent_config = get_first_server_config_dict(
             self.server_client.global_config_dict,
-            self.config.agent_server.name,
+            agent_server_name if agent_server_name is not None else self.config.agent_server.name,
         )
         skip = self.config.skip_verification
         if skip is None:
@@ -892,11 +962,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             reward = TypeAdapter(float).validate_python(agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0))
         return reward
 
-    def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
+    def _agent_responses_path(self, request: SingleAgentTurnRequest, *, agent_server_name: str | None = None) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         agent_config = get_first_server_config_dict(
             self.server_client.global_config_dict,
-            self.config.agent_server.name,
+            agent_server_name if agent_server_name is not None else self.agent_server_for(request),
         )
         # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
         token_capture = (
