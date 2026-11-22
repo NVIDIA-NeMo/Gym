@@ -58,7 +58,7 @@ flowchart LR
 
 **Alternative pattern (external):** some servers call an **OpenAI-compatible** `chat.completions` client pointed at URLs you supply, such as HPC or a separate cluster. [`proof_verification`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/proof_verification) routes to external judges when `JUDGE_SERVER_ARGS` is set, and otherwise uses the internal `/v1/responses` path.
 
-The [STEM question-bank preset](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/stem_judge#question-bank-grading-options) supports boxed answers, per-environment math verification, extra grading rules, and three-way judgments with reasons.
+The [STEM question-bank preset](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/stem_judge#question-bank-grading-options) supports boxed answers, extra grading rules, and three-way judgments with reasons.
 
 For how NeMo Gym sits next to GPUs and training frameworks, refer to [Deployment Topology](/infrastructure/deployment-topology).
 

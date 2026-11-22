@@ -15,11 +15,8 @@
 """Tests for the stem_judge server: length guards, the boxed/free answer contract,
 verdict and rubric parsing, and the shipped config."""
 
-import asyncio
 import hashlib
 import json
-import multiprocessing as mp
-import signal
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -46,7 +43,6 @@ from nemo_gym.server_runtime import ReverifyMode, verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import judge_failsafe
 from resources_servers.stem_judge.app import (
-    MathVerifyConfig,
     RubricCriterion,
     StemJudgeConfig,
     StemJudgeResourcesServer,
@@ -170,15 +166,6 @@ class TestAnswerOptions:
         assert prompt.split("</rule>")[0] == original.split("</rule>")[0]
         assert result.reward == 1 and result.judge_evaluations[0].verdict_label == "Judgement: yes"
 
-    async def test_additional_rule_reaches_model_even_on_a_math_match(self, config):
-        config.math_verify = MathVerifyConfig()
-        config.boxed_judge_input = "box"
-        config.extra_answer_rules = ["Reject answers that omit the unit."]
-        server = _server(config, "Judgement: no")
-        result = await server.verify(_request(_split(r"\boxed{2}")))
-        assert result.grading_status == "judged" and result.reward == 0
-        assert config.extra_answer_rules[0] in _judge_prompt(server)
-
     def test_extra_rules_require_nonblank_text_and_an_insertion_point(self, config, tmp_path):
         with raises(ValidationError, match="extra_answer_rules"):
             StemJudgeConfig.model_validate(config.model_dump() | {"extra_answer_rules": ["  "]})
@@ -218,16 +205,6 @@ class TestAnswerOptions:
         with raises(ValueError, match="no digest for its rule file"):
             StemJudgeResourcesServer.load_config_from_global_config()
         config.extra_answer_rules_sha256 = "a" * 64
-        assert StemJudgeResourcesServer.load_config_from_global_config() is config
-
-    def test_managed_worker_requires_a_resolved_math_policy(self, config, monkeypatch):
-        from nemo_gym.server_runtime import SimpleResourcesServer
-
-        monkeypatch.setattr(SimpleResourcesServer, "load_config_from_global_config", classmethod(lambda cls: config))
-        config.math_verify = MathVerifyConfig(units=False)
-        with raises(ValueError, match="omits units or bidirectional"):
-            StemJudgeResourcesServer.load_config_from_global_config()
-        config.math_verify = MathVerifyConfig(units=False, bidirectional=True)
         assert StemJudgeResourcesServer.load_config_from_global_config() is config
 
     def test_changed_rule_file_is_refused_by_the_worker(self, config, tmp_path):
@@ -414,64 +391,6 @@ class TestAnswerOptions:
         result = await server.verify(_request(_split(r"\boxed{2}")))
         assert result.reward == 1 and not result.mask_sample
 
-    @mark.parametrize("verdict,status", [("yes", "judged"), ("no", "judged"), ("unresolved", "judge_unresolved")])
-    async def test_math_match_skips_model_and_nonmatch_uses_the_same_box(self, config, verdict, status):
-        config.box_parser = "last_command"
-        config.boxed_judge_input = "box"
-        config.verdict_mode = "yes_no_unresolved"
-        config.math_verify = MathVerifyConfig()
-        server = _server(config, f"Judgement: '{verdict}'")
-        response = _split(r"\boxed{5} then \boxed {\frac{4}{2}}")
-        result = await server.verify(_request(response))
-        assert (result.reward, result.grading_status, result.judge_evaluations) == (1, "math_verified", [])
-        server.server_client.post.assert_not_awaited()
-        result = await server.verify(_request(response, expected="5"))
-        server.server_client.post.assert_awaited_once()
-        assert (result.reward, result.grading_status, result.verdict) == (float(verdict == "yes"), status, verdict)
-        assert result.mask_sample is (verdict == "unresolved")
-        assert _judge_prompt(server).endswith("**Student Solution**:\n" + r"\frac{4}{2}")
-
-    @mark.parametrize(
-        "options,reference,box,library_match",
-        [
-            ({"units": True, "bidirectional": False}, "3t", "3", True),
-            ({}, "3t", "3", False),
-            ({}, "2", r"2 \text{ (or 3)}", False),
-            ({}, r"12\,\text{J}", r"12\,\text{kJ}", False),
-            ({"units": False}, "3t", "t+t+t", True),
-            ({}, "0.0000001", "0.0000002", True),
-            ({"precision": 12}, "0.0000001", "0.0000002", False),
-            ({"units": False, "precision": 12}, "1/2", "0.5", True),
-            ({"bidirectional": False}, "1", "9=1", True),
-            ({}, "1", "9=1", False),
-            ({"bidirectional": True}, "1", "x=2=1", False),
-            ({"bidirectional": True}, "x=1", "x=2=1", False),
-            ({"bidirectional": True}, "1", "x=y=1", False),
-            ({"bidirectional": True}, "1", "x=2-1=1", True),
-            ({"bidirectional": True}, "1", "x=1", True),
-            ({"bidirectional": True}, "1", "1", True),
-            ({"bidirectional": True}, "1", "2", False),
-            ({}, "(1,2)", r"\{1,2\}", False),
-            ({"bidirectional": True}, r"\{1,2\}", "(1,2)", False),
-            ({"bidirectional": True}, "(1,2)", "(1,1+1)", True),
-            ({"bidirectional": True}, r"\{1,2\}", r"\{2,1\}", True),
-            ({"bidirectional": True}, r"\(\frac{1}{2}\)", "0.5", True),
-        ],
-    )
-    async def test_math_options_route_boxed_answers(self, config, options, reference, box, library_match):
-        config.boxed_judge_input = "box"
-        config.math_verify = MathVerifyConfig(**options)
-        server = _server(config, "Judgement: 'no'")
-        result = await server.verify(_request(_split(r"\boxed{" + box + "}"), expected=reference))
-        assert result.grading_status == ("math_verified" if library_match else "judged")
-        assert result.reward == float(library_match)
-        assert server.server_client.post.await_count == (0 if library_match else 1)
-
-    @mark.parametrize("precision", [-1, 1.5, True])
-    def test_math_precision_requires_nonnegative_decimal_places(self, precision):
-        with raises(ValidationError, match="precision"):
-            MathVerifyConfig(precision=precision)
-
     async def test_partial_judge_text_is_logged_without_grading_it(self, config, tmp_path):
         config.verdict_mode = "yes_no_unresolved"
         config.generation_log_dir = str(tmp_path)
@@ -482,89 +401,21 @@ class TestAnswerOptions:
         saved_log = json.loads(next(tmp_path.glob("*.jsonl")).read_text())
         assert saved_log["judge_generations"] == ["Judgement: yes"]
 
-    async def test_math_worker_unavailable_defers_to_judge(self, config, monkeypatch):
-        config.boxed_judge_input = "box"
-        config.math_verify = MathVerifyConfig()
-        server = _server(config, "Judgement: 'yes'")
-        monkeypatch.setattr(server._math_library, "matches", AsyncMock(side_effect=OSError))
-        result = await server.verify(_request(_split(r"\boxed{2}")))
-        server.server_client.post.assert_awaited_once()
-        assert (result.reward, result.grading_status) == (1, "judged")
-
-    async def test_math_timeout_defers_to_stem_verdict(self, config, monkeypatch):
-        def slow_match(*args):
-            time.sleep(1)
-            return 1.0, "2"
-
-        monkeypatch.setattr("resources_servers.stem_judge.boxed_math._run_math_verify", slow_match)
-        config.boxed_judge_input = "box"
-        config.math_verify = MathVerifyConfig(timeout_seconds=0.02)
-        server = _server(config, "Judgement: 'yes'")
-        result = await server.verify(_request(_split(r"\boxed{2}")))
-        server.server_client.post.assert_awaited_once()
-        assert (result.reward, result.grading_status) == (1, "judged")
-
-    async def test_cancelling_symbolic_workers_keeps_the_loop_responsive(self, config, monkeypatch, tmp_path):
-        def unresponsive_worker(reference, *_):
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            (tmp_path / reference).touch()
-            time.sleep(15)
-
-        monkeypatch.setattr("resources_servers.stem_judge.boxed_math._score_box", unresponsive_worker)
-        config.math_verify = MathVerifyConfig(max_concurrency=3)
-        library = _server(config)._math_library
-        children_before = set(mp.active_children())
-        tasks = [asyncio.create_task(library.matches(str(i), "2")) for i in range(3)]
-        try:
-            async with asyncio.timeout(5):
-                while len(list(tmp_path.iterdir())) < len(tasks):
-                    await asyncio.sleep(0.01)
-            for task in tasks:
-                task.cancel()
-            loop = asyncio.get_running_loop()
-            start = loop.time()
-            await asyncio.sleep(0.05)  # An unrelated request must still be able to run during cleanup.
-            assert loop.time() - start < 0.75
-            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-            assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
-            assert set(mp.active_children()) <= children_before
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    @mark.parametrize(
-        "row,view,reply",
-        [
-            ({"answer_format": "free"}, "box", "Judgement: 'no'"),
-            ({}, "final_answer", "Judgement: 'no'"),
-            ({"rubric": RUBRIC}, "box", '{"r1":false,"r2":false,"r3":false}'),
-        ],
-    )
-    async def test_math_precheck_skips_rubrics_and_whole_answers(self, config, row, view, reply):
-        config.boxed_judge_input = view
-        config.math_verify = MathVerifyConfig()
-        server = _server(config, reply)
-        result = await server.verify(_request(_split(r"\boxed{2}"), **row))
-        server.server_client.post.assert_awaited_once()
-        assert result.reward == 0 and result.grading_status == "judged"
-
-    async def test_question_bank_preset_uses_json_and_the_environment_selects_math(self, config):
+    async def test_question_bank_preset_uses_json(self, config):
         preset = yaml.safe_load((SERVER_DIR / "configs/question_bank.yaml").read_text())
         config = StemJudgeConfig.model_validate(
             config.model_dump() | preset["stem_judge"]["resources_servers"]["stem_judge"]
         )
-        row = _request(_split(r"\boxed{2}"), math_equivalence=True)  # Older rows may still carry the flag.
+        row = _request(_split(r"\boxed{2}"))
         judgment = {"verdict": "correct", "reason_code": "equal", "evidence": "2 equals 2"}
         server = _server(config, _response(NeMoGymEasyInputMessage(role="assistant", content=json.dumps(judgment))))
         result = await server.verify(row)
         server.server_client.post.assert_awaited_once()
         assert result.verdict == "yes" and result.judge_evaluations[0].judgment.model_dump() == judgment
 
-        server = _server(config.model_copy(update={"math_verify": MathVerifyConfig()}))
-        result = await server.verify(row.model_copy(update={"math_equivalence": False}))
-        server.server_client.post.assert_not_awaited()
-        assert result.grading_status == "math_verified" and result.reward == 1
+    def test_enabled_symbolic_config_requires_the_math_feature(self, config):
+        with raises(ValidationError, match="math_verify"):
+            StemJudgeConfig.model_validate(config.model_dump() | {"math_verify": {}})
 
     async def test_reverify_drops_stale_answer_evidence(self, config):
         server = _server(config, "Judgement: 'yes'")

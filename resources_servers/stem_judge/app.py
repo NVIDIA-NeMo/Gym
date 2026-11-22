@@ -44,8 +44,7 @@ records why in ``grading_status``:
 4. ``answer_too_long``: the judge would see the whole final answer and it is
    over ``max_answer_chars``.
 
-An opt-in Math-Verify match on a box-only answer row earns 1 immediately.
-Otherwise the server makes one judge call. By default, answer rows end with
+After the gates, the server makes one judge call. By default, answer rows end with
 ``Judgement: 'yes'|'no'`` (reward 1 or 0). Rubric rows end with a JSON object
 marking every criterion and the server sums the points. A judge reply that cannot be parsed scores 0
 (``judge_unparsed``). A failed judge call is retried by ``call_judge`` when another
@@ -124,16 +123,6 @@ VERDICT_FALLBACK_PATTERN = (
 )
 
 
-class MathVerifyConfig(BaseModel, extra="forbid"):
-    units: bool = Field(
-        default=False, description="Allow Math-Verify to strip suffixes, including trailing text blocks."
-    )
-    precision: int = Field(default=6, ge=0, strict=True, description="Decimal places for comparing floats.")
-    bidirectional: bool = Field(default=True, description="Require Math-Verify to match in both directions.")
-    timeout_seconds: float = Field(default=10.0, gt=0, allow_inf_nan=False)
-    max_concurrency: int = Field(default=8, gt=0)
-
-
 class StemJudgeConfig(BaseResourcesServerConfig):
     """Configuration for the stem_judge server.
 
@@ -176,7 +165,8 @@ class StemJudgeConfig(BaseResourcesServerConfig):
     verdict_mode: VerdictMode = "binary"
     verdict_format: VerdictFormat = "line"
     box_parser: Literal["exact", "last_command"] = "exact"
-    math_verify: MathVerifyConfig | None = None
+    # Reject enabled configurations from the stacked Math-Verify feature before grading.
+    math_verify: None = None
 
     # --- Answer contract. A row's own answer_format wins. ---
     default_answer_format: Literal["boxed", "free"] = "boxed"
@@ -452,12 +442,6 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
     @classmethod
     def load_config_from_global_config(cls) -> StemJudgeConfig:
         config = super().load_config_from_global_config()
-        math = config.math_verify
-        if math is not None and not {"units", "bidirectional"}.issubset(math.model_fields_set):
-            raise ValueError(
-                "The saved STEM math_verify config omits units or bidirectional. Resolve the config with Gym "
-                "before starting the worker, or explicitly set both options for this run."
-            )
         if isinstance(config.extra_answer_rules, str) and config.extra_answer_rules_sha256 is None:
             raise ValueError(
                 "The saved STEM config has no digest for its rule file. Resolve the config with Gym before starting the worker."
@@ -486,12 +470,6 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         # A custom template with an unknown placeholder or a stray brace fails here, not on every judged row.
         self._answer_template.format(question="", expected_answer="", generated_answer="")
         self._rubric_template.format(question="", expected_answer="", rubric="", generated_answer="")
-
-        self._math_library = None
-        if (math_config := self.config.math_verify) is not None and not rules:
-            from resources_servers.stem_judge.boxed_math import BoxedMathVerifier
-
-            self._math_library = BoxedMathVerifier(math_config, self.config.name)
 
         # The host and pid suffix keeps server worker processes from sharing one file. Writes run
         # in a worker thread so a slow filesystem does not stall the event loop; the lock keeps the
@@ -535,15 +513,6 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         judges_whole_answer = answer_format == "free" or cfg.boxed_judge_input == "final_answer"
         if judges_whole_answer and cfg.max_answer_chars is not None and len(final) > cfg.max_answer_chars:
             return await zero("answer_too_long")
-
-        if self._math_library and not body.rubric and not judges_whole_answer:
-            try:
-                matches = await self._math_library.matches(expected, solution)
-            except OSError as exc:
-                logger.warning("Math-Verify unavailable, grading with the STEM judge: %s", exc)
-            else:
-                if matches:
-                    return await self._finish(body, expected, answer_format, "math_verified", 1.0, solution, [])
 
         question = _extract_question_text(body.responses_create_params, self._question_regex())
         grade = self._grade_rubric if body.rubric else self._grade_answer
@@ -653,8 +622,6 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             "library_reward",
         ):
             payload.pop(key, None)
-        if status == "math_verified":
-            payload["library_reward"] = reward
         if self.config.verdict_mode == "yes_no_unresolved" and not body.rubric:
             unknown = status in ("judge_unparsed", "judge_unresolved")
             payload.update(

@@ -68,7 +68,6 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
-from nemo_gym.rollouts.rollout_recovery import ResumeRefusedError, RunManifest, validate_resume
 
 
 @fixture(autouse=True)
@@ -169,39 +168,6 @@ class TestGlobalConfig:
         settings["extra_answer_rules_sha256"] = digest
         with raises(ConfigError, match="differs from its saved SHA-256"):
             resolve()
-
-    @mark.parametrize(
-        "previous", [None, {}, {"units": False}, {"bidirectional": True}, {"units": True, "bidirectional": False}]
-    )
-    def test_stem_math_resume_uses_the_effective_grading_policy(self, previous, tmp_path):
-        settings = {"entrypoint": "app.py", "domain": "other", "math_verify": previous}
-        config = GlobalConfigDictParser().parse(
-            GlobalConfigDictParserConfig(
-                initial_global_config_dict=DictConfig({"my_judge": {"resources_servers": {"stem_judge": settings}}}),
-                skip_load_from_cli=True,
-                skip_load_from_dotenv=True,
-                offline=True,
-            )
-        )
-        resolved = OmegaConf.to_container(config, resolve=True)
-        effective = resolved["my_judge"]["resources_servers"]["stem_judge"]["math_verify"]
-        assert effective == ({"units": False, "bidirectional": True} | previous if previous is not None else None)
-
-        source = tmp_path / "rows.jsonl"
-        source.write_text("{}\n")
-        manifest = tmp_path / "run.manifest.json"
-        current = RunManifest.create(source, [{}], {}, resolved)
-        current.write(manifest)
-        assert validate_resume(manifest, current, source).run_id == current.run_id
-
-        resolved["my_judge"]["resources_servers"]["stem_judge"]["math_verify"] = previous
-        older = RunManifest.create(source, [{}], {}, resolved)
-        older.write(manifest)
-        if previous == effective:
-            assert validate_resume(manifest, current, source).run_id == older.run_id
-        else:
-            with raises(ResumeRefusedError, match="math_verify"):
-                validate_resume(manifest, current, source)
 
     def test_offline_resolution_uses_invalid_port_without_probing(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)

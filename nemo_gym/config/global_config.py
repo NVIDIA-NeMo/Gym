@@ -87,11 +87,6 @@ logger = logging.getLogger(__name__)
 
 def _resolve_stem_grading_settings(settings: DictConfig) -> None:
     """Record the grading policy used by the worker in the configuration saved for resume."""
-    math = settings.get("math_verify")
-    if isinstance(math, DictConfig):
-        # Older STEM workers stripped suffixes and accepted one-way matches when these options were omitted.
-        with open_dict(settings):
-            settings.math_verify = OmegaConf.merge({"units": False, "bidirectional": True}, math)
     rules = settings.get("extra_answer_rules")
     if not isinstance(rules, str):
         return

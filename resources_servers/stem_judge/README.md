@@ -38,8 +38,7 @@ the reason in `grading_status`.
 | `box_too_long` | The box is longer than `max_box_chars` (off by default). |
 | `answer_too_long` | The judge would see the whole final answer, and it is longer than `max_answer_chars`. |
 
-After the gates, a match from the optional Math-Verify check earns 1 immediately.
-The base configuration sends all other rows to the judge as follows. The
+After the gates, the base configuration sends the row to the judge. The
 [question-bank preset](#question-bank-grading-options) also supports masked abstentions and JSON reasons.
 
 - **Answer rows:** the stem_v11 prompt. The judge's last `Judgement: 'yes'|'no'`
@@ -171,57 +170,16 @@ usual model arguments. It includes the base config and overrides its answer opti
 | `verdict_format` | `line` | `json` saves the verdict, reason code and supporting evidence on model-judged answer rows. |
 | `box_parser` | `exact` | `last_command` recognizes whitespace before the opening brace, skips escaped commands, and rejects a malformed final box even when an earlier one is valid. |
 | `boxed_judge_input` | `final_answer` | `box` grades the extracted answer. Free-answer rows use their full final message. |
-| `math_verify` | Disabled | Disabled. Set `math_verify: {}` on a math environment to check boxed answer comparisons. A match earns 1 immediately. A nonmatch or timeout sends the same extracted box to the LLM judge. |
 
 Set each option independently. The prompt options reuse the sections of the shipped
 `stem_v11.txt` template. Custom templates used with those options must retain its section
-markers. Enable Math-Verify only for sources where symbolic equivalence establishes
-the answer. Route other sources to a STEM instance with `math_verify: null`.
-Free answers, whole-answer comparisons and rubric rows always use the judge. Gym
-marks the individual sample. On NeMo RL branches that provide SingleController's
+markers. Gym marks the individual sample. On NeMo RL branches that provide SingleController's
 `grpo.exclude_failed_judge_groups`, enable it with NeMo Gym, `grpo.use_dynamic_sampling=true`
 and `env.should_mask_flagged_samples=true` to exclude and refill the entire group.
 
 If recovery rejudges a saved answer, a parsed `unresolved` verdict completes the
 regrade once. The saved answer stays masked with unknown correctness. A malformed
 judge reply leaves the original answer eligible for another grading attempt.
-
-With `math_verify: {}`, STEM preserves unit suffixes (`units: false`) and checks
-both comparison directions (`bidirectional: true`). A box containing `12 kJ`
-for a `12 J` reference goes to the judge. To reproduce the standalone library
-settings, set `units: true`, `bidirectional: false`, and `precision: 6`. Unit
-stripping can also remove variables such as the `t` in `3t` and trailing LaTeX
-text. `precision` defaults to six decimal places for float comparisons.
-Gym records the effective `units` and `bidirectional` values when math verification
-is enabled. Start a new run if an earlier manifest omitted either value. A run
-that explicitly set both options can resume with the same grading policy.
-At 6 places, `0.0000001` and `0.0000002` compare equal. At 12 they go to the judge.
-For reference `1`, the library accepts `9=1` in only one direction, so STEM
-sends that box to the judge. It accepts `x=1` in both directions. Only a
-forward match between different strings incurs a second comparison. Both
-comparisons share one worker and timeout. For mathematical sets, STEM also asks
-SymPy to prove that their symmetric difference is empty. An open interval and its endpoint set go to the model judge. Equivalent
-intervals and reordered finite sets can still earn automatic credit. For a chain
-such as `x=2=1`, the reverse check accounts for each equality. A contradiction
-or additional unresolved constraint goes to the judge.
-
-For example, add this override to the question-bank launch command to configure one
-STEM instance for algebra:
-
-```sh
-'++stem_judge.resources_servers.stem_judge.math_verify={units:false,precision:12,bidirectional:true}'
-```
-
-To route a math question through STEM, enable Math-Verify on the question-bank preset and give the
-dataset row the STEM agent reference, as in this JSONL row.
-
-```json
-{"agent_ref":{"type":"responses_api_agents","name":"stem_judge_simple_agent"},"answer_format":"boxed","expected_answer":"1/2","responses_create_params":{"input":[{"role":"user","content":"What is 2 divided by 4? Put only the final answer in \\boxed{}."}]}}
-```
-
-For this row, `\boxed{0.5}` earns 1 through Math-Verify. If the library cannot
-establish equivalence, the configured STEM judge sees the question, reference and
-selected box. The STEM process runs the library check locally.
 
 The question-bank preset requests a structured explanation. Select `verdict_format: line`
 to use the text verdict instead.
@@ -236,8 +194,7 @@ the usual `verdict_label`. The optional generation log records it in `judgments`
 Binary mode accepts `correct` and `incorrect`. Three-way mode also accepts
 `unresolved`. A missing reason, blank evidence, duplicate field, or truncated
 reply produces `judge_unparsed`. Binary mode gives an unparsed reply reward zero.
-Three-way mode masks it as unknown. Symbolic matches produce `math_verified`
-with an empty `judge_evaluations` list.
+Three-way mode masks it as unknown.
 
 The solver instruction is a separate generation option. For a dataset of **boxed**
 questions with a raw `question` field, render it once before generating rollouts:

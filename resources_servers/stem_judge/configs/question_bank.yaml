@@ -10,5 +10,4 @@ stem_judge:
       verdict_format: json
       box_parser: last_command
       boxed_judge_input: box
-      math_verify: null  # Set to {} for STEM's unit-preserving, bidirectional precheck.
       verified: false
