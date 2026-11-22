@@ -14,7 +14,7 @@ seed, verify, close, fences and expiry it keeps as they are:
 - a release deletes the snapshots of checkpoints the controller no longer keeps.
 
 What a snapshot holds depends on the provider: always the sandbox's files, and its running processes too when the
-provider's ``snapshot_keeps_processes`` says so (a VM memory snapshot).
+provider's ``capabilities.snapshot_keeps`` says so (a VM memory snapshot).
 
 With checkpointing on, a server exports its sessions only when its sandbox provider can snapshot; otherwise it runs
 ``restart_only``, and its episodes start over after a crash. A server whose grader needs something a snapshot of its

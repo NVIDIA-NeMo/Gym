@@ -96,7 +96,7 @@ A commit snapshots each session's task sandbox through the provider and indexes 
 `<checkpoint.state_dir>/<server>/snapshots/<checkpoint id>/`. It exports the seed, the agent's working directory, the
 patch verify captured (if it has) and the task state. The snapshot is the restore point: a restore forks it into a new
 sandbox, whatever happened to the original since. What the snapshot keeps depends on the provider: always the
-sandbox's **files**, and its **running processes** too when the provider's `snapshot_keeps_processes` says so (a VM
+sandbox's **files**, and its **running processes** too when the provider's `capabilities.snapshot_keeps` says so (a VM
 memory snapshot). The checkpoint records which it was (`keeps_processes`).
 
 - **Grade a captured patch, not a live sandbox.** Declare `checkpoint_verify = "replay"`: a checkpoint does not wait

@@ -20,6 +20,7 @@ import pytest
 
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -2010,13 +2011,15 @@ async def test_an_export_records_whether_the_providers_snapshots_keep_processes(
     assert state_of(files_only, "s1").keeps_processes is False
 
     keeping = FakeSnapshotProvider()
-    keeping.snapshot_keeps_processes = True  # type: ignore[attr-defined]
+    keeping.capabilities = SandboxCapabilities(  # type: ignore[attr-defined]
+        snapshot_keeps=frozenset({"files", "processes"})
+    )
     exported = await (await seeded(keeping, state_dir / "vm", "s1")).export(["s1"], checkpoint_id="c1")
     assert state_of(exported, "s1").keeps_processes is True
 
-    # Only the provider's own True counts: anything else is read as files only.
+    # Only a declared SandboxCapabilities counts: anything else is read as files only.
     truthy = FakeSnapshotProvider()
-    truthy.snapshot_keeps_processes = "yes"  # type: ignore[attr-defined]
+    truthy.capabilities = {"snapshot_keeps": {"processes"}}  # type: ignore[attr-defined]
     exported = await (await seeded(truthy, state_dir / "truthy", "s1")).export(["s1"], checkpoint_id="c1")
     assert state_of(exported, "s1").keeps_processes is False
 
