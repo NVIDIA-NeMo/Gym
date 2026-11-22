@@ -61,6 +61,8 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server, or by a task folder's `tests/` (or its dataset's shared `verifier.py`), run in the task's sandbox or a fresh one. Also called scorer or grader. See [Build Verifiers](/build-verifiers) and [Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers). |
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
+| **Sandbox lease** | The short timeout a provider creates a sandbox with and renews while the process that created it lives (`create.renew_ttl_s` on OpenSandbox and E2B), so a process that dies leaves its sandboxes for one lease instead of their full lifetime. Unrelated to the checkpoint settings' `lease_grace_seconds`. |
+| **Sandbox capabilities** | What a sandbox provider class can do, declared as its `capabilities` (`SandboxCapabilities`) and read with `provider_capabilities()`. `snapshot_keeps` says what a snapshot keeps: files only, or running processes too. |
 
 ### Sessions
 

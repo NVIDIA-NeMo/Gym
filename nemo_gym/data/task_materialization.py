@@ -20,6 +20,13 @@ from nemo_gym.core.episode_types import TaskId
 TASK_ID_FIELDS = ("task_id", "problem_id", "instance_id")
 
 
+def require_row_in_taskset(row: Mapping[str, JsonValue], taskset: str) -> None:
+    """Refuse an already materialized row that names another taskset than the one its dataset declares."""
+    named = row["task_id"].get("taskset")
+    if named != taskset:
+        raise ValueError(f"task_id.taskset {named!r} differs from the dataset taskset {taskset!r}")
+
+
 def materialize_task(
     row: Mapping[str, JsonValue], *, taskset: str, task_index: int | None = None
 ) -> dict[str, JsonValue]:

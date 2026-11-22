@@ -48,7 +48,7 @@ from responses_api_agents.codex_agent.app import (
     CodexAgentConfig,
     _model_endpoint_error,
 )
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -165,6 +165,16 @@ class Sandbox:
             self.files[shlex.split(destination)[0]] = self.files.pop(shlex.split(source)[0])
         if "exec bash " in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
+        if command.startswith("tail -c "):
+            # preserve_failure_artifacts trims a log inside the sandbox before downloading it.
+            limit, source, _, target = shlex.split(command)[2:6]
+            if source not in self.files:
+                return SimpleNamespace(error_type=None, return_code=1, stdout="", stderr=f"tail: {source}: missing")
+            self.files[target] = self.files[source][-int(limit) :]
+            return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
+        if command.startswith("readlink ") and "launch.claim" in command:
+            # stop_and_confirm_cleanup asks who won the launch claim.
+            return SimpleNamespace(error_type=None, return_code=0, stdout="launch\n", stderr="")
         if "echo absent" in command:
             # The adapter checks whether a stopped worker left a transcript.
             present = any(path.endswith("/events.jsonl") for path in self.files)
@@ -713,6 +723,95 @@ def test_unreadable_startup_stderr_does_not_hold_the_activation(setup):
     assert result.json()["detail"] == "Codex execution failed: Codex exited with code 1"
     # The read is bounded by session_close_timeout_seconds (1 s in this fixture).
     assert elapsed < 5
+
+
+def _supervisor_left_no_receipt(sandbox):
+    """Seen in a real run: Codex ran, the launch exec returned, no cleanup.json."""
+
+    def publish():
+        sandbox.files[f"{sandbox.directory}/runtime.json"] = json.dumps({"hostname": "task-container", "pid": 2})
+        sandbox.files[f"{sandbox.directory}/events.jsonl"] = sandbox.events
+        sandbox.files[f"{sandbox.directory}/output.log"] = "supervisor diagnostics"
+
+    sandbox.publish = publish
+
+
+def test_missing_receipt_confirmed_by_provider_completes_and_keeps_diagnostics(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        state = agent._session_records[session_id].state
+        assert state.session.cleanup_receipt_missing
+        assert "cleanup_receipt_missing" in {gap.code for gap in state.observations.gaps}
+        commands = [
+            str(call.args[0] if call.args else call.kwargs.get("command")) for call in sandbox.exec.await_args_list
+        ]
+        assert not any("stop.request" in command and "touch " in command for command in commands)
+        sandbox.launch.assert_awaited_once()
+        (saved,) = (tmp_path / "failures").iterdir()
+        assert (saved / "output.log").read_text() == "supervisor diagnostics"
+        summary = json.loads((saved / "failure.json").read_text())
+        assert summary["cleanup_receipt_missing"] is True and summary["failure"] is None
+        assert "cleanup.json" in summary["unavailable"] and "events.jsonl" in summary["copied"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    sandbox.disconnect.assert_awaited_once()
+
+
+def test_failure_logs_are_trimmed_inside_the_sandbox_before_the_download(setup, tmp_path, monkeypatch):
+    from responses_api_agents.codex_agent import sandbox as sandbox_module
+
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    monkeypatch.setattr(sandbox_module, "FAILURE_ARTIFACT_MAX_BYTES", 10)
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+    (saved,) = (tmp_path / "failures").iterdir()
+    # Only the tail crossed into the Agent Server: the sandbox trimmed "supervisor diagnostics" first.
+    assert (saved / "output.log").read_text() == "iagnostics"
+    commands = [
+        str(call.args[0] if call.args else call.kwargs.get("command")) for call in sandbox.exec.await_args_list
+    ]
+    assert any(command.startswith("tail -c 10 ") and "output.log" in command for command in commands)
+
+
+def test_unprovable_missing_receipt_fails_closed_and_preserves_logs(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)  # this provider cannot prove termination
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code >= 500
+        (saved,) = (tmp_path / "failures").iterdir()
+        assert (saved / "output.log").read_text() == "supervisor diagnostics"
+        summary = json.loads((saved / "failure.json").read_text())
+        assert "launch outcome is unknown" in summary["failure"]
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code >= 500
+    sandbox.disconnect.assert_not_awaited()
+
+
+def test_failure_artifacts_are_off_by_default(setup, tmp_path, monkeypatch):
+    agent, sandbox = setup
+    monkeypatch.chdir(tmp_path)
+    _supervisor_left_no_receipt(sandbox)
+    # The guard itself, not preserve_failure_artifacts' own error handling, must keep it from running.
+    preserve = AsyncMock()
+    monkeypatch.setattr(CodexSandboxSession, "preserve_failure_artifacts", preserve)
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code >= 500
+    preserve.assert_not_awaited()
+    assert not list(tmp_path.iterdir())
 
 
 def test_several_workers_seed_sessions(setup):
@@ -1403,7 +1502,7 @@ async def test_close_stops_config_staging_before_releasing_the_sandbox(setup):
             raise
 
     sandbox.upload = stall_config
-    sandbox.disconnect.side_effect = lambda: events.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: events.append("sandbox released")
     request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
     # The configuration carries the grant's headers.
     body = AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": [mcp_grant()]})
@@ -1812,7 +1911,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
 
-    async def disconnect():
+    async def disconnect(**_):
         clock[0] = 200.0
 
     sandbox.disconnect.side_effect = disconnect
@@ -1829,7 +1928,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -3271,8 +3370,8 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, owned):
         await asyncio.Future()
 
     state.execute = pause_after_capture
-    sandbox.stop.side_effect = sandbox.files.clear
-    sandbox.disconnect.side_effect = sandbox.files.clear
+    sandbox.stop.side_effect = lambda **_: sandbox.files.clear()
+    sandbox.disconnect.side_effect = lambda **_: sandbox.files.clear()
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(captured.wait(), 2)
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))
@@ -4246,7 +4345,7 @@ async def test_close_cancels_image_staging_before_sandbox_release(setup):
         await upload(source, destination)
 
     sandbox.upload = stall
-    sandbox.disconnect.side_effect = lambda: order.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: order.append("sandbox released")
     request, session_id, task = await start_image_activation(agent)
     await asyncio.wait_for(staging.wait(), 2)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))

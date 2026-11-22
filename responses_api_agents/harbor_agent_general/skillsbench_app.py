@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from harbor.models.job.config import JobConfig
+from harbor.models.task.config import TaskConfig
 from harbor.models.trial.result import TrialResult
 from ray.exceptions import RayTaskError
 
@@ -70,6 +71,12 @@ class SkillsBenchHarborAgent(HarborAgent):
         extra_body = json.loads(metadata.get("extra_body", "{}"))
         if "seed" in extra_body:
             kwargs["responses_create_params"]["seed"] = extra_body["seed"]
+        # Harbor hands the trial's agent deadline only to its oracle agent; resolve it the same way here.
+        agent = job_config.agents[0]
+        task = TaskConfig.model_validate_toml((job_config.datasets[0].path / body.task_name / "task.toml").read_text())
+        budget = min(agent.override_timeout_sec or task.agent.timeout_sec, agent.max_timeout_sec or float("inf"))
+        multiplier = job_config.agent_timeout_multiplier
+        kwargs["agent_timeout_sec"] = budget * (job_config.timeout_multiplier if multiplier is None else multiplier)
 
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         reason = verifier_infrastructure_failure(trial_dir)

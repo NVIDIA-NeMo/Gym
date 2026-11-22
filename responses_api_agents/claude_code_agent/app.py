@@ -31,7 +31,7 @@ from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -75,25 +75,45 @@ from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, B
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
-    ContextCompactionObservation,
     ObservationGap,
     SandboxObservation,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.claude_code_agent.observability import (
+    ClaudeCodeTranscripts,
     associate_claude_code_compaction_calls,
+    captured_claude_code_usage,
     extract_claude_code_observations,
+    read_transcripts,
 )
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
 from responses_api_agents.claude_code_agent.sandbox import (
     ClaudeCodeSandboxSession,
     parse_artifact_observations,
+    read_artifact_transcripts,
 )
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
+from responses_api_agents.claude_code_agent.system_dependencies import system_dependencies_command
 
 
 LOG = logging.getLogger(__name__)
+# Environment the agent sets itself; extra_env may not replace it.
+_MANAGED_ENV = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        "CLAUDE_CONFIG_DIR",
+    }
+)
 # Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash.
 _BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
     [ "$(id -u)" = 0 ] || { echo "Claude Code sandbox sessions require bash: preinstall it or use a root image." >&2; exit 1; }
@@ -130,6 +150,8 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     allowed_tools: Optional[str] = None
     disallowed_tools: Optional[str] = None
+    tools: Optional[str] = None
+    session_name: Optional[str] = None
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
@@ -142,7 +164,7 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
     bare: bool = True
     mcp_config: Optional[str] = None
-    settings: Optional[str] = None
+    settings: str | dict[str, Any] | None = None
 
     # Used only when an episode does not supply a borrowed SandboxAccess.
     sandbox_provider: str | None = None
@@ -160,6 +182,44 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Sandbox sessions: pass the instruction on the CLI's stdin, as Harbor 0.24's claude-code agent pipes
+    # it, instead of as an argument. It then never appears on a command line that an agent's
+    # `pkill -f <word from its task>` could match.
+    instruction_on_stdin: bool = False
+    # Sandbox sessions: accept a task workdir of "/" (images without a WORKDIR). The runtime and session
+    # files then sit under /tmp inside it, as a harness's own files do there.
+    allow_root_workdir: bool = False
+    # Sandbox sessions: run Harbor 0.24's system-dependency step for its claude-code agent (curl, bash,
+    # nodejs, npm and procps, installed when missing) before installing Claude Code. As in Harbor, a failed
+    # install (a nonzero package-manager exit) fails session setup, so the episode is retried, never graded.
+    harbor_system_dependencies: bool = False
+    system_dependencies_timeout_seconds: float = Field(default=1800, gt=0, allow_inf_nan=False)
+    # Claude Code's --effort (low, medium, high, xhigh or max), as Harbor passes its reasoning effort.
+    reasoning_effort: Optional[str] = None
+    # The per-call output cap, as CLAUDE_CODE_MAX_OUTPUT_TOKENS; None keeps the CLI's own default.
+    max_output_tokens: Optional[int] = Field(default=None, gt=0)
+    # Further Claude Code client environment, e.g. {API_TIMEOUT_MS: "3600000"}. The variables the agent
+    # sets itself (endpoint, credentials, model, CLAUDE_CONFIG_DIR, the output cap) are rejected.
+    extra_env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("extra_env", mode="before")
+    @classmethod
+    def _stringify_numbers(cls, value: Any) -> Any:
+        # YAML and Hydra overrides turn API_TIMEOUT_MS=3600000 into an int.
+        if isinstance(value, Mapping):
+            return {
+                key: str(item) if isinstance(item, int) and not isinstance(item, bool) else item
+                for key, item in value.items()
+            }
+        return value
+
+    @field_validator("extra_env")
+    @classmethod
+    def _reject_managed_env(cls, value: dict[str, str]) -> dict[str, str]:
+        managed = sorted(_MANAGED_ENV & value.keys())
+        if managed:
+            raise ValueError(f"extra_env cannot set {', '.join(managed)}; use the agent's own settings")
+        return value
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -243,8 +303,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
 
-        The base settings disable telemetry/attribution. When ``config.settings`` points at a
-        JSON file, its contents are layered on top: top-level keys override, and the ``env`` block
+        The base settings disable telemetry/attribution. ``config.settings`` accepts a JSON file
+        path or an inline mapping: top-level keys override, and the ``env`` block
         is shallow-merged so the telemetry defaults are preserved unless explicitly overridden.
         """
         settings: dict[str, Any] = {
@@ -255,7 +315,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             }
         }
         if self.config.settings:
-            user_settings = json.loads(Path(self.config.settings).expanduser().read_text())
+            user_settings = self.config.settings
+            if isinstance(user_settings, str):
+                user_settings = json.loads(Path(user_settings).expanduser().read_text())
             user_env = user_settings.get("env") or {}
             settings = {**settings, **user_settings, "env": {**settings["env"], **user_env}}
         return settings
@@ -285,7 +347,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def _build_command(
         self,
         model: str,
-        instruction: str,
+        instruction: Optional[str],
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_active: bool = False,
@@ -317,6 +379,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if self.config.bare and not skills_active:
             cmd.append("--bare")
         cmd += ["--model", model]
+        if self.config.reasoning_effort:
+            cmd += ["--effort", self.config.reasoning_effort]
         effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
         if effective_mcp_config:
             cmd += ["--mcp-config", effective_mcp_config]
@@ -326,14 +390,27 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--allowedTools", self.config.allowed_tools]
         if self.config.disallowed_tools:
             cmd += ["--disallowedTools", self.config.disallowed_tools]
+        if self.config.tools is not None:
+            cmd += ["--tools", self.config.tools]
+        if self.config.session_name:
+            cmd += ["--name", self.config.session_name]
         if self.config.thinking:
             cmd += ["--thinking", self.config.thinking]
         if self.config.max_thinking_tokens is not None:
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
         if self.config.max_turns is not None:
             cmd += ["--max-turns", str(self.config.max_turns)]
-        cmd += ["--", instruction]
+        # Without an instruction argument, `claude -p` reads the instruction from stdin.
+        if instruction is not None:
+            cmd += ["--", instruction]
         return cmd
+
+    def _client_env(self) -> dict[str, str]:
+        """Client settings shared by local and sandbox launches: extra_env and the output cap."""
+        env = dict(self.config.extra_env)
+        if self.config.max_output_tokens is not None:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(self.config.max_output_tokens)
+        return env
 
     async def _run_claude_code(
         self,
@@ -342,7 +419,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-        observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
+        observation_collector: Optional[Callable[[ClaudeCodeTranscripts, dict[str, Any]], None]] = None,
     ) -> tuple[list[Any], str, dict[str, Any]]:
         """Run Claude Code and return parsed output, model name, and run metadata.
 
@@ -356,6 +433,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         api_key = self.config.anthropic_api_key
 
         claude_config_dir = None
+        # Read once the CLI has ended, for its token usage and its observations.
+        transcripts: Optional[ClaudeCodeTranscripts] = None
         run_metadata: dict[str, Any] = {"status": "unknown"}
         try:
             # Inside the try so a bad skills.path (raising in stage_skills) still cleans up the
@@ -370,6 +449,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
+                **self._client_env(),
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
                 **_HEADLESS_RUN_ENV,
             }
@@ -404,9 +484,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         proc.kill()
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
+                transcripts = await asyncio.to_thread(read_transcripts, claude_config_dir)
                 # Keep the actual partial work so capture can corroborate the terminal call.
                 output_items, run_metadata = parse_stream_json(
-                    stdout.decode(errors="replace"), fold_thinking=self._fold_thinking()
+                    stdout.decode(errors="replace"),
+                    fold_thinking=self._fold_thinking(),
+                    transcript_records=transcripts.usage_records,
                 )
                 run_metadata.update(
                     status="incomplete",
@@ -426,7 +509,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
-            output_items, run_metadata = parse_stream_json(stdout_text, fold_thinking=self._fold_thinking())
+            transcripts = await asyncio.to_thread(read_transcripts, claude_config_dir)
+            output_items, run_metadata = parse_stream_json(
+                stdout_text,
+                fold_thinking=self._fold_thinking(),
+                transcript_records=transcripts.usage_records,
+            )
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
             run_metadata["status"] = status
@@ -437,7 +525,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             if claude_config_dir is not None:
                 try:
                     if observation_collector is not None:
-                        await asyncio.to_thread(observation_collector, claude_config_dir, run_metadata)
+                        if transcripts is None:
+                            transcripts = await asyncio.to_thread(read_transcripts, claude_config_dir)
+                        await asyncio.to_thread(observation_collector, transcripts, run_metadata)
                 except Exception:
                     LOG.exception("failed to collect Claude Code observations")
                 finally:
@@ -509,7 +599,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-        observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
+        observation_collector: Optional[Callable[[ClaudeCodeTranscripts, dict[str, Any]], None]] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -566,6 +656,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
 
         input_tokens = run_metadata.get("input_tokens", 0)
+        # None when no cache count was reported; Anthropic reports no separate reasoning-token count.
+        cached_tokens = run_metadata.get("cached_tokens")
         output_tokens = run_metadata.get("output_tokens", 0)
 
         # Under capture, name the response by the last served id so terminal attribution can match it directly.
@@ -587,9 +679,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
                 total_tokens=input_tokens + output_tokens,
             ),
         )
@@ -622,11 +714,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config}) if owns_sandbox else None
         workdir = access.workdir if access else spec.workdir
         path = PurePosixPath(workdir or "")
+        root_workdir = self.config.allow_root_workdir and path == PurePosixPath("/")
         if (
             not path.is_absolute()
             or ".." in path.parts
             or "\x00" in workdir
-            or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or (path in (PurePosixPath("/"), PurePosixPath("/tmp")) and not root_workdir)
             or str(path).startswith(("/tmp/nemo-gym-claude-sessions", "/tmp/nemo-gym-claude-runtime-"))
         ):
             raise HTTPException(
@@ -670,11 +763,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+            dependencies = self.config.harbor_system_dependencies
+            setup_limit = self.config.sandbox_install_timeout_seconds + (
+                self.config.system_dependencies_timeout_seconds if dependencies else 0
+            )
+            async with asyncio.timeout(setup_limit):
                 if owns_sandbox:
                     await sandbox.start(spec)
                     result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
                     self._check_sandbox_setup(result)
+                if dependencies:
+                    # Before anything else, as Harbor's install() runs it before installing Claude Code.
+                    await self._run_system_dependencies(sandbox)
                 result = await sandbox.exec(
                     _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
                     cwd="/",
@@ -694,6 +794,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     local_source=self.config.sandbox_local_executable_path,
                     expected=self.config.sandbox_executable_sha256,
                 )
+            state.sandbox_id = sandbox.sandbox_id
             return state
         except BaseException as error:
             try:
@@ -701,6 +802,22 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
             raise
+
+    async def _run_system_dependencies(self, sandbox: AsyncSandbox) -> str:
+        """Harbor's ensure_system_dependencies for Claude Code, as the sandbox's default user (root for
+        Terminal-Bench task sandboxes). Harbor errors the trial when the install fails; here a failed install
+        fails session setup, so the task never runs without the tools Harbor guarantees."""
+        started = monotonic()
+        result = await sandbox.exec(
+            system_dependencies_command(), timeout_s=self.config.system_dependencies_timeout_seconds
+        )
+        log = (result.stdout or "") + (result.stderr or "")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(
+                f"Harbor's system dependency step failed (exit={result.return_code}, error={result.error_type}) "
+                f"after {monotonic() - started:.0f}s: {log[-16000:]}"
+            )
+        return log
 
     @staticmethod
     def _check_sandbox_setup(result: SandboxExecResult) -> None:
@@ -781,6 +898,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 ANTHROPIC_BASE_URL=base_url,
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
+        env.update(self._client_env())
         artifacts = None
         failure = None
         try:
@@ -788,8 +906,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             async with self.sem:
                 mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
                 skills_path = self._configured_skills_path()
+                stdin = self.config.instruction_on_stdin
                 command = self._build_command(
-                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                    model, None if stdin else prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
                 )
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
@@ -800,6 +919,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "settings": self._build_settings(),
                         "mcp_config": self._get_static_mcp_config() if mcp_config else None,
                         "skills_path": skills_path,
+                        **({"prompt": prompt} if stdin else {}),
                     },
                     timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
                     close_timeout=self.config.session_close_timeout_seconds,
@@ -808,11 +928,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             failure = error
             artifacts = state.session.artifacts
         items, run_metadata = ([], {})
+        transcripts = None
         if artifacts is not None:
+            # Read once, for the token usage and the observations.
+            transcripts = await asyncio.to_thread(read_artifact_transcripts, artifacts)
             items, run_metadata = await asyncio.to_thread(
                 parse_stream_json,
                 artifacts.events,
                 fold_thinking=self._fold_thinking(),
+                transcript_records=transcripts.usage_records if transcripts is not None else None,
             )
         cleanup = state.session.cleanup
         if cleanup and cleanup["timed_out"]:
@@ -826,7 +950,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if artifacts is not None:
             state.observations = await asyncio.to_thread(
                 parse_artifact_observations,
-                artifacts,
+                transcripts,
                 model_ref=self.config.model_server,
                 status=status,
                 error_type=reason,
@@ -836,8 +960,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
-        state.observations = await self._associate_compaction_calls(
-            state.observations, rollout_id=state.request.episode_id.capture_key
+        response = self._response_from_output(body, items, model, run_metadata, status=status)
+        state.observations = await self._reconcile_captured_calls(
+            state.observations, rollout_id=state.request.episode_id.capture_key, response=response
         )
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
@@ -846,6 +971,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations.records.append(
                 SandboxObservation(
                     role="agent",
+                    sandbox_id=state.sandbox_id,
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
                     outcome=(
                         "timeout"
@@ -862,7 +988,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if failure is not None:
             raise failure
-        return self._response_from_output(body, items, model, run_metadata, status=status)
+        return response
 
     async def responses(
         self,
@@ -891,18 +1017,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
-    async def _associate_compaction_calls(
-        self, observations: AgentObservationBundle, *, rollout_id: str | None
+    async def _reconcile_captured_calls(
+        self, observations: AgentObservationBundle, *, rollout_id: str | None, response: NeMoGymResponse | None = None
     ) -> AgentObservationBundle:
-        """Resolve Claude's hidden helpers before handing its bundle to the collector."""
-        if (
-            rollout_id is None
-            or self.config.model_server is None
-            or not any(
-                isinstance(record, ContextCompactionObservation) and not record.model_calls
-                for record in observations.records
-            )
-        ):
+        """Resolve hidden helpers and reconcile usage against the invocation's captured calls."""
+        if rollout_id is None or self.config.model_server is None:
             return observations
         try:
             capture_dirs = model_call_capture_dirs_from_config(self.server_client.global_config_dict)
@@ -913,9 +1032,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             calls, _ = await asyncio.to_thread(
                 read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
             )
-            return associate_claude_code_compaction_calls(
-                observations, [call for call in calls if call.model_ref == self.config.model_server]
-            )
+            calls = [call for call in calls if call.model_ref == self.config.model_server]
+            observations = associate_claude_code_compaction_calls(observations, calls)
+            if response is not None:
+                usage = captured_claude_code_usage(observations, calls)
+                if usage is not None:
+                    response.usage = usage
+                else:
+                    observations.gaps.append(ObservationGap(code="model_usage_reconciliation_unavailable"))
+            return observations
         except Exception:
             LOG.warning("Could not associate Claude Code compaction calls for rollout %s.", rollout_id, exc_info=True)
             observations.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
@@ -931,11 +1056,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     ) -> AgentEpisode:
         observations: Optional[AgentObservationBundle] = None
 
-        def collect(config_dir: Path, run_metadata: dict[str, Any]) -> None:
+        def collect(transcripts: ClaudeCodeTranscripts, run_metadata: dict[str, Any]) -> None:
             nonlocal observations
             try:
                 observations = extract_claude_code_observations(
-                    config_dir,
+                    transcripts=transcripts,
                     model_ref=self.config.model_server,
                     root_status=run_metadata["status"],
                     root_duration_ms=run_metadata.get("duration_ms"),
@@ -963,7 +1088,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
-        observations = await self._associate_compaction_calls(observations, rollout_id=rollout_id)
+        observations = await self._reconcile_captured_calls(observations, rollout_id=rollout_id, response=response)
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 

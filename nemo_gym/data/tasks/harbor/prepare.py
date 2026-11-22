@@ -37,6 +37,7 @@ from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.global_config import ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME, FORWARD_CONFIGURATION_REFUSALS_KEY_NAME
 from nemo_gym.data.tasks.harbor.build_options import (
     BuildOptions,
+    _block_from_overrides,
 )
 from nemo_gym.data.tasks.harbor.build_plan import (
     DEFAULT_PLATFORM,
@@ -103,6 +104,11 @@ from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
+# The command-line setting that moves a task TARGET's rows, run config and skipped list elsewhere than
+# ``DEFAULT_OUTPUT_ROOT``. A submitted run sets it to a folder in its job directory: the driver works in a fresh
+# checkout on every allocation, so a default relative to the working directory would put the rows at a different
+# absolute path each time, and the run config that names them would no longer match a saved run.
+HARBOR_OUTPUT_ROOT_KEY = "harbor_output_root"
 IMAGES_FILE = "images.json"
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/harbor/configs/harbor.yaml"
 # The benchmark config key that hands `gym eval prepare/run --benchmark` to a Harbor target (see `harbor_benchmark`).
@@ -1159,6 +1165,20 @@ def _has_override(overrides: list[str], key: str) -> bool:
     return _override_value(overrides, key) is not None
 
 
+def output_root_from_overrides(overrides: list[str]) -> Path:
+    """Where a task TARGET's output goes: ``+harbor_output_root=...`` when the command sets it, else ``results/harbor``.
+
+    Read as the other settings the command names are (:func:`_block_from_overrides`), so a Hydra-quoted value
+    (``'/tmp/prepared rows'``) is the path it spells and not a name that includes its quotes.
+    """
+    value = _block_from_overrides(overrides, HARBOR_OUTPUT_ROOT_KEY)
+    if value is None or value == "":
+        return DEFAULT_OUTPUT_ROOT
+    if not isinstance(value, str):
+        raise ValueError(f"`{HARBOR_OUTPUT_ROOT_KEY}` must be a path string")
+    return Path(value)
+
+
 def _override_value(overrides: list[str], key: str) -> str | None:
     for token in overrides:
         name, _, value = token.lstrip("+").partition("=")
@@ -1253,12 +1273,13 @@ def build_run(
             f"++{agent_instance(prepared.taskset)}.responses_api_agents.{agent.impl_name}."
             f"{HARNESS_OUTPUT_LIMIT_FIELD}={output_limit}"
         )
+    # The output root was read above (`output_root_from_overrides`); it is not a run setting. The harness got the
+    # output limit above; the collector refuses request overrides for task rows.
     tokens += [
         token
         for token in overrides
         if not token.startswith("+agent_name=")
-        # The harness got the limit above; the collector refuses request overrides for task rows.
-        and token.lstrip("+").partition("=")[0] != MAX_OUTPUT_TOKENS_OVERRIDE
+        and token.lstrip("+").partition("=")[0] not in (HARBOR_OUTPUT_ROOT_KEY, MAX_OUTPUT_TOKENS_OVERRIDE)
     ]
     if not _has_override(tokens, "split"):
         tokens.append(f"+split={split}")
