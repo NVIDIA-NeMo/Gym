@@ -24,6 +24,7 @@ from nemo_gym.sandbox.config import (
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     ExecResult,
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
@@ -42,6 +43,7 @@ from nemo_gym.sandbox.providers import (
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
+    SnapshotContent,
     SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
     SupportsSandboxExecScopedProcesses,
@@ -59,6 +61,7 @@ from nemo_gym.sandbox.providers import (
     create_provider,
     get_provider_class,
     list_providers,
+    provider_capabilities,
     register_provider,
 )
 from nemo_gym.sandbox.utils import rewrite_image
@@ -86,7 +89,10 @@ __all__ = [
     "SandboxSidecarSpec",
     "SandboxSnapshotError",
     "SandboxSnapshotFailedError",
+    "SandboxCapabilities",
     "SandboxSnapshotInfo",
+    "SnapshotContent",
+    "provider_capabilities",
     "SandboxSnapshotInUseError",
     "SandboxSnapshotNotFoundError",
     "SandboxSpec",

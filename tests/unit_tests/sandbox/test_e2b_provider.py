@@ -29,6 +29,7 @@ from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from packaging.requirements import Requirement
 
@@ -39,6 +40,7 @@ from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
+    SandboxCapabilities,
     SandboxHandle,
     SandboxSnapshotError,
     SandboxSnapshotInfo,
@@ -47,6 +49,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
     SupportsSandboxPauseResume,
     SupportsSandboxSnapshot,
+    provider_capabilities,
 )
 from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.e2b import provider as e2b_provider
@@ -405,7 +408,7 @@ def fake_e2b_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeApiClient.get_calls.clear()
     # Most tests model a sandbox past its new-sandbox grace period; _with_grace() opts a test back in.
     monkeypatch.setattr(E2BProvider, "_start_grace", lambda self, sandbox_id: None)
-    monkeypatch.setattr(e2b_provider, "NEW_SANDBOX_KILL_RETRY_S", 0.0)
+    monkeypatch.setattr(e2b_provider, "NEW_SANDBOX_RETRY_S", 0.0)
     monkeypatch.setattr(e2b_provider, "_resource_warning_logged", False)
     monkeypatch.setattr(FakeApiClient, "get_response", FakeHttpResponse(200, {"state": "running"}))
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _fake_sdk)
@@ -1082,8 +1085,7 @@ class TestCreateAndLifecycle:
     async def test_provider_create_leaves_spec_files_to_the_facade(self) -> None:
         provider = E2BProvider(create={"template": "base"})
         handle = await provider.create(_spec(files={"/app/seed.txt": "hello"}))
-        # Only the provider's own login-shell hook.
-        assert [call["path"] for call in handle.raw.file_write_calls] == [_LOGIN_ENV_HOOK_PATH]
+        assert handle.raw.file_write_calls == []
 
     async def test_async_sandbox_uploads_spec_files_exactly_once(self) -> None:
         provider = E2BProvider(create={"template": "base"})
@@ -1202,6 +1204,64 @@ class TestCreateAndLifecycle:
             await provider.create(_spec())
 
         assert killed == ["sbx-rest"]
+
+    async def test_a_rest_create_cancelled_during_its_connect_through_a_cancel_scope_kills_the_sandbox(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No SDK object and no lease exist yet, so nothing else would end the sandbox before its timeout. A kill
+        # awaited in the cancelled create would end at its first suspension under an anyio cancel scope.
+        connecting = asyncio.Event()
+        killed: list[str] = []
+
+        async def connect(cls, sandbox_id, **kwargs):
+            connecting.set()
+            await asyncio.Event().wait()
+
+        async def kill(sandbox_id, **kwargs):
+            await asyncio.sleep(0.05)
+            killed.append(sandbox_id)
+            return True
+
+        monkeypatch.setattr(FakeSandbox, "connect", classmethod(connect))
+        monkeypatch.setattr(FakeSandbox, "kill", staticmethod(kill))
+        provider = E2BProvider(create={"template": "base", "custom_extension_params": {"sandbank": "all"}})
+        async with anyio.create_task_group() as group:
+            group.start_soon(provider.create, _spec())
+            async with asyncio.timeout(10):
+                await connecting.wait()
+            group.cancel_scope.cancel()
+        assert killed == [], "the kill is still running when the cancelled create returns"
+        async with asyncio.timeout(10):
+            await provider.aclose()
+        assert killed == ["sbx-rest"]
+
+    async def test_aclose_cancels_and_names_the_cleanup_it_gave_up_on(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setattr(e2b_provider, "CLEANUP_DRAIN_TIMEOUT_S", 0.05)
+        provider = E2BProvider(create={"template": "base"})
+
+        async def never() -> None:
+            await asyncio.Event().wait()
+
+        provider._run_cleanup(never(), "e2b-abandoned-create-cleanup:sbx-stuck", provider._abandoned_creates)
+        (task,) = provider._abandoned_creates
+        with caplog.at_level("WARNING"):
+            async with asyncio.timeout(10):
+                await provider.aclose()
+        assert task.cancelled() and provider._abandoned_creates == set()
+        assert "e2b-abandoned-create-cleanup:sbx-stuck" in caplog.text
+
+    async def test_expired_grace_periods_are_forgotten(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _with_grace(monkeypatch)
+        provider = E2BProvider(create={"template": "base"}, operations={"new_sandbox_grace_s": 0.01})
+        provider._start_grace("closed-elsewhere")
+        await asyncio.sleep(0.05)
+        provider._start_grace("sbx-new")
+        # One never looked up again does not stay for the life of the process.
+        assert set(provider._new_until) == {"sbx-new"}
+        await provider.aclose()
+        assert provider._new_until == {}
 
     async def test_status_and_close(self) -> None:
         provider = E2BProvider(create={"template": "base"})
@@ -1905,7 +1965,10 @@ async def test_real_sdk_status_only_reads_control_plane(
     monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
     monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", fake_api)
-    provider = E2BProvider(connection={"api_key": "test-key", "validate_api_key": False}, create={"template": "base"})
+    provider = E2BProvider(
+        connection={"api_key": "test-key", "validate_api_key": False},
+        create={"template": "base", "restore_login_env": True},
+    )
     handle = await provider.create(_spec())
     assert hook_uploads == [{"path": _LOGIN_ENV_HOOK_PATH, "username": "root"}]
     requests.clear()
@@ -1925,7 +1988,14 @@ class TestSnapshots:
     def test_the_provider_snapshots_and_keeps_processes(self) -> None:
         provider = E2BProvider()
         assert isinstance(provider, SupportsSandboxSnapshot)
-        assert getattr(provider, "snapshot_keeps_processes", False) is True
+        assert provider_capabilities(provider).snapshot_keeps == {"files", "processes"}
+
+    def test_a_provider_that_declares_no_capabilities_keeps_nothing_in_a_snapshot(self) -> None:
+        assert provider_capabilities(object()) == SandboxCapabilities()
+        # Only a SandboxCapabilities counts: a look-alike attribute is not read as one.
+        assert provider_capabilities(types.SimpleNamespace(capabilities={"snapshot_keeps": {"processes"}})) == (
+            SandboxCapabilities()
+        )
 
     async def test_snapshot_returns_the_id_and_sends_no_name_by_default(self) -> None:
         provider = E2BProvider(create={"template": "base"})
@@ -1944,6 +2014,71 @@ class TestSnapshots:
         await provider.snapshot(handle, name="ng-run-ckpt-key-1")
 
         assert handle.raw.snapshot_names == ["ng-run-ckpt-key-1"]
+
+    async def test_a_named_snapshot_whose_request_fails_is_deleted_by_its_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def failing(self, name=None, **kwargs):
+            raise FakeSdkError("500: reply lost", status_code=500)
+
+        monkeypatch.setattr(FakeSandbox, "create_snapshot", failing)
+        provider = E2BProvider(create={"template": "base"}, snapshots={"send_names": True})
+        handle = await provider.create(_spec())
+
+        with pytest.raises(FakeSdkError, match="reply lost"):
+            await provider.snapshot(handle, name="ng-run-ckpt-key-1")
+        # The service may have taken it all the same, and nobody has its id: the name is all that finds it.
+        await provider.aclose()
+        assert FakeSandbox.delete_snapshot_calls == ["ng-run-ckpt-key-1"]
+
+    async def test_a_named_snapshot_cancelled_through_a_cancel_scope_is_deleted_by_its_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requested = asyncio.Event()
+
+        async def hanging(self, name=None, **kwargs):
+            requested.set()
+            await asyncio.Event().wait()
+
+        original_delete = FakeSandbox.delete_snapshot.__func__
+
+        async def suspending_delete(cls, snapshot_id, **kwargs):
+            await asyncio.sleep(0.05)
+            return await original_delete(cls, snapshot_id, **kwargs)
+
+        monkeypatch.setattr(FakeSandbox, "create_snapshot", hanging)
+        monkeypatch.setattr(FakeSandbox, "delete_snapshot", classmethod(suspending_delete))
+        provider = E2BProvider(create={"template": "base"}, snapshots={"send_names": True})
+        handle = await provider.create(_spec())
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(lambda: provider.snapshot(handle, name="ng-run-ckpt-key-1"))
+            async with asyncio.timeout(10):
+                await requested.wait()
+            group.cancel_scope.cancel()
+        # A delete awaited in the cancelled request would have ended at its first suspension.
+        async with asyncio.timeout(10):
+            await provider.aclose()
+        assert FakeSandbox.delete_snapshot_calls == ["ng-run-ckpt-key-1"]
+
+    async def test_a_snapshot_without_a_sent_name_is_not_deleted_when_its_request_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def failing(self, name=None, **kwargs):
+            raise FakeSdkError("500: reply lost", status_code=500)
+
+        monkeypatch.setattr(FakeSandbox, "create_snapshot", failing)
+        provider = E2BProvider(create={"template": "base"})
+        with pytest.raises(FakeSdkError):
+            await provider.snapshot(await provider.create(_spec()), name="ng-run-ckpt-key-1")
+        await provider.aclose()
+        assert FakeSandbox.delete_snapshot_calls == []
+
+    async def test_a_snapshot_that_returns_its_id_is_not_deleted(self) -> None:
+        provider = E2BProvider(create={"template": "base"}, snapshots={"send_names": True})
+        await provider.snapshot(await provider.create(_spec()), name="ng-run-ckpt-key-1")
+        await provider.aclose()
+        assert FakeSandbox.delete_snapshot_calls == [] and len(FakeSandbox.snapshots) == 1
 
     @pytest.mark.parametrize("gone", [True, False])
     async def test_a_snapshot_answered_with_an_empty_404_names_the_sandbox_gone(
@@ -2091,6 +2226,22 @@ class TestSnapshots:
         assert FakeSandbox.snapshots == {}
         assert FakeSandbox.delete_snapshot_calls == [snapshot_id] * 3
 
+    @pytest.mark.parametrize("gone", [True, False])
+    async def test_a_delete_answered_with_an_empty_404_counts_as_deleted_only_for_a_snapshot_gone(
+        self, gone: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = E2BProvider(operations={"retries": 0})
+        FakeSandbox.delete_snapshot_outcomes.append(_unparsed_404())
+        monkeypatch.setattr(
+            FakeApiClient, "get_response", FakeHttpResponse(404 if gone else 200, {"templateID": "tmpl1"})
+        )
+        if gone:
+            await provider.delete_snapshot("tmpl1:default")
+        else:
+            with pytest.raises(SandboxSnapshotError):
+                await provider.delete_snapshot("tmpl1:default")
+        assert FakeApiClient.get_calls == ["/templates/tmpl1"]
+
     async def test_delete_snapshot_retries_a_transient_failure_and_raises_a_persistent_one(self) -> None:
         provider = E2BProvider(operations={"retries": 1, "retry_delay_s": 0.0})
         FakeSandbox.delete_snapshot_outcomes.extend([ConnectionError("reset"), False])
@@ -2102,7 +2253,7 @@ class TestSnapshots:
         assert raised.value.snapshot_id == "tmpl1:default"
 
     async def test_list_snapshots_returns_snapshot_infos_filtered_by_name_without_namespace_or_tag(self) -> None:
-        provider = E2BProvider(create={"template": "base"}, snapshots={"send_names": True})
+        provider = E2BProvider(create={"template": "base"}, snapshots={"send_names": True, "list_by_name": True})
         handle = await provider.create(_spec())
         kept = await provider.snapshot(handle, name="ng-run1-a")
         await provider.snapshot(handle, name="other-run")
@@ -2114,11 +2265,33 @@ class TestSnapshots:
         assert set(listed) == set(FakeSandbox.snapshots)
         assert listed["tmpl-unnamed:default"] is None
 
-    async def test_list_snapshots_without_names_finds_none_under_a_prefix_and_asks_nothing(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("send_names", [False, True])
+    async def test_without_listing_by_name_a_prefix_finds_none_and_the_service_is_not_asked(
+        self, send_names: bool, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Also with names on: a checkpoint release waits for this listing, and it may never answer.
         monkeypatch.setattr(FakeSandbox, "list_snapshots", classmethod(lambda cls, **kwargs: pytest.fail("listed")))
-        assert await E2BProvider().list_snapshots("ng-run1-") == []
+        assert await E2BProvider(snapshots={"send_names": send_names}).list_snapshots("ng-run1-") == []
+
+    async def test_a_listing_that_does_not_answer_ends_at_its_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class Hanging(FakeSnapshotPaginator):
+            async def next_items(self):
+                await asyncio.Event().wait()
+
+        monkeypatch.setattr(FakeSandbox, "list_snapshots", classmethod(lambda cls, **kwargs: Hanging([[]])))
+        provider = E2BProvider(snapshots={"list_by_name": True}, operations={"snapshot_list_timeout_s": 0.05})
+        async with asyncio.timeout(10):
+            with pytest.raises(SandboxSnapshotError, match="did not finish within 0.05s"):
+                await provider.list_snapshots("ng-")
+
+    @pytest.mark.parametrize("invalid", [0, -1, None, "300"])
+    def test_the_listing_budget_must_be_positive(self, invalid: object) -> None:
+        with pytest.raises(ValueError, match="snapshot_list_timeout_s"):
+            E2BProvider(operations={"snapshot_list_timeout_s": invalid})
+
+    def test_list_by_name_must_be_a_boolean(self) -> None:
+        with pytest.raises(ValueError, match="list_by_name must be a boolean"):
+            E2BProvider(snapshots={"list_by_name": "yes"})
 
     async def test_a_failed_listing_raises_a_snapshot_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class Failing(FakeSnapshotPaginator):
@@ -2127,7 +2300,7 @@ class TestSnapshots:
 
         monkeypatch.setattr(FakeSandbox, "list_snapshots", classmethod(lambda cls, **kwargs: Failing([[]])))
         with pytest.raises(SandboxSnapshotError, match="500"):
-            await E2BProvider(snapshots={"send_names": True}).list_snapshots("ng-")
+            await E2BProvider(snapshots={"list_by_name": True}).list_snapshots("ng-")
 
 
 # --------------------------------------------------------------------------
@@ -2140,15 +2313,15 @@ class TestLease:
         provider = E2BProvider(create={"template": "base"})
         handle = await provider.create(_spec(ttl_s=600))
         assert handle.raw.create_kwargs["timeout"] == 600
-        await provider.renew_leases()
+        await provider._renew_leases()
         assert handle.raw.set_timeout_calls == []
 
     async def test_a_leased_sandbox_is_created_with_the_lease_and_renewed_to_it(self) -> None:
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         handle = await provider.create(_spec(ttl_s=600))
         try:
             assert handle.raw.create_kwargs["timeout"] == 60
-            await provider.renew_leases()
+            await provider._renew_leases()
             assert handle.raw.set_timeout_calls == [60]
         finally:
             await provider.aclose()
@@ -2156,13 +2329,13 @@ class TestLease:
     async def test_renewal_never_extends_past_the_sandbox_lifetime(self, monkeypatch: pytest.MonkeyPatch) -> None:
         clock = [1000.0]
         monkeypatch.setattr(e2b_provider, "monotonic", lambda: clock[0])
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         handle = await provider.create(_spec(ttl_s=100))
         try:
             clock[0] += 70  # 30 s of lifetime left
-            await provider.renew_leases()
+            await provider._renew_leases()
             clock[0] += 40  # lifetime over: no renewal, the lease is dropped
-            await provider.renew_leases()
+            await provider._renew_leases()
             assert handle.raw.set_timeout_calls == [30]
             assert provider._leases == {}
         finally:
@@ -2175,7 +2348,7 @@ class TestLease:
             return FakeSandbox(sandbox_id=next(ids), **kwargs)
 
         monkeypatch.setattr(FakeSandbox, "create", create)
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         gone = await provider.create(_spec())
         closed = await provider.create(_spec())
         kept = await provider.create(_spec())
@@ -2186,7 +2359,7 @@ class TestLease:
             kept.raw.set_timeout_outcomes.append(ConnectionError("blip"))  # retried next round
             await provider.close(closed)
             for _ in range(3):
-                await provider.renew_leases()
+                await provider._renew_leases()
             assert gone_sandbox.set_timeout_calls == [60, 60]
             assert closed_sandbox.set_timeout_calls == []
             assert kept.raw.set_timeout_calls == [60, 60, 60]
@@ -2195,54 +2368,195 @@ class TestLease:
 
     @pytest.mark.parametrize("gone", [True, False])
     async def test_a_renewal_answered_with_an_empty_404_stops_only_for_a_sandbox_gone(self, gone: bool) -> None:
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         handle = await provider.create(_spec())
         try:
             handle.raw.set_timeout_outcomes.extend([_unparsed_404(), _unparsed_404()])
             FakeApiClient.get_response = FakeHttpResponse(404 if gone else 200, "")
             for _ in range(3):
-                await provider.renew_leases()
+                await provider._renew_leases()
             assert handle.raw.set_timeout_calls == ([60, 60] if gone else [60, 60, 60])
         finally:
             await provider.aclose()
 
     async def test_one_renewal_not_found_keeps_the_lease(self) -> None:
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         handle = await provider.create(_spec())
         try:
             handle.raw.set_timeout_outcomes.extend(
                 [FakeSandboxNotFound("replica"), None, FakeSandboxNotFound("replica")]
             )
             for _ in range(4):
-                await provider.renew_leases()
+                await provider._renew_leases()
             assert handle.raw.set_timeout_calls == [60] * 4  # the count starts over after a renewal that succeeded
             assert handle.sandbox_id in provider._leases
         finally:
             await provider.aclose()
 
     async def test_aclose_stops_the_renewal_loop(self) -> None:
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         await provider.create(_spec())
         task = provider._lease_task
         assert task is not None and not task.done()
         await provider.aclose()
         assert task.done() and provider._leases == {}
 
-    async def test_the_renewal_loop_renews_every_third_of_a_lease(self) -> None:
-        provider = E2BProvider(create={"template": "base", "lease_s": 0.03})
+    async def test_the_renewal_loop_renews_every_third_of_a_lease(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_sleep = asyncio.sleep
+        slept: list[float] = []
+
+        async def recording_sleep(delay: float) -> None:
+            slept.append(delay)
+            await real_sleep(0)
+
+        monkeypatch.setattr(e2b_provider.asyncio, "sleep", recording_sleep)
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         handle = await provider.create(_spec())
         try:
-            for _ in range(200):
-                if len(handle.raw.set_timeout_calls) >= 2:
-                    break
-                await asyncio.sleep(0.01)
-            assert len(handle.raw.set_timeout_calls) >= 2
+            async with asyncio.timeout(10):
+                while len(handle.raw.set_timeout_calls) < 2:
+                    await real_sleep(0)
+            # Each round waits a third of the lease, not the lease.
+            assert set(slept) == {20.0}
         finally:
             await provider.aclose()
 
     def test_lease_must_be_positive(self) -> None:
-        with pytest.raises(ValueError, match="lease_s"):
-            E2BProvider(create={"lease_s": 0})
+        with pytest.raises(ValueError, match="renew_ttl_s"):
+            E2BProvider(create={"renew_ttl_s": 0})
+
+    def test_a_lease_needs_a_lifetime(self) -> None:
+        # Renewed for ever otherwise: nothing but close() would end the sandbox.
+        with pytest.raises(ValueError, match="renew_ttl_s needs create.timeout_s"):
+            E2BProvider(create={"renew_ttl_s": 60.0, "timeout_s": None})
+
+    async def test_a_renewal_that_hangs_is_cut_off_and_the_round_finishes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(e2b_provider, "LEASE_RENEW_TIMEOUT_S", 0.05)
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
+        hung, healthy = FakeSandbox("sbx-hung"), FakeSandbox("sbx-healthy")
+
+        async def never(timeout, **kwargs):
+            await asyncio.Event().wait()
+
+        hung.set_timeout = never
+        provider._leases = {
+            sandbox.sandbox_id: e2b_provider._Lease(sandbox=sandbox, lifetime_end=None) for sandbox in (hung, healthy)
+        }
+
+        async with asyncio.timeout(10):
+            await provider._renew_leases()
+
+        assert healthy.set_timeout_calls == [60]
+        assert "sbx-hung" in provider._leases, "a renewal cut off is tried again next round"
+        provider._leases.clear()
+
+    async def test_the_lookup_after_an_unparsed_reply_counts_against_the_renewal_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(e2b_provider, "LEASE_RENEW_TIMEOUT_S", 0.05)
+
+        async def hanging_get(self, url):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(FakeApiClient, "get", hanging_get)
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
+        try:
+            handle = await provider.create(_spec())
+            handle.raw.set_timeout_outcomes.append(_unparsed_404())
+            async with asyncio.timeout(10):
+                await provider._renew_leases()
+            assert handle.sandbox_id in provider._leases
+        finally:
+            await provider.aclose()
+
+    async def test_a_slow_renewal_does_not_hold_up_the_ones_waiting_for_a_slot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(e2b_provider, "LEASE_RENEW_CONCURRENCY", 2)
+        release = asyncio.Event()
+        running = 0
+        most = 0
+        renewed: list[str] = []
+
+        class Renewable:
+            def __init__(self, sandbox_id: str) -> None:
+                self.sandbox_id = sandbox_id
+
+            async def set_timeout(self, timeout, **kwargs):
+                nonlocal running, most
+                running += 1
+                most = max(most, running)
+                try:
+                    if self.sandbox_id == "slow":
+                        await release.wait()
+                    else:
+                        await asyncio.sleep(0)
+                    renewed.append(self.sandbox_id)
+                finally:
+                    running -= 1
+
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
+        ids = ["slow", "a", "b", "c", "d"]
+        provider._leases = {name: e2b_provider._Lease(sandbox=Renewable(name), lifetime_end=None) for name in ids}
+        round_ = asyncio.create_task(provider._renew_leases())
+        async with asyncio.timeout(10):
+            while len(renewed) < 4:
+                await asyncio.sleep(0)
+        # Everything else went through the free slot while the slow one kept its own.
+        assert sorted(renewed) == ["a", "b", "c", "d"] and not round_.done()
+        release.set()
+        async with asyncio.timeout(10):
+            await round_
+        assert most == 2
+        provider._leases.clear()
+
+    async def test_resuming_a_leased_sandbox_grants_one_lease_and_renews_the_resumed_handle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0, "timeout_s": 3600})
+        try:
+            handle = await provider.create(_spec())
+            created = handle.raw
+            resumed = FakeSandbox(sandbox_id=handle.sandbox_id)
+            connect = AsyncMock(return_value=resumed)
+            monkeypatch.setattr(FakeSandbox, "connect", connect)
+
+            await provider.resume(handle)
+
+            # One lease, not the full lifetime: a process that dies after the resume leaves it for a lease.
+            assert connect.await_args.kwargs["timeout"] == 60
+            await provider._renew_leases()
+            assert resumed.set_timeout_calls == [60] and created.set_timeout_calls == []
+        finally:
+            await provider.aclose()
+
+    async def test_resuming_near_the_end_of_the_lifetime_grants_only_what_is_left(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0, "timeout_s": 3600})
+        try:
+            handle = await provider.create(_spec())
+            provider._leases[handle.sandbox_id].lifetime_end = e2b_provider.monotonic() + 20
+            connect = AsyncMock(return_value=FakeSandbox(sandbox_id=handle.sandbox_id))
+            monkeypatch.setattr(FakeSandbox, "connect", connect)
+            await provider.resume(handle)
+            assert 1 <= connect.await_args.kwargs["timeout"] <= 20
+        finally:
+            await provider.aclose()
+
+    async def test_a_resume_that_fails_keeps_the_handle_and_the_lease(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
+        try:
+            handle = await provider.create(_spec())
+            created = handle.raw
+            monkeypatch.setattr(FakeSandbox, "connect", AsyncMock(side_effect=FakeSdkError("500: boom", 500)))
+            with pytest.raises(FakeSdkError):
+                await provider.resume(handle)
+            assert handle.raw is created and provider._leases[handle.sandbox_id].sandbox is created
+        finally:
+            await provider.aclose()
 
 
 # --------------------------------------------------------------------------
@@ -2259,6 +2573,30 @@ class TestProviderOptions:
             await provider.create(_spec(provider_options=options))
         assert sum("resource_requests" in record.getMessage() for record in caplog.records) == 1
         assert "resource_requests" not in first.raw.create_kwargs
+
+    async def test_a_deny_rule_under_default_deny_is_refused_on_a_fork_through_the_rest_create(self) -> None:
+        provider = E2BProvider(create={"template": "base"}, snapshots={"keep_guest_clock": True})
+        policy = {
+            "defaultAction": "deny",
+            "egress": [{"action": "deny", "target": "10.1.0.0/16"}, {"action": "allow", "target": "10.0.0.0/8"}],
+        }
+        with pytest.raises(ValueError, match="deny rules under defaultAction deny"):
+            await provider.create_from_snapshot("tmpl1:default", _spec(provider_options={"network_policy": policy}))
+        assert FakeApiClient.calls == [] and FakeSandbox.instances == []
+
+    async def test_a_network_policy_that_replaces_the_configured_network_is_warned_about_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        provider = E2BProvider(create={"template": "base", "network": {"deny_out": ["10.0.0.0/8"]}})
+        policy = {"defaultAction": "allow"}
+        with caplog.at_level("WARNING"):
+            handle = await provider.create(_spec(provider_options={"network_policy": policy}))
+            await provider.create(_spec(provider_options={"network_policy": policy}))
+            await provider.create(_spec())
+        # The operator's deny_out is gone from the sandbox with the policy, and kept without one.
+        assert handle.raw.create_kwargs["network"] == {}
+        assert FakeSandbox.instances[-1].create_kwargs["network"] == {"deny_out": ["10.0.0.0/8"]}
+        assert sum("replaces create.network" in record.getMessage() for record in caplog.records) == 1
 
     async def test_a_deny_by_default_network_policy_maps_to_deny_all_but_the_allowed(self) -> None:
         provider = E2BProvider(create={"template": "base"})
@@ -2281,6 +2619,11 @@ class TestProviderOptions:
             "deny",
             # E2B's deny list takes addresses only.
             {"defaultAction": "allow", "egress": [{"action": "deny", "target": "example.com"}]},
+            # Allow entries override the blanket deny, so the deny inside the allowed range would be dropped.
+            {
+                "defaultAction": "deny",
+                "egress": [{"action": "deny", "target": "10.1.0.0/16"}, {"action": "allow", "target": "10.0.0.0/8"}],
+            },
         ],
     )
     async def test_a_network_policy_it_cannot_express_is_refused(self, policy: object) -> None:
@@ -2431,7 +2774,7 @@ async def test_a_cancelled_create_drops_the_lease_and_kills_the_sandbox(monkeypa
         await asyncio.Event().wait()
 
     monkeypatch.setattr(FakeCommands, "run", hanging)
-    provider = E2BProvider(create={"template": "base", "lease_s": 30.0, "reachable_timeout_s": 30})
+    provider = E2BProvider(create={"template": "base", "renew_ttl_s": 30.0, "reachable_timeout_s": 30})
     create = asyncio.create_task(provider.create(_spec(ttl_s=60)))
     async with asyncio.timeout(10):
         await probing.wait()
@@ -2445,20 +2788,64 @@ async def test_a_cancelled_create_drops_the_lease_and_kills_the_sandbox(monkeypa
     assert FakeSandbox.instances[-1].killed
 
 
+async def test_a_create_cancelled_through_a_cancel_scope_still_kills_the_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Gym cancels request work through an anyio cancel scope, which also cancels every later await of the cancelled
+    # task: a kill awaited there would end at its first suspension. The kill has to run in a task of its own, and
+    # ``aclose`` has to wait for it.
+    probing = asyncio.Event()
+
+    async def hanging(self, **kwargs):
+        probing.set()
+        await asyncio.Event().wait()
+
+    original_kill = FakeSandbox.kill
+
+    async def suspending_kill(self, **kwargs):
+        await asyncio.sleep(0.05)
+        return await original_kill(self, **kwargs)
+
+    monkeypatch.setattr(FakeCommands, "run", hanging)
+    monkeypatch.setattr(FakeSandbox, "kill", suspending_kill)
+    provider = E2BProvider(create={"template": "base", "renew_ttl_s": 30.0, "reachable_timeout_s": 30})
+    async with anyio.create_task_group() as group:
+        group.start_soon(provider.create, _spec(ttl_s=60))
+        async with asyncio.timeout(10):
+            await probing.wait()
+        group.cancel_scope.cancel()
+    assert provider._leases == {}
+    assert not FakeSandbox.instances[-1].killed, "the kill is still running when the cancelled create returns"
+    async with asyncio.timeout(10):
+        await provider.aclose()
+    assert FakeSandbox.instances[-1].killed
+
+
 @pytest.mark.parametrize("name", ["e2b.yaml", "agentenv.yaml"])
 def test_the_shipped_configs_build_a_provider(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from omegaconf import OmegaConf
 
     for variable in ("E2B_API_KEY", "E2B_API_URL", "E2B_SANDBOX_URL"):
         monkeypatch.delenv(variable, raising=False)
-    path = Path(e2b_provider.__file__).parent / "configs" / name
-    config = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    configs = Path(e2b_provider.__file__).parent / "configs"
+    loaded = OmegaConf.load(configs / name)
+    if name == "agentenv.yaml":
+        # It holds only what AgentENV changes and pulls in e2b.yaml for the rest, as the config loader merges them.
+        assert list(loaded.config_paths) == ["nemo_gym/sandbox/providers/e2b/configs/e2b.yaml"]
+        loaded = OmegaConf.merge(OmegaConf.load(configs / "e2b.yaml"), loaded)
+    config = OmegaConf.to_container(loaded, resolve=True)
     # An unknown or misspelt key fails here, not when a job starts.
     provider = E2BProvider(**config["sandbox"]["e2b"])
     if name == "agentenv.yaml":
-        assert provider._create.lease_s == 1200.0 and provider._create.reachable_timeout_s == 120.0
-        assert provider._snapshots.keep_guest_clock and not provider._snapshots.send_names
+        assert provider._create.renew_ttl_s == 1200.0 and provider._create.reachable_timeout_s == 120.0
+        assert provider._create.timeout_s == 10800.0 and provider._create.auto_resume is False
+        assert provider._create.restore_login_env and provider._exec.user == "root"
+        assert provider._snapshots.keep_guest_clock and provider._snapshots.send_names
+        assert not provider._snapshots.list_by_name, "a checkpoint release must not wait for the cell's listing"
         assert provider._operations.new_sandbox_grace_s == 15.0
+    else:
+        assert not provider._create.restore_login_env and provider._create.renew_ttl_s is None
+        assert not provider._snapshots.send_names and not provider._snapshots.list_by_name
 
 
 async def test_only_unreachable_is_waited_out_after_a_create(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2487,11 +2874,11 @@ _HOOK_WRITE = {"path": _LOGIN_ENV_HOOK_PATH, "data": _LOGIN_ENV_HOOK, "user": "r
 
 class TestLoginEnvHook:
     async def test_create_writes_the_hook_as_root(self) -> None:
-        handle = await E2BProvider(create={"template": "base"}).create(_spec())
+        handle = await E2BProvider(create={"template": "base", "restore_login_env": True}).create(_spec())
         assert handle.raw.file_write_calls == [_HOOK_WRITE]
 
     async def test_create_from_a_snapshot_writes_it_too(self) -> None:
-        provider = E2BProvider(create={"template": "base"})
+        provider = E2BProvider(create={"template": "base", "restore_login_env": True})
         source = await provider.create(_spec())
         snapshot_id = await provider.snapshot(source)
         restored = await provider.create_from_snapshot(snapshot_id, _spec())
@@ -2511,12 +2898,69 @@ class TestLoginEnvHook:
 
         monkeypatch.setattr(FakeCommands, "run", run)
         monkeypatch.setattr(FakeFiles, "write", write)
-        await E2BProvider(create={"template": "base", "reachable_timeout_s": 30}).create(_spec())
+        await E2BProvider(create={"template": "base", "reachable_timeout_s": 30, "restore_login_env": True}).create(
+            _spec()
+        )
         assert order == ["probe", "hook"]
 
-    async def test_restore_login_env_false_writes_nothing(self) -> None:
-        handle = await E2BProvider(create={"template": "base", "restore_login_env": False}).create(_spec())
+    async def test_by_default_no_hook_is_written(self) -> None:
+        # Opt-in: a config that never asked for the hook keeps its login shells as the template has them.
+        handle = await E2BProvider(create={"template": "base"}).create(_spec())
         assert handle.raw.file_write_calls == []
+
+    async def test_a_write_answered_not_found_in_the_grace_period_is_repeated(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _with_grace(monkeypatch)
+        failures = [FakeSandboxNotFound("sandbox assignment not found"), _unparsed_404()]
+        original_write = FakeFiles.write
+
+        async def flaky_write(self, path, data, **kwargs):
+            if failures:
+                raise failures.pop(0)
+            return await original_write(self, path, data, **kwargs)
+
+        monkeypatch.setattr(FakeFiles, "write", flaky_write)
+        provider = E2BProvider(create={"template": "base", "restore_login_env": True}, operations={"retries": 0})
+        handle = await provider.create(_spec())
+        assert handle.raw.files_written == {_LOGIN_ENV_HOOK_PATH: _LOGIN_ENV_HOOK} and not handle.raw.killed
+
+    async def test_a_write_still_not_found_when_the_grace_period_ends_fails_the_create(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _with_grace(monkeypatch)
+        writes = 0
+
+        async def missing_write(self, path, data, **kwargs):
+            nonlocal writes
+            writes += 1
+            raise FakeSandboxNotFound("sandbox assignment not found")
+
+        monkeypatch.setattr(FakeFiles, "write", missing_write)
+        provider = E2BProvider(
+            create={"template": "base", "restore_login_env": True},
+            operations={"retries": 0, "new_sandbox_grace_s": 0.05},
+        )
+        async with asyncio.timeout(10):
+            with pytest.raises(E2BCreateError, match="login-shell hook .* could not be written"):
+                await provider.create(_spec())
+        assert writes > 1 and FakeSandbox.instances[-1].kill_calls
+
+    async def test_a_write_not_found_outside_the_grace_period_fails_at_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        writes = 0
+
+        async def missing_write(self, path, data, **kwargs):
+            nonlocal writes
+            writes += 1
+            raise FakeSandboxNotFound("no such sandbox")
+
+        monkeypatch.setattr(FakeFiles, "write", missing_write)
+        provider = E2BProvider(create={"template": "base", "restore_login_env": True})
+        with pytest.raises(E2BCreateError, match="could not be written"):
+            await provider.create(_spec())
+        assert writes == 1
 
     async def test_a_transient_write_failure_is_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
         failures = [FakeUnreachable("502: The sandbox could not be reached")]
@@ -2528,7 +2972,9 @@ class TestLoginEnvHook:
             return await original_write(self, path, data, **kwargs)
 
         monkeypatch.setattr(FakeFiles, "write", flaky_write)
-        provider = E2BProvider(create={"template": "base"}, operations={"retry_delay_s": 0.0})
+        provider = E2BProvider(
+            create={"template": "base", "restore_login_env": True}, operations={"retry_delay_s": 0.0}
+        )
         handle = await provider.create(_spec())
         assert handle.raw.files_written == {_LOGIN_ENV_HOOK_PATH: _LOGIN_ENV_HOOK}
         assert not handle.raw.killed
@@ -2539,7 +2985,8 @@ class TestLoginEnvHook:
 
         monkeypatch.setattr(FakeFiles, "write", failing_write)
         provider = E2BProvider(
-            create={"template": "base", "lease_s": 60.0}, operations={"retries": 1, "retry_delay_s": 0.0}
+            create={"template": "base", "renew_ttl_s": 60.0, "restore_login_env": True},
+            operations={"retries": 1, "retry_delay_s": 0.0},
         )
         try:
             with pytest.raises(E2BCreateError, match="login-shell hook .* could not be written: 500: envd crashed"):
@@ -2601,6 +3048,18 @@ class TestLoginEnvHookScript:
         twice = self._run(tmp_path, self._PROFILE + '. "$HOOK"; . "$HOOK"; ' + self._PRINT)
         assert once == twice
 
+    def test_a_variable_the_shell_cannot_set_does_not_end_a_shell_that_exits_on_errors(self, tmp_path: Path) -> None:
+        # An inherited SHELLOPTS turns errexit on, and is itself read-only: setting it would end the shell, and so
+        # would the failed export of a name that is no identifier.
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "SHELLOPTS": "braceexpand:errexit:hashall:interactive-comments",
+            "NOT-A-NAME": "x",
+            "KEPT": "start",
+        }
+        result = _source_hook(tmp_path, ["bash"], 'KEPT=profile; . "$HOOK"; printf %s "$KEPT"', env)
+        assert (result.returncode, result.stdout, result.stderr) == (0, "start", "")
+
     def test_leaves_no_variables_of_its_own(self, tmp_path: Path) -> None:
         assert self._run(tmp_path, '. "$HOOK"; compgen -v __ng_ || true') == [""]
 
@@ -2630,7 +3089,7 @@ class TestNewSandboxGrace:
             return await original_run(self, **kwargs)
 
         monkeypatch.setattr(FakeCommands, "run", flaky_run)
-        provider = E2BProvider(create={"template": "base", "reachable_timeout_s": 30, "lease_s": 60})
+        provider = E2BProvider(create={"template": "base", "reachable_timeout_s": 30, "renew_ttl_s": 60})
         try:
             with caplog.at_level("INFO"):
                 handle = await provider.create(_spec(ttl_s=600))
@@ -2729,7 +3188,7 @@ class TestNewSandboxGrace:
 
 class TestLeaseRenewalNoise:
     async def test_a_lease_dropped_during_a_round_is_not_renewed(self) -> None:
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         handle = await provider.create(_spec())
         try:
             [(sandbox_id, lease)] = list(provider._leases.items())  # the round's snapshot of held leases
@@ -2740,15 +3199,15 @@ class TestLeaseRenewalNoise:
             await provider.aclose()
 
     async def test_a_sandbox_being_killed_drops_its_lease_at_info(self, caplog) -> None:
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         handle = await provider.create(_spec())
         try:
             handle.raw.set_timeout_outcomes.append(
                 FakeSdkError(f"500: sandbox {handle.sandbox_id} is in invalid state Killing", status_code=500)
             )
             with caplog.at_level("INFO"):
-                await provider.renew_leases()
-                await provider.renew_leases()
+                await provider._renew_leases()
+                await provider._renew_leases()
             assert handle.raw.set_timeout_calls == [60]
             assert not [r for r in caplog.records if r.levelname == "WARNING"]
             assert any("is being killed" in r.getMessage() for r in caplog.records)
@@ -2757,12 +3216,19 @@ class TestLeaseRenewalNoise:
 
     async def test_a_renewal_not_found_in_the_grace_period_keeps_the_lease(self, monkeypatch) -> None:
         _with_grace(monkeypatch)
-        provider = E2BProvider(create={"template": "base", "lease_s": 60.0})
+        provider = E2BProvider(create={"template": "base", "renew_ttl_s": 60.0})
         handle = await provider.create(_spec())
         try:
-            handle.raw.set_timeout_outcomes.append(FakeSandboxNotFound("sandbox assignment not found"))
-            await provider.renew_leases()
-            await provider.renew_leases()
-            assert handle.raw.set_timeout_calls == [60, 60]
+            # Two misses in a row end a lease after the grace period; inside it they do not count.
+            handle.raw.set_timeout_outcomes.extend(
+                [
+                    FakeSandboxNotFound("sandbox assignment not found"),
+                    FakeSandboxNotFound("sandbox assignment not found"),
+                ]
+            )
+            for _ in range(3):
+                await provider._renew_leases()
+            assert handle.raw.set_timeout_calls == [60, 60, 60]
+            assert handle.sandbox_id in provider._leases
         finally:
             await provider.aclose()

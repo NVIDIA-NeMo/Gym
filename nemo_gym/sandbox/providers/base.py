@@ -19,7 +19,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
@@ -350,6 +350,31 @@ class SandboxSnapshotInUseError(SandboxSnapshotError):
     """Raised when a provider refuses to delete a snapshot because something still uses it."""
 
 
+# What a snapshot of a sandbox can keep.
+SnapshotContent = Literal["files", "processes"]
+
+
+@dataclass(frozen=True)
+class SandboxCapabilities:
+    """What a provider class can do, declared as its ``capabilities`` class attribute.
+
+    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none.
+
+    Attributes:
+        snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots. With
+            ``"processes"``, a snapshot saves memory and running processes, and a sandbox created from it
+            continues them.
+    """
+
+    snapshot_keeps: frozenset[SnapshotContent] = frozenset()
+
+
+def provider_capabilities(provider: object) -> SandboxCapabilities:
+    """The capabilities ``provider`` declares; the defaults for a provider that declares none."""
+    capabilities = getattr(provider, "capabilities", None)
+    return capabilities if isinstance(capabilities, SandboxCapabilities) else SandboxCapabilities()
+
+
 @dataclass(frozen=True)
 class SandboxSnapshotInfo:
     """One snapshot in a provider's listing.
@@ -611,9 +636,10 @@ class SupportsSandboxSnapshot(Protocol):
     its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
     other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
 
-    What a snapshot keeps depends on the provider. A provider whose snapshots save memory and running processes, so
-    that a sandbox created from one continues them, sets the class attribute ``snapshot_keeps_processes = True``;
-    read it with ``getattr(provider, "snapshot_keeps_processes", False)``. Otherwise a snapshot keeps files only.
+    What a snapshot keeps depends on the provider, which declares it as ``capabilities.snapshot_keeps``
+    (:class:`SandboxCapabilities`); read it with ``provider_capabilities(provider).snapshot_keeps``. A provider whose
+    snapshots save memory and running processes, so that a sandbox created from one continues them, declares
+    ``"processes"`` beside ``"files"``.
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:

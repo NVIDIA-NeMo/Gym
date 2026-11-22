@@ -36,7 +36,9 @@ class _Paginator:
 @pytest.fixture
 def cleanup(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     module = _load()
-    state = types.SimpleNamespace(module=module, deleted=[], killed=[], queries=[], provider_config=None)
+    state = types.SimpleNamespace(
+        module=module, deleted=[], killed=[], queries=[], provider_config=None, failing=set()
+    )
 
     class FakeProvider:
         def __init__(self, **config: object) -> None:
@@ -46,6 +48,8 @@ def cleanup(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
             return [types.SimpleNamespace(snapshot_id=f"{prefix}snap:default", name=f"{prefix}snap")]
 
         async def delete_snapshot(self, snapshot_id: str) -> None:
+            if snapshot_id in state.failing:
+                raise RuntimeError(f"cannot delete {snapshot_id}")
             state.deleted.append(snapshot_id)
 
     class FakeAsyncSandbox:
@@ -81,7 +85,7 @@ async def test_a_dry_run_lists_and_deletes_nothing(
     ids.write_text("tmpl-a:default\n\ntmpl-b:default\n")
 
     code = await cleanup.module.run(
-        ["--snapshot-prefix", "ng-run-", "--snapshot-ids", str(ids), "--metadata", "purpose=r1"]
+        ["--snapshot-prefix", "ng-0123abcd-", "--snapshot-ids", str(ids), "--metadata", "purpose=r1"]
     )
 
     assert code == 0 and cleanup.deleted == [] and cleanup.killed == []
@@ -91,14 +95,31 @@ async def test_a_dry_run_lists_and_deletes_nothing(
 
 
 async def test_apply_deletes_every_selected_snapshot_and_sandbox(cleanup: types.SimpleNamespace) -> None:
-    code = await cleanup.module.run(["--snapshot-prefix", "ng-run-", "--metadata", "purpose=r1", "--apply"])
+    code = await cleanup.module.run(["--snapshot-prefix", "ng-0123abcd-", "--metadata", "purpose=r1", "--apply"])
 
     assert code == 0
-    assert cleanup.deleted == ["ng-run-snap:default"]
+    assert cleanup.deleted == ["ng-0123abcd-snap:default"]
     # Only the sandboxes that carry the label, whatever the service listed.
     assert sorted(cleanup.killed) == ["sbx-1", "sbx-2"]
-    # Names on, or the provider would find no snapshot under a prefix.
-    assert cleanup.provider_config == {"snapshots": {"send_names": True}}
+    # Listing by name on, or the provider would find no snapshot under a prefix.
+    assert cleanup.provider_config == {"snapshots": {"list_by_name": True}}
+
+
+async def test_a_failed_delete_is_reported_and_the_rest_are_still_deleted(
+    cleanup: types.SimpleNamespace, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    ids = tmp_path / "ids.txt"
+    ids.write_text("tmpl-a:default\ntmpl-b:default\n")
+    cleanup.failing.add("tmpl-a:default")
+
+    code = await cleanup.module.run(["--snapshot-ids", str(ids), "--metadata", "purpose=r1", "--apply"])
+
+    assert code == 1
+    assert cleanup.deleted == ["tmpl-b:default"]
+    assert sorted(cleanup.killed) == ["sbx-1", "sbx-2"]
+    captured = capsys.readouterr()
+    assert "failed: snapshot tmpl-a:default" in captured.err
+    assert "deleted 3, failed 1" in captured.out
 
 
 def test_nothing_selected_is_an_error(cleanup: types.SimpleNamespace) -> None:
@@ -108,7 +129,18 @@ def test_nothing_selected_is_an_error(cleanup: types.SimpleNamespace) -> None:
         cleanup.module.parse_args(["--metadata", "no-equals"])
 
 
-@pytest.mark.parametrize("arguments", [["--snapshot-prefix", ""], ["--metadata", "=x"], ["--metadata", "k="]])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--snapshot-prefix", ""],
+        # Every Gym run's checkpoint snapshots on the cell, and one that only looks like a state directory's.
+        ["--snapshot-prefix", "ng-"],
+        ["--snapshot-prefix", "ng-run-"],
+        ["--snapshot-prefix", "xng-0123abcd-"],
+        ["--metadata", "=x"],
+        ["--metadata", "k="],
+    ],
+)
 def test_a_selection_that_would_match_everything_is_an_error(
     cleanup: types.SimpleNamespace, arguments: list[str]
 ) -> None:

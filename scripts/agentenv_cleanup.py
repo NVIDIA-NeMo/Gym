@@ -3,19 +3,26 @@
 """List, and with ``--apply`` delete, the AgentENV (E2B) snapshots and sandboxes a run left behind.
 
 AgentENV is shared: snapshots and sandboxes a crashed or finished run did not release stay visible to every team on
-the cell until deleted. Select them by snapshot name prefix (named snapshots only), by a file of snapshot ids (for
-example the ids a checkpointer indexed), or by sandbox metadata (the run's labels). Select by a label only your run
-carries: a label every sandbox has, such as a provider default, selects everyone's. Without ``--apply`` nothing is
-deleted.
+the cell until deleted. Select them by a checkpointer's snapshot name prefix (``ng-<state dir id>-``, named snapshots
+only), by a file of snapshot ids (for example the ids a checkpointer indexed), or by sandbox metadata (the run's
+labels). Select by a label only your run carries: a label every sandbox has, such as a provider default, selects
+everyone's. Without ``--apply`` nothing is deleted.
+
+A prefix is found by listing every snapshot the key can see; when the cell's listing does not answer, the listing
+fails after the provider's ``operations.snapshot_list_timeout_s`` and ``--snapshot-ids`` is what still works.
 
 Connection settings come from the SDK's environment: E2B_API_KEY, E2B_API_URL, E2B_SANDBOX_URL, SSL_CERT_FILE.
 
-    python scripts/agentenv_cleanup.py --metadata purpose=my-run --snapshot-ids snapshot_ids.txt
-    python scripts/agentenv_cleanup.py --metadata purpose=my-run --snapshot-ids snapshot_ids.txt --apply
+Gym labels every sandbox it creates with its run id (``nemo-gym.nvidia.com/run``), which selects one run's sandboxes:
+
+    python scripts/agentenv_cleanup.py --metadata nemo-gym.nvidia.com/run=$NEMO_GYM_RUN_ID
+    python scripts/agentenv_cleanup.py --metadata nemo-gym.nvidia.com/run=$NEMO_GYM_RUN_ID --apply
+    python scripts/agentenv_cleanup.py --snapshot-ids snapshot_ids.txt --apply
 """
 
 import argparse
 import asyncio
+import re
 import sys
 from collections.abc import Awaitable, Sequence
 from pathlib import Path
@@ -26,6 +33,8 @@ from nemo_gym.sandbox import E2BProvider
 
 # Deletions in flight at once.
 PARALLELISM = 16
+# What every snapshot name of one checkpoint state directory starts with (``ng-<state dir id>-``).
+_CHECKPOINT_PREFIX = re.compile(r"ng-[0-9a-f]{8}-")
 
 
 def _e2b_sdk() -> Any:
@@ -38,7 +47,12 @@ def _e2b_sdk() -> Any:
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--snapshot-prefix", action="append", default=[], help="snapshot name prefix (repeatable)")
+    parser.add_argument(
+        "--snapshot-prefix",
+        action="append",
+        default=[],
+        help="snapshot name prefix, ng-<state dir id>-... (repeatable)",
+    )
     parser.add_argument("--snapshot-ids", type=Path, help="file with one snapshot id per line")
     parser.add_argument(
         "--metadata", action="append", default=[], metavar="KEY=VALUE", help="sandbox metadata to match (repeatable)"
@@ -48,8 +62,11 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     if not (args.snapshot_prefix or args.snapshot_ids or args.metadata):
         parser.error("select something: --snapshot-prefix, --snapshot-ids or --metadata")
     for prefix in args.snapshot_prefix:
-        if not prefix.strip():
-            parser.error("--snapshot-prefix must not be empty: it would select every snapshot the key can see")
+        if not _CHECKPOINT_PREFIX.match(prefix):
+            parser.error(
+                f"--snapshot-prefix must start with a checkpointer's prefix, ng-<state dir id>-, got {prefix!r}: "
+                "a shorter one would select the snapshots of other runs"
+            )
     for item in args.metadata:
         key, separator, value = item.partition("=")
         if not separator or not key.strip() or not value.strip():
@@ -81,8 +98,8 @@ async def selected_sandboxes(e2b: Any, metadata: dict[str, str]) -> list[str]:
 
 async def run(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    # Names on: this provider takes no snapshot, and with names off list_snapshots finds none under a prefix.
-    provider = E2BProvider(snapshots={"send_names": True})
+    # Listing by name on: without it list_snapshots finds none under a prefix.
+    provider = E2BProvider(snapshots={"list_by_name": True})
     e2b = _e2b_sdk()
     snapshots = await selected_snapshots(provider, args.snapshot_prefix, args.snapshot_ids)
     metadata = dict(item.split("=", 1) for item in args.metadata)
