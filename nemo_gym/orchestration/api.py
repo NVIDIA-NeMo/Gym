@@ -364,8 +364,19 @@ class NodePool(_StrictModel):
     ntasks_per_node: int = 1
     # Structured field the executor uses for smart deployment decisions (e.g. multi-instance vLLM).
     gpus_per_node: int | None = None
+    # Whether gpus_per_node is also requested from Slurm as `#SBATCH --gpus-per-node`. Set False on a cluster
+    # without GPU GRES, where sbatch rejects that directive; gpus_per_node then only sizes Gym's own deployment.
+    request_gpus: bool = True
     # Arbitrary #SBATCH directives forwarded verbatim for options we don't model explicitly.
     extra_args: dict[str, str] = {}
+
+    @model_serializer(mode="wrap")
+    def _omit_default_request_gpus(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Left at its default, the saved config is the one a launcher without the field writes and can read back.
+        data = handler(self)
+        if self.request_gpus:
+            data.pop("request_gpus", None)
+        return data
 
 
 class BaseComputeConfig(_StrictModel):

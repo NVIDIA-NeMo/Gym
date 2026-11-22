@@ -175,6 +175,24 @@ def test_render_pool_directives_gpus(pool):
     assert "#SBATCH --gpus-per-node=4" in lines
 
 
+def test_render_pool_directives_without_gpu_request_keeps_the_rest(pool):
+    # A cluster without GPU GRES rejects --gpus-per-node; gpus_per_node still sizes the deployment.
+    pool.gpus_per_node = 8
+    pool.request_gpus = False
+    lines = _render_pool_directives({"main": pool})
+    assert not any(line.startswith("#SBATCH --gpus-per-node") for line in lines)
+    assert lines == ["#SBATCH --partition=batch", "#SBATCH --nodes=1", "#SBATCH --ntasks-per-node=4"]
+
+
+def test_pools_disagreeing_on_request_gpus_are_refused():
+    pools = {
+        "a": NodePool(partition="batch", gpus_per_node=8),
+        "b": NodePool(partition="batch", gpus_per_node=8, request_gpus=False),
+    }
+    with pytest.raises(ValueError, match="Node pools disagree on request_gpus"):
+        _render_pool_directives(pools)
+
+
 def test_render_pool_directives_extra_args(pool):
     pool.extra_args["gres"] = "shard:8"
     lines = _render_pool_directives({"main": pool})

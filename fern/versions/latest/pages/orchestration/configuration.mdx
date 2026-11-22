@@ -138,9 +138,10 @@ to the job; an explicit `--export=NONE` prevents that inheritance.
 | `nodes` | `1` | Number of nodes in the pool. |
 | `ntasks_per_node` | `1` | Tasks per node. |
 | `gpus_per_node` | `null` | GPUs per node (`--gpus-per-node`). Also used to size and check vLLM deployments. |
+| `request_gpus` | `true` | Emit `#SBATCH --gpus-per-node` for `gpus_per_node`. Set `false` on a cluster without GPU GRES, where `sbatch` rejects that directive; `gpus_per_node` then only sizes and checks the deployment. |
 | `extra_args` | `{}` | Extra `#SBATCH` directives, written without leading dashes. |
 
-A benchmark is **one** Slurm job. Pools do not create separate Slurm requests; they divide the one allocation between services. The job requests the sum of every pool's `nodes`, and pool `i` owns the contiguous node range after all pools before it, in declaration order. Because Slurm takes one value per job, pools must agree on `partition`, `ntasks_per_node`, and `gpus_per_node`, and may not set the same `extra_args` key to different values. Disagreement is an error.
+A benchmark is **one** Slurm job. Pools do not create separate Slurm requests; they divide the one allocation between services. The job requests the sum of every pool's `nodes`, and pool `i` owns the contiguous node range after all pools before it, in declaration order. Because Slurm takes one value per job, pools must agree on `partition`, `ntasks_per_node`, `gpus_per_node`, and `request_gpus`, and may not set the same `extra_args` key to different values. Disagreement is an error.
 
 ## driver
 

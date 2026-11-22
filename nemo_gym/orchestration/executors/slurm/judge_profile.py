@@ -299,6 +299,8 @@ def judge_execution_profile(
         nodes=1,
         ntasks_per_node=1,
         gpus_per_node=0,
+        # Same cluster: a run whose pools do not request GPUs from Slurm (no GPU GRES) must not have its judge do so.
+        request_gpus=all(p.request_gpus for p in compute.node_pools.values()),
         extra_args=dict(saved_pool.extra_args) if saved_pool is not None else {},
     )
     extra_args = {k: v for k, v in compute.extra_args.items() if k not in _ALLOCATION_SHAPE_DIRECTIVES}

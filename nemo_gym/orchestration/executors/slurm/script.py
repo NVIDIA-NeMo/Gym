@@ -161,7 +161,9 @@ def _render_pool_directives(pools: dict[str, NodePool]) -> list[str]:
         f"#SBATCH --ntasks-per-node={_pool_directive(pools, 'ntasks_per_node')}",
     ]
     gpus_per_node = _pool_directive(pools, "gpus_per_node")
-    if gpus_per_node is not None:
+    # On a cluster without GPU GRES sbatch rejects --gpus-per-node, so a pool can keep gpus_per_node for sizing
+    # without requesting it from Slurm.
+    if gpus_per_node is not None and _pool_directive(pools, "request_gpus"):
         lines.append(f"#SBATCH --gpus-per-node={gpus_per_node}")
     extra_args: dict[str, str] = {}
     for name, pool in pools.items():
