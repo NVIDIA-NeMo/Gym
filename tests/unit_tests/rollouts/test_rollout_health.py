@@ -4332,7 +4332,11 @@ def _tool_call_failed_findings(tmp_path: Path, tool_calls: list[dict], **record_
 
 def test_tool_outputs_that_report_the_harness_tool_could_not_run_are_one_counted_finding(tmp_path: Path) -> None:
     failed = [_tool_call(i, "ripgrep execution failed: spawn rg ENOENT") for i in range(129)]
-    ok = [_tool_call(1000, "3 matches"), _tool_call(1001, None), _tool_call(1002, "the ripgrep execution failed")]
+    ok = [
+        _tool_call(1000, "3 matches") | {"tool_name": "bash"},
+        _tool_call(1001, None),
+        _tool_call(1002, "the ripgrep execution failed") | {"tool_name": "bash"},
+    ]
 
     record, findings = _tool_call_failed_findings(tmp_path, [*failed, *ok], reward=0.0)
 
@@ -4358,6 +4362,35 @@ def test_a_completed_tool_call_that_prints_the_marker_is_not_a_tool_failure(tmp_
     _, findings = _tool_call_failed_findings(tmp_path, [completed, failed, other_tool])
     [finding] = findings
     assert finding.detail["count"] == 1
+
+
+def test_a_marked_search_next_to_a_search_that_ran_is_not_a_tool_failure(tmp_path: Path) -> None:
+    # OpenCode returns the marker when a search names a path that does not exist; a search that returned
+    # output in the same rollout shows ripgrep runs, so the marked call is a model path error.
+    bad_path = _tool_call(1, "ripgrep execution failed: no such file or directory") | {"status": "failed"}
+    matches = _tool_call(2, "src/app.py:3: def main()") | {"status": "completed"}
+    glob_ok = _tool_call(3, "src/app.py") | {"tool_name": "glob", "status": "completed"}
+
+    _, findings = _tool_call_failed_findings(tmp_path, [bad_path])
+    assert [finding.detail["count"] for finding in findings] == [1]
+
+    _, findings = _tool_call_failed_findings(tmp_path, [bad_path, matches])
+    assert findings == []
+
+    _, findings = _tool_call_failed_findings(tmp_path, [glob_ok, bad_path])
+    assert findings == []
+
+
+def test_a_search_with_no_output_or_another_tool_does_not_show_the_search_tool_runs(tmp_path: Path) -> None:
+    failed = [_tool_call(i, "ripgrep execution failed: spawn rg ENOENT") | {"status": "failed"} for i in range(3)]
+    no_output = [_tool_call(10, None), _tool_call(11, "  "), _tool_call(12, {"unrelated": "x"})]
+    other_tool = _tool_call(13, "3 matches") | {"tool_name": "bash", "status": "completed"}
+    completed_marker = _tool_call(14, "ripgrep execution failed: quoted") | {"status": "completed"}
+
+    _, findings = _tool_call_failed_findings(tmp_path, [*failed, *no_output, other_tool, completed_marker])
+
+    [finding] = findings
+    assert finding.detail["count"] == 3
 
 
 def test_a_trajectory_without_failed_tool_outputs_has_no_tool_call_failed_finding(tmp_path: Path) -> None:
