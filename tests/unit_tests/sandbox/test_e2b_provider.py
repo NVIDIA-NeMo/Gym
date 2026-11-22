@@ -2080,6 +2080,53 @@ class TestSnapshots:
         await provider.aclose()
         assert FakeSandbox.delete_snapshot_calls == [] and len(FakeSandbox.snapshots) == 1
 
+    async def test_a_named_snapshot_survives_a_refused_request_for_the_same_name(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AgentENV refuses a name a snapshot already holds, and a delete by name deletes the snapshot that holds it.
+        original_create = FakeSandbox.create_snapshot
+        original_delete = FakeSandbox.delete_snapshot.__func__
+
+        async def create_refusing_a_taken_name(self, name=None, **kwargs):
+            if any(f"team-slug/{name}:default" in entry["names"] for entry in FakeSandbox.snapshots.values()):
+                raise FakeSdkError(f"400: AliasConflict: alias {name!r} is already in use", status_code=400)
+            return await original_create(self, name, **kwargs)
+
+        async def delete_by_id_or_name(cls, snapshot_id, **kwargs):
+            held = [
+                key for key, entry in cls.snapshots.items() if f"team-slug/{snapshot_id}:default" in entry["names"]
+            ]
+            return await original_delete(cls, held[0] if held else snapshot_id, **kwargs)
+
+        monkeypatch.setattr(FakeSandbox, "create_snapshot", create_refusing_a_taken_name)
+        monkeypatch.setattr(FakeSandbox, "delete_snapshot", classmethod(delete_by_id_or_name))
+        provider = E2BProvider(create={"template": "base"}, snapshots={"send_names": True})
+        handle = await provider.create(_spec())
+        snapshot_id = await provider.snapshot(handle, name="checkpoint-1")
+
+        with pytest.raises(FakeSdkError, match="AliasConflict"):
+            await provider.snapshot(handle, name="checkpoint-1")
+        await provider.aclose()
+
+        assert FakeSandbox.delete_snapshot_calls == []
+        assert list(FakeSandbox.snapshots) == [snapshot_id]
+
+    @pytest.mark.parametrize(
+        ("error", "refused"),
+        [
+            (FakeSdkError("400: AliasConflict", status_code=400), True),
+            (FakeSdkError("409: conflict", status_code=409), True),
+            (Exception("404: b'sandbox not found'"), True),
+            (FakeSdkError("408: request timeout", status_code=408), False),
+            (FakeSdkError("500: reply lost", status_code=500), False),
+            (FakeTimeout("Request timed out"), False),
+            (json.JSONDecodeError("Expecting value", "", 0), False),
+            (ConnectionError("connection reset"), False),
+        ],
+    )
+    def test_only_a_client_error_counts_as_a_refused_request(self, error: Exception, refused: bool) -> None:
+        assert e2b_provider._is_refused(error) is refused
+
     @pytest.mark.parametrize("gone", [True, False])
     async def test_a_snapshot_answered_with_an_empty_404_names_the_sandbox_gone(
         self, monkeypatch: pytest.MonkeyPatch, gone: bool
@@ -3232,3 +3279,122 @@ class TestLeaseRenewalNoise:
             assert handle.sandbox_id in provider._leases
         finally:
             await provider.aclose()
+
+
+def _installed_sdk_502s() -> tuple[types.ModuleType, Exception, Exception]:
+    """The installed SDK, and the errors its own mappers make of a 502 on a command stream and on the files API."""
+    e2b = pytest.importorskip("e2b", reason="e2b optional sandbox dependency is not installed")
+    import httpx
+    from connectrpc.code import Code
+    from connectrpc.errors import ConnectError
+    from e2b.envd.api import handle_envd_api_exception
+    from e2b.envd.rpc import handle_rpc_exception
+
+    return (
+        e2b,
+        handle_rpc_exception(ConnectError(Code.UNAVAILABLE, "HTTP 502")),
+        handle_envd_api_exception(httpx.Response(502)),
+    )
+
+
+def _fake_sdk_with_installed_errors(e2b: types.ModuleType) -> types.SimpleNamespace:
+    """The fake SDK, with the timeout and unreachable errors of the installed one (which may have no unreachable)."""
+    sdk = _fake_sdk()
+    sdk.TimeoutException = e2b.TimeoutException
+    sdk.exceptions = e2b.exceptions
+    del sdk.SandboxUnreachableException
+    if hasattr(e2b, "SandboxUnreachableException"):
+        sdk.SandboxUnreachableException = e2b.SandboxUnreachableException
+    return sdk
+
+
+class TestGateway502OnTheInstalledSdk:
+    """A 502 from the gateway, as the installed SDK's own mappers raise it: no fake error class."""
+
+    def test_both_502s_count_as_unreachable(self) -> None:
+        e2b, stream_502, files_502 = _installed_sdk_502s()
+        assert e2b_provider._is_unreachable(stream_502, e2b)
+        assert e2b_provider._is_unreachable(files_502, e2b)
+
+    def test_the_sdks_other_timeouts_do_not_count_as_unreachable(self) -> None:
+        e2b, _, _ = _installed_sdk_502s()
+        from connectrpc.code import Code
+        from connectrpc.errors import ConnectError
+        from e2b.envd.rpc import handle_rpc_exception
+        from e2b.exceptions import format_request_timeout_error
+
+        for error in (
+            handle_rpc_exception(ConnectError(Code.DEADLINE_EXCEEDED, "deadline exceeded")),
+            handle_rpc_exception(ConnectError(Code.CANCELED, "canceled")),
+            format_request_timeout_error(),
+        ):
+            assert isinstance(error, e2b.TimeoutException)
+            assert not e2b_provider._is_unreachable(error, e2b)
+
+    async def test_create_waits_out_a_502_on_the_reachability_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        e2b, stream_502, _ = _installed_sdk_502s()
+        monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: _fake_sdk_with_installed_errors(e2b))
+        monkeypatch.setattr(e2b_provider, "REACHABLE_RETRY_DELAY_S", 0.0)
+        outcomes = [stream_502, stream_502]
+        original_run = FakeCommands.run
+
+        async def flaky_run(self, **kwargs):
+            if kwargs.get("cmd") == "true" and outcomes:
+                self._sandbox.exec_calls.append(kwargs)
+                raise outcomes.pop(0)
+            return await original_run(self, **kwargs)
+
+        monkeypatch.setattr(FakeCommands, "run", flaky_run)
+        provider = E2BProvider(create={"template": "base", "reachable_timeout_s": 30})
+        handle = await provider.create(_spec(ttl_s=60))
+        assert [call["cmd"] for call in handle.raw.exec_calls] == ["true", "true", "true"]
+        assert not handle.raw.killed
+
+    async def test_create_writes_the_login_shell_hook_again_after_a_502(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        e2b, _, files_502 = _installed_sdk_502s()
+        monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: _fake_sdk_with_installed_errors(e2b))
+        outcomes = [files_502]
+        original_write = FakeFiles.write
+        attempts = []
+
+        async def flaky_write(self, path, data, **kwargs):
+            attempts.append(path)
+            if outcomes:
+                raise outcomes.pop(0)
+            return await original_write(self, path, data, **kwargs)
+
+        monkeypatch.setattr(FakeFiles, "write", flaky_write)
+        provider = E2BProvider(
+            create={"template": "base", "restore_login_env": True}, operations={"retries": 2, "retry_delay_s": 0.0}
+        )
+        handle = await provider.create(_spec())
+        assert attempts == [_LOGIN_ENV_HOOK_PATH] * 2
+        assert handle.raw.files_written[_LOGIN_ENV_HOOK_PATH] == _LOGIN_ENV_HOOK and not handle.raw.killed
+
+    async def test_a_hook_write_that_keeps_getting_502_fails_after_its_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        e2b, _, files_502 = _installed_sdk_502s()
+        monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: _fake_sdk_with_installed_errors(e2b))
+        attempts = []
+
+        async def failing_write(self, path, data, **kwargs):
+            attempts.append(path)
+            raise files_502
+
+        monkeypatch.setattr(FakeFiles, "write", failing_write)
+        provider = E2BProvider(
+            create={"template": "base", "restore_login_env": True}, operations={"retries": 2, "retry_delay_s": 0.0}
+        )
+        with pytest.raises(E2BCreateError, match="login-shell hook .* could not be written"):
+            await provider.create(_spec())
+        assert len(attempts) == 3 and FakeSandbox.instances[-1].killed
+
+    async def test_a_502_on_a_command_is_raised_as_unreachable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        e2b, stream_502, _ = _installed_sdk_502s()
+        monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: _fake_sdk_with_installed_errors(e2b))
+        provider = E2BProvider(create={"template": "base"}, exec={"background": False})
+        handle = await provider.create(_spec())
+        handle.raw.exec_behaviour = stream_502
+        with pytest.raises(E2BSandboxUnreachableError, match="could not reach sandbox"):
+            await provider.exec(handle, "ls", timeout_s=60)

@@ -229,11 +229,44 @@ def _is_missing_template(error: BaseException | None) -> bool:
     return bad_request and "not found" in message.lower()
 
 
+def _is_refused(error: BaseException) -> bool:
+    """Whether the service answered a request with a client error other than a timeout, so it did not carry it out.
+
+    Read from the status the SDK puts on its error, or failing that from the ``"<status>:"`` its message starts with.
+    An error with no status (a dropped connection, a reply the SDK cannot parse) does not count: the request may
+    have been carried out.
+    """
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        prefix = str(error)[:4]
+        status = int(prefix[:3]) if prefix[:3].isdigit() and prefix.endswith(":") else None
+    return status is not None and 400 <= status < 500 and status != 408
+
+
 def _is_unreachable(error: BaseException, e2b: Any) -> bool:
+    """Whether the gateway could not reach a sandbox (HTTP 502); the sandbox may still be alive."""
     unreachable = getattr(e2b, "SandboxUnreachableException", None)
-    if isinstance(unreachable, type) and isinstance(error, unreachable):
+    if isinstance(unreachable, type):
+        if isinstance(error, unreachable):
+            return True
+    elif _is_sandbox_timeout(error, e2b):
         return True
     return getattr(error, "status_code", None) == 502 or str(error).startswith("502:")
+
+
+def _is_sandbox_timeout(error: BaseException, e2b: Any) -> bool:
+    """Whether ``error`` is how an SDK without ``SandboxUnreachableException`` reports a 502 from the gateway.
+
+    Such an SDK raises a ``TimeoutException`` built by its ``format_sandbox_timeout_exception``, for a 502 from the
+    sandbox's HTTP API and for an unavailable command stream, and for nothing else. The error carries no status, so
+    it is told from the SDK's other timeouts by the text that formatter appends, read from the SDK itself. A sandbox
+    that reached its lifetime gets the same error, so callers bound their retries.
+    """
+    timeout = getattr(e2b, "TimeoutException", None)
+    formatter = getattr(getattr(e2b, "exceptions", None), "format_sandbox_timeout_exception", None)
+    if not isinstance(timeout, type) or not isinstance(error, timeout) or not callable(formatter):
+        return False
+    return str(error).endswith(str(formatter("")))
 
 
 def _network_options(network_policy: Any) -> dict[str, list[str]]:
@@ -1326,7 +1359,9 @@ class E2BProvider:
         The VM pauses for the moment it is captured and then keeps running. Not retried: a repeated request could
         leave a second snapshot nobody knows the id of. ``name`` is sent only with ``snapshots.send_names``. A
         request that sent one and ends without an id, cancelled or failed, has that name deleted off the caller's
-        path: the service may have taken the snapshot all the same. So a name is used for one request only.
+        path: the service may have taken the snapshot all the same. So a name is used for one request only. A
+        request the service refused (``_is_refused``) took no snapshot, so its name is left alone: a name that is
+        already taken is refused, and deleting it would delete the snapshot that holds it.
         """
         sandbox = self._sandbox(handle)
         create_snapshot = getattr(sandbox, "create_snapshot", None)
@@ -1337,10 +1372,12 @@ class E2BProvider:
             )
         sent_name = name if self._snapshots.send_names else None
         snapshot_id = None
+        refused = False
         try:
             info = await create_snapshot(sent_name, **self._request_params())
             snapshot_id = getattr(info, "snapshot_id", None)
         except Exception as error:
+            refused = _is_refused(error)
             if not self._in_grace(handle.sandbox_id) and await self._gone_behind_unparsed_reply(
                 error, handle.sandbox_id
             ):
@@ -1349,7 +1386,7 @@ class E2BProvider:
                 ) from error
             raise
         finally:
-            if sent_name is not None and not snapshot_id:
+            if sent_name is not None and not snapshot_id and not refused:
                 self._run_cleanup(
                     self._delete_unreturned_snapshot(sent_name),
                     f"e2b-unreturned-snapshot:{sent_name}",

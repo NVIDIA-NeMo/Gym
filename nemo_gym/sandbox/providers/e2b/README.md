@@ -168,6 +168,9 @@ metadata.
 - A kill that finds no sandbox is checked again and repeated if the sandbox still runs.
 - A sandbox the gateway could not reach raises `E2BSandboxUnreachableError` from `exec`, and is
   retried by idempotent operations (connect, close, file transfer, snapshot delete).
+  An SDK without `SandboxUnreachableException` (before 2.53) reports the gateway's 502 as a
+  `TimeoutException` with its "sandbox timeout" text; the provider reads that as unreachable too.
+  A sandbox that reached its lifetime gets the same error there, so it fails only after the retries.
 - With `create.reachable_timeout_s` (120 s in `agentenv.yaml`), a create or fork returns only once a
   no-op command reaches the new sandbox: AgentENV can report a sandbox created while its gateway
   still answers 502. The no-op is retried on a 502 and on a 404 (a new sandbox can be unroutable for
@@ -201,6 +204,9 @@ names on:
 - A snapshot whose request fails or is cancelled is deleted by its name, off the caller's path:
   the service may have taken it without the caller learning its id. So a name is used for one
   request only.
+- A request the service refused with a client error (HTTP 4xx other than 408) took no snapshot,
+  so its name is left alone. AgentENV refuses a name that a snapshot already holds, and deleting
+  that name would delete the snapshot that holds it.
 - A snapshot taken again under a name that exists becomes a new build of the same template.
 
 Listing by a name prefix is a separate switch, `snapshots.list_by_name`, off by default and in
