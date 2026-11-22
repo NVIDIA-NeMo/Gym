@@ -46,6 +46,31 @@ def test_prepared_mapping_and_secrets_are_loaded_without_rewriting_task_files(tm
     assert app._seed.__func__ is HarborEnvironmentServer._seed
 
 
+def test_a_relative_prepared_mapping_is_read_from_the_repository_root(tmp_path, monkeypatch):
+    """Gym starts each server in its own folder, so the default `benchmarks/...tasksets.json` path from the
+    benchmark config must be read from the repository root, not from the server's working folder."""
+    root = tmp_path / "repo"
+    mapping = root / "benchmarks/legal_agent_bench/data/rows.jsonl.tasksets.json"
+    mapping.parent.mkdir(parents=True)
+    mapping.write_text(json.dumps({"legal_agent_bench": {"folder": str(tmp_path / "tasks"), "tasks": {"one": "d"}}}))
+    server_folder = root / "environment_servers/harbor"
+    server_folder.mkdir(parents=True)
+    monkeypatch.chdir(server_folder)
+    monkeypatch.setattr("resources_servers.legal_agent_bench.app.PARENT_DIR", root, raising=False)
+    config = LegalAgentBenchEnvironmentConfig(
+        name="lab",
+        host="127.0.0.1",
+        port=0,
+        entrypoint="app.py",
+        agent_server={"type": "responses_api_agents", "name": "agent"},
+        prepared_tasksets_file="benchmarks/legal_agent_bench/data/rows.jsonl.tasksets.json",
+        artifacts_dir=tmp_path / "artifacts",
+        judges=[{"model_name": "gpt-5.5", "api_key": "test-only-judge-key"}],
+    )
+    app = LegalAgentBenchEnvironmentServer(config=config, server_client=MagicMock(spec=ServerClient))
+    assert app.config.tasksets["legal_agent_bench"].tasks == {"one": "d"}
+
+
 @pytest.mark.parametrize("reward", [0.0, 0.5, 1.0])
 async def test_successful_rewards_are_preserved(tmp_path, reward):
     app = server(tmp_path)

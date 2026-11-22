@@ -13,7 +13,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from nemo_gym.data.tasks.harbor import load_task, materialize_task
+from nemo_gym.data.tasks.harbor import MAIN_SERVICE, built_service_images, load_task, materialize_task
 from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
 from nemo_gym.data.tasks.harbor.image_build import build_images
 from nemo_gym.data.tasks.harbor.materialize import taskset_mapping
@@ -121,7 +121,9 @@ def prepare_environment(
     if image is None:
         # Identical task contexts share one tools image. Only explicit task build files reach the builder.
         build_images(tasks_dir / names[0], builder=ImageBuilder(tool=build_tool, repository=build_repository))
-        image = load_task(tasks_dir / names[0], root=tasks_dir).image
+        # Read the image from the build record. Loading the cache task would refuse it: its separate verifier has no
+        # environment of its own until the materialized task below names this image for it.
+        image = built_service_images(tasks_dir / names[0], tasks_dir).get(MAIN_SERVICE)
         if not image:
             raise ValueError("LAB tools image was not built; provide a prepared image")
     preamble = (PACKAGE_DIR / "harness/system-prompt.md").read_text().split("## Completion", 1)[0]
