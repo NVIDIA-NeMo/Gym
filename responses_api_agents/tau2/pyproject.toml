@@ -4,7 +4,7 @@
 [project]
 name = "gym-responses-api-agents-tau2"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "nemo-gym[dev]",
     "tau2[knowledge]@ git+https://github.com/bxyu-nvidia/tau2-bench@60c2a0dbf974ea7533456a4706f837c3a6d14afc",

@@ -4,7 +4,7 @@
 [project]
 name = "gym-responses-api-agents-hermes-agent"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "nemo-gym[dev,sandbox]",
     "hermes-agent@ git+https://github.com/cmunley1/hermes-agent@26bb847a88493342ca1b194e0455b479073ae21d",

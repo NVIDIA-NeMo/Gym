@@ -209,7 +209,7 @@ it with `openai[aiohttp]<=2.7.2`. That line must mirror the cap in the root
 package, Gym's included; a test asserts the two stay in sync.
 
 `finance-agent` publishes no tags and is not on PyPI, so it is pinned to a commit.
-nemo-gym requires Python >=3.13.14, the binding floor here.
+nemo-gym requires Python >=3.13.18, the binding floor here.
 
 ## Setup (`env.yaml`)
 

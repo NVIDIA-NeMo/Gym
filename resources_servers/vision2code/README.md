@@ -47,7 +47,7 @@ that behavior. Exact criteria, weights, and caps are in [rubrics.py](rubrics.py)
 Run commands from the Gym repository root:
 
 ```bash
-uv venv --python 3.13.14
+uv venv --python 3.13.18
 source .venv/bin/activate
 uv sync --frozen --extra dev
 uv sync --locked --project resources_servers/vision2code

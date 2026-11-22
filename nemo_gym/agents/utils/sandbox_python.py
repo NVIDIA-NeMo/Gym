@@ -49,15 +49,15 @@ from nemo_gym.sandbox.api import AsyncSandbox
 
 LOG = logging.getLogger(__name__)
 
-PYTHON_VERSION = "3.13.14"
-_PYTHON_RELEASE = "20260805"
+PYTHON_VERSION = "3.13.18"
+_PYTHON_RELEASE = "20261026"
 # Published with the immutable python-build-standalone release:
-# https://github.com/astral-sh/python-build-standalone/releases/tag/20260805
+# https://github.com/astral-sh/python-build-standalone/releases/tag/20261026
 _PYTHON_SHA256 = {
-    "x86_64/gnu": "39e82d05926bdcd206732026bcd878d9f00e288cd227d91c1fabf379b6ea4fa5",  # pragma: allowlist secret
-    "aarch64/gnu": "f1cda716f5595a97e79f760f81da7150e4f6b4ae9dc49968b4ce5d6d64bba058",  # pragma: allowlist secret
-    "x86_64/musl": "c6b77767b2c97ce77c21496909396b6e056b96220b2cda45f2c93b654376dd93",  # pragma: allowlist secret
-    "aarch64/musl": "960738ebde53abeceb5452b71c2217d50452023e3baf2439dc57290d07930637",  # pragma: allowlist secret
+    "x86_64/gnu": "df15fe60d3ff55bf9dcf25824b5572756bb8816ff93865a273d3301d7066a8b7",  # pragma: allowlist secret
+    "aarch64/gnu": "578d9da1983463ffb0c8c98ab0da2f18177f44069328eb0af847860c1eb05c3e",  # pragma: allowlist secret
+    "x86_64/musl": "d997b3bd2d0651cfba6dd43c18c31b35d3a142819015fd5c35338c2ea27d4ceb",  # pragma: allowlist secret
+    "aarch64/musl": "61d02dd9a1b9631723c7c5d593021cde684cafc31b18a535b9584377a7b54038",  # pragma: allowlist secret
 }
 # UV_PYTHON_INSTALL_MIRROR replaces this base for HTTP(S) mirrors; file:// mirrors are not supported here.
 # Offline hosts can prepopulate cache_dir/sandbox_python with the pinned archive; checksums still apply.

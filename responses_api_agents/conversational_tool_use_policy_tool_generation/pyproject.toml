@@ -4,7 +4,7 @@
 [project]
 name = "gym-responses-api-agents-conversational-tool-use-policy-tool-generation"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "nemo-gym[dev]",
     "json-repair==0.53.0",

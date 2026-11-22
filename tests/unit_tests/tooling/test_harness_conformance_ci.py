@@ -288,7 +288,7 @@ def test_selection_emits_runtime_requirements_before_dependencies_are_installed(
     matrix = json.loads(values["matrix"])["include"]
     assert [row["harness"] for row in matrix] == json.loads(values["harnesses"]) == list(HARNESSES)
     rows = {row["harness"]: row for row in matrix}
-    assert rows["nooa"]["container"] == {"image": "python:3.13.14-slim", "options": "--init"}
+    assert rows["nooa"]["container"] == {"image": "python:3.13.18-slim", "options": "--init"}
     assert rows["nooa"]["packages"] == "git curl"
     assert rows["terminus_2_sandboxed"]["packages"] == "tmux"
     assert rows["terminus_2_sandboxed"]["requires_root"] is True

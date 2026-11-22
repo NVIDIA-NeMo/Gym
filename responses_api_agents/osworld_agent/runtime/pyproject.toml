@@ -4,7 +4,7 @@
 [project]
 name = "gym-osworld-opt-in-runtime"
 version = "0.0.0"
-requires-python = ">=3.13.14,<3.14"
+requires-python = ">=3.13.18,<3.14"
 dependencies = [
     "numpy>=2.1,<2.5",
     "cryptography~=46.0",

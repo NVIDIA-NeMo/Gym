@@ -182,7 +182,7 @@ rollout per row. The model and serving setup are in the
 
 ## CPU tests
 
-From the Gym repository root using Python 3.13.14 or later:
+From the Gym repository root using Python 3.13.18 or later:
 
 ```bash
 python -m pytest resources_servers/videomme_v2/tests resources_servers/video_mcqa/tests -q

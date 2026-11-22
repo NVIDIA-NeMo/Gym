@@ -5,8 +5,8 @@ set -euo pipefail
 # Keep pip from satisfying deps from the host user site.
 export PYTHONNOUSERSITE=1
 
-PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"
-PBS_RELEASE="${PBS_RELEASE:-20260805}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.13.18}"
+PBS_RELEASE="${PBS_RELEASE:-20261026}"
 # python-build-standalone target; defaults to the host architecture. Override ARCH to prepare a bundle for
 # images of a different architecture.
 if [ -z "${ARCH:-}" ]; then

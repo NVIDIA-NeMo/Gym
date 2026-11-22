@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Build before creating offline execution sandboxes; record and use the resulting immutable image digest.
 # Override PYTHON_IMAGE with a registry digest to reproduce the exact base image as well.
-ARG PYTHON_IMAGE=python:3.13.14-slim-bookworm
+ARG PYTHON_IMAGE=python:3.13.18-slim-bookworm
 FROM ${PYTHON_IMAGE}
 
 COPY requirements.txt /tmp/requirements.txt

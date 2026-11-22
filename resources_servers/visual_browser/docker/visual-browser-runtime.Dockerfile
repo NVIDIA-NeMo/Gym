@@ -16,7 +16,7 @@
 # which sends only the files this image needs as the build context.
 
 ARG PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright/python:v1.55.0-noble@sha256:640d578aae63cfb632461d1b0aecb01414e4e020864ac3dd45a868dc0eff3078
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.4
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.7
 
 FROM ${UV_IMAGE} AS uv
 
@@ -56,13 +56,13 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
     XDG_SESSION_TYPE=x11 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Gym requires Python >= 3.13.14; this is the same uv-managed CPython build the
+# Gym requires Python >= 3.13.18; this is the same uv-managed CPython build the
 # reference runs used.
-RUN uv python install 3.13.14
+RUN uv python install 3.13.18
 
 COPY . /opt/nemo-gym
 WORKDIR /opt/nemo-gym/resources_servers/visual_browser
-RUN uv sync --locked --project . --python 3.13.14 --no-dev \
+RUN uv sync --locked --project . --python 3.13.18 --no-dev \
     && xvfb-run -a -s "-screen 0 1920x1080x24" .venv/bin/python -c \
         "import nemo_gym.web.browser_instance, resources_servers.visual_browser.backend, playwright, pyautogui; print(pyautogui.size())" \
     && test -x /ms-playwright/chromium-1187/chrome-linux/chrome

@@ -325,7 +325,7 @@ HARNESSES = {
     "nooa": HarnessDefinition(
         agent="NOOAAgent",
         install_module="scripts.harness_conformance.nooa",
-        ci_container={"image": "python:3.13.14-slim", "options": "--init"},
+        ci_container={"image": "python:3.13.18-slim", "options": "--init"},
         ci_packages=("git", "curl"),
         runtime_files={
             "pyproject_sha256": "responses_api_agents/nooa_agent/pyproject.toml",

@@ -211,7 +211,7 @@ direct declaration and the dataset-builder code path, nothing more.
 
 ```bash
 cd resources_servers/moldetox
-uv venv --python 3.13.14
+uv venv --python 3.13.18
 uv sync --locked
 cd ../..
 source resources_servers/moldetox/.venv/bin/activate

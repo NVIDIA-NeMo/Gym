@@ -34,8 +34,8 @@ jobs:
         with:
           ref: ${{ inputs.checkout-ref }}
       - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/0.13.4/install.sh | sh
+        run: curl -LsSf https://astral.sh/uv/0.13.7/install.sh | sh
       - name: Check every managed lock and resolver policy
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          uv run --no-project --python 3.13.14 python scripts/component_locks.py
+          uv run --no-project --python 3.13.18 python scripts/component_locks.py

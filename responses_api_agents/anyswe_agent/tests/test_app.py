@@ -502,8 +502,8 @@ class TestSetupScriptsExist:
 
     def test_portable_python_meets_project_minimum(self) -> None:
         script = (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").read_text()
-        assert 'PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"' in script
-        assert 'PBS_RELEASE="${PBS_RELEASE:-20260805}"' in script
+        assert 'PYTHON_VERSION="${PYTHON_VERSION:-3.13.18}"' in script
+        assert 'PBS_RELEASE="${PBS_RELEASE:-20261026}"' in script
 
 
 def _fake_bin(tmp_path: Path, machine: str) -> Path:

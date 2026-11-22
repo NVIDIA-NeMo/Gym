@@ -313,7 +313,7 @@ gym env resolve --config ...
 - `pyproject.toml` is authoritative for Python, Ruff, formatter, and coverage settings;
   `.pre-commit-config.yaml` is authoritative for the hooks that enforce them.
 - Line length: 119
-- Python 3.13.14+, async-first
+- Python 3.13.18+, async-first
 - Ruff for linting and formatting (double quotes, isort)
 - Prefer the smallest clear implementation that satisfies current requirements. Do not add abstractions, options,
   dependencies, or layers for hypothetical future needs.

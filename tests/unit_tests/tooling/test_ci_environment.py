@@ -237,7 +237,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         "#!/bin/sh\n"
         'echo "$*" >> "$UV_TEST_CALLS"\n'
         'case "$1" in\n'
-        "  --version) echo 'uv 0.13.4' ;;\n"
+        "  --version) echo 'uv 0.13.7' ;;\n"
         "  venv) mkdir -p .venv/bin; : > .venv/bin/activate ;;\n"
         "  sync) ;;\n"
         "  *) exit 2 ;;\n"
@@ -283,7 +283,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         text=True,
     )
     assert later_step.returncode == 0, later_step.stderr
-    assert later_step.stdout.strip() == "uv 0.13.4"
+    assert later_step.stdout.strip() == "uv 0.13.7"
 
 
 def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
@@ -1072,7 +1072,7 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
         """#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
-    --version) printf '%s\\n' 'uv 0.13.4' ;;
+    --version) printf '%s\\n' 'uv 0.13.7' ;;
     cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
     venv)
         venv_dir="${@: -1}"
@@ -1209,7 +1209,7 @@ def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock
         """#!/usr/bin/env bash
 set -eu
 case "$1" in
-    --version) echo 'uv 0.13.4' ;;
+    --version) echo 'uv 0.13.7' ;;
     cache) echo "${UV_CACHE_DIR}" ;;
     lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
     sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;

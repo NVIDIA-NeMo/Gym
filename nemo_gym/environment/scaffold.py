@@ -865,7 +865,7 @@ def _requirements(directory: Path, checkout_root: Path | None) -> str:
     text = (
         _license_header()
         + f'\n[project]\nname = "{project_name}"\nversion = "0.0.0"\n'
-        + f'requires-python = ">=3.13.14"\ndependencies = [{json.dumps(gym_dependency)}]\n'
+        + f'requires-python = ">=3.13.18"\ndependencies = [{json.dumps(gym_dependency)}]\n'
         + "\n[tool.uv]\npackage = false\n"
     )
     metadata_path = PARENT_DIR / "pyproject.toml"

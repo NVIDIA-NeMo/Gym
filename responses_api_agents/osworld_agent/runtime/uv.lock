@@ -1,6 +1,6 @@
 version = 1
 revision = 5
-requires-python = ">=3.13.14, <3.14"
+requires-python = ">=3.13.18, <3.14"
 resolution-markers = [
     "platform_machine == 'aarch64' and sys_platform == 'linux'",
     "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')",
