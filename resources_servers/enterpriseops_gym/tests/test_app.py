@@ -114,7 +114,7 @@ def sandboxes(monkeypatch) -> dict[str, list]:
         assert port in self._spec.ports
         return SandboxEndpoint(endpoint=f"http://{self._spec.metadata['gym_server']}.test", headers={"auth": "proxy"})
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, *, timeout_s: float | None = None) -> None:
         if self._spec is not None:
             if self._spec.metadata["gym_server"] in record["failing_stops"]:
                 raise RuntimeError("delete timed out")

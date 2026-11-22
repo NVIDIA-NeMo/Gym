@@ -24,10 +24,13 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.core.episode_context import (
         current_rollout_id,
+        current_rollout_skips_token_capture,
         current_session_key,
         current_verifier_invocation_id,
         maybe_rollout_id_from_run_body,
         rollout_context,
+        skip_token_capture_context,
+        skips_token_capture,
         verifier_invocation_context,
     )
     from nemo_gym.core.episode_types import (
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
         TaskId,
     )
     from nemo_gym.core.failure_kinds import (
+        AGENT_COMMAND_NOT_ALLOWED,
         AGENT_INVALID_OUTPUT,
         AGENT_LIMIT,
         AGENT_ROUTE_FAILED,
@@ -45,12 +49,14 @@ if TYPE_CHECKING:
         AGENT_TIMEOUT,
         ENVIRONMENT_SERVER_FAILED,
         EPISODE_FAILED,
+        GIT_WORKTREE_COMMIT_REJECTED,
         HARNESS_TERMINATION_UNCONFIRMED,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         MODEL_CONTEXT_LIMIT,
         MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_REQUEST_ERROR,
+        MODEL_SERVER_QUEUE_TIMEOUT,
         MODEL_TRANSPORT_ERROR,
         PROVIDER_IO_TIMEOUT,
         PROVIDER_OOM_KILLED,
@@ -90,6 +96,16 @@ if TYPE_CHECKING:
         report_for_current_request,
     )
     from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
+    from nemo_gym.core.model_call_sampling import (
+        MODEL_SAMPLING_HEADER,
+        MODEL_SAMPLING_NULL,
+        ModelCallSampling,
+        current_model_sampling_segment,
+        encode_model_sampling,
+        model_sampling_context,
+        model_sampling_from_run_body,
+        model_sampling_path_segment,
+    )
     from nemo_gym.core.operation_timing import OperationTiming, TimingBoundary
     from nemo_gym.core.outcome_policy import (
         OutcomeAction,
@@ -97,8 +113,11 @@ if TYPE_CHECKING:
         OutcomePolicyConfig,
         StageOutcomePolicyConfig,
         StagePolicyConfig,
+        applied_outcome_fields,
         choose_action,
         choose_stage_outcome,
+        environment_fault_policy,
+        require_retry_or_fail,
     )
     from nemo_gym.core.responses_api_types import (
         CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
@@ -163,6 +182,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "AGENT_COMMAND_NOT_ALLOWED": "failure_kinds",
     "MediaFile": "media",
     "UnsupportedContentError": "media",
     "split_text_and_media": "media",
@@ -178,6 +198,7 @@ _PUBLIC_API = {
     "CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS": "responses_api_types",
     "ENVIRONMENT_SERVER_FAILED": "failure_kinds",
     "EPISODE_FAILED": "failure_kinds",
+    "GIT_WORKTREE_COMMIT_REJECTED": "failure_kinds",
     "EpisodeFailure": "failure_records",
     "EpisodeId": "episode_types",
     "FailureBoundary": "failure_records",
@@ -196,14 +217,21 @@ _PUBLIC_API = {
     "StageOutcomePolicyConfig": "outcome_policy",
     "StagePolicyConfig": "outcome_policy",
     "choose_stage_outcome": "outcome_policy",
+    "applied_outcome_fields": "outcome_policy",
+    "environment_fault_policy": "outcome_policy",
+    "require_retry_or_fail": "outcome_policy",
     "HARNESS_TERMINATION_UNCONFIRMED": "failure_kinds",
     "JUDGE_FAILED": "failure_kinds",
     "JUDGE_UNPARSEABLE": "failure_kinds",
     "MODEL_CONTEXT_LIMIT": "failure_kinds",
     "MODEL_POLICY_RESPONSE_TIMEOUT": "failure_kinds",
+    "MODEL_SERVER_QUEUE_TIMEOUT": "failure_kinds",
     "MODEL_REQUEST_ERROR": "failure_kinds",
+    "MODEL_SAMPLING_HEADER": "model_call_sampling",
+    "MODEL_SAMPLING_NULL": "model_call_sampling",
     "MODEL_TRANSPORT_ERROR": "failure_kinds",
     "MaterializedTask": "episode_types",
+    "ModelCallSampling": "model_call_sampling",
     "ModelFailureDetails": "failure_records",
     "SandboxFailureDetails": "failure_records",
     "NeMoGymChatCompletion": "responses_api_types",
@@ -272,19 +300,27 @@ _PUBLIC_API = {
     "accumulate_response_usage": "responses_api_types",
     "agent_route_failure": "typed_exceptions",
     "choose_action": "outcome_policy",
+    "current_model_sampling_segment": "model_call_sampling",
     "current_rollout_id": "episode_context",
+    "current_rollout_skips_token_capture": "episode_context",
     "current_session_key": "episode_context",
     "current_verifier_invocation_id": "episode_context",
+    "encode_model_sampling": "model_call_sampling",
     "failure_report_for": "typed_exceptions",
     "is_namespaced": "failure_kinds",
     "is_registered": "failure_kinds",
     "maybe_rollout_id_from_run_body": "episode_context",
+    "model_sampling_context": "model_call_sampling",
+    "model_sampling_from_run_body": "model_call_sampling",
+    "model_sampling_path_segment": "model_call_sampling",
     "observe_failure": "failure_transport",
     "rebuild_failure": "typed_exceptions",
     "reply_failure_report": "failure_transport",
     "report_for_current_request": "failure_transport",
     "rollout_context": "episode_context",
     "sdk_error_details": "typed_exceptions",
+    "skip_token_capture_context": "episode_context",
+    "skips_token_capture": "episode_context",
     "split_tool_output_images": "tool_output_images",
     "validate_failure_kind": "failure_kinds",
     "verifier_invocation_context": "episode_context",

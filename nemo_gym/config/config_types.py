@@ -23,6 +23,7 @@ from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set,
 
 import rich
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -205,6 +206,10 @@ class ServerRefNotFoundError(ConfigError, ValueError):
 
 class InheritPathNotFoundError(ConfigError, ValueError):
     """An `_inherit_from` / swap / copy directive references a config path that does not exist."""
+
+
+class InheritCycleError(ConfigError, ValueError):
+    """`_inherit_from` / copy directives form a cycle, so no config in it has a base to start from."""
 
 
 class AlmostServerError(ConfigError, ValueError):
@@ -533,6 +538,8 @@ class Domain(str, Enum):
     - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
     - `games`                 — interactive game environments (e.g. blackjack, tetris).
     - `translation`           — machine translation quality (e.g. WMT).
+    - `asr`                   — speech recognition and speech transcription (e.g. LibriSpeech, the Open ASR leaderboard,
+      meeting transcription).
     - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
     - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
     - `other`                 — catch-all when no specific domain above applies.
@@ -547,6 +554,7 @@ class Domain(str, Enum):
     SAFETY = "safety"
     GAMES = "games"
     TRANSLATION = "translation"
+    ASR = "asr"
     E2E = "e2e"
     RLHF = "rlhf"
     OTHER = "other"
@@ -846,10 +854,33 @@ def maybe_get_server_instance_config(
     if not isinstance(server_type_config_dict, DictConfig):
         return None, None
 
+    from nemo_gym.config.global_config import SERVER_TYPE_KEYS
+
+    server_values = OmegaConf.to_container(server_type_config_dict)
+    # Benchmark metadata uses Path fields. Resolve those in their original rooted
+    # context before Pydantic turns an interpolation into a literal Path filename.
+    # Keep other server fields unresolved: composition may still supply their values.
+    for server_kind, instances in server_type_config_dict.items_ex(resolve=False):
+        if server_kind not in SERVER_TYPE_KEYS or not isinstance(instances, DictConfig):
+            continue
+        for instance_name, instance in instances.items_ex(resolve=False):
+            if not isinstance(instance, DictConfig):
+                continue
+            for index, dataset in enumerate(instance.get("datasets") or []):
+                if isinstance(dataset, DictConfig) and dataset.get("type") == "benchmark":
+                    for field in ("jsonl_fpath", "prepare_script", "prompt_config", "prepare_project"):
+                        if field not in dataset:
+                            continue
+                        try:
+                            resolved = dataset[field]
+                        except InterpolationResolutionError:
+                            # Unused datasets may depend on variables supplied only at evaluation time.
+                            continue
+                        server_values[server_kind][instance_name]["datasets"][index][field] = resolved
     maybe_server_instance_config_dict = {
         "name": name,
         "server_type_config_dict": server_type_config_dict,
-        **OmegaConf.to_container(server_type_config_dict),
+        **server_values,
     }
     try:
         config = ServerInstanceConfigTypeAdapter.validate_python(maybe_server_instance_config_dict)
@@ -1064,6 +1095,8 @@ class AggregateMetrics(BaseModel):
 ROLLOUT_PATH_PREFIX = "ng-rollout"
 TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
 TRACE_CONTEXT_PATH_SEGMENT = "ng-trace"
+# Sampling values for a model call, or `null`, placed after the other prefixes (nemo_gym/core/model_call_sampling.py).
+MODEL_SAMPLING_PATH_SEGMENT = "ng-sampling"
 
 # The listen backlog of every Gym server socket, above uvicorn's default of 2048.
 # A burst of new connections at Gym's concurrency then waits in the queue rather than on TCP retransmission backoff.

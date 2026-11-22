@@ -82,6 +82,7 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     AGENT_TIMEOUT,
+    JUDGE_FAILED,
     SESSION_EXPIRED,
     SESSION_LOST,
     NeMoGymResponse,
@@ -228,6 +229,16 @@ _TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
 # reference tree or the judge panel's limits may have been repaired between launches. A missing evaluated
 # deliverable (``eval_missing``) has nothing to judge, so it stays closed.
 _REVERIFIABLE_FAILURE_CLASSES = frozenset({_REFERENCE_MISSING_FAILURE_CLASS, _TRANSPORT_INELIGIBLE_FAILURE_CLASS})
+
+
+def _is_rejudgeable_judge_failure(row: Mapping[str, Any]) -> bool:
+    """Whether a row's judge failed after the answer was saved, so a retry judges the persisted deliverable.
+
+    A judge's failsafe reply carries the class alone, not the verification stage, and a terminal judge failure
+    stays closed. This is separate from ``_REVERIFIABLE_FAILURE_CLASSES``, which also reopens terminal failures.
+    """
+    return row.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED and not row.get(NG_TERMINAL_KEY)
+
 
 # Stamped on every row of a stage accepted by its partial-completion policy, so
 # aggregation can tell an accepted partial final stage from a degraded one.
@@ -2459,7 +2470,7 @@ def load_reuse_cached_keys(output_fpath: str | Path) -> Dict[int, set[Tuple[Any,
             if not line:
                 continue
             row = orjson.loads(line)
-            if not row.get("reuse_cached_deliverable"):
+            if not (row.get("reuse_cached_deliverable") or _is_rejudgeable_judge_failure(row)):
                 continue
             if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
                 continue
@@ -2716,7 +2727,7 @@ async def run_e2e_multistage(
     """Drive a multi-stage ELO run through the standard rollout-collection helper.
 
     Called by ``ng_e2e_collect_rollouts`` when ``multistage.enabled=true``. Brings
-    nothing up itself (the caller's ``RunHelper`` has already started the servers);
+    nothing up itself (the caller's ``ServerSupervisor`` has already started the servers);
     it preprocesses the prepared dataset into materialized rows, samples/judges
     stage-by-stage via the helper's ``_run_examples_with_metadata``, writes the
     merged rollouts, and runs the standard stage-aware ``_call_aggregate_metrics``.
@@ -2841,6 +2852,7 @@ async def run_e2e_multistage(
             if (
                 completed.result.get("_ng_failure_stage") == "verification"
                 or completed.result.get(NG_FAILURE_CLASS_KEY) in _REVERIFIABLE_FAILURE_CLASSES
+                or _is_rejudgeable_judge_failure(completed.result)
             ):
                 completed.result["reuse_cached_deliverable"] = True
             if completed.environment_server is not None:

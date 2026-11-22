@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import sys
 import traceback
 from functools import cache
@@ -27,6 +28,7 @@ from shutil import rmtree
 from subprocess import Popen
 from tempfile import TemporaryDirectory
 from time import time
+from types import FrameType
 from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import rich
@@ -71,6 +73,7 @@ from nemo_gym.environment.registry import (
     EnvironmentCatalogEntry,
     RegistryError,
     discover_environment_catalog,
+    manifest_workloads_for_server,
     read_environment_details,
     resolve_catalog_entry,
 )
@@ -83,7 +86,7 @@ from nemo_gym.environment.validation import (
 from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
 from nemo_gym.server_runtime.server_status import StatusCommand
 from nemo_gym.server_runtime.supervisor.server_supervisor import (
-    RunHelper,
+    ServerSupervisor,
     _configured_servers,
     _resolve_server_dir,
 )
@@ -203,7 +206,7 @@ def prefetch(
         print(f"Pre-warming venv for: {dir_path}")
 
         # Run only the setup (venv creation + dep install) — no server start.
-        # Serial execution reduces uv cache size (same reasoning as dry_run in RunHelper.start).
+        # Serial execution reduces uv cache size (same reasoning as dry_run in ServerSupervisor.start).
         setup_cmd = setup_env_command(dir_path, global_config_dict, top_level_path)
         process = run_command(setup_cmd, dir_path, server_name=top_level_path)
         returncode = process.wait()
@@ -240,9 +243,30 @@ def run(
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    rh = RunHelper()
-    rh.start(global_config_dict_parser_config)
-    rh.run_forever()
+    supervisor = ServerSupervisor()
+    terminated = False
+
+    def _on_sigterm(signum: int, frame: FrameType | None) -> None:
+        nonlocal terminated
+        terminated = True
+        raise KeyboardInterrupt
+
+    # Slurm ends a job with SIGTERM (scancel, the time limit). Python's default action exits without unwinding,
+    # which leaves the servers running and the config file, with its API keys, on disk. Here and not in
+    # `ServerSupervisor.start()`: a trainer calls that off the main thread, where a handler cannot be set.
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        supervisor.start(global_config_dict_parser_config)
+        # When a server uses Ray, the start runs Ray's init, which replaces the handler with one that exits with
+        # status 15. That one unwinds too, so a SIGTERM during the rest of the start still shuts everything down.
+        signal.signal(signal.SIGTERM, _on_sigterm)
+        supervisor.run_forever()
+    except KeyboardInterrupt:
+        if not terminated:
+            raise
+    if terminated:
+        # As a SIGTERM kill would, so a stopped job never looks successful: `run_forever` returns after Ctrl-C.
+        sys.exit(128 + signal.SIGTERM)
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
@@ -251,6 +275,21 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
 
     # We have special data checks for resources servers
     if test_config.dir_path.parts[0] != "resources_servers":
+        return
+
+    # A server that only manifest workloads use carries verifier fixtures instead of the legacy five-row rollout
+    # artifacts (see manifest_workloads_for_server). Exercise every workload sharing it, offline and without requiring
+    # its full dataset to be downloaded on CI workers.
+    manifest_entries = manifest_workloads_for_server(
+        test_config.dir_path.name, test_config.resolved_dir_path, discover_environment_catalog()
+    )
+    if manifest_entries:
+        conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
+        assert not conflict_paths, f"Found conflicting paths: {conflict_paths}"
+        for entry in manifest_entries:
+            validation = validate_environment(entry.manifest_path, entry.config_path, validate_datasets=False)
+            _run_manifest_verifier(entry, update_expected=False, validation=validation)
+        print(f"The verifier fixtures for {test_config.dir_path} have been successfully validated!")
         return
 
     # Check that the required examples and example metrics are present. Read from the resolved dir
@@ -353,6 +392,7 @@ def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Po
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+@exit_cleanly_on_config_error
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -464,6 +504,7 @@ Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_disp
         exit(1)
 
 
+@exit_cleanly_on_config_error
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
@@ -1184,12 +1225,20 @@ def _inspect_environment(
         domain=entry.domain or parsed["domain"],
         description=description,
         details=details,
-        usage=(
-            f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
-            if entry.resources_server_selector
-            else f"gym env start --{entry.kind} {name} --model-type vllm_model"
-        ),
+        usage=_inspect_usage(name, entry),
     )
+
+
+def _inspect_usage(name: str, entry: EnvironmentCatalogEntry) -> str:
+    """The example command an inspected entry shows: a Harbor-backed one runs through `gym eval run`, which composes
+    its Harbor environment server; `gym env start` does not."""
+    if entry.harbor_target and entry.kind == "benchmark":
+        return f"gym eval run --benchmark {name} --sandbox <provider> --model-type vllm_model"
+    if entry.harbor_target:
+        return f"gym eval run {entry.harbor_target} --agent <harness> --sandbox <provider> --model-type vllm_model"
+    if entry.resources_server_selector:
+        return f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
+    return f"gym env start --{entry.kind} {name} --model-type vllm_model"
 
 
 def _entry_servers(

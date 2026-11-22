@@ -204,7 +204,11 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         activation_attempted = False
 
         async def release_runtime() -> None:
-            if state.runtime and state.sandbox is None and state.judge_sandbox is None:
+            if state.runtime:
+                # The sandboxes use the bundle, so it waits for them. At shutdown the sweep runs every cleanup at
+                # once, and a stop can still be running; a stop that fails keeps the bundle for a retry.
+                await judge_cleanup.close()
+                await candidate_cleanup.close()
                 await state.runtime.release(state.session_id)
 
         async def close_sandbox(role: str) -> None:
@@ -421,7 +425,12 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
     def _activation_path(self, request: SWETRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
-        capture = bool(block.get("enabled")) and (block.get("all_agents") or config.get("token_id_capture"))
+        # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
+        capture = (
+            not request.skip_token_capture
+            and bool(block.get("enabled"))
+            and (block.get("all_agents") or config.get("token_id_capture"))
+        )
         segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""
         return f"/ng-rollout/{request.episode_id.capture_key}{segment}/v1/responses"
 
@@ -605,6 +614,9 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
 
     async def _next_user_turn(self, state: Episode, activation: CandidateTurn) -> UserTurn:
         turn = activation.activation_id - 1
+        # A full context cannot take another turn; score the work so far.
+        if activation.stop_reason == "context_limit":
+            return UserTurn(activation_id=activation.activation_id, kind="stop", stop_reason="context_limit")
         if turn >= self.config.max_resumes:
             return UserTurn(activation_id=activation.activation_id, kind="stop", stop_reason="max_resumes")
         remaining = self._remaining_interaction_seconds(state)

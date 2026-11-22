@@ -204,7 +204,10 @@ async def score(
                     continue
                 if not saved:
                     raise RetryableTransportError(
-                        "Judge transport failed; fix the service or credentials and explicitly resume the saved answer"
+                        f"Judge transport failed (http_status={receipt.get('http_status')}, "
+                        f"reason={receipt.get('reason')}, receipt={receipt_path.name}); "
+                        "fix the service or credentials and explicitly resume the saved answer",
+                        http_status=status,
                     )
                 continue
             delivered_reviews += 1
@@ -232,7 +235,12 @@ def _checked_result(
 ) -> tuple[dict, dict]:
     """Derive the full grade from the authoritative judge response."""
     choices = response["choices"]
-    if len(choices) != 1 or choices[0]["finish_reason"] != "stop":
+    if (
+        len(choices) != 1
+        or choices[0]["finish_reason"] != "stop"
+        or choices[0].get("native_finish_reason") == "repetition"
+        or choices[0].get("stop_reason") == "repetition_detected"
+    ):
         raise ValueError("Incomplete judge delivery")
     review = json.loads(choices[0]["message"]["content"])
     if indexed:

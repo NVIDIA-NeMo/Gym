@@ -96,7 +96,7 @@ telemetry:
 A checkpoint is rare, so the group gives every checkpoint operation a span:
 
 - `gym.checkpoint.<operation>` on each participating server, for `prepare`, `commit`, `restore`, `resume`,
-  `retire`, and `forget`, and `gym.checkpoint.lease_reopen` for each attempt to reopen a server whose lease
+  `retire`, `forget`, and `release`, and `gym.checkpoint.lease_reopen` for each attempt to reopen a server whose lease
   expired. Child spans time the steps that grow with the number of rollouts in flight: `wait_ready` under
   `prepare`, `export` and `write` under `commit`, and `read` and `install` under `restore`. A model server
   also emits `gym.checkpoint.generation_cut` while it prepares.

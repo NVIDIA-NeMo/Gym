@@ -7,6 +7,7 @@ import json
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -76,6 +77,13 @@ def request(capture_key: str) -> Request:
     )
 
 
+def run_request(routing_id: str | None) -> Request:
+    app = SimpleNamespace(state=SimpleNamespace())
+    if routing_id is not None:
+        app.state.nemo_gym_routing_id = routing_id
+    return Request({"type": "http", "path": "/run", "query_string": b"", "headers": [], "app": app})
+
+
 class Reply:
     ok = True
 
@@ -140,6 +148,9 @@ class Harness:
             server_client=client,
         )
         self.tasks: list[asyncio.Task] = []
+        self.self_call_headers: list = []
+        # Without session routing (one worker), a server has no routing ID.
+        self.routing_id: str | None = None
 
     async def post(self, *, server_name, url_path, json, **kwargs):
         if server_name == "model":
@@ -148,6 +159,7 @@ class Harness:
             await self.model_release.wait()
             return Reply(MODEL_REPLY)
         if server_name == "agent":
+            self.self_call_headers.append(kwargs.get("headers"))
             capture_key = re.search(r"/ng-rollout/([^/]+)", url_path)[1]
             if self.detached_dispatch:
                 # Cancelling an HTTP caller need not cancel the server's handler.
@@ -161,7 +173,10 @@ class Harness:
             await self.reply_delivery.wait()
             return Reply(response.model_dump(mode="json"))
         if url_path == "/seed_session":
-            headers = {"x-ng-checkpoint-verify": "replay"}
+            headers = {
+                "x-ng-checkpoint-verify": "replay",
+                "x-ng-checkpoint-resources-session-id": "resource-session-id",
+            }
             if self.restart_resource:
                 headers["x-ng-checkpoint-restart"] = "1"
             return Reply({}, headers=headers, cookies={"session": "resource-session"})
@@ -174,13 +189,14 @@ class Harness:
             verdict = await self.verifier.verify(SingleStepToolUseArgumentComparisonVerifyRequest.model_validate(json))
             return Reply(verdict.model_dump(mode="json"))
         if url_path == "/close_session":
-            self.closes += 1
             assert kwargs["cookies"] == {"session": "resource-session"}
+            assert json["resources_session_id"] == "resource-session-id"
+            self.closes += 1
             return Reply({})
         raise AssertionError((server_name, url_path))
 
     def start(self, attempt: int = 0) -> asyncio.Task:
-        task = asyncio.create_task(self.agent.run(row(attempt)))
+        task = asyncio.create_task(self.agent.run(run_request(self.routing_id), row(attempt)))
         self.tasks.append(task)
         return task
 
@@ -192,7 +208,7 @@ class Harness:
     async def save(self, directory: Path, checkpoint_id="c1") -> list[AgentSessionRecord]:
         await self.prepare(checkpoint_id)
         await self.controller.commit(CommitRequest(**control(checkpoint_id), checkpoint_dir=str(directory)))
-        return await self.participant.export(None)
+        return await self.participant.export(None, checkpoint_id="c")
 
     async def restore(self, directory: Path, attempt=0, checkpoint_id="c1") -> None:
         await self.controller.restore(
@@ -234,6 +250,7 @@ async def test_inflight_model_wait_saves_and_survives_a_second_restore(harnesses
     records = await first.save(tmp_path / "first")
     assert len(records) == 1 and records[0].boundary == {}
     assert records[0].episode["next"] == "model"
+    assert records[0].episode["resources_session_id"] == "resource-session-id"
     assert not first.participant.readiness().restarts
     first.model_release.set()
     await asyncio.sleep(0.02)
@@ -306,7 +323,7 @@ async def test_failed_verification_during_checkpoint_can_restart_after_restore(h
             await asyncio.sleep(0)
     assert not run.done(), "the failed replay step must stay parked until resume"
     await first.controller.commit(CommitRequest(**control(), checkpoint_dir=str(tmp_path)))
-    records = await first.participant.export(None)
+    records = await first.participant.export(None, checkpoint_id="c")
     assert records[0].episode is None
     assert records[0].session == {"model_completed": False}
 
@@ -378,7 +395,7 @@ async def test_unsupported_resource_keeps_restart_fallback(harnesses):
     await asyncio.wait_for(first.model_started.wait(), 2)
     await first.prepare()
     assert first.participant.readiness().restarts == ["rollout"]
-    assert await first.participant.export(None) == []
+    assert await first.participant.export(None, checkpoint_id="c") == []
     first.model_release.set()
     await first.controller.resume(CheckpointRequest(**control()))
     assert (await asyncio.wait_for(run, 2)).reward == 1.0
@@ -429,3 +446,15 @@ async def test_real_verifier_seed_advertises_replay_without_restart(harnesses):
         assert response.status_code == 200, response.text
         assert response.headers["x-ng-checkpoint-verify"] == "replay"
         assert response.headers.get("x-ng-checkpoint-restart") != "1"
+
+
+@pytest.mark.parametrize("routing_id", [None, "worker-b"])
+async def test_the_model_call_returns_to_the_worker_that_holds_the_episode(harnesses, routing_id):
+    harness = harnesses()
+    harness.routing_id = routing_id
+    harness.model_release.set()
+    result = await asyncio.wait_for(harness.start(), 2)
+
+    assert result.reward == 1.0
+    # With several workers, session routing sends a call that names its owner back to that worker.
+    assert harness.self_call_headers == [{"x-ng-session-owner": routing_id} if routing_id else {}]

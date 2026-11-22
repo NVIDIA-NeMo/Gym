@@ -26,7 +26,7 @@ Computes:
 - is_hallucination: 1.0 when INCORRECT (confident wrong answer)
 
 Based on the AA-Omniscience benchmark:
-https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
+https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public-v1.1
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 
 
@@ -217,6 +218,7 @@ class OmniscienceRunRequest(BaseRunRequest):
 
     id: Optional[Union[int, str]] = None
     domain: Optional[str] = None
+    subtopic: Optional[str] = None
     topic: Optional[str] = None
     question: Optional[str] = None
     expected_answer: Optional[str] = None
@@ -407,3 +409,6 @@ class OmniscienceServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     OmniscienceServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OmniscienceServer.run_webserver()  # noqa: F401
