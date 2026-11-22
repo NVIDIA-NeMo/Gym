@@ -910,6 +910,24 @@ def test_a_nemo_rl_row_output_limit_passes_when_opencode_stays_within_it(setup, 
     assert sandbox.params()["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "4096"
 
 
+@pytest.mark.parametrize("limits", [{"max_bytes": 512}, {"max_lines": 3}, {"max_lines": 3, "max_bytes": 512}])
+def test_sandbox_command_limits_reach_opencode(setup, limits):
+    agent, sandbox = setup
+    agent.config.bash_timeout_seconds = 1.5
+    agent.config.opencode_config["tool_output"] = limits
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).raise_for_status()
+    env = sandbox.params()["env"]
+    assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["tool_output"] == limits
+    assert env["NEMO_GYM_BASH_TIMEOUT_MS"] == "1500"
+
+
+@pytest.mark.parametrize("limits", [None, [], {"extra": 3}, {"max_lines": 0}, {"max_bytes": True}])
+def test_invalid_tool_output_limits_are_rejected(limits):
+    assert "tool_output" in _session_opencode_config_error({"tool_output": limits})
+
+
 def test_rejected_request_does_not_consume_activation(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -2928,3 +2946,19 @@ def test_a_database_without_a_root_session_raises_the_typed_error(tmp_path: Path
         connection.execute("create table session (id text, parent_id text, time_created integer)")
     with pytest.raises(NoRootSessionError, match="found 0"):
         snapshot(database, tmp_path, harness_session_id=None, previous_message_ids=())
+
+
+def test_the_task_env_json_merges_the_owners_env_under_the_directory_keys(tmp_path):
+    """The bash setup writes task-env.json with the owner's pairs first, so a directory key the owner also set is
+    overridden by the sandbox's own."""
+    from responses_api_agents.opencode_agent.sandbox import runner_setup
+
+    setup = runner_setup(str(tmp_path), [str(tmp_path / "d")])
+    script = (
+        f"owner_env=('PAGER=cat' 'HOME=/evil' 'ODD=a\"b')\nHOME={tmp_path}\nunset XDG_DATA_HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME\n"
+        + setup
+    )
+    subprocess.run(["bash", "-c", script], check=True)
+    written = json.loads((tmp_path / "task-env.json").read_text())
+    assert written["PAGER"] == "cat" and written["ODD"] == 'a"b'
+    assert written["HOME"] == str(tmp_path), "the directory keys win over the owner's env"

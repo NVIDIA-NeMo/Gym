@@ -103,7 +103,14 @@ _TASK_ENV_SETUP = r"""json() {
     printf '"%s"' "$value"
 }
 home=${HOME:-~}
-printf '{"HOME": %s, "XDG_DATA_HOME": %s, "XDG_CONFIG_HOME": %s, "XDG_CACHE_HOME": %s, "XDG_STATE_HOME": %s}' \
+# The owner's environment for the task's commands (SandboxAccess.env) comes first; the directory keys win.
+# (`task_env` is the output path; the pairs arrive as the `owner_env` array, which may be unset.)
+extra=""
+for item in ${owner_env[@]+"${owner_env[@]}"}; do
+    extra+="$(json "${item%%=*}"): $(json "${item#*=}"), "
+done
+printf '{%s"HOME": %s, "XDG_DATA_HOME": %s, "XDG_CONFIG_HOME": %s, "XDG_CACHE_HOME": %s, "XDG_STATE_HOME": %s}' \
+    "$extra" \
     "$(json "$home")" \
     "$(json "${XDG_DATA_HOME:-${home%/}/.local/share}")" \
     "$(json "${XDG_CONFIG_HOME:-${home%/}/.config}")" \
@@ -517,6 +524,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             "stdout": f"{directory}/stdout.jsonl",
             "stderr": f"{directory}/stderr.log",
             "setup": runner_setup(directory, [env[key] for key in _TASK_DIRECTORY_KEYS]),
+            "owner_env": payload.get("task_env") or {},
         }
         if payload.get("path_prefix"):
             # Preinstalled runtime tools come first; the task's own PATH still follows.

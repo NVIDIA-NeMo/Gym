@@ -573,12 +573,19 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
       runs on the session's model with the session's sampling; its calls are captured with the rollout's and carry
       its own OpenCode session, which the observations report as a child invocation.
     """
-    unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
+    unsupported = sorted(
+        opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent", "tool_output"}
+    )
     if unsupported:
         return (
             "supports permission, tools, attachment, compaction.auto, compaction.reserved (OpenCode 1), "
-            f"compaction.buffer (OpenCode 2), agent.build.steps and subagents only; unsupported: {unsupported}"
+            f"compaction.buffer (OpenCode 2), agent.build.steps, subagents and tool_output only; unsupported: {unsupported}"
         )
+    tool_output = opencode_config.get("tool_output", {})
+    if not isinstance(tool_output, Mapping) or tool_output.keys() - {"max_bytes", "max_lines"}:
+        return "tool_output supports only max_bytes and max_lines"
+    if any(type(value) is not int or value <= 0 for value in tool_output.values()):
+        return "tool_output.max_bytes and tool_output.max_lines must be positive integers"
     compaction = opencode_config.get("compaction", {})
     if not isinstance(compaction, Mapping) or compaction.keys() - {"auto", "reserved", "buffer"}:
         return "compaction supports only auto and reserved (OpenCode 1), or auto and buffer (OpenCode 2)"
@@ -753,6 +760,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
             "sandbox keeps its owner's network, so a session that borrows one rejects any other value than `inherit`."
         ),
     )
+    bash_timeout_seconds: float | None = Field(default=None, ge=0.001, allow_inf_nan=False)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     report_agent_sandbox_oom: bool = False
     # Connection and per-call timeout of a sandbox session's MCP tool grants. Unset, OpenCode connects within 30 s
@@ -1626,6 +1634,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     ("output_token_policy", self.config.output_token_policy != "fixed"),
                     ("declare_model_limits", not self.config.declare_model_limits),
                     ("argv_prompt_quoting", self.config.argv_prompt_quoting),
+                    ("bash_timeout_seconds", self.config.bash_timeout_seconds is not None),
+                    ("opencode_config.tool_output", "tool_output" in self.config.opencode_config),
                 )
                 if value
             ]
@@ -2798,6 +2808,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "cwd": state.session.workdir,
             "command": command,
             "prompt": argv_prompt(prompt) if self.config.argv_prompt_quoting else prompt,
+            "task_env": dict(state.request.sandbox_access.env) if state.request.sandbox_access else {},
             "mcp_grants": mcp_grants if mcp_servers else None,
             "env": {
                 **_private_directories(state.persistent_directory),
@@ -2812,6 +2823,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             },
             "raise_oom_score_adj": self.config.raise_oom_score_adj,
         }
+        if self.config.bash_timeout_seconds is not None:
+            payload["env"]["NEMO_GYM_BASH_TIMEOUT_MS"] = str(int(self.config.bash_timeout_seconds * 1000))
         if self.config.session_project_config:
             del payload["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"]
         return config, payload, mcp_servers, mcp_grants

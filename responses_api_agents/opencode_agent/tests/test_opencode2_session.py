@@ -241,6 +241,11 @@ def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
         ({"interleaved_reasoning_field": "reasoning"}, "interleaved_reasoning_field apply only to OpenCode 1"),
         ({"output_token_policy": "remaining_context"}, "output_token_policy apply only to OpenCode 1"),
         ({"declare_model_limits": False}, "declare_model_limits apply only to OpenCode 1"),
+        ({"bash_timeout_seconds": 1}, "bash_timeout_seconds apply only to OpenCode 1"),
+        (
+            {"opencode_config": {"tool_output": {"max_lines": 3}}},
+            "opencode_config.tool_output apply only to OpenCode 1",
+        ),
         (
             {"argv_prompt_quoting": True, "reasoning_effort": "max"},
             "reasoning_effort, argv_prompt_quoting apply only to OpenCode 1",

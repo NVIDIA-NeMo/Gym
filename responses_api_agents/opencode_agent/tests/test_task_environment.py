@@ -168,3 +168,52 @@ def test_recorded_task_directories_are_valid_json(tmp_path: Path, home: str) -> 
     assert result.returncode == 0, result.stderr
     recorded = json.loads((tmp_path / "task-env.json").read_text())
     assert recorded["HOME"] == home and recorded["XDG_CONFIG_HOME"] == f"{home}\x01\x1fconfig"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the OpenCode plugin")
+@pytest.mark.parametrize(
+    ("cap_ms", "asked", "expected"),
+    [
+        ("180000", 600000, 180000),  # over the cap: clamped
+        ("180000", 5000, 5000),  # under the cap: the model's own
+        ("180000", None, 180000),  # none asked: the cap
+        ("", 600000, 600000),  # no cap configured: untouched
+    ],
+)
+def test_the_bash_timeout_cap_bounds_what_the_model_asks_for(tmp_path: Path, cap_ms, asked, expected) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    shutil.copyfile(PLUGIN, session / "task_environment.mjs")
+    (session / "task-env.json").write_text(
+        json.dumps(
+            {
+                key: str(tmp_path / key)
+                for key in ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+            }
+        )
+    )
+    script = """
+import { TaskEnvironment } from "./task_environment.mjs";
+const hooks = await TaskEnvironment();
+const asked = process.argv[2] === "none" ? {} : {timeout: Number(process.argv[2])};
+const bash = {args: {command: "sleep 1000", ...asked}};
+await hooks["tool.execute.before"]({tool: "bash"}, bash);
+const other = {args: {...asked}};
+await hooks["tool.execute.before"]({tool: "read"}, other);
+console.log(JSON.stringify({bash: bash.args.timeout ?? null, other: other.args.timeout ?? null}));
+"""
+    (session / "probe.mjs").write_text(script)
+    env = {key: value for key, value in os.environ.items() if key != "NEMO_GYM_BASH_TIMEOUT_MS"}
+    if cap_ms:
+        env["NEMO_GYM_BASH_TIMEOUT_MS"] = cap_ms
+    result = subprocess.run(
+        [shutil.which("node"), str(session / "probe.mjs"), "none" if asked is None else str(asked)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed["bash"] == expected
+    assert observed["other"] == asked, "only the bash tool is capped"
