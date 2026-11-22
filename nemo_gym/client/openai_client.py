@@ -443,6 +443,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     base_url: str
     api_key: str
 
+    spare_api_keys: list[str] = Field(
+        default_factory=list,
+        repr=False,
+        description=(
+            "Keys used in order once the current key is spent (a budget_exceeded or insufficient_quota 429) or "
+            "rejected (an invalid-key 401/403). The failed request is resent at once with the next key; the client "
+            "trips only after the last key fails the same way."
+        ),
+    )
+
     internal: bool = Field(
         default=False,
         description=(
@@ -541,6 +551,33 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     # Spent-key/auth trip: (status, body, url). Later calls raise a fresh exception.
     _permanent_trip: Optional[tuple[int, bytes, str]] = PrivateAttr(default=None)
+    # Index into spare_api_keys of the next key to switch to.
+    _next_spare_key: int = PrivateAttr(default=0)
+
+    def _switch_to_spare_key(self, failed_authorization: Optional[str]) -> bool:
+        """Retire the key a request failed with; True when a key not yet failed is now current.
+
+        Concurrent requests that failed on an already-retired key just resend with the current one.
+        """
+        if failed_authorization not in (None, f"Bearer {self.api_key}"):
+            return True
+        if self._next_spare_key >= len(self.spare_api_keys):
+            return False
+        self.api_key = self.spare_api_keys[self._next_spare_key]
+        self._next_spare_key += 1
+        print(
+            f"[model_key_failover base_url={self.base_url} spare_keys_left="
+            f"{len(self.spare_api_keys) - self._next_spare_key}]",
+            flush=True,
+        )
+        return True
+
+    def _authorize(self, request_kwargs: Dict[str, Any]) -> None:
+        """Send the current key, which a spare key may have replaced since the request was built."""
+        if self.spare_api_keys and "headers" in request_kwargs:
+            request_kwargs["headers"] = _merge_headers(
+                request_kwargs["headers"], {"Authorization": f"Bearer {self.api_key}"}
+            )
 
     def _raise_permanent_error(self, cause: Optional[NgFailureEvent] = None) -> None:
         assert self._permanent_trip is not None
@@ -711,6 +748,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
             tries += 1
+            self._authorize(request_kwargs)
+            sent_authorization = (request_kwargs.get("headers") or {}).get("Authorization")
             try:
                 response = await request(_on_transport_failure=observe_transport_failure, **request_kwargs)
             except BaseException as error:
@@ -763,6 +802,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 permanent_auth = _error_body_is_permanent_auth(body)
                 content = _bounded_error_body(body)
                 del body
+                if permanent_auth and self._switch_to_spare_key(sent_authorization):
+                    # The provider never ran the request, so it is resent with the spare key at once.
+                    tries -= 1
+                    continue
                 if permanent_auth:
                     observe_terminal(
                         operation_id=operation_id,
@@ -801,6 +844,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             context_overflow = _error_body_is_context_overflow(body)
             content = _bounded_error_body(body)
             del body
+            if permanent_quota and self._switch_to_spare_key(sent_authorization):
+                tries -= 1
+                continue
             if permanent_quota:
                 observe_terminal(
                     operation_id=operation_id,

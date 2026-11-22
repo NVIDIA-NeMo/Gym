@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Type
 
 from aiohttp import ClientResponseError
 from openai.types.shared import ReasoningEffort
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from nemo_gym.client import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.core import (
@@ -139,7 +139,22 @@ class UpstreamRetryPolicy(BaseModel):
 class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_base_url: str
     openai_api_key: str
+    openai_spare_api_keys: list[str] = Field(
+        default_factory=list,
+        repr=False,
+        description=(
+            "Keys switched to in order when the current key is spent (budget_exceeded or insufficient_quota) "
+            "or rejected as invalid. A string is split on commas, so one environment variable can hold them all."
+        ),
+    )
     openai_model: str
+
+    @field_validator("openai_spare_api_keys", mode="before")
+    @classmethod
+    def split_spare_api_keys(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [key.strip() for key in value.split(",") if key.strip()]
+        return value
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     provider_refusal_codes: frozenset[Literal["bio_policy", "content_filter", "content_policy_violation"]] = Field(
@@ -304,6 +319,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
+            spare_api_keys=self.config.openai_spare_api_keys,
             default_headers=self.config.openai_default_headers,
             # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
             internal=False,
