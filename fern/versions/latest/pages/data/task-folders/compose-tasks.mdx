@@ -14,9 +14,9 @@ calls can often run in the agent's sandbox instead (see
 [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool)).
 
 <Note>
-A Compose task needs a sandbox provider that connects the sandboxes of a group. On main, that is OpenSandbox. Other
-providers, Docker included, refuse to start a Compose group, so its episodes fail at seed. A `compose_overlay`
-that names Compose `files` makes every task of the run a group.
+A Compose task needs a sandbox provider that connects the sandboxes of a group and gives them shared storage. On main,
+those are OpenSandbox and Docker. Other providers refuse to start a Compose group, so its episodes fail at seed. A
+`compose_overlay` that names Compose `files` makes every task of the run a group.
 </Note>
 
 ## Layout
@@ -62,6 +62,22 @@ document again at seed.
 
 `artifacts` entries and `[[verifier.collect]]` hooks can name a `service`. A sidecar that writes a file for `test.sh`
 needs [Sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs).
+
+## Run on Docker
+
+The [Docker provider](/main/infrastructure/sandbox/docker#compose-services) runs a Compose task without extra
+configuration, on Docker 26.0 or newer (both the Engine and the `docker` CLI):
+
+```bash
+gym dataset validate my-dataset --sandbox docker
+```
+
+Each service is a container on the provider's `create.network`, the default bridge unless set, and services find each
+other by name through `/etc/hosts`. Named volumes are folders on the provider's shared volume,
+`nemo-gym-shared-storage`: each episode gets fresh ones, filled from the image unless the volume sets `nocopy`,
+mounted read-only where the file says so, and removed when the group stops.
+For `volume_sources`, create the mapped folders in that volume. Docker does not support `cap_add`, `shm_size` or
+`network_mode: service:<name>`.
 
 ## Run on OpenSandbox
 
@@ -168,9 +184,9 @@ with no `user:` it runs as the image's user. The agent keeps its own user.
 | `platform` | Must match the server's `sandbox_provider_options.platform`, `linux/amd64` by default. |
 | `networks` | Become name scopes on the group's one network. `internal: true`, `ipam`, `driver_opts` and static addresses fail. |
 | `ports` | A container port alone. Fixed published ports, `host_ip`, non-TCP protocols and ranges fail. |
-| `extra_hosts` | Host-to-IP entries. `host-gateway` fails, and a non-root sidecar cannot take them. |
+| `extra_hosts` | Host-to-IP entries. `host-gateway` fails. On OpenSandbox, a sidecar whose image runs as a non-root user cannot take them. |
 | `post_start` | Run once the command starts. `privileged` hooks and `pre_stop` fail. |
-| `tmpfs`, `ulimits`, `sysctls`, `security_opt` | Not supported on OpenSandbox, the only provider that starts a group, so the task is left out. |
+| `tmpfs`, `ulimits`, `sysctls`, `security_opt` | Applied by Docker as the matching `docker run` flags. Not supported on OpenSandbox, so the task is left out there. |
 
 ## Volumes
 

@@ -25,6 +25,7 @@ from nemo_gym.data.tasks.harbor.image_configs import (
     check_task_compose_fields,
     compose_image_references,
     dockerfile_base_images,
+    exec_as_any_user_sidecars,
     load_compose_document,
     plan_task_compose_volumes,
     record_base_images,
@@ -1916,8 +1917,9 @@ class TestComposeFields:
         assert (service_gpus(document["services"]["db"]), service_gpus(document["services"]["model"])) == (0, 1)
 
     def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_once_the_image_user_is_known(self, tmp_path):
-        """The group starts a non-root sidecar without host injection, so its extra_hosts would be lost; prepare
-        learns the user from the recorded image configuration and fails there, naming task, file and service."""
+        """On a provider that switches users inside the sandbox (OpenSandbox) the group starts a non-root sidecar
+        without host injection, so its extra_hosts would be lost; prepare learns the user from the recorded image
+        configuration and fails there, naming task, file and service."""
 
         class NonRootClient(FakeClient):
             def image_config(self, reference):
@@ -1937,13 +1939,59 @@ class TestComposeFields:
             "host injection: the image runs as user '472'",
         ):
             record_compose_images(
-                discover_tasks(tmp_path), tmp_path, client=NonRootClient(), sandbox_provider="docker"
+                discover_tasks(tmp_path), tmp_path, client=NonRootClient(), sandbox_provider="opensandbox"
             )
         # The same task with a root grafana image prepares; main takes host entries whatever its user.
         root = tmp_path / "root"
         root.mkdir()
         write_task(root, "o11y", compose=compose)
-        assert record_compose_images(discover_tasks(root), root, client=FakeClient(), sandbox_provider="docker")
+        assert record_compose_images(discover_tasks(root), root, client=FakeClient(), sandbox_provider="opensandbox")
+
+    def test_extra_hosts_on_a_non_root_sidecar_prepare_on_a_provider_that_runs_commands_as_any_user(self, tmp_path):
+        """Docker names each command's user itself, so a sidecar whose image runs as a non-root user keeps host
+        injection and its extra_hosts prepare. Each sidecar is decided on the provider it runs on: a sidecar that
+        reserves GPUs on the GPU block's."""
+
+        class NonRootClient(FakeClient):
+            def image_config(self, reference):
+                record = super().image_config(reference)
+                if reference.startswith(("grafana/", "vllm/")):
+                    record["config"] = {**record["config"], "User": "472"}
+                return record
+
+        compose = (
+            f"services:\n  main:\n    image: {MAIN_IMAGE}\n"
+            "  grafana:\n    image: grafana/grafana:11\n    extra_hosts: ['metrics.example:10.0.0.9']\n"
+            "  model:\n    image: vllm/vllm-openai:v0.6\n    extra_hosts: ['metrics.example:10.0.0.9']\n"
+            "    deploy:\n      resources:\n        reservations:\n"
+            "          devices:\n            - capabilities: [gpu]\n              count: 1\n"
+        )
+        write_task(tmp_path, "o11y", compose=compose)
+        (task,) = discover_tasks(tmp_path)
+        document = check_task_compose_fields(task, load_compose_document(task))  # deploy in its normalized form
+        assert exec_as_any_user_sidecars(task, document, provider="docker") == {"grafana", "model"}
+        assert record_compose_images([task], tmp_path, client=NonRootClient(), sandbox_provider="docker")
+        # The GPU sidecar runs on the GPU block: on OpenSandbox it takes no host entries, so it is refused alone.
+        assert exec_as_any_user_sidecars(task, document, provider="docker", gpu_provider="opensandbox") == {"grafana"}
+        with pytest.raises(ImageConfigError, match="service 'model' extra_hosts cannot be applied without"):
+            record_compose_images(
+                [task],
+                tmp_path,
+                client=NonRootClient(),
+                sandbox_provider="docker",
+                gpu_sandbox_provider="opensandbox",
+            )
+        # And the other way round: the CPU sidecar on OpenSandbox is refused, the GPU one on Docker is not.
+        with pytest.raises(ImageConfigError, match="service 'grafana' extra_hosts cannot be applied without"):
+            record_compose_images(
+                [task],
+                tmp_path,
+                client=NonRootClient(),
+                sandbox_provider="opensandbox",
+                gpu_sandbox_provider="docker",
+            )
+        assert exec_as_any_user_sidecars(task, document, provider="opensandbox", gpu_provider="docker") == {"model"}
+        assert exec_as_any_user_sidecars(task, document, provider="opensandbox") == set()
 
     def test_platform_is_the_deployments_at_prepare_as_at_seed(self, tmp_path):
         compose = (

@@ -17,8 +17,9 @@ nodes. The adapter does not inspect images or contact an image registry; the
 sandbox provider pulls the configured images.
 
 Configure an [OpenSandbox provider](/infrastructure/sandbox/opensandbox) whose
-sandbox IPs can reach each other. The example images run as root so the provider
-can install service names in `/etc/hosts`.
+sandbox IPs can reach each other, or use the [Docker provider](/infrastructure/sandbox/docker)
+(`provider_config = {"docker": {}}`), which needs no configuration. The example images run as
+root so the provider can install service names in `/etc/hosts`.
 
 Save this as `compose.yaml`:
 
@@ -153,6 +154,11 @@ are passed to the API. Images need a POSIX shell and basic utilities. Lifecycle
 and health commands use the image's default user unless YAML overrides it.
 Host-file configuration requires root access by default.
 
+Each service's command runs from a script that records when it starts and
+exits. A provider that implements `SupportsSandboxDetachedExec`, such as Docker,
+starts it detached, so a running service holds none of the provider's command
+capacity. Other providers keep the service's exec attached for its lifetime.
+
 Deployment-specific settings remain configurable:
 
 - `service_specs={name: SandboxSpec(...)}` supplies sandbox TTL, resources and
@@ -164,7 +170,9 @@ Deployment-specific settings remain configurable:
 
 Providers must implement `SupportsSandboxNetwork`, including for single-service
 collections. OpenSandbox requires `networking.enabled=True` and mutually reachable
-sandbox IPs. Service names and aliases are installed in each sandbox's `/etc/hosts`.
+sandbox IPs. Docker supports it on the default bridge or a named `create.network`, and
+refuses `none`, `host` and `container:<name>`. Service names and aliases are installed
+in each sandbox's `/etc/hosts`.
 Client-facing proxy endpoints cannot substitute for direct service communication.
 
 Because services talk by IP and share storage, every sandbox of one collection
@@ -215,7 +223,9 @@ Volumes require `SupportsSandboxSharedStorage`. Configure OpenSandbox with
 `shared_storage={"host_path": "/mnt/shared/compose", "metadata": {}}`, using a path
 backed by storage shared across sandbox nodes and allowed by the server. Metadata
 can supply deployment-specific placement settings. No cluster or EFS paths are
-built into the adapter.
+built into the adapter. The Docker provider keeps shared storage on a named volume
+it creates itself, `nemo-gym-shared-storage`, and needs Docker 26.0 or newer, Engine and CLI
+(see [Docker Provider](/infrastructure/sandbox/docker#compose-services)).
 
 Unmapped named volumes use a unique directory for the collection. Empty volumes
 receive the image mount target's contents unless `volume.nocopy` is set. These

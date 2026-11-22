@@ -63,7 +63,8 @@ Like Harbor, Gym ignores unknown keys (logging each one) and reads the legacy sp
 | `skills_dir` | none | A skills folder for harnesses that read one; a relative path resolves in the working directory. When the sandbox's folder is missing or empty and the task ships `environment/skills/`, the server uploads it there at seed. |
 
 A task whose `environment/` holds `docker-compose.yaml` runs as a group of sandboxes, one per service, on
-OpenSandbox only; see [Multi-Container Tasks](/main/data/task-folders/compose-tasks).
+OpenSandbox or on [Docker](/main/infrastructure/sandbox/docker#compose-services) 26.0 or newer; see
+[Multi-Container Tasks](/main/data/task-folders/compose-tasks).
 
 ### [agent]
 
@@ -200,7 +201,8 @@ publishing refuses Python verifiers that read `response` or grade in separate mo
 
 - Windows and TPU tasks are not supported.
 - Network restrictions apply only to a verifier in separate mode, on OpenSandbox.
-- Compose tasks run only on OpenSandbox.
+- Compose tasks run only on OpenSandbox and Docker. On Docker, `cap_add`, `shm_size` and
+  `network_mode: service:<name>` fail at seed.
 - A task that seeds the agent with a transcript (`trajectory.json`, or `steps/<first step>/trajectory.json` in a
   multi-step task) runs only with the oracle.
 

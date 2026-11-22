@@ -46,6 +46,7 @@ from nemo_gym.sandbox.observability import span_attributes
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
     COMPOSE_SERVICE_OPTION_FIELDS,
+    SupportsSandboxDetachedExec,
     SupportsSandboxEndpoint,
     SupportsSandboxNetwork,
     SupportsSandboxPortForwarding,
@@ -608,6 +609,12 @@ class AsyncSandboxCompose:
                     if result.return_code:
                         raise RuntimeError(f"Shared volume initialization failed: {result.stderr}")
                     if not (volume.get("volume") or {}).get("nocopy"):
+                        # The seed stages the volume at a path of its own, neither the target nor inside it: at the
+                        # helper's root, a target of `/tmp` would copy the volume into itself, and a target of that
+                        # root would hide the image's files behind the empty volume.
+                        staging = "/.nemo-gym-copy-up"
+                        if (lexical_target(volume["target"]) + "/").startswith(staging + "/"):
+                            staging += "-1"
                         # The seed reads the service's image, so it keeps the service's provider options, its
                         # pull policy first (``pull_policy_options``, which OpenSandbox reads per spec: a deployment
                         # default of Never would otherwise fail the seed of an uncached ``always`` image before the
@@ -621,7 +628,7 @@ class AsyncSandboxCompose:
                             metadata=metadata,
                             provider_options=_merge_provider_options(
                                 {key: value for key, value in service_options.items() if key != "volumes"},
-                                provider.shared_volume_options(relative, root),
+                                provider.shared_volume_options(relative, staging),
                             ),
                         )
                         seed = AsyncSandbox(provider, seed_spec, owns_provider=False)
@@ -630,8 +637,8 @@ class AsyncSandboxCompose:
                         try:
                             target = shlex.quote(volume["target"])
                             result = await seed.exec(
-                                f'if test -n "$(ls -A {root})"; then :; '
-                                f"elif test -d {target}; then cp -a {target}/. {root}/; "
+                                f'if test -n "$(ls -A {staging})"; then :; '
+                                f"elif test -d {target}; then cp -a {target}/. {staging}/; "
                                 f"elif test -e {target}; then exit 1; fi",
                                 user="root",
                                 cwd="/",  # The service's working directory may not exist in the seed image.
@@ -1057,19 +1064,36 @@ class AsyncSandboxCompose:
                         path = Path(temp) / "run.sh"
                         path.write_text(script)
                         await self.services[name].upload(path, runtime + "/run.sh")
-                    # Keep the exec request alive: some providers reap background
-                    # children as soon as their launching shell exits.
-                    process = asyncio.create_task(
-                        self.services[name].exec(
-                            f"sh {runtime}/run.sh >{runtime}/log 2>&1 </dev/null",
-                            user=plan["user"],
+                    launch = f"sh {runtime}/run.sh >{runtime}/log 2>&1 </dev/null"
+                    provider = self._provider_for(name)
+                    process: asyncio.Task | None = None
+                    if isinstance(provider, SupportsSandboxDetachedExec):
+                        # The service runs on after this call returns and holds none of the provider's command
+                        # capacity, which the checks below and every later command need. The started and exit
+                        # files track it as they track an attached one.
+                        sandbox = self.services[name]
+                        launched = await provider.exec_detached(
+                            sandbox._require_handle(),
+                            launch,
+                            cwd=sandbox.default_workdir,
                             env=plan.get("resolved_env"),
-                            timeout_s=None,
+                            user=plan["user"] if plan["user"] is not None else sandbox.default_user,
                         )
-                    )
-                    self._processes[name] = process
+                        if launched.return_code or launched.error_type:
+                            raise RuntimeError(
+                                f"Compose service {name!r} did not start: {launched.stderr or launched.stdout}"
+                            )
+                    else:
+                        # Keep the exec request alive: some providers reap background
+                        # children as soon as their launching shell exits.
+                        process = asyncio.create_task(
+                            self.services[name].exec(
+                                launch, user=plan["user"], env=plan.get("resolved_env"), timeout_s=None
+                            )
+                        )
+                        self._processes[name] = process
                     while True:
-                        finished = process.done()
+                        finished = process is not None and process.done()
                         result = await self.services[name].exec(f"test -f {runtime}/started")
                         if result.return_code == 0:
                             break
