@@ -129,14 +129,18 @@ def assistant_text(response: NeMoGymResponse, *, judge_reply: bool = False, allo
     *prefix, final = items
     if final.type != "message" or final.role != "assistant":
         return None
-    if not allow_partial and (
-        response.status not in (None, "completed")
-        or response.incomplete_details is not None
-        or response.error
-        or getattr(final, "phase", None) == "commentary"
-        or getattr(final, "status", "completed") != "completed"
-    ):
-        return None
+    if not allow_partial:
+        complete = response.status in (None, "completed") and response.incomplete_details is None
+        # A content-filter finish can still carry a completed policy answer for the judge to grade.
+        filtered_policy = (
+            not judge_reply
+            and response.status == "incomplete"
+            and getattr(response.incomplete_details, "reason", None) == "content_filter"
+        )
+        if response.error or not (complete or filtered_policy):
+            return None
+        if getattr(final, "phase", None) == "commentary" or getattr(final, "status", "completed") != "completed":
+            return None
     if judge_reply and any(
         (item.type == "message" and (item.role != "assistant" or getattr(item, "phase", None) != "commentary"))
         or (item.type != "message" and getattr(item, "status", None) not in (None, "completed"))

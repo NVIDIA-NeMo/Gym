@@ -643,6 +643,26 @@ class TestRequestValidation:
 
 
 class TestVerify:
+    async def test_content_filtered_policy_answer_is_gradable_but_judge_verdict_is_incomplete(self, config):
+        def filtered(text):
+            return NeMoGymResponse.model_validate(
+                {
+                    **_response(_msg(text)).model_dump(),
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "content_filter"},
+                }
+            )
+
+        answer = _request(filtered(r"\boxed{2}"))
+        server = _server(config, "Judgement: yes")
+        result = await server.verify(answer)
+        assert result.grading_status == "judged" and result.reward == 1
+        assert _judge_prompt(server).endswith(r"\boxed{2}")
+
+        config.verdict_mode = "yes_no_unresolved"
+        result = await _server(config, filtered("Judgement: yes")).verify(answer)
+        assert result.grading_status == "judge_unparsed" and result.mask_sample
+
     async def test_policy_text_with_refusal_is_graded_but_mixed_judge_verdict_is_unparseable(self, config):
         refusal = NeMoGymResponseOutputRefusal(type="refusal", refusal="Declined another part.")
         policy = _msg("First line.")

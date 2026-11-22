@@ -205,10 +205,8 @@ class StemJudgeVerifyRequest(StemJudgeRunRequest, BaseVerifyRequest):
 class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
-    # "Judgement: yes" or "Judgement: no" on answer rows (the form Gym's rollout recovery checks
-    # against the reward); None when the reply could not be parsed, on any row. A parsed
-    # rubric grade leaves the field out: its verdict is criteria_met, and Gym's recovery reads a
-    # None verdict_label as a reply without a verdict.
+    # Answer rows record "Judgement: yes", "Judgement: no", or "Judgement: unresolved".
+    # An unparsed reply records None. A parsed rubric grade omits the label and uses criteria_met.
     verdict_label: Optional[str] = None
     judgment: JsonJudgment | None = Field(default=None, exclude_if=lambda value: value is None)
     # Rubric rows: criterion id -> met; None when the output could not be parsed.
@@ -229,7 +227,7 @@ class StemJudgeVerifyResponse(BaseVerifyResponse):
 
     expected_answer: str
     answer_format: str
-    # "judged", "judge_unparsed", or why the judge was not called.
+    # "judged", "judge_unresolved", "judge_unparsed", or why the judge was not called.
     grading_status: str
     # Rubric rows only: earned / total positive points, before rubric_reward.
     rubric_score: Optional[float] = None
