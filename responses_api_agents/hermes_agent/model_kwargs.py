@@ -84,6 +84,31 @@ def _install_continuation_fragment_capture() -> None:
         )
 
 
+def _one_reasoning_field(messages: list[Any]) -> list[Any]:
+    """Return the request messages with no replayed assistant turn carrying both ``reasoning`` and ``reasoning_content``.
+
+    Hermes replays a turn's reasoning under both keys. A server that reads the two as one field gets it twice and
+    rejects the request, so such a turn keeps ``reasoning_content``, the field Gym's chat path reads, filled from
+    ``reasoning`` when it holds only whitespace. A turn with one of the two keys is sent as it is, and Hermes's own
+    history is not modified.
+    """
+    replayed = []
+    for message in messages:
+        if (
+            isinstance(message, dict)
+            and message.get("role") == "assistant"
+            and "reasoning" in message
+            and "reasoning_content" in message
+        ):
+            message = dict(message)
+            reasoning = message.pop("reasoning")
+            content = message.get("reasoning_content")
+            if not (isinstance(content, str) and content.strip()) and reasoning:
+                message["reasoning_content"] = reasoning
+        replayed.append(message)
+    return replayed
+
+
 def configure_model_calls(agent: Any, *, preserve_reasoning_history: bool) -> None:
     """Adapt primary and delegated Hermes calls to Gym's model and training contracts."""
     if getattr(agent, "_gym_model_calls_configured", False):
@@ -99,6 +124,8 @@ def configure_model_calls(agent: Any, *, preserve_reasoning_history: bool) -> No
             original_build_kwargs(api_messages, tools_for_api=tools_for_api),
             preserve_reasoning_history=preserve_reasoning_history,
         )
+        if isinstance(kwargs.get("messages"), list):
+            kwargs["messages"] = _one_reasoning_field(kwargs["messages"])
         kwargs["stream"] = False
         # Hermes doubles the output cap on each truncation retry, up to 32,768 tokens. Gym's `max_tokens` is the
         # per-call budget that runs are compared and trained under, so keep every call within it.
