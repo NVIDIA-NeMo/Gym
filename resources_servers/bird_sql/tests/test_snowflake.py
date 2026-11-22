@@ -395,6 +395,28 @@ class TestLoader:
             ensure_bird_snowflake(snowflake_env.dev_dir, tmp_path)
 
 
+@requires_fakesnow
+def test_stand_in_frees_each_result_once_read(snowflake_env):
+    # fakesnow caches every completed query's result (for RESULT_SCAN) and never frees it. The grader reads each result
+    # once, so it drops that entry and memory stays flat; another connection's unread result is left alone.
+    from resources_servers.bird_sql.eval_utils import execute_snowflake
+
+    local = snowflake_env.local
+    cache = local.fake_snow.results_cache
+    before = set(cache)
+    pending = local.connect(DB_ID)
+    try:
+        pending_cur = pending.cursor()
+        pending_cur.execute('SELECT "x" FROM "t"')
+        for _ in range(5):
+            assert execute_snowflake(local, DB_ID, 'SELECT COUNT(*) FROM "big"', []) == [(3000,)]
+        assert set(cache) - before == {pending_cur.sfqid}
+        assert sorted(local.fetch_all(pending_cur)) == [(1,), (2,), (3,)]
+        assert set(cache) == before
+    finally:
+        pending.close()
+
+
 class _FakeAdminConnection:
     """An admin connection for the account loader: records statements, answers the loaded-db_ids query from ``loaded``,
     SHOW SCHEMAS from ``schemas`` ({name: comment}) and each COUNT(*) from what ``write_pandas`` wrote (one row short

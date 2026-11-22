@@ -119,14 +119,19 @@ class LocalSnowflake:
         """A new connection (its own DuckDB cursor, so safe to use from another thread) with ``db_id`` selected."""
         return self.fake_snow.connect(database=SNOWFLAKE_DATABASE, schema=db_id)
 
-    @staticmethod
-    def fetch_all(cur: Any) -> List[tuple]:
-        """All rows of ``cur``'s result, by position.
+    def fetch_all(self, cur: Any) -> List[tuple]:
+        """All rows of ``cur``'s result, by position; the result then leaves fakesnow's cache.
 
         fakesnow's ``fetchall()`` builds a dict per row, which keeps only one of two same-named columns
-        (``SELECT T1.name, T2.name``); its Arrow table, private as ``_arrow_table``, keeps both.
+        (``SELECT T1.name, T2.name``); its Arrow table, private as ``_arrow_table``, keeps both. fakesnow also keeps
+        every completed query's result in ``results_cache``, shared by all connections and never freed (it serves
+        ``RESULT_SCAN``), so memory would grow with every graded query: this query's own entry is removed once read,
+        and other queries' entries are left alone.
         """
-        return list(zip(*(column.to_pylist() for column in cur._arrow_table.columns)))
+        try:
+            return list(zip(*(column.to_pylist() for column in cur._arrow_table.columns)))
+        finally:
+            self.fake_snow.results_cache.pop(cur.sfqid, None)
 
     @staticmethod
     def interrupt(conn: Any) -> None:
