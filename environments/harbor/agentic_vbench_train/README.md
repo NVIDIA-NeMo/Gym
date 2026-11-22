@@ -98,6 +98,12 @@ What differs:
   sets on `policy_model`). Without it the first frame Codex views fails the episode at `stage: agent`. Codex also
   has no per-call output key, so `agentic_vbench_output_tokens` does not reach it.
 
+- Sampling. Pi, OpenClaw and Codex refuse `temperature`, `top_p` and `max_output_tokens` in a request; OpenCode
+  applies them itself. A NeMo RL version that sends its sampling values with each rollout (`_ng_model_sampling`)
+  needs nothing. One that writes them into each row's request would fail every episode at `stage: agent`, so the
+  three overlays set `request_sampling_to_model_calls` on the server block, which moves them from the request onto
+  the turn's model calls.
+
 - Compaction. The compaction plugins and the model server's summary recovery are OpenCode's. The Pi overlay turns
   compaction off (`auto_compaction: false`), so an episode that fills the context ends there. OpenClaw compacts
   when its estimate nears `context_window`, and Codex below `model_context_window`. For all three, give the

@@ -2,7 +2,8 @@
 # `harbor_train.yaml`, which carries the OpenCode harness's block and so loads only with `--agent opencode_agent`, and
 # list it in a NeMo RL run's `env.nemo_gym.config_paths` after the generated `run_config_pi_agent.yaml` (README).
 #
-# The server block and the capture store are `harbor_train.yaml`'s, key for key (a test keeps them equal). The
+# The server block and the capture store are `harbor_train.yaml`'s, key for key (a test keeps them equal), plus
+# `request_sampling_to_model_calls`. The
 # harness block sets for Pi what that file sets for OpenCode: the capture opt-in, `image_input`, the time ceiling and
 # the model budgets.
 harbor_environment_server:
@@ -14,6 +15,12 @@ harbor_environment_server:
       max_concurrent_episodes: ${oc.select:agentic_vbench_concurrency,12}
       queue_timeout_seconds: 43200
       sandbox_ready_timeout_s: 1800
+      # This harness refuses `temperature`, `top_p` and `max_output_tokens` in a request, since it cannot put them
+      # on each of its model calls. A training framework that writes its sampling values into the row's request,
+      # not beside it as `_ng_model_sampling`, would fail every episode at `stage: agent`. With this on, the
+      # server moves them from the request onto the turn's model calls. A row with `_ng_model_sampling`, or with
+      # no sampling in its request, is unaffected.
+      request_sampling_to_model_calls: true
 
 token_id_capture:
   enabled: true

@@ -60,6 +60,10 @@ def test_an_added_overlay_keeps_every_setting_outside_the_harness_block(harness:
     del opencode["opencode_agent"], added[harness]
     if harness == "codex_agent":
         assert added.pop("policy_model") == CODEX_MODEL_SERVER
+    # OpenCode applies a request's sampling itself; the added harnesses refuse it, so their training overlays have
+    # the server move it onto the model calls.
+    server = added["harbor_environment_server"]["environment_servers"]["harbor"]
+    assert server.pop("request_sampling_to_model_calls", False) is (index == 1)
     assert added == opencode
 
 
