@@ -27,6 +27,7 @@ import contextlib
 import json
 import logging
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Dict, FrozenSet, List, Optional
@@ -276,7 +277,8 @@ def check_bird_snowflake_account(
 
     Returns the ``snowflake`` engine with the account's catalog. ``load_bird_snowflake_account`` loads an account.
     """
-    db_ids = _db_ids(databases_dir)
+    sqlite_paths = sorted(databases_dir.glob("*/[!.]*.sqlite"))
+    db_ids = [p.parent.name for p in sqlite_paths]
     engine = AccountSnowflake(connection_name=connection_name, timeout_s=timeout_s, tables={})
     with contextlib.closing(engine.connect(_META_SCHEMA)) as conn:
         cur = conn.cursor()
@@ -290,13 +292,23 @@ def check_bird_snowflake_account(
             f"SELECT table_schema, table_name, column_name FROM {SNOWFLAKE_DATABASE}.information_schema.columns"
         )
         tables = _catalog(cur.fetchall(), db_ids)
-    # The catalog lists only what the connection's role may read. A db_id with no visible table (a missing grant, a
-    # dropped schema) would refuse every model query on it as an unknown table and score it 0.
-    unreadable = sorted(db_id for db_id in db_ids if not tables[db_id])
+    # The catalog lists only what the connection's role may read. A table it can't see (a missing grant, a dropped
+    # schema or table) would refuse every model query on it as an unknown table and score it 0.
+    unreadable = {}
+    for sqlite_path, db_id in zip(sqlite_paths, db_ids):
+        with contextlib.closing(sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)) as sqlite_conn:
+            expected = {
+                name
+                for (name,) in sqlite_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name != 'sqlite_sequence'"
+                )
+            }
+        if expected - set(tables[db_id]):
+            unreadable[db_id] = sorted(expected - set(tables[db_id]))
     if unreadable:
         raise RuntimeError(
-            f"BIRD db_ids whose tables the Snowflake connection's role can't see: {unreadable}. Grant it SELECT on "
-            "them (load_bird_snowflake_account's grant_to does), or load them again"
+            f"BIRD tables the Snowflake connection's role can't see: {unreadable}. Grant it SELECT on them "
+            "(load_bird_snowflake_account's grant_to does), or load them again"
         )
     return AccountSnowflake(connection_name=connection_name, timeout_s=timeout_s, tables=tables)
 

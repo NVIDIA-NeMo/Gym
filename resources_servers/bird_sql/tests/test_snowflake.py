@@ -9,6 +9,7 @@ tests need only ``sqlglot``. The ``snowflake`` engine (a real account) is tested
 
 import asyncio
 import importlib.util
+import re
 import sqlite3
 import threading
 import time
@@ -694,20 +695,27 @@ class _FakeGraderConnection(_FakeAdminConnection):
 
 
 @requires_fakesnow
-@pytest.mark.parametrize("visible", [True, False])
-def test_account_check_refuses_a_db_id_its_role_cannot_read(snowflake_env, monkeypatch, visible):
-    # Without the grant the catalog is empty for that db_id, and every model query on it would be refused and score 0.
+@pytest.mark.parametrize("visible", ["all", "some", "none"])
+def test_account_check_refuses_tables_its_role_cannot_read(snowflake_env, monkeypatch, visible):
+    # A table missing its grant would refuse every model query on it as an unknown table and score it 0, so startup
+    # names every table of the SQLite file that the grader's role can't see.
     import snowflake.connector
 
     from resources_servers.bird_sql.setup_bird_snowflake import check_bird_snowflake_account
 
-    columns = [(DB_ID, "t", "x")] if visible else [("other_db", "t", "x")]
+    every = [(DB_ID, "t", "x"), (DB_ID, "big", "x")] + [(DB_ID, "Mixed Case", c) for c in ("Col Name", "n", "r")]
+    columns = {"all": every, "some": every[:1], "none": [("other_db", "t", "x")]}[visible]
     conn = _FakeGraderConnection(loaded={DB_ID: 1}, columns=columns)
     monkeypatch.setattr(snowflake.connector, "connect", lambda **kw: conn)
-    if visible:
-        assert check_bird_snowflake_account(snowflake_env.dev_dir, "bird_ro", 30).tables == {DB_ID: {"t": {"x"}}}
+    if visible == "all":
+        assert set(check_bird_snowflake_account(snowflake_env.dev_dir, "bird_ro", 30).tables[DB_ID]) == {
+            "t",
+            "big",
+            "Mixed Case",
+        }
     else:
-        with pytest.raises(RuntimeError, match=f"can't see: \\['{DB_ID}'\\]"):
+        missing = ["Mixed Case", "big"] + (["t"] if visible == "none" else [])
+        with pytest.raises(RuntimeError, match=re.escape(f"can't see: {{'{DB_ID}': {missing}}}")):
             check_bird_snowflake_account(snowflake_env.dev_dir, "bird_ro", 30)
 
 
