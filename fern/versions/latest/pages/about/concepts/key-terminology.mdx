@@ -103,6 +103,7 @@ Other features use some of these words in their own senses and keep them:
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
 | **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
 | **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
+| **Max num tries** | HTTP attempt limit for a request. Set `environment_server_max_num_tries` on rollout collection, `agent_server_max_num_tries` on the legacy agent environment, or `model_server_max_num_tries` on the simple agent to `1` to disable resends on that hop. Omitting a setting keeps that client’s default. |
 
 ### Evaluation
 
