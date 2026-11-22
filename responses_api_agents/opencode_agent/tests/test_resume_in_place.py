@@ -28,7 +28,7 @@ import pytest
 
 from nemo_gym.agents import AgentSeedSessionRequest, LaunchFinished, NotResumable, RestoredLaunch, SandboxSession
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, SandboxCapabilities
 from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent import runtime as opencode_runtime
 from responses_api_agents.opencode_agent.sandbox import RELAY_ENDPOINT_FILE, OpenCodeSandboxSession
@@ -143,7 +143,7 @@ class InPlaceFixture(OpenCodeFixture):
             )
         )
         # This machine as a sandbox whose snapshots keep processes.
-        self.provider.snapshot_keeps_processes = True
+        self.provider.capabilities = SandboxCapabilities(snapshot_keeps=frozenset({"files", "processes"}))
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.relay_port = probe.getsockname()[1]

@@ -705,7 +705,7 @@ opencode_agent:
 - **Permissions.** `opencode run` rejects permission requests. The reprompt helper rejects them the same way, so a
   relaunch behaves like a first launch for configs with `ask` rules.
 
-On a sandbox whose snapshots keep its processes (an AgentENV memory snapshot, `snapshot_keeps_processes`), nothing is
+On a sandbox whose snapshots keep its processes (an AgentENV memory snapshot, `capabilities.snapshot_keeps`), nothing is
 relaunched when it need not be:
 
 - **At a checkpoint** OpenCode keeps running: the supervisor holds the pause without signalling anything, and OpenCode's

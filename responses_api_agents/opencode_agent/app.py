@@ -106,6 +106,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
     create_provider,
+    provider_capabilities,
     resolve_provider_config,
 )
 from nemo_gym.server_runtime import Activation, BaseRunRequest, BaseVerifyResponse, MCPToolAccess, RestoredAgentSession
@@ -1891,7 +1892,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         checkpointed = self.checkpoint_participant is not None and not self._seed_restarts(body)
         # A restore of this sandbox brings its processes back: the harness keeps running through checkpoints and
         # calls the model through a relay a restore can re-point.
-        keeps_processes = checkpointed and bool(getattr(provider, "snapshot_keeps_processes", False))
+        keeps_processes = checkpointed and "processes" in provider_capabilities(provider).snapshot_keeps
         state = OpenCodeSandboxSession(
             request=body,
             session=SandboxSession(
