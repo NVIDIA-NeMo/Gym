@@ -353,6 +353,39 @@ termination receipt fails the activation and skips verification; close releases
 the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
 the connection remain retryable.
 
+## OpenCode partial-rollout checkpoints
+
+With checkpointing on (the top-level `checkpoint` block sets `enabled: true`), an `opencode_agent`
+session with one activation in a borrowed sandbox takes part in partial-rollout checkpoints. At a
+checkpoint the activation parks and OpenCode's processes are paused in place with `SIGSTOP`, then
+continued with `SIGCONT`. The Resources Server snapshots the sandbox. Two agent settings apply:
+
+| Setting | Default | Constraint |
+| --- | --- | --- |
+| `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on storage the sandbox snapshot covers. The saved conversation lives here; a restore that does not find it starts the task afresh. |
+| `checkpoint_pause_allowance_seconds` | `3600` | Bounds the time a launch spends paused. Size it to cover the longest checkpoint commit. |
+
+- **Pause limits.** Paused time does not count against the agent's `timeout`. A launch paused for
+  longer than the allowance fails the execution. One pause that lasts longer than the allowance
+  makes the process supervisor end OpenCode as at its time limit, so OpenCode is not left paused
+  if the Agent Server dies during a checkpoint.
+- **Clocks.** A pause stops OpenCode's processes, not their clocks. A tool that runs across a
+  pause can hit its own timeout when OpenCode continues. Model calls are not affected.
+- **Pause and continue versus crash recovery.** Pause and continue keep OpenCode's processes. If a
+  pause is not confirmed, OpenCode is stopped and relaunched after the checkpoint. After a crash no
+  process is kept: the restore forks the sandbox snapshot, the Environment Server seeds the session
+  again, and the agent re-binds the session to the fork. A re-sent activation gets the reply the
+  session already gave if it is the same request, and otherwise relaunches OpenCode. A relaunch
+  reprompts the saved conversation without adding a user turn when it starts with the task's
+  prompt and the model answered at least once. Otherwise it sets the saved conversation aside and
+  starts the task afresh.
+- **Restart-only sessions.** Sandboxes the agent owns, multi-turn continuation sessions, sessions
+  that continue an imported conversation (`session_import_path`), and OpenCode 2 sessions start
+  over after a crash.
+
+See [Partial-rollout checkpoints](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/README.md#partial-rollout-checkpoints)
+in the `opencode_agent` README for the relaunch rules, interrupted tool calls and the reply metadata.
+
 ## NOOA worker checkpoints
 
 The [NOOA sandbox worker](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/nooa_agent/sandbox_entrypoint.py)

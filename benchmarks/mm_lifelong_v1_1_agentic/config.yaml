@@ -1,0 +1,66 @@
+# MM-Lifelong v1.1, agentic: OpenCode answers each of the 1,023 questions in a sandbox whose image already holds the
+# original videos of the question's split, with the video tools watch_video and view_image
+# (resources_servers/video_qa_rubric/configs/video_qa_rubric_agentic.yaml), and the dataset's grader scores the final
+# answer 0-5 against the question's frozen rubric (grading.yaml of benchmarks/mm_lifelong_v1_1).
+# The videos are not redistributed and too large to upload per episode, so each user builds one image per domain from
+# their own copy (sandbox_image/build.py) and names them in MM_LIFELONG_V1_1_{DAY,WEEK,MONTH}_IMAGE; nothing is
+# uploaded, and each seed checks the image's catalog and files (video_mcqa's preloaded media).
+# Data: prepare.py downloads the annotations into mm_lifelong_v1_1_agentic_data_dir and reads build.py's output in
+# mm_lifelong_v1_1_agentic_media_dir. Also needs OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY and the judge (grading.yaml).
+config_paths:
+  - resources_servers/video_qa_rubric/configs/video_qa_rubric_agentic.yaml
+  - benchmarks/mm_lifelong_v1_1/grading.yaml
+
+mm_lifelong_v1_1_agentic_data_dir: null
+mm_lifelong_v1_1_agentic_media_dir: null
+# The seed reads only the model's catalogs, under the media directory.
+video_qa_rubric_agentic_video_roots:
+  - ${mm_lifelong_v1_1_agentic_media_dir}
+prepare_script_args:
+  data_dir: ${mm_lifelong_v1_1_agentic_data_dir}
+  media_dir: ${mm_lifelong_v1_1_agentic_media_dir}
+
+video_qa_rubric_agentic:
+  resources_servers:
+    video_qa_rubric:
+      reference_levels: ${mm_lifelong_v1_1_grading}
+      judge_chat_completion_create_params:
+        messages: []
+        n: 1
+      # The images built by sandbox_image/build.py, by the name the rows give.
+      sandbox_preloaded_images:
+        mm_lifelong_v1_1_day: ${oc.env:MM_LIFELONG_V1_1_DAY_IMAGE,null}
+        mm_lifelong_v1_1_week: ${oc.env:MM_LIFELONG_V1_1_WEEK_IMAGE,null}
+        mm_lifelong_v1_1_month: ${oc.env:MM_LIFELONG_V1_1_MONTH_IMAGE,null}
+      sandbox_config:
+        # The rows' images replace the uploading configs' image.
+        image: null
+        # The images are 9-103 GB: pull them onto the provider's nodes before a run, so that a sandbox starts within
+        # ready_timeout_s.
+        ready_timeout_s: 1200
+        # Above the episode deadline below.
+        ttl_s: 10800
+      video_tools:
+        profile:
+          # The first watch_video of a long recording indexes the whole file; on a node that has not read it yet
+          # this takes minutes (the day video and most month videos are over 2 GiB).
+          decode_timeout_seconds: 900
+
+video_qa_rubric_agentic_opencode:
+  responses_api_agents:
+    opencode_agent:
+      # A question can need hours of video: the runner's own budget is in its README.
+      timeout: 7200
+      datasets:
+      - name: mm_lifelong_v1_1_agentic
+        type: benchmark
+        jsonl_fpath: benchmarks/mm_lifelong_v1_1_agentic/data/mm_lifelong_v1_1_agentic_benchmark.jsonl
+        prepare_script: benchmarks/mm_lifelong_v1_1_agentic/prepare.py
+        num_repeats: 1
+
+video_qa_rubric_agentic_environment:
+  environment_servers:
+    single_agent_turn_legacy:
+      # Above the sandbox start (ready_timeout_s), the seed check, OpenCode's run (timeout) and grading; below the
+      # sandbox's ttl_s.
+      default_episode_timeout_seconds: 9000
