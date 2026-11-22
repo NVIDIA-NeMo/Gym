@@ -119,8 +119,9 @@ class LocalSnowflake:
         """A new connection (its own DuckDB cursor, so safe to use from another thread) with ``db_id`` selected."""
         return self.fake_snow.connect(database=SNOWFLAKE_DATABASE, schema=db_id)
 
-    def fetch_all(self, cur: Any) -> List[tuple]:
-        """All rows of ``cur``'s result, by position; the result then leaves fakesnow's cache.
+    def fetch_all(self, cur: Any, max_rows: Optional[int] = None) -> Optional[List[tuple]]:
+        """All rows of ``cur``'s result, by position (``None`` if there are more than ``max_rows``, without converting
+        them); the result then leaves fakesnow's cache.
 
         fakesnow's ``fetchall()`` builds a dict per row, which keeps only one of two same-named columns
         (``SELECT T1.name, T2.name``); its Arrow table, private as ``_arrow_table``, keeps both. fakesnow also keeps
@@ -129,6 +130,8 @@ class LocalSnowflake:
         and other queries' entries are left alone.
         """
         try:
+            if max_rows is not None and cur._arrow_table.num_rows > max_rows:
+                return None
             return list(zip(*(column.to_pylist() for column in cur._arrow_table.columns)))
         finally:
             self.fake_snow.results_cache.pop(cur.sfqid, None)
@@ -180,8 +183,11 @@ class AccountSnowflake:
         return conn
 
     @staticmethod
-    def fetch_all(cur: Any) -> List[tuple]:
-        return cur.fetchall()  # tuples, by position
+    def fetch_all(cur: Any, max_rows: Optional[int] = None) -> Optional[List[tuple]]:
+        """All rows, as tuples by position; ``None``, without downloading them, if there are more than ``max_rows``."""
+        if max_rows is not None and (cur.rowcount or 0) > max_rows:
+            return None
+        return cur.fetchall()
 
     @staticmethod
     def interrupt(conn: Any) -> None:

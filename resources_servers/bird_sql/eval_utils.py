@@ -36,6 +36,9 @@ ResultSet = list[ResultRow]
 _OUTER_TIMEOUT_BUFFER_S = 10.0
 # How often a timed-out Snowflake query is interrupted again while its worker thread winds down.
 _SNOWFLAKE_INTERRUPT_RETRY_S = 1.0
+# A Snowflake result larger than this isn't converted (or, from an account, downloaded): it scores as the query's
+# failure. 18x the largest BIRD dev gold result (278,230 rows), so no answer that could match a gold is cut.
+_MAX_SNOWFLAKE_RESULT_ROWS = 5_000_000
 # A Snowflake query is timed from when it starts: queueing for a worker thread, the static check and connecting don't
 # count. Getting that far taking longer than this is the engine's failure, not the query's.
 _SNOWFLAKE_SETUP_TIMEOUT_S = 120.0
@@ -574,7 +577,8 @@ def execute_snowflake(
 ) -> Optional[ResultSet]:
     """Run one query on the Snowflake engine (see ``setup_bird_snowflake``) and return all rows.
 
-    Returns ``None`` if ``snowflake_rejection`` finds a reason Snowflake would refuse the query, or if the query fails.
+    Returns ``None`` if ``snowflake_rejection`` finds a reason Snowflake would refuse the query, if the query fails, or
+    if its result has over ``_MAX_SNOWFLAKE_RESULT_ROWS`` rows.
     Raises ``TimeoutError`` when the server cancels it at its statement timeout (SQLSTATE ``57014``), and re-raises
     engine and connection failures, so they are not scored as the model's mistake. The connection is appended to
     ``connections`` so a caller that times out can interrupt it. If the caller has given up by the time the connection
@@ -593,7 +597,8 @@ def execute_snowflake(
         if on_start is not None:
             on_start()
         cur.execute(sql.strip().rstrip(";"))
-        return normalize_rows(snowflake.fetch_all(cur))
+        rows = snowflake.fetch_all(cur, _MAX_SNOWFLAKE_RESULT_ROWS)
+        return None if rows is None else normalize_rows(rows)
     except Exception as e:
         if getattr(e, "sqlstate", None) == "57014":
             raise TimeoutError("Snowflake query exceeded its statement timeout") from None

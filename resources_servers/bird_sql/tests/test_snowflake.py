@@ -519,6 +519,29 @@ def test_stand_in_frees_each_result_once_read(snowflake_env):
         pending.close()
 
 
+@requires_fakesnow
+def test_a_result_too_large_to_grade_is_not_converted(snowflake_env, monkeypatch):
+    # Converting a huge result can't be interrupted, so one over the cap scores as the query's failure instead, and
+    # still leaves fakesnow's cache. An account's result over the cap isn't downloaded.
+    from resources_servers.bird_sql.eval_utils import execute_snowflake
+    from resources_servers.bird_sql.setup_bird_snowflake import AccountSnowflake
+
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils._MAX_SNOWFLAKE_RESULT_ROWS", 100)
+    local = snowflake_env.local
+    before = set(local.fake_snow.results_cache)
+    assert execute_snowflake(local, DB_ID, 'SELECT "x" FROM "big"', []) is None  # 3,000 rows
+    assert sorted(execute_snowflake(local, DB_ID, 'SELECT "x" FROM "t"', [])) == [(1,), (2,), (3,)]
+    assert set(local.fake_snow.results_cache) == before
+
+    class Cursor:
+        rowcount = 101
+
+        def fetchall(self):
+            raise AssertionError("an oversized result must not be downloaded")
+
+    assert AccountSnowflake.fetch_all(Cursor(), 100) is None
+
+
 class _FakeAdminConnection:
     """An admin connection for the account loader: records statements, answers the loaded-db_ids query from ``loaded``,
     SHOW SCHEMAS from ``schemas`` ({name: comment}) and each COUNT(*) from what ``write_pandas`` wrote (one row short
