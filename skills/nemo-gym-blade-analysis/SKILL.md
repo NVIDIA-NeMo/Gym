@@ -1,5 +1,6 @@
 ---
 name: nemo-gym-blade-analysis
+license: Apache-2.0
 description: >-
   Use when analyzing NeMo Gym benchmark rollouts for BLADE-style reports,
   writing benchmark methodology notes, checking whether a benchmark is
@@ -18,6 +19,8 @@ description: >-
 Use this skill when the user wants to turn NeMo Gym rollout outputs into an
 analysis report, benchmark card, model comparison, benchmark-improvement
 recommendation, or BLADE-ready benchmark package.
+
+When the question is whether two scores are comparable at all, start with the `nemo-gym-score-triage` skill. To produce a run to analyze, use the `run-and-babysit-eval` skill.
 
 Load `references/blade-benchmark-build-guide.md` when the user asks how to
 build, validate, submit, or review a BLADE benchmark or asks whether a benchmark
@@ -44,7 +47,7 @@ goal and needs a concrete completed example. Do not load those files by default.
 
 Start by identifying the artifact set:
 
-- rollout JSONL from `ng_collect_rollouts`
+- rollout JSONL from `gym eval run` (or the legacy `ng_collect_rollouts`)
 - aggregate metrics JSON, if present
 - reward profile JSONL from `ng_reward_profile`, if present
 - benchmark-specific report directory, if present

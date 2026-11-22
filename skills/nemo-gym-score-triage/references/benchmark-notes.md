@@ -4,10 +4,9 @@ Known differences between Gym benchmarks and the published methods they follow, 
 
 ## Terminal-Bench 2.1 (`benchmarks/terminal_bench_2_1`)
 
-- 8 repeats. The Terminus 2 and OpenCode sandboxed agents use a 10,800 s sandbox timeout, and the verifier's evaluation timeout is 1,800 s.
-- Prepared rows carry no per-task agent timeout, so every task gets the sandbox timeout. Harbor-based runs that read each task's own timeout can differ.
-- `prepare.py` clones the Terminal-Bench 2.1 repository at its head when no checkout exists, while the README's steps check out a pinned commit first. The script checks only that there are 89 tasks, so ask which commit a run used.
-- A verifier error or a missing reward file scores 0 and stays in the denominator.
+- 89 tasks. The `terminus_2` and `opencode` presets run the published task folders, pinned by content hash, through the Harbor environment server with 8 repeats and need no `gym eval prepare`. Each harness gets the task's own agent budget (`[agent].timeout_sec` in its `task.toml`), capped by its 10,800 s limit, and the task's tests then grade the sandbox as the agent left it.
+- The deprecated `*_legacy_agent` presets and `inkling_small` run through the resources server's `legacy_agent` relay with fixed sandbox and verifier timeouts set in their own configs. Do not compare their scores with the Harbor presets without checking those settings.
+- A missing reward file scores 0 once the task's tests have run, and stays in the denominator. Infrastructure endings are retried or masked, never scored 0.
 - Timeouts are wall-clock, so throughput and concurrency change scores. Before raising a timeout to finish more tasks, check whether the reference used the same one.
 - Artificial Analysis publishes its own timeout and episode limits. Compare them with the run's settings before comparing scores.
 
@@ -15,8 +14,8 @@ Known differences between Gym benchmarks and the published methods they follow, 
 
 - The profile follows Artificial Analysis's version, prompts, step limit and command timeout, as described in the README.
 - It defaults to 1 repeat. Set `++num_repeats=3` to follow AA's protocol of averaging pass@1 over three runs.
-- Since #3624, the model sees mini-SWE's own output limit: long command output is cut to its first and last 5,000 characters, and the full output stays in `trajectory.json`. Earlier runs showed full output, so they are not comparable with later ones. The note on observations in `benchmarks/terminal_bench_4/README.md` predates #3624.
-- A verifier timeout, or a missing, empty or malformed reward file, scores 0 and stays in the denominator. Only real infrastructure errors (`infrastructure_error`) leave the score. Runs from before #5038 left all of these out of the denominator, so they are not comparable with later runs. That README's note on verifier timeouts predates #5038.
+- Since #3624, the model sees mini-SWE's own output limit: long command output is cut to its first and last 5,000 characters, and the full output stays in `trajectory.json`. Earlier runs showed full output, so they are not comparable with later ones.
+- A verifier timeout, or a missing, empty or malformed reward file, scores 0 and stays in the denominator. Only real infrastructure errors (`infrastructure_error`) leave the score. Runs from before #5038 left all of these out of the denominator, so they are not comparable with later runs.
 
 ## tau2 and tau3 (`benchmarks/tau2`)
 
@@ -66,7 +65,7 @@ Known differences between Gym benchmarks and the published methods they follow, 
 
 - Uses the AA-Omniscience v1.1 public set (300 questions). Scores are not comparable with runs on the v1 public set (600 questions, a different question per id), and Artificial Analysis publishes scores on its 3,000-question set.
 - The dataset revision is pinned. The default judge is `openai/gpt-oss-20b` at temperature 0, with 8 repeats. A different judge model gives different scores.
-- The grader expects the judge to reply with a single letter. When neither the reply nor its last line is a bare letter, it looks for A, B, C and D in that order anywhere in the reply, so any capital A (even in `Answer: B`) reads as CORRECT; with no letter at all it returns B. Check a sample of judge replies before trusting a surprising number.
+- The grader expects the judge to reply with a single letter. It accepts a grade only when it is unambiguous: the bare letter, the last line, or an explicit verdict at the start of a line such as `Grade: A`. Any other reply returns `B` without recording a verdict, so grading stays unknown and can be graded again. Check a sample of judge replies before trusting a surprising number.
 
 ## AA-LCR (`benchmarks/aalcr`)
 

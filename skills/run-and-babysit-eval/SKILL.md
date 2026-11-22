@@ -1,5 +1,6 @@
 ---
 name: run-and-babysit-eval
+license: Apache-2.0
 description: >
   Take a NeMo Gym evaluation from a request to a trusted result: compose the eval config when none
   exists (by following add-model-eval-config, in the same task), submit it, let the resumable Slurm
@@ -16,14 +17,18 @@ description: >
 # Run a Gym Evaluation to Its Result
 
 The Gym pages are the reference; when they and this skill disagree, the pages win:
-[Configuration](../../../fern/versions/latest/pages/orchestration/configuration.mdx),
-[Resumable Runs](../../../fern/versions/latest/pages/orchestration/how-to/resumable-runs.mdx),
-[Job Records](../../../fern/versions/latest/pages/orchestration/job-records.mdx) and
-[Resume](../../../fern/versions/latest/pages/evaluation/resume.mdx). For servers you started yourself
+[Configuration](https://docs.nvidia.com/nemo/gym/latest/orchestration/configuration),
+[Resumable Runs](https://docs.nvidia.com/nemo/gym/latest/orchestration/how-to/resumable-runs),
+[Job Records](https://docs.nvidia.com/nemo/gym/latest/orchestration/job-records) and
+[Resume](https://docs.nvidia.com/nemo/gym/latest/evaluation/resume). For servers you started yourself
 (`gym env start`, then `gym eval run --no-serve`) and for reading health while you build a benchmark or
-a harness, follow [add-benchmark](../add-benchmark/SKILL.md) and [add-harness](../add-harness/SKILL.md).
-The page links point into a full Gym checkout (`fern/...`); a copy of this skill installed on its own does not
-contain those pages, so read them in the Gym repository.
+a harness, follow the Gym repository skills
+[add-benchmark](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) and
+[add-harness](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-harness).
+This skill drives resumable Slurm runs. For a first local run, follow the
+[Quickstart](https://docs.nvidia.com/nemo/gym/latest/get-started/quickstart). To compare a finished run with
+another run or a reference number, use [nemo-gym-score-triage](../nemo-gym-score-triage/SKILL.md), and for
+which tasks fail and why, [nemo-gym-blade-analysis](../nemo-gym-blade-analysis/SKILL.md).
 
 ## How to act
 
@@ -462,31 +467,10 @@ Name each correction in your report with its count.
 ## 8. Fresh run, and stopping a chain
 
 A segment that ended before the task inventory was written has nothing to resume: recovery answers
-`fresh-restart` and names the command, which restarts in the same directory with fresh budgets (saved
-files kept, plan journaled):
-
-```bash
-gym eval resubmit "$GYM_JOB_ID" <benchmark> --recover \
-  --max-walltime HH:MM:SS --walltime-reason "<why the longer walltime>"
-```
-
-`--max-walltime` must be longer than the recorded walltime. To evaluate something different, submit a new
-run to a new location: a fresh `gym eval run` at an existing output path replaces it.
-
-To stop a chain: `scancel` the running job, its successor (in `.gym_followup_queued.<job id>`) and the
-sentinels (`.gym_followup_sentinel.<job id>`, and the one its predecessor queued for it, which becomes
-eligible when you cancel the job; `squeue --me -o '%i %j %T %E'` shows it by its dependency). A successor
-left to start sees `CANCELLED`, writes the stop to `.gym_chain_incomplete` and exits (it ends `FAILED`,
-exit 1, by design: that is the stop, not a fault), after it got an
-allocation; cancelling the successor and the sentinels saves that allocation and leaves no stop record
-(the inspection reads the state from the scheduler either way). Then inspect (section 3) before deciding
-anything else, and keep the run directory.
-
-A segment whose driver exits 76 (nothing is eligible for another attempt) and left no failure kind the
-next segment's guard handles stops the chain itself: it writes that stop to `.gym_chain_incomplete`, cancels the successor and
-sentinel it queued, and journals the end in `chain-end-journal.jsonl`, so no allocation starts just to
-write the stop. A typed stop (credentials rejected, resume refused, spin-up timeout, install failed) is
-still written by the next segment's guard, with its own remedy.
+`fresh-restart` and names the command. To stop a chain, `scancel` the running job, its successor and the
+sentinels, then inspect (section 3) before deciding anything else. The commands, the files that name the
+successor and the sentinels, and the typed stops are in
+[references/fresh-run-and-stop.md](references/fresh-run-and-stop.md).
 
 ## Exit checks
 

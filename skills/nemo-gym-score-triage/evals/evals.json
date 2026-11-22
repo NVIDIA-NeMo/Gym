@@ -1,0 +1,49 @@
+[
+  {
+    "id": "triage-below-reference",
+    "question": "User prompt: My Gym GPQA score is 3 points below the number in the model card. Why?",
+    "expected_skill": "nemo-gym-score-triage",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Works the triage order from the top and reports the evidence: noise first with standard errors, then code, benchmark and reference, method, accounting, health, scoring and serving.",
+    "expected_behavior": [
+      "Starts by checking noise from the repeat counts and standard errors of both numbers.",
+      "Compares the two runs' resolved configs and materialized inputs.",
+      "Ends with the report block: summary, compared numbers, what was checked, what explains the gap, next step."
+    ]
+  },
+  {
+    "id": "triage-bf16-vs-quantized",
+    "question": "User prompt: Is the difference between my BF16 run and my quantized run real?",
+    "expected_skill": "nemo-gym-score-triage",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Runs both on the same stack with identical configs and the same Gym commit, and uses gym eval compare for the interval.",
+    "expected_behavior": [
+      "Uses the Welch interval from `gym eval compare` for two Gym runs.",
+      "Requires the same Gym commit and identical configs on both sides."
+    ]
+  },
+  {
+    "id": "triage-single-agentic-run",
+    "question": "User prompt: I ran an agentic benchmark once before and once after a change. The score went down 2 points, so it regressed, right?",
+    "expected_skill": "nemo-gym-score-triage",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "Does not call a regression from a single run of an agentic benchmark.",
+    "expected_behavior": [
+      "Says several runs are needed and prefers paired comparisons on the same tasks, commit and config."
+    ]
+  },
+  {
+    "id": "triage-negative-crashed",
+    "question": "User prompt: My Gym run crashed and produced no rollouts.",
+    "expected_skill": "nemo-gym-debugging",
+    "expected_script": null,
+    "files": [],
+    "ground_truth": "This is a failed run. The right skill is nemo-gym-debugging.",
+    "expected_behavior": [
+      "Does not load nemo-gym-score-triage for this request."
+    ]
+  }
+]
