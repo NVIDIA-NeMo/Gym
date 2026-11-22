@@ -1290,6 +1290,32 @@ async def test_the_oracle_gets_each_steps_own_solution_before_its_turn(tmp_path,
     ]
 
 
+@pytest.mark.parametrize("mode", ["shared", "separate"])
+async def test_no_turn_of_the_oracle_puts_a_transcript_where_its_verifier_reads(tmp_path, monkeypatch, mode):
+    """Harbor's oracle writes no trajectory.json in any step (``SUPPORTS_ATIF`` is false), so no step's verifier, in
+    the agent's sandbox or in one of its own, finds one under /logs/agent; Gym still keeps each turn's transcript
+    with that turn's verifier logs."""
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    if mode == "separate":
+        steps += (
+            '[steps.verifier]\nenvironment_mode = "separate"\n[steps.verifier.environment]\ndocker_image = "org/v:1"\n'
+        )
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"}, agent_implementation="harbor_oracle_agent"
+    )
+    verifiers, _ = wire_verifier_sandboxes(server, monkeypatch)
+
+    response = await server.run_request(request_for(task))
+
+    result = response.result
+    assert result is not None, response.failure
+    assert [turn.verifier_mode for turn in result.turns] == ["shared", mode]
+    assert len(verifiers) == (mode == "separate")
+    assert [uploaded_files(box, "trajectory.json") for box in (sandbox, *verifiers)] == [[]] * (1 + len(verifiers))
+    transcripts = [json.loads((Path(turn.verifier_logs_dir) / "trajectory.json").read_text()) for turn in result.turns]
+    assert [transcript["steps"][0]["message"] for transcript in transcripts] == ["P", "B"]
+
+
 async def test_other_harnesses_never_get_a_steps_solution(tmp_path, monkeypatch):
     steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
     task_dir = tmp_path / "datasets" / "ds" / "hello"
