@@ -272,6 +272,7 @@ def test_gold_check_names_why_a_gold_fails():
 _TABLES = {
     "t": frozenset({"x"}),
     "Mixed Case": frozenset({"Col Name", "ID", "n"}),
+    "u": frozenset({"X"}),  # "X" in another case than t's "x"
 }
 
 
@@ -335,6 +336,21 @@ _TABLES = {
         ('SELECT string_agg("x", \',\') FROM "t"', "duckdb_function:STRING_AGG"),
         ("SELECT FILTER([1, 2, 3], a -> a > 1), DIV0(1, 0), LISTAGG('a', ',')", None),
         ('WITH divide AS (SELECT "x" FROM "t") SELECT "x" FROM divide', None),
+        # An alias doesn't make a wrong-case column inside its own definition valid; used elsewhere, it's fine.
+        ('SELECT MAX(n) AS n FROM "Mixed Case"', "unknown_column:N"),
+        ('SELECT MAX("n") AS n FROM "Mixed Case"', None),
+        ('SELECT "n" AS k, k + 1 AS k1 FROM "Mixed Case" WHERE k > 1 ORDER BY k', None),
+        # A column belongs to its own table, qualified or not; a correlated subquery may use the outer table's.
+        ('SELECT COUNT(*) FROM "t" WHERE "X" > 0', "unknown_column:X"),
+        ('SELECT COUNT(*) FROM "t" AS a JOIN "u" AS b ON a."X" = b."X"', "unknown_column:A.X"),
+        ('SELECT COUNT(*) FROM "t" AS a JOIN "u" AS b ON a."x" = b."X"', None),
+        ('SELECT COUNT(*) FROM "t" WHERE EXISTS (SELECT 1 FROM "u" WHERE "X" = "x")', None),
+        # A bare function in FROM is DuckDB's; Snowflake's table functions are wrapped in TABLE() or LATERAL.
+        ("SELECT COUNT(*) FROM range(10)", "table_function:RANGE"),
+        ("SELECT * FROM query('SELECT 1')", "table_function:QUERY"),
+        ("SELECT COUNT(*) FROM TABLE(GENERATOR(ROWCOUNT => 3))", None),
+        # VALUES outputs COLUMN1, COLUMN2, ...
+        ("SELECT column1, column2 FROM VALUES (1, 'a'), (2, 'b')", None),
         # SELECT DISTINCT can't ORDER BY a column it doesn't select; a selected column, alias or position can, and so
         # can an expression that is selected or built from selected columns.
         ('SELECT DISTINCT "n" FROM "Mixed Case" ORDER BY "ID"', "distinct_order_by:ID"),

@@ -347,6 +347,15 @@ _DUCKDB_ONLY_FUNCTIONS = frozenset({"DIVIDE", "EPOCH_MS", "LIST_VALUE", "REGEXP_
 _FLATTEN_COLUMNS = frozenset({"SEQ", "KEY", "PATH", "INDEX", "VALUE", "THIS"})
 
 
+def _within(node: Any, ancestor: Any) -> bool:
+    """Whether sqlglot node ``node`` is ``ancestor`` or inside it."""
+    while node is not None:
+        if node is ancestor:
+            return True
+        node = node.parent
+    return False
+
+
 def _is_boolean(node: Any) -> bool:
     """Whether a sqlglot expression is BOOLEAN: a comparison or logical operator, ``TRUE``/``FALSE``, or an ``IFF``,
     ``CASE`` or ``COALESCE`` whose every result is."""
@@ -454,7 +463,9 @@ def snowflake_rejection(
     qualifiers = ctes | {a.name for a in table_aliases}
     for table in tree.find_all(exp.Table):
         if not isinstance(table.this, exp.Identifier):
-            continue  # a table function, e.g. FLATTEN
+            # A bare function in FROM, such as DuckDB's range() or query() (which runs any SQL): Snowflake has none.
+            # Its table functions are wrapped in TABLE(...) or LATERAL, which parse to other nodes.
+            return f"table_function:{(table.this.name or table.this.key).upper()}"
         if table.catalog and table.catalog != database:
             return f"unknown_database:{table.catalog}"
         if table.db and table.db != db_id:
@@ -465,12 +476,14 @@ def snowflake_rejection(
             return f"unknown_table:{table.name}"
         qualifiers.add(table.name)
     catalog_columns = set().union(*tables.values())
-    columns = (
-        catalog_columns
-        | {a.alias for a in tree.find_all(exp.Alias)}
-        | {c.name for a in table_aliases for c in a.columns}
-        | _FLATTEN_COLUMNS
+    aliases = list(tree.find_all(exp.Alias))
+    # VALUES (...) outputs COLUMN1, COLUMN2, ... on Snowflake.
+    values_width = max((len(row.expressions) for v in tree.find_all(exp.Values) for row in v.expressions), default=0)
+    values_columns = {f"COLUMN{i + 1}" for i in range(values_width)}
+    not_aliases = (
+        catalog_columns | {c.name for a in table_aliases for c in a.columns} | _FLATTEN_COLUMNS | values_columns
     )
+    columns = not_aliases | {a.alias for a in aliases}
     for join in tree.find_all(exp.Join):
         # A USING name is a column of both join inputs: a catalog column, or a column a CTE or derived table outputs.
         for name in join.args.get("using") or []:
@@ -482,27 +495,47 @@ def snowflake_rejection(
             continue
         if column.name not in columns:
             return f"unknown_column:{column.name}"
+        if column.name not in not_aliases and all(_within(column, a) for a in aliases if a.alias == column.name):
+            # Only an alias has this name, and the column is inside that alias's own definition
+            # (MAX(height_cm) AS height_cm): Snowflake looks for a real column there and finds none.
+            return f"unknown_column:{column.name}"
         if column.table and column.table not in qualifiers:
             return f"unknown_qualifier:{column.table}"
         if column.db and column.db != db_id:
             return f"unknown_schema:{column.db}"
-    # A select alias can't be qualified by a table: in each scope, a column qualified by a catalog table (by name or
-    # alias) must be one of the catalog's columns. Scopes matter: one alias can name a table in one subquery and a
-    # derived table in another.
+    # In each scope, a column qualified by a catalog table (by name or alias) must be a column of that table: not a
+    # select alias, not another table's column. An unqualified column must belong to one of the catalog tables in
+    # scope (or in an enclosing scope, for a correlated subquery); this is checked only when every source in reach
+    # is a catalog table, and aliases are left to the checks above. Scopes matter: one alias can name a table in one
+    # subquery and a derived table in another.
     try:
         scopes = traverse_scope(tree)
     except sqlglot.errors.SqlglotError:
         scopes = []
     for scope in scopes:
+        reach, sources, node = set(), [], scope
+        while node is not None:
+            sources += list(node.sources.values())
+            node = node.parent
+        all_catalog = all(isinstance(src, exp.Table) and src.name in tables for src in sources)
+        if all_catalog:
+            reach = set().union(*(tables[src.name] for src in sources))
         for column in scope.columns:
+            if isinstance(column.this, exp.Star):
+                continue
             source = scope.sources.get(column.table) if column.table else None
-            if (
-                isinstance(source, exp.Table)
-                and source.name in tables
-                and not isinstance(column.this, exp.Star)
-                and column.name not in catalog_columns
-            ):
+            if isinstance(source, exp.Table) and source.name in tables and column.name not in tables[source.name]:
                 return f"unknown_column:{column.table}.{column.name}"
+            # A scope's columns can include a subquery's unqualified ones; each is judged in its own SELECT's scope.
+            own = column.find_ancestor(exp.Select) is scope.expression
+            if (
+                not column.table
+                and own
+                and sources
+                and all_catalog
+                and column.name not in reach | (columns - catalog_columns)
+            ):
+                return f"unknown_column:{column.name}"
     return None
 
 
