@@ -26,6 +26,11 @@ def _dataset(**extra) -> dict:
     return {"name": "ds", "type": "example", "jsonl_fpath": "data.jsonl", **extra}
 
 
+def test_dataset_preserves_cc_by_nc_sa_license() -> None:
+    config = DatasetConfig.model_validate(_dataset(license="CC-BY-NC-SA-4.0"))
+    assert config.model_dump()["license"] == "CC-BY-NC-SA-4.0"
+
+
 class TestDatasetSource:
     def test_source_gitlab_backfills_legacy_identifier(self) -> None:
         cfg = DatasetConfig.model_validate(
