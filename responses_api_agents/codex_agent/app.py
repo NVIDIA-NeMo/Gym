@@ -99,7 +99,12 @@ from responses_api_agents.codex_agent.observability import (
     parse_codex_usage,
     read_codex_observations,
 )
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession, harness_kill_evidence
+from responses_api_agents.codex_agent.sandbox import (
+    HARBOR_AGENT_LOGS_DIR,
+    LAUNCHER_FILE,
+    CodexSandboxSession,
+    harness_kill_evidence,
+)
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
 from responses_api_agents.codex_agent.tool_host import (
     codex_config_overrides,
@@ -690,10 +695,11 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # danger-full-access the pinned CLIs serve "cached" as "live". Unlike extra_config, this also applies to
     # sandbox sessions.
     web_search: Literal["disabled", "cached", "indexed", "live"] = "disabled"
-    # Sandbox sessions, which run without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with
-    # per-call token counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session
-    # directory is removed. Point it at a directory the resources server collects, such as /logs/agent for
-    # Harbor-format tasks.
+    # Sandbox sessions, which run without --ephemeral: after Codex stops, before the session directory is removed,
+    # copy its `exec --json` output to <sandbox_logs_dir>/codex.txt and its session rollouts (CODEX_HOME/sessions,
+    # with per-call token counts and timestamps) to <sandbox_logs_dir>/sessions, replacing both, as Harbor's Codex
+    # agent leaves them in /logs/agent. None: a borrowed task sandbox that has Harbor's /logs/agent gets them there
+    # (a Harbor task environment, whose verifier may read them); any other sandbox gets no copy.
     sandbox_logs_dir: Optional[str] = None
     # Per-call timeout Codex applies to Gym MCP tools (`tool_timeout_sec`); None leaves the CLI default.
     mcp_tool_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
@@ -830,6 +836,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
         return state.session if isinstance(state, CodexSandboxSession) else None
 
+    def reports_model_conversation(self) -> bool:
+        """The close's invocation conversation comes from Codex's session records, with each tool result as the
+        model read it (``Process exited with code 0\\nOutput:\\n...``); the response output comes from the
+        ``exec --json`` events, which carry only a command's aggregated output."""
+        return True
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
@@ -936,13 +948,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise
         directory = f"/tmp/nemo-gym-codex-sessions/{uuid4().hex}"
         runtime = self.config.sandbox_runtime_dir or f"/tmp/nemo-gym-codex-node-22.19.0-{self.config.codex_version}"
+        # Without a configured directory, a borrowed task sandbox gets Harbor's layout when it has Harbor's directory.
+        harbor_logs = self.config.sandbox_logs_dir is None and not owns_sandbox
         state = CodexSandboxSession(
             request=body,
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=workdir, owns_sandbox=owns_sandbox, harness="Codex"
             ),
             runtime=runtime,
-            logs_dir=self.config.sandbox_logs_dir,
+            logs_dir=HARBOR_AGENT_LOGS_DIR if harbor_logs else self.config.sandbox_logs_dir,
+            create_logs_dir=not harbor_logs,
         )
         try:
             if owns_sandbox:

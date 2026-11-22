@@ -72,7 +72,13 @@ from nemo_gym.sandbox import (
     upload_dir,
     upload_path,
 )
-from nemo_gym.trajectory import encode_atif_trajectory, transcript_to_atif
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    AtifExportError,
+    encode_atif_trajectory,
+    transcript_to_atif,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -99,6 +105,64 @@ INVALID_REWARD_KIND = "harbor:invalid_reward"
 # turn is measured as on any other exit, with the ignored code named in the reason.
 VERIFIER_UNAVAILABLE_EXIT_CODE = 75
 VERIFIER_UNAVAILABLE_KIND = "harbor:verifier_unavailable"
+
+
+def _reported_transcript(observations: AgentObservationBundle | None) -> list[dict[str, Any]] | None:
+    """The conversation of the one root invocation in ``observations``, as items for the transcript converter; None
+    when there is not exactly one root invocation or its conversation is empty. Raises :class:`AtifExportError` when
+    the observations show the conversation may be missing items: a record of the agent's session log could not be
+    read (``agent_artifact_record_unparseable``) and its tool history is then incomplete
+    (``tool_timing_unavailable``), as Codex reports a skipped record that may have held a tool call or its result.
+    The converter accepts a call without its result, so such a conversation would export without that evidence.
+
+    ATIF has one tool-call shape, so a freeform custom tool call (Codex's ``apply_patch``) and its output are given
+    as a function call and its output. Its arguments are what Harbor's Codex agent exports: the input when it is a
+    JSON object, ``{"input": ...}`` when it is no JSON, ``{"value": ...}`` for other JSON, and ``{}`` for none or
+    an empty value. A hosted web search (Codex's ``web_search_call``) is a call named ``web_search_call`` with no
+    result, as Harbor's Codex agent exports it: its arguments are the action's type as ``action_type``, plus the
+    action's ``query``, ``queries`` and ``url`` when it has them. Its call ID is the item's ID, since ATIF needs one.
+    """
+    if observations is None:
+        return None
+    roots = [
+        record
+        for record in observations.records
+        if isinstance(record, AgentInvocation) and record.parent_invocation_id is None
+    ]
+    if len(roots) != 1 or not roots[0].conversation:
+        return None
+    root_gaps = {gap.code for gap in observations.gaps if gap.invocation_id in (None, roots[0].invocation_id)}
+    if {"agent_artifact_record_unparseable", "tool_timing_unavailable"} <= root_gaps:
+        raise AtifExportError("records of the agent's session log could not be read, so it may be missing items")
+    items = []
+    for item in roots[0].conversation:
+        raw = item.model_dump(mode="json")
+        if raw.get("type") == "custom_tool_call":
+            text = raw.get("input")
+            try:
+                arguments = json.loads(text)
+            except (TypeError, ValueError):
+                arguments = {"input": text} if isinstance(text, str) else None
+            if not isinstance(arguments, dict):
+                arguments = {"value": arguments} if arguments else {}
+            call = {"type": "function_call", "call_id": raw.get("call_id"), "name": raw.get("name")}
+            call["arguments"] = json.dumps(arguments)
+            raw = call | ({"id": raw["id"]} if raw.get("id") else {})
+        elif raw.get("type") == "custom_tool_call_output":
+            raw = {"type": "function_call_output", "call_id": raw.get("call_id"), "output": raw.get("output")}
+        elif raw.get("type") == "web_search_call":
+            action = raw.get("action") if isinstance(raw.get("action"), dict) else {}
+            arguments = {"action_type": action.get("type") or ""}
+            arguments |= {key: action[key] for key in ("query", "queries", "url") if action.get(key) is not None}
+            item_id = raw.get("id")
+            raw = {
+                "type": "function_call",
+                "call_id": item_id or f"web_search_call_{len(items)}",
+                "name": "web_search_call",
+                "arguments": json.dumps(arguments),
+            } | ({"id": item_id} if item_id else {})
+        items.append(raw)
+    return items
 
 
 def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
@@ -918,6 +982,31 @@ class HarborVerificationMixin:
                 f"{result.stderr or result.stdout}"
             )
 
+    async def _reset_agent_logs(self, sandbox: AsyncSandbox) -> None:
+        """Empty ``/logs/agent`` in the agent's own sandbox, as root. Raises :class:`RuntimeError` when the
+        sandbox could not.
+
+        A multi-step episode does this before every turn after the first that opens a fresh agent session, as
+        Harbor 0.22.0's ``_reset_agent_logs_for_step`` empties it before each step that does not resume (or, for a
+        bind-mounted folder, moves the previous step's files away): the previous turn's harness logs (Codex's
+        ``codex.txt`` and ``sessions/``, the oracle's output) and the server's transcript hold that turn's
+        conversation, which the fresh agent must not read and the next turn's verifier must not mistake for its
+        own. A link at /logs or /logs/agent, or anything else in /logs/agent's place, is removed without touching
+        its target, as in :meth:`_reset_shared_verifier_dirs`.
+        """
+        logs, agent = shlex.quote(str(Path(AGENT_LOGS_DIR).parent)), shlex.quote(AGENT_LOGS_DIR)
+        result = await exec_as_root(
+            sandbox,
+            f"if test -L {logs}; then rm -- {logs}; fi && "
+            f"if test -L {agent} || {{ test -e {agent} && ! test -d {agent}; }}; then rm -rf -- {agent}; fi && "
+            f"mkdir -p {agent} && find {agent} -mindepth 1 -delete && chmod 777 {agent}",
+            timeout_s=60,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"Could not empty {AGENT_LOGS_DIR} in the agent's sandbox: {result.stderr or result.stdout}"
+            )
+
     async def _run_collect_hooks(self, session: HarborSession, hooks: list[Any]) -> None:
         """Run ``[[verifier.collect]]`` hooks in their services, before anything is collected from them.
 
@@ -1408,7 +1497,12 @@ class HarborVerificationMixin:
             raise RuntimeError(f"Could not make {target} readable: {readable.stderr or readable.stdout}")
 
     def _export_trajectory(
-        self, request: BaseEpisodeRequest[Any], agent_response: NeMoGymResponse, responses_create_params: Any = None
+        self,
+        request: BaseEpisodeRequest[Any],
+        agent_response: NeMoGymResponse,
+        responses_create_params: Any = None,
+        *,
+        observations: AgentObservationBundle | None = None,
     ) -> bytes:
         """The agent's transcript as ATIF v1.7 JSON, for ``/logs/agent/trajectory.json``.
 
@@ -1416,20 +1510,39 @@ class HarborVerificationMixin:
         :class:`AtifExportError` for anything the converter cannot represent, which masks the turn.
         ``responses_create_params`` is the request the turn was sent when it is not the row's own (a
         multi-step task's turn); by default the row's ``responses_create_params`` is the input.
+
+        ``observations`` are the session close's observations of a harness that reports the conversation the
+        model received (``reports_model_conversation`` in its seed). Their one root invocation's conversation is
+        exported instead, as Harbor's installed agents write the file from their own session records, so each tool
+        result reads as the model read it. Without such a conversation, or with one the converter cannot represent or
+        that may be missing items (:func:`_reported_transcript`), the Gym transcript is exported as above.
         """
+        usage = agent_response.usage.model_dump(mode="json") if agent_response.usage is not None else None
+        identity = {
+            "session_id": request.episode_id.capture_key,
+            "agent_name": self.config.agent_server.name,
+            "agent_version": __version__,
+            "model_name": agent_response.model,
+            "usage": usage,
+        }
+        try:
+            reported = _reported_transcript(observations)
+            trajectory = transcript_to_atif(None, reported, **identity) if reported is not None else None
+        except AtifExportError as error:
+            LOGGER.warning(
+                f"{request.task.task_id}: the agent's reported conversation is not representable in ATIF "
+                f"({error}); exporting its response output instead"
+            )
+        else:
+            if trajectory is not None:
+                trajectory.extra["nemo_gym"]["source"] = {"format": "agent_observations"}
+                return encode_atif_trajectory(trajectory)
         params: Any = request.task.task_input.responses_create_params
         if responses_create_params is not None:
             params = responses_create_params
         input_items = params.get("input") if isinstance(params, Mapping) else getattr(params, "input", None)
-        usage = agent_response.usage.model_dump(mode="json") if agent_response.usage is not None else None
         trajectory = transcript_to_atif(
-            input_items,
-            [item.model_dump(mode="json") for item in agent_response.output],
-            session_id=request.episode_id.capture_key,
-            agent_name=self.config.agent_server.name,
-            agent_version=__version__,
-            model_name=agent_response.model,
-            usage=usage,
+            input_items, [item.model_dump(mode="json") for item in agent_response.output], **identity
         )
         return encode_atif_trajectory(trajectory)
 

@@ -30,7 +30,11 @@ from nemo_gym.trajectory import AgentObservationBundle
 LOG = logging.getLogger(__name__)
 # Uploaded beside the runner; runs Codex behind the 429 forwarder on the runtime's Node.
 LAUNCHER_FILE = "sandbox_launcher.mjs"
-# The longest the optional session-rollout copy may take, and the part of the capture budget kept free after it.
+# Harbor's agent-log directory. Harbor gives it to every task environment, its Codex agent writes `codex exec --json`
+# output to codex.txt and the session rollouts to sessions/ there, and a Harbor verifier may read both.
+HARBOR_AGENT_LOGS_DIR = "/logs/agent"
+HARBOR_CODEX_OUTPUT_FILE = "codex.txt"
+# The longest the optional agent-log copy may take, and the part of the capture budget kept free after it.
 _ARCHIVE_TIMEOUT_S = 120.0
 _ARCHIVE_RESERVE_S = 1.0
 # Session files kept for a failed activation: supervisor + harness diagnostics first.
@@ -119,6 +123,9 @@ class CodexSandboxSession(AgentSessionState):
     session: SandboxSession[str]
     runtime: str
     logs_dir: str | None = None
+    # False copies into logs_dir only when the sandbox already has it: Harbor's directory, which a borrowed sandbox
+    # has when it is a Harbor task environment.
+    create_logs_dir: bool = True
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
@@ -219,28 +226,39 @@ class CodexSandboxSession(AgentSessionState):
         await self.upload_text("params.sh", shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
-    async def copy_session_rollouts(self, deadline: float | None = None) -> None:
-        """Copy Codex's session rollouts (CODEX_HOME/sessions) to logs_dir/sessions by ``deadline``
-        (``time.monotonic()``); never fails collection."""
+    async def copy_agent_logs(self, deadline: float | None = None) -> None:
+        """Copy Codex's logs into logs_dir in Harbor's layout by ``deadline`` (``time.monotonic()``): its
+        ``exec --json`` output to codex.txt and its session rollouts (CODEX_HOME/sessions) to sessions/. Never fails
+        collection.
+
+        Both replace whatever logs_dir held under those names, as Harbor's Codex agent replaces sessions/: a rollout
+        the agent wrote there during its run, or a directory or link it put in either's place, never reaches a
+        verifier that reads them. Harbor keeps an existing sessions/ when CODEX_HOME has none; here it goes anyway,
+        since the agent runs as Codex's user and could have removed CODEX_HOME/sessions itself."""
         if not self.logs_dir:
             return
         budget = _ARCHIVE_TIMEOUT_S if deadline is None else min(_ARCHIVE_TIMEOUT_S, deadline - time.monotonic())
         if budget <= 0:
-            LOG.warning("Codex session rollouts not copied: no capture time left")
+            LOG.warning("Codex logs not copied: no capture time left")
             return
-        sessions = f"{self.session.session_dir}/home/.codex/sessions"
-        target = f"{self.logs_dir}/sessions"
-        command = (
-            f"if [ -d {shlex.quote(sessions)} ]; then mkdir -p {shlex.quote(target)} && "
-            f"cp -R {shlex.quote(sessions)}/. {shlex.quote(target)}/; fi"
+        logs = shlex.quote(self.logs_dir)
+        output = shlex.quote(f"{self.session.session_dir}/stdout.log")
+        sessions = shlex.quote(f"{self.session.session_dir}/home/.codex/sessions")
+        output_target = shlex.quote(f"{self.logs_dir}/{HARBOR_CODEX_OUTPUT_FILE}")
+        sessions_target = shlex.quote(f"{self.logs_dir}/sessions")
+        copies = (
+            f"rm -rf -- {output_target} {sessions_target} && "
+            f"if [ -f {output} ]; then mkdir -p {logs} && cp {output} {output_target}; fi && "
+            f"if [ -d {sessions} ]; then mkdir -p {logs} && cp -R {sessions} {sessions_target}; fi"
         )
+        command = copies if self.create_logs_dir else f"if [ -d {logs} ]; then {copies}; fi"
         try:
             async with asyncio.timeout(budget):
                 result = await self.session.sandbox.exec(command, cwd="/", timeout_s=budget)
             if result.return_code != 0 or result.error_type:
-                LOG.warning("Codex session rollouts not copied: %s", result.stderr or result.stdout)
+                LOG.warning("Codex logs not copied: %s", result.stderr or result.stdout)
         except Exception:
-            LOG.exception("Codex session rollouts not copied")
+            LOG.exception("Codex logs not copied")
 
     async def _read_tail(self, name: str, max_bytes: int) -> str:
         """The last ``max_bytes`` of a session file, trimmed inside the sandbox before the download, so a huge log
@@ -339,9 +357,9 @@ class CodexSandboxSession(AgentSessionState):
             LOG.warning("Codex model attempt statuses unavailable", exc_info=True)
         # The optional copy goes last and ends before the capture budget does, so a slow copy cannot cost the events.
         if self.capture_budget_s is not None:
-            await self.copy_session_rollouts(deadline=started + self.capture_budget_s - _ARCHIVE_RESERVE_S)
+            await self.copy_agent_logs(deadline=started + self.capture_budget_s - _ARCHIVE_RESERVE_S)
         else:
-            await self.copy_session_rollouts()
+            await self.copy_agent_logs()
         return events
 
     async def _events_absent(self) -> bool:

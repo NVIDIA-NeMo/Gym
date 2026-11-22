@@ -225,6 +225,15 @@ class AgentSeedSessionResponse(BaseModel):
     # and ``skills_dir``). An environment server refuses such a task to a harness that does not, instead of
     # running it without its tools.
     supports_task_tool_context: bool = False
+    reports_model_conversation: bool = Field(
+        default=False,
+        description=(
+            "Whether the session close's observations hold the conversation the model received, as their root "
+            "invocation's conversation (each tool result as the model read it), where the activation's response "
+            "output renders it differently. An environment server that hands a verifier the turn's transcript "
+            "(Harbor's /logs/agent/trajectory.json) exports it from those observations. Omitted when false."
+        ),
+    )
     capabilities: AgentContinuationCapabilities | None = Field(
         default=None,
         description=(
@@ -239,6 +248,8 @@ class AgentSeedSessionResponse(BaseModel):
         result = handler(self)
         if self.capabilities is None:
             result.pop("capabilities", None)
+        if not self.reports_model_conversation:
+            result.pop("reports_model_conversation", None)
         return result
 
 
@@ -1099,6 +1110,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 agent_session_id=body.agent_session_id,
                 capabilities=capabilities,
                 supports_task_tool_context=self.supports_task_tool_context(),
+                reports_model_conversation=self.reports_model_conversation(),
             )
 
     async def close_agent_session(
@@ -1356,6 +1368,16 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Harbor tasks declare ``[[environment.mcp_servers]]`` and ``skills_dir``. A harness that drives them
         from inside the sandbox answers True, and the seed response carries the answer to the environment
         server, which refuses such a task to a harness that would run it without its tools.
+        """
+        return False
+
+    def reports_model_conversation(self) -> bool:
+        """Whether this harness's session close reports the conversation the model received.
+
+        A harness whose response output renders its run differently from what the model read (Codex's
+        ``exec --json`` events, say, against its session records) answers True when its close observations carry
+        the model's own conversation as the root invocation's. The seed response carries the answer, and the
+        ``harbor`` environment server then writes ``/logs/agent/trajectory.json`` from that conversation.
         """
         return False
 

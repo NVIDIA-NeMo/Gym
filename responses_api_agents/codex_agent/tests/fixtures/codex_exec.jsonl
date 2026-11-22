@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"**Installing Gym**"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'pip install nemo-gym && gym --version'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'pip install nemo-gym && gym --version'","aggregated_output":"Collecting nemo-gym\nSuccessfully installed nemo-gym-0.9.0\nNeMo Gym v0.9.0\nPython 3.12.3 (/opt/venv/bin/python)\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"NeMo Gym 0.9.0 is installed."}}
+{"type":"turn.completed","usage":{"input_tokens":2400,"cached_input_tokens":0,"output_tokens":80}}
