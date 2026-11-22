@@ -181,6 +181,11 @@ def _snowflake_error(cls_name, sqlstate):
         (lambda: _snowflake_error("DatabaseError", "08003"), "raises"),  # the connection is closed
         (lambda: __import__("duckdb").IOException("disk"), "raises"),  # the engine cannot read its data
         (lambda: _snowflake_error("ProgrammingError", "57014"), "timeout"),  # the server's statement timeout
+        # Without a SQLSTATE the connector says "n/a": a failed request (250003) or interface error is the engine's,
+        # anything else still the query's.
+        (lambda: _snowflake_error("OperationalError", None), "raises"),
+        (lambda: _snowflake_error("InterfaceError", None), "raises"),
+        (lambda: _snowflake_error("ProgrammingError", None), None),
     ],
 )
 def test_errors_are_split_into_query_faults_and_engine_failures(make_error, outcome):

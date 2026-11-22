@@ -504,14 +504,19 @@ def _is_snowflake_infra_error(e: Exception) -> bool:
     """Whether ``e`` means the engine or its connection failed, not the query.
 
     The connector's errors carry a SQLSTATE (a closed connection is ``08003``), judged by the same classes as
-    PostgreSQL's. DuckDB's own I/O, fatal, internal and connection errors can also surface through the stand-in.
+    PostgreSQL's. Without one (the connector then says ``"n/a"``), its ``OperationalError`` and ``InterfaceError``
+    are transport failures, such as a request that never reached the server (``250003``), as psycopg's are for
+    PostgreSQL. DuckDB's own I/O, fatal, internal and connection errors can also surface through the stand-in.
     Anything else the query raised, including a result Python cannot hold (``'infinity'::date``), is the query's.
     """
     import duckdb
+    from snowflake.connector import errors as snowflake_errors
 
     sqlstate = getattr(e, "sqlstate", None)
-    if sqlstate:
+    if sqlstate and sqlstate != "n/a":
         return sqlstate[:2] in _POSTGRES_INFRA_SQLSTATE_CLASSES
+    if isinstance(e, (snowflake_errors.OperationalError, snowflake_errors.InterfaceError)):
+        return True
     return isinstance(
         e, (duckdb.IOException, duckdb.FatalException, duckdb.InternalException, duckdb.ConnectionException)
     )
