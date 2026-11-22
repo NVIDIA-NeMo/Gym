@@ -29,7 +29,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional
 
 from resources_servers.bird_sql.setup_bird_spark import _typed_tables
 
@@ -153,6 +153,9 @@ class AccountSnowflake:
     connection_name: Optional[str]
     timeout_s: float
     tables: Catalog
+    # The server stops a query at STATEMENT_TIMEOUT_IN_SECONDS; the client's timer waits this much longer, so a timeout
+    # is the server's verdict rather than a race with it.
+    timeout_buffer_s: ClassVar[float] = 10.0
 
     def connect(self, db_id: str) -> Any:
         """A new connection with ``db_id`` selected and only the connection's own role active.

@@ -36,6 +36,9 @@ ResultSet = list[ResultRow]
 _OUTER_TIMEOUT_BUFFER_S = 10.0
 # How often a timed-out Snowflake query is interrupted again while its worker thread winds down.
 _SNOWFLAKE_INTERRUPT_RETRY_S = 1.0
+# A Snowflake query is timed from when it starts: queueing for a worker thread, the static check and connecting don't
+# count. Getting that far taking longer than this is the engine's failure, not the query's.
+_SNOWFLAKE_SETUP_TIMEOUT_S = 120.0
 # How many SQLite VM instructions run between progress-handler checks.
 _PROGRESS_HANDLER_INTERVAL = 1000
 
@@ -562,7 +565,12 @@ def _is_snowflake_infra_error(e: Exception) -> bool:
 
 
 def execute_snowflake(
-    snowflake: Any, db_id: str, sql: str, connections: List[Any], cancelled: Optional[threading.Event] = None
+    snowflake: Any,
+    db_id: str,
+    sql: str,
+    connections: List[Any],
+    cancelled: Optional[threading.Event] = None,
+    on_start: Optional[Callable[[], None]] = None,
 ) -> Optional[ResultSet]:
     """Run one query on the Snowflake engine (see ``setup_bird_snowflake``) and return all rows.
 
@@ -570,7 +578,8 @@ def execute_snowflake(
     Raises ``TimeoutError`` when the server cancels it at its statement timeout (SQLSTATE ``57014``), and re-raises
     engine and connection failures, so they are not scored as the model's mistake. The connection is appended to
     ``connections`` so a caller that times out can interrupt it. If the caller has given up by the time the connection
-    is ready (``cancelled`` is set), the query doesn't run and ``TimeoutError`` is raised.
+    is ready (``cancelled`` is set), the query doesn't run and ``TimeoutError`` is raised. ``on_start`` is called just
+    before the query is sent, when its clock starts.
     """
     if snowflake_rejection(sql, db_id, snowflake.tables.get(db_id, {})) is not None:
         return None
@@ -581,6 +590,8 @@ def execute_snowflake(
         raise TimeoutError("Snowflake query timed out while connecting")
     try:
         cur = conn.cursor()
+        if on_start is not None:
+            on_start()
         cur.execute(sql.strip().rstrip(";"))
         return normalize_rows(snowflake.fetch_all(cur))
     except Exception as e:
@@ -603,31 +614,53 @@ async def execute_snowflake_async(
 ) -> Optional[ResultSet]:
     """Execute SQL on the Snowflake engine in a worker thread, bounded by semaphore.
 
-    Returns ``None`` on timeout (unless ``raise_on_timeout`` is True) or query error. On timeout the query is
-    interrupted (``asyncio.wait_for`` alone would leave it running), a worker still connecting is told not to run it,
-    and the semaphore slot is held until the worker thread has stopped, so no more queries run at once than the
-    semaphore allows.
+    Returns ``None`` on timeout (unless ``raise_on_timeout`` is True) or query error. ``timeout_s`` counts from when
+    the query starts: waiting for a worker thread, the static check and connecting don't count, so a busy server
+    doesn't time out (and score 0) a fast query; taking over ``_SNOWFLAKE_SETUP_TIMEOUT_S`` to get there raises, as
+    the engine's failure. An engine whose server enforces ``timeout_s`` itself (``timeout_buffer_s``) gets that much
+    longer, so the server's verdict arrives first. On timeout the query is interrupted (``asyncio.wait_for`` alone
+    would leave it running), and the semaphore slot is held until the worker thread has stopped, so no more queries
+    run at once than the semaphore allows.
     """
     async with semaphore:
+        loop = asyncio.get_running_loop()
         connections: List[Any] = []
         cancelled = threading.Event()
+        started: asyncio.Future = loop.create_future()
+
+        def on_start() -> None:
+            loop.call_soon_threadsafe(lambda: started.done() or started.set_result(time.monotonic()))
+
         worker = asyncio.ensure_future(
-            asyncio.to_thread(execute_snowflake, snowflake, db_id, sql, connections, cancelled)
+            asyncio.to_thread(execute_snowflake, snowflake, db_id, sql, connections, cancelled, on_start)
         )
+        await asyncio.wait({worker, started}, timeout=_SNOWFLAKE_SETUP_TIMEOUT_S, return_when=asyncio.FIRST_COMPLETED)
+        if not worker.done() and not started.done():
+            await _stop_snowflake_worker(snowflake, worker, connections, cancelled)
+            raise RuntimeError(f"Snowflake engine took over {_SNOWFLAKE_SETUP_TIMEOUT_S:.0f}s to start a query")
+        deadline = timeout_s + getattr(snowflake, "timeout_buffer_s", 0.0)
+        elapsed = time.monotonic() - started.result() if started.done() else 0.0
         try:
-            return await asyncio.wait_for(asyncio.shield(worker), timeout=timeout_s)
+            return await asyncio.wait_for(asyncio.shield(worker), timeout=max(0.0, deadline - elapsed))
         except (asyncio.TimeoutError, TimeoutError):
-            cancelled.set()
-            while not worker.done():
-                # Again on every round: a query can start just after an interrupt.
-                for conn in list(connections):
-                    snowflake.interrupt(conn)
-                await asyncio.wait({worker}, timeout=_SNOWFLAKE_INTERRUPT_RETRY_S)
-            if not worker.cancelled():
-                worker.exception()  # retrieved here; the caller sees a timeout either way
+            await _stop_snowflake_worker(snowflake, worker, connections, cancelled)
             if raise_on_timeout:
                 raise asyncio.TimeoutError from None
             return None
+
+
+async def _stop_snowflake_worker(
+    snowflake: Any, worker: asyncio.Future, connections: List[Any], cancelled: threading.Event
+) -> None:
+    """Tell a Snowflake worker thread to stop and wait until it has: a worker still connecting won't run its query, and
+    a running query is interrupted again every round, since one can start (or a first interrupt be lost) just after."""
+    cancelled.set()
+    while not worker.done():
+        for conn in list(connections):
+            snowflake.interrupt(conn)
+        await asyncio.wait({worker}, timeout=_SNOWFLAKE_INTERRUPT_RETRY_S)
+    if not worker.cancelled():
+        worker.exception()  # retrieved here; the caller sees the timeout or failure instead
 
 
 Runner = Callable[[str], Awaitable[Optional[ResultSet]]]

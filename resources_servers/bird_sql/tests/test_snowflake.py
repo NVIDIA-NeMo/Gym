@@ -201,13 +201,15 @@ def test_errors_are_split_into_query_faults_and_engine_failures(make_error, outc
             execute_snowflake(engine, DB_ID, 'SELECT "x" FROM "t"', [])
 
 
-class _SlowConnectEngine:
-    """A Snowflake engine whose ``connect`` takes ``connect_s``; counts executed queries and overlapping workers."""
+class _SlowEngine:
+    """A Snowflake engine whose ``connect`` and ``execute`` take ``connect_s`` and ``query_s``; counts executed queries and
+    overlapping workers. ``timeout_buffer_s`` stands for an account, whose server enforces the timeout itself."""
 
     tables = {DB_ID: {"t": frozenset({"x"})}}
 
-    def __init__(self, connect_s):
-        self.connect_s, self.executed, self.active, self.most_active = connect_s, 0, 0, 0
+    def __init__(self, connect_s=0.0, query_s=0.0, timeout_buffer_s=0.0):
+        self.connect_s, self.query_s, self.timeout_buffer_s = connect_s, query_s, timeout_buffer_s
+        self.executed, self.active, self.most_active = 0, 0, 0
         self.lock = threading.Lock()
 
     def connect(self, db_id):
@@ -222,32 +224,56 @@ class _SlowConnectEngine:
 
     def execute(self, sql):
         self.executed += 1
+        time.sleep(self.query_s)
 
     def close(self):
         with self.lock:
             self.active -= 1
 
-    def fetch_all(self, cur):
+    def fetch_all(self, cur, max_rows=None):
         return [(1,)]
 
     def interrupt(self, conn):
         pass
 
 
-@requires_fakesnow
-@pytest.mark.asyncio
-async def test_a_timeout_while_connecting_holds_the_slot_and_runs_nothing():
-    # The timeout can fire while connect() is still running. The worker must not run the query once connected, and
-    # the semaphore slot stays held until the worker stops, so no more queries run at once than the semaphore allows.
+async def _run_three(engine, timeout_s):
     from resources_servers.bird_sql.eval_utils import execute_snowflake_async
 
-    engine, sem = _SlowConnectEngine(connect_s=0.5), asyncio.Semaphore(1)
-    sql = 'SELECT "x" FROM "t"'
-    results = await asyncio.gather(
-        *(execute_snowflake_async(engine, DB_ID, sql, sem, timeout_s=0.1) for _ in range(3))
+    sem, sql = asyncio.Semaphore(1), 'SELECT "x" FROM "t"'
+    return await asyncio.gather(
+        *(execute_snowflake_async(engine, DB_ID, sql, sem, timeout_s=timeout_s) for _ in range(3)),
+        return_exceptions=True,
     )
-    assert results == [None, None, None]
+
+
+@requires_fakesnow
+@pytest.mark.asyncio
+async def test_waiting_and_connecting_dont_count_toward_the_timeout():
+    # A fast query behind others, or behind a slow login, is not the model's timeout: its clock starts with the query.
+    engine = _SlowEngine(connect_s=0.3)
+    assert await _run_three(engine, timeout_s=0.1) == [[(1,)], [(1,)], [(1,)]]
+    assert (engine.executed, engine.most_active, engine.active) == (3, 1, 0)
+
+
+@requires_fakesnow
+@pytest.mark.asyncio
+async def test_a_setup_that_never_finishes_is_an_engine_failure(monkeypatch):
+    # Getting a query started (thread, connection) taking too long is the engine's failure: it raises, to be masked.
+    # The worker then never runs the query, and the semaphore slot stays held until it stops.
+    monkeypatch.setattr("resources_servers.bird_sql.eval_utils._SNOWFLAKE_SETUP_TIMEOUT_S", 0.1)
+    engine = _SlowEngine(connect_s=0.5)
+    results = await _run_three(engine, timeout_s=30)
+    assert [type(r) for r in results] == [RuntimeError] * 3
     assert (engine.executed, engine.most_active, engine.active) == (0, 1, 0)
+
+
+@requires_fakesnow
+@pytest.mark.asyncio
+async def test_an_engine_that_times_out_itself_gets_the_buffer():
+    # On an account the server stops the query at timeout_s; the client waits timeout_buffer_s longer for that verdict.
+    assert await _run_three(_SlowEngine(query_s=0.3, timeout_buffer_s=1.0), timeout_s=0.1) == [[(1,)]] * 3
+    assert await _run_three(_SlowEngine(query_s=0.3), timeout_s=0.1) == [None] * 3
 
 
 @requires_fakesnow
@@ -761,6 +787,16 @@ class TestExecuteAndCompareSnowflake:
         assert (match, pred, err) == (False, None, "pred_sql_timeout")
         match, *_ = await self._compare(snowflake_env, "SELECT x FROM t", 'SELECT "x" FROM "t"')
         assert match is True
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_before_the_query_starts_still_stops_it(self, snowflake_env):
+        # A timer firing while fakesnow transpiles: DuckDB drops an interrupt sent before the query starts, so the
+        # query is interrupted again until it stops, instead of running on with no limit.
+        slow = 'SELECT COUNT(*) FROM "big" a, "big" b, "big" c WHERE MOD(a."x" * b."x" + c."x", 7) = 3'
+        start = time.monotonic()
+        match, _gold, pred, err = await self._compare(snowflake_env, "SELECT 1", slow, timeout_s=0.001)
+        assert (match, pred, err) == (False, None, "pred_sql_timeout")
+        assert time.monotonic() - start < 10
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
