@@ -1,0 +1,31 @@
+name: finance_sec_search/config_edgar_search_no_web_search
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: Financial research over SEC filings with grounded answer verification,
+  using the published harness's prompt and live edgar_search, without web search.
+modality: text
+licensing: unknown
+authors:
+- ushnish-de
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_edgar_search_no_web_search.yaml
+resources_server: finance_sec_search
+agent_server: finance_agent
+datasets:
+- name: finance_sec_search_edgar_search
+  type: benchmark
+  jsonl_fpath: benchmarks/finance_sec_search/data/finance_sec_search_benchmark_edgar_search.jsonl
+  prepare_script: benchmarks/finance_sec_search/prepare_edgar_search.py
+  num_repeats: 3
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

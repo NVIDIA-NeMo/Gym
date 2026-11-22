@@ -23,6 +23,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
+from fastapi import HTTPException
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
@@ -36,11 +38,17 @@ from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
     FinanceAgentResourcesServerConfig,
+    FinanceAgentRubricVerifyResponse,
     FinanceAgentSearchRequest,
+    FinanceAgentSeedSessionRequest,
     FinanceAgentVerifyRequest,
+    FinanceAgentVerifyResponse,
     RateLimiter,
     RetrieveInformationRequest,
+    RubricJudgement,
+    WebSearchRequest,
     _extract_judge_rating,
+    aggregate_rubric_scores,
     per_worker_rate_limiter,
 )
 from resources_servers.sec_local_index.tests.index_fixtures import build_index
@@ -776,6 +784,103 @@ class TestDateFiltering:
         results = json.loads(response.results)
         dates = [r["filing_date"] for r in results]
         assert dates == sorted(dates, reverse=True)
+
+
+class TestAsOfDateCap:
+    """cap_tool_dates_at_as_of_date: every search capped at the row's as_of_date, as in finance_agent_v2."""
+
+    ALL_FILINGS = ["2025-01-15", "2024-07-15", "2024-01-10", "2023-06-01"]
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, server):
+        server._tickers = {"AAPL": {"cik": "0000320193", "name": "APPLE INC."}}
+        server._initialized = True
+        _write_filings_cache(server, "0000320193", MIXED_DATE_FILINGS)
+        server._edgar_search_service = MagicMock()
+        server._edgar_search_service.run = AsyncMock(return_value="[]")
+        server._tavily = MagicMock()
+        server._tavily.search = MagicMock(return_value={"results": []})
+
+    @staticmethod
+    async def _seed(server, as_of_date) -> None:
+        await server.seed_session(_mock_request(), FinanceAgentSeedSessionRequest(as_of_date=as_of_date))
+
+    @staticmethod
+    async def _filing_dates(server, **dates) -> list:
+        response = await server.sec_filing_search(_mock_request(), FinanceAgentSearchRequest(ticker="AAPL", **dates))
+        return [filing["filing_date"] for filing in json.loads(response.results)]
+
+    @staticmethod
+    async def _searched_dates(server, **dates) -> tuple:
+        await server.edgar_search(_mock_request(), EdgarSearchRequest(search_query="revenue", **dates))
+        await server.web_search(_mock_request(), WebSearchRequest(search_query="revenue", **dates))
+        edgar = server._edgar_search_service.run.await_args.args[0]
+        web = server._tavily.search.call_args.kwargs
+        return (edgar["start_date"], edgar["end_date"]), (web.get("start_date"), web["end_date"])
+
+    @pytest.mark.asyncio
+    async def test_off_a_rows_as_of_date_of_any_shape_changes_nothing(self, server) -> None:
+        for as_of_date in ("2024-03-01", "March 01, 2024", 20240301, {"date": "2024-03-01"}):
+            await self._seed(server, as_of_date)
+            assert await self._filing_dates(server) == self.ALL_FILINGS
+            assert await self._searched_dates(server) == (("1900-01-01", None), (None, None))
+        assert server._as_of_dates == {}
+
+    @pytest.mark.asyncio
+    async def test_on_every_search_is_capped_at_the_rows_date(self, server) -> None:
+        server.config.cap_tool_dates_at_as_of_date = True
+        await self._seed(server, "2024-03-01")
+
+        assert await self._filing_dates(server) == ["2024-01-10", "2023-06-01"]
+        assert await self._filing_dates(server, end_date="2030-01-01") == ["2024-01-10", "2023-06-01"]
+        assert await self._filing_dates(server, end_date="2023-12-31") == ["2023-06-01"]
+        assert await self._searched_dates(server) == (("1900-01-01", "2024-03-01"), (None, "2024-03-01"))
+        assert await self._searched_dates(server, start_date="2024-06-01", end_date="2030-01-01") == (
+            ("2024-03-01", "2024-03-01"),
+            ("2024-03-01", "2024-03-01"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_later_seed_never_moves_the_date(self, server) -> None:
+        server.config.cap_tool_dates_at_as_of_date = True
+        await self._seed(server, "2024-03-01")
+        for reseed in (None, "2099-01-01"):
+            await self._seed(server, reseed)
+            assert await self._filing_dates(server) == ["2024-01-10", "2023-06-01"]
+
+    @pytest.mark.asyncio
+    async def test_verify_ends_the_cap(self, server) -> None:
+        server.config.cap_tool_dates_at_as_of_date = True
+        await self._seed(server, "2024-03-01")
+        await server.verify(
+            _mock_request(),
+            FinanceAgentVerifyRequest(
+                question="q",
+                expected_answer="a",
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+                response=NeMoGymResponse(
+                    id="r",
+                    created_at=0.0,
+                    model="m",
+                    object="response",
+                    output=[],
+                    parallel_tool_calls=False,
+                    tool_choice="auto",
+                    tools=[],
+                ),
+            ),
+        )
+        assert server._as_of_dates == {}
+        assert await self._filing_dates(server) == self.ALL_FILINGS
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("as_of_date", ["06/23/2025", "20250623", "2025-02-30", "", 20250623])
+    async def test_on_a_malformed_date_fails_the_seed(self, server, as_of_date) -> None:
+        server.config.cap_tool_dates_at_as_of_date = True
+        with pytest.raises(HTTPException) as failure:
+            await self._seed(server, as_of_date)
+        assert failure.value.status_code == 422
+        assert server._as_of_dates == {}
 
 
 # ============================================================================
@@ -1712,3 +1817,329 @@ class TestVerify:
         req = self._make_verify_request(response, '{"net": 1000}')
         res = await server.verify(self._mock_request(), req)
         assert res.reward == 1.0
+
+
+_SERVERS = Path(__file__).resolve().parents[2]
+_PROMPTS = _SERVERS / "finance_sec_search" / "prompt_templates"
+# Copied from finance_agent_v2: its rubric scoring, which reward_mode 'rubric' must match, and its tool date cap.
+_SHARED_WITH_FINANCE_AGENT_V2 = (
+    "RubricJudgement",
+    "aggregate_rubric_scores",
+    "_JudgeAttempt",
+    "_parse_modifiers",
+    "_parse_rubric",
+    "_json_objects",
+    "_extract_score",
+    "_judge_reply_text",
+    "_judge_attempt",
+    "_judge_criterion",
+    "_extract_json_payload",
+    "cap_tool_dates",
+)
+
+
+def _definitions(path: Path) -> dict:
+    """Each top-level and method definition of a module, as an AST dump without docstrings."""
+    import ast
+
+    found = {}
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+                body = body[1:]
+            found[node.name] = ast.dump(type(node)(**{**node.__dict__, "body": body}))
+    return found
+
+
+def test_the_copied_code_is_finance_agent_v2s() -> None:
+    ours = _definitions(_SERVERS / "finance_sec_search" / "app.py")
+    theirs = _definitions(_SERVERS / "finance_agent_v2" / "app.py")
+    assert [name for name in _SHARED_WITH_FINANCE_AGENT_V2 if ours[name] != theirs[name]] == []
+
+
+def test_the_rubric_judge_prompt_is_finance_agent_v2s() -> None:
+    def template(path: Path) -> str:
+        with open(path) as f:
+            return yaml.safe_load(f)["rubric_judge_prompt_template"]
+
+    assert template(_PROMPTS / "finance_sec_search_rubric_judge.yaml") == template(
+        _SERVERS / "finance_agent_v2" / "prompt_templates" / "finance_agent_v2_rubric_judge.yaml"
+    )
+
+
+class TestRubricReward:
+    """reward_mode 'rubric': each criterion judged on its own, Partial Credit as the reward."""
+
+    @pytest.fixture(autouse=True)
+    def _no_backoff(self, monkeypatch) -> None:
+        monkeypatch.setattr("resources_servers.finance_sec_search.app.asyncio.sleep", AsyncMock())
+
+    RUBRIC = json.dumps(
+        [
+            {
+                "operator": "correctness",
+                "criteria": "Revenue was $391.0 billion",
+                "modifiers": {"severity": 3, "category": "must_pass"},
+            },
+            {"operator": "correctness", "criteria": "Revenue rose 2%", "modifiers": {"severity": 1}},
+            {
+                "operator": "correctness",
+                "criteria": "Cites the 10-K",
+                "modifiers": {"severity": 2, "category": "must_pass"},
+            },
+        ]
+    )
+
+    @staticmethod
+    def _judge_reply(text: str, incomplete: bool = False) -> MagicMock:
+        reply = MagicMock()
+        reply.read = AsyncMock(
+            return_value=NeMoGymResponse(
+                id="judge_resp",
+                created_at=0.0,
+                model="judge",
+                object="response",
+                status="incomplete" if incomplete else "completed",
+                incomplete_details={"reason": "max_output_tokens"} if incomplete else None,
+                output=[
+                    {
+                        "id": "judge_msg",
+                        "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                    }
+                ],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ).model_dump_json()
+        )
+        return reply
+
+    @staticmethod
+    def _score(score: int) -> str:
+        return json.dumps({"extracted_evidence": "...", "score": score, "reason": "..."})
+
+    def _server(self, tmp_path: Path, replies, reward_mode: str = "rubric", **config) -> FinanceAgentResourcesServer:
+        """A server whose judge answers each request with ``replies(criterion)``."""
+        server = FinanceAgentResourcesServer(
+            config=FinanceAgentResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="test",
+                cache_dir=str(tmp_path),
+                judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+                judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                    input=[], max_output_tokens=1000
+                ),
+                judge_prompt_template_fpath=str(_PROMPTS / "finance_sec_search_judge.yaml"),
+                retrieval_system_prompt_fpath=str(_PROMPTS / "finance_sec_search_retrieval.yaml"),
+                rubric_judge_prompt_template_fpath=str(_PROMPTS / "finance_sec_search_rubric_judge.yaml"),
+                reward_mode=reward_mode,
+                **config,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        async def post(**kwargs):
+            prompt = kwargs["json"].input[-1].content
+            reply = replies(prompt.rsplit("RUBRIC CRITERION (grade only this):\n\n", 1)[-1])
+            return reply if isinstance(reply, MagicMock) else self._judge_reply(reply)
+
+        server.server_client.post = AsyncMock(side_effect=post)
+        return server
+
+    @staticmethod
+    def _request(answer: str | None, rubric=RUBRIC) -> FinanceAgentVerifyRequest:
+        output = (
+            []
+            if answer is None
+            else [
+                {
+                    "id": "tc_1",
+                    "call_id": "call_1",
+                    "name": "submit_final_result",
+                    "arguments": json.dumps({"final_result": answer}),
+                    "type": "function_call",
+                    "status": "completed",
+                }
+            ]
+        )
+        return FinanceAgentVerifyRequest(
+            question="What was revenue?",
+            expected_answer="$391.0 billion",
+            rubric=rubric,
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "What was revenue?"}]
+            ),
+            response=NeMoGymResponse(
+                id="resp_test",
+                created_at=0.0,
+                model="test",
+                object="response",
+                output=output,
+                parallel_tool_calls=False,
+                tool_choice="auto",
+                tools=[],
+            ),
+        )
+
+    @staticmethod
+    def _http_request() -> MagicMock:
+        request = MagicMock()
+        request.session = {}
+        return request
+
+    @pytest.mark.asyncio
+    async def test_binary_mode_takes_a_rubric_of_any_shape_and_keeps_its_response(self, tmp_path) -> None:
+        server = self._server(tmp_path, lambda _: "Fully correct. [[2]]", reward_mode="binary")
+
+        for rubric in ([{"criteria": "Revenue was $391.0 billion"}], {"criteria": "x"}, self.RUBRIC, None):
+            result = await server.verify(self._http_request(), self._request("$391.0 billion", rubric=rubric))
+            assert (result.reward, result.judge_rating) == (1.0, 2)
+            assert type(result) is FinanceAgentVerifyResponse
+            assert not any(key.startswith("rubric") for key in result.model_dump())
+
+    def test_binary_mode_over_http_never_echoes_the_rubric(self, tmp_path) -> None:
+        from fastapi.testclient import TestClient
+
+        from nemo_gym.verification import JudgeError
+
+        def judge_down(_):
+            raise JudgeError("judge down")
+
+        row = self._request("$391.0 billion", rubric=[{"criteria": "Revenue was $391.0 billion"}]).model_dump(
+            mode="json"
+        )
+        row["rubric"] = [{"criteria": "Revenue was $391.0 billion"}]
+        for replies, masked in ((lambda _: "Fully correct. [[2]]", False), (judge_down, True)):
+            server = self._server(tmp_path, replies, reward_mode="binary")
+            # Without a cache, setup_webserver downloads SEC's ticker list, which this test does not use.
+            with patch.object(FinanceAgentResourcesServer, "_load_tickers_or_fail"):
+                app = server.setup_webserver()
+            with TestClient(app) as client:
+                assert client.post("/seed_session", json=row).status_code == 200
+                body = client.post("/verify", json=row).json()
+            assert body["mask_sample"] is masked
+            assert not any(key.startswith("rubric") for key in body)
+
+    @pytest.mark.asyncio
+    async def test_every_criterion_met_earns_the_whole_reward(self, tmp_path) -> None:
+        server = self._server(tmp_path, lambda _: self._score(1))
+        result = await server.verify(self._http_request(), self._request("$391.0 billion, up 2%, per the 10-K"))
+
+        assert isinstance(result, FinanceAgentRubricVerifyResponse)
+        assert (result.reward, result.rubric_partial_credit, result.rubric_all_pass) == (1.0, 1.0, True)
+        assert [j.votes for j in result.rubric_judgements] == [[1, 1, 1]] * 3
+        assert (result.rubric_dealbreakers_total, result.rubric_dealbreakers_failed, result.judge_error) == (
+            2,
+            0,
+            None,
+        )
+        assert (result.mask_sample, result.failure_kind) == (False, None)
+        assert server.server_client.post.await_count == 9
+
+    @pytest.mark.asyncio
+    async def test_a_missed_criterion_costs_its_weight_or_every_point_when_it_is_a_dealbreaker(self, tmp_path) -> None:
+        growth = self._server(tmp_path, lambda c: self._score(0 if c == "Revenue rose 2%" else 1))
+        result = await growth.verify(self._http_request(), self._request("$391.0 billion, per the 10-K"))
+        assert (result.reward, result.rubric_weighted_fraction) == (5 / 6, 5 / 6)
+
+        citation = self._server(tmp_path, lambda c: self._score(0 if c == "Cites the 10-K" else 1))
+        result = await citation.verify(self._http_request(), self._request("$391.0 billion, up 2%"))
+        assert (result.reward, result.rubric_weighted_fraction, result.rubric_dealbreakers_failed) == (0.0, 4 / 6, 1)
+
+    @pytest.mark.asyncio
+    async def test_a_reply_without_a_verdict_is_asked_again(self, tmp_path) -> None:
+        replies = iter(["I am not sure."] + [self._score(1)] * 9)
+        server = self._server(tmp_path, lambda _: next(replies))
+        result = await server.verify(self._http_request(), self._request("$391.0 billion, up 2%, per the 10-K"))
+
+        assert result.reward == 1.0
+        assert sorted(j.attempts_used for j in result.rubric_judgements) == [3, 3, 4]
+        assert sum(j.parse_failures for j in result.rubric_judgements) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_reply_cut_off_by_its_budget_is_asked_again_with_a_bigger_one(self, tmp_path) -> None:
+        replies = iter([self._judge_reply("", incomplete=True)] + [self._score(1)] * 3)
+        server = self._server(tmp_path, lambda _: next(replies), judge_max_concurrency=1)
+        rubric = json.dumps([{"criteria": "Revenue was $391.0 billion"}])
+        result = await server.verify(self._http_request(), self._request("$391.0 billion", rubric=rubric))
+
+        budgets = [call.kwargs["json"].max_output_tokens for call in server.server_client.post.await_args_list]
+        assert budgets == [1000, 2000, 2000, 2000]
+        assert result.reward == 1.0
+
+    @pytest.mark.asyncio
+    async def test_a_criterion_the_judge_never_settles_keeps_v2s_reward_and_masks_the_sample(self, tmp_path) -> None:
+        for criterion, reward in (("Cites the 10-K", 0.0), ("Revenue rose 2%", 5 / 6)):
+            server = self._server(
+                tmp_path,
+                lambda c, unsettled=criterion: "No verdict." if c == unsettled else self._score(1),
+                judge_max_attempts=4,
+            )
+            result = await server.verify(self._http_request(), self._request("$391.0 billion, up 2%, per the 10-K"))
+
+            assert (result.reward, result.rubric_unresolved) == (reward, 1)
+            [unresolved] = [j for j in result.rubric_judgements if j.score is None]
+            assert unresolved.attempts_used == 4
+            assert result.judge_error.startswith("1/3 criteria unresolved")
+            assert (result.mask_sample, result.failure_kind, result.failure_reason) == (
+                True,
+                "judge_failed",
+                result.judge_error,
+            )
+
+    @pytest.mark.asyncio
+    async def test_only_an_unsettled_criterion_masks_the_sample(self, tmp_path) -> None:
+        server = self._server(tmp_path, lambda c: self._score(0 if c == "Cites the 10-K" else 1))
+        failed = await server.verify(self._http_request(), self._request("$391.0 billion, up 2%"))
+        unsubmitted = await server.verify(self._http_request(), self._request(None))
+        unscorable = await server.verify(self._http_request(), self._request("$391.0 billion", rubric=None))
+
+        assert [result.reward for result in (failed, unsubmitted, unscorable)] == [0.0, 0.0, 0.0]
+        assert [result.mask_sample for result in (failed, unsubmitted, unscorable)] == [False, False, False]
+
+    @pytest.mark.asyncio
+    async def test_no_submission_scores_explicit_zeros_without_calling_the_judge(self, tmp_path) -> None:
+        server = self._server(tmp_path, lambda _: self._score(1))
+        result = await server.verify(self._http_request(), self._request(None))
+
+        assert (result.reward, result.rubric_partial_credit, result.rubric_all_pass, result.rubric_total) == (
+            0.0,
+            0.0,
+            False,
+            3,
+        )
+        server.server_client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_row_without_a_usable_rubric_is_an_unscorable_dry_run(self, tmp_path) -> None:
+        server = self._server(tmp_path, lambda _: self._score(1))
+        for rubric in (None, "not json", json.dumps({"criteria": "x"}), [{"criteria": "a list, not JSON"}]):
+            result = await server.verify(self._http_request(), self._request("$391.0 billion", rubric=rubric))
+            assert result.reward == 0.0
+            assert result.judge_error.startswith("no usable rubric criteria")
+        server.server_client.post.assert_not_awaited()
+
+    def test_aggregation_gates_on_dealbreakers_and_weighs_by_severity(self) -> None:
+        judgements = [
+            RubricJudgement(criteria="a", severity=3, must_pass=True, score=1),
+            RubricJudgement(criteria="b", severity=1, score=0),
+            RubricJudgement(criteria="c", severity=2, must_pass=True, score=None),
+        ]
+        scores = aggregate_rubric_scores(judgements)
+        assert (scores["rubric_partial_credit"], scores["rubric_weighted_fraction"]) == (0.0, 0.5)
+        assert (scores["rubric_unresolved"], scores["rubric_dealbreakers_failed"]) == (1, 1)
+
+    def test_rubric_metrics_come_only_in_rubric_mode(self, tmp_path) -> None:
+        rollouts = [[{"reward": 1.0, "rubric_partial_credit": 1.0, "rubric_judgements": [{"score": 1}]}]]
+        binary = self._server(tmp_path, lambda _: "[[2]]", reward_mode="binary")
+        rubric = self._server(tmp_path, lambda _: self._score(1))
+
+        assert binary.compute_metrics(rollouts) == {}
+        assert binary.compute_repeat_metrics(rollouts) == {}
+        assert rubric.compute_metrics(rollouts)["mean/rubric_partial_credit"] == 1.0

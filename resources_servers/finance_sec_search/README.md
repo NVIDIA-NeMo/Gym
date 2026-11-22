@@ -101,6 +101,7 @@ for contrast:
 | `cache_dir` | `~/.cache/...` | shared absolute path | Must be visible from every rollout worker. |
 | `supplementary_tickers_fpath` | `null` | path to the overlay JSON | Resolve filers that live SEC no longer lists. |
 | `max_end_date` | `null` | dataset cutoff | Latest filing date any date-filtered tool returns. |
+| `cap_tool_dates_at_as_of_date` | `false` | `true` when rows carry `as_of_date` | Cap each question's searches at its own as-of date, as `finance_agent_v2` does. |
 | `reward_mode` | `binary` | `scaled` | Partial credit: `[[1]]` scores 0.5 instead of 0.0. |
 | `max_rollout_time_seconds` | `null` | e.g. `1800` | Without it a stalled rollout blocks the batch. |
 
@@ -109,6 +110,13 @@ Leaving it `null` lets the agent retrieve filings published after that date. It
 also matters for `edgar_search`, which falls back to an internal default when
 `max_end_date` is unset — searches are then silently capped at that date rather
 than at your dataset's cutoff.
+
+When each question is asked as of its own date, write it as the row's
+`as_of_date` (`YYYY-MM-DD`) and set `cap_tool_dates_at_as_of_date: true`. Every
+`sec_filing_search`, `edgar_search` and `web_search` call then has its
+`start_date` and `end_date` capped at that date, and `max_end_date` still applies.
+A session keeps the date of its first seed, so a model that reaches
+`/seed_session` mid-rollout cannot move it. A malformed date fails the seed.
 
 One agent-side setting lives in the `responses_api_agents` block rather than
 here:
@@ -138,8 +146,9 @@ With a local corpus or index available, also set `sec_dump_path` and
 | `local` | Local SQLite index | `local_edgar_index_path` |
 | `live` | sec-api.io | `sec_api_key` |
 
-Only datasets that expose `edgar_search` need a mode; the benchmark exposes
-`sec_filing_search` and leaves it unset. A mode whose index or key is missing
+Only datasets that expose `edgar_search` need a mode. The benchmark's default
+configs expose `sec_filing_search` and leave it unset; its edgar_search variants
+use `live`. A mode whose index or key is missing
 fails at startup. The mode in use, and in local mode the date range the index
 covers, is logged at startup; `NEMO_GYM_LOG_LEVEL=WARNING` silences that.
 
@@ -391,4 +400,6 @@ gym env test --resources-server finance_sec_search
 ## Verification
 
 Uses LLM-as-judge with a financial grading rubric (0/1/2 scale). `reward_mode: binary` gives reward 1.0 only to fully correct answers (`[[2]]`); `reward_mode: scaled` also gives partially correct answers (`[[1]]`) 0.5. The judge additionally requires grounding: an answer that restates general financial knowledge without filing-specific figures, dates, or disclosures scores `[[0]]` even when it is conceptually correct. The judge prompt and rubric are defined in /prompt_templates.
+
+`reward_mode: rubric` instead grades the row's own `rubric` exactly as `finance_agent_v2` does, with the same code and judge prompt (`prompt_templates/finance_sec_search_rubric_judge.yaml`); a test keeps both in step. The rubric is a JSON string of criteria, each with `criteria` and optional `modifiers`: `severity` weights it and `category: must_pass` makes it a dealbreaker. Each criterion is judged on its own until `judge_required_successes` (3) verdicts are in, at most `judge_max_attempts` (10) calls, with a larger output budget after a reply that ran out of tokens, and decided by majority. The reward is Partial Credit: the severity-weighted share of criteria met, or 0.0 when a dealbreaker failed. A criterion the judge never settles counts as not met and sets `judge_error`. It also masks the sample (`mask_sample`, `failure_kind: judge_failed`), as a binary-mode judge failure does, while the reward stays `finance_agent_v2`'s. The response carries `finance_agent_v2`'s rubric fields and metrics. The other reward modes ignore `rubric`.
 

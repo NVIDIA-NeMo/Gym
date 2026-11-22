@@ -19,10 +19,21 @@ prompt and rubric are defined in the resource server's `prompt_templates/`.
 | Tool | Description |
 |------|-------------|
 | `sec_filing_search` | Search SEC EDGAR for filing metadata by stock ticker symbol |
+| `edgar_search` | Full-text EDGAR search via sec-api.io, in place of `sec_filing_search` in the [edgar_search variants](#edgar_search-variants) |
 | `parse_html_page` | Fetch and parse an HTML page, optionally cache SEC content, and store it under a key |
 | `retrieve_information` | Query stored documents via LLM prompt with `{{key}}` placeholders |
 | `submit_final_result` | Submit the final answer (required to receive a reward) |
 | `web_search` | Internet search via Tavily API (optional — requires `tavily_api_key` in `env.yaml`) |
+
+## edgar_search variants
+
+`config_edgar_search_no_web_search` and `config_edgar_search_web_search` ask the
+same questions the way the published
+[Vals AI finance-agent](https://github.com/vals-ai/finance-agent) harness does:
+with its prompt, which asks every question as of April 07, 2025, and its
+`edgar_search` and `web_search` tools. `edgar_search` calls sec-api.io live, so
+running these needs `SEC_API_KEY`; preparing them does not. Every search stops
+at 2025-04-07, as the harness's do.
 
 ## Configure models
 
@@ -46,6 +57,8 @@ tavily_api_key: ${oc.env:TAVILY_API_KEY,null}
 export OPENAI_API_KEY=...
 # Export only for the web-search variant:
 export TAVILY_API_KEY=...
+# Export only for the edgar_search variants:
+export SEC_API_KEY=...
 ```
 
 ## Data preparation
@@ -62,6 +75,13 @@ With the web-search tool included:
 gym eval prepare --benchmark finance_sec_search/config_web_search
 ```
 
+The edgar_search variants, without and with web search:
+
+```bash
+gym eval prepare --benchmark finance_sec_search/config_edgar_search_no_web_search
+gym eval prepare --benchmark finance_sec_search/config_edgar_search_web_search
+```
+
 Downloads `public.csv` from the Vals AI GitHub repo and writes benchmark
 JSONL to `data/`. A Tavily key is not needed during preparation; it is required
 when running the web-search variant.
@@ -70,6 +90,8 @@ when running the web-search variant.
 |--------|-------------|
 | `config_no_web_search.yaml` | `data/finance_sec_search_benchmark.jsonl` |
 | `config_web_search.yaml` | `data/finance_sec_search_benchmark_web_search.jsonl` |
+| `config_edgar_search_no_web_search.yaml` | `data/finance_sec_search_benchmark_edgar_search.jsonl` |
+| `config_edgar_search_web_search.yaml` | `data/finance_sec_search_benchmark_edgar_search_web_search.jsonl` |
 
 ## Run
 
@@ -107,7 +129,9 @@ gym eval run --no-serve \
 Use `--limit 1` for a quick end-to-end check. For the web-search variant, use
 `finance_sec_search/config_web_search`, agent
 `finance_sec_search_web_search_benchmark_agent`, and
-`data/finance_sec_search_benchmark_web_search.jsonl`.
+`data/finance_sec_search_benchmark_web_search.jsonl`. The edgar_search variants
+follow the same pattern: agents `finance_sec_search_edgar_search_benchmark_agent`
+and `finance_sec_search_edgar_search_web_search_benchmark_agent`.
 
 ## Optional: prefetch filing metadata
 
