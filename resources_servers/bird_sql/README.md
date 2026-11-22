@@ -83,18 +83,20 @@ be on Snowflake.
 
 DuckDB is more lenient than Snowflake in places, so before running the query the grader
 refuses, as Snowflake would, anything but a single query, identifiers that do not resolve
-under Snowflake's rules (an unquoted name means its upper-case spelling), and a few
-SQLite-only spellings (`IIF`, `INSTR`, `GROUP_CONCAT`, `STRFTIME`, `JULIANDAY`, `TOTAL`,
-`LIMIT offset, count`), `SUM`/`AVG` of a boolean expression (including an `IFF`, `CASE` or
-`COALESCE` of booleans), a `SELECT DISTINCT` ordered by something it doesn't select, an
-aggregate `FILTER (WHERE ...)` clause, and six functions DuckDB has and Snowflake doesn't
-(`DIVIDE`, `EPOCH_MS`, `LIST_VALUE`, `REGEXP_MATCHES`, `STRING_AGG`, `STRPTIME`). This check
-is static and approximate; on a real account, Snowflake refused every query it refuses (see
-the calibration below). It matches function names as written: a quoted name (`"DIVIDE"(a, b)`)
-or a call in a query with a CTE of the same name (`WITH divide AS (...) SELECT DIVIDE(a, b)`)
-gets past it, and a table alias with a column list that has one of these names
-(`FROM t AS divide (a, b)`) is refused although Snowflake accepts it. Known differences from Snowflake that the check does not cover,
-each checked on an account:
+under Snowflake's rules (an unquoted name means its upper-case spelling; a column must belong
+to its own table, and an alias doesn't cover a column inside its own definition), a bare
+function in `FROM` (DuckDB's `range()` or `query()`; Snowflake wraps table functions in
+`TABLE(...)`), and a few SQLite-only spellings (`IIF`, `INSTR`, `GROUP_CONCAT`, `STRFTIME`,
+`JULIANDAY`, `TOTAL`, `LIMIT offset, count`), `SUM`/`AVG` of a boolean expression (including
+an `IFF`, `CASE` or `COALESCE` of booleans), a `SELECT DISTINCT` ordered by something it
+doesn't select, an aggregate `FILTER (WHERE ...)` clause, and six functions DuckDB has and
+Snowflake doesn't (`DIVIDE`, `EPOCH_MS`, `LIST_VALUE`, `REGEXP_MATCHES`, `STRING_AGG`,
+`STRPTIME`). This check is static and approximate; on a real account, Snowflake refused every
+query it refuses (see the calibration below). It matches function names as written: a quoted
+name (`"DIVIDE"(a, b)`) or a call in a query with a CTE of the same name (`WITH divide AS
+(...) SELECT DIVIDE(a, b)`) gets past it, and a table alias with a column list that has one of
+these names (`FROM t AS divide (a, b)`) is refused although Snowflake accepts it. Known
+differences from Snowflake that the check does not cover, each checked on an account:
 
 - `DATEADD` and `DATE_TRUNC` on a date return a timestamp, so the result gains `00:00:00`;
   `TO_CHAR` ignores its format when `sqlglot` cannot infer the argument's type (a
@@ -112,18 +114,27 @@ each checked on an account:
 
 A query that fails on the stand-in scores as the model's error; a failure of the stand-in
 itself (a closed connection, an I/O error) is masked as a verifier error (`unknown_error`).
-Queries run single-threaded so float sums are repeatable, and a timed-out query is
-interrupted. DuckDB's file and network access is off and locked, so model SQL can't read
-files through table functions such as `read_csv` or `sqlite_scan`. `fakesnow` and `snowflake-connector-python` are dependencies of this server
-(`pyproject.toml`), pinned to `fakesnow==0.12.1` because the grader reads two of its private
-attributes; the default SQLite dialect never imports them.
+Queries run single-threaded so float sums are repeatable. A query's timeout counts from when
+it starts, not from when it waited for a thread or a connection; a timed-out query is
+interrupted, and its slot stays taken until its thread has stopped. A result over 5,000,000
+rows (18 times the largest dev gold result) isn't converted and scores as the query's failure.
+DuckDB's file and network access is off and locked, so model SQL can't read files through
+table functions such as `read_csv` or `sqlite_scan`. `fakesnow` and
+`snowflake-connector-python` are dependencies of this server (`pyproject.toml`), pinned to
+`fakesnow==0.12.1` because the grader reads two of its private attributes; the default SQLite
+dialect never imports them.
 
 `snowflake_engine: snowflake` runs the same grader against a real account instead, through
 `snowflake_connection_name` in the connector's `connections.toml` (no credentials in this
 config), with the data already loaded in the same layout. Each connection runs
 `USE SECONDARY ROLES NONE`, so only the connection's own role applies: a user's default
 secondary roles are often `ALL`, which would let a session on a read-only role write through
-the user's other roles.
+the user's other roles. That read-only role is also what contains `TABLE(...)` functions the
+static check lets through, such as `TABLE(INFORMATION_SCHEMA.QUERY_HISTORY())`. Each query
+opens its own connection, so it logs in each time: use key-pair (or another non-interactive)
+authentication, and expect about a second of extra latency per query; that time doesn't count
+toward the query's timeout. At startup, the grader checks that its role can see every table of
+every database, and stops if one is missing.
 
 To set up an account:
 
