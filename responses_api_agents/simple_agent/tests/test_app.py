@@ -1032,7 +1032,10 @@ class TestApp:
         assert tool.started_at is not None and tool.completed_at is not None and tool.duration_ms is not None
 
     @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
-    async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
+    @pytest.mark.parametrize("single_attempt", [False, True])
+    async def test_run_preserves_self_dispatch(
+        self, capture_enabled: bool, override_responses: bool, single_attempt: bool
+    ) -> None:
         agent_type = SimpleAgent
         if override_responses:
 
@@ -1041,6 +1044,10 @@ class TestApp:
 
             agent_type = type("OverriddenSimpleAgent", (SimpleAgent,), {"responses": overridden_responses})
         server, server_client = _make_agent(capture_enabled, agent_type)
+
+        if single_attempt:
+            server.config.request_max_transport_attempts = 1
+            server.config.request_timeout_seconds = 12
 
         model_response = {
             "id": "response-1",
@@ -1057,6 +1064,13 @@ class TestApp:
             if url_path == "/seed_session":
                 return _mock_response()
             if url_path.endswith("/v1/responses"):
+                if single_attempt:
+                    assert kwargs["_max_num_tries"] == 1 and kwargs["_resend_after_disconnect"] is False
+                    assert kwargs["timeout"].total == 12
+                else:
+                    assert "_max_num_tries" not in kwargs
+                    assert "_resend_after_disconnect" not in kwargs
+                    assert "timeout" not in kwargs
                 return _mock_response(model_response)
             assert url_path == "/verify"
             return _mock_response(kwargs["json"] | {"reward": 1.0})
