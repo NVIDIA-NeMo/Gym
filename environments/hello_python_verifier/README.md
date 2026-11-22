@@ -16,13 +16,13 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 
 ```bash
 gym eval run environments/hello_python_verifier --agent opencode_agent --sandbox docker \
-  --model-type openai_model --model <model> --model-url <url> --model-api-key <key> \
-  --max-output-tokens 16384
+  --model-type openai_model --model gpt-6.1-sol --model-url https://api.openai.com/v1 \
+  --model-api-key "$OPENAI_API_KEY"
 ```
 
 The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
 
-`--max-output-tokens 16384` caps each OpenCode model call. Without it, OpenCode asks for up to 131,072 output tokens, more than most hosted models allow (GPT-5 allows 128,000 and gpt-4.1 32,768), so the endpoint refuses every request. 16,384 fits common hosted models and is far more than this example needs.
+The command calls OpenAI's `gpt-6.1-sol` with the API key in `OPENAI_API_KEY`. Any other OpenAI-compatible endpoint works too: set `--model`, `--model-url` (its base URL) and `--model-api-key`. OpenCode asks for up to 131,072 output tokens per model call, which gpt-6.1-sol accepts. Some models allow fewer (gpt-4.1 allows 32,768 and GPT-5 128,000); with them, add `--max-output-tokens <n>` within the model's cap, such as `--max-output-tokens 16384`, or the endpoint refuses every request.
 
 ## Validate it
 

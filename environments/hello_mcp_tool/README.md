@@ -21,10 +21,11 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 
 ```bash
 gym eval run environments/hello_mcp_tool --agent miniswe_sandboxed_agent --sandbox docker \
-  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+  --model-type openai_model --model gpt-6.1-sol --model-url https://api.openai.com/v1 \
+  --model-api-key "$OPENAI_API_KEY"
 ```
 
-The command uses mini-SWE because it starts the task's `stdio` MCP server inside the sandbox. A harness that does not, such as OpenCode, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider.
+The command uses mini-SWE because it starts the task's `stdio` MCP server inside the sandbox. A harness that does not, such as OpenCode, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider. The command calls OpenAI's `gpt-6.1-sol` with the API key in `OPENAI_API_KEY`; any other OpenAI-compatible endpoint works too: set `--model`, `--model-url` (its base URL) and `--model-api-key`.
 
 ## Validate it
 

@@ -159,16 +159,18 @@ the harness, which reports it as a graded `model_request_error`.
 
 **Cause.** The endpoint refused the request because the run's own settings are invalid, so the episode is not
 graded. A common case is a harness output limit above the model's cap: OpenCode and Pi
-ask for up to 131,072 output tokens per model call unless their `max_output_tokens` is set. Most hosted models allow
+ask for up to 131,072 output tokens per model call unless their `max_output_tokens` is set. Some hosted models allow
 fewer, for example:
 
 | Model | Output-token cap |
 | --- | --- |
-| GPT-5 family | 128,000 |
+| GPT-5 | 128,000 |
 | gpt-4.1 | 32,768 |
 | gpt-4o, gpt-4o-mini | 16,384 |
 | o1, o3-mini, o4-mini | 100,000 |
-| Claude | 64,000 or 128,000, depending on the model |
+| Claude | depends on the model |
+
+Newer models, such as GPT-5.5 and gpt-6.1-sol, accept 131,072.
 
 A parameter the model does not accept, such as a `temperature` other than 1 on an OpenAI reasoning model, fails the
 same way. Any other 400, and a refusal that names the model's context window, is handled as on any other run:
@@ -177,8 +179,8 @@ as `vllm_model`, has it graded. OpenCode 2 (`opencode_version` 2 or later) can r
 generic message such as `Bad request`; such a refusal also stays graded, as before.
 
 **Fix.** Pass `--max-output-tokens <n>` with `n` at or below the model's cap, such as `--max-output-tokens 32768`
-for gpt-4.1. Your provider's model documentation gives the cap. The OpenCode commands in `environments/hello_*` pass
-16384, which fits every model above.
+for gpt-4.1. Your provider's model documentation gives the cap. The OpenCode commands in `environments/hello_*` use
+gpt-6.1-sol, which accepts the default; add the flag when you run them with another model.
 
 ## A harness cannot install its runtime in the sandbox
 
