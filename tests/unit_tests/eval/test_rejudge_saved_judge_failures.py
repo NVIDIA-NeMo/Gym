@@ -111,6 +111,55 @@ def test_a_settled_row_keeps_the_evidence_of_the_judge_failure_it_settles(tmp_pa
     assert settled["_ng_rejudged_failure_observations"]["ng_perf"] == evidence["ng_perf"]
 
 
+# A verdict that did not parse is saved under its own kind; the producer's routing class stays in the legacy field.
+JUDGE_CLASSES = [
+    {"_ng_failure_class": "judge_failed"},
+    {"_ng_failure_class": "judge_unparseable", "_ng_failure_legacy_class": "judge_failed"},
+]
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_every_due_judge_failure_is_bound_and_settled(tmp_path, classes):
+    output, [failure] = _run(tmp_path, judge_failures=1, evidence=classes)
+    identity = logical_rollout_id(failure)
+    assert due_judge_failures(output) == [identity]
+    assert list(bind_judge_failures(output)["failures"]) == [identity]
+
+    _settle(output, failure, 0.5)
+
+    assert due_judge_failures(output) == []
+    assert sorted(row["reward"] for row in RolloutStore.read(output).selected("success")) == [0.5, 1.0, 1.0]
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_a_rejudgment_that_fails_again_spends_a_failure_attempt(tmp_path, classes):
+    output, [failure] = _run(tmp_path, judge_failures=1, evidence=classes)
+    identity = logical_rollout_id(failure)
+    spent = RolloutStore.read(output)._state.failure_count(identity)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        again = failure | {
+            "_ng_failure_id": "judge-0-again",
+            "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+        }
+        assert store.record_rejudgment(failure, again)
+        store.close_rejudgment(identity, pending.operation_id)
+
+    assert RolloutStore.read(output)._state.failure_count(identity) == spent + 1
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_a_spent_judge_failure_is_refused_whichever_class_names_it(tmp_path, monkeypatch, classes):
+    """The budget check is the binding's other single-field comparison, which neither case above reaches."""
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    output, _ = _run(tmp_path, judge_failures=1, evidence=classes)
+    with pytest.raises(ConfigError, match="has spent its 1 saved failure attempts"):
+        bind_judge_failures(output)
+    assert bind_judge_failures(output, skip_spent=True)["failures"] == {}
+
+
 async def test_a_run_with_nothing_due_runs_no_pass(tmp_path, monkeypatch):
     output, _ = _run(tmp_path, judge_failures=0)
     before = output.read_bytes()
