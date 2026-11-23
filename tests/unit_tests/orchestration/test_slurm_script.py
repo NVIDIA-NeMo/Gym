@@ -3719,6 +3719,8 @@ def test_a_laptop_run_setting_the_benchmarks_run_block_names_is_left_to_it(tmp_p
     tokens = render_target_args(
         "/data/t", agent="opencode_agent", sandbox=None, output_root="/jobs", run=run
     ) + flatten_run_args(run)
+    # The run config build_run writes turns the setting on, so it is off only where the command line says so.
+    assert ("++forward_configuration_refusals=false" in tokens) is not forwarded
     config = _merged_cli_config([shlex.split(token)[0] for token in tokens[3:]])
     assert bool(config.get("forward_configuration_refusals")) is forwarded
     assert config.absolute_ip_route_fallback is False
