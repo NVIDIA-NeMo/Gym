@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+gym-review-pools:
+  stage: test
+  image: python:3.12-slim-trixie@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+  environment:
+    name: review-pools
+    action: access
+  resource_group: gym-review-pools
+  timeout: 15m
+  allow_failure: true
+  variables:
+    GIT_STRATEGY: empty
+  script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends ca-certificates git nodejs npm gh glab
+    - git init ci-templates
+    - git -C ci-templates remote add origin https://github.com/NVIDIA-NeMo/FW-CI-templates.git
+    - git -C ci-templates fetch --depth=1 origin 6433b3b14022abe1a72da8baac638944b36e3099
+    - git -C ci-templates checkout --detach FETCH_HEAD
+    - npm ci --prefix ci-templates/.github/scripts/review-matcher --ignore-scripts --no-audit --no-fund
+    - export GH_TOKEN="$GH_SSO_MANAGMENT_PAT"
+    - export GITLAB_TOKEN="$GITLAB_REVIEW_POOLS_TOKEN"
+    - >-
+      python3 ci-templates/.github/scripts/gitlab_review_pools.py
+      --gitlab-host "$CI_SERVER_HOST"
+      --project 191584
+      --target-branch nv-internal-main
+      --github-repository NVIDIA-NeMo/Gym
+      --github-ref main
+      --gitlab-username-from-email
+      --event-file "$TRIGGER_PAYLOAD"
+      --apply
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "trigger" &&
+        $CI_COMMIT_BRANCH == "nv-internal-main" &&
+        $CI_COMMIT_REF_PROTECTED == "true" &&
+        $TRIGGER_PAYLOAD
