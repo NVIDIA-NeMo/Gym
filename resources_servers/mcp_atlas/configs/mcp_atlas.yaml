@@ -6,6 +6,10 @@ mcp_atlas:
       verified: false
       description: MCP-Atlas multi-step tool use against real MCP servers, scored by LLM-judged claim coverage
       value: Evaluate tool discovery and multi-step tool use over 36 MCP servers
+      # The system that serves the tasks' tools (resources_servers/mcp_atlas/backends/). scale_live runs the
+      # upstream agent-environment image against live services and is the only backend in the public tree; a
+      # deployment that adds a backend selects it here and sets its settings in backend_options.
+      backend: scale_live
       # Select an OCI image and include the approved OpenSandbox provider config. A local SIF or shared
       # agent-environment URL requires explicit development mode and must not produce benchmark scores.
       sandbox_image: ${oc.select:mcp_atlas_sandbox_image,''}
@@ -45,7 +49,8 @@ mcp_atlas_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      # Upstream harness limit on model turns; the resources server enforces the 100 tool calls.
+      # Upstream harness default on model turns; the resources server enforces the 100 tool calls. Reference
+      # runs of the credentialed benchmark used 100 turns (override max_steps to compare with them).
       max_steps: 256
       datasets:
       - name: example

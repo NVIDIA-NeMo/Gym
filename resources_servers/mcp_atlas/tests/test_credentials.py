@@ -304,8 +304,8 @@ def test_actual_five_examples_require_no_service_credential_at_startup(monkeypat
     image = tmp_path / "development.sif"
     image.touch()
     server = make_server("", client, sandbox_image=str(image), sandbox_provider=CLEAN_APPTAINER_PROVIDER)
-    assert server._pool is not None
-    assert task_environment(server._pool.sandbox_env, sorted(required.servers)) == {}
+    assert server._backend.pool is not None
+    assert task_environment(server._backend.pool.sandbox_env, sorted(required.servers)) == {}
 
 
 def test_startup_rejects_missing_actual_dataset_credentials(monkeypatch, tmp_path) -> None:

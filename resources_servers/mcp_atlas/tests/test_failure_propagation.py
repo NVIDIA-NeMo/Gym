@@ -20,8 +20,8 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId
 from nemo_gym.server_runtime import ResourcesCloseSessionRequest
-from resources_servers.mcp_atlas import app as mcp_app
 from resources_servers.mcp_atlas.app import MCPAtlasResourcesServer, MCPAtlasResourcesServerConfig
+from resources_servers.mcp_atlas.backends import scale_live
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 
 
@@ -90,7 +90,7 @@ def test_authentication_rejection_reaches_policy_and_keeps_run_ungraded(monkeypa
         server_client=judge,
     )
     transport = AsyncMock(return_value=(401, {"detail": "synthetic credential rejection"}))
-    monkeypatch.setattr(mcp_app, "call_sandbox_tool", transport)
+    monkeypatch.setattr(scale_live, "call_sandbox_tool", transport)
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {}
     agent = SimpleAgent(

@@ -176,7 +176,7 @@ def test_opensandbox_rejects_a_local_sif(tmp_path) -> None:
 
 def test_opensandbox_rejects_domain_port_restrictions_before_pool_creation(monkeypatch: pytest.MonkeyPatch) -> None:
     pool_factory = MagicMock()
-    monkeypatch.setattr("resources_servers.mcp_atlas.app.SandboxPool", pool_factory)
+    monkeypatch.setattr("resources_servers.mcp_atlas.backends.scale_live.SandboxPool", pool_factory)
     rule = {"action": "allow", "target": "service.example"}
     options = {"network_policy": {"defaultAction": "deny", "egress": [rule]}}
     server = make_server(
@@ -188,7 +188,7 @@ def test_opensandbox_rejects_domain_port_restrictions_before_pool_creation(monke
         sandbox_development_mode=False,
     )
     pool_factory.assert_called_once()
-    assert server._pool is pool_factory.return_value
+    assert server._backend.pool is pool_factory.return_value
     assert pool_factory.call_args.kwargs["sandbox_options"] == options
     pool_factory.reset_mock()
 
@@ -224,7 +224,7 @@ def test_opensandbox_rejects_policy_fields_the_sdk_silently_discards(
     monkeypatch: pytest.MonkeyPatch, policy: dict[str, object]
 ) -> None:
     pool_factory = MagicMock()
-    monkeypatch.setattr("resources_servers.mcp_atlas.app.SandboxPool", pool_factory)
+    monkeypatch.setattr("resources_servers.mcp_atlas.backends.scale_live.SandboxPool", pool_factory)
     with pytest.raises(ValueError, match="SDK drops or changes"):
         make_server(
             "",
@@ -256,10 +256,10 @@ def test_opensandbox_resolves_provider_and_keeps_control_credentials_host_side(m
         sandbox_env={"PYTHONUNBUFFERED": "1"},
         sandbox_development_mode=False,
     )
-    assert server._pool.sandbox_provider == {"opensandbox": block["opensandbox"]}
-    assert server._pool.sandbox_metadata == {"team": "atlas"}
-    assert server._pool.sandbox_env == {"EXA_API_KEY": "service-only", "PYTHONUNBUFFERED": "1"}
-    assert server._pool.sandbox_options == options
+    assert server._backend.pool.sandbox_provider == {"opensandbox": block["opensandbox"]}
+    assert server._backend.pool.sandbox_metadata == {"team": "atlas"}
+    assert server._backend.pool.sandbox_env == {"EXA_API_KEY": "service-only", "PYTHONUNBUFFERED": "1"}
+    assert server._backend.pool.sandbox_options == options
 
 
 @pytest.mark.parametrize("provider_name", ["opensandbox", "apptainer"])
@@ -299,7 +299,7 @@ async def test_resolved_provider_stages_cache_defaults_and_preserves_file_overri
         service_env_names=[],
         **overrides,
     )
-    assert server._pool.sandbox_provider == provider
+    assert server._backend.pool.sandbox_provider == provider
     specs = []
 
     def runtime(provider, spec):
@@ -309,9 +309,9 @@ async def test_resolved_provider_stages_cache_defaults_and_preserves_file_overri
         return FakeSandbox(provider, spec, tools=["calculate"])
 
     # Keep config resolution, the real pool, and SandboxSpec construction; fake only the external runtime.
-    monkeypatch.setattr(server._pool, "_factory", runtime)
+    monkeypatch.setattr(server._backend.pool, "_factory", runtime)
     try:
-        await server._pool.start("cache-defaults", servers=["calculator"], tools=["calculator_calculate"])
+        await server._backend.pool.start("cache-defaults", servers=["calculator"], tools=["calculator_calculate"])
         assert len(specs) == 1
         staged = {path: content for path, content in specs[0].files.items() if path != HTTP_HELPER_PATH}
         if files_mode in {"omitted", "none"}:
@@ -533,7 +533,7 @@ async def test_auth_failure_rejects_resources_until_close_without_calling_tools_
 async def test_bad_seed_metadata_is_rejected_before_provider_allocation(field, value) -> None:
     server = make_server("http://unused", judge_client())
     provider = AsyncMock()
-    server._pool = provider
+    server._backend = provider
     request = MCPAtlasSeedSessionRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         verifier_metadata={**META, field: value},
@@ -572,7 +572,7 @@ async def test_default_bridge_budget_allows_a_delayed_program_timeout_response(
 ) -> None:
     from omegaconf import OmegaConf
 
-    import resources_servers.mcp_atlas.app as app_module
+    import resources_servers.mcp_atlas.backends.scale_live as app_module
     from resources_servers.mcp_atlas.sandbox import call_sandbox_tool
 
     class DelayedEnvironment(FakeAgentEnvironment):
@@ -613,7 +613,7 @@ async def test_default_bridge_budget_allows_a_delayed_program_timeout_response(
 async def test_bridge_timeout_remains_an_infrastructure_failure_even_for_a_code_tool(
     environment: tuple[FakeAgentEnvironment, str], monkeypatch: pytest.MonkeyPatch, mask_service_errors: bool
 ) -> None:
-    import resources_servers.mcp_atlas.app as app_module
+    import resources_servers.mcp_atlas.backends.scale_live as app_module
 
     _, url = environment
     code_tool = "mcp-code-executor_execute_code"
@@ -664,7 +664,7 @@ async def test_closed_auth_session_cannot_bypass_rejection_with_saved_fields_but
 @pytest.mark.parametrize("service_failure", [False, True])
 async def test_single_server_error_wrappers_use_the_served_tool_name(service_failure: bool) -> None:
     server = make_server("http://unused", judge_client("not_fulfilled", "not_fulfilled"))
-    server._pool = pool(["get_repository"])
+    server._backend.pool = pool(["get_repository"])
     try:
         await server.seed_session(
             http_request(),
@@ -702,7 +702,7 @@ async def test_calls_after_the_sandbox_stopped_are_refused_and_masked(environmen
     env, url = environment
     server = make_server(url, judge_client("fulfilled", "fulfilled"))
     await seed(server)
-    server._rollouts["s1"].box.stopped = True  # as the reaper leaves it
+    server._rollouts["s1"].handle.stopped = True  # as the reaper leaves it
     output = await server.call_tool(http_request(), "calculator_calculate", {"expression": "1"})
     assert output == "Error: tool call failed: SandboxError"
     assert env.calls == []
@@ -719,13 +719,13 @@ def close_body(resources_session_id: str = "run:r1") -> ResourcesCloseSessionReq
 
 async def test_close_stops_the_sandbox_and_refuses_a_later_seed() -> None:
     server = make_server("http://unused", judge_client())
-    server._pool = pool(TOOLS)
+    server._backend.pool = pool(TOOLS)
     await seed(server)
-    box = server._rollouts["s1"].box
+    box = server._rollouts["s1"].handle
     # A /run close names its run in the body; the cookie names the session this server seeded.
     await server.close_resources_session(http_request(), close_body())
     assert box.stopped
-    assert "s1" not in server._rollouts and server._pool.get("s1") is None
+    assert "s1" not in server._rollouts and server._backend.pool.get("s1") is None
     await server.close_resources_session(http_request(), close_body())
     await server.close_resources_session(http_request("never-seeded"), close_body("run:never-seeded"))
     with pytest.raises(ValueError, match="already closed"):
@@ -734,13 +734,13 @@ async def test_close_stops_the_sandbox_and_refuses_a_later_seed() -> None:
 
 async def test_a_close_whose_sandbox_does_not_stop_can_be_retried() -> None:
     server = make_server("http://unused", judge_client())
-    server._pool = pool(TOOLS, stop_errors=1)
+    server._backend.pool = pool(TOOLS, stop_errors=1)
     await seed(server)
     with pytest.raises(SandboxError, match="sandbox stop failed"):
         await server.close_resources_session(http_request(), close_body())
     assert "s1" in server._rollouts and "s1" not in server._closed_sessions
     await server.close_resources_session(http_request(), close_body())
-    assert server._pool.get("s1") is None and "s1" in server._closed_sessions
+    assert server._backend.pool.get("s1") is None and "s1" in server._closed_sessions
 
 
 async def test_reverify_judges_a_saved_row_again(environment) -> None:
@@ -844,6 +844,7 @@ async def test_failed_claim_cancels_and_drains_other_judge_requests(environment)
     cleanup_release = asyncio.Event()
     unreadable = next(judge_client("not json").post.side_effect)
     client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
 
     async def post(**kwargs):
         prompt = kwargs["json"]["messages"][0]["content"]
@@ -895,6 +896,7 @@ async def test_cancelled_verification_drains_judge_requests_and_retires_session(
     requests_cancelled = 0
     requests_finished = 0
     client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
 
     async def post(**kwargs):
         nonlocal requests_started, requests_cancelled, requests_finished
@@ -938,6 +940,7 @@ async def test_cancelled_verification_drains_judge_requests_and_retires_session(
 async def test_failed_judge_call_is_routed_to_judge_failures(environment) -> None:
     _, url = environment
     client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
     failed = AsyncMock()
     failed.ok = False
     failed.raise_for_status = MagicMock(side_effect=RuntimeError("HTTP 503"))
@@ -956,7 +959,7 @@ async def test_failed_judge_call_is_routed_to_judge_failures(environment) -> Non
 async def test_close_waits_for_provisioning_and_prevents_session_resurrection() -> None:
     ready_gate = asyncio.Event()
     server = make_server("http://unused", judge_client())
-    server._pool = pool(TOOLS, ready_gate=ready_gate)
+    server._backend.pool = pool(TOOLS, ready_gate=ready_gate)
     seeding = asyncio.create_task(seed(server))
     await asyncio.sleep(0)
     sandbox = FakeSandbox.instances[-1]
@@ -970,7 +973,7 @@ async def test_close_waits_for_provisioning_and_prevents_session_resurrection() 
     await asyncio.wait_for(seeding, 2)
     await asyncio.wait_for(closing, 2)
     assert sandbox.stopped
-    assert server._pool.get("s1") is None
+    assert server._backend.pool.get("s1") is None
     assert "s1" not in server._rollouts
     with pytest.raises(ValueError, match="already closed"):
         await seed(server)
@@ -979,7 +982,7 @@ async def test_close_waits_for_provisioning_and_prevents_session_resurrection() 
 async def test_concurrent_seeds_replace_only_after_the_first_sandbox_is_owned() -> None:
     ready_gate = asyncio.Event()
     server = make_server("http://unused", judge_client())
-    server._pool = pool(TOOLS, ready_gate=ready_gate)
+    server._backend.pool = pool(TOOLS, ready_gate=ready_gate)
     first = asyncio.create_task(seed(server))
     await asyncio.sleep(0)
     first_sandbox = FakeSandbox.instances[-1]
@@ -990,34 +993,34 @@ async def test_concurrent_seeds_replace_only_after_the_first_sandbox_is_owned() 
     ready_gate.set()
     await asyncio.wait_for(asyncio.gather(first, second), 2)
     assert first_sandbox.stopped
-    assert server._pool.get("s1") is server._rollouts["s1"].box
-    assert server._rollouts["s1"].box.sandbox is not first_sandbox
+    assert server._backend.pool.get("s1") is server._rollouts["s1"].handle
+    assert server._rollouts["s1"].handle.sandbox is not first_sandbox
     await server.close_resources_session(http_request(), close_body())
-    assert server._pool.get("s1") is None
+    assert server._backend.pool.get("s1") is None
 
 
 async def test_checkpoint_retirement_retries_failed_teardown_and_releases_capacity() -> None:
     server = make_server("http://unused", judge_client())
-    server._pool = pool(TOOLS, stop_errors=1)
+    server._backend.pool = pool(TOOLS, stop_errors=1)
     await seed(server)
-    box = server._rollouts["s1"].box
+    box = server._rollouts["s1"].handle
     episode = EpisodeId(rollout_id="r1")
     participant = ResourcesParticipant(server, "restart_only")
     participant.seeded("s1", episode)
     with pytest.raises(SandboxError, match="sandbox stop failed"):
         await participant.retire(episode)
     assert not box.stopped
-    assert server._pool.get("s1") is box
+    assert server._backend.pool.get("s1") is box
     assert "s1" in server._rollouts
     await participant.retire(episode)
     assert box.stopped
-    assert server._pool.get("s1") is None
+    assert server._backend.pool.get("s1") is None
     assert "s1" not in server._rollouts
     await participant.retire(episode)
     # Retirement releases ownership without fencing later checkpoint restoration of the same ID.
-    assert box.port not in server._pool._ports._leased
+    assert box.port not in server._backend.pool._ports._leased
     await asyncio.wait_for(seed(server), 2)
-    assert not server._rollouts["s1"].box.stopped
+    assert not server._rollouts["s1"].handle.stopped
     with pytest.raises(SandboxError, match="1 sandboxes did not stop"):
         await server._shutdown()
     await server._shutdown()
@@ -1027,14 +1030,14 @@ async def test_shutdown_warns_about_manual_cleanup_and_preserves_retryable_owner
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     server = make_server("http://unused", judge_client())
-    server._pool = pool(TOOLS, stop_errors=1)
+    server._backend.pool = pool(TOOLS, stop_errors=1)
     await seed(server)
-    box = server._rollouts["s1"].box
+    box = server._rollouts["s1"].handle
     try:
         with caplog.at_level("ERROR", logger="resources_servers.mcp_atlas.app"):
             with pytest.raises(SandboxError, match="1 sandboxes did not stop"):
                 await server._shutdown()
-        assert server._pool.get("s1") is box
+        assert server._backend.pool.get("s1") is box
         assert not box.stopped
         messages = [
             record.getMessage() for record in caplog.records if record.name == "resources_servers.mcp_atlas.app"
@@ -1046,7 +1049,7 @@ async def test_shutdown_warns_about_manual_cleanup_and_preserves_retryable_owner
     finally:
         await server._shutdown()
     assert box.stopped
-    assert server._pool.get("s1") is None
+    assert server._backend.pool.get("s1") is None
 
 
 async def test_retirement_drops_only_local_state_for_a_shared_development_environment(environment) -> None:
@@ -1084,8 +1087,8 @@ def test_provider_configuration_resolves_defaults_and_metadata(tmp_path, named: 
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
     )
     server = MCPAtlasResourcesServer(config=config, server_client=client)
-    assert server._pool.sandbox_provider == provider
-    assert server._pool.sandbox_metadata == {"team": "atlas"}
+    assert server._backend.pool.sandbox_provider == provider
+    assert server._backend.pool.sandbox_metadata == {"team": "atlas"}
 
 
 @pytest.mark.parametrize("service_failure", [False, True])
@@ -1290,7 +1293,7 @@ def test_startup_rejects_host_credentials_even_with_no_dataset_inventory(tmp_pat
 async def test_empty_task_server_list_is_rejected_before_provider_allocation() -> None:
     server = make_server("http://unused", judge_client())
     provider = AsyncMock()
-    server._pool = provider
+    server._backend = provider
     body = MCPAtlasSeedSessionRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         verifier_metadata={**META, "servers": []},

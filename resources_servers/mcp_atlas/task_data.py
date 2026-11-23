@@ -6,6 +6,8 @@ The wire requires a ``verifier_metadata`` dict and reads these fields from it wi
 optional here; ``benchmarks/mcp_atlas/prepare.py`` writes all of them. ``task_id`` is also a top-level key.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -33,5 +35,15 @@ class TaskData(BaseModel):
     dropped_tools: list[str] = Field(
         default_factory=list,
         description="Distractor tools of servers the image does not ship; kept for the audit only.",
+        json_schema_extra={"legacy_location": "verifier_metadata", "consumed_by": ["provenance"]},
+    )
+    backend: str = Field(
+        default="scale_live",
+        description="The backend the row was prepared for; a server running another backend refuses the row.",
+        json_schema_extra={"legacy_location": "verifier_metadata", "consumed_by": ["provenance"]},
+    )
+    backend_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Fields only that backend reads, such as a simulator's state identifier; empty for scale_live.",
         json_schema_extra={"legacy_location": "verifier_metadata", "consumed_by": ["provenance"]},
     )

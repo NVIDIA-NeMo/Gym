@@ -17,6 +17,16 @@ reach other rollouts or the NeMo Gym control plane before benchmark scoring. Uni
 request do not establish that boundary.
 </Warning>
 
+## Backends
+
+The system that serves a task's tools is the resources server's **backend**, selected by
+`mcp_atlas.resources_servers.mcp_atlas.backend`. The public default and only built-in backend is `scale_live`:
+one sandbox of the upstream agent-environment image per rollout, serving the task's MCP servers against live
+services with your credentials. Every prepared row records `verifier_metadata.backend`, every verify response
+reports `backend` and a `provenance` record, and a server refuses rows prepared for another backend. The
+[resources-server README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md#backends)
+describes how a deployment adds a backend.
+
 ## Prepare the runtime and accounts
 
 Complete [installation](/main/get-started/installation) and configure a policy endpoint that supports
@@ -94,7 +104,8 @@ These keys control the benchmark's runtime:
 
 | Key | Purpose |
 |---|---|
-| `mcp_atlas_sandbox_image` | OCI image reference for OpenSandbox. |
+| `mcp_atlas.resources_servers.mcp_atlas.backend` | The backend that serves the tools; `scale_live` is the default and the only public one. |
+| `mcp_atlas_sandbox_image` | OCI image reference for OpenSandbox (`scale_live`). |
 | `mcp_atlas_sandbox_provider` | Named or inline provider configuration; defaults to `sandbox`. |
 | `mcp_atlas_sandbox_options` | Provider create options, including the reviewed network policy. |
 | `mcp_atlas.resources_servers.mcp_atlas.sandbox_max_concurrency` | Maximum simultaneous task sandboxes. |
@@ -148,7 +159,8 @@ The verifier judges each ground-truth claim against the final assistant answer. 
 `reward` is 1 when coverage reaches 0.75. Thus `mean/reward` is pass rate, while `mean/coverage` measures
 claim coverage; neither is a percentage unless multiplied by 100 for display.
 
-Read the saved trajectories, `verdicts`, `coverage`, `reward`, `tool_calls` and `service_errors` alongside
+Read the saved trajectories, `verdicts`, `coverage`, `reward`, `tool_calls`, `service_errors` and `provenance`
+(the backend, its sandbox settings and, for `scale_live`, the count of known-unavailable service replies) alongside
 the [rollout-health artifacts](/main/evaluation/rollout-health). Environment or judge failures are masked
 separately from model failures. An execution-deadline error actually returned by an MCP tool for
 model-written code is scored. Returned errors from local program, command, file and state tools also

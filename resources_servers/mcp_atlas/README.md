@@ -15,8 +15,9 @@ at revision `8c563b55`) with the servers of the upstream agent-environment image
   caching off. This transport alone does not establish outbound network isolation. Except for configuration
   failures described below, a tool error reaches the model as the sandbox's error text and an empty result
   as `success`. Bridge/provider transport timeouts are infrastructure failures.
-- **Limits.** 256 model turns (`max_steps`) and 100 tool calls; calls past the 100th return an error that asks
-  for the final answer. The [pinned upstream evaluation driver](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/run_eval.py#L344-L345)
+- **Limits.** 256 model turns (`max_steps`, the upstream harness default; reference runs of the credentialed
+  benchmark used 100, so override `max_steps` to compare with them) and 100 tool calls; calls past the 100th
+  return an error that asks for the final answer. The [pinned upstream evaluation driver](https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/run_eval.py#L344-L345)
   uses a default 1800 s per-task request deadline and records a timeout as an `ERROR` response. This
   resources server sets no per-task wall-clock deadline. Its bridge timeout defaults to 1860 s, giving a
   response the upstream task budget plus 60 s of transport headroom; this is not a tool execution limit.
@@ -34,6 +35,30 @@ at revision `8c563b55`) with the servers of the upstream agent-environment image
   places. `reward` is 1 when coverage is at least 0.75, so `mean/reward` is the upstream pass rate.
   `passed_at_0_50` and `coverage` are also reported. An empty answer, or one that starts with `ERROR:`, scores 0
   without a judge call.
+
+## Backends
+
+The resources server owns the session bookkeeping, the tool allowlist and call budget, the judge, the reward
+and the masking policy. The system that serves a task's tools is a **backend** (`backends/`), selected by the
+`backend` config key. The public tree ships one, the default:
+
+| Backend | Tools run against | Rows |
+|---|---|---|
+| `scale_live` | One sandbox of the upstream agent-environment image per rollout, serving only the task's MCP servers against live third-party services with the operator's credentials (the rest of this README). | `benchmarks/mcp_atlas/prepare.py` and `data/example.jsonl` |
+
+The backend's name is explicit everywhere: a prepared row carries `verifier_metadata.backend` (and
+`backend_metadata`, fields only that backend reads; empty for `scale_live`), every verify response reports
+`backend` and a `provenance` record that starts with it, and `gym eval reverify` reuses the saved `provenance`.
+A server refuses a seed or a saved row prepared for another backend with HTTP 422, and an unknown `backend`
+name stops startup with the list of available names. A deployment adds a backend by registering a class that
+implements `backends/base.py` (`register_backend`, or a module of the `backends` package named after the
+backend that registers it on import) and selects it with `backend: <name>`; its own settings go in
+`backend_options`, which `scale_live` requires to be empty because it reads the `sandbox_*` fields.
+
+`scale_live` also counts replies of services a deployment's egress may be unable to reach (`ddg-search`
+answering `No results were found`, `osm-mcp-server` unable to reach `overpass-api.de`) in
+`provenance.known_unavailable`. Those replies are tool results the model saw: the row is scored and never
+masked, as upstream does, and the counter lets a report label the affected rows without rescanning trajectories.
 
 ## Who failed
 

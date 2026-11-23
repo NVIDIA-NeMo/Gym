@@ -54,6 +54,8 @@ def test_row_offers_only_served_tools_and_keeps_claims() -> None:
     assert meta["servers"] == ["calculator", "whois"]
     assert meta["dropped_tools"] == ["anili_search"]
     assert meta["claims"] == ["The domain was registered in 2006."]
+    assert meta["backend"] == "scale_live"
+    assert meta["backend_metadata"] == {}
 
 
 def test_a_server_missing_from_the_catalog_fails_the_task() -> None:
@@ -113,6 +115,8 @@ def test_the_pinned_task_keeps_its_row_and_audits_the_unavailable_clinical_tool(
         "servers": ["clinicaltrialsgov-mcp-server"],
         "claims": ["The study is identified."],
         "dropped_tools": [unavailable],
+        "backend": "scale_live",
+        "backend_metadata": {},
     }
 
 

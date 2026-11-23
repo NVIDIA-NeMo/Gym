@@ -812,6 +812,7 @@ class TestBuildVerifyPayload:
                 "response": {"output": []},
                 "service_errors": errors,
                 "tool_calls": 1,
+                "provenance": {"backend": "scale_live"},
                 "reward": 0.0,
                 "coverage": 0.0,
                 "mask_sample": True,
@@ -824,6 +825,7 @@ class TestBuildVerifyPayload:
             "response": {"output": []},
             "service_errors": errors,
             "tool_calls": 1,
+            "provenance": {"backend": "scale_live"},
         }
 
     @pytest.mark.parametrize("forward", [None, False, True])

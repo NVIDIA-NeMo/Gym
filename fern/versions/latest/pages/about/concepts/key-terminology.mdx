@@ -63,6 +63,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
 | **Sandbox lease** | The short timeout a provider creates a sandbox with and renews while the process that created it lives (`create.renew_ttl_s` on OpenSandbox and E2B), so a process that dies leaves its sandboxes for one lease instead of their full lifetime. Unrelated to the checkpoint settings' `lease_grace_seconds`. |
 | **Sandbox capabilities** | What a sandbox provider class can do, declared as its `capabilities` (`SandboxCapabilities`) and read with `provider_capabilities()`. `snapshot_keeps` says what a snapshot keeps: files only, or running processes too. |
+| **Backend** (resources server) | The system a resources server's tools run against, named by its `backend` config key and recorded in every prepared row (`verifier_metadata.backend`) and verify response, so a row prepared for one backend is refused by another. MCP-Atlas's public backend is `scale_live`. Not: provider (a sandbox provider runs containers; a backend serves a task's tools), mode, transport. |
 
 ### Sessions
 

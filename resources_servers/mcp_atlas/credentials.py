@@ -40,6 +40,13 @@ from nemo_gym.core import is_materialized_task_row
 from nemo_gym.data import normalize_task_fields
 
 
+try:
+    from .backends.base import BackendConfigurationError
+except ImportError:
+    # Gym starts a resources server from its own directory, so the server's modules import at top level.
+    from backends.base import BackendConfigurationError
+
+
 # Configuration facts from the pinned agent-environment template, independently implemented here:
 # https://github.com/scaleapi/mcp-atlas/blob/5c11ac44e96d31b91b92a0affad5f2648255907a/services/agent-environment/src/agent_environment/mcp_server_template.json
 # The recorded 1.2.7 amd64 image template has the same per-server placeholder requirements.
@@ -87,7 +94,7 @@ HOST_CREDENTIAL_NAMES = frozenset(
 )
 
 
-class CredentialConfigurationError(ValueError):
+class CredentialConfigurationError(BackendConfigurationError):
     """The requested task cannot run with the configured service credentials."""
 
 

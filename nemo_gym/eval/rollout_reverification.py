@@ -787,6 +787,7 @@ def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: boo
         "step_usage",
         "service_errors",
         "tool_calls",
+        "provenance",
         # A verifier that grades a saved source again needs the source, its SHA256 and its binding.
         "source_artifact",
         "source_sha256",

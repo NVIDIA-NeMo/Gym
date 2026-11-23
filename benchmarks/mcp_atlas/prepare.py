@@ -52,6 +52,8 @@ TOOL_CATALOG = BENCHMARK_DIR.parent.parent / "resources_servers" / "mcp_atlas" /
 REVISION = "8c563b55d7c967755f474299848049834d624617"  # pragma: allowlist secret (public dataset revision)
 PARQUET_URL = f"https://huggingface.co/datasets/ScaleAI/MCP-Atlas/resolve/{REVISION}/MCP-Atlas.parquet"
 EXPECTED_TASKS = 500
+# The public rows run against live services through the resources server's default backend.
+BACKEND = "scale_live"
 # This exact task in REVISION requests search_studies, but the image's pinned 1.0.8 package registers
 # list_studies instead. Keep the task and its other tools, auditing this missing name in dropped_tools;
 # do not alias it or allow the same omission for another task. No server code is copied here.
@@ -141,6 +143,8 @@ def build_row(record: dict[str, str], catalog: dict[str, dict[str, Any]], server
             "servers": sorted({catalog[name]["server"] for name in served}),
             "claims": extract_claims(record["GTFA_CLAIMS"]),
             "dropped_tools": sorted(set(names) - set(served)),
+            "backend": BACKEND,
+            "backend_metadata": {},
         },
     }
 
