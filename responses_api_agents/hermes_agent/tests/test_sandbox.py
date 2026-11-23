@@ -2054,7 +2054,7 @@ def hold_task_context(sandbox, context: str, *, copy_code: int = 0) -> None:
     async def run(command, **kwargs):
         if "task.json" in command:
             return SimpleNamespace(error_type=None, return_code=0, stdout=context, stderr="")
-        if " cp -R -- " in command:
+        if " cp -RL -- " in command:
             return SimpleNamespace(error_type=None, return_code=copy_code, stdout="", stderr="cp: not allowed")
         return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
 
@@ -2086,8 +2086,8 @@ async def test_a_task_that_declares_skills_gets_them_in_hermes_home(agent, state
     assert seeded.task_skills == "/workspace/skills"
     # The runner sets HERMES_HOME to this folder of the session directory, so Hermes finds the skills it holds.
     assert seeded.hermes_home == f"{seeded.session.session_dir}/hermes-home"
-    (copy,) = [command for command in commands if " cp -R -- " in command]
-    assert f"mkdir -p -- {seeded.hermes_home}/skills && cp -R -- /workspace/skills/. " in copy
+    (copy,) = [command for command in commands if " cp -RL -- " in command]
+    assert f"mkdir -p -- {seeded.hermes_home}/skills && cp -RL -- /workspace/skills/. " in copy
     assert copy.endswith(f" {seeded.hermes_home}/skills/")
 
 
@@ -2095,7 +2095,7 @@ async def test_a_task_that_declares_skills_gets_them_in_hermes_home(agent, state
 async def test_a_task_without_skills_copies_nothing(agent, state, monkeypatch, context):
     seeded, commands = await seed_task_sandbox(agent, state, monkeypatch, context)
     assert seeded.task_skills is None
-    assert not any(" cp -R -- " in command for command in commands)
+    assert not any(" cp -RL -- " in command for command in commands)
 
 
 async def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(agent, state, monkeypatch):

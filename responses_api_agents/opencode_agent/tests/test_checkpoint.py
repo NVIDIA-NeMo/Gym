@@ -1320,9 +1320,9 @@ async def test_a_re_bind_that_installs_the_session_files_again_stages_the_task_s
     # The skills go back into OpenCode's skills folder under the session root, where the seed put them, copied from
     # the folder the checkpoint names: the re-bind does not depend on task.json.
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
-    copies = [command for command in commands if " cp -R -- " in command]
+    copies = [command for command in commands if " cp -RL -- " in command]
     assert len(copies) == 1 and copies[0].endswith(" /sessions/s/config/opencode/skills/")
-    assert "cp -R -- /workspace/skills/. " in copies[0]
+    assert "cp -RL -- /workspace/skills/. " in copies[0]
     assert not any("task.json" in command for command in commands)
     assert state.task_skills == "/workspace/skills" and state.session is session
 

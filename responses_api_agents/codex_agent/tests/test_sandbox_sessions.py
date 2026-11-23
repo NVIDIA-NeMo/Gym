@@ -86,7 +86,7 @@ def hold_task_context(sandbox, context: str, *, copy_code: int = 0) -> None:
     async def run(command, **kwargs):
         if "task.json" in command:
             return SimpleNamespace(error_type=None, return_code=0, stdout=context, stderr="")
-        if " cp -R -- " in command:
+        if " cp -RL -- " in command:
             return SimpleNamespace(error_type=None, return_code=copy_code, stdout="", stderr="cp: not allowed")
         return await answer(command, **kwargs)
 
@@ -104,8 +104,8 @@ def test_a_task_that_declares_skills_gets_them_in_codex_home_before_the_cli_runs
         session_id = created.json()["agent_session_id"]
         directory = agent._session_records[session_id].state.session.session_dir
         commands = [call.args[0] for call in sandbox.exec.await_args_list]
-        (copy,) = [command for command in commands if " cp -R -- " in command]
-        assert f"mkdir -p -- {directory}/home/.codex/skills && cp -R -- /workspace/skills/. " in copy
+        (copy,) = [command for command in commands if " cp -RL -- " in command]
+        assert f"mkdir -p -- {directory}/home/.codex/skills && cp -RL -- /workspace/skills/. " in copy
         assert copy.endswith(f" {directory}/home/.codex/skills/")
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Read the skill"})
         assert result.status_code == 200, result.text
@@ -123,7 +123,7 @@ def test_a_task_without_skills_copies_nothing(setup, context):
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
-    assert not any(" cp -R -- " in call.args[0] for call in sandbox.exec.await_args_list)
+    assert not any(" cp -RL -- " in call.args[0] for call in sandbox.exec.await_args_list)
 
 
 def test_an_owned_sandbox_reads_no_task_context(setup):
@@ -147,7 +147,7 @@ def test_an_owned_sandbox_reads_no_task_context(setup):
         assert created.status_code == 200, created.text
         assert agent._session_records[body.agent_session_id].state.session.owns_sandbox is True
         commands = [call.args[0] for call in sandbox.exec.await_args_list]
-        assert not any("task.json" in command or " cp -R -- " in command for command in commands)
+        assert not any("task.json" in command or " cp -RL -- " in command for command in commands)
         client.post("/v1/agent_sessions/close", json=close_body(body.agent_session_id)).raise_for_status()
 
 

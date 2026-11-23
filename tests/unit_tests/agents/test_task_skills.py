@@ -6,6 +6,7 @@ The helper runs its commands in a real shell on a local sandbox, so the tests ob
 """
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -56,6 +57,55 @@ async def test_the_declared_folder_is_copied_whole_to_the_destination(local_sand
     assert (destination / "demo" / ".hidden").read_text() == "dotfile\n"
     # A copy: the task's own folder stays as it was.
     assert (source / "demo" / "SKILL.md").is_file()
+
+
+async def test_symlinks_to_files_outside_the_folder_are_staged_as_their_readable_contents(local_sandbox) -> None:
+    """An image can ship a skill whose files link outside ``skills_dir``. The copy lives elsewhere, so a relative link
+    copied as a link would no longer resolve: the staged files hold the targets' contents and keep their modes."""
+    source = local_sandbox.root / "app" / "skills"
+    (source / "demo" / "scripts").mkdir(parents=True)
+    shared = local_sandbox.root / "app" / "shared.md"
+    shared.write_text("---\nname: demo\ndescription: Demo skill.\n---\nThe magic word is pineapple.\n")
+    helper = local_sandbox.root / "app" / "helper.sh"
+    helper.write_text("echo helper\n")
+    helper.chmod(0o755)
+    (source / "demo" / "SKILL.md").symlink_to("../../shared.md")
+    (source / "demo" / "scripts" / "helper.sh").symlink_to("../../../helper.sh")
+    local_sandbox.context.write_text(json.dumps({"skills_dir": str(source)}))
+    destination = local_sandbox.root / "config" / "skills"
+
+    await stage_task_skills(local_sandbox.sandbox, str(destination))
+
+    staged_skill = destination / "demo" / "SKILL.md"
+    staged_helper = destination / "demo" / "scripts" / "helper.sh"
+    assert not staged_skill.is_symlink() and staged_skill.read_text() == shared.read_text()
+    assert not staged_helper.is_symlink() and staged_helper.read_text() == "echo helper\n"
+    assert staged_helper.stat().st_mode & 0o111
+
+
+async def test_a_symlink_whose_target_is_missing_is_refused_instead_of_staged_broken(local_sandbox) -> None:
+    source = _skills_folder(local_sandbox.root)
+    (source / "demo" / "reference.md").symlink_to("../../missing.md")
+    local_sandbox.context.write_text(json.dumps({"skills_dir": str(source)}))
+
+    with pytest.raises(AgentSeedRejectedError, match="Could not stage the task's skills_dir"):
+        await stage_task_skills(local_sandbox.sandbox, str(local_sandbox.root / "config" / "skills"))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads files whatever their mode")
+async def test_a_symlink_whose_target_cannot_be_read_is_refused(local_sandbox) -> None:
+    source = _skills_folder(local_sandbox.root)
+    secret = local_sandbox.root / "secret.md"
+    secret.write_text("unreadable\n")
+    secret.chmod(0)
+    (source / "demo" / "reference.md").symlink_to(secret)
+    local_sandbox.context.write_text(json.dumps({"skills_dir": str(source)}))
+
+    try:
+        with pytest.raises(AgentSeedRejectedError, match="Could not stage the task's skills_dir"):
+            await stage_task_skills(local_sandbox.sandbox, str(local_sandbox.root / "config" / "skills"))
+    finally:
+        secret.chmod(0o644)
 
 
 async def test_paths_with_spaces_and_shell_characters_are_copied_as_written(local_sandbox) -> None:

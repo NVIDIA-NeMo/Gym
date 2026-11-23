@@ -50,7 +50,9 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str, *, skills_d
     ``skills_dir`` that is not an absolute path (the server makes a relative one absolute from the working directory,
     so only one a shell resolves reaches here, such as ``~/skills`` or ``$HOME/skills``, which cannot be copied from
     safely), or a folder that is not in the sandbox or cannot be copied. A declared folder that is empty is copied
-    all the same, so the task counts as one that declares skills.
+    all the same, so the task counts as one that declares skills. Symlinks in the folder are followed and their
+    targets copied, since a relative link would no longer resolve from ``destination``; a link whose target is
+    missing or unreadable fails the copy, so the seed is refused rather than staging a skill the CLI cannot read.
     A read or copy that did not report an exit code (a timeout or a provider failure) raises ``RuntimeError``,
     which a seed answers as a retryable failure.
     """
@@ -64,7 +66,7 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str, *, skills_d
     source, target = shlex.quote(declared), shlex.quote(destination)
     copied = await sandbox.exec(
         f"[ -d {source} ] || {{ echo 'not a folder in the sandbox' >&2; exit 2; }}; "
-        f"mkdir -p -- {target} && cp -R -- {source}/. {target}/",
+        f"mkdir -p -- {target} && cp -RL -- {source}/. {target}/",
         cwd="/",
         timeout_s=_COPY_TIMEOUT_S,
     )

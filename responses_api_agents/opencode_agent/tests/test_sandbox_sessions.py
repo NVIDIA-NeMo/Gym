@@ -2945,7 +2945,7 @@ def hold_task_context(sandbox, context: str, *, copy_code: int = 0) -> None:
     async def run(command, **kwargs):
         if "task.json" in command:
             return SimpleNamespace(error_type=None, return_code=0, stdout=context, stderr="")
-        if " cp -R -- " in command:
+        if " cp -RL -- " in command:
             return SimpleNamespace(error_type=None, return_code=copy_code, stdout="", stderr="cp: not allowed")
         return await sandbox.run_exec(command, **kwargs)
 
@@ -2974,8 +2974,8 @@ def test_a_task_that_declares_skills_gets_them_in_the_opencode_config_folder_and
         agent, sandbox, json.dumps({"mcp_servers": [], "skills_dir": "/workspace/skills"})
     )
     # OpenCode finds skills in the skills folder of XDG_CONFIG_HOME/opencode, the folder the seed filled.
-    (copy,) = [command for command in commands if " cp -R -- " in command]
-    assert f"mkdir -p -- {config_home}/opencode/skills && cp -R -- /workspace/skills/. " in copy
+    (copy,) = [command for command in commands if " cp -RL -- " in command]
+    assert f"mkdir -p -- {config_home}/opencode/skills && cp -RL -- /workspace/skills/. " in copy
     assert copy.endswith(f" {config_home}/opencode/skills/")
     # OpenCode applies the last matching rule: the skill rule follows "*", and the profile's other rules stay.
     assert list(permission)[-1] == "skill" and permission["skill"] == "allow"
@@ -2990,7 +2990,7 @@ def test_a_task_without_skills_keeps_the_skill_tool_denied(setup, context):
     agent, sandbox = setup
     permission, _, commands = launched_permission(agent, sandbox, context)
     assert permission == DEFAULT_PROFILE["permission"] and permission["skill"] == "deny"
-    assert not any(" cp -R -- " in command for command in commands)
+    assert not any(" cp -RL -- " in command for command in commands)
 
 
 def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(setup):

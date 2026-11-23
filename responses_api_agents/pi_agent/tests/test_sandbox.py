@@ -3540,7 +3540,7 @@ def hold_task_context(sandbox, context: str, *, copy_code: int = 0) -> None:
     async def run(command, **kwargs):
         if "task.json" in command:
             return SimpleNamespace(error_type=None, return_code=0, stdout=context, stderr="")
-        if " cp -R -- " in command:
+        if " cp -RL -- " in command:
             return SimpleNamespace(error_type=None, return_code=copy_code, stdout="", stderr="cp: not allowed")
         return await sandbox.execute(command, **kwargs)
 
@@ -3568,8 +3568,8 @@ def test_a_task_that_declares_skills_gets_them_in_pi_skills_folder_and_on_the_co
         agent, sandbox, json.dumps({"mcp_servers": [], "skills_dir": "/workspace/skills"})
     )
     skills = f"{directory}/home/.pi/agent/skills"
-    (copy,) = [command for command in commands if " cp -R -- " in command]
-    assert f"mkdir -p -- {skills} && cp -R -- /workspace/skills/. " in copy
+    (copy,) = [command for command in commands if " cp -RL -- " in command]
+    assert f"mkdir -p -- {skills} && cp -RL -- /workspace/skills/. " in copy
     assert copy.endswith(f" {skills}/")
     # Discovery stays off; Pi loads the task's skills from the folder named after --skill, in PI_CODING_AGENT_DIR.
     command = payload["command"]
@@ -3582,7 +3582,7 @@ def test_a_task_without_skills_runs_pi_without_skills(setup, context):
     agent, sandbox = setup
     payload, _, commands = run_task(agent, sandbox, context)
     assert "--no-skills" in payload["command"] and "--skill" not in payload["command"]
-    assert not any(" cp -R -- " in command for command in commands)
+    assert not any(" cp -RL -- " in command for command in commands)
 
 
 def test_without_tools_pi_takes_no_task_skills(setup):
@@ -3593,7 +3593,7 @@ def test_without_tools_pi_takes_no_task_skills(setup):
     assert agent.supports_task_skills() is False
     assert asyncio.run(agent.agent_session_capabilities()).supports_task_skills is False
     assert "--skill" not in payload["command"]
-    assert not any("task.json" in command or " cp -R -- " in command for command in commands)
+    assert not any("task.json" in command or " cp -RL -- " in command for command in commands)
 
 
 def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(setup):
