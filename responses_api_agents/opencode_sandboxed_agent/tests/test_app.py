@@ -23,15 +23,16 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, call
 
 import anyio
 from fastapi import Request
 from pydantic import ValidationError
-from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises
+from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises, skip
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
@@ -1730,6 +1731,33 @@ class TestOpenCodeSandboxedAgent:
         assert server._sandbox_id_to_sandbox == {}
         assert server._sandbox_id_to_run_result == {}
 
+    async def test_data_home_in_tmp_sets_xdg_for_run_and_session_commands(self, monkeypatch: MonkeyPatch) -> None:
+        config = self._create_config().model_copy(update={"opencode_data_home_in_tmp": True})
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex="abc"))
+        )
+
+        await server.responses(
+            request=self._responses_request(),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+
+        run_call, session_list_call, export_call = sandbox_mock.exec.await_args_list[:3]
+        # data, state, cache and config all move off $HOME (pyautogui's image failed on ~/.local/state otherwise)
+        expected = {
+            "XDG_DATA_HOME": "/tmp/nemo-gym-opencode-abc",
+            "XDG_STATE_HOME": "/tmp/nemo-gym-opencode-abc-state",
+            "XDG_CACHE_HOME": "/tmp/nemo-gym-opencode-abc-cache",
+            "XDG_CONFIG_HOME": "/tmp/nemo-gym-opencode-abc-config",
+        }
+        for key, value in expected.items():
+            assert f"{key}={value}" in run_call.kwargs["command"]
+        # the session list/export must read the same dirs the run wrote to
+        assert session_list_call.kwargs["env"] == expected
+        assert export_call.kwargs["env"] == expected
+
 
 class TestBenchmarkLifecycle:
     _create_config = TestOpenCodeSandboxedAgent._create_config
@@ -3171,3 +3199,770 @@ async def test_ripgrep_queue_shares_the_existing_setup_budget(tmp_path, monkeypa
     assert caught.value.operation == "opencode.setup"
     assert isinstance(caught.value.__cause__, TimeoutError)
     sandbox.upload.assert_not_awaited()
+
+
+def _export(last_parts, error=None, finish=None) -> Dict[str, Any]:
+    info = {"role": "assistant"}
+    if error:
+        info["error"] = error
+    if finish:
+        info["finish"] = finish
+    return {
+        "messages": [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "build it"}]},
+            {"info": {"role": "assistant"}, "parts": [{"type": "tool", "tool": "read"}]},
+            {"info": info, "parts": last_parts},
+        ]
+    }
+
+
+def test_idle_reason_follows_the_programbench_idle_nudge_rule() -> None:
+    reason = app_module._idle_reason
+    # any stop without a tool call is idle: reasoning only, empty, or text that just stops
+    assert reason(_export([{"type": "reasoning", "text": "plan ... from .util"}])) == "idle"
+    assert reason(_export([])) == "idle"
+    assert reason(_export([{"type": "text", "text": "I'll implement the parser next."}], finish="stop")) == "idle"
+    # unless the model says the agreed sentinel
+    assert reason(_export([{"type": "text", "text": "All done. TASK_COMPLETE"}]), "TASK_COMPLETE") is None
+    # a turn cut off at the output token limit (the 2026-11-02 live case, partial text and all)
+    cut = [{"type": "text", "text": "Let me set up a task plan"}, {"type": "step-finish", "reason": "length"}]
+    assert reason(_export(cut, finish="length"), "TASK_COMPLETE") == "length"
+    assert reason(_export(cut), "TASK_COMPLETE") == "length"
+    # not continued: a tool call, an API error, no assistant turn
+    assert reason(_export([{"type": "tool", "tool": "bash"}], finish="length")) is None
+    assert reason(_export([{"type": "reasoning", "text": "x"}], error={"name": "APIError"})) is None
+    assert reason({"messages": []}) is None
+
+
+class TestIdleNudge:
+    TEXT = "Continue working now. If nothing is left to do, reply with exactly TASK_COMPLETE."
+
+    def _server(self, nudges: int) -> Any:
+        config = (
+            TestOpenCodeSandboxedAgent()
+            ._create_config()
+            .model_copy(
+                update={
+                    "idle_nudge": app_module.IdleNudgeConfig(
+                        text=self.TEXT, max_nudges=nudges, stop_on_text="TASK_COMPLETE"
+                    )
+                }
+            )
+        )
+        return OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def _sandbox(self, exports: list, stuck_marker: str = "") -> MagicMock:
+        """exec answers by command; each download writes the next session export."""
+
+        async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+            if "nemo_gym_stuck/stuck.json" in command:
+                return SimpleNamespace(stdout=stuck_marker, stderr="", return_code=0, error_type=None)
+            if "session list" in command:
+                return SimpleNamespace(stdout='[{"id": "ses_1"}]', stderr="", return_code=0, error_type=None)
+            if "opencode export" in command:
+                return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+            if "opencode run --session" in command:
+                return SimpleNamespace(
+                    stdout="working\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                )
+            raise AssertionError(command)
+
+        remaining = list(exports)
+
+        async def download(remote: str, local: Path) -> None:
+            Path(local).write_text(json.dumps(remaining.pop(0)))
+
+        sandbox = MagicMock()
+        sandbox.exec = AsyncMock(side_effect=exec_)
+        sandbox.download = AsyncMock(side_effect=download)
+        return sandbox
+
+    async def _run(
+        self, server: Any, sandbox: Any, first: Any, seconds_left: float = 3600, config: str = "{}"
+    ) -> tuple:
+        return await server._nudge_idle_turns(
+            sandbox=sandbox,
+            first_result=first,
+            config_content=config,
+            env_suffix="OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1",
+            run_flags="--thinking",
+            session_env={"XDG_DATA_HOME": "/tmp/x"},
+            deadline=app_module.time() + seconds_left,
+        )
+
+    FIRST = SimpleNamespace(
+        stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+    )
+
+    def _resumes(self, sandbox: Any) -> list:
+        return [
+            c.kwargs["command"]
+            for c in sandbox.exec.await_args_list
+            if "opencode run --session" in c.kwargs["command"]
+        ]
+
+    async def test_continues_until_the_model_says_task_complete(self) -> None:
+        stopped = _export([{"type": "text", "text": "Next I will write the tests."}], finish="stop")
+        done = _export([{"type": "text", "text": "TASK_COMPLETE"}], finish="stop")
+        sandbox = self._sandbox([stopped, done])
+        result, nudges = await self._run(self._server(3), sandbox, self.FIRST)
+        assert nudges == 1
+        [resume] = self._resumes(sandbox)
+        assert "--session ses_1" in resume and shlex.quote(self.TEXT) in resume
+        assert f"printf '%s' {shlex.quote(self.TEXT)} |" in resume and " -- " not in resume  # nudge on stdin too
+        assert "OPENCODE_CONFIG_CONTENT='{}'" in resume and "--thinking" in resume
+        assert "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1" in resume
+        assert result.stdout.endswith("OpenCode run finished")  # opencode_finished still detected after the resume
+
+    async def test_length_cutoff_gets_the_length_note_first(self) -> None:
+        cut = _export([{"type": "text", "text": "Let me set up"}], finish="length")
+        done = _export([{"type": "text", "text": "TASK_COMPLETE"}], finish="stop")
+        sandbox = self._sandbox([cut, done])
+        _, nudges = await self._run(self._server(3), sandbox, self.FIRST)
+        assert nudges == 1
+        [resume] = self._resumes(sandbox)
+        assert shlex.quote(f"{app_module.LENGTH_NOTE}\n{self.TEXT}") in resume
+
+    async def test_stops_at_the_limit_after_an_unclean_exit_and_when_time_is_short(self) -> None:
+        idle = _export([{"type": "reasoning", "text": "cut"}])
+        _, nudges = await self._run(self._server(2), self._sandbox([idle, idle, idle]), self.FIRST)
+        assert nudges == 2
+        crashed = SimpleNamespace(stdout="Shell: x\nError: boom", stderr="", return_code=1, error_type=None)
+        _, nudges = await self._run(self._server(2), self._sandbox([idle]), crashed)
+        assert nudges == 0
+        _, nudges = await self._run(self._server(2), self._sandbox([idle]), self.FIRST, seconds_left=30)
+        assert nudges == 0
+
+    def _server_with(self, **nudge) -> Any:
+        config = (
+            TestOpenCodeSandboxedAgent()
+            ._create_config()
+            .model_copy(
+                update={
+                    "idle_nudge": app_module.IdleNudgeConfig(text=self.TEXT, stop_on_text="TASK_COMPLETE", **nudge)
+                }
+            )
+        )
+        return OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @staticmethod
+    def _with_steps(export: Dict[str, Any], steps: int) -> Dict[str, Any]:
+        msgs = [{"info": {"role": "assistant"}, "parts": [{"type": "step-finish"}]} for _ in range(steps)]
+        return {"messages": msgs + export["messages"]}
+
+    async def test_step_cap_is_one_budget_across_resumes(self) -> None:
+        # OpenHands' max_iterations: the session used 120 of 500 steps, so the resume may take 380 more
+        idle = self._with_steps(_export([{"type": "reasoning", "text": "x"}]), 119)  # +1 step-finish-free last turn
+        done = _export([{"type": "text", "text": "TASK_COMPLETE"}])
+        sandbox = self._sandbox([idle, done])
+        config = json.dumps({"agent": {"build": {"steps": 500}}, "permission": {"*": "allow"}})
+        _, nudges = await self._run(self._server_with(max_nudges=100), sandbox, self.FIRST, config=config)
+        assert nudges == 1
+        [resume] = self._resumes(sandbox)
+        sent = json.loads(shlex.split(resume.split("OPENCODE_CONFIG_CONTENT=", 1)[1])[0])
+        assert sent["agent"]["build"]["steps"] == 500 - 119 and sent["permission"] == {"*": "allow"}
+
+    async def test_no_resume_once_the_step_budget_is_spent(self) -> None:
+        idle = self._with_steps(_export([{"type": "reasoning", "text": "x"}]), 500)
+        sandbox = self._sandbox([idle])
+        config = json.dumps({"agent": {"build": {"steps": 500}}})
+        _, nudges = await self._run(self._server_with(max_nudges=100), sandbox, self.FIRST, config=config)
+        assert nudges == 0 and self._resumes(sandbox) == []
+
+    async def test_length_note_off_sends_the_text_alone(self) -> None:
+        cut = _export([{"type": "text", "text": "Let me"}], finish="length")
+        done = _export([{"type": "text", "text": "TASK_COMPLETE"}])
+        sandbox = self._sandbox([cut, done])
+        _, nudges = await self._run(self._server_with(length_note=False), sandbox, self.FIRST)
+        [resume] = self._resumes(sandbox)
+        assert nudges == 1 and app_module.LENGTH_NOTE not in resume and shlex.quote(self.TEXT) in resume
+
+    # OpenHands' StuckDetector: the plugin's marker, and the monologue check made here
+    def _stuck_server(self) -> Any:
+        server = self._server_with(max_nudges=100)
+        server.config = server.config.model_copy(update={"stuck_detector": True})
+        return server
+
+    async def test_no_nudge_after_the_plugin_ended_a_stuck_run(self) -> None:
+        idle = _export([{"type": "text", "text": "hm"}])
+        sandbox = self._sandbox([idle], stuck_marker='{"scenario": "repeating_action_observation"}\n')
+        result, nudges = await self._run(self._stuck_server(), sandbox, self.FIRST)
+        assert nudges == 0 and self._resumes(sandbox) == [] and result.stuck == "repeating_action_observation"
+
+    async def test_monologue_ends_the_session(self) -> None:
+        def said(*texts: str) -> Dict[str, Any]:
+            msgs = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "build it"}]}]
+            for t in texts:
+                msgs.append(
+                    {
+                        "info": {"role": "assistant"},
+                        "parts": [{"type": "step-start"}, {"type": "text", "text": t}, {"type": "step-finish"}],
+                    }
+                )
+                msgs.append({"info": {"role": "user"}, "parts": [{"type": "text", "text": "continue"}]})
+            return {"messages": msgs[:-1]}
+
+        sandbox = self._sandbox([said("done"), said("done", "done"), said("done", "done", "done")])
+        result, nudges = await self._run(self._stuck_server(), sandbox, self.FIRST)
+        assert nudges == 2 and result.stuck == "monologue"
+
+
+def _step(*parts: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [{"type": "step-start"}, *parts, {"type": "step-finish"}]
+
+
+def test_monologue_stuck_follows_openhands() -> None:
+    text = lambda t: {"type": "text", "text": t}  # noqa: E731
+    tool = {"type": "tool", "tool": "bash"}
+    user = {"info": {"role": "user"}, "parts": [text("continue")]}
+    agent = lambda *steps: {"info": {"role": "assistant"}, "parts": [p for s in steps for p in s]}  # noqa: E731
+    same = {"messages": [agent(_step(text("ok"))), user, agent(_step(text("ok"))), user, agent(_step(text("ok")))]}
+    assert app_module._monologue_stuck(same)
+    differ = {"messages": [agent(_step(text("ok"))), user, agent(_step(text("ok!"))), user, agent(_step(text("ok")))]}
+    assert not app_module._monologue_stuck(differ)
+    # a tool call between them is an observation: not a monologue
+    worked = {
+        "messages": [
+            agent(_step(text("ok"))),
+            user,
+            agent(_step(text("x"), tool), _step(text("ok"))),
+            user,
+            agent(_step(text("ok"))),
+        ]
+    }
+    assert not app_module._monologue_stuck(worked)
+    assert not app_module._monologue_stuck({"messages": [agent(_step(text("ok"))), user, agent(_step(text("ok")))]})
+
+
+def test_stuck_detector_plugin_scenarios() -> None:
+    node = shutil.which("node")
+    if node is None:
+        skip("node not installed")
+    here = Path(__file__).parent
+    out = subprocess.run([node, str(here / "stuck_detector_check.mjs")], capture_output=True, text=True, cwd=here)
+    assert out.returncode == 0 and out.stdout.strip() == "ok", out.stderr
+
+
+def _session(sid: str, tokens: List[int], children: List[str]) -> Dict[str, Any]:
+    """An export whose assistant messages used `tokens` input tokens each and whose task calls started `children`."""
+    msgs: List[Dict[str, Any]] = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "go"}]}]
+    for n in tokens:
+        msgs.append(
+            {
+                "info": {
+                    "role": "assistant",
+                    "tokens": {"input": n, "output": 1, "reasoning": 0, "cache": {"read": 2, "write": 0}},
+                },
+                "parts": [{"type": "text", "text": "ok"}],
+            }
+        )
+    for child in children:
+        msgs.append(
+            {
+                "info": {"role": "assistant"},
+                "parts": [
+                    {
+                        "type": "tool",
+                        "tool": "task",
+                        "callID": f"call_{child}",
+                        "state": {
+                            "status": "completed",
+                            "input": {"prompt": "x"},
+                            "metadata": {"sessionId": child},
+                            "output": f'<task id="{child}" state="completed">done</task>',
+                        },
+                    }
+                ],
+            }
+        )
+    return {"info": {"id": sid}, "messages": msgs}
+
+
+def test_child_session_ids_and_token_breakdown() -> None:
+    main = _session("ses_main", [10, 20], ["ses_a", "ses_b"])
+    # a resumed child is named by task_id; an errored call with no session names none
+    main["messages"].append(
+        {
+            "info": {"role": "assistant"},
+            "parts": [
+                {
+                    "type": "tool",
+                    "tool": "task",
+                    "state": {"status": "completed", "input": {"task_id": "ses_a"}, "output": ""},
+                },
+                {
+                    "type": "tool",
+                    "tool": "task",
+                    "state": {"status": "error", "input": {"prompt": "y"}, "error": "boom"},
+                },
+                {
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {"status": "completed", "input": {"command": "echo ses_zzz"}},
+                },
+            ],
+        }
+    )
+    assert app_module._child_session_ids(main) == ["ses_a", "ses_b"]
+    out = app_module._token_breakdown(
+        main, {"ses_a": _session("ses_a", [5], []), "ses_b": _session("ses_b", [7, 1], [])}
+    )
+    assert out["main"]["input"] == 30 and out["main"]["calls"] == 2 and out["main"]["cache_read"] == 4
+    assert out["subagents"]["input"] == 13 and out["subagents"]["calls"] == 3
+    assert out["per_subagent"]["ses_b"]["input"] == 8
+
+
+async def test_subagent_sessions_are_exported_recursively(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    exports = {
+        "ses_main": _session("ses_main", [100], ["ses_a"]),
+        "ses_a": _session("ses_a", [40], ["ses_grand"]),
+        "ses_grand": _session("ses_grand", [3], []),
+    }
+    written: Dict[str, str] = {}
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
+        if "session list" in command:
+            return ok('[{"id": "ses_main"}]')
+        if "opencode export" in command:
+            sid = command.split("opencode export ", 1)[1].split()[0]
+            written[command.rsplit("> ", 1)[1].strip()] = json.dumps(exports[sid])
+            return ok()
+        return ok("Shell: /bin/bash\nOpenCode run finished")
+
+    async def download(remote: str, local: Path) -> None:
+        Path(local).write_text(written[remote])
+
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_)
+    sandbox.download = AsyncMock(side_effect=download)
+    config = TestOpenCodeSandboxedAgent()._create_config().model_copy(update={"artifacts_dir": str(tmp_path)})
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+    await server.responses(
+        request=MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}),
+        body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+    )
+    row = server._sandbox_id_to_run_result[""]
+    assert row["opencode_subagent_sessions"] == ["ses_a", "ses_grand"]
+    assert row["opencode_tokens"]["main"]["input"] == 100 and row["opencode_tokens"]["subagents"]["input"] == 43
+    assert (tmp_path / "s1" / "export.json").exists()
+    assert sorted(p.name for p in (tmp_path / "s1" / "children").iterdir()) == ["ses_a.json", "ses_grand.json"]
+
+
+async def test_agent_phase_is_cut_off_at_sandbox_timeout(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """A run that never returns (provider timeouts not holding) is stopped at sandbox_timeout + wall_grace_s:
+    OpenCode is killed in the sandbox, the session is still exported, and the row says opencode_wall_exceeded."""
+    commands: List[str] = []
+    written: Dict[str, str] = {}
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
+        if "opencode run" in command and "pkill" not in command:
+            await asyncio.sleep(3600)  # hangs, as the 14 h rollouts did
+        if "QUIESCED" in command:  # the quiesce step: every session and leftover run killed, and confirmed
+            return ok("QUIESCED")
+        if "session list" in command:
+            return ok('[{"id": "ses_main"}]')
+        if "opencode export" in command:
+            written[command.rsplit("> ", 1)[1].strip()] = json.dumps(_session("ses_main", [10], []))
+        return ok()
+
+    async def download(remote: str, local: Path) -> None:
+        Path(local).write_text(written[remote])
+
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_)
+    sandbox.download = AsyncMock(side_effect=download)
+    config = (
+        TestOpenCodeSandboxedAgent()
+        ._create_config()
+        .model_copy(update={"artifacts_dir": str(tmp_path), "sandbox_timeout": 0.2, "wall_grace_s": 0.0})
+    )
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+    await asyncio.wait_for(
+        server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        ),
+        timeout=10,
+    )
+    row = server._sandbox_id_to_run_result[""]
+    assert row["opencode_wall_exceeded"] is True and row["opencode_finished"] is False
+    quiesce = next(i for i, c in enumerate(commands) if "QUIESCED" in c)
+    export = next(i for i, c in enumerate(commands) if "opencode export" in c)
+    assert quiesce < export  # nothing is exported until the run and its tool processes are confirmed gone
+    assert "pkill -KILL -s" in commands[quiesce] and "pgrep -s" in commands[quiesce]
+    assert row["opencode_tokens"]["main"]["input"] == 10  # exported after the cut-off
+
+
+async def test_finish_instruction_is_appended_to_the_first_prompt(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """idle_nudge.finish_instruction reaches the first `opencode run` after the task prompt; without it, the prompt is
+    sent as is."""
+    for instruction in ("Reply with exactly TASK_COMPLETE when done.", None):
+        commands: List[str] = []
+        written: Dict[str, str] = {}
+
+        async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+            commands.append(command)
+            ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
+            if "session list" in command:
+                return ok('[{"id": "ses_main"}]')
+            if "opencode export" in command:
+                written[command.rsplit("> ", 1)[1].strip()] = json.dumps(_session("ses_main", [10], []))
+                return ok()
+            return ok("Shell: /bin/bash\nOpenCode run finished")
+
+        async def download(remote: str, local: Path) -> None:
+            Path(local).write_text(written[remote])
+
+        sandbox = MagicMock()
+        sandbox.exec = AsyncMock(side_effect=exec_)
+        sandbox.download = AsyncMock(side_effect=download)
+        nudge = app_module.IdleNudgeConfig(text="go on", stop_on_text="TASK_COMPLETE", finish_instruction=instruction)
+        config = (
+            TestOpenCodeSandboxedAgent()
+            ._create_config()
+            .model_copy(update={"artifacts_dir": str(tmp_path), "idle_nudge": nudge, "opencode_query_via_stdin": True})
+        )
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"}
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "build it"}]),
+        )
+        [first] = [c for c in commands if "opencode run --title" in c]
+        expected = "build it\n\n" + instruction if instruction else "build it"
+        assert shlex.quote(expected) in first
+        # on stdin, not as an argument: OpenCode would wrap an argument containing a space in literal double quotes
+        assert f"printf '%s' {shlex.quote(expected)} |" in first and " -- " not in first
+
+
+def _resume_world(tmp_path: Path, monkeypatch: MonkeyPatch, resume_error: BaseException | None = None):
+    """A server with idle_nudge, opencode_env and a required tool server, and a sandbox that stops idle once."""
+    commands: List[str] = []
+    written: Dict[str, str] = {}
+    checks = [
+        _export([{"type": "text", "text": "Next I will write the tests."}], finish="stop"),
+        _export([{"type": "text", "text": "TASK_COMPLETE"}], finish="stop"),
+    ]
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
+        if "session list" in command:
+            return ok('[{"id": "ses_main"}]')
+        if "opencode export" in command:
+            remote = command.rsplit("> ", 1)[1].strip()
+            written[remote] = json.dumps(checks.pop(0) if "idle_check" in remote else _session("ses_main", [10], []))
+            return ok()
+        if "opencode run --session" in command and resume_error is not None:
+            raise resume_error
+        return ok("Shell: /bin/bash\nOpenCode run finished")
+
+    uploaded: Dict[str, bytes] = {}
+
+    async def upload(local: Path, remote: str) -> None:
+        uploaded[remote] = Path(local).read_bytes()  # the plugin uploads are read back and compared
+
+    async def download(remote: str, local: Path) -> None:
+        if remote in uploaded:
+            Path(local).write_bytes(uploaded[remote])
+        else:
+            Path(local).write_text(written[remote])
+
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_)
+    sandbox.upload = AsyncMock(side_effect=upload)
+    sandbox.download = AsyncMock(side_effect=download)
+    config = (
+        TestOpenCodeSandboxedAgent()
+        ._create_config()
+        .model_copy(
+            update={
+                "artifacts_dir": str(tmp_path),
+                "sandbox_timeout": 3600,  # a nudge needs a minute of budget left
+                "idle_nudge": app_module.IdleNudgeConfig(text="go on", stop_on_text="TASK_COMPLETE"),
+                "opencode_env": {"SEARCH_KEY": "a b"},
+                "tool_servers": [ResourcesServerRef(type="resources_servers", name="tools")],
+            }
+        )
+    )
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+    request = MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"})
+    request.state = SimpleNamespace(_ng_opencode_mcp={})
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "build it"}])
+    return server, request, body, commands
+
+
+async def test_resume_runs_with_the_environment_of_the_first_launch(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, body, commands = _resume_world(tmp_path, monkeypatch)
+
+    await server.responses(request=request, body=body)
+
+    [first] = [c for c in commands if "opencode run --title" in c]
+    [resume] = [c for c in commands if "opencode run --session" in c]
+    shared = (
+        "SEARCH_KEY='a b'",  # opencode_env
+        "NEMO_GYM_REQUIRED_MCP_SERVERS='[\"tools\"]'",  # the required-MCP list
+        "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000",
+    )
+    for value in shared:
+        assert value in first, value
+        assert value in resume, value
+    # both launches start in a session of their own and record it in the same file, so a deadline can kill all of them
+    first_file = re.search(r"echo \$\$ >> (\S+);", first)
+    resume_file = re.search(r"echo \$\$ >> (\S+);", resume)
+    assert first_file and resume_file and first_file.group(1) == resume_file.group(1)
+    assert "setsid -w sh -c" in first and "setsid -w sh -c" in resume
+
+
+@mark.parametrize(
+    "error",
+    [sandbox_unavailable("provider down"), OSError("connection reset")],
+    ids=["typed_provider_failure", "oserror"],
+)
+async def test_a_failed_resume_is_an_attributed_failure_not_a_short_attempt(
+    tmp_path: Path, monkeypatch: MonkeyPatch, error: BaseException
+) -> None:
+    server, request, body, commands = _resume_world(tmp_path, monkeypatch, resume_error=error)
+
+    with raises(NgFailureEvent) as caught:
+        await server.responses(request=request, body=body)
+
+    if isinstance(error, NgFailureEvent):
+        assert caught.value is error
+    else:
+        assert caught.value.operation == "opencode.execute" and caught.value.__cause__ is error
+    assert not any("TASK_COMPLETE" in c for c in commands)  # nothing after the failed resume ran
+    assert server._sandbox_id_to_run_result == {}  # no row was recorded, so there is nothing to send to /verify
+
+
+async def test_a_resume_that_times_out_keeps_its_partial_work_path() -> None:
+    nudge = TestIdleNudge()
+    sandbox = nudge._sandbox([_export([{"type": "reasoning", "text": "cut"}])])
+    inner = sandbox.exec.side_effect
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        if "opencode run --session" in command:
+            return SimpleNamespace(stdout="", stderr="", return_code=124, error_type="timeout")
+        return await inner(command, **kwargs)
+
+    sandbox.exec = AsyncMock(side_effect=exec_)
+
+    result, nudges = await nudge._run(nudge._server(1), sandbox, nudge.FIRST)
+
+    assert nudges == 1 and result.error_type == "timeout"  # returned as a result, not raised
+
+
+class TestOpenCodeRuntimeConfig:
+    """The shipped nl2repobench preset carries no private runtime, and offline setups fail at startup without one."""
+
+    def _config(self, **updates: Any) -> OpenCodeSandboxedAgentConfig:
+        return TestOpenCodeSandboxedAgent()._create_config().model_copy(update=updates, deep=True)
+
+    def _build(self, **fields: Any) -> OpenCodeSandboxedAgentConfig:
+        base = TestOpenCodeSandboxedAgent()._create_config().model_dump()
+        return OpenCodeSandboxedAgentConfig.model_validate(base | fields)
+
+    def test_the_shipped_preset_references_no_private_runtime(self) -> None:
+        import yaml
+
+        path = Path(__file__).resolve().parents[3] / "benchmarks/nl2repobench/opencode.yaml"
+        text = path.read_text()
+        agent = yaml.safe_load(text)["nl2repobench_opencode_sandboxed_agent"]["responses_api_agents"][
+            "opencode_sandboxed_agent"
+        ]
+
+        assert "/mnt/s3-data" not in text
+        # with the fields unset the agent downloads the installer, which is what open-egress modes need
+        assert not agent.get("remote_opencode_install_script_path")
+        assert not agent.get("remote_opencode_binary_path")
+        assert not agent.get("preinstalled_opencode")
+        assert not agent.get("require_opencode_runtime")
+
+    def test_offline_setup_without_a_runtime_fails_at_startup(self) -> None:
+        with raises(ValueError, match="no OpenCode runtime is configured"):
+            self._build(require_opencode_runtime=True)
+        with raises(ValueError, match="no OpenCode runtime is configured"):
+            self._build(require_opencode_runtime=True, remote_opencode_binary_path="/opt/opencode")  # script missing
+
+    @mark.parametrize(
+        "fields",
+        [
+            {"preinstalled_opencode": True},
+            {"remote_opencode_install_script_path": "/opt/install.sh", "remote_opencode_binary_path": "/opt/opencode"},
+        ],
+    )
+    def test_a_configured_runtime_satisfies_the_requirement(self, fields: dict) -> None:
+        assert self._build(require_opencode_runtime=True, **fields).require_opencode_runtime is True
+
+    def test_the_default_still_allows_the_installer_download_and_cached_runtimes(self) -> None:
+        assert self._build().require_opencode_runtime is False
+        cached = self._build(
+            remote_opencode_install_script_path="/mnt/cache/install.sh",
+            remote_opencode_binary_path="/mnt/cache/opencode",
+        )
+        assert cached.remote_opencode_binary_path == "/mnt/cache/opencode"
+
+
+def _wall_deadline_world(tmp_path: Path, monkeypatch: MonkeyPatch, quiesce_reply: Any):
+    """A rollout whose run hangs past its deadline; `quiesce_reply(command)` answers the quiesce exec."""
+    commands: List[str] = []
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        if "QUIESCED" in command:
+            reply = quiesce_reply(command)
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+        if "opencode run" in command:
+            await asyncio.sleep(3600)
+        return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_)
+    sandbox.download = AsyncMock()
+    config = (
+        TestOpenCodeSandboxedAgent()
+        ._create_config()
+        .model_copy(update={"artifacts_dir": str(tmp_path), "sandbox_timeout": 0.2, "wall_grace_s": 0.0})
+    )
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+    request = MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"})
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}])
+    return server, request, body, commands
+
+
+@mark.parametrize(
+    "reply",
+    [
+        SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),  # ran, but no confirmation
+        SimpleNamespace(stdout="QUIESCED", stderr="", return_code=1, error_type=None),
+        SimpleNamespace(stdout="QUIESCED", stderr="", return_code=0, error_type="sandbox"),
+        RuntimeError("the exec failed"),
+    ],
+    ids=["no_marker", "nonzero_exit", "provider_error_type", "exec_raised"],
+)
+async def test_unconfirmed_cleanup_after_the_wall_deadline_is_an_ungraded_failure(
+    tmp_path: Path, monkeypatch: MonkeyPatch, reply: Any
+) -> None:
+    server, request, body, commands = _wall_deadline_world(tmp_path, monkeypatch, lambda command: reply)
+
+    with raises(NgFailureEvent) as caught:
+        await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+
+    assert caught.value.operation == "opencode.quiesce"
+    assert caught.value.failure_kind == "agent_route_failed"
+    # nothing was exported or snapshotted after the failed cleanup, and no row was recorded for /verify
+    assert not any("opencode export" in c or "session list" in c for c in commands)
+    assert server._sandbox_id_to_run_result == {}
+
+
+async def test_confirmed_cleanup_after_the_wall_deadline_lets_the_run_be_graded(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ok = SimpleNamespace(stdout="QUIESCED", stderr="", return_code=0, error_type=None)
+    server, request, body, commands = _wall_deadline_world(tmp_path, monkeypatch, lambda command: ok)
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+
+    # the export is unavailable in this stub, so the row is built from what is there; the point is the order and no raise
+    try:
+        await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+    except NgFailureEvent as error:
+        assert error.operation != "opencode.quiesce"
+    quiesce = next(i for i, c in enumerate(commands) if "QUIESCED" in c)
+    # the collection steps run, and only after the cleanup was confirmed
+    assert any("session list" in c for c in commands[quiesce + 1 :])
+
+
+@mark.skipif(not all(shutil.which(tool) for tool in ("setsid", "bash", "sleep", "cat")), reason="needs setsid")
+async def test_the_quiesce_step_works_without_procps_and_never_confirms_unchecked(tmp_path: Path) -> None:
+    """An image without pkill and pgrep (a slim Python image): the process group is still stopped and checked with the
+    shell builtin kill, so QUIESCED is printed only for a group that is gone."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("sleep", "cat", "setsid", "bash", "sh"):
+        if shutil.which(tool):
+            (bin_dir / tool).symlink_to(shutil.which(tool))
+    env = {"PATH": str(bin_dir)}  # no pkill, no pgrep, no ps
+    sessions_file = str(tmp_path / "sessions")
+    written = tmp_path / "workspace-output"
+    run = (
+        f"{app_module._opencode_launcher(sessions_file)} bash -c "
+        f"'(while true; do echo x >> {written}; sleep 0.05; done) & exec sleep 60'"
+    )
+    process = await asyncio.create_subprocess_exec("bash", "-c", run, env=env)
+    try:
+        for _ in range(100):
+            if written.exists() and written.stat().st_size:
+                break
+            await asyncio.sleep(0.05)
+        assert written.stat().st_size, "the tool child never started"
+
+        quiesce = await asyncio.create_subprocess_exec(
+            "bash", "-c", app_module._quiesce_command(sessions_file), stdout=asyncio.subprocess.PIPE, env=env
+        )
+        stdout, _ = await asyncio.wait_for(quiesce.communicate(), timeout=30)
+        assert b"QUIESCED" in stdout
+
+        size = written.stat().st_size
+        await asyncio.sleep(0.5)
+        assert written.stat().st_size == size  # the group was really stopped, not just reported stopped
+        assert await asyncio.wait_for(process.wait(), timeout=5) is not None
+    finally:
+        if process.returncode is None:
+            process.kill()
+
+
+@mark.skipif(
+    not all(shutil.which(tool) for tool in ("setsid", "ps", "pkill", "pgrep", "bash")),
+    reason="needs procps and setsid",
+)
+async def test_the_quiesce_step_stops_a_tool_child_that_keeps_writing(tmp_path: Path) -> None:
+    """A real process-group test: a run's child (as a shell tool would start) stops writing once the run is quiesced."""
+    sessions_file = str(tmp_path / "sessions")
+    marker = f"nemo-test-{uuid.uuid4().hex}"
+    written = tmp_path / "workspace-output"
+    # `exec -a` gives the run a name only this test uses, so the leftover-run kill never touches another process
+    run = (
+        f"{app_module._opencode_launcher(sessions_file)} bash -c "
+        f"'(while true; do echo x >> {written}; sleep 0.05; done) & exec -a \"{marker} run\" sleep 60'"
+    )
+    process = await asyncio.create_subprocess_exec("bash", "-c", run)
+    try:
+        for _ in range(100):
+            if written.exists() and written.stat().st_size:
+                break
+            await asyncio.sleep(0.05)
+        assert written.stat().st_size, "the tool child never started"
+        assert Path(sessions_file).read_text().split(), "the run did not record its session"
+
+        pattern = f"[n]emo-test-{marker.split('-')[-1]} run"
+        quiesce = await asyncio.create_subprocess_exec(
+            "bash", "-c", app_module._quiesce_command(sessions_file, pattern), stdout=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(quiesce.communicate(), timeout=30)
+        assert b"QUIESCED" in stdout
+
+        size = written.stat().st_size
+        await asyncio.sleep(0.5)
+        assert written.stat().st_size == size  # no write after the quiesce
+        assert await asyncio.wait_for(process.wait(), timeout=5) is not None  # the launcher returned: the run is gone
+    finally:
+        if process.returncode is None:
+            process.kill()

@@ -159,7 +159,20 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
         description=(
             "Seconds one outgoing TCP handshake may take. It does not count the wait for a free connection-pool "
             "slot, so a request queued behind a busy pool is not cut short. Total and read time stay unlimited "
-            "unless the caller passes its own timeout."
+            "unless the caller passes its own timeout or sets global_aiohttp_client_timeout_s."
+        ),
+    )
+    global_aiohttp_client_timeout_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Total and socket-read timeout (seconds) for every request on the shared data client, via "
+            "aiohttp.ClientTimeout(total=..., sock_read=...). Unset leaves total and read time unlimited. TCP "
+            "keepalive only detects a dead socket, not a live peer that accepts a connection and never answers "
+            "(e.g. a stuck proxy hop), which would hang the caller with no exception for the retry loop to act on. "
+            "Pick a value above the longest single call on this client: a whole-rollout /run relayed by an "
+            "Environment Server lasts as long as the episode (hours for agentic benchmarks), and under heavy load "
+            "per-request generation can drop to ~11-30 tok/s, so a few hundred seconds cuts off healthy calls."
         ),
     )
     global_aiohttp_internal_retry_budget_seconds: float = Field(
@@ -259,7 +272,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     )
     client_session = ClientSession(
         connector=connector,
-        timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
+        timeout=ClientTimeout(
+            total=cfg.global_aiohttp_client_timeout_s,
+            sock_read=cfg.global_aiohttp_client_timeout_s,
+            sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds,
+        ),
         cookie_jar=DummyCookieJar(),
     )
 
