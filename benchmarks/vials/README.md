@@ -9,6 +9,28 @@ model tools. The separate verifier calls an independently configured judge.
 This path uses Gym's execution runtime and does not depend on the Harbor Python
 package, `harbor_agent_general`, or a VIALS resources server.
 
+## Execution path
+
+Harbor defines the task-folder format; Gym executes the tasks. The components
+used by the evaluation command below are:
+
+| Component | Responsibility |
+| --- | --- |
+| `gym eval run <task-folder>` | Loads the prepared dataset and wires the Harbor environment server, selected agent server, model server, and sandbox provider. |
+| [Harbor environment server](../../environment_servers/harbor/README.md) | Owns each episode: creates the task sandbox, lends access to the agent, runs the separate verifier, collects results, and cleans up. |
+| [Direct vision agent](../../responses_api_agents/direct_vision_agent/README.md) | Reads the public prompts and ordered images, makes one policy call through Gym's model server, and writes `/task/answer.txt`. It exposes no model tools and does not own the sandbox. |
+| `tests/test.sh` and `tests/grade.py` in each task | Run in the separate verifier sandbox with private references and judge credentials, call the configured judge, and write the reward. |
+
+`--agent direct_vision_agent` selects the policy harness; `--model-type openai_model`
+selects its model transport, including for a vLLM-served policy. The task-folder
+CLI selects `environment_servers/harbor`. The benchmark's `config.yaml` supplies
+judge secrets to that environment server; it does not select the deprecated
+`responses_api_agents/harbor_agent_general` bridge.
+
+The earlier bridge delegated execution to Harbor's Python runtime and a
+VIALS-specific Harbor agent. This implementation replaces that path. Use the
+task-folder commands below, without a benchmark manifest or a `gym.jsonl` index.
+
 ## Install and prepare
 
 Use Gym's development setup with Python 3.13.14+ and its supported uv version.
