@@ -68,11 +68,15 @@ def world(tmp_path, monkeypatch: MonkeyPatch):
     seed.cookies = {}
     seed.json.return_value = {"sandbox_handle": "sandbox-1"}
     posts: list[str] = []
+    post_kwargs: list[dict] = []
 
     async def post(*, url_path: str, **kwargs):
         posts.append(url_path)
+        post_kwargs.append({"url_path": url_path, **kwargs})
         if url_path == "/seed_session":
             return seed
+        if url_path == "/close_session":
+            return AsyncMock()
         raise AssertionError(f"unexpected call to {url_path}")
 
     agent.server_client.post = post
@@ -82,7 +86,9 @@ def world(tmp_path, monkeypatch: MonkeyPatch):
     body.responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
         input=[{"role": "user", "content": "build it"}]
     )
-    return SimpleNamespace(agent=agent, sandbox=sandbox, posts=posts, request=request, body=body)
+    return SimpleNamespace(
+        agent=agent, sandbox=sandbox, posts=posts, post_kwargs=post_kwargs, request=request, body=body
+    )
 
 
 async def test_install_failure_is_a_failed_setup_and_is_never_verified(world) -> None:
@@ -173,7 +179,7 @@ def runner_sandbox(
         if "elif [ -d /proc/" in command:
             item = polls.pop(0) if len(polls) > 1 else polls[0]
             return _exec(0, item) if isinstance(item, str) else item
-        if "kill -TERM" in command or "pkill" in command:
+        if "kill -s TERM" in command or "pkill" in command:
             events.append("quiesce")
             if isinstance(quiesce, BaseException):
                 raise quiesce
@@ -220,15 +226,16 @@ async def test_a_confirmed_runner_that_hits_its_deadline_is_stopped_then_graded(
     assert run_result["openhands_partial"] is True
     # confirmed started, then stopped and confirmed gone, and only then is the result collected
     assert script.events.index("confirm") < script.events.index("quiesce") < script.events.index("download-result")
-    assert any("pid=4242" in command and "kill -TERM -- -$pid" in command for command in script.commands)
+    assert any("pid=4242" in command and "kill -s TERM -- -$pid" in command for command in script.commands)
 
 
-async def test_a_runner_that_exited_on_its_own_is_not_killed(world, tmp_path) -> None:
+async def test_a_runner_that_exited_on_its_own_is_confirmed_stopped_before_collection(world, tmp_path) -> None:
+    """An exit code shows the runner command exited, not that the processes it started did."""
     script = runner_sandbox(world, tmp_path, poll="0", result={**PARTIAL_RESULT, "partial": False, "finished": True})
 
     await call_responses(world)
 
-    assert "quiesce" not in script.events
+    assert script.events.index("quiesce") < script.events.index("download-result")
     assert world.agent._sandbox_id_to_run_result["session"]["openhands_finished"] is True
 
 
@@ -353,17 +360,38 @@ async def test_a_foreground_run_runs_in_its_own_session_and_a_timeout_stops_it_b
     assert foreground_command.startswith("setsid -w bash -c") and "/pid;" in foreground_command
     # the stop is confirmed before anything is collected
     assert script.events.index("pid") < script.events.index("quiesce") < script.events.index("download-result")
-    assert any("pid=4242" in command and "kill -TERM -- -$pid" in command for command in script.commands)
+    assert any("pid=4242" in command and "kill -s TERM -- -$pid" in command for command in script.commands)
 
 
-async def test_a_foreground_run_that_finished_is_not_stopped(world, tmp_path, monkeypatch: MonkeyPatch) -> None:
+async def test_a_foreground_run_that_finished_is_confirmed_stopped_before_collection(
+    world, tmp_path, monkeypatch: MonkeyPatch
+) -> None:
     monkeypatch.setattr(world.agent.config, "background_exec", False)
     script = runner_sandbox(world, tmp_path, result={**PARTIAL_RESULT, "partial": False, "finished": True})
 
     await call_responses(world)
 
-    assert "quiesce" not in script.events
+    assert script.events.index("pid") < script.events.index("quiesce") < script.events.index("download-result")
     assert world.agent._sandbox_id_to_run_result["session"]["openhands_finished"] is True
+
+
+@pytest.mark.parametrize("quiesce", STOP_FAILURES)
+@pytest.mark.parametrize("background", [True, False], ids=["background", "foreground"])
+async def test_a_naturally_exited_runner_that_cannot_be_confirmed_stopped_is_ungraded(
+    world, tmp_path, monkeypatch: MonkeyPatch, quiesce, background: bool
+) -> None:
+    monkeypatch.setattr(world.agent.config, "background_exec", background)
+    script = runner_sandbox(
+        world, tmp_path, poll="3", quiesce=quiesce, result={**PARTIAL_RESULT, "partial": False, "finished": True}
+    )
+
+    with pytest.raises(NgFailureEvent) as caught:
+        await world.agent.run(world.request, world.body)
+
+    assert caught.value.operation == "openhands.execute"
+    assert world.posts == ["/seed_session"]
+    assert "download-result" not in script.events
+    world.sandbox.stop.assert_awaited_once()
 
 
 async def test_a_foreground_run_that_never_wrote_its_pid_is_ungraded(
@@ -380,11 +408,14 @@ async def test_a_foreground_run_that_never_wrote_its_pid_is_ungraded(
     assert world.posts == ["/seed_session"]
 
 
+@pytest.mark.parametrize("background", [False, True], ids=["foreground", "background"])
+@pytest.mark.parametrize("parent", ["hangs", "exits_0", "exits_3"])
 async def test_a_child_that_keeps_writing_stops_writing_before_the_workspace_is_collected(
-    world, tmp_path, monkeypatch: MonkeyPatch
+    world, tmp_path, monkeypatch: MonkeyPatch, parent: str, background: bool
 ) -> None:
-    """The real supervision, with real processes: the foreground runner starts a child that keeps writing; when the
-    exec times out the tree keeps running, and the stop must end the child before the result is downloaded."""
+    """The real supervision, with real processes: the runner starts a child that keeps writing. When the run hits its
+    deadline the tree keeps running, and when the runner exits on its own (0 or 3) its child does too: either way the
+    stop must end the child before the result is downloaded."""
     shim_bin = tmp_path / "shim-bin"
     shim_bin.mkdir()
     for name in ("pkill", "pgrep"):  # never touch (or be fooled by) this machine's own tmux
@@ -396,11 +427,11 @@ async def test_a_child_that_keeps_writing_stops_writing_before_the_workspace_is_
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     python = venv / "bin" / "python"
-    python.write_text(
-        f"#!/bin/bash\n(while true; do echo x >> {writes}; sleep 0.05; done) &\nwhile true; do sleep 1; done\n"
-    )
+    ending = {"hangs": "while true; do sleep 1; done", "exits_0": "sleep 0.5; exit 0", "exits_3": "sleep 0.5; exit 3"}
+    python.write_text(f"#!/bin/bash\n(while true; do echo x >> {writes}; sleep 0.05; done) &\n{ending[parent]}\n")
     python.chmod(0o755)
-    monkeypatch.setattr(world.agent.config, "background_exec", False)
+    monkeypatch.setattr(world.agent.config, "background_exec", background)
+    monkeypatch.setattr(world.agent.config, "poll_interval_s", 0.1)
     monkeypatch.setattr(world.agent.config, "venv_dir", str(venv))
     monkeypatch.setattr(world.agent.config, "sandbox_timeout", 1.0)
     world.agent._sandbox_id_to_sandbox["session"] = world.sandbox
@@ -432,7 +463,7 @@ async def test_a_child_that_keeps_writing_stops_writing_before_the_workspace_is_
                 await process.wait()
                 order.append("timeout")
                 return SimpleNamespace(return_code=124, stdout="", stderr="", error_type="timeout")
-        if "kill -TERM" in command:
+        if "kill -s TERM" in command:
             order.append("stopped")
         return SimpleNamespace(
             return_code=process.returncode,
@@ -453,7 +484,9 @@ async def test_a_child_that_keeps_writing_stops_writing_before_the_workspace_is_
     try:
         response = await call_responses(world)
         await asyncio.sleep(0.4)
-        assert order[:3] == ["timeout", "stopped", "download-result"]
+        # only a foreground exec that hit its deadline is cut off by the provider; the other runs are stopped at the end
+        timed_out = ["timeout"] if parent == "hangs" and not background else []
+        assert order[:3] == [*timed_out, "stopped", "download-result"][:3]
         assert sizes["at_download"] > 0  # the child really was writing while the runner ran
         assert writes.stat().st_size == sizes["at_download"]  # and wrote nothing after the stop
         assert response.output  # graded on the partial work
@@ -667,8 +700,9 @@ async def test_a_nonzero_exit_code_is_a_natural_exit(world, tmp_path, monkeypatc
 
     response = await call_responses(world)
 
-    assert "quiesce" not in script.events
-    assert response.output  # an explicit exit code, zero or not, ends the run and is graded
+    # an explicit exit code, zero or not, ends the run; its process tree is confirmed gone, then it is graded
+    assert script.events.index("quiesce") < script.events.index("download-result")
+    assert response.output
 
 
 # --- unsupported request fields (item 7) ----------------------------------------------------------
@@ -754,3 +788,398 @@ def test_runners_write_unreported_usage_details_as_null(module: str) -> None:
     assert unreported["cache_read_tokens"] is None and unreported["reasoning_tokens"] is None
     assert unreported["prompt_tokens"] == 3 and unreported["n_llm_calls"] == 2
     assert (reported["cache_read_tokens"], reported["reasoning_tokens"]) == (0, 2)  # an explicit zero stays a zero
+
+
+# --- the quiesce command under dash, without procps ----------------------------------------------------
+
+
+@pytest.mark.parametrize("shell", ["bash", "dash"])
+async def test_the_quiesce_command_stops_a_group_through_dash_and_bash_without_procps(
+    world, tmp_path, shell: str
+) -> None:
+    """`kill -SIG -- -ID` is rejected by dash (sh on Debian/Ubuntu) and its error was hidden, so nothing was killed."""
+    import shutil
+
+    if not all(shutil.which(tool) for tool in (shell, "setsid", "sleep", "bash")):
+        pytest.skip(f"needs {shell} and setsid")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in {shell, "setsid", "sleep", "bash", "cat"}:
+        if shutil.which(tool):
+            (bin_dir / tool).symlink_to(shutil.which(tool))
+    writes, pid_file = tmp_path / "writes", tmp_path / "pid"
+    runner = await asyncio.create_subprocess_exec(
+        "setsid",
+        "bash",
+        "-c",
+        f"echo $$ > {pid_file}; (while true; do echo x >> {writes}; sleep 0.05; done) & exec sleep 60",
+        env={"PATH": str(bin_dir)},
+    )
+
+    async def exec_in_shell(command: str, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            shell, "-c", command, env={"PATH": str(bin_dir)}, stdout=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=60)
+        return SimpleNamespace(return_code=process.returncode, stdout=stdout.decode(), stderr="", error_type=None)
+
+    world.sandbox.exec.side_effect = exec_in_shell
+    try:
+        for _ in range(100):
+            if writes.exists() and writes.stat().st_size:
+                break
+            await asyncio.sleep(0.05)
+        assert writes.stat().st_size, "the child never started"
+
+        await world.agent._quiesce(world.sandbox, pid_file.read_text().strip())
+
+        size = writes.stat().st_size
+        await asyncio.sleep(0.5)
+        assert writes.stat().st_size == size  # really stopped, not only reported stopped
+    finally:
+        if runner.returncode is None:
+            runner.kill()
+
+
+async def test_a_group_that_cannot_be_probed_is_never_reported_stopped(world, tmp_path) -> None:
+    """Without procps only the group probe can show the runner is gone; an error other than "No such process" is not it."""
+    import shutil
+
+    sh = shutil.which("sh")
+    if not sh:
+        pytest.skip("needs sh")
+
+    async def exec_in_sh(command: str, **kwargs):
+        # An absolute path and an empty PATH: no pkill, no pgrep, so only the group probe can answer.
+        process = await asyncio.create_subprocess_exec(
+            sh, "-c", command, env={"PATH": "/nonexistent"}, stdout=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=60)
+        return SimpleNamespace(return_code=process.returncode, stdout=stdout.decode(), stderr="", error_type=None)
+
+    world.sandbox.exec.side_effect = exec_in_sh
+
+    with pytest.raises(NgFailureEvent) as caught:
+        # An out-of-range id the shell cannot probe: the probe errors with something other than "No such process".
+        await world.agent._quiesce(world.sandbox, "99999999999999999999")
+
+    assert caught.value.operation == "openhands.execute"
+    assert "was not confirmed stopped" in caught.value.failure_reason  # not an exec error
+
+
+# --- runner failures are ungraded -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("background", [True, False], ids=["background", "foreground"])
+@pytest.mark.parametrize("phase", ["setup", "run"])
+async def test_a_runner_that_reports_an_error_is_never_verified(
+    world, tmp_path, monkeypatch, background, phase
+) -> None:
+    monkeypatch.setattr(world.agent.config, "background_exec", background)
+    failed = {
+        **PARTIAL_RESULT,
+        "error": "ConnectionError: model unavailable",
+        "error_phase": phase,
+        "error_causes": ["builtins.ConnectionError"],
+    }
+    runner_sandbox(world, tmp_path, poll="0", result=failed)
+
+    with pytest.raises(NgFailureEvent) as caught:
+        await world.agent.run(world.request, world.body)
+
+    assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+    assert caught.value.operation == "openhands.runner"
+    assert f"{phase} phase" in caught.value.failure_reason and "model unavailable" in caught.value.failure_reason
+    assert world.posts == ["/seed_session"]  # not verified: the untouched workspace must not score as a 0
+    world.sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("background", [True, False], ids=["background", "foreground"])
+async def test_a_runner_that_exits_without_a_result_is_never_verified(
+    world, tmp_path, monkeypatch, background
+) -> None:
+    monkeypatch.setattr(world.agent.config, "background_exec", background)
+    runner_sandbox(world, tmp_path, poll="1", result=None)
+
+    with pytest.raises(NgFailureEvent) as caught:
+        await world.agent.run(world.request, world.body)
+
+    assert caught.value.operation == "openhands.runner"
+    assert "without a readable result" in caught.value.failure_reason
+    assert world.posts == ["/seed_session"]
+
+
+async def test_a_runner_stopped_at_its_deadline_without_a_result_is_still_graded(
+    world, tmp_path, monkeypatch: MonkeyPatch
+) -> None:
+    """Only a natural exit with nothing written is refused; a confirmed-stopped timeout keeps its policy."""
+    monkeypatch.setattr(world.agent.config, "sandbox_timeout", 0.05)
+    monkeypatch.setattr(world.agent.config, "poll_interval_s", 0)
+    runner_sandbox(world, tmp_path, poll="RUNNING", result=None)
+
+    await call_responses(world)
+
+    assert "sandbox_timeout" in world.agent._sandbox_id_to_run_result["session"]["openhands_poll_error"]
+
+
+# --- the runners, against a fake SDK --------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_sdk(monkeypatch: MonkeyPatch):
+    """Stand-ins for the openhands modules the runners import, so each runner can be driven without the SDK."""
+    import sys
+    from types import ModuleType
+
+    class Convertible:
+        def __init__(self, message: dict) -> None:
+            self.message = message
+
+        @staticmethod
+        def events_to_messages(events):
+            return [SimpleNamespace(to_chat_dict=lambda m=e.message, **kw: m) for e in events]
+
+    class ErrorEvent:
+        def __init__(self, code: str) -> None:
+            self.code, self.detail = code, ""
+
+    plan = SimpleNamespace(construct_error=None, run_events=[], run_error=None)
+
+    class Conversation:
+        def __init__(self, *, callbacks, **kwargs) -> None:
+            if plan.construct_error is not None:
+                raise plan.construct_error
+            self._callbacks = callbacks
+            self.state = SimpleNamespace(execution_status="finished", events=[])
+            self.conversation_stats = SimpleNamespace(
+                get_combined_metrics=lambda: SimpleNamespace(
+                    accumulated_cost=0.0,
+                    token_usages=[1],
+                    accumulated_token_usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2),
+                )
+            )
+
+        def send_message(self, prompt: str) -> None:
+            pass
+
+        def run(self) -> None:
+            for event in plan.run_events:
+                self._callbacks[0](event)
+                self.state.events.append(event)
+            if plan.run_error is not None:
+                raise plan.run_error
+
+        def close(self) -> None:
+            pass
+
+    def module(name: str, **attrs) -> ModuleType:
+        mod = ModuleType(name)
+        mod.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, mod)
+        return mod
+
+    tool = lambda n: SimpleNamespace(name=n)  # noqa: E731
+    module("openhands")
+    module(
+        "openhands.sdk",
+        LLM=lambda **kw: SimpleNamespace(**kw),
+        Agent=lambda **kw: SimpleNamespace(**kw),
+        Conversation=Conversation,
+        Tool=lambda name: name,
+    )
+    module("openhands.sdk.llm")
+    module("openhands.sdk.llm.llm", litellm_completion=lambda *a, **kw: None)
+    module("openhands.sdk.event", LLMConvertibleEvent=Convertible)
+    module("openhands.sdk.event.conversation_error", ConversationErrorEvent=ErrorEvent)
+    module("openhands.tools")
+    module("openhands.tools.file_editor", FileEditorTool=tool("file_editor"))
+    module("openhands.tools.task_tracker", TaskTrackerTool=tool("task_tracker"))
+    module("openhands.tools.terminal", TerminalTool=tool("terminal"))
+    plan.Convertible = Convertible
+    return plan
+
+
+def _run_runner(module: str, tmp_path) -> dict:
+    import importlib
+
+    runner = importlib.import_module(f"responses_api_agents.openhands_sdk_sandboxed_agent.{module}")
+    request, result = tmp_path / "request.json", tmp_path / "result.json"
+    request.write_text(
+        json.dumps(
+            {"model": "m", "base_url": "http://x", "workdir": str(tmp_path), "prompt": "p", "max_iterations": 3}
+        )
+    )
+    runner.main(str(request), str(result))
+    return json.loads(result.read_text())
+
+
+@pytest.mark.parametrize("module", ["runner", "runner_v2"])
+def test_a_runner_records_the_phase_and_cause_of_a_failure_before_the_task(module, tmp_path, fake_sdk) -> None:
+    try:
+        raise ConnectionError("model unavailable")
+    except ConnectionError as cause:
+        error = RuntimeError("could not start")
+        error.__cause__ = cause
+    fake_sdk.construct_error = error
+
+    result = _run_runner(module, tmp_path)
+
+    assert result["error"] == "RuntimeError: could not start"
+    assert result["error_phase"] == "setup"
+    assert result["error_causes"] == ["builtins.RuntimeError", "builtins.ConnectionError"]
+    assert result["messages"] == [] and result["finished"] is False
+
+
+@pytest.mark.parametrize("module", ["runner", "runner_v2"])
+def test_a_runner_keeps_the_trajectory_gathered_before_a_failed_run(module, tmp_path, fake_sdk) -> None:
+    fake_sdk.run_events = [
+        fake_sdk.Convertible({"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]}),
+        fake_sdk.Convertible({"role": "tool", "tool_call_id": "c1", "content": "ok"}),
+    ]
+    fake_sdk.run_error = ConnectionError("model unavailable")
+
+    result = _run_runner(module, tmp_path)
+
+    assert result["error"] == "ConnectionError: model unavailable"
+    assert result["error_phase"] == "run"
+    assert [m["role"] for m in result["messages"]] == ["assistant", "tool"]  # in order, next to the error
+
+
+@pytest.mark.parametrize("module", ["runner", "runner_v2"])
+def test_a_completed_run_carries_no_error_and_keeps_its_transcript_and_usage(module, tmp_path, fake_sdk) -> None:
+    fake_sdk.run_events = [fake_sdk.Convertible({"role": "assistant", "content": "done"})]
+
+    result = _run_runner(module, tmp_path)
+
+    assert result["error"] is None and result["finished"] is True
+    assert [m["content"] for m in result["messages"]] == ["done"]
+    assert result["metrics"]["prompt_tokens"] == 3 and result["metrics"]["completion_tokens"] == 2
+
+
+# --- request shape ---------------------------------------------------------------------------------------
+
+
+def _params(**fields) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(**{"input": [{"role": "user", "content": "build it"}], **fields})
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"input": "build it"},
+        {"input": [{"role": "user", "content": "build it"}]},
+        {"input": [{"role": "user", "content": [{"type": "input_text", "text": "build it"}]}]},
+    ],
+    ids=["string", "one user message", "one text part"],
+)
+async def test_every_supported_input_shape_gives_the_runner_the_same_prompt(
+    world, tmp_path, monkeypatch, fields
+) -> None:
+    monkeypatch.setattr(world.agent.config, "user_prompt", None)
+    runner_sandbox(world, tmp_path, poll="0", result=PARTIAL_RESULT)
+
+    await call_responses(world, _params(**fields))
+
+    assert request_json(tmp_path)["prompt"] == "build it"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"input": [{"role": "system", "content": "be terse"}, {"role": "user", "content": "build it"}]},
+        {"input": [{"role": "developer", "content": "be terse"}, {"role": "user", "content": "build it"}]},
+        {"input": [{"role": "user", "content": "one"}, {"role": "user", "content": "two"}]},
+        {"input": [{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}]},
+        {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": "x", "detail": "auto"}]}]},
+        {"input": []},
+        {"tool_choice": "required"},
+        {"tool_choice": "none"},
+        {"parallel_tool_calls": False},
+        {"max_tool_calls": 1},
+        {"text": {"format": {"type": "json_schema", "name": "n", "schema": {}}}},
+    ],
+    ids=[
+        "system",
+        "developer",
+        "two users",
+        "assistant history",
+        "image",
+        "empty",
+        "tool_choice required",
+        "tool_choice none",
+        "parallel off",
+        "max_tool_calls",
+        "structured output",
+    ],
+)
+async def test_a_request_the_runner_cannot_honor_is_refused_before_any_seed(world, tmp_path, fields) -> None:
+    runner_sandbox(world, tmp_path, poll="0", result=PARTIAL_RESULT)
+    world.body.responses_create_params = _params(**fields)
+
+    with pytest.raises(HTTPException) as caught:
+        await world.agent.run(world.request, world.body)
+
+    assert caught.value.status_code == 422
+    assert world.posts == []  # not even /seed_session
+
+
+async def test_default_generation_controls_are_accepted(world, tmp_path) -> None:
+    runner_sandbox(world, tmp_path, poll="0", result=PARTIAL_RESULT)
+
+    await call_responses(world, _params(tool_choice="auto", parallel_tool_calls=True, temperature=0.3, top_p=0.9))
+
+    assert request_json(tmp_path)["temperature"] == 0.3 and request_json(tmp_path)["top_p"] == 0.9
+
+
+# --- a seed that cannot be attached ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("error", [RuntimeError("attach failed"), asyncio.CancelledError()])
+async def test_a_seeded_sandbox_that_cannot_be_attached_is_released_by_its_owner(
+    world, monkeypatch: MonkeyPatch, error: BaseException
+) -> None:
+    monkeypatch.setattr(OpenHandsSDKSandboxedAgent, "_connect_sandbox", AsyncMock(side_effect=error))
+
+    with pytest.raises(type(error)):
+        await world.agent.run(world.request, world.body)
+
+    assert world.posts == ["/seed_session", "/close_session"]  # never verified; the owner closes what it allocated
+    close = world.post_kwargs[-1]
+    assert close["json"] == {"resources_session_id": "session", "episode_id": {"rollout_id": "rollout", "attempt": 0}}
+    assert world.agent._sandbox_id_to_sandbox == {}
+
+
+async def test_a_failed_owner_release_does_not_replace_the_attach_failure(world, monkeypatch: MonkeyPatch) -> None:
+    attach_error = RuntimeError("attach failed")
+    monkeypatch.setattr(OpenHandsSDKSandboxedAgent, "_connect_sandbox", AsyncMock(side_effect=attach_error))
+    seed_post = world.agent.server_client.post
+
+    async def post(*, url_path: str, **kwargs):
+        if url_path == "/close_session":
+            world.posts.append(url_path)
+            raise TimeoutError("owner unreachable")
+        return await seed_post(url_path=url_path, **kwargs)
+
+    world.agent.server_client.post = post
+
+    with pytest.raises(RuntimeError) as caught:
+        await world.agent.run(world.request, world.body)
+
+    assert caught.value is attach_error
+    assert world.posts == ["/seed_session", "/close_session"]
+
+
+# --- mid-run user messages ----------------------------------------------------------------------------------
+
+
+def test_a_mid_run_user_message_stays_in_the_exported_trajectory_in_place() -> None:
+    items = app_module._result_to_output_items(
+        [
+            {"role": "assistant", "content": "first"},
+            {"role": "user", "content": "please continue"},
+            {"role": "assistant", "content": "second"},
+        ]
+    )
+
+    assert [getattr(item, "role", None) for item in items] == ["assistant", "user", "assistant"]
+    assert items[1].content == "please continue"

@@ -45,9 +45,27 @@ def _usage_metrics(metrics, usage) -> dict:
     }
 
 
+def _causes(exc: BaseException) -> list:
+    """Type names along the exception's __cause__/__context__ chain, for diagnosis."""
+    names, seen = [], set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        names.append(f"{type(exc).__module__}.{type(exc).__name__}")
+        exc = exc.__cause__ or exc.__context__
+    return names
+
+
 def main(request_path: str, result_path: str) -> None:
     req = json.load(open(request_path))
-    result = {"finished": False, "partial": True, "error": None, "messages": [], "metrics": None, "errors": []}
+    result = {
+        "error_phase": "setup",
+        "finished": False,
+        "partial": True,
+        "error": None,
+        "messages": [],
+        "metrics": None,
+        "errors": [],
+    }
     started = time.time()
     snap = {}
     try:
@@ -124,6 +142,7 @@ def main(request_path: str, result_path: str) -> None:
             visualizer=None,
         )
         conversation.send_message(req["prompt"])
+        result["error_phase"] = "run"  # an exception before this point never attempted the task
         conversation.run()
 
         state = conversation.state
@@ -136,6 +155,7 @@ def main(request_path: str, result_path: str) -> None:
         conversation.close()
     except BaseException as exc:  # noqa: BLE001 - always write a result file
         result["error"] = f"{type(exc).__name__}: {exc}"
+        result["error_causes"] = _causes(exc)
         result["traceback"] = traceback.format_exc()[-4000:]
         result["duration_s"] = time.time() - started
         try:

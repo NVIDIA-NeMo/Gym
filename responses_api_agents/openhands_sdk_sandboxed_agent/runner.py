@@ -16,6 +16,15 @@ import time
 import traceback
 
 
+_CHAT_KWARGS = dict(
+    cache_enabled=False,
+    vision_enabled=False,
+    function_calling_enabled=True,
+    force_string_serializer=True,
+    send_reasoning_content=True,
+)
+
+
 def _usage_metrics(metrics, usage) -> dict:
     """The result file's metrics. Details the SDK does not report stay null: unknown, not a measured zero."""
     return {
@@ -28,10 +37,21 @@ def _usage_metrics(metrics, usage) -> dict:
     }
 
 
+def _causes(exc: BaseException) -> list:
+    """Type names along the exception's __cause__/__context__ chain, for diagnosis."""
+    names, seen = [], set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        names.append(f"{type(exc).__module__}.{type(exc).__name__}")
+        exc = exc.__cause__ or exc.__context__
+    return names
+
+
 def main(request_path: str, result_path: str) -> None:
     req = json.load(open(request_path))
-    result = {"finished": False, "error": None, "messages": [], "metrics": None}
+    result = {"error_phase": "setup", "finished": False, "error": None, "messages": [], "metrics": None}
     started = time.time()
+    events = []  # filled by the conversation's callback, so an exception still leaves what was gathered
     try:
         # Gym's model server validates chat messages strictly (NeMoGymChatCompletionToolMessageParam
         # forbids extra fields), but the SDK adds `name` to tool-result messages. The chat template
@@ -73,7 +93,6 @@ def main(request_path: str, result_path: str) -> None:
             llm=llm,
             tools=[Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name), Tool(name=TaskTrackerTool.name)],
         )
-        events = []
         conversation = Conversation(
             agent=agent,
             workspace=req["workdir"],
@@ -82,6 +101,7 @@ def main(request_path: str, result_path: str) -> None:
             visualizer=None,
         )
         conversation.send_message(req["prompt"])
+        result["error_phase"] = "run"  # an exception before this point never attempted the task
         conversation.run()
 
         state = conversation.state
@@ -89,14 +109,7 @@ def main(request_path: str, result_path: str) -> None:
         result["finished"] = result["execution_status"] == "finished"
         convertible = [e for e in state.events if isinstance(e, LLMConvertibleEvent)]
         result["messages"] = [
-            m.to_chat_dict(
-                cache_enabled=False,
-                vision_enabled=False,
-                function_calling_enabled=True,
-                force_string_serializer=True,
-                send_reasoning_content=True,
-            )
-            for m in LLMConvertibleEvent.events_to_messages(convertible)
+            m.to_chat_dict(**_CHAT_KWARGS) for m in LLMConvertibleEvent.events_to_messages(convertible)
         ]
         result["event_types"] = [type(e).__name__ for e in state.events]
         metrics = conversation.conversation_stats.get_combined_metrics()
@@ -105,7 +118,17 @@ def main(request_path: str, result_path: str) -> None:
         conversation.close()
     except BaseException as exc:  # noqa: BLE001 - always write a result file
         result["error"] = f"{type(exc).__name__}: {exc}"
+        result["error_causes"] = _causes(exc)
         result["traceback"] = traceback.format_exc()[-4000:]
+        try:  # keep the trajectory gathered before the exception, next to the error
+            from openhands.sdk.event import LLMConvertibleEvent
+
+            convertible = [e for e in events if isinstance(e, LLMConvertibleEvent)]
+            result["messages"] = [
+                m.to_chat_dict(**_CHAT_KWARGS) for m in LLMConvertibleEvent.events_to_messages(convertible)
+            ]
+        except Exception:  # noqa: BLE001 - the error itself is already recorded
+            pass
     result["duration_s"] = time.time() - started
     with open(result_path, "w") as f:
         json.dump(result, f, default=str)

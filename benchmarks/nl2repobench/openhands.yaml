@@ -28,6 +28,10 @@ nl2repobench_opencode_resources_server:
         name: policy_model
       # Same grading as opencode.yaml: NL2RepoBench's own protocol. Use grading_protocol=gym_strict to resume older runs.
       grading_protocol: upstream
+      # The SDK's own dependency `pyperclip` is also a task in this set. It is installed into the sandbox (pip, or the
+      # offline bundle) after the resources server's target scrubs, so a pyperclip rollout can read the implementation:
+      # no clean score for it. The official `reward` is unchanged. The first four are the server's default exclusions.
+      clean_exclude_tasks: [six, tenacity, typing_extensions, more-Itertools, pyperclip]
 
 nl2repobench_opencode_sandboxed_agent:
   _inherit_from: openhands_sdk_sandboxed_agent

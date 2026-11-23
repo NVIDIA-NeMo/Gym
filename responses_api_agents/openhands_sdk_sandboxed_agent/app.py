@@ -29,7 +29,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import AGENT_ROUTE_FAILED, NgFailureEvent
+from nemo_gym.core import AGENT_ROUTE_FAILED, EpisodeId, NeMoGymEasyInputMessage, NgFailureEvent
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -46,6 +46,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -163,7 +164,9 @@ def _result_to_output_items(messages: List[Dict[str, Any]]) -> List[NeMoGymRespo
                 )
         elif role == "tool":
             items.append(NeMoGymFunctionCallOutput(call_id=message["tool_call_id"], output=content))
-        # role == "user" mid-run messages (e.g. SDK nudges) have no Responses output equivalent.
+        elif role == "user":
+            # A mid-run user message (for example an SDK nudge) influenced the next reply; the output union accepts it.
+            items.append(NeMoGymEasyInputMessage(role="user", content=content))
     return items
 
 
@@ -207,16 +210,58 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         )
 
     @staticmethod
-    def _reject_unsupported_request(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
-        """Refuse a request field the runner would silently ignore, before any sandbox work."""
+    def _user_query(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
+        """The one text user message the runner receives, else a 422: nothing is silently dropped or recorded unused."""
+
+        def refuse(detail: str) -> HTTPException:
+            return HTTPException(status_code=422, detail=f"openhands_sdk_sandboxed_agent {detail}")
+
+        if isinstance(body.input, str):
+            return body.input
+        query: Optional[str] = None
+        for item in body.input:
+            role = getattr(item, "role", None)
+            if role != "user":
+                raise refuse(f"supports only a single user message; got {role or type(item).__name__} input")
+            if query is not None:
+                raise refuse("supports only a single user message; got several")
+            content = item.content
+            if isinstance(content, str):
+                query = content
+            elif isinstance(content, list) and len(content) == 1 and content[0].get("type") in ("input_text", "text"):
+                query = content[0]["text"]
+            else:
+                raise refuse("supports only plain text user content")
+        if not query:
+            raise refuse("needs a user message")
+        return query
+
+    @classmethod
+    def _reject_unsupported_request(cls, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        """Refuse a request the runner cannot honor, before any sandbox work: nothing is accepted and then ignored."""
+        unsupported = []
         if getattr(body, "instructions", None) is not None:
+            unsupported.append("`instructions`")
+        if body.tool_choice not in (None, "auto"):
+            unsupported.append("`tool_choice`")
+        if body.parallel_tool_calls is False:
+            unsupported.append("`parallel_tool_calls: false`")
+        if getattr(body, "max_tool_calls", None) is not None:
+            unsupported.append("`max_tool_calls`")
+        text = getattr(body, "text", None)
+        text_format = text.get("format") if isinstance(text, dict) else getattr(text, "format", None)
+        format_type = text_format.get("type") if isinstance(text_format, dict) else getattr(text_format, "type", None)
+        if text_format is not None and format_type != "text":
+            unsupported.append("`text.format`")
+        if unsupported:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "openhands_sdk_sandboxed_agent does not support the request field `instructions`: the runner is "
-                    "given only the user message, or the configured user_prompt"
+                    f"openhands_sdk_sandboxed_agent does not support the request field(s) {', '.join(unsupported)}: "
+                    "the runner is given only the user message, or the configured user_prompt, and sampling controls"
                 ),
             )
+        cls._user_query(body)
 
     @staticmethod
     def _foreground_command(run_cmd: str, pid_file: str) -> str:
@@ -283,10 +328,14 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         if pid is None or not pid.isdigit():
             raise self._execute_failure("OpenHands runner could not be stopped: its pid is unknown")
         try:
+            # `kill -s SIG -- -ID` is the group form dash (sh on Debian/Ubuntu) and bash both accept; dash rejects
+            # `kill -SIG -- -ID`. A group probe that fails for any reason but "No such process" counts as alive.
             result = await sandbox.exec(
-                f"pid={pid}; kill -TERM -- -$pid 2>/dev/null; pkill -TERM -s $pid 2>/dev/null; sleep 2; "
-                "kill -KILL -- -$pid 2>/dev/null; pkill -KILL -s $pid 2>/dev/null; pkill -KILL -x tmux 2>/dev/null; "
-                "sleep 1; if kill -0 $pid 2>/dev/null || pgrep -s $pid >/dev/null 2>&1 || "
+                f"pid={pid}; kill -s TERM -- -$pid 2>/dev/null; pkill -TERM -s $pid 2>/dev/null; sleep 2; "
+                "kill -s KILL -- -$pid 2>/dev/null; pkill -KILL -s $pid 2>/dev/null; pkill -KILL -x tmux 2>/dev/null; "
+                'sleep 1; alive=0; if err=$(LC_ALL=C kill -s 0 -- -$pid 2>&1); then alive=1; else case "$err" in '
+                '*"No such process"*) ;; *) alive=1;; esac; fi; '
+                "if [ $alive = 1 ] || pgrep -s $pid >/dev/null 2>&1 || "
                 "pgrep -x tmux >/dev/null 2>&1; then echo ALIVE; else echo QUIESCED; fi",
                 cwd="/",
                 timeout_s=60,
@@ -340,16 +389,7 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = self._sandbox_id_to_sandbox[session_key]
         cfg = self.config
 
-        query = None
-        for input_item in body.input:
-            if input_item.role == "user":
-                assert not query, body.input
-                if isinstance(input_item.content, str):
-                    query = input_item.content
-                elif isinstance(input_item.content, list):
-                    assert len(input_item.content) == 1, body.input
-                    query = input_item.content[0]["text"]
-        assert query, body.input
+        query = self._user_query(body)
         prompt = cfg.user_prompt or query
 
         workdir = self._sandbox_id_to_workdir.get(session_key) or "/workspace"
@@ -443,6 +483,7 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         # A launch or provider failure is ungraded: with no confirmed start there is no attempt to grade, and an empty
         # success would be scored as a 0. Once the runner is confirmed started, whatever it left is graded.
         runner_pid: Optional[str] = None
+        natural_exit = False  # the runner command exited by itself (not killed at a deadline or lost)
         if not cfg.background_exec:
             try:
                 # cwd is the seeded workdir so the SDK's terminal starts where start.md was written. The runner has a
@@ -460,7 +501,10 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             runner_pid = await self._read_pid(sandbox, pid_file)
             if error_type == "timeout":
                 poll_error = f"sandbox_timeout {cfg.sandbox_timeout}s exceeded"
-                await self._quiesce(sandbox, runner_pid)
+            # An exit code shows that the runner command exited, not that what it started has: confirm the whole
+            # process tree is gone, whatever the exit, before anything is collected.
+            await self._quiesce(sandbox, runner_pid)
+            natural_exit = error_type is None
             stdout += result.stdout or ""
             stderr += result.stderr or ""
             finished_marker = "OpenHands run finished" in (result.stdout or "")
@@ -523,8 +567,8 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
                     poll_error = f"sandbox_timeout {cfg.sandbox_timeout}s exceeded"
                     break
                 await asyncio.sleep(cfg.poll_interval_s)
-            if not runner_exited:
-                await self._quiesce(sandbox, runner_pid)
+            await self._quiesce(sandbox, runner_pid)  # also after a natural exit: see the foreground path
+            natural_exit = runner_exited
             try:
                 local_log = results_dir / "run.log"
                 await sandbox.download(run_log, local_log)
@@ -543,6 +587,30 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         sdk_result: Dict[str, Any] = {}
         if local_result.exists():
             sdk_result = json.loads(local_result.read_text().strip() or "{}")
+
+        # A runner that caught an exception (an import, the model client, the conversation) exits normally with the
+        # error in its result: nothing shows the task was attempted, so it is an ungraded harness failure rather than a
+        # score. Completion, the iteration limit (an error event, not an exception) and a run stopped at a deadline
+        # carry no `error` and stay gradable. The trajectory it did gather is kept in results_dir.
+        if sdk_result.get("error"):
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="openhands.runner",
+                stage="agent",
+                failure_reason=(
+                    f"OpenHands runner failed in its {sdk_result.get('error_phase') or 'unknown'} phase: "
+                    f"{sdk_result['error']} (causes: {sdk_result.get('error_causes') or []})"
+                ),
+            )
+        if natural_exit and not sdk_result:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="openhands.runner",
+                stage="agent",
+                failure_reason="OpenHands runner exited without a readable result file",
+            )
 
         output: List[NeMoGymResponseOutputItem] = []
         usage = None
@@ -606,6 +674,27 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
         )
+
+    async def _release_seeded_session(self, session_key: str, rollout_id: Optional[str], cookies: Any) -> None:
+        """Ask the resources server to close the session it seeded, shielded from a cancellation that may be ending the
+        request. A failed release is logged and left to the server's own close, shutdown or TTL."""
+
+        async def close() -> None:
+            close_request = ResourcesCloseSessionRequest(
+                resources_session_id=session_key, episode_id=EpisodeId(rollout_id=rollout_id or session_key)
+            )
+            response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/close_session",
+                json=close_request.model_dump(mode="json"),
+                cookies=cookies,
+            )
+            await raise_for_status(response)
+
+        try:
+            await asyncio.shield(close())
+        except BaseException:
+            print("Failed to release the seeded session after an attach failure", format_exc(), file=sys.stderr)
 
     async def _teardown(self, session_key: str, sandbox: AsyncSandbox) -> None:
         """Stop the sandbox and forget its handle as one operation that a cancelled request cannot interrupt.
@@ -671,9 +760,15 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         cookies = cookies | seed_session_response.cookies
 
         seed_session_result = await seed_session_response.json()
-        sandbox = await self._connect_sandbox(
-            seed_session_result["sandbox_handle"], seed_session_result.get("workdir")
-        )
+        try:
+            sandbox = await self._connect_sandbox(
+                seed_session_result["sandbox_handle"], seed_session_result.get("workdir")
+            )
+        except BaseException:
+            # The resources server allocated the sandbox and no AsyncSandbox exists here to stop, so its owner releases
+            # it. The original failure is the one reported.
+            await self._release_seeded_session(session_key, request.state._ng_rollout_id, cookies)
+            raise
         self._sandbox_id_to_sandbox[session_key] = sandbox
         self._sandbox_id_to_workdir[session_key] = seed_session_result.get("workdir") or "/workspace"
 
