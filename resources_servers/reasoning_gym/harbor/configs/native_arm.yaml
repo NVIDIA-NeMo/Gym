@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass with environments/opencode_reasoning_gym/config.yaml for the native arm of a parity run, on `gym env start` and
+# on the `gym eval run --no-serve` client.
+# 1. Route the local OpenCode CLI through Gym's policy_model server, so the same --model-type/--model/--model-url
+#    flags pick the model on both arms (the pairing YAML names its own provider instead).
+# 2. Keep the machine out of the prompt: no AGENTS.md, CLAUDE.md or personal skills may reach the system prompt.
+#    Each run needs a fresh empty HOME and a workspace outside any git checkout; create both before the run and
+#    supply them:
+#      ++opencode_reasoning_gym_agent.responses_api_agents.opencode_agent.workspace_root=<dir>
+#      ++opencode_reasoning_gym_agent.responses_api_agents.opencode_agent.env.HOME=<fresh empty dir>
+#    The XDG directories default to folders under HOME. OpenCode writes state there, so do not reuse a HOME across
+#    runs. Do not set OPENCODE_DISABLE_PROJECT_CONFIG: the local path writes its provider into the workspace's
+#    opencode.json, and with that flag OpenCode ignores it.
+# Also put OpenCode 1.17.11 (opencode_version in the pairing YAML) first on PATH. The CLI runs as your user and can
+# read any file, the native rows (which hold the answers) included: keep the rows outside the workspace and HOME.
+opencode_reasoning_gym_agent:
+  responses_api_agents:
+    opencode_agent:
+      model: ${policy_model_name}
+      model_server: {type: responses_api_models, name: policy_model}
+      workspace_root: ???
+      env:
+        HOME: ???
+        XDG_CONFIG_HOME: ${.HOME}/.config
+        XDG_CACHE_HOME: ${.HOME}/.cache
+        XDG_STATE_HOME: ${.HOME}/.local/state

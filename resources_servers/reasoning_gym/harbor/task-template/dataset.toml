@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Written into the dataset by resources_servers/reasoning_gym/harbor/adapter.py.
+
+[dataset]
+name = "nemo-gym/reasoning-gym"
+version = "1.0.0"
+description = "Reasoning Gym rows of the opencode_reasoning_gym pairing, graded by the reasoning_gym scorer"
+
+[gym]
+license = "Apache 2.0"
+
+[gym.defaults]
+timeout_multiplier = 1.0
+resource_multiplier = 1.0
