@@ -2424,7 +2424,7 @@ wheels = [
 
 [[package]]
 name = "idegym-api"
-version = "0.11.1"
+version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idegym-common-utils" },
@@ -2433,14 +2433,14 @@ dependencies = [
     { name = "pyyaml" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/69/3d/5dd13d2d8d6c985d3b47e3e5c0a1b3e982e32d4315bff9ce971d22616711/idegym_api-0.11.1.tar.gz", hash = "sha256:ae2b2a16846d48471e38843f6ffda3dfeb9ec44650bf065df66c9324689752e6", size = 24493, upload-time = "2026-07-30T15:23:23.484Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/75/d3/f17ee1cdc4f1815d34e220514ae75ea48e273ecb77b6f46bd8b13e94ca42/idegym_api-0.13.1.tar.gz", hash = "sha256:4c16021a3c6cb5116b0d93eb0709f13b1b7a933efe60325c571ae7b7d91e8428", size = 38447, upload-time = "2026-10-16T17:37:42.243Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/79/48/72e215c157299d940e7e2bb1f66601d34d35645f572fa44b0da3ce0aaeb8/idegym_api-0.11.1-py3-none-any.whl", hash = "sha256:ea4dd0b6bbb5e143216fe7a6f90870ab8ea5137ceacc64927e3df92b81a6b6e7", size = 35445, upload-time = "2026-07-30T15:23:18.64Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/87/60e4dfc73101b6afda1303284b64372925a5310babac875a66279fc0dd4a/idegym_api-0.13.1-py3-none-any.whl", hash = "sha256:a4864bd4747b0056e2c559100f01483fb0940eb58da089d3e51b7878fe89c0de", size = 49747, upload-time = "2026-10-16T17:37:36.206Z" },
 ]
 
 [[package]]
 name = "idegym-client"
-version = "0.11.1"
+version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -2448,23 +2448,22 @@ dependencies = [
     { name = "idegym-common-utils" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fd/13/7fc17a8bb41c0c219b6d362a30a1b26c88e20146bc3455f18d8438332d96/idegym_client-0.11.1.tar.gz", hash = "sha256:2744956add0b27560625c7ac625fe053af8344abcf41fb2dde59f0872846ec5d", size = 16093, upload-time = "2026-07-30T15:23:24.365Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/ca/2e7e4d600333b685e444ebed99cfc78a547e0d66d8c7c5f2e3e126989432/idegym_client-0.13.1.tar.gz", hash = "sha256:466325a2431a9f38022cd7ca9da3d9900c50546e6c765fdd4a304889d68ba027", size = 27674, upload-time = "2026-10-16T17:37:43.095Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2e/8b/be6c956383cebdfd36050de38823c97a67fa3708df7d64de0956a1344fa6/idegym_client-0.11.1-py3-none-any.whl", hash = "sha256:0daa67205653d7e529243b64795e5a19104e00953f09fbf12b85edad7d076d02", size = 21493, upload-time = "2026-07-30T15:23:19.516Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/db/491bd5b627e655c10af3a05ec49febbb5e3f2fe84c592f5f387011987af4/idegym_client-0.13.1-py3-none-any.whl", hash = "sha256:13748c0d4af22b2f8593a697992163a415e86706c2eaab18ce39ea0d6d17277a", size = 34318, upload-time = "2026-10-16T17:37:37.613Z" },
 ]
 
 [[package]]
 name = "idegym-common-utils"
-version = "0.11.1"
+version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "hydra-core" },
     { name = "pydantic" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/33/df/c8a16eb76b2140a15d915e43474250fe68cf698b382c219c00df310fa4b1/idegym_common_utils-0.11.1.tar.gz", hash = "sha256:e548be3c0d97bf4ab9369d8dd40e74fffc6e050cd95821519d5f2029163386f2", size = 4838, upload-time = "2026-07-30T15:23:25.136Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/04/c6/5a15dd1317e069ca2d79aa2cb8d0bf84ab70bc2c2a93889082e547806088/idegym_common_utils-0.13.1.tar.gz", hash = "sha256:9c1f1fcc2b66aa99cf9d9355402d6bf595b6b91e51c3744c88a7e5a23e037c55", size = 8592, upload-time = "2026-10-16T17:37:43.758Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/77/9e/994e4a150d3ecd4f5c5e582a6c4b669d333bb7a84506a4b050608c672f76/idegym_common_utils-0.11.1-py3-none-any.whl", hash = "sha256:cc0ac1f0792b9d28832168c37951cae9ba8cfe28943a9e562968a4b47684c3d2", size = 4833, upload-time = "2026-07-30T15:23:20.304Z" },
+    { url = "https://files.pythonhosted.org/packages/30/a6/e6b00c0bd7272ea61e4cce0e4e5eb72ab95846b91f6a55c09163c6a6efd8/idegym_common_utils-0.13.1-py3-none-any.whl", hash = "sha256:848c7bb56fd6da7ddcb18cf0cde08409135ada016bd2802ec7dd2925ba2f80f9", size = 8906, upload-time = "2026-10-16T17:37:38.597Z" },
 ]
 
 [[package]]
@@ -3901,7 +3900,7 @@ requires-dist = [
     { name = "httpx-aiohttp", marker = "extra == 'idegym'", specifier = ">=0.2.0" },
     { name = "huggingface-hub", marker = "extra == 'dev'", specifier = "<2" },
     { name = "hydra-core" },
-    { name = "idegym-client", marker = "extra == 'idegym'", specifier = ">=0.11.1" },
+    { name = "idegym-client", marker = "extra == 'idegym'", specifier = ">=0.13.1" },
     { name = "itsdangerous" },
     { name = "jinja2", marker = "extra == 'ray'", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.18,<5" },
@@ -5288,7 +5287,7 @@ name = "protobuf-py"
 version = "0.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "protobuf-py-ext", marker = "platform_machine == 'arm64' and platform_python_implementation == 'CPython' and sys_platform == 'darwin' or (platform_machine == 'aarch64' or platform_machine == 'x86_64') and platform_python_implementation == 'CPython' and sys_platform == 'linux' or (platform_machine == 'AMD64' or platform_machine == 'ARM64') and platform_python_implementation == 'CPython' and sys_platform == 'win32'" },
+    { name = "protobuf-py-ext", marker = "(platform_machine == 'arm64' and platform_python_implementation == 'CPython' and sys_platform == 'darwin') or (platform_machine == 'aarch64' and platform_python_implementation == 'CPython' and sys_platform == 'linux') or (platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux') or (platform_machine == 'AMD64' and platform_python_implementation == 'CPython' and sys_platform == 'win32') or (platform_machine == 'ARM64' and platform_python_implementation == 'CPython' and sys_platform == 'win32')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/72/ed/02fd902d9c51b7ff53dfc9a745eb11490722edfd30073af889e171f07b8e/protobuf_py-0.1.1.tar.gz", hash = "sha256:6bd08ac4d8f1661965bbe2685429d79043704cdd1ee720a7a89617331742240b", size = 133525, upload-time = "2026-06-24T19:02:15.271Z" }
 wheels = [

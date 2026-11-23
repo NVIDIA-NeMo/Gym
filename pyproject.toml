@@ -411,13 +411,15 @@ idegym = [
     # IdeGYM client SDK: used by the IdeGYM sandbox provider for client registration and
     # server start/exec/stop against an IdeGYM orchestrator. Pulls in idegym-api and
     # idegym-common-utils (its request/response models and logging helpers).
-    # Lower bound 0.11.1: the first release whose start-server API carries the pod_spec
-    # overrides and max_restarts fields the provider passes through. No upper bound, so
-    # new IdeGYM releases are picked up as they ship; the SDK-conformance unit test is
-    # what catches a change to the client and server operation shapes the provider uses.
-    # Updated: Wed Aug 19, 2026 with idegym-client>=0.11.1
+    # Lower bound 0.13.1: the first release with typed SDK errors, an injectable httpx
+    # transport, SharedIdeGYMClient, bash cwd/env/user/max_output_bytes, chunked file
+    # transfer, the server status and keepalive calls, and labels/annotations on start.
+    # The provider relies on all of these and refuses an older SDK on first use.
+    # No upper bound, so new IdeGYM releases are picked up as they ship; the SDK-conformance
+    # unit test is what catches a change to the client and server operation shapes used.
+    # Updated: Mon Nov 23, 2026 with idegym-client>=0.13.1
     # License: Apache 2.0 https://github.com/JetBrains-Research/idegym/blob/main/LICENSE
-    "idegym-client>=0.11.1",
+    "idegym-client>=0.13.1",
 
     # httpx-aiohttp: the IdeGYM provider swaps the SDK's httpx transport for this
     # aiohttp-backed one. Without it the provider falls back to raw httpx, whose
