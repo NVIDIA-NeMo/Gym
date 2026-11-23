@@ -49,9 +49,11 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any, Optional
 
 import stirrup.core.agent as _stirrup_agent_mod
+from openai import APIStatusError
 from pydantic import ValidationError as _PydanticValidationError
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.clients.utils import to_openai_tools
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -69,6 +71,15 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _is_context_rejection(error: Exception) -> bool:
+    """Recognize explicit prompt overflow without treating other invalid requests as recoverable."""
+    if not isinstance(error, APIStatusError) or error.status_code not in (400, 413):
+        return False
+    # ``body`` is the error object itself: the SDK has already unwrapped OpenAI's ``{"error": {...}}`` envelope.
+    body = error.body
+    return isinstance(body, dict) and body.get("code") == "context_length_exceeded"
 
 
 # Monkey-patch stirrup.core.agent.Agent.run_tool to surface pydantic
@@ -201,6 +212,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         min_completion_tokens: int = _MIN_COMPLETION_TOKENS,
         prompt_estimator_truncate_history_thinking: Optional[bool] = None,
         truncation_recovery: bool = False,
+        context_overflow_recovery: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -217,6 +229,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         self._min_completion_tokens = min_completion_tokens
         self._prompt_estimator_truncate_history_thinking = prompt_estimator_truncate_history_thinking
         self._truncation_recovery = truncation_recovery
+        self._context_overflow_recovery = context_overflow_recovery
         # Set when the previous call exhausted its completion budget without
         # emitting a tool call; consumed by the very next generate().
         self._recover_from_truncation = False
@@ -382,6 +395,14 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         try:
             response = await self._client.chat.completions.create(**request_kwargs)
         except Exception as exc:
+            if self._context_overflow_recovery and _is_context_rejection(exc):
+                # Opt-in: Stirrup drops the latest completed turn and sends the call again, or raises at a
+                # progress boundary. The runner reads the rejection back from this exception's cause.
+                LOGGER.warning(
+                    "context overflow rejection (HTTP %d); handing the call to Stirrup's overflow recovery",
+                    exc.status_code,
+                )
+                raise ContextOverflowError("The model rejected a prompt that exceeds its context window.") from exc
             LOGGER.error("API call raised %s: %s", type(exc).__name__, exc)
             raise
         request_end_time = perf_counter()

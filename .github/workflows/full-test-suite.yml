@@ -204,7 +204,7 @@ jobs:
   # same commit, as gym:main-offline: an image that runs the server suite without network access.
   offline-image:
     name: Publish offline server image
-    runs-on: nemo-ci-aws-cpu-4-16
+    runs-on: nemo-ci-aws-cpu-4-16-200
     needs: [server-suite]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     steps:
