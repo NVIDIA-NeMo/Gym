@@ -143,11 +143,16 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
 
     # ----- agent session ----- #
 
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AutoOntologySessionState:
-        if body.sandbox_access is not None:
+    def parse_agent_context(self, request: AgentSeedSessionRequest) -> BaseModel | None:
+        # The base class reads the context before it calls _seed_agent_session_state: refuse a lent sandbox here, so
+        # that the refusal gives this reason whatever the context holds.
+        if request.sandbox_access is not None:
             raise AgentSeedRejectedError(
                 "Auto Ontology does not support sandbox access: it runs in its own sandbox, from the Auto Ontology image"
             )
+        return super().parse_agent_context(request)
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AutoOntologySessionState:
         if required := [grant.name for grant in self.effective_tool_accesses(body) if grant.required]:
             raise AgentSeedRejectedError(f"Auto Ontology uses its own tools and cannot use the grants {required}")
         # The base class refuses a context that does not satisfy AutoOntologyTask, a missing one included.

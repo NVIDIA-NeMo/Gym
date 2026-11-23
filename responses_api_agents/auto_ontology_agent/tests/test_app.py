@@ -83,14 +83,17 @@ def sandbox(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return sandbox
 
 
-def test_a_seed_with_a_task_sandbox_is_refused() -> None:
+@pytest.mark.parametrize("agent_context", [{"values": TASK}, None], ids=["with the task", "without a task"])
+def test_a_seed_with_a_task_sandbox_is_refused(agent_context: Any) -> None:
     seed = _seed(
+        agent_context=agent_context,
         sandbox_access=SandboxAccess(
             connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={"sandbox_id": "s"}),
             workdir="/app",
-        )
+        ),
     )
-    assert "its own sandbox" in check_agent_seed_rejected(_agent().setup_webserver(), seed)
+    # The refusal the Environment Server compliance probe (rule A4) reads, whatever the context holds.
+    assert "does not support sandbox access" in check_agent_seed_rejected(_agent().setup_webserver(), seed)
 
 
 def test_a_seed_without_the_task_is_refused() -> None:
