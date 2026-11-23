@@ -25,6 +25,11 @@ gym eval run --no-serve \
    --limit 1
 ```
 
+With `expose_tools_over_mcp: true`, the server's `/mcp` endpoint lists the same 27 tools, and each harness reports
+them under its own name, such as `workplace_assistant_email_reply_email` (OpenCode, Kilo Code),
+`workplace_assistant__email_reply_email` (OpenClaw) or `mcp__workplace_assistant__email_reply_email` (Claude Code,
+Hermes, Pi). `/verify` scores each of these as the bare tool name, here `email_reply_email`.
+
 ## Generating Additional Training Data
 
 To generate your own training JSONL for this environment using NeMo Data Designer, see the [synthetic data generation example](notebooks/synthetic-data-generation/).
