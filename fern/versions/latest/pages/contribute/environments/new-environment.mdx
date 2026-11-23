@@ -443,6 +443,8 @@ For named configs, put the manifest in the workload's catalog directory and set 
 
 A named config that only changes the harness, such as `benchmarks/my_benchmark/opencode.yaml`, is a run preset of its benchmark and gets no manifest. If the Resources Server in the benchmark's main config declares `allowed_agents`, add the preset's agent there only after a representative rollout with a real model and verifier shows that the pairing works, as the [Terminal Bench 2.1 note](/main/agent-server/integrate-existing-agents#swap-the-agent-or-the-benchmark) describes. Until then, run the preset with `--allow-unsupported-pairing`. A named config that changes the prompt, scoring, task limits, or tools is a benchmark or environment of its own and gets its own manifest, as above. Do not add manifests for `*_legacy_agent` configs.
 
+In this repository, every manifest must declare `maintainers`, `capabilities`, `domains`, `requirements.gpu`, `requirements.network` and, for a benchmark, `primary_metric`. The `check-manifest-selection-fields` pre-commit hook enforces this. Write `unknown` for capabilities, domains, a requirement or a headline metric that hasn't been established; the hook rejects a scaffold `TODO`.
+
 `dataset_owner` names a config instance, not a component implementation. It selects the intended dataset declaration when multiple instances have datasets; runtime agent routing must still be unambiguous. New task scaffolds put datasets on the resources-server instance. Existing agent-owned declarations, including the reuse-verifier scaffold, remain supported.
 
 ### Prompt Sources
