@@ -182,8 +182,9 @@ off until `reasoning_penalty_start_tokens` is set. Up to that many reasoning tok
 from there it grows linearly to `reasoning_penalty_max` at `reasoning_penalty_end_tokens` and stays
 there. It is subtracted from `reward` for every attempt, passed or not, so a long failed attempt still
 ranks below a short one, and it never touches the answer the judge grades. The count comes from
-`usage.output_tokens_details.reasoning_tokens` when the policy server reports it, otherwise from the
-reasoning text length divided by `reasoning_chars_per_token`. The response records
+`usage.output_tokens_details.reasoning_tokens` when the policy server reports it, including zero. Otherwise
+the estimate uses each reasoning item's full text, or its summary when the full text is unavailable,
+and divides the total character count by `reasoning_chars_per_token`. The response records
 `reasoning_tokens`, `reasoning_tokens_source`, `reasoning_penalty` and `reward_before_reasoning_penalty`.
 NeMo RL's `grpo.length_penalty` handles binary rewards only, so it does not apply to the `mixed` or
 `mean_criteria` rewards. Keep benchmark evaluation with the penalty off.

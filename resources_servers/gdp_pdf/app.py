@@ -221,13 +221,14 @@ def _reasoning_tokens(response: NeMoGymResponse, chars_per_token: float) -> tupl
     count = (
         details.get("reasoning_tokens") if isinstance(details, dict) else getattr(details, "reasoning_tokens", None)
     )
-    if isinstance(count, int) and count > 0:
+    if type(count) is int and count >= 0:
         return count, "usage"
     chars = 0
     for item in response.output:
         if getattr(item, "type", None) == "reasoning":
-            for part in list(getattr(item, "content", None) or []) + list(getattr(item, "summary", None) or []):
-                chars += len(getattr(part, "text", "") or "")
+            # Providers can return both the reasoning and a summary of the same text.
+            content_chars = sum(len(part.text) for part in item.content or [])
+            chars += content_chars or sum(len(part.text) for part in item.summary or [])
     return int(round(chars / chars_per_token)), "text_estimate"
 
 

@@ -46,6 +46,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NeMoGymResponseUsage,
     NgFailureEvent,
 )
 from nemo_gym.verification import JudgeError, is_judge_failure
@@ -1088,15 +1089,13 @@ def _with_reasoning(answer: str, reasoning_text: str, usage_tokens: Optional[int
     )
     resp = _response([reasoning, _assistant_msg(answer)], response_id="model_resp")
     if usage_tokens is not None:
-        resp = resp.model_copy(
-            update={
-                "usage": {
-                    "input_tokens": 10,
-                    "input_tokens_details": {"cached_tokens": 0},
-                    "output_tokens": usage_tokens + 5,
-                    "output_tokens_details": {"reasoning_tokens": usage_tokens},
-                    "total_tokens": usage_tokens + 15,
-                }
+        resp.usage = NeMoGymResponseUsage.model_validate(
+            {
+                "input_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": usage_tokens + 5,
+                "output_tokens_details": {"reasoning_tokens": usage_tokens},
+                "total_tokens": usage_tokens + 15,
             }
         )
     return resp
@@ -1126,6 +1125,20 @@ class TestReasoningPenalty:
     def test_counts_from_usage_first_then_text(self) -> None:
         assert _reasoning_tokens(_with_reasoning("a", "x" * 400, usage_tokens=1234), 4.0) == (1234, "usage")
         assert _reasoning_tokens(_with_reasoning("a", "x" * 400), 4.0) == (100, "text_estimate")
+
+    def test_reported_zero_takes_precedence_over_reasoning_text(self) -> None:
+        response = _with_reasoning("a", "x" * 400, usage_tokens=0)
+        assert _reasoning_tokens(response, 4.0) == (0, "usage")
+
+    def test_estimate_uses_full_reasoning_without_adding_its_summary(self) -> None:
+        item = NeMoGymResponseReasoningItem(
+            id="r",
+            type="reasoning",
+            content=[{"type": "reasoning_text", "text": "x" * 400}],
+            summary=[{"type": "summary_text", "text": "y" * 100}],
+        )
+        response = _response([item, _assistant_msg("a")], response_id="model_resp")
+        assert _reasoning_tokens(response, 4.0) == (100, "text_estimate")
 
     @pytest.mark.asyncio
     async def test_off_by_default(self, server: GdpPdfResourcesServer) -> None:
