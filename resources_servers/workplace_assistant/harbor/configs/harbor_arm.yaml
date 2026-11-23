@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass to every `gym dataset validate` and `gym eval run` of the converted workplace_assistant dataset, with
+# `--sandbox opensandbox`. These are the deployment settings the parity run used.
+#
+# - The tools run in the Compose service `tools`, so the sandboxes of one task's group must reach each other by
+#   service name: OpenSandbox networking.
+# - OpenCode does not start a task's MCP servers itself. `required` grants the task's streamable-http MCP server
+#   (http://tools:8000/mcp) to the agent, and fails the episode at seed or first turn when the agent cannot connect,
+#   instead of running it without its tools.
+#
+# Reward safety needs no option here: every task declares a [verifier.environment], so Gym verifies it in a fresh
+# sandbox, from the call journal copied out of `tools`. The agent can add to that journal only by calling a tool.
+sandbox:
+  opensandbox:
+    networking:
+      enabled: true
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      task_mcp_grants: required

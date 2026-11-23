@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass to `gym eval run` of the converted dataset only, after harbor_arm.yaml; `gym dataset validate` runs no model.
+# Written for `--model-type openai_model`: with another model server, set the same value under its own block.
+#
+# The native rows send temperature 1.0, but a Harbor task cannot carry request parameters, so OpenCode sends no
+# temperature on this arm. extra_body fills a field the request leaves unset, which gives every request of this arm
+# the native rows' 1.0. The parity run passed the same value on the command line
+# (++policy_model.responses_api_models.openai_model.extra_body.temperature=1.0). The OpenCode settings were the
+# opencode_agent defaults on both arms, so nothing else is needed here.
+policy_model:
+  responses_api_models:
+    openai_model:
+      extra_body:
+        temperature: 1.0

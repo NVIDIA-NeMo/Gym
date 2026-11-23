@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# NOT A SUPPORTED PAIRING: the configuration the parity run's native arm ran with, on a patched copy of the server (a
+# demonstrator). It does not run on main: it needs two fixes that are not on main, each its own follow-up change:
+# 1. Episode seed. app.py's seed_session override answers only the agent-run seed, so every episode seed from the
+#    Environment Server is refused ("validation errors for ResourcesSeedSessionResponse"). Fix: drop the
+#    override and implement the base class's session hooks (has_session_state, initialize_session_state,
+#    release_session_state) over the existing per-session tool tables.
+# 2. Tool names. Once seeded, verify() scores 0 on every row whose ground truth is not empty: OpenCode names the
+#    calls workplace_assistant_<tool>, and the MCP exposure's normalize_tool_name strips only Claude Code's
+#    mcp__<server>__ prefix, so is_correct cannot replay them. Fix: also map <server name>_<tool> to <tool> when <tool>
+#    is one of the server's exposed tools.
+# The parity numbers in harbor/README.md were measured with a patched copy of this server that has exactly these two
+# fixes (tools, tables and verify() unchanged), not with main.
+#
+# workplace_assistant with OpenCode in place of simple_agent: the same Resources Server, tables and verify(). The
+# Resources Server serves its 27 tools over MCP (expose_tools_over_mcp, through its mcp_tools() override) and the
+# Environment Server grants them to OpenCode (resources_tool_transports: [mcp]); the model sees them as
+# workplace_assistant_<tool>. OpenCode runs in a sandbox it creates per session from a public image and downloads
+# OpenCode there, so the sandbox must reach the model server and this Resources Server's /mcp by address:
+# use_absolute_ip with both server types below.
+#
+# OpenCode's sandbox session accepts only input, instructions, model, temperature and top_p in a request, so the rows
+# leave out the native rows' `tools` (served over MCP instead) and `parallel_tool_calls`. The dataset below,
+# data/validation_opencode.jsonl, is not in the repository (data/.gitignore ignores it): write it with
+# resources_servers/workplace_assistant/harbor/adapter.py --opencode-rows-out (which also writes the matching Harbor
+# tasks). `gym eval run` refuses --input when it starts the servers, and it looks for the dataset path relative to the
+# working directory first, so run from a directory that holds the file at that relative path:
+#
+#   mkdir -p resources_servers/workplace_assistant/data
+#   cp <rows.jsonl> resources_servers/workplace_assistant/data/validation_opencode.jsonl
+#   gym eval run --config <repo>/resources_servers/workplace_assistant/harbor/configs/native_pairing.yaml \
+#       --config <repo>/resources_servers/workplace_assistant/harbor/configs/native_arm.yaml \
+#       --agent workplace_assistant_opencode_agent --split validation --model-type openai_model ...
+config_paths:
+  - resources_servers/workplace_assistant/configs/workplace_assistant.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models, resources_servers]
+
+workplace_assistant:
+  resources_servers:
+    workplace_assistant:
+      expose_tools_over_mcp: true
+      verified: false
+
+# Drop simple_agent and its legacy_agent relay; the Environment Server below runs OpenCode.
+workplace_assistant_simple_agent: null
+workplace_assistant_environment_server: null
+
+workplace_assistant_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      description: workplace_assistant with OpenCode; the 27 tools over MCP
+      resources_server:
+        type: resources_servers
+        name: workplace_assistant
+      # The workplace_assistant Resources Server lends no sandbox, so each session creates one.
+      sandbox_provider: sandbox
+      sandbox_config:
+        # The image the converted Harbor tasks give the agent (harbor/task-template/environment/Dockerfile).
+        image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca
+        workdir: /workspace
+        # Without a TTL, OpenSandbox ends the sandbox 10 minutes after creation.
+        ttl_s: 3600
+        resources: {cpu: 1, memory_mib: 2048}
+      # The converted tasks' [agent].timeout_sec.
+      timeout: 900
+      datasets:
+        - name: validation_opencode
+          type: validation
+          jsonl_fpath: resources_servers/workplace_assistant/data/validation_opencode.jsonl
+          license: Apache 2.0
+
+workplace_assistant_opencode_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: workplace_assistant
+      agent_server:
+        type: responses_api_agents
+        name: workplace_assistant_opencode_agent
+      resources_tool_transports: [mcp]

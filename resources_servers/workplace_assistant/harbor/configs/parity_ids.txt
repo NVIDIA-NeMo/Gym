@@ -1,0 +1,54 @@
+# The 50 parity row ids (the rows' `id`) of validation.jsonl from the Hugging Face dataset
+# nvidia/Nemotron-RL-agent-workplace_assistant at revision f674d9bba17820d90f14eefe9156fdc018a0db60.
+# 10 per category: each category's ids sorted by sha256("workplace_assistant-parity-<id>"), the first 10 kept,
+# then interleaved one per category in sorted category order.
+115
+375
+290
+497
+465
+435
+303
+190
+37
+531
+233
+246
+351
+434
+90
+88
+198
+394
+17
+306
+161
+53
+107
+287
+398
+451
+202
+30
+211
+308
+442
+243
+381
+326
+441
+471
+128
+474
+245
+499
+344
+304
+193
+540
+297
+387
+114
+101
+307
+22
