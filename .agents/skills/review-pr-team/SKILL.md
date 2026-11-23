@@ -60,14 +60,12 @@ Nothing is posted to GitHub without the reviewer's explicit approval at each ste
     - suggestion blocks.
   - [references/data-contracts.md](references/data-contracts.md), for PRs that change dataset rows,
     schemas, request models, or what crosses a boundary.
-  - [references/benchmark-review/review.md](references/benchmark-review/review.md), for PRs that touch
-    `resources_servers/`, `environments/`, `benchmarks/`, or `environment_servers/`: the findings
-    reviewers raise most often on benchmark PRs, item by item. Open a `details/` file only when its item
-    applies to the diff.
-  - [references/agent-harness-review.md](references/agent-harness-review.md), for PRs that touch
-    `responses_api_agents/` or text that tells users which agent to run. It starts from
-    [references/agent-review/review.md](references/agent-review/review.md), the same kind of checklist for
-    agents.
+  - Follow the existing [expert ownership](references/agent-briefs.md). The resources-server expert
+    uses the [benchmark checklist](references/benchmark-review/review.md) for resources servers,
+    environments and benchmarks. The agent expert uses the [agent checklist](references/agent-review/review.md)
+    for agent server implementations and their configs. The environment-server expert owns environment
+    servers, and the core expert owns shared Gym code and Fern docs. Trace callers across these
+    boundaries and send findings to the expert who owns the changed files.
 - **From the rubric's "Posting findings" section**, a team review uses:
   - the BLOCKER, RISK, and NOTE grades;
   - the verdict mapping, where SHIP, SHIP WITH CARE, and HOLD become approve, comment, and request

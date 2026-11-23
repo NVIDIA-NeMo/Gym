@@ -76,34 +76,13 @@ You own nemo_gym/, fern/, root configuration, and the checks that cut across the
 
 ## resources-server-expert (resources_servers/, environments/, benchmarks/)
 
-```
-- Read .agents/skills/review-pr-team/references/benchmark-review/review.md first. Open a file under its
-  details/ only when that item applies to the diff.
-- verify() reward semantics, per-task state isolation, and meaningful errors on tool failures and bad
-  model output.
-- Hydra wiring of the resources server, agent, and model, and the environment or benchmark manifest.
-- Baselining evidence, per the rubric: `verified: true`, or a changed verifier on a fixed benchmark,
-  needs reward-profiling numbers. Name the numbers to provide.
-- Dataset contracts from preparation through schema and request model into verify().
-- Session lifecycle: seeding and closing sessions, the fence a close leaves against late seeds (see
-  the glossary's Sessions section), and release of per-task resources on every path.
-```
+Use the [benchmark checklist](benchmark-review/review.md) to review these files.
+Trace their agent and environment server pairings with the experts who own those components.
 
 ## agent-expert (responses_api_agents/)
 
-```
-- Read .agents/skills/review-pr-team/references/agent-harness-review.md first, then .agents/skills/review-pr-team/references/agent-review/review.md
-  beside it. Open a file under details/ only when that item applies to the diff.
-- Multi-turn and tool-calling trajectories in the Responses API format.
-- Agent sessions: seeding, closing, and releasing what the session holds on every path.
-- Agents that still run a whole episode in their own `/run` endpoint: the same release rules apply
-  there.
-- Every model call goes through the model server. Model-call capture and token capture record only
-  calls that pass through it, and training needs the token IDs they record.
-- Concurrency limits for subprocesses and external calls, and cookie propagation.
-- Sandboxed harnesses: who owns the sandbox, and that a borrowed sandbox is never destroyed by the
-  borrower.
-```
+Use the [agent checklist](agent-review/review.md) for the changed agent servers, their configs and
+subclasses. Identify which benchmark presets consume the change and share that list with the resources-server expert.
 
 ## environment-server-expert (environment_servers/)
 

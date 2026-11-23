@@ -23,7 +23,6 @@ Additional fields like `expected_answer` vary by resources server—the componen
 | Field | Added By | Description |
 |-------|----------|-------------|
 | `responses_create_params` | User | Input to the model during training. Contains `input` (messages) and optional `tools`, `temperature`, etc. |
-| `agent_ref` | `gym dataset collate` | Routes each row to its agent server. Auto-generated during data preparation. |
 
 ### Optional Fields
 
@@ -38,18 +37,11 @@ Check `resources_servers/<name>/README.md` for fields required by each resources
 
 </Tip>
 
-### The `agent_ref` Field
+### Routing prepared rows
 
-The `agent_ref` field maps each row to a specific agent server, which in turn knows its resources server from the YAML config. A training dataset can blend multiple agent servers in a single file—`agent_ref` tells NeMo Gym which server handles each row.
-
-```json
-{
-  "responses_create_params": {"input": [{"role": "user", "content": "..."}]},
-  "agent_ref": {"type": "responses_api_agents", "name": "math_with_judge_simple_agent"}
-}
-```
-
-**You don't create `agent_ref` manually.** The `gym dataset collate` tool adds it automatically based on your config file. The tool matches the agent type (`responses_api_agents`) with the agent name from the config.
+`gym dataset collate` removes legacy `agent_ref` fields. For flat rows, it writes the name of the
+server instance that declares the dataset into `task_source`. A materialized task that already
+names its source keeps it and routes by its taskset. The run configuration selects the agent.
 
 ### Example Data
 
@@ -83,7 +75,7 @@ gym dataset collate \
 
 ## Configuration
 
-Define datasets in your agent server's YAML config:
+Declare the dataset on its resources server in the YAML config:
 
 ```yaml
 datasets:
@@ -173,7 +165,7 @@ HuggingFace downloads require authentication. Set `hf_token` in `env.yaml` or ex
 | Error | Cause | Fix |
 |-------|-------|-----|
 | `JSON parse error at line N` | Invalid JSON | Check quotes, commas, brackets at line N |
-| `ValidationError: responses_create_params` | Missing field | Add `responses_create_params.input` |
+| A flat row is missing from the sample metrics | Missing prompt on a row that requires one | Add `responses_create_params.input` and collate again |
 | `A license is required` | Missing license | Add `license` to dataset config |
 | `Missing local datasets` | File not found | Check path or add `--download` |
 

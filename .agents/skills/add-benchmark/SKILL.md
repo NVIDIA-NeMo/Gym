@@ -16,7 +16,14 @@ The Gym page [Add a benchmark](../../../fern/versions/latest/pages/contribute/en
 
 ## Determine Integration Type
 
-Before starting, determine which type of benchmark you're adding:
+Choose the task format and episode owner before wiring the preset. Gym rows and Harbor task folders
+are both supported. Use agent sessions for interchangeable harnesses. Flat rows can use
+`single_agent_turn_legacy`; a taskset can use `single_agent_turn`. A benchmark that must run its
+upstream harness's entire episode through `/run` may use `legacy_agent` when it documents why
+that single harness is required. This exception does not introduce new users of deprecated agents.
+See [Choose an environment server](../../../fern/versions/latest/pages/agent-interactions/index.mdx#choose-an-environment-server).
+
+Determine which type of benchmark you're adding:
 
 **Native benchmark** — verification logic implemented directly in a Gym resources server:
 - Resources server implements `verify()` with reward logic
@@ -25,7 +32,7 @@ Before starting, determine which type of benchmark you're adding:
 
 **External benchmark** — wrapping a 3rd-party library that has its own orchestration:
 - Integrate at the agent server level (not resources server)
-- Agent's `/run` endpoint wraps the external library
+- When the single-harness exception above applies, the agent's `/run` endpoint wraps the external library
 - Pre-process from Gym schema to library input, post-process back to `BaseVerifyResponse`
 - Reproduce publicly reported numbers with the original repo first, then reproduce again after Gym integration
 - Add the dependency in `pyproject.toml` and commit its `uv.lock`
@@ -147,7 +154,7 @@ Key points:
 
 ### Step 4: Wire YAML config
 
-Edit `configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
+Use `configs/<name>.yaml` for the primary pairing. A compatibility relay kept alongside it uses `<name>_legacy_agent.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
 
 Key points:
 - `verified: false` is auto-added by pre-commit hook (set to `true` after baselining)
@@ -156,15 +163,16 @@ Key points:
 
 For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
 
-For a coding harness in a task sandbox, pair the resources server with a session harness (`pi_agent`, `codex_agent`, `opencode_agent`, `openclaw_agent`, `hermes_agent`) through an environment server; see [Integrate existing agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx). Do not wire a new benchmark to `opencode_sandboxed_agent`, `pi_sandboxed_agent` or `hermes_sandboxed_agent`, or to the `/run` path of `terminus_2_sandboxed_agent` or `miniswe_sandboxed_agent`: that legacy path is deprecated, even though older presets still use it.
+For a coding harness in a task sandbox, pair the resources server with a session harness (`pi_agent`, `codex_agent`, `opencode_agent`, `openclaw_agent`, `hermes_agent`) through an environment server; see [Integrate existing agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx). Do not wire a new benchmark to `opencode_sandboxed_agent`, `pi_sandboxed_agent` or `hermes_sandboxed_agent`, or to `miniswe_sandboxed_agent`, or to the `/run` path of `terminus_2_sandboxed_agent`: that legacy path is deprecated, even though older presets still use it.
 
-For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpath`:
+For data fetched from a registry, declare its `source` alongside the local `jsonl_fpath`. For example:
 ```yaml
 datasets:
 - name: my_dataset
   type: train
   jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-  gitlab_identifier:
+  source:
+    type: gitlab
     dataset_name: my_benchmark
     version: 0.0.1
     artifact_fpath: my_dataset.jsonl
@@ -174,7 +182,7 @@ datasets:
   jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
 ```
 
-Both fields must coexist: `jsonl_fpath` is the local download destination, `gitlab_identifier` tells the system where to fetch from. `example` datasets don't need `gitlab_identifier` — they're committed to git directly.
+A dataset already available at its local path can omit `source`. Commit example data with the server.
 
 ### Step 5: Test
 
@@ -186,7 +194,7 @@ gym env test --resources-server my_benchmark
 pytest tests/unit_tests/ -x
 ```
 
-Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong output), verify fail (no code extracted), verify fail (compilation error if applicable), verify timeout.
+Run the server's behavior tests. The repository coverage threshold applies to the core suite. Cover: verify pass, verify fail (wrong output), verify fail (no code extracted), verify fail (compilation error if applicable), verify timeout.
 
 ### Step 6: Smoke test end-to-end
 
@@ -224,7 +232,9 @@ follow the [run-and-babysit-eval](../run-and-babysit-eval/SKILL.md) skill.
 
 Run on one benchmark and harness pair. Read the rollouts, not the exit code: an exit of 0, an empty failures file and a rising rollout count prove nothing. List every health check you ignore (`--health-check-ignore`) in the PR, with the reason.
 
-Reward profiling for training environments is a separate skill: `nemo-gym-reward-profiling`.
+Use the [reward profiling guidance](references/patterns.md#reward-profiling-best-practices) for a fixed benchmark.
+For a training environment, the [contribution requirements](../../../CONTRIBUTING.md#checks-a-new-environment-or-benchmark-must-satisfy)
+call for a representative real-model smoke with agent and verifier behavior inspected. Reward profiling and training runs are optional.
 
 For an external benchmark: reproduce the original repo's published numbers first, then again after the Gym integration. The scores should match.
 
@@ -265,7 +275,7 @@ pre-commit run --all-files
 
 First run may fail as hooks auto-modify files (`verified: false` flag, README table). Stage changes and run again.
 
-Set `verified: true` in YAML config after the exit checks pass. Link the run folder and its `quality_summary.json` in the PR description.
+To propose `verified: true`, link the run folder, its `quality_summary.json`, and the baselining results after the exit checks pass. The maintainer reviews that evidence before merging the change.
 
 CI does not start on its own for unverified commits or external contributors; a maintainer must comment `/ok to test <full-sha>`. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and labels.
 

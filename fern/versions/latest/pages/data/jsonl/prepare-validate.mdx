@@ -222,7 +222,7 @@ gym dataset collate \
     --output-dir data
 ```
 
-This validates your data and adds the `agent_ref` field to each row, routing samples to your resources server.
+For flat rows, this writes the declaring instance into `task_source`. The run configuration selects the agent. See [Routing prepared rows](/main/data/jsonl#routing-prepared-rows).
 
 ---
 
@@ -270,13 +270,13 @@ gym dataset collate \
 
 | Issue | Symptom | Fix |
 |-------|---------|-----|
-| Missing `responses_create_params` | Sample silently skipped | Add field with valid `input` |
-| Invalid JSON | Sample skipped | Fix JSON syntax |
-| Invalid role | Sample skipped | Use `user`, `assistant`, `system`, or `developer` |
+| Missing `responses_create_params` | Excluded from prompt metrics for flat rows | Add field with valid `input` |
+| Invalid JSON | Collation stops at the malformed line | Fix JSON syntax |
+| Invalid role | The selected model or agent can reject the input | Use `user`, `assistant`, `system`, or `developer` |
 | Missing dataset file | `AssertionError` | Create file or pass `--download` |
 
 <Warning>
-Invalid samples are silently skipped. If metrics show fewer examples than expected, check your data format.
+A row can be written to the prepared file even when it was excluded from prompt metrics. Inspect both the prepared rows and the metrics when investigating a count mismatch.
 
 </Warning>
 
@@ -317,7 +317,7 @@ with open("your_data.jsonl") as f:
 2. **Check files** — Verify dataset files exist
 3. **Validate samples** — Parse each line, validate against schema
 4. **Compute metrics** — Aggregate statistics
-5. **Collate** — Combine samples with agent references
+5. **Collate** — Combine prepared samples with their task sources
 
 ### Output Locations
 

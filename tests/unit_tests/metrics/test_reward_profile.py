@@ -908,11 +908,23 @@ class TestTheTwoViewsAgree:
             "response": {},
         }
 
-    def test_the_same_rollouts_give_the_same_mean_either_way(self) -> None:
-        """One valid reward of 1 and one masked reward of 0 is a mean of 1, not 0.5."""
+    @pytest.mark.parametrize(
+        ("mask_fields", "expected_mean", "masked_count"), [({}, 0.5, 0), ({"mask_sample": True}, 1.0, 1)]
+    )
+    def test_the_same_rollouts_give_the_same_mean_either_way(
+        self, mask_fields: dict[str, bool], expected_mean: float, masked_count: int
+    ) -> None:
+        """Only a mask excludes an infrastructure zero from either mean."""
         verify_responses = [
             self._verify_response(0, 0, reward=1.0, masked=False),
-            self._verify_response(0, 1, reward=0.0, masked=True),
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 1,
+                "reward": 0.0,
+                "response": {},
+                "evaluation_completed": False,
+                **mask_fields,
+            },
         ]
 
         aggregated = compute_aggregate_metrics(verify_responses)
@@ -929,10 +941,10 @@ class TestTheTwoViewsAgree:
         _, agent_level_metrics, _ = RewardProfiler().profile_from_data(measured_rows, measured_results)
 
         # The point is that the two views agree, not the scale either one uses.
-        assert aggregated.key_metrics["mean/reward"] == 1.0
+        assert aggregated.key_metrics["mean/reward"] == expected_mean
         assert agent_level_metrics[0]["mean/reward"] == aggregated.key_metrics["mean/reward"]
-        assert len(masked) == 1
-        assert coverage["coverage/masked_rollouts"] == 1
+        assert len(masked) == masked_count
+        assert coverage.get("coverage/masked_rollouts", 0) == masked_count
 
     def test_the_profiling_view_does_not_publish_the_flag_as_a_metric(self) -> None:
         measured_rows, measured_results, _, _ = select_measured(

@@ -217,7 +217,9 @@ Servers and agent harnesses run tasks in remote sandboxes through `nemo_gym.sand
   means the sandbox did not report a process exit code. Treat `stdout`/`stderr` as optional (`result.stdout or ""`).
 - **Separate infrastructure failures from task failures.** When verification is inconclusive (sandbox start, exec,
   or provider error), retry on a fresh sandbox a bounded, configurable number of times
-  (`inconclusive_verification_retries`), and report `evaluation_completed=False` instead of a silent reward of 0.
+  (`inconclusive_verification_retries`). When no grade is possible, report a typed ungraded failure, or return a
+  verification result with `mask_sample: true` and a `failure_kind`. Only `mask_sample` excludes a result from the
+  score. A row with `evaluation_completed: false` alone still counts. Keep genuine wrong answers as unmasked zeros.
 
 ## Common Commands for Building & Testing Environments
 

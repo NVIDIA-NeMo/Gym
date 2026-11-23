@@ -97,6 +97,8 @@ Other features use some of these words in their own senses and keep them:
 | Term | Definition |
 | --- | --- |
 | **Model / policy model** | The model being trained or evaluated — local weights or a remote endpoint, usually via the Model server. See [Model Server](/model-server). |
+| **Harness adapter** | The Gym agent server implementation that exposes an upstream agent harness through Gym's API. |
+| **Sandbox owner** | The component responsible for destroying the sandbox. A resources server can provide its task sandbox to an agent session and keep it for verification. |
 | **Agent harness** | How the model interacts with the environment: loops model calls, routes tools, manages context, and decides when the task is done. See [Agent Server](/agent-server). |
 | **Agent** | Model + agent harness. |
 | **Rollout driver** | Coordinates an episode and records its trajectory. |

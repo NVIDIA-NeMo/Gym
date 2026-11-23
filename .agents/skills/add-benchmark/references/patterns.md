@@ -211,7 +211,8 @@ my_benchmark_simple_agent:
       - name: my_dataset
         type: train
         jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-        gitlab_identifier:
+        source:
+          type: gitlab
           dataset_name: my_benchmark
           version: 0.0.1
           artifact_fpath: my_dataset.jsonl
@@ -237,7 +238,8 @@ my_benchmark_eval_agent:
       - name: my_dataset
         type: train
         jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-        gitlab_identifier:
+        source:
+          type: gitlab
           dataset_name: my_benchmark
           version: 0.0.1
           artifact_fpath: my_dataset.jsonl
@@ -253,10 +255,10 @@ my_benchmark_eval_agent:
 - The `verified: false` flag is auto-added by pre-commit hook. Set to `true` after baselining.
 - `license` is required for `train` and `validation` datasets.
 - Valid license values: `Apache 2.0`, `MIT`, `CC-BY-4.0`, etc.
-- `domain` should be one of: `coding`, `math`, `other`, or check `config_types.py` for current enum.
-- Dataset `type` must be one of: `train`, `validation`, `example`.
-- `gitlab_identifier` is required for `train`/`validation` datasets. `jsonl_fpath` is the local download path. Both fields coexist.
-- `example` datasets don't have `gitlab_identifier` — they're committed to git directly.
+- Choose a `domain` from the `Domain` enum in `nemo_gym/config/config_types.py`.
+- Use a supported `DatasetType` for the dataset.
+- Set `jsonl_fpath` to the local data path. Set `source` if Gym needs to download the data.
+- Commit example data with the server.
 
 ---
 
@@ -542,7 +544,7 @@ Externalize system prompts to text files, pass via `--system-prompt` argument. M
 
 ### Dataset types and where they live
 
-| Type | Location | Committed to git? | `gitlab_identifier`? |
+| Type | Location | Committed to git? | Download `source` in this example |
 |------|----------|-------------------|---------------------|
 | `example` | `data/example.jsonl` | Yes | No |
 | `train` | GitLab dataset registry | No | Yes |
@@ -571,12 +573,13 @@ If your filename doesn't match (e.g. `my_eval.jsonl`), add a custom pattern (e.g
        --revision 0.0.1 \
        --input resources_servers/my_benchmark/data/my_dataset.jsonl
    ```
-3. **Add `gitlab_identifier`** to the dataset entry in YAML config:
+3. **Declare the GitLab `source`** to the dataset entry in YAML config:
    ```yaml
    - name: my_dataset
      type: train
      jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-     gitlab_identifier:
+     source:
+       type: gitlab
        dataset_name: my_benchmark
        version: 0.0.1
        artifact_fpath: my_dataset.jsonl
@@ -707,7 +710,7 @@ Run the highest-scoring open-source model multiple times. Increase `num_repeats`
 
 ### Training environments
 
-If adding a training environment (not just a benchmark), additionally run training with NeMo RL:
+For an optional NeMo RL training run, one example setup is:
 - GRPO algorithm, 64 prompts per step, 16 rollouts per prompt (adjustable)
 - Train with both instruct and thinking models
 - Include W&B links and train/validation curve screenshots in the PR
