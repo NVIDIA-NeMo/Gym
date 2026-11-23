@@ -42,7 +42,7 @@ taken. On a remote sandbox provider, give the Model Server an address the sandbo
 | `environment` | none | Auto Ontology's settings in the sandbox, such as the embedding key (`DEFAULT_MODELS_API_KEY`) or `TEXT_TO_SQL_REACT_MAX_TOOL_CALLS`. They cannot change the model |
 | `catalog_ports` | 20000 to 60000 | The ports an episode's catalog may take |
 | `setup_timeout_seconds`, `episode_timeout_seconds`, `close_timeout_seconds` | 300, 1800, 60 | Limits on the seed, the episode and the close |
-| `max_concurrent_episodes` | 8 | Episodes at once in this server, each with its own sandbox and Postgres |
+| `max_concurrent_episodes` | 8 | Episodes this server runs at once. Each session holds its sandbox and Postgres from seed to close, so the run's concurrency bounds the sandboxes |
 
 ## Known limits
 
@@ -50,3 +50,5 @@ taken. On a remote sandbox provider, give the Model Server an address the sandbo
   and the close reports the `model_call_usage_unavailable` gap.
 - **Retries:** a failed activation is not retried in the same sandbox; the Environment Server's retry starts a new
   episode.
+- **Request controls:** Auto Ontology's loop sets its own sampling, limits and instructions. An activation that sets
+  another field, such as `temperature`, `max_output_tokens`, `tool_choice` or `instructions`, is refused with a 422.

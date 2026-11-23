@@ -12,8 +12,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
-from nemo_gym.agents import AgentSeedSessionRequest, AgentSessionConflictError, check_agent_seed_rejected
+from nemo_gym.agents import (
+    AgentSeedSessionRequest,
+    AgentSessionConflictError,
+    AgentSessionSetupError,
+    check_agent_seed_rejected,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
@@ -149,6 +155,21 @@ async def test_a_catalog_that_does_not_start_fails_the_seed_and_stops_the_sandbo
     sandbox.stop.assert_awaited_once()
 
 
+async def test_a_failed_setup_whose_cleanup_fails_keeps_the_sandbox_for_close(sandbox: AsyncMock) -> None:
+    sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="no PGDATA", return_code=1)
+    sandbox.stop.side_effect = [RuntimeError("stop timed out"), None]
+    agent = _agent()
+
+    with pytest.raises(AgentSessionSetupError) as failed:
+        await agent._seed_agent_session_state(_seed())
+
+    # The seed's error is the catalog's, and the state keeps the sandbox that did not stop.
+    assert "no PGDATA" in str(failed.value.error)
+    closed = await agent._close_agent_session_state(failed.value.state)
+    assert sandbox.stop.await_count == 2
+    assert closed.cleanup_confirmed is True
+
+
 async def test_a_taken_port_is_retried_on_another(sandbox: AsyncMock) -> None:
     sandbox.exec.side_effect = [
         SandboxExecResult(stdout="", stderr="could not bind: address in use", return_code=1),
@@ -271,6 +292,26 @@ async def test_a_different_second_activation_is_refused(activate) -> None:  # no
     with pytest.raises(AgentSessionConflictError) as refused:
         await agent.responses(_request(), NeMoGymResponseCreateParamsNonStreaming(input="second"))
     assert refused.value.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"max_output_tokens": 1}, {"temperature": 0.2}, {"tool_choice": "none"}, {"instructions": "Be brief."}],
+)
+async def test_an_activation_with_a_control_the_episode_does_not_honor_is_refused(activate, fields: dict) -> None:  # noqa: ANN001
+    agent = _agent()
+    session = _FakeSession({"sql": "SELECT 1", "reason": "submitted"})
+    activate(agent, session)
+
+    with pytest.raises(HTTPException) as refused:
+        await agent.responses(_request(), NeMoGymResponseCreateParamsNonStreaming(input="x", **fields))
+    assert refused.value.status_code == 422
+    assert list(fields)[0] in refused.value.detail
+    assert session.runs == 0
+    # The default request, with the configured model and the stream flags off, runs.
+    body = NeMoGymResponseCreateParamsNonStreaming(input="x", model="openai/policy", stream=False, metadata={"k": "v"})
+    await agent.responses(_request(), body)
+    assert session.runs == 1
 
 
 async def test_an_activation_on_another_rollout_is_refused(activate) -> None:  # noqa: ANN001

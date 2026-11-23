@@ -30,7 +30,7 @@ from time import time
 from typing import Any, Optional, cast
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.agents import (
@@ -38,6 +38,7 @@ from nemo_gym.agents import (
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
+    AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
@@ -113,7 +114,8 @@ class AutoOntologyAgentConfig(BaseResponsesAPIAgentConfig):
     setup_timeout_seconds: float = Field(default=300, gt=0)
     episode_timeout_seconds: float = Field(default=1800, gt=0)
     close_timeout_seconds: float = Field(default=60, gt=0)
-    # Episodes at once in this server: each holds a sandbox with a Postgres.
+    # Episodes this server runs at once. It bounds the episodes, not the sandboxes: each session holds its sandbox
+    # and Postgres from seed to close, so the run's concurrency bounds those.
     max_concurrent_episodes: int = Field(default=8, gt=0)
     # The loopback ports a sandbox's catalog may take. Sandboxes on the host
     # network share loopback, so each takes its own, at random from this range.
@@ -198,8 +200,13 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         )
         try:
             catalog_port = await self._start_catalog(sandbox)
-        except BaseException:
-            await session.close(timeout=self.config.close_timeout_seconds)
+        except BaseException as error:
+            try:
+                await session.close(timeout=self.config.close_timeout_seconds)
+            except BaseException:
+                # The sandbox may still run: keep it in the session, so that close tries to stop it again.
+                state = AutoOntologySessionState(request=body, task=task, session=session, catalog_port=0)
+                raise AgentSessionSetupError(state, error=error) from error
             raise
         return AutoOntologySessionState(request=body, task=task, session=session, catalog_port=catalog_port)
 
@@ -324,6 +331,7 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         rollout_id = request.path_params.get("rollout_id")
         if rollout_id != state.request.episode_id.capture_key:
             raise AgentSessionConflictError("The activation's rollout does not match the seeded session")
+        refuse_unsupported_request_fields(body, model=self.config.model, honored={"input"})
         if state.activation is None:
             # No await before the activation is installed: a retry joins it.
             state.activation_request = body.model_copy(deep=True)
@@ -332,6 +340,31 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             raise AgentSessionConflictError("An Auto Ontology session has one activation; retry the same request")
         # A waiter that disconnects must not cancel the episode; close does.
         return (await asyncio.shield(state.activation)).model_copy(deep=True)
+
+
+def refuse_unsupported_request_fields(
+    body: NeMoGymResponseCreateParamsNonStreaming, *, model: str, honored: set[str]
+) -> None:
+    """Refuse an activation that sets a field the episode does not honor, rather than drop it.
+
+    Auto Ontology's loop sets its own sampling, limits and instructions. ``honored`` names the fields the episode reads;
+    ``model`` may also name the configured model, and ``metadata`` is echoed in the response.
+    """
+    unsupported = []
+    for name, field in type(body).model_fields.items():
+        value = getattr(body, name)
+        if name in honored or name == "metadata" or (name == "model" and value in (None, model)):
+            continue
+        if name in ("stream", "background") and value is False:
+            continue
+        if value != field.get_default(call_default_factory=True):
+            unsupported.append(name)
+    if unsupported:
+        raise HTTPException(
+            422,
+            f"Auto Ontology does not support the request fields {unsupported}: its loop sets its own sampling, "
+            "limits and instructions",
+        )
 
 
 def answer_message(episode: dict[str, Any]) -> NeMoGymResponseOutputMessage:
