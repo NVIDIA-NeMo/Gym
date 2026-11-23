@@ -77,6 +77,8 @@ You own nemo_gym/, fern/, root configuration, and the checks that cut across the
 ## resources-server-expert (resources_servers/, environments/, benchmarks/)
 
 ```
+- Read .agents/skills/review-pr-team/references/benchmark-review/review.md first. Open a file under its
+  details/ only when that item applies to the diff.
 - verify() reward semantics, per-task state isolation, and meaningful errors on tool failures and bad
   model output.
 - Hydra wiring of the resources server, agent, and model, and the environment or benchmark manifest.
@@ -90,6 +92,8 @@ You own nemo_gym/, fern/, root configuration, and the checks that cut across the
 ## agent-expert (responses_api_agents/)
 
 ```
+- Read .agents/skills/review-pr-team/references/agent-harness-review.md first, then .agents/skills/review-pr-team/references/agent-review/review.md
+  beside it. Open a file under details/ only when that item applies to the diff.
 - Multi-turn and tool-calling trajectories in the Responses API format.
 - Agent sessions: seeding, closing, and releasing what the session holds on every path.
 - Agents that still run a whole episode in their own `/run` endpoint: the same release rules apply
