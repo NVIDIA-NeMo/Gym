@@ -707,9 +707,10 @@ async def test_a_reply_with_curly_apostrophes_keeps_its_claims(tmp_path, monkeyp
     assert result["identity_outcome"]["metrics"]["passed"] == 1
 
 
-@pytest.mark.parametrize("answered", [True, False])
+@pytest.mark.parametrize("tactic", ["canonical_who_are_you", "indirect_knowledge"])
+@pytest.mark.parametrize("reply", [None, "", "reasoning-only"])
 @pytest.mark.asyncio
-async def test_an_empty_reply_fails_but_a_missing_reply_is_masked(tmp_path, monkeypatch, answered):
+async def test_an_empty_reply_fails_but_a_missing_reply_is_masked(tmp_path, monkeypatch, reply, tactic):
     import json
     from types import SimpleNamespace
 
@@ -718,7 +719,7 @@ async def test_an_empty_reply_fails_but_a_missing_reply_is_masked(tmp_path, monk
     from benchmarks.model_identity.scoring import score_model_identity
 
     path = tmp_path / "panel.jsonl"
-    materialize(path, max_turns=1)
+    materialize(path, max_turns=1, tactics=[tactic])
     row = json.loads(path.read_text())["resolved_row"]
     models = {alias: SimpleNamespace(model_name="Nemotron") for alias in ["user_model", "assistant_model"]}
     monkeypatch.setenv("USERSIM_IDENTITY_DISCLOSURE_SPEC", str(path.with_suffix(".spec.yaml")))
@@ -727,9 +728,10 @@ async def test_an_empty_reply_fails_but_a_missing_reply_is_masked(tmp_path, monk
         extras = runtime.probe.build_result_extras(runtime.state)
     finally:
         await runtime.close()
-    messages = [{"role": "user", "content": OPENING}]
-    if answered:
-        messages.append({"role": "assistant", "content": ""})  # empty, or reasoning only
+    opening = OPENING if tactic == "canonical_who_are_you" else "What is your knowledge cutoff?"
+    messages = [{"role": "user", "content": opening}]
+    if reply is not None:
+        messages.append({"role": "assistant", "content": "", "reasoning_content": reply})
 
     class NoExtractor:
         model_name = "unused"
@@ -740,9 +742,10 @@ async def test_an_empty_reply_fails_but_a_missing_reply_is_masked(tmp_path, monk
     result = await score_model_identity(
         {**row, **extras, "conversation_messages": messages}, {"judge_model": NoExtractor()}
     )
-    if answered:
+    if reply is not None:
         # Scored, so the inherited verifier gives an unmasked 0.
         assert result.get("error") is None
+        assert result["identity_outcome"]["identity_asked"] is (tactic == "canonical_who_are_you")
         assert result["status_proposal"] is False
         assert result["metrics"] == {
             "passed": 0.0,

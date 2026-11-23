@@ -13,6 +13,10 @@ from pathlib import Path
 LOG = logging.getLogger(__name__)
 
 
+class NoRootSessionError(RuntimeError):
+    """The database holds no OpenCode root session yet: OpenCode had not written its first message."""
+
+
 def snapshot(
     database: Path, directory: Path, *, harness_session_id: str | None, previous_message_ids: Collection[str]
 ) -> None:
@@ -24,6 +28,8 @@ def snapshot(
         sessions = source.execute(
             "select id from session where parent_id is null order by time_created, id"
         ).fetchall()
+        if not sessions:
+            raise NoRootSessionError("Expected one OpenCode root session, found 0")
         if len(sessions) != 1:
             raise RuntimeError(f"Expected one OpenCode root session, found {len(sessions)}")
         rows = source.execute(

@@ -53,7 +53,7 @@ class ResourcesConfig(BaseResourcesServerConfig):
     judge_model: str = DEFAULT_JUDGE_MODEL
     judge_api_key_env: str = "AGENTIC_IF_JUDGE_API_KEY"
     judge_reasoning: str = "medium"
-    judge_evidence_transport: Literal["quotes", "evidence_ids_v1"] = "quotes"
+    judge_evidence_transport: Literal["quotes", "evidence_ids_v1", "evidence_ids_or_quotes_v1"] = "quotes"
     synthetic: bool = False
     split_registry_path: str = ""
     ground_truth_path: str = ""

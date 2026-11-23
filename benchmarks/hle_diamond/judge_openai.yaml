@@ -13,6 +13,10 @@ hle_diamond_judge_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
+      # Loopback even where absolute_ip_server_types moves the model servers to the routable address (the
+      # sandboxed presets): only the judge resources server calls this model, from the same host, and the
+      # sandbox must not reach a second model endpoint.
+      host: 127.0.0.1
       openai_base_url: ${policy_base_url}
       openai_api_key: ${policy_api_key}
       openai_model: ${oc.env:HLE_DIAMOND_JUDGE_MODEL,azure/openai/o3-mini}
