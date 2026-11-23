@@ -1,0 +1,5 @@
+# Prepared training JSONL is a ~1.8 GB filtered slice of the Hub dataset (patch/test_patch
+# content for every supported instance). Regenerate with prepare_swe_rebench.py.
+*.jsonl
+!example.jsonl
+!example_rollouts.jsonl

@@ -44,7 +44,7 @@ gym eval profile \
     --rollouts "$ROLLOUTS_JSONL"
 ```
 
-If rows already contain `agent_ref`, leave `AGENT_NAME` empty. Passing `+agent_name` supplies a default for rows without one.
+Passing `--agent`/`+agent_name` routes EVERY row to that agent, overriding any `agent_ref` baked into rows (it is shorthand for `+agent_map={_default: <name>}`). To keep the rows' own `agent_ref` routing, leave `AGENT_NAME` empty. To re-route only specific agents, use `+agent_map` with per-agent entries instead of `_default`.
 
 ## Partial Rollouts
 

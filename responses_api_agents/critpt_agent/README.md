@@ -10,6 +10,10 @@ Custom two-turn agent for the CritPt benchmark (research-level physics problems)
 The accumulated Turn 2 output is submitted to the CritPt resources server's `/verify`, which scores it via
 the Artificial Analysis API.
 
+The returned response's `usage` sums input, output, and total tokens across both turns, so the standard
+token metrics report the full solve-and-format cost. If either turn omits usage, the combined usage is
+unknown (`null`). Only the Turn 2 output is graded.
+
 ## Configuration
 
 - `resources_server`: the CritPt resources server instance to seed sessions and verify against

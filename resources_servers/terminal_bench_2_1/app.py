@@ -1,0 +1,820 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import asyncio
+import logging
+import re
+from collections import OrderedDict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, contextmanager
+from copy import deepcopy
+from dataclasses import dataclass, field
+from glob import glob
+from pathlib import Path
+from shlex import join
+from sys import stderr
+from tempfile import NamedTemporaryFile
+from time import monotonic, time
+from traceback import format_exc
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
+
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
+from nemo_gym import PARENT_DIR
+from nemo_gym.agents import OutcomeAction, OutcomePolicyConfig, failure_outcome_policy
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    EpisodeId,
+    FailureBoundary,
+    FailureClass,
+    NgFailureEvent,
+    classify_failure,
+    current_verifier_invocation_id,
+    observe_failure,
+)
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxAccess,
+    SandboxResources,
+    SandboxSpec,
+    cpu_cap_env,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ReverifyMode,
+    SimpleResourcesServer,
+)
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
+
+
+LOG = logging.getLogger(__name__)
+
+
+# Bullseye security packages were removed from the live mirror after LTS ended.
+# Keep the signed final-LTS repository and package versions available to task setup.
+_BULLSEYE_SECURITY_SNAPSHOT_SETUP = r"""set -eu
+. "$1"
+if [ "${ID:-}:${VERSION_CODENAME:-}" = "debian:bullseye" ]; then
+    snapshot=https://snapshot.debian.org/archive/debian-security/20260831T235959Z/
+    old='deb http://deb[.]debian[.]org/debian-security bullseye-security main'
+    new="deb [check-valid-until=no] $snapshot bullseye-security main"
+    sed -i -E "s|^$old$|$new|" "$2"
+fi
+"""
+
+
+class TerminalBench21OutcomePolicyConfig(OutcomePolicyConfig):
+    """The verify boundary can mask a sample or score it zero; it cannot fail or grade the episode."""
+
+    default_action: OutcomeAction = OutcomeAction.RETRY
+
+    @model_validator(mode="after")
+    def require_verify_actions(self) -> "TerminalBench21OutcomePolicyConfig":
+        if {OutcomeAction.FAIL, OutcomeAction.VERIFY} & {
+            self.default_action,
+            *self.by_failure_kind.values(),
+            *self.by_status_code.values(),
+        }:
+            raise ValueError("Terminal Bench 2.1 verifier outcome policy supports only retry and count_as_zero")
+        return self
+
+
+class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
+    is_verifying_golden_patch: bool = False
+    evaluation_timeout: Optional[int] = None
+    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    session_close_retry_window_seconds: float = Field(
+        default=300,
+        gt=0,
+        allow_inf_nan=False,
+        description="Retain completed close fences for this many seconds; cover the caller's retry horizon.",
+    )
+
+    # Sandbox config
+    sandbox_provider: str
+    sandbox_config: Dict[str, Any]
+
+    debug: bool = False
+    # Many task test.sh files run pytest under set -e, so failing tests end the script before it writes
+    # reward.txt. With this on, such a run (non-zero exit, no readable reward.txt, a pytest summary counting
+    # failures or errors) is graded 0 instead of left ungraded; exits without a pytest summary stay ungraded.
+    # Agentic IF masks a tb21 task result that is not completed, so there such a row becomes a scored 0.
+    score_pytest_failures_without_reward: bool = True
+
+    outcome_policy: TerminalBench21OutcomePolicyConfig = Field(
+        default_factory=TerminalBench21OutcomePolicyConfig,
+        description=(
+            "Action for a verifier that could not produce a verdict, selected by the failure's kind: retry masks the "
+            "sample (the default), count_as_zero keeps it as an unmasked zero. The failure event is recorded either way."
+        ),
+    )
+
+
+class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
+    sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+
+
+class TerminalBench21SeedSessionRequest(BaseModel):
+    task_name: str
+    docker_image: str
+    task_folder: str
+
+
+class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerifyRequest):
+    pass
+
+
+_MAX_FAILURE_REASON_CHARS = 1000
+
+
+class _VerifierInfraError(RuntimeError):
+    """The sandbox could not run the verifier; there is no verdict on the model."""
+
+
+def _verifier_failure_reason(cause: BaseException) -> str:
+    """A concise reason for a masked verifier failure; the exception itself stays attached as the event's cause."""
+    if isinstance(cause, NgFailureEvent):
+        detail = cause.failure_reason
+    elif isinstance(cause, _VerifierInfraError):
+        detail = str(cause)
+    else:
+        detail = type(cause).__name__
+    return bounded_text(f"Verifier sandbox error: {detail}", _MAX_FAILURE_REASON_CHARS)
+
+
+# pytest's closing line, e.g. "==== 17 failed, 3 passed in 12.34s ====" or "== 1 error in 0.50s (0:00:00) ==".
+# pytest -q prints it without the "=" borders: "1 failed, 2 passed in 0.10s".
+_PYTEST_SUMMARY = re.compile(
+    r"^(?:=+ )?(?P<counts>\d+ \w+(?:, \d+ \w+)*|no tests ran) in [\d.]+s(?: \([^)\n]*\))?(?: =+)?[ \t]*$",
+    re.MULTILINE,
+)
+_TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def pytest_reported_failure(output: str) -> bool:
+    """Whether the last pytest summary line in ``output`` counts failed tests or errors."""
+    summaries = _PYTEST_SUMMARY.findall(_TERMINAL_ESCAPE.sub("", output).replace("\r", ""))
+    return bool(summaries) and re.search(r"\b\d+ (failed|errors?)\b", summaries[-1]) is not None
+
+
+class _VerifierDirError(RuntimeError):
+    """/logs/verifier or an upload directory could not be created: the task state the model left behind."""
+
+
+class TerminalBench21VerifyResponse(BaseVerifyResponse):
+    evaluation_completed: bool
+
+    # Misc metrics
+    verification_time_taken: float
+
+    task_name: str
+    test_output: str
+    # True when the reward came from pytest's summary because test.sh exited without a readable reward.txt.
+    reward_from_pytest_summary: bool = False
+    golden_patch_output: Optional[str]
+
+
+@dataclass
+class _ResourcesSessionState:
+    """Resources-owned request identity and replay results for one episode.
+
+    EnvironmentServer supplies the session ID and closes it after verification.
+    Sandbox ownership is retained separately in ``_session_id_to_sandbox``.
+    """
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    episode_id: EpisodeId | None = None
+    request: ResourcesSeedSessionRequest | None = None
+    closing: bool = False
+    expires_at: float = float("inf")
+    response: ResourcesSeedSessionResponse | None = None
+    verification_request: TerminalBench21VerifyRequest | None = None
+    verification_response: TerminalBench21VerifyResponse | None = None
+
+
+GOLDEN_PATCH_SOLVE_SH_PATCHES = {
+    # This install is in solution/solve.sh, not tests/test.sh.
+    "terminal-bench/mcmc-sampling-stan": [
+        ("sudo apt-get install -y \\\n    gfortran", "sudo apt-get install -y \\\n    cmake \\\n    gfortran"),
+    ],
+    "terminal-bench/build-cython-ext": [
+        (
+            "pip install setuptools==80.9.0 cython==3.1.3",
+            "pip install setuptools==80.9.0 cython==3.1.3 planarity==0.6",
+        ),
+    ],
+    "terminal-bench/build-pov-ray": [
+        ("wget=1.21.4-1ubuntu4.1", "wget"),
+        ("ncompress=5.0-1", "ncompress"),
+        # The official host rejects downloads and the previous mirror is unreachable.
+        # These archived copies retain the SHA-256 pins below.
+        # https://github.com/harbor-framework/terminal-bench-2/pull/77
+        (
+            "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVDOC.TAR.Z",
+            "wget --tries=5 --timeout=60 --output-document=POVDOC.TAR.Z "
+            "https://web.archive.org/web/20180330013814id_/"
+            "http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVDOC.TAR.Z",
+        ),
+        (
+            "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSCN.TAR.Z",
+            "wget --tries=5 --timeout=60 --output-document=POVSCN.TAR.Z "
+            "https://web.archive.org/web/20180330013815id_/"
+            "http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSCN.TAR.Z",
+        ),
+        (
+            "wget https://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSRC.TAR.Z",
+            """wget --tries=5 --timeout=60 --output-document=POVSRC.TAR.Z \\
+  https://web.archive.org/web/20180330013813id_/http://www.povray.org/ftp/pub/povray/Old-Versions/Official-2.2/POVSRC.TAR.Z
+cat <<'EOF' | sha256sum --check -
+e70e44d1fe8835c4dff7c7a55bd6629b15e6a15b2ab7f2f49ee9e2dc016cc470  POVDOC.TAR.Z
+4272e2d4724d8dfd916d68827194577221d17b733d99e84e7040f3a9f7eb92a7  POVSCN.TAR.Z
+4d8a7073fadaca82827f1354428393cd13e4d3f71a5a3149fd7d6fffd77293d4  POVSRC.TAR.Z
+EOF""",
+        ),
+    ],
+}
+
+TEST_SH_PATCHES = {
+    # Agent installs without recommends can leave curl present but its CA bundle
+    # absent. Install the verifier's HTTPS dependency explicitly at grading time.
+    "terminal-bench/compile-compcert": [
+        ("apt-get install -y curl binutils", "apt-get install -y curl ca-certificates binutils"),
+    ],
+    "terminal-bench/extract-moves-from-video": [
+        ("apt-get install -y curl", "apt-get install -y curl ca-certificates"),
+    ],
+    "terminal-bench/pytorch-model-recovery": [
+        ("-w torch==2.7.1", "-w torch==2.7.1 --index https://download.pytorch.org/whl/cpu"),
+    ],
+    "terminal-bench/torch-tensor-parallelism": [
+        ("-w torch==2.7.0", "-w torch==2.7.0 --index https://download.pytorch.org/whl/cpu"),
+    ],
+    "terminal-bench/torch-pipeline-parallelism": [
+        ("-w torch==2.7.0", "-w torch==2.7.0 --index https://download.pytorch.org/whl/cpu"),
+    ],
+    "terminal-bench/mteb-retrieve": [
+        ("-w mteb==1.36.8", "-w mteb==1.36.8 --index https://download.pytorch.org/whl/cpu"),
+    ],
+}
+
+
+class TerminalBench21ResourcesServer(SimpleResourcesServer):
+    config: TerminalBench21ResourcesServerConfig
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+
+        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._session_id_to_state: dict[str, _ResourcesSessionState] = {}
+        self._fenced_session_records: OrderedDict[str, _ResourcesSessionState] = OrderedDict()
+        self._shutting_down = False
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                self._shutting_down = True
+                for record in self._session_id_to_state.values():
+                    record.closing = True
+                await asyncio.gather(
+                    *(
+                        self._shutdown_session(session_id)
+                        for session_id in set(self._session_id_to_state) | set(self._session_id_to_sandbox)
+                    )
+                )
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    @asynccontextmanager
+    async def _locked_resources_session(
+        self, session_id: str, *, close_episode_id: EpisodeId | None = None
+    ) -> AsyncIterator[_ResourcesSessionState]:
+        now = monotonic()
+        while self._fenced_session_records:
+            key, record = next(iter(self._fenced_session_records.items()))
+            if record.expires_at > now:
+                break
+            self._fenced_session_records.pop(key)
+            self._session_id_to_state.pop(key)
+        while True:
+            record = self._session_id_to_state.setdefault(session_id, _ResourcesSessionState())
+            if close_episode_id is not None:
+                if record.episode_id is not None and record.episode_id != close_episode_id:
+                    raise ResourcesSessionConflictError("episode_id does not match the resources session")
+                record.episode_id = close_episode_id
+                # Mark the session as closing before waiting: a timed-out close must not leave a late allocation running.
+                record.closing = True
+            async with record.lock:
+                # An expired fence can drop a record while a caller is waiting on its lock.
+                if self._session_id_to_state.get(session_id) is not record:
+                    continue
+                try:
+                    yield record
+                finally:
+                    if record.request is None and not record.closing:
+                        self._session_id_to_state.pop(session_id, None)
+                return
+
+    def _fence_closed_session(self, session_id: str, record: _ResourcesSessionState) -> None:
+        if record.expires_at != float("inf"):
+            return  # Close retries do not extend the fence.
+        record.closing = True
+        record.request = None
+        record.response = None
+        record.verification_request = None
+        record.verification_response = None
+        record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
+        self._fenced_session_records[session_id] = record
+
+    async def _shutdown_session(self, session_id: str) -> None:
+        try:
+            async with self._locked_resources_session(session_id):
+                await self._stop_session_sandbox(session_id)
+                self._session_id_to_state.pop(session_id, None)
+                self._fenced_session_records.pop(session_id, None)
+        except Exception:
+            LOG.exception(
+                "Failed to stop Terminal-Bench session %s on shutdown; provider TTL is the backstop", session_id
+            )
+
+    async def _stop_session_sandbox(self, session_id: str) -> None:
+        sandbox = self._session_id_to_sandbox.get(session_id)
+        if sandbox is not None:
+            await sandbox.stop(timeout_s=self.config.session_close_timeout_seconds)
+            # Keep ownership when stop fails so close can retry.
+            self._session_id_to_sandbox.pop(session_id, None)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Mark the session as closing, stop the owned sandbox, and fence the session for the close retry window.
+
+        Failed or pending cleanup does not expire. The close retry window starts only
+        after teardown succeeds, including when a late seed performs the teardown.
+        """
+        session_id = body.resources_session_id
+        async with self._locked_resources_session(session_id, close_episode_id=body.episode_id) as record:
+            await self._stop_session_sandbox(session_id)
+            self._fence_closed_session(session_id, record)
+            return ResourcesCloseSessionResponse(resources_session_id=session_id)
+
+    def _patch_sandbox_provider_options_for_instances(
+        self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
+    ) -> None:
+        # TODO @bxyu-nvidia: These patches may not be necessary eventually, but for now we need them in order for the below instance golden patches to pass.
+        tasks_to_increase_initial_resources_for = {
+            "terminal-bench/torch-pipeline-parallelism",
+            "terminal-bench/torch-tensor-parallelism",
+            "terminal-bench/pytorch-model-recovery",
+            "terminal-bench/mteb-retrieve",
+            "terminal-bench/caffe-cifar-10",
+        }
+        if task_name in tasks_to_increase_initial_resources_for:
+            provider_options["resource_requests"] = {
+                "cpu": resources.cpu,
+                "memory_mib": resources.memory_mib,
+                "disk_gib": resources.disk_gib,
+            }
+
+    async def _create_sandbox(
+        self, verify_request: TerminalBench21SeedSessionRequest, *, session_id: str | None = None
+    ) -> AsyncSandbox:
+        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+        global_config_dict = get_global_config_dict()
+        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+        provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        resources = dict(self.config.sandbox_config.get("resources", {}))
+
+        # Derive from the final resources map (after the multilingual bump);
+        # explicit sandbox_config.env keys win over the derived caps.
+        sandbox_resources = SandboxResources.from_mapping(resources)
+        env = dict(self.config.sandbox_config.get("env", {}))
+        if self.config.sandbox_config.get("derive_cpu_env", True):
+            env = cpu_cap_env(sandbox_resources.cpu) | env
+
+        provider_options = deepcopy(self.config.sandbox_config.get("provider_options") or {})
+        self._patch_sandbox_provider_options_for_instances(
+            verify_request.task_name, sandbox_resources, provider_options
+        )
+
+        eval_sandbox_spec = SandboxSpec(
+            image=verify_request.docker_image,
+            ttl_s=self.config.sandbox_config.get("ttl_s", None),
+            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
+            workdir=None,  # Default to container's WORKDIR
+            env=env,
+            files=dict(),
+            metadata=provider_default_metadata
+            | self.config.sandbox_config.get("metadata", {})
+            | {
+                "nemo_gym_agent": self.config.name,
+                "instance_id": verify_request.task_name,
+            },
+            resources=SandboxResources.from_mapping(resources),
+            entrypoint=None,
+            provider_options=provider_options,
+        )
+        eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
+
+        async def _run_setup(sandbox: AsyncSandbox) -> None:
+            result = await sandbox.exec(
+                join(
+                    ["bash", "-c", _BULLSEYE_SECURITY_SNAPSHOT_SETUP, "--", "/etc/os-release", "/etc/apt/sources.list"]
+                ),
+                timeout_s=self.config.evaluation_timeout,
+            )
+            if result.return_code != 0:
+                raise RuntimeError(f"Failed to prepare TerminalBench package sources: {result}")
+
+            result = await sandbox.exec("apt-get update", timeout_s=self.config.evaluation_timeout)
+            if result.return_code != 0:
+                print(f"Failed to apt-get update: {result}")
+
+        if session_id is None:
+            # Direct-agent callers have no Resources session to retain failed cleanup.
+            await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
+        else:
+            # Resources session setup owns cleanup, preserving the error and a handle
+            # for close/shutdown retries even if the first stop fails.
+            self._session_id_to_sandbox[session_id] = eval_sandbox
+            await eval_sandbox.start(eval_sandbox_spec)
+            await _run_setup(eval_sandbox)
+
+        return eval_sandbox
+
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | TerminalBench21SeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | TerminalBench21SeedSessionResponse:
+        if self._shutting_down:
+            raise HTTPException(503, "Terminal-Bench server is shutting down")
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self._seed_resources_session(request, body)
+        eval_sandbox = await self._create_sandbox(body)
+        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+        if self._shutting_down:
+            await self._stop_session_sandbox(request.session[SESSION_ID_KEY])
+            raise HTTPException(503, "Terminal-Bench server is shutting down")
+
+        return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+
+    async def _seed_resources_session(
+        self, request: Request, body: ResourcesSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse:
+        """Bind an EnvironmentServer episode to its benchmark-owned sandbox."""
+        if self.config.is_verifying_golden_patch:
+            raise HTTPException(422, "Golden-patch mode cannot be used with agent sandbox sessions")
+        try:
+            task = TerminalBench21SeedSessionRequest.model_validate(body.task_data)
+        except ValidationError as error:
+            raise HTTPException(422, detail=error.errors(include_input=False)) from error
+        task_folder = Path(task.task_folder)
+        if not task_folder.is_absolute():
+            task_folder = PARENT_DIR / task_folder
+        if not (task_folder / "tests/test.sh").is_file():
+            raise HTTPException(422, f"Missing local task verifier: {task_folder / 'tests/test.sh'}")
+        session_id = body.resources_session_id
+        async with self._locked_resources_session(session_id) as session:
+            if session.closing or self._shutting_down:
+                raise ResourcesSessionConflictError("Resources session is already closed")
+            if session.request is not None:
+                if session.request != body:
+                    raise ResourcesSessionConflictError("resources_session_id is already bound to a different request")
+                if session.response is None or session.verification_request is not None:
+                    raise ResourcesSessionConflictError("Resources session is no longer available for seeding")
+                request.session[SESSION_ID_KEY] = session_id
+                return session.response
+            session.request = body.model_copy(deep=True)
+            session.episode_id = body.episode_id
+            try:
+                sandbox = await self._create_sandbox(task, session_id=session_id)
+                if session.closing:
+                    raise ResourcesSessionConflictError("Resources session closed during setup")
+                working_directory = await sandbox.exec("pwd", timeout_s=30)
+                workdir = (working_directory.stdout or "").strip()
+                if working_directory.return_code != 0 or not Path(workdir).is_absolute():
+                    raise RuntimeError("Could not determine the task sandbox's absolute working directory")
+                session.response = ResourcesSeedSessionResponse(
+                    resources_session_id=session_id,
+                    sandbox_access=SandboxAccess(
+                        connection=DirectSandboxConnection(
+                            provider_config_ref=self.config.sandbox_provider,
+                            descriptor=await sandbox.serialize(),
+                        ),
+                        workdir=workdir,
+                    ),
+                )
+                if session.closing:
+                    raise ResourcesSessionConflictError("Resources session closed during setup")
+            except BaseException:
+                try:
+                    await self._stop_session_sandbox(session_id)
+                    if session.closing:
+                        self._fence_closed_session(session_id, session)
+                except Exception:
+                    LOG.exception("Failed to stop partially seeded Terminal-Bench session %s", session_id)
+                raise
+            request.session[SESSION_ID_KEY] = session_id
+            return session.response
+
+    @contextmanager
+    def _patch_golden_patch_solve_sh(
+        self,
+        task_name: str,
+        local_fpath: Path,
+        patches: Dict[str, List[Tuple[str, str]]],
+        unmatched: set[str],
+    ):
+        if task_name not in patches or local_fpath.suffix != ".sh":
+            yield local_fpath
+            return
+
+        content = local_fpath.read_text()
+        for old, new in patches[task_name]:
+            if old in content:
+                unmatched.discard(old)
+                content = content.replace(old, new)
+
+        with NamedTemporaryFile(mode="w+", suffix=".sh", delete_on_close=False) as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+
+            yield temp_file.name
+
+    async def _upload_folder(
+        self,
+        sandbox: AsyncSandbox,
+        local_dirpath: Path,
+        target_dirpath: str,
+        patches: Dict[str, List[Tuple[str, str]]],
+        task_name: Optional[str] = None,
+    ) -> None:
+        if not local_dirpath.is_absolute():
+            local_dirpath = PARENT_DIR / local_dirpath
+
+        # A patch may match any one script in the folder. One that matches none means the task's scripts changed
+        # (the default benchmark clones upstream unpinned), so warn rather than fail: the stale repair is simply
+        # not applied. A unit test checks that every patch matches the pinned task scripts.
+        unmatched = {old for old, _ in patches.get(task_name, [])}
+        for file in glob("**", root_dir=str(local_dirpath), recursive=True):
+            local_fpath = local_dirpath / file
+            if not local_fpath.is_file():
+                continue
+
+            target_fpath = f"{target_dirpath}/{file}"
+            mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
+            if getattr(mkdir_result, "error_type", None) is not None:
+                raise _VerifierInfraError(
+                    f"Could not prepare upload directory: sandbox error {mkdir_result.error_type}"
+                )
+            if mkdir_result.return_code != 0:
+                raise _VerifierDirError(f"Could not prepare upload directory: {mkdir_result}")
+
+            with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches, unmatched) as new_local_fpath:
+                await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
+
+        if unmatched:
+            print(
+                f"WARNING: {task_name}: patches matched no .sh file under {local_dirpath}; the task scripts may have "
+                f"changed, so these repairs were not applied. Unmatched: {sorted(unmatched)}",
+                file=stderr,
+            )
+
+    async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
+        session_id = request.session.get(SESSION_ID_KEY)
+        if session_id in self._session_id_to_state:
+            async with self._locked_resources_session(session_id) as session:
+                if session.closing or session.request is None or session.response is None:
+                    raise ResourcesSessionConflictError("Resources session is not available for verification")
+                try:
+                    task = TerminalBench21SeedSessionRequest.model_validate(session.request.task_data)
+                    if task != TerminalBench21SeedSessionRequest.model_validate(body.model_dump()):
+                        raise ResourcesSessionConflictError("Verification task does not match the seeded task")
+                    if session.verification_request is not None:
+                        if session.verification_request != body:
+                            raise ResourcesSessionConflictError(
+                                "Verification request does not match the first request"
+                            )
+                        if session.verification_response is None:
+                            # The verifier may have mutated the task before failing.
+                            raise HTTPException(503, "Previous verification did not complete; retry the episode")
+                    else:
+                        session.verification_request = body.model_copy(deep=True)
+                        session.verification_response = await self._verify(request, body)
+                    # Replay a lost response without grading the mutated task twice.
+                    return session.verification_response.model_copy(deep=True)
+                finally:
+                    if session.closing:
+                        try:
+                            await self._stop_session_sandbox(session_id)
+                            self._fence_closed_session(session_id, session)
+                        except Exception:
+                            LOG.exception(
+                                "Failed to stop closing Terminal-Bench session %s after verification", session_id
+                            )
+        if not self.config.is_verifying_golden_patch and session_id not in self._session_id_to_sandbox:
+            raise ResourcesSessionConflictError("Resources session is unknown or closed")
+        try:
+            return await self._verify(request, body)
+        finally:
+            try:
+                await self._stop_session_sandbox(session_id)
+            except Exception:
+                LOG.exception("Failed to stop Terminal-Bench sandbox after legacy verification")
+
+    async def _verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
+        task_folder = Path(body.task_folder)
+
+        if self.config.is_verifying_golden_patch:
+            if self.config.debug:
+                print(f"Creating eval sandbox for {body.task_name}", file=stderr)
+            eval_sandbox = await self._create_sandbox(body)
+            try:
+                cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
+                await self._upload_folder(
+                    eval_sandbox,
+                    task_folder / "solution",
+                    cwd,
+                    GOLDEN_PATCH_SOLVE_SH_PATCHES,
+                    task_name=body.task_name,
+                )
+
+                if self.config.debug:
+                    print(f"Running golden patch for {body.task_name}", file=stderr)
+                golden_patch_result = await eval_sandbox.exec(
+                    f"bash {cwd}/solve.sh",
+                    timeout_s=self.config.evaluation_timeout,
+                    preserve_background_services=True,
+                )
+                golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
+                if self.config.debug:
+                    print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
+                return await self._verify_sandbox(eval_sandbox, body, golden_patch_output=golden_patch_output)
+            finally:
+                try:
+                    await eval_sandbox.stop(timeout_s=self.config.session_close_timeout_seconds)
+                except Exception:
+                    LOG.exception("Failed to stop Terminal-Bench golden-patch sandbox")
+        return await self._verify_sandbox(self._session_id_to_sandbox[request.session[SESSION_ID_KEY]], body)
+
+    async def _verify_sandbox(
+        self,
+        eval_sandbox: AsyncSandbox,
+        body: TerminalBench21VerifyRequest,
+        *,
+        golden_patch_output: str | None = None,
+    ) -> TerminalBench21VerifyResponse:
+        task_folder = Path(body.task_folder)
+        if self.config.debug:
+            print(f"Running tests for {body.task_name}", file=stderr)
+        start_time = time()
+        # An infrastructure failure leaves no verdict on the model: mask the sample instead of scoring it 0.
+        # Only the model's own failures (verifier dir broken, test.sh timeout, no or invalid reward.txt) score 0.
+        failure_cause: BaseException | None = None
+        try:
+            await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
+            # Test scripts write rewards here even if their test runner fails to start.
+            setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
+            if getattr(setup_result, "error_type", None) is not None:
+                raise _VerifierInfraError(f"mkdir /logs/verifier failed: sandbox error {setup_result.error_type}")
+            if setup_result.return_code != 0:
+                raise _VerifierDirError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
+            # A raised TimeoutError is ambiguous (a status poll can time out too): only a result reporting
+            # error_type="timeout" is the test script outrunning its deadline.
+            eval_result = await eval_sandbox.exec(
+                "bash /tests/test.sh",
+                timeout_s=self.config.evaluation_timeout,
+            )
+            error_type = getattr(eval_result, "error_type", None)
+            if error_type not in (None, "timeout"):
+                raise _VerifierInfraError(f"test.sh could not run: sandbox error {error_type}")
+            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+        except _VerifierDirError:
+            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+            eval_result = None
+            test_output = ""
+        except Exception as exc:
+            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+            eval_result = None
+            test_output = ""
+            failure_cause = exc
+        verification_time_taken = time() - start_time
+
+        if self.config.debug:
+            print(f"Test output for {body.task_name}: {test_output}", file=stderr)
+
+        evaluation_completed = False
+        reward_from_pytest_summary = False
+        reward = 0.0
+        if eval_result is not None:
+            try:
+                with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
+                    try:
+                        await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    except Exception as download_exc:
+                        # Typed or not, a failed download does not say the file is missing (OpenSandbox reports a
+                        # missing file as a typed 404 too): it is a failed grade only when the sandbox itself
+                        # confirms that reward.txt is absent.
+                        if await self._reward_file_exists(eval_sandbox):
+                            failure_cause = download_exc
+                        raise
+                    # Providers such as Docker can replace the destination file during download.
+                    reward = float(Path(temp_file.name).read_text())
+
+                evaluation_completed = True
+            except Exception:
+                if self.config.debug:
+                    print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
+                # test.sh exited without a readable reward.txt, typically because a failing pytest ended it under
+                # set -e before it wrote one. A failing pytest summary is a verdict on the model: grade 0. A timed-out
+                # run did not exit, so its partial output says nothing about the test run and it stays ungraded.
+                if (
+                    failure_cause is None
+                    and self.config.score_pytest_failures_without_reward
+                    and eval_result.return_code != 0
+                    and getattr(eval_result, "error_type", None) is None
+                    and pytest_reported_failure(test_output)
+                ):
+                    evaluation_completed = True
+                    reward_from_pytest_summary = True
+
+        failure_reason: str | None = None
+        counts_as_zero = False
+        outcome_action: OutcomeAction | None = None
+        outcome_attribution: FailureClass | None = None
+        # A typed provider failure keeps its kind; only a verifier-side failure is a verifier_error.
+        failure_kind = failure_cause.failure_kind if isinstance(failure_cause, NgFailureEvent) else VERIFIER_ERROR
+        if failure_cause is not None:
+            failure_reason = _verifier_failure_reason(failure_cause)
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=failure_kind,
+                http_status=failure_cause.http_status if isinstance(failure_cause, NgFailureEvent) else None,
+                failure_reason=failure_reason,
+                operation="verify",
+                operation_id=current_verifier_invocation_id() or body.task_name,
+                stage="verification",
+                exception_type=type(failure_cause).__name__,
+            )
+            # The caught exception is the cause: a provider event keeps its id, kind, status and details.
+            failure.__cause__ = failure_cause
+            observe_failure(failure)
+            evaluation_completed = False
+            reward = 0.0
+            # The configured policy decides whether the failed verification is masked or a scored zero. The applied
+            # decision is part of the result, so a saved row and its recovery read it instead of inferring it.
+            outcome_action = failure_outcome_policy(failure, config=self.config.outcome_policy)
+            outcome_attribution = classify_failure(
+                failure_kind=failure.failure_kind, stage=failure.stage, http_status=failure.http_status
+            )
+            counts_as_zero = outcome_action == OutcomeAction.COUNT_AS_ZERO
+
+        return TerminalBench21VerifyResponse(
+            **body.model_dump(),
+            evaluation_completed=evaluation_completed,
+            reward=reward,
+            verification_time_taken=verification_time_taken,
+            test_output=test_output,
+            reward_from_pytest_summary=reward_from_pytest_summary,
+            golden_patch_output=golden_patch_output,
+            mask_sample=failure_reason is not None and not counts_as_zero,
+            failure_kind=failure_kind if failure_reason is not None else None,
+            failure_reason=failure_reason,
+            failure_outcome_action=outcome_action,
+            failure_outcome_attribution=outcome_attribution,
+        )
+
+    async def _reward_file_exists(self, eval_sandbox: AsyncSandbox) -> bool:
+        """After a failed reward download: True unless `test -f` answers (exit 1) that the file is absent."""
+        try:
+            probe = await eval_sandbox.exec("test -f /logs/verifier/reward.txt", timeout_s=30)
+        except Exception:
+            return True
+        return getattr(probe, "error_type", None) is not None or probe.return_code != 1
+
+
+if __name__ == "__main__":
+    TerminalBench21ResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TerminalBench21ResourcesServer.run_webserver()  # noqa: F401

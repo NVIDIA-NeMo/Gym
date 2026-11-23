@@ -12,9 +12,9 @@
 # nemotron_3_ultra_dev_nemorl_gb200.yaml for an MTP example, or vLLM's docs:
 #   https://docs.vllm.ai/en/latest/features/spec_decode.html
 #
-# This config inherits everything from Qwen3-30B-A3B-Instruct-2507.yaml and
-# adds the speculative_config block — the diff vs the non-spec-decode config
-# is exactly the 4-line `speculative_config:` entry below.
+# This config mirrors Qwen3-30B-A3B-Instruct-2507.yaml and enables ngram
+# speculative decoding. SPEED-Bench enables per-request acceptance metrics
+# automatically when this model is bound to the benchmark.
 Qwen3-30B-A3B-Instruct-2507-ngram-specdec:
   responses_api_models:
     local_vllm_model:
@@ -52,8 +52,7 @@ Qwen3-30B-A3B-Instruct-2507-ngram-specdec:
 
         # Speculative decoding via vLLM's ngram method. No draft model needed —
         # the ngram lookup hits the prompt cache for short repeated sequences.
-        # `speed_bench` reads `vllm:spec_decode_*` Prometheus counters from
-        # this server's /metrics endpoint to derive acceptance length / rate.
+        # `speed_bench` reads acceptance counts from each generation response.
         speculative_config:
           method: ngram
           num_speculative_tokens: 3

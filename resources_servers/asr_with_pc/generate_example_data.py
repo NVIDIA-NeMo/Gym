@@ -7,7 +7,7 @@
 
 Produces 5 example rows. Each row has:
   * a 1-second silence WAV data-URI in
-    ``responses_create_params.metadata.audio_url`` (the audio sidechannel
+    ``responses_create_params.metadata.audio_data`` (the audio sidechannel
     that ``vllm_model`` reads at request time)
   * pre-baked ``responses_create_params.input`` (system + user messages),
     because the resource server's example dataset is wired without a
@@ -22,10 +22,8 @@ import argparse
 import base64
 import io
 import json
+import wave
 from pathlib import Path
-
-import numpy as np
-import soundfile as sf
 
 
 # Same prompt strings the benchmarks/librispeech_pc/prompts/default.yaml
@@ -47,9 +45,13 @@ SAMPLE_TRANSCRIPTS = [
 
 
 def _silent_wav_base64(duration_sec: float = 1.0, sample_rate: int = 16000) -> str:
-    audio = np.zeros(int(duration_sec * sample_rate), dtype=np.int16)
+    frame_count = int(duration_sec * sample_rate)
     buf = io.BytesIO()
-    sf.write(buf, audio, sample_rate, format="WAV", subtype="PCM_16")
+    with wave.open(buf, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * frame_count)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -61,7 +63,7 @@ def make_example(sample_id: str, expected_answer: str) -> dict:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT},
             ],
-            "metadata": {"audio_url": f"data:audio/wav;base64,{audio_b64}"},
+            "metadata": {"audio_data": f"data:audio/wav;base64,{audio_b64}"},
         },
         "expected_answer": expected_answer,
         "sample_id": sample_id,

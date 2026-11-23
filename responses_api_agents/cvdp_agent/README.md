@@ -1,5 +1,7 @@
 # CVDP Agent
 
+For heavy repository tasks, follow the [CVDP heavy preparation and run procedure](https://docs.nvidia.com/nemo/gym/main/build-verifiers/verification-patterns/execution-and-state-match#cvdp-heavy-repository-tasks).
+
 Agents for the **CVDP** (Comprehensive Verilog Design Problems) benchmark — hardware
 (RTL/SystemVerilog) design and code-comprehension tasks. All flavors here share the same
 CVDP resources server, which owns task data, verification, and reward computation. See
@@ -171,8 +173,10 @@ Kept as a plain, lintable module rather than a string template.
   - `_portable_python.sh` — shared base: downloads a relocatable CPython and `pip install`s
   nemo_gym into `$DEPS_DIR`. (Leading underscore = sourced helper, not run directly.)
   - `claude_code_agent_deps.sh` — adds portable Node + the `@anthropic-ai/claude-code` CLI.
-  - `hermes_agent_deps.sh` — adds the `hermes-agent` Python package (version pinned from
-  `responses_api_agents/hermes_agent/requirements.txt`).
+  - `hermes_agent_deps.sh` — builds the separate Hermes Python 3.14 runtime under `$DEPS_DIR/hermes-runtime`
+  from the source pinned in `responses_api_agents/hermes_agent/pyproject.toml` (`HERMES_SPEC` overrides it).
+  The build runs on the Agent Server host, so the task sandbox must share its architecture, and task images
+  need glibc 2.28 or newer.
   - `opencode_agent_deps.sh`: adds portable Node and the pinned `opencode-ai` CLI.
 - `**configs/cvdp_agent_generic_claude.yaml**`, `**configs/cvdp_agent_generic_hermes.yaml**`,
 `**configs/cvdp_agent_generic_opencode.yaml**`

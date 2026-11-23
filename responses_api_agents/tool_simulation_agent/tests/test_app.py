@@ -18,12 +18,31 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from pytest import fixture, raises
+from pytest import fixture
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.agents import raises_agent_failure
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.tool_simulation_agent.app import ToolSimulationAgent, ToolSimulationAgentConfig
+
+
+def _drop_nulls(value):
+    """Remove dictionary entries with a value of ``None`` recursively.
+
+    SDK releases can add optional response fields.
+    Exact payload comparisons should ignore these unset fields.
+    Expected non-null values remain part of the comparison.
+    """
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
+def _calls_without_nulls(calls):
+    return [(c.args, _drop_nulls(c.kwargs)) for c in calls]
 
 
 class TestApp:
@@ -87,7 +106,7 @@ class TestApp:
             "id": "no_created_at",
         }
         self._set_server_client_post_responses(server_client_post_mock, no_time_response_object)
-        with raises(RuntimeError, match="Received an invalid response from the model server: "):
+        with raises_agent_failure(RuntimeError, match="Received an invalid response from the model server: "):
             test_client.post(
                 "/v1/responses",
                 json={
@@ -187,7 +206,7 @@ class TestApp:
             "usage": None,
             "user": None,
         }
-        assert chat_response.json() == expected_chat_response_json
+        assert _drop_nulls(expected_chat_response_json) == _drop_nulls(chat_response.json())
         server_client_post_mock.assert_called_once_with(
             server_name="model_server",
             url_path="/v1/responses",
@@ -216,7 +235,7 @@ class TestApp:
             "id": "no_model",
         }
         self._set_server_client_post_responses(server_client_post_mock, no_model_response_object)
-        with raises(ValidationError, match="ToolSimulationAgentVerifyRequest"):
+        with raises_agent_failure(ValidationError, match="ToolSimulationAgentVerifyRequest"):
             test_client.post(
                 "/run",
                 json={
@@ -229,6 +248,7 @@ class TestApp:
         server_client_post_mock.assert_called_once_with(
             server_name="tool_agent",
             url_path="/v1/responses",
+            headers={},
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[],
             ),
@@ -266,7 +286,7 @@ class TestApp:
         self._set_server_client_post_responses(
             server_client_post_mock, tool_call_response_object, invalid_verify_response_object
         )
-        with raises(ValidationError, match="ToolSimulationAgentVerifyResponse"):
+        with raises_agent_failure(ValidationError, match="ToolSimulationAgentVerifyResponse"):
             test_client.post(
                 "/run",
                 json={
@@ -327,6 +347,7 @@ class TestApp:
             call(
                 server_name="tool_agent",
                 url_path="/v1/responses",
+                headers={},
                 json=NeMoGymResponseCreateParamsNonStreaming(
                     input=[
                         NeMoGymEasyInputMessage(
@@ -376,7 +397,9 @@ class TestApp:
                 },
             ),
         ]
-        assert server_client_post_mock.call_args_list == expected_invalid_verify_response_calls
+        assert _calls_without_nulls(server_client_post_mock.call_args_list) == _calls_without_nulls(
+            expected_invalid_verify_response_calls
+        )
 
         valid_verify_response_object = {
             "responses_create_params": {
@@ -444,9 +467,14 @@ class TestApp:
             },
             "response": full_tool_call_response,
             "reward": 1,
+            "mask_sample": False,
+            "failure_kind": None,
+            "failure_reason": None,
         }
-        assert valid_verify_response.json() == expected_valid_verify_response_json
-        assert server_client_post_mock.call_args_list == expected_invalid_verify_response_calls
+        assert _drop_nulls(expected_valid_verify_response_json) == _drop_nulls(valid_verify_response.json())
+        assert _calls_without_nulls(server_client_post_mock.call_args_list) == _calls_without_nulls(
+            expected_invalid_verify_response_calls
+        )
 
     async def test_run_skip_verification_uses_configured_reward(self, agent_config: ToolSimulationAgentConfig) -> None:
         server_client_post_mock = AsyncMock()
@@ -498,6 +526,7 @@ class TestApp:
         server_client_post_mock.assert_called_once_with(
             server_name="tool_agent",
             url_path="/v1/responses",
+            headers={},
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[
                     NeMoGymEasyInputMessage(

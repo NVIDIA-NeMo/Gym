@@ -12,18 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    ModelCallSampling,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
+    encode_model_sampling,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.mini_swe_agent.app import (
     MiniSWEAgent,
     MiniSWEAgentConfig,
@@ -113,10 +117,8 @@ def create_test_config(
     )
 
 
-def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
-    mock_server_client_instance = MagicMock()
-    mock_server_client_instance.global_config_dict = {"policy_model_name": "test_model"}
-    mock_load_from_global_config.return_value = mock_server_client_instance
+def setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict):
+    mock_server_client.global_config_dict = {"policy_model_name": "test_model"}
 
     mock_get_first_server_config_dict.return_value = {
         "host": "0.0.0.0",
@@ -220,7 +222,6 @@ class TestApp:
         config = create_test_config(model_name="", cache_dir_template="/")
         MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
@@ -231,7 +232,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Test successful execution of the run method with mocked run_swegym."""
 
@@ -239,17 +239,55 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
         setup_run_swegym_mock(mock_to_thread, mock_runner_ray_remote)
 
         run_request = create_run_request()
 
+        run_request.responses_create_params.max_output_tokens = 32
+        with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+            await server.run(run_request)
+        assert refused.value.status_code == 422
+        mock_get_config_path.assert_not_called()
+        mock_runner_ray_remote.remote.assert_not_called()
+        mock_to_thread.assert_not_called()
+
+        run_request.responses_create_params.max_output_tokens = None
         response = await server.run(run_request)
 
         assert_run_response(response)
 
         assert_run_swegym_called(mock_to_thread)
+
+    @pytest.mark.parametrize("sampled", [False, True])
+    @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
+    @patch("asyncio.to_thread")
+    async def test_run_puts_the_rollouts_sampling_values_in_the_model_url(
+        self,
+        mock_to_thread,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        sampled,
+    ) -> None:
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=create_test_config(), server_client=mock_server_client)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
+        setup_config_path_mock(mock_get_config_path)
+        setup_run_swegym_mock(mock_to_thread, mock_runner_ray_remote)
+        sampling = ModelCallSampling(temperature=1.0, top_p=1.0, max_output_tokens=8192)
+        run_request = create_run_request()
+        if sampled:
+            run_request = run_request.model_copy(update={"model_sampling": sampling})
+
+        await server.run(run_request)
+
+        params = mock_runner_ray_remote.remote.call_args.args[1]
+        segment = f"/ng-sampling/{encode_model_sampling(sampling)}" if sampled else ""
+        assert params["base_url"] == f"http://0.0.0.0:8080{segment}/v1"
 
     def test_chat_cmp_to_responses_preserves_routed_experts(self) -> None:
         routed_experts = [
@@ -276,7 +314,6 @@ class TestApp:
 
         assert output[1]["routed_experts"] == routed_experts
 
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
@@ -287,7 +324,6 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Test run method when run_swegym fails."""
 
@@ -295,7 +331,7 @@ class TestApp:
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         # Mock Ray remote function
@@ -319,7 +355,6 @@ class TestApp:
 
         assert_run_swegym_called(mock_to_thread, instance_id="test_instance_456")
 
-    @patch("responses_api_agents.mini_swe_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.mini_swe_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote")
@@ -330,13 +365,12 @@ class TestApp:
         mock_runner_ray_remote,
         mock_get_config_path,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         config = create_test_config(env="docker")
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
         setup_config_path_mock(mock_get_config_path)
 
         # Mock Ray remote function
@@ -360,15 +394,26 @@ class TestApp:
 
         assert_run_swegym_called(mock_to_thread, instance_id="test_instance_789")
 
-    async def test_responses_not_implemented(self) -> None:
+    async def test_responses_without_an_agent_session_have_no_host_path(self) -> None:
         config = create_test_config(env="docker")
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
 
-        request_body = NeMoGymResponseCreateParamsNonStreaming(temperature=0.7, top_p=0.9, input=[])
+        request_body = NeMoGymResponseCreateParamsNonStreaming(temperature=0.7, top_p=0.9, input="task")
 
-        with pytest.raises(NotImplementedError):
-            await server.responses(request_body)
+        with pytest.raises(HTTPException, match="require an agent session") as error:
+            await server.responses(SimpleNamespace(session={}, path_params={}), request_body)
+        assert error.value.status_code == 422
+
+    async def test_run_without_env_is_refused_before_starting_ray(self) -> None:
+        config = create_test_config(env=None)
+        server = MiniSWEAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        with patch("responses_api_agents.mini_swe_agent.app.runner_ray_remote") as mock_runner_ray_remote:
+            with pytest.raises(HTTPException, match="requires env") as error:
+                await server.run(create_run_request())
+        assert error.value.status_code == 422
+        mock_runner_ray_remote.remote.assert_not_called()
 
     def test_endpoints_registration(self) -> None:
         config = create_test_config(env="docker")
@@ -378,8 +423,10 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app, raise_server_exceptions=False)
 
-        response = client.post("/v1/responses", json={"temperature": 0.7, "top_p": 0.9, "input": []})
-        assert response.status_code == 500
+        response = client.post("/v1/responses", json={"temperature": 0.7, "top_p": 0.9, "input": "task"})
+        assert response.status_code == 422
 
         run_response = client.post("/run", json={})
         assert run_response.status_code != 404
+        paths = {route.path for route in app.routes}
+        assert {"/v1/agent_sessions", "/v1/agent_sessions/close", "/ng-rollout/{rollout_id}/v1/responses"} <= paths

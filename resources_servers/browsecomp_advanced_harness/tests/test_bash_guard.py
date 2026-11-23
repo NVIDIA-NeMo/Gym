@@ -14,7 +14,7 @@
 # limitations under the License.
 """Tests for the read-only bash_command guards (terminal mode).
 
-Ported byte-for-byte from the bc_frankie_bash_tool harness @ ee72d54
+Ported byte-for-byte from an internal reference harness
 (tests/test_bash_denylist.py + tests/test_bash_allowlist.py). Two always-on
 layers run before any subprocess in `_run_bash_readonly`: the deny-list first
 (specific reasons), then the default-deny read-only allow-list (catch-all).
@@ -27,9 +27,9 @@ import asyncio
 import os
 from unittest.mock import MagicMock
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.browsecomp_advanced_harness.app import (
     TavilySearchResourcesServer,
     TavilySearchResourcesServerConfig,
@@ -167,6 +167,7 @@ def _server() -> TavilySearchResourcesServer:
         port=8080,
         entrypoint="",
         name="",
+        allow_host_execution=True,
         tavily_api_key="test_api_key",  # pragma: allowlist secret
         exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),

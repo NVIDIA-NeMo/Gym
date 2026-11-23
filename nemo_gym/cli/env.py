@@ -13,32 +13,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
+import importlib.util
 import json
 import os
+import re
 import shlex
+import signal
 import sys
+import traceback
+from functools import cache
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
-from signal import SIGINT
-from subprocess import Popen, TimeoutExpired
+from subprocess import Popen
 from tempfile import TemporaryDirectory
-from threading import Thread
-from time import monotonic, sleep, time
-from typing import Dict, List, Optional, Tuple
+from time import time
+from types import FrameType
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
-import requests
 import rich
-import uvicorn
-from devtools import pprint
-from omegaconf import DictConfig, ListConfig, OmegaConf
-from pydantic import Field
+from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import OmegaConfBaseException
+from omegaconf.resolvers.oc import env as _oc_env
+from pydantic import BaseModel, Field, ValidationError
+from rich.markup import escape
 from rich.table import Table
 from tqdm.auto import tqdm
 
-from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
+from nemo_gym import PARENT_DIR, component_search_roots
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -47,7 +50,18 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
+from nemo_gym.config.global_config import (
+    COMPONENT_NAME_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    JSON_OUTPUT_KEY_NAME,
+    NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    QUERY_KEY_NAME,
+    SERVER_TYPE_KEYS,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    get_global_config_dict,
+)
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -55,249 +69,28 @@ from nemo_gym.environment.onboarding import (
     prepare_verifier_run,
 )
 from nemo_gym.environment.publication import finalize_publication
-from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
-from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
-from nemo_gym.global_config import (
-    COMPONENT_NAME_KEY_NAME,
-    DRY_RUN_KEY_NAME,
-    JSON_OUTPUT_KEY_NAME,
-    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
-    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
-    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
-    QUERY_KEY_NAME,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-    get_global_config_dict,
-)
-from nemo_gym.registry import (
+from nemo_gym.environment.registry import (
     EnvironmentCatalogEntry,
+    RegistryError,
     discover_environment_catalog,
+    manifest_workloads_for_server,
     read_environment_details,
     resolve_catalog_entry,
 )
-from nemo_gym.server_status import StatusCommand
-from nemo_gym.server_utils import (
-    HEAD_SERVER_KEY_NAME,
-    HeadServer,
-    ServerClient,
-    ServerInstanceDisplayConfig,
-    ServerStatus,
-    initialize_ray,
+from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
+from nemo_gym.environment.validation import (
+    EnvironmentValidationReport,
+    resolve_config_servers,
+    validate_environment,
 )
-
-
-# Grace period after SIGINT before escalating to SIGKILL. Kept short so Ctrl-C is responsive.
-_GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
-# Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
-_FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
-
-
-# Model servers name their upstream endpoint inconsistently: `openai_base_url` (openai_model,
-# azure_openai_model), `base_url` (inference_provider, vllm_model, and the local vLLM servers),
-# `anthropic_base_url`. Matching on the shape of the key rather than a fixed list also covers
-# configs that carry a provider URL literally instead of interpolating `policy_base_url`, which
-# most inference_provider variants do.
-_MODEL_SERVER_TYPE = "responses_api_models"
-_BASE_URL_KEY_SUFFIX = "base_url"
-_ENDPOINT_PROBE_TIMEOUT_SEC: float = 5.0
-_ENDPOINT_POLL_INTERVAL_SEC: float = 3.0
-
-# What a probe found. The distinction that matters is whether waiting could change the answer: a
-# name that does not resolve will not start resolving, while a refused connection may be a server
-# that is still coming up.
-_ENDPOINT_ANSWERING = "answering"
-_ENDPOINT_REFUSED = "refused"
-_ENDPOINT_UNRESOLVABLE = "unresolvable"
-
-
-def _collect_model_endpoints(global_config_dict: DictConfig) -> List[Tuple[str, str]]:
-    """The upstream model endpoints named in the resolved config, as (config key, url) pairs.
-
-    `wait_for_spinup` only polls Gym's own servers, and the Gym-side model server answers as soon
-    as it starts whether or not anything is behind it, so these are the URLs nothing checks.
-
-    `base_url` is typed `Union[str, List[str]]` on vllm_model and the local vLLM servers, where the
-    list form spreads load across replicas. The local ones default to an empty list and are filled
-    in after Gym launches vLLM, so an empty list means "not yet" rather than "misconfigured" and is
-    skipped, as is an unset value.
-
-    The key travels with the url because the endpoint that fails may be a judge or user model, and
-    a message naming `policy_base_url` would then be wrong.
-    """
-    endpoints: List[Tuple[str, str]] = []
-    seen: set[str] = set()
-    for top_level_path, top_level_value in global_config_dict.items():
-        if top_level_path in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS or not isinstance(top_level_value, DictConfig):
-            continue
-
-        model_servers = top_level_value.get(_MODEL_SERVER_TYPE)
-        if not isinstance(model_servers, DictConfig):
-            continue
-
-        for server_config_dict in model_servers.values():
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-
-            for key, value in server_config_dict.items():
-                if not str(key).endswith(_BASE_URL_KEY_SUFFIX):
-                    continue
-
-                urls = (
-                    [value] if isinstance(value, str) else list(value) if isinstance(value, (list, ListConfig)) else []
-                )
-                for url in urls:
-                    if not isinstance(url, str) or not url:
-                        continue
-                    # `http://x/v1` and `http://x/v1/` probe the same place.
-                    trimmed = url.rstrip("/")
-                    if trimmed in seen:
-                        continue
-                    seen.add(trimmed)
-                    endpoints.append((str(key), url))
-
-    return endpoints
-
-
-def _endpoint_probe_url(base_url: str) -> str:
-    """What to GET to find out whether `base_url` is being served.
-
-    `GET /v1/models` is part of the OpenAI API, so most endpoints behind a `/v1` base URL answer it,
-    but nothing here depends on that: any HTTP response counts as answering, so an endpoint without
-    it replies 404 and still passes. URLs that do not end in `/v1` are probed at their root.
-    """
-    trimmed = base_url.rstrip("/")
-    return f"{trimmed}/models" if trimmed.endswith("/v1") else trimmed
-
-
-def _is_dns_failure(error: BaseException) -> bool:
-    """Whether a `requests` connection error was a name that does not resolve.
-
-    `requests` reports this as a `ConnectionError` like any other, with the resolver failure nested
-    inside, so the cause chain has to be walked rather than the class inspected.
-    """
-    seen = set()
-    while error is not None and id(error) not in seen:
-        seen.add(id(error))
-        if type(error).__name__ in ("NameResolutionError", "gaierror"):
-            return True
-        nested = next((arg for arg in getattr(error, "args", ()) if isinstance(arg, BaseException)), None)
-        error = nested or error.__cause__ or error.__context__
-    return False
-
-
-def _probe_endpoint(base_url: str, timeout_seconds: float = _ENDPOINT_PROBE_TIMEOUT_SEC) -> str:
-    """Whether anything answers at `base_url`, and if not, whether waiting could help.
-
-    Answering is the bar, not healthy: a 401 or 404 means something is there, and requiring a 200
-    would reject endpoints that need auth. A completed TLS handshake counts too, even against a
-    certificate this process does not trust, which is why `SSLError` is checked before
-    `ConnectionError` it inherits from.
-    """
-    try:
-        requests.get(_endpoint_probe_url(base_url), timeout=timeout_seconds)
-        return _ENDPOINT_ANSWERING
-    except requests.exceptions.SSLError:
-        return _ENDPOINT_ANSWERING
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-        return _ENDPOINT_UNRESOLVABLE if _is_dns_failure(e) else _ENDPOINT_REFUSED
-    except requests.exceptions.RequestException:
-        # Not probeable at all, such as a bad scheme or a redirect loop. Not a reason to hold up
-        # startup; the request path reports it if it matters.
-        return _ENDPOINT_ANSWERING
-
-
-def _wait_for_model_endpoints(
-    endpoints: List[Tuple[str, str]],
-    timeout_seconds: float,
-    poll_interval_seconds: float = _ENDPOINT_POLL_INTERVAL_SEC,
-    monotonic=monotonic,
-    sleep_fn=sleep,
-) -> List[Tuple[str, str]]:
-    """Wait for every endpoint to answer. Returns the ones that never did.
-
-    Unresolvable names are reported once and not waited on. Refused connections are waited on,
-    because an inference server can take minutes to load weights and someone who starts thirty
-    seconds early should not have to start over.
-    """
-    if timeout_seconds <= 0 or not endpoints:
-        return []
-
-    # The clock starts before the first round, not after it. That round is not free: an
-    # unresolvable name costs a full resolver timeout, so several of them would otherwise push the
-    # real wall time well past the bound the caller asked for.
-    started_at = monotonic()
-
-    waiting = []
-    for key, url in endpoints:
-        result = _probe_endpoint(url)
-        if result == _ENDPOINT_UNRESOLVABLE:
-            print(
-                f"Model endpoint {url} ({key}) does not resolve. Waiting cannot fix a hostname, so it is not retried."
-            )
-        elif result == _ENDPOINT_REFUSED:
-            waiting.append((key, url))
-    if not waiting:
-        return []
-
-    print(
-        f"Waiting for {len(waiting)} model endpoint(s) to answer: "
-        + ", ".join(f"{url} ({key})" for key, url in waiting)
-        + f"\nIf an inference server is still loading weights this is expected. Waiting up to {timeout_seconds:.0f}s..."
-    )
-
-    poll_count = 0
-    while True:
-        if monotonic() - started_at >= timeout_seconds:
-            return waiting
-
-        sleep_fn(poll_interval_seconds)
-        waiting = [(key, url) for key, url in waiting if _probe_endpoint(url) != _ENDPOINT_ANSWERING]
-        if not waiting:
-            print(f"All model endpoints are answering after {monotonic() - started_at:.0f}s.")
-            return []
-
-        poll_count += 1
-        if poll_count % 10 == 0:
-            print(f"  still waiting, {monotonic() - started_at:.0f}s elapsed")
-
-
-# Matches the value `GlobalConfigDictParser` sets, so a caller that builds a config without going
-# through the parser gets the same behaviour instead of silently skipping the check.
-_DEFAULT_MODEL_ENDPOINT_READINESS_TIMEOUT_SEC: float = 600.0
-
-
-def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
-    """How long to wait for model endpoints, from config. 0 or a negative value skips the check.
-
-    An unset key falls back to the same default the config parser applies. A value that is not a
-    number is a configuration mistake, so it is reported as one rather than surfacing as a
-    `ValueError` traceback from `float()`.
-    """
-    value = global_config_dict.get(MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME)
-    if value is None:
-        return _DEFAULT_MODEL_ENDPOINT_READINESS_TIMEOUT_SEC
-
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        raise ConfigError(
-            f"`{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` must be a number of seconds, got {value!r}. "
-            "Set it to 0 to skip waiting for model endpoints."
-        ) from None
-
-
-def _resolve_server_dir(rel_path: Path) -> Path:
-    """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
-
-    Searches NEMO_GYM_EXTRA_ROOTS, the current working directory (a user's local server), then the Gym
-    install root (``PARENT_DIR``) where built-in servers live in both editable and wheel installs. A
-    directory counts as a server only if it ships an install marker for one of our two venv setups. This
-    lets ``gym env test`` find and run built-in (and plugin) servers from any cwd, not just a repo checkout.
-    """
-    return _resolve_under_cwd_or_install(
-        rel_path, validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists()
-    )
+from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
+from nemo_gym.server_runtime.server_status import StatusCommand
+from nemo_gym.server_runtime.supervisor.server_supervisor import (
+    ServerSupervisor,
+    _configured_servers,
+    _resolve_server_dir,
+)
+from nemo_gym.server_runtime.supervisor.server_venv import get_venv_path, run_command, setup_env_command
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -356,342 +149,6 @@ class TestConfig(RunConfig):
         return _resolve_server_dir(self._dir_path)
 
 
-class RunHelper:  # pragma: no cover
-    _head_server: uvicorn.Server
-    _head_server_thread: Thread
-    _head_server_instance: HeadServer
-
-    _processes: Dict[str, Popen]
-    _server_instance_display_configs: List[ServerInstanceDisplayConfig]
-    _server_client: ServerClient
-
-    def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
-        global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
-
-        # Fail fast before starting Ray if nothing is configured to run (covers env run and the
-        # e2e rollout-collection path, which both start servers via this method).
-        GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
-
-        # Initialize Ray cluster in the main process
-        # Note: This function will modify the global config dict - update `ray_head_node_address`
-        initialize_ray()
-
-        # Assume Nemo Gym Run is for a single agent.
-        escaped_config_dict_yaml_str = shlex.quote(OmegaConf.to_yaml(global_config_dict))
-
-        # We always run the head server in this `run` command.
-        self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
-
-        top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
-
-        self._processes: Dict[str, Popen] = dict()
-        self._server_instance_display_configs: List[ServerInstanceDisplayConfig] = []
-
-        start_time = time()
-
-        # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
-        for top_level_path in top_level_paths:
-            server_config_dict = global_config_dict[top_level_path]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-
-            first_key = list(server_config_dict)[0]
-            server_config_dict = server_config_dict[first_key]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-            second_key = list(server_config_dict)[0]
-            server_config_dict = server_config_dict[second_key]
-            if not isinstance(server_config_dict, DictConfig):
-                continue
-
-            if "entrypoint" not in server_config_dict:
-                continue
-
-            # TODO: This currently only handles relative entrypoints. Later on we can resolve the absolute path.
-            entrypoint_fpath = Path(server_config_dict.entrypoint)
-            assert not entrypoint_fpath.is_absolute()
-
-            # Resolve cwd-first (a local server), else the install location for built-ins.
-            dir_path = _resolve_server_dir(Path(first_key, second_key))
-
-            command = f"""{setup_env_command(dir_path, global_config_dict, top_level_path)} \\
-    && {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME}={escaped_config_dict_yaml_str} \\
-    {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME}={shlex.quote(top_level_path)} \\
-    python {str(entrypoint_fpath)}"""
-
-            process = run_command(command, dir_path, server_name=top_level_path)
-            self._processes[top_level_path] = process
-            # In dry run mode, wait for each setup command to finish before starting the next.
-            # This installs uv virtual environments serially, which significantly reduces uv
-            # cache size. For Nemotron's set of environments, parallel installation can produce
-            # a cache 10-20GB larger than serial installation.
-            if global_config_dict[DRY_RUN_KEY_NAME]:
-                print("DRY_RUN enabled: setup commands are run serially")
-                process.communicate()
-
-            host = server_config_dict.get("host")
-            port = server_config_dict.get("port")
-
-            self._server_instance_display_configs.append(
-                ServerInstanceDisplayConfig(
-                    process_name=top_level_path,
-                    server_type=first_key,
-                    name=second_key,
-                    dir_path=str(dir_path),
-                    entrypoint=str(entrypoint_fpath),
-                    host=host,
-                    port=port,
-                    url=f"http://{host}:{port}" if host and port else None,
-                    pid=process.pid,
-                    config_path=top_level_path,
-                    start_time=start_time,
-                )
-            )
-
-        self._head_server_instance.set_server_instances(
-            [inst.model_dump(mode="json") for inst in self._server_instance_display_configs]
-        )
-
-        self._server_client = ServerClient(
-            head_server_config=ServerClient.load_head_server_config(),
-            global_config_dict=global_config_dict,
-        )
-
-        print("Waiting for head server to spin up")
-        poll_count = 0
-        while True:
-            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
-            if status == "success":
-                break
-
-            if poll_count % 10 == 0:  # Print every 30s
-                print(f"Head server is not up yet (status `{status}`). Sleeping...")
-
-            poll_count += 1
-            sleep(3)
-
-        print("Waiting for servers to spin up")
-        if global_config_dict[DRY_RUN_KEY_NAME]:
-            self.wait_for_dry_run_spinup()
-        else:
-            self.wait_for_spinup()
-            self.wait_for_model_endpoints(global_config_dict)
-
-    def display_server_instance_info(self) -> None:
-        if not self._server_instance_display_configs:
-            print("No server instances to display.")
-            return
-
-        print(f"""
-{"#" * 100}
-#
-# Server Instances
-#
-{"#" * 100}
-""")
-
-        for i, inst in enumerate(self._server_instance_display_configs, 1):
-            print(f"[{i}] {inst.process_name} ({inst.server_type}/{inst.name})")
-            pprint(inst.model_dump(mode="json", exclude={"start_time", "status", "uptime_seconds"}))
-        print(f"{'#' * 100}\n")
-
-    def poll(self) -> None:
-        if not self._head_server_thread.is_alive():
-            raise RuntimeError("Head server finished unexpectedly!")
-
-        for process_name, process in self._processes.items():
-            if process.poll() is not None:
-                proc_out, proc_err = process.communicate()
-                print_str = f"Process `{process_name}` finished unexpectedly!"
-
-                if isinstance(proc_out, bytes):
-                    proc_out = proc_out.decode("utf-8")
-                    print_str = f"""{print_str}
-Process `{process_name}` stdout:
-{proc_out}
-"""
-                if isinstance(proc_err, bytes):
-                    proc_err = proc_err.decode("utf-8")
-                    print_str = f"""{print_str}
-Process `{process_name}` stderr:
-{proc_err}"""
-
-                raise RuntimeError(print_str)
-
-    def wait_for_dry_run_spinup(self) -> None:
-        """Wait for every dry-run process to finish, and fail if any of them did.
-
-        A dry run builds each server's venv and exits, so unlike poll() a finished process is the
-        expected outcome here and only the exit code separates success from failure.
-        The code has to be checked: uv creates the venv before installing into it, so a failed
-        install still leaves an interpreter and an activate script behind.
-        That venv then satisfies skip_venv_if_present on the next run, and the first symptom is an
-        ImportError from a server long after the install that caused it.
-        """
-        sleep_interval = 3
-
-        failures: List[Tuple[str, int]] = []
-        remaining_processes = list(self._processes.items())
-        while remaining_processes:
-            for i in reversed(range(len(remaining_processes))):
-                process_name, process = remaining_processes[i]
-                returncode = process.poll()
-                if returncode is not None:
-                    if returncode != 0:
-                        failures.append((process_name, returncode))
-                    remaining_processes.pop(i)
-
-            if remaining_processes:
-                sleep(sleep_interval)
-
-        if failures:
-            raise RuntimeError(
-                "Dry run failed to set up "
-                + ("1 server" if len(failures) == 1 else f"{len(failures)} servers")
-                + ". Each server's output is above, prefixed with its name:\n"
-                + "\n".join(f"  `{name}` exited with {code}" for name, code in failures)
-            )
-
-    def wait_for_spinup(self) -> None:
-        sleep_interval = 3
-        poll_count = 0
-        successful_servers = []
-        total_servers = len(self._server_instance_display_configs)
-
-        # Until we spin up or error out.
-        while True:
-            self.poll()
-            statuses = self.check_http_server_statuses(successful_servers)
-            successful_servers.extend(s for s, status in statuses if status == "success")
-
-            waiting = []
-            for name, status in statuses:
-                if status != "success":
-                    waiting.append(name)
-
-            if len(successful_servers) != total_servers:
-                if poll_count % 10 == 0:  # Print every sleep_interval * poll_count = 3 * 10 = 30s
-                    print(
-                        f"""Checking for HTTP server statuses.
-{len(successful_servers)} / {total_servers} servers ready. Waiting for servers to spin up: {waiting}"""
-                    )
-                poll_count += 1
-            else:
-                print(f"All {len(successful_servers)} / {total_servers} servers ready! Polling every 60s")
-                self.display_server_instance_info()
-                return
-
-            sleep(sleep_interval)
-
-    def shutdown(self) -> None:
-        print("Sending interrupt signals to servers...")
-        for process in self._processes.values():
-            process.send_signal(SIGINT)
-
-        print("Waiting for processes to finish...")
-        killed_process_names: List[str] = []
-        unreaped_process_names: List[str] = []
-        for process_name, process in self._processes.items():
-            try:
-                process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
-            except TimeoutExpired:
-                process.kill()
-                killed_process_names.append(process_name)
-                # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
-                try:
-                    process.wait(timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
-                except TimeoutExpired:
-                    unreaped_process_names.append(process_name)
-
-        if killed_process_names:
-            print(
-                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout, killing instead. You may see messages like:
-```bash
-rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
-```
-"""
-            )
-        if unreaped_process_names:
-            print(
-                f"WARNING: processes ({', '.join(unreaped_process_names)}) did not exit "
-                f"within {_FORCE_KILL_REAP_TIMEOUT_SEC}s after SIGKILL; "
-                "they may remain as zombies until this process exits."
-            )
-        self._processes = dict()
-
-        self._head_server.should_exit = True
-        self._head_server_thread.join()
-
-        self._head_server = None
-        self._head_server_thread = None
-
-        print("NeMo Gym finished!")
-
-    def run_forever(self) -> None:
-        if self._server_client.global_config_dict[DRY_RUN_KEY_NAME]:
-            self.shutdown()
-            return
-
-        async def sleep():
-            # Indefinitely
-            while True:
-                self.poll()
-                await asyncio.sleep(60)
-
-        try:
-            asyncio.run(sleep())
-        except KeyboardInterrupt:
-            pass
-        finally:
-            self.shutdown()
-
-    def wait_for_model_endpoints(self, global_config_dict: DictConfig) -> None:
-        """Block until every model endpoint named in the config answers, then return.
-
-        Reads the bound from `model_endpoint_readiness_timeout_seconds`, where 0 skips the check
-        entirely. Raises `ConfigError` naming the endpoints that never answered and the config key
-        each came from. It raises rather than exits because `RunHelper` is imported and driven as a
-        library, so the caller decides what an unreachable endpoint means; the CLI entrypoints turn
-        it into an exit.
-
-        The servers spawned above are shut down first. They hold ports and have neither a process
-        group nor an atexit handler, and every caller reaches its own `shutdown()` only after
-        `start()` returns.
-        """
-        timeout_seconds = _model_endpoint_timeout_seconds(global_config_dict)
-        unreachable = _wait_for_model_endpoints(_collect_model_endpoints(global_config_dict), timeout_seconds)
-        if not unreachable:
-            return
-
-        listed = "\n".join(f"  - {url} (from `{key}`)" for key, url in unreachable)
-        self.shutdown()
-        raise ConfigError(
-            f"""{len(unreachable)} model endpoint(s) never answered within {timeout_seconds:.0f}s:
-{listed}
-
-Nothing accepted a connection there. The server was never started, is still starting up, or the URL
-in your config does not match where it is listening.
-  - Check the config key named beside each URL. Verify with `curl -i <base_url>/models` for a
-    `/v1` endpoint, or `curl -i <base_url>` otherwise.
-  - Any response, including 401 or 404, means something is listening.
-  - Raise `{MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME}` to wait longer, or set it to 0 to skip this check."""
-        )
-
-    def check_http_server_statuses(self, successful_servers: List[str]) -> List[Tuple[str, ServerStatus]]:
-        statuses = []
-        for server_instance_display_config in self._server_instance_display_configs:
-            name = server_instance_display_config.config_path
-
-            # No need to re-poll successfully spun up servers.
-            if name in successful_servers:
-                continue
-
-            status = self._server_client.poll_for_status(name)
-            statuses.append((name, status))
-
-        return statuses
-
-
 @exit_cleanly_on_config_error
 def prefetch(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
@@ -714,7 +171,7 @@ def prefetch(
     ```bash
     # Pre-warm venvs for a specific config
     config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\\
-    resources_servers/math/configs/math.yaml"
+    resources_servers/math_with_judge/configs/math_with_judge.yaml"
     gym env prefetch "+config_paths=[${config_paths}]"
     ```
     """
@@ -749,7 +206,7 @@ def prefetch(
         print(f"Pre-warming venv for: {dir_path}")
 
         # Run only the setup (venv creation + dep install) — no server start.
-        # Serial execution reduces uv cache size (same reasoning as dry_run in RunHelper.start).
+        # Serial execution reduces uv cache size (same reasoning as dry_run in ServerSupervisor.start).
         setup_cmd = setup_env_command(dir_path, global_config_dict, top_level_path)
         process = run_command(setup_cmd, dir_path, server_name=top_level_path)
         returncode = process.wait()
@@ -786,9 +243,30 @@ def run(
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    rh = RunHelper()
-    rh.start(global_config_dict_parser_config)
-    rh.run_forever()
+    supervisor = ServerSupervisor()
+    terminated = False
+
+    def _on_sigterm(signum: int, frame: FrameType | None) -> None:
+        nonlocal terminated
+        terminated = True
+        raise KeyboardInterrupt
+
+    # Slurm ends a job with SIGTERM (scancel, the time limit). Python's default action exits without unwinding,
+    # which leaves the servers running and the config file, with its API keys, on disk. Here and not in
+    # `ServerSupervisor.start()`: a trainer calls that off the main thread, where a handler cannot be set.
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        supervisor.start(global_config_dict_parser_config)
+        # When a server uses Ray, the start runs Ray's init, which replaces the handler with one that exits with
+        # status 15. That one unwinds too, so a SIGTERM during the rest of the start still shuts everything down.
+        signal.signal(signal.SIGTERM, _on_sigterm)
+        supervisor.run_forever()
+    except KeyboardInterrupt:
+        if not terminated:
+            raise
+    if terminated:
+        # As a SIGTERM kill would, so a stopped job never looks successful: `run_forever` returns after Ctrl-C.
+        sys.exit(128 + signal.SIGTERM)
 
 
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
@@ -797,6 +275,21 @@ def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
 
     # We have special data checks for resources servers
     if test_config.dir_path.parts[0] != "resources_servers":
+        return
+
+    # A server that only manifest workloads use carries verifier fixtures instead of the legacy five-row rollout
+    # artifacts (see manifest_workloads_for_server). Exercise every workload sharing it, offline and without requiring
+    # its full dataset to be downloaded on CI workers.
+    manifest_entries = manifest_workloads_for_server(
+        test_config.dir_path.name, test_config.resolved_dir_path, discover_environment_catalog()
+    )
+    if manifest_entries:
+        conflict_paths = glob(str(test_config.resolved_dir_path / "data/*conflict*"))
+        assert not conflict_paths, f"Found conflicting paths: {conflict_paths}"
+        for entry in manifest_entries:
+            validation = validate_environment(entry.manifest_path, entry.config_path, validate_datasets=False)
+            _run_manifest_verifier(entry, update_expected=False, validation=validation)
+        print(f"The verifier fixtures for {test_config.dir_path} have been successfully validated!")
         return
 
     # Check that the required examples and example metrics are present. Read from the resolved dir
@@ -891,6 +384,15 @@ def _test_single(test_config: TestConfig, global_config_dict: DictConfig) -> Pop
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Popen:
+    """Install one server's venv exactly as `_test_single` does, without running its tests."""
+    prefix = test_config.entrypoint.replace("/", "\\/")
+    resolved_dir = test_config.resolved_dir_path
+    command = setup_env_command(resolved_dir, global_config_dict, prefix)
+    return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
+
+
+@exit_cleanly_on_config_error
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -929,7 +431,7 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    gym env test
+    gym env test --all
     ```
     """
 
@@ -951,6 +453,11 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
         default=0,
         ge=0,
         description="Which shard (0-based) this invocation runs; must be < num_shards (default: 0).",
+    )
+    setup_only: bool = Field(
+        default=False,
+        description="Only install each selected server's venv; run no tests and validate no data (default: False). "
+        "Seeds `uv_cache_dir` so the server suite can later install the same venvs offline.",
     )
 
 
@@ -974,6 +481,30 @@ def _delete_server_venv(dir_path: Path, global_config_dict: DictConfig) -> None:
     rmtree(venv_path, ignore_errors=True)
 
 
+def _setup_all(dir_paths: List[Path], test_all_config: TestAllConfig, global_config_dict: DictConfig) -> None:
+    """Install every selected server's venv the way the suite would, then exit non-zero if any failed.
+
+    The container build runs this to seed its uv cache, so `scripts/ci/server_tests.sh` can create the same
+    per-server venvs offline. Every server is attempted before failing, so one run reports every gap.
+    """
+    setup_failed: List[Path] = []
+    for dir_path in tqdm(dir_paths, desc="Setting up server venvs"):
+        proc = _setup_single(TestConfig(entrypoint=str(dir_path)), global_config_dict)
+        if proc.wait() != 0:
+            setup_failed.append(dir_path)
+        if test_all_config.delete_venvs_after_each_test:
+            _delete_server_venv(_resolve_server_dir(dir_path), global_config_dict)
+
+    set_up = len(dir_paths) - len(setup_failed)
+    print(f"""Server venvs set up {_format_pct(set_up, len(dir_paths))}
+
+Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_display_list_of_paths(setup_failed)}
+""")
+    if setup_failed:
+        exit(1)
+
+
+@exit_cleanly_on_config_error
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
@@ -982,13 +513,16 @@ def test_all():  # pragma: no cover
     # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
     # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
     # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
-    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
     for root in component_search_roots():
-        for server_type_dir in server_type_dirs:
+        for server_type_dir in SERVER_TYPE_KEYS:
             for module_path in sorted((root / server_type_dir).glob("*")):
-                if "pycache" in module_path.name or not module_path.is_dir():
+                if (
+                    "pycache" in module_path.name
+                    or module_path.name.endswith((".egg-info", ".dist-info"))
+                    or not module_path.is_dir()
+                ):
                     continue
                 rel_path = f"{server_type_dir}/{module_path.name}"
                 if rel_path in seen_rel_paths:
@@ -1008,6 +542,10 @@ def test_all():  # pragma: no cover
             f"Shard {test_all_config.shard_index + 1}/{test_all_config.num_shards}: "
             f"testing {len(dir_paths)} of {len(full_dir_paths)} modules:{_display_list_of_paths(dir_paths)}\n"
         )
+
+    if test_all_config.setup_only:
+        _setup_all(dir_paths, test_all_config, global_config_dict)
+        return
 
     tests_passed: List[Path] = []
     tests_failed: List[Path] = []
@@ -1091,7 +629,7 @@ gym env test +entrypoint={data_validation_failed[0]} +should_validate_data=true
 
 Extra candidate paths:{_display_list_of_paths(extra_candidates)}"""
 
-    if tests_missing or tests_failed or data_validation_failed:
+    if tests_missing or tests_failed or tests_unrecognized or data_validation_failed:
         exit(1)
 
 
@@ -1153,6 +691,136 @@ def init_resources_server():  # pragma: no cover
     scaffold_resources_server(directory=dirpath, checkout_root=checkout_root)
 
 
+@cache
+def _entrypoint_config_class(entrypoint_fpath: Path, module_name: str) -> type[BaseModel]:
+    """The config class of the server an entrypoint runs, the one its launch validates its block against."""
+    spec = importlib.util.spec_from_file_location(module_name, entrypoint_fpath)
+    if spec is None or spec.loader is None:  # pragma: no cover - importlib internals
+        raise ImportError(f"no import spec for {entrypoint_fpath}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec, so annotations that pydantic resolves through sys.modules are found.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    config_classes = {
+        server_class.model_fields["config"].annotation
+        for class_name in entrypoint_server_class_names(entrypoint_fpath)
+        if isinstance(server_class := getattr(module, class_name, None), type)
+        and issubclass(server_class, BaseModel)
+        and "config" in server_class.model_fields
+    }
+    if len(config_classes) != 1:
+        raise LookupError("it does not call run_webserver() on exactly one server class with a config")
+    return config_classes.pop()
+
+
+def _check_environment_server_configs(global_config_dict: DictConfig) -> List[str]:
+    """Validate each Environment Server block against its server's config class without starting it.
+
+    `gym env start` applies that class only when the server launches, after the other servers are up. Environment
+    Servers ship with Gym and need few packages of their own, so this process imports their entrypoints. A server
+    whose entrypoint does not import here is left to its launch: the returned warnings name each one.
+
+    Raises EnvironmentServerConfigError listing every invalid field, by its path in the merged config.
+    """
+    errors: List[str] = []
+    unchecked: List[str] = []
+    for server in _configured_servers(global_config_dict):
+        if server.server_type != ENVIRONMENT_SERVER_TYPE_KEY_NAME:
+            continue
+        source = f"{server.server_type}/{server.name}/{server.entrypoint_fpath}"
+        module_name = ".".join(
+            ["nemo_gym_environment_server_entrypoint", server.name, *server.entrypoint_fpath.with_suffix("").parts]
+        )
+        try:
+            config_class = _entrypoint_config_class(server.dir_path / server.entrypoint_fpath, module_name)
+        except Exception as error:  # Its own venv may have what this one lacks.
+            unchecked.append(
+                f"Could not check Environment Server '{server.top_level_path}' before launch, so `gym env start` "
+                f"checks its config when it launches. Loading {source} here failed: {type(error).__name__}: {error}"
+            )
+            continue
+        server_config = OmegaConf.to_container(server.config, resolve=True) | {"name": server.top_level_path}
+        try:
+            config_class.model_validate(server_config)
+        except ValidationError as error:
+            block_path = f"{server.top_level_path}.{server.server_type}.{server.name}"
+            errors.append(f"'{server.top_level_path}' ({source}) does not match {config_class.__name__}:")
+            errors.extend(
+                f"  {'.'.join([block_path, *map(str, detail['loc'])])}: {detail['msg']}" for detail in error.errors()
+            )
+    if errors:
+        raise EnvironmentServerConfigError(
+            "Environment Server config is invalid, so `gym env start` would fail when the server launches.\n"
+            + "\n".join(errors)
+        )
+    return unchecked
+
+
+class ServerConfigProblem(NamedTuple):
+    """A server block value that its server's config class rejects, or a block that could not be checked."""
+
+    path: str
+    """Dotted path in the merged config: the rejected field, else the block (or the unknown server type)."""
+    message: str
+    """The config class's message, or why the block's config class could not be loaded."""
+    config_class: Optional[str] = None
+    """The name of the config class that rejected the value; None when the block could not be checked."""
+    value: object = None
+    """The rejected input, as the config class received it."""
+
+
+def validate_server_configs(global_config_dict: DictConfig, server_types: Iterable[str]) -> List[ServerConfigProblem]:
+    """Validate each server block of the given server types against its own server's config class, starting nothing.
+
+    Each block is checked against the class its server validates it with at launch. This process imports the
+    entrypoint to find that class. A block whose entrypoint does not import here, for example because the server's
+    own venv has packages this one lacks, is one problem with ``config_class`` None, and its fields stay unchecked.
+    A server type that Gym does not define is such a problem too, at the type's name, so a caller written for
+    another Gym version still gets an answer. An empty list means every checked block is valid.
+    """
+    wanted = frozenset(server_types)
+    problems = [
+        ServerConfigProblem(name, f"Gym defines no server type '{name}'; it defines {', '.join(SERVER_TYPE_KEYS)}")
+        for name in sorted(wanted.difference(SERVER_TYPE_KEYS))
+    ]
+    for server in _configured_servers(global_config_dict):
+        if server.server_type not in wanted:
+            continue
+        block_path = f"{server.top_level_path}.{server.server_type}.{server.name}"
+        module_name = ".".join(
+            ["nemo_gym_server_config_check", server.server_type, server.name]
+            + list(server.entrypoint_fpath.with_suffix("").parts)
+        )
+        try:
+            config_class = _entrypoint_config_class(server.dir_path / server.entrypoint_fpath, module_name)
+        except Exception as error:  # Its own venv may have what this one lacks.
+            message = f"could not load {server.entrypoint_fpath}: {type(error).__name__}: {error}"
+            problems.append(ServerConfigProblem(block_path, message))
+            continue
+        try:
+            server_config = OmegaConf.to_container(server.config, resolve=True) | {"name": server.top_level_path}
+        except OmegaConfBaseException as error:
+            problems.append(ServerConfigProblem(block_path, f"could not resolve the block: {error}"))
+            continue
+        try:
+            config_class.model_validate(server_config)
+        except ValidationError as error:
+            problems.extend(
+                ServerConfigProblem(
+                    ".".join([block_path, *map(str, detail["loc"])]),
+                    detail["msg"],
+                    config_class.__name__,
+                    detail.get("input"),
+                )
+                for detail in error.errors()
+            )
+    return problems
+
+
 @exit_cleanly_on_config_error
 def dump_config():  # pragma: no cover
     """
@@ -1174,6 +842,14 @@ def dump_config():  # pragma: no cover
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+    # The config prints either way, since it is what you debug a failing config with.
+    try:
+        unchecked = _check_environment_server_configs(global_config_dict)
+    except EnvironmentServerConfigError as error:
+        unchecked = [str(error)]
+    for warning in unchecked:
+        rich.print(f"[yellow]Warning:[/yellow] {escape(warning)}", file=sys.stderr)
 
 
 class ManifestCommandConfig(BaseNeMoGymCLIConfig):
@@ -1226,10 +902,119 @@ def _print_validation_report(report: EnvironmentValidationReport, *, json_output
         rich.print(f"[yellow]Warning:[/yellow] {warning}", file=sys.stderr)
 
 
+# Stands in for a value only the job supplies, under --allow-job-time-values.
+JOB_TIME_VALUE = "gym-job-time-value"
+# Each round of composition names at most three unset values, so this covers 48 of them.
+_JOB_TIME_VALUE_ROUNDS = 16
+
+
+_NO_DEFAULT = object()
+
+
+def _env_or_job_time_value(key: str, default: object = _NO_DEFAULT) -> Optional[str]:
+    """``oc.env`` that reads an unset variable without a default as a job-time value."""
+    if default is _NO_DEFAULT:
+        return os.environ.get(key, JOB_TIME_VALUE)
+    return _oc_env(key, default)
+
+
+def _compose_for_validation(*, allow_job_time_values: bool, supplied: List[str]) -> DictConfig:
+    """Compose the config as `gym eval run` does from the same run args; the job adds the policy model itself."""
+    for _ in range(_JOB_TIME_VALUE_ROUNDS):
+        try:
+            try:
+                return get_global_config_dict()
+            except ConfigError:
+                return get_global_config_dict(
+                    global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                        initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                    ),
+                )
+        except ConfigError as error:
+            missing = [key for key in re.findall(r"\+\+([A-Za-z0-9_.]+)=<value>", str(error)) if key not in supplied]
+            if not allow_job_time_values or not missing:
+                raise
+            supplied.extend(missing)
+            sys.argv.extend(f"++{key}={JOB_TIME_VALUE}" for key in missing)
+    raise ConfigError(f"composition still needs values after {len(supplied)} job-time stand-ins")
+
+
+def _composition_failure(error: BaseException) -> Dict[str, str]:
+    """Why the config did not compose, and the key whose value did not resolve when the error names one.
+
+    A failing resolver (for example ``oc.decode`` given an int) is reported at its key with the resolver's own
+    message. Gym's own explanation, such as the override that supplies a missing key, is kept as it reads.
+    """
+    resolution = error if isinstance(error, OmegaConfBaseException) else error.__cause__
+    full_key = getattr(resolution, "full_key", None)
+    if not isinstance(resolution, OmegaConfBaseException) or not isinstance(full_key, str) or not full_key:
+        return {"why": f"{type(error).__name__}: {error}"}
+    # OmegaConf appends the key and the node type to its own message; the path field carries the key.
+    message = resolution.msg.split("\n    full_key:", 1)[0]
+    why = message if str(error) == str(resolution) else f"{type(error).__name__}: {error}"
+    return {"path": full_key, "why": why}
+
+
+def _validate_server_types(command_dict: DictConfig) -> int:
+    """`gym env validate --server-types`: print one finding per line; return 0, 1, 2, or 3 for a crash."""
+    # Importing entrypoints must write nothing into the checkout.
+    sys.dont_write_bytecode = True
+    allow_job_time_values = bool(command_dict.get("allow_job_time_values", False))
+    marks = [str(mark) for mark in command_dict.get("ignore_input_containing") or []]
+    marks += [JOB_TIME_VALUE] if allow_job_time_values else []
+    json_output = bool(command_dict.get(JSON_OUTPUT_KEY_NAME, False))
+
+    def emit(finding: dict) -> None:
+        if json_output:
+            print(json.dumps(finding), flush=True)
+        else:
+            print(" ".join(f"{key}={value}" for key, value in finding.items()), flush=True)
+
+    if allow_job_time_values:
+        OmegaConf.register_new_resolver("oc.env", _env_or_job_time_value, replace=True, use_cache=False)
+    try:
+        supplied: List[str] = []
+        # A block that fails Gym's generic server check is reported field by field below, not as a failed composition.
+        sys.argv.append("++error_on_almost_servers=false")
+        try:
+            global_config_dict = _compose_for_validation(
+                allow_job_time_values=allow_job_time_values, supplied=supplied
+            )
+        except (ConfigError, OmegaConfBaseException) as error:
+            emit({"kind": "uncomposed", **_composition_failure(error), "supplied": supplied})
+            return 2
+        invalid = 0
+        server_types = command_dict.server_types
+        server_types = [server_types] if isinstance(server_types, str) else list(server_types)
+        for problem in validate_server_configs(global_config_dict, server_types):
+            if problem.config_class is None:
+                emit({"kind": "unchecked", "path": problem.path, "why": problem.message})
+            elif not any(mark in repr(problem.value) for mark in marks):
+                invalid += 1
+                emit(
+                    {
+                        "kind": "invalid",
+                        "path": problem.path,
+                        "class": problem.config_class,
+                        "message": problem.message,
+                        "input": repr(problem.value)[:120],
+                    }
+                )
+        return 1 if invalid else 0
+    except Exception:  # A crash must not read as a finding: its exit code is neither 1 nor 2.
+        traceback.print_exc()
+        return 3
+    finally:
+        if allow_job_time_values:
+            OmegaConf.register_new_resolver("oc.env", _oc_env, replace=True, use_cache=False)
+
+
 @exit_cleanly_on_config_error
 def validate() -> None:
     """Validate a manifest-backed workload or a legacy Gym config without starting services."""
     command_dict = _command_overrides()
+    if command_dict.get("server_types") is not None:
+        sys.exit(_validate_server_types(command_dict))
     command_config = ManifestCommandConfig.model_validate(command_dict)
     entry = _manifest_entry(command_config)
     if command_config.manifest_path is not None or entry is not None:
@@ -1252,12 +1037,31 @@ def validate() -> None:
     if unsupported:
         raise ConfigError("The following options require a workload name or --manifest: " + ", ".join(unsupported))
 
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        ),
-    )
+    # Resolve what a run resolves. Falling back to the stand-ins keeps a config that needs no model
+    # checkable, but only an error the stand-ins account for is downgraded: any other still propagates.
+    try:
+        global_config_dict = get_global_config_dict()
+        incomplete_config_error = None
+    except ConfigError as error:
+        if command_dict.get("strict", False):
+            raise
+        incomplete_config_error = error
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            ),
+        )
+
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+    for warning in _check_environment_server_configs(global_config_dict):
+        rich.print(f"[yellow]Warning:[/yellow] {escape(warning)}", file=sys.stderr)
+    if incomplete_config_error is not None:
+        rich.print(
+            "[yellow]Warning:[/yellow] this config does not define model server configuration "
+            "and will not start as-is. Re-run with [bold]--strict[/bold] to fail on this "
+            f"instead of warning.\n{incomplete_config_error}",
+            file=sys.stderr,
+        )
     rich.print("[green]✓[/green] Config is valid.")
 
 
@@ -1297,9 +1101,10 @@ def publish_environment_manifest() -> None:
     if command_dict.get(JSON_OUTPUT_KEY_NAME, False):
         print(json.dumps(report.to_dict()))
         return
+    annotation = f"catalog status={report.status} " if report.status else ""
     rich.print(
         f"[green]✓[/green] Publication checks passed for {report.kind} {report.name} {report.version}; "
-        f"catalog status={report.status} ({report.verifier_cases} verifier cases)."
+        f"{annotation}({report.verifier_cases} verifier cases)."
     )
 
 
@@ -1370,13 +1175,26 @@ def _inspect_environment(
 ) -> None:
     """Render one entry from the unified environment catalog."""
     kind = global_config_dict.get("catalog_kind")
-    matching_names = {entry.name: entry for entry in entries}
+    if kind not in (None, "environment", "benchmark"):  # else a bogus kind renders as the error noun
+        raise RegistryError(f"Unknown catalog kind '{kind}'.")
+    # Scope the did-you-mean pool to the requested kind so it never suggests the kind the user did not ask for.
+    matching_names = {entry.name: entry for entry in entries if kind is None or entry.kind == kind}
     if name not in matching_names:
-        exit_unknown_component(name, matching_names, "environment")
+        # A `kind` is always set here when the name exists at all, since an unset one matches everything.
+        known = next((entry for entry in entries if entry.name == name), None)
+        if known is not None:
+            article = "an" if known.kind.startswith(("a", "e", "i", "o", "u")) else "a"
+            rich.print(
+                f"[red]'{name}' is {article} {known.kind}, not a {kind}.[/red] Try `gym list {known.kind}s {name}`."
+            )
+            sys.exit(1)
+        exit_unknown_component(name, matching_names, kind or "environment")
         return
     entry = resolve_catalog_entry(name, kind, entries=entries)
     parsed = read_environment_details(entry.config_path)
-    details = {"config": str(entry.config_path.resolve()), "status": entry.status}
+    details = {"config": str(entry.config_path.resolve())}
+    if entry.status is not None:
+        details["status"] = entry.status
     if entry.manifest_path is not None:
         details["manifest"] = str(entry.manifest_path.resolve())
     for label, value in (
@@ -1388,10 +1206,11 @@ def _inspect_environment(
     ):
         if value:
             details[label] = value
-    if parsed["resources_servers"]:
-        details["resources servers"] = ", ".join(parsed["resources_servers"])
-    if parsed["agent"]:
-        details["agent"] = parsed["agent"]
+    resources_server, agent_server = _entry_servers(entry, parsed)
+    if resources_server:
+        details["resources servers"] = resources_server
+    if agent_server:
+        details["agent"] = agent_server
     if parsed["datasets"]:
         details["datasets"] = ", ".join(parsed["datasets"])
 
@@ -1406,16 +1225,49 @@ def _inspect_environment(
         domain=entry.domain or parsed["domain"],
         description=description,
         details=details,
-        usage=(
-            f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
-            if entry.resources_server_selector
-            else f"gym env start --{entry.kind} {name} --model-type vllm_model"
-        ),
+        usage=_inspect_usage(name, entry),
+    )
+
+
+def _inspect_usage(name: str, entry: EnvironmentCatalogEntry) -> str:
+    """The example command an inspected entry shows: a Harbor-backed one runs through `gym eval run`, which composes
+    its Harbor environment server; `gym env start` does not."""
+    if entry.harbor_target and entry.kind == "benchmark":
+        return f"gym eval run --benchmark {name} --sandbox <provider> --model-type vllm_model"
+    if entry.harbor_target:
+        return f"gym eval run {entry.harbor_target} --agent <harness> --sandbox <provider> --model-type vllm_model"
+    if entry.resources_server_selector:
+        return f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
+    return f"gym env start --{entry.kind} {name} --model-type vllm_model"
+
+
+def _entry_servers(
+    entry: EnvironmentCatalogEntry, details: Optional[Dict[str, object]] = None
+) -> Tuple[Optional[str], Optional[str]]:
+    """The resources server and agent an entry runs with, as the catalog views show them.
+
+    The manifest says when there is one. Otherwise the config's runtime routes select the servers. A
+    config that needs values only a run supplies, such as a judge model server, or that is malformed does not
+    resolve; then the names written in the config file are used, each only when the file names exactly one, since a
+    file naming several does not say which one runs. ``details`` is the config's ``read_environment_details``
+    result when the caller has it.
+    """
+    if entry.manifest_path is not None:
+        return entry.resources_server, entry.agent_server
+    resolved = resolve_config_servers(entry.config_path)
+    if resolved is not None:
+        return resolved
+    details = details or read_environment_details(entry.config_path)
+    resources_servers, agents = set(details["resources_servers"]), set(details["agents"])
+    return (
+        next(iter(resources_servers)) if len(resources_servers) == 1 else None,
+        next(iter(agents)) if len(agents) == 1 else None,
     )
 
 
 def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
-    return {
+    resources_server, agent_server = _entry_servers(entry)
+    payload = {
         "name": entry.name,
         "kind": entry.kind,
         "status": entry.status,
@@ -1426,7 +1278,16 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "modality": entry.modality,
         "licensing": entry.licensing,
         "lifecycle": entry.lifecycle,
+        # Absolute, like the agent inspect view, so an entry found under any search root can be located.
+        "path": str(entry.path.resolve()),
+        "config_path": str(entry.config_path.resolve()),
+        "manifest_path": str(entry.manifest_path.resolve()) if entry.manifest_path else None,
+        "resources_server": resources_server,
+        "agent_server": agent_server,
     }
+    if entry.status is None:
+        payload.pop("status")
+    return payload
 
 
 @exit_cleanly_on_config_error
@@ -1454,7 +1315,7 @@ def list_environments() -> None:
             continue
         attribute = "kind" if field == "catalog_kind" else field
         missing = sum(getattr(entry, attribute) is None for entry in entries)
-        if missing:
+        if missing and field != "status":
             noun = "entry" if missing == 1 else "entries"
             print(
                 f"Warning: {missing} catalog {noun} {'has' if missing == 1 else 'have'} no "
@@ -1488,7 +1349,7 @@ def list_environments() -> None:
         table.add_row(
             entry.name,
             entry.kind,
-            entry.status,
+            entry.status or "",
             entry.lifecycle or "",
             entry.domain or "",
             entry.description or "",
@@ -1558,3 +1419,42 @@ def pip_list():  # pragma: no cover
     proc = run_command(command, dir_path)
     return_code = proc.wait()
     exit(return_code)
+
+
+class SchemaConfig(RunConfig):
+    """
+    Print a resources server's task-data schema as JSON Schema.
+
+    Examples:
+
+    ```bash
+    gym env schema --resources-server example_multi_step
+    ```
+    """
+
+
+@exit_cleanly_on_config_error
+def show_schema():  # pragma: no cover
+    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/data/task_data.py``)."""
+    from nemo_gym.data.task_data import TaskDataSchemaError, load_task_data_schema
+
+    global_config_dict = get_global_config_dict()
+    config = SchemaConfig.model_validate(global_config_dict)
+
+    dir_path = _resolve_server_dir(Path(config.entrypoint))
+    try:
+        adapter = load_task_data_schema(dir_path)
+    except TaskDataSchemaError as e:
+        print(str(e))
+        exit(1)
+    if adapter is None:
+        print(
+            f"{config.entrypoint} does not ship a task_data.py schema yet. "
+            "Add one exporting `TaskData` (see nemo_gym/data/task_data.py for the protocol)."
+        )
+        exit(1)
+    print(json.dumps(adapter.json_schema(), indent=2))
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

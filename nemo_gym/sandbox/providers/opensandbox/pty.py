@@ -30,13 +30,25 @@ import asyncio
 import json
 import logging
 import shlex
-from collections.abc import AsyncIterator
+import sys
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import urlencode
 
 import aiohttp
 
-from nemo_gym.sandbox.providers.base import SandboxPtyError, SandboxPtySpec
+from nemo_gym.core.failure_kinds import (
+    PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+    PROVIDER_PROTOCOL_ERROR,
+    PROVIDER_PTY_BUSY,
+    PROVIDER_PTY_UNAVAILABLE,
+    PROVIDER_REQUEST_FAILED,
+)
+from nemo_gym.core.failure_transport import observe_failure
+from nemo_gym.core.typed_exceptions import NgFailureEvent
+from nemo_gym.sandbox.providers.base import SandboxPtySpec
+from nemo_gym.sandbox.providers.opensandbox.failures import opensandbox_failure
 
 
 LOGGER = logging.getLogger(__name__)
@@ -54,6 +66,17 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 # window; the tail rides out per-replica informer lag (each retry re-rolls the
 # load-balanced replica, so 404 "pod IP not yet available" clears quickly).
 _PTY_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+# A takeover that finds a half-open peer waits out execd's eviction timeout
+# before the policy-violation close arrives, so these are spaced in seconds,
+# not fractions: the stale client is torn down in the background and a later
+# attempt lands.
+_PTY_TAKEOVER_RETRY_DELAYS = (2.0, 5.0, 10.0)
+# Long-held PTY sockets cross an NLB and the server proxy, either of which can
+# drop them silently. Heartbeats keep intermediaries from idle-reaping the
+# connection and surface a dead socket as a failed ping within about a minute
+# (triggering the reattach path) instead of leaving a half-open client behind
+# for the next takeover to time out against.
+_PTY_WS_HEARTBEAT_S = 30.0
 
 # Mirrors execd's shell pick (bash when available, else sh) for env-only specs.
 _DEFAULT_SHELL_SNIPPET = 'exec "$(command -v bash || echo sh)"'
@@ -91,33 +114,61 @@ class OpenSandboxPtySession:
         session_url: str,
         headers: dict[str, str],
         request_timeout_s: float | None,
+        sandbox_id: str | None = None,
         owned: bool = True,
+        takeover: bool = False,
+        diagnose: Callable[[BaseException], Awaitable[NgFailureEvent]] | None = None,
     ) -> None:
         self._client = client
         self._ws = ws
         self.session_id = session_id
+        self._sandbox_id = sandbox_id
         self._session_url = session_url
         self._headers = headers
         self._request_timeout_s = request_timeout_s
         # Attached sessions belong to whoever created them: closing one detaches
         # rather than ending it.
         self._owned = owned
+        # True when the initial socket asked to take the session over: an
+        # "already attached" refusal then just means execd is still evicting
+        # the previous, dead client — not that another client owns the session.
+        self._takeover = takeover
+        # Asked for a better cause when the socket dies for no admitted reason
+        # (the provider checks whether the sandbox itself was OOM-killed).
+        self._diagnose = diagnose
         self.mode: str | None = None
         self.replay_offset: int | None = None
         self._output: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._stderr: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._exit: asyncio.Future[int] = asyncio.get_running_loop().create_future()
         self._connected: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._error: SandboxPtyError | None = None
+        self._error: NgFailureEvent | None = None
         self._closed = False
+        self._detached = False
         self._received = 0  # bytes of the session's retained stream seen so far
+        self._replay_gap = 0  # bytes the server evicted before we could replay them
         self._pump_task = asyncio.create_task(self._pump())
+
+    def _failure(
+        self,
+        reason: str,
+        *,
+        failure_kind: str = PROVIDER_PTY_UNAVAILABLE,
+        cause: BaseException | None = None,
+    ) -> NgFailureEvent:
+        return opensandbox_failure(
+            operation="pty", sandbox_id=self._sandbox_id, failure_kind=failure_kind, reason=reason, cause=cause
+        )
 
     @property
     def closed(self) -> bool:
         """True once the session can no longer run commands: after ``close()``,
         or once the connection pump has ended (process exit, takeover eviction,
-        or connection loss). Resources are released by ``close()``."""
+        or connection loss). A ``detach()``-ed session is not closed: the
+        server side keeps running and ``reattach()`` restores it. Resources
+        are released by ``close()``."""
+        if self._detached:
+            return self._closed
         return self._closed or self._pump_task.done()
 
     async def _pump_socket(self) -> None:
@@ -137,9 +188,11 @@ class OpenSandboxPtySession:
                     await self._stderr.put(data[1:])
                 elif channel == CHAN_REPLAY and len(data) > REPLAY_HEADER_BYTES:
                     # Replay is one merged stream regardless of mode. The
-                    # server clamps a `since` older than its 1 MiB buffer,
-                    # so a higher offset here means output was evicted.
+                    # server clamps a `since` older than its retained window,
+                    # so a frame starting past what we saw means eviction.
                     self.replay_offset = int.from_bytes(data[1:REPLAY_HEADER_BYTES], "big")
+                    if self.replay_offset > self._received:
+                        self._replay_gap += self.replay_offset - self._received
                     self._received = self.replay_offset + len(data) - REPLAY_HEADER_BYTES
                     await self._output.put(data[REPLAY_HEADER_BYTES:])
             elif message.type == aiohttp.WSMsgType.TEXT:
@@ -154,10 +207,15 @@ class OpenSandboxPtySession:
                         if not self._exit.done():
                             self._exit.set_result(int(frame.get("exit_code", -1)))
                     elif frame_type == "error":
-                        self._error = SandboxPtyError(f"PTY session failed: {frame.get('code')}: {frame.get('error')}")
+                        self._error = self._failure(
+                            f"PTY session failed: {frame.get('code')}: {frame.get('error')}",
+                            failure_kind=PROVIDER_REQUEST_FAILED,
+                        )
                 except (ValueError, TypeError, AttributeError) as e:
                     if self._error is None:
-                        self._error = SandboxPtyError(f"PTY session sent a malformed frame: {e!r}")
+                        self._error = self._failure(
+                            f"PTY session sent a malformed frame: {e!r}", failure_kind=PROVIDER_PROTOCOL_ERROR, cause=e
+                        )
                     break
             elif message.type == aiohttp.WSMsgType.ERROR:
                 break
@@ -167,6 +225,7 @@ class OpenSandboxPtySession:
         base_url = self._session_url.rsplit("/pty/", 1)[0]
         try:
             self._ws = await _connect_ws(
+                sandbox_id=self._sandbox_id,
                 client=self._client,
                 base_url=base_url,
                 headers=self._headers,
@@ -189,46 +248,90 @@ class OpenSandboxPtySession:
         """
         try:
             barren = 0
+            reattached = False
+            takeover_retries = 0
             while True:
                 received_before = self._received
                 await self._pump_socket()
                 if self._closed or self._exit.done() or self._error is not None:
                     break
-                if self._ws.close_code in (WS_CLOSE_TAKEN_OVER, WS_CLOSE_POLICY_VIOLATION):
+                if self._ws.close_code == WS_CLOSE_TAKEN_OVER:
                     break
+                if self._ws.close_code == WS_CLOSE_POLICY_VIOLATION:
+                    # Execd refused us because it still counts the previous
+                    # client as attached. After a reattach — or when we asked
+                    # to take the session over — that client is dead and execd
+                    # just hasn't finished evicting it, so wait and retry.
+                    # Otherwise another client really owns the session: give up.
+                    if not (reattached or self._takeover) or takeover_retries >= len(_PTY_TAKEOVER_RETRY_DELAYS):
+                        break
+                    await asyncio.sleep(_PTY_TAKEOVER_RETRY_DELAYS[takeover_retries])
+                    takeover_retries += 1
+                    observe_failure(self._close_error())
+                    reattached = await self._reattach_socket()
+                    if not reattached:
+                        break
+                    continue
+                takeover_retries = 0
                 # A socket that reconnects but keeps dying without delivering a
                 # byte would spin forever; three barren rounds mean the session
                 # is gone in a way the close code does not admit.
                 barren = barren + 1 if self._received == received_before else 0
-                if barren >= 3 or not await self._reattach_socket():
+                if barren >= 3:
+                    break
+                observe_failure(self._close_error())
+                reattached = await self._reattach_socket()
+                if not reattached:
                     break
         finally:
-            if not self._exit.done():
-                self._exit.set_exception(self._close_error())
-                self._exit.exception()  # retrieved; silences never-retrieved warnings
-            # A pump that ends before `connected` arrived means the session
-            # never became usable; fail the waiter.
-            if not self._connected.done():
-                self._connected.set_exception(self._close_error())
-                self._connected.exception()  # retrieved; silences never-retrieved warnings
-            await self._output.put(None)
-            await self._stderr.put(None)
+            # A detach ends the pump without ending the session: skip the
+            # finalization so reads and the exit future survive reattach().
+            if not self._detached:
+                if (
+                    self._diagnose is not None
+                    and not self._closed
+                    and not self._exit.done()
+                    and self._error is None
+                    and self._ws.close_code not in (WS_CLOSE_TAKEN_OVER, WS_CLOSE_POLICY_VIOLATION)
+                ):
+                    # The socket died for no admitted reason — often the whole
+                    # sandbox is gone. Ask the provider for a real cause (an
+                    # OOM kill, typically) instead of a bare close code.
+                    try:
+                        self._error = await self._diagnose(self._close_error())
+                    except Exception:
+                        # Diagnosis failure must preserve the observed socket failure.
+                        pass
+                if self._error is None and not self._exit.done():
+                    self._error = self._close_error()
+                if not self._exit.done():
+                    self._exit.set_exception(self._close_error())
+                    self._exit.exception()  # retrieved; silences never-retrieved warnings
+                # A pump that ends before `connected` arrived means the session
+                # never became usable; fail the waiter.
+                if not self._connected.done():
+                    self._connected.set_exception(self._close_error())
+                    self._connected.exception()  # retrieved; silences never-retrieved warnings
+                await self._output.put(None)
+                await self._stderr.put(None)
 
-    def _close_error(self) -> SandboxPtyError:
+    def _close_error(self) -> NgFailureEvent:
         if self._error is not None:
             return self._error
         code = self._ws.close_code
         if code == WS_CLOSE_TAKEN_OVER:
-            return SandboxPtyError("PTY session was taken over by another client")
+            return self._failure("PTY session was taken over by another client")
         if code == WS_CLOSE_POLICY_VIOLATION:
-            return SandboxPtyError("PTY session already has an attached client")
-        return SandboxPtyError(f"PTY connection closed unexpectedly (close code {code})")
+            return self._failure("PTY session already has an attached client", failure_kind=PROVIDER_PTY_BUSY)
+        return self._failure(f"PTY connection closed unexpectedly (close code {code})")
 
     async def _wait_connected(self, timeout_s: float | None) -> None:
         # shield: the future is shared; a timed-out waiter must not cancel it.
         await asyncio.wait_for(asyncio.shield(self._connected), timeout=timeout_s)
 
     async def _read_stream(self, queue: asyncio.Queue[bytes | None], timeout_s: float | None) -> bytes:
+        if self._detached and not self._closed:
+            raise self._failure("PTY session is detached; reattach() first")
         chunk = await asyncio.wait_for(queue.get(), timeout=timeout_s)
         if chunk is None:
             # Keep the EOF observable by subsequent reads and iterators.
@@ -252,15 +355,17 @@ class OpenSandboxPtySession:
         return _iterate()
 
     async def _send(self, frame: bytes | str) -> None:
+        if self._detached:
+            raise self._failure("PTY session is detached; reattach() first")
         if self._closed or self._ws.closed:
-            raise SandboxPtyError("PTY session is closed")
+            raise self._failure("PTY session is closed")
         try:
             if isinstance(frame, bytes):
                 await self._ws.send_bytes(frame)
             else:
                 await self._ws.send_str(frame)
         except (aiohttp.ClientError, ConnectionResetError) as e:
-            raise SandboxPtyError(f"PTY connection lost: {e}") from e
+            raise self._failure(f"PTY connection lost: {e}", cause=e) from e
 
     async def write(self, data: bytes) -> None:
         await self._send(bytes([CHAN_STDIN]) + data)
@@ -277,17 +382,141 @@ class OpenSandboxPtySession:
         # shield: the future is shared; a timed-out waiter must not cancel it.
         return await asyncio.wait_for(asyncio.shield(self._exit), timeout=timeout_s)
 
+    async def detach(self) -> None:
+        """Drop the WebSocket while the server-side session keeps running.
+
+        Output produced while detached lands in execd's replay buffer (a 1 MiB
+        ring; older bytes are evicted), and ``reattach()`` resumes from the
+        last byte this object saw. A detached session refuses reads and
+        writes; ``close()`` still releases it (and ends it when owned).
+        """
+        if self._detached:
+            return
+        if self.closed:
+            # Covers close() and a pump that already ended (process exit,
+            # takeover, connection loss): a dead session must not be
+            # resurrected into a not-closed, prune-evading detached state.
+            raise self._failure("PTY session is closed")
+        self._detached = True
+        self._pump_task.cancel()
+        # Let the pump observe the detach before the socket goes away.
+        await asyncio.gather(self._pump_task, return_exceptions=True)
+        await self._ws.close()
+
+    async def reattach(self) -> None:
+        """Re-dial a ``detach()``-ed session, replaying output produced since."""
+        if self._closed:
+            raise self._failure("PTY session is closed")
+        if not self._detached:
+            return
+        self._ws = await _connect_ws(
+            sandbox_id=self._sandbox_id,
+            client=self._client,
+            base_url=self._session_url.rsplit("/pty/", 1)[0],
+            headers=self._headers,
+            session_id=self.session_id,
+            query={"takeover": "1", "since": str(self._received)},
+            request_timeout_s=self._request_timeout_s,
+        )
+        # This socket asked to take the session over, so the new pump must
+        # treat an "already attached" refusal as execd still evicting our own
+        # previous socket, and retry.
+        self._takeover = True
+        self._detached = False
+        self._pump_task = asyncio.create_task(self._pump())
+
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        """Run one command holding the socket only for brief polls.
+
+        The command is written with the same marker discipline as session
+        exec, the socket is dropped, and every ``poll_interval_s`` the session
+        re-attaches and drains output produced in the meantime from the
+        server's retained window. Nothing is written to the sandbox
+        filesystem; if the command produced more output between polls than
+        the server retains, the loss is detected and raised rather than
+        returned truncated. Returns ``(output, exit_code)`` — output is one
+        merged stream (replayed bytes carry no stdout/stderr split) and
+        ``exit_code`` is ``None`` when the marker line came back mangled.
+        The session ends attached. Callers serialize: one command per
+        session at a time, as with session exec.
+        """
+        token = f"NGPTY{uuid.uuid4().hex[:12]}"
+        needle = f"{token}:".encode()
+        # Same marker discipline as _run_in_pty_session in the api module:
+        # markers split across two printf arguments so the shell's echo can
+        # never match them, both printfs inside the brace group so the slice
+        # between the markers is the command's output alone, stdin at EOF.
+        await self.write(
+            f"{{ printf '%s%s\\n' '{token[:5]}' '{token[5:]}S'\n"
+            f"{command}\n"
+            f"printf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n"
+            f"}} </dev/null\n".encode()
+        )
+        buffer = bytearray()
+        while True:
+            while needle not in buffer:
+                try:
+                    chunk = await self.read(timeout_s=1.0)
+                except (TimeoutError, asyncio.TimeoutError):
+                    break  # stream is quiet; wait detached
+                if not chunk:
+                    raise self._failure(
+                        "PTY session ended before the command finished", failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN
+                    )
+                buffer.extend(chunk)
+            # Checked after draining (replay frames land asynchronously), and
+            # before accepting the marker: a mid-stream hole must not come
+            # back as silently truncated output.
+            if self._replay_gap:
+                print(
+                    "PTY output exceeded the server's retained window while detached; "
+                    "run bulk-output commands attached or through the exec API instead",
+                    file=sys.stderr,
+                )
+            if needle in buffer:
+                break
+            await self.detach()
+            await asyncio.sleep(poll_interval_s)
+            await self.reattach()
+        output, _, trailing = bytes(buffer).partition(needle)
+        # Drop the echoed input and prompts: real output starts on the line
+        # after the start marker. (Replay may have evicted the marker while
+        # detached; keep the prefix then.)
+        _, seen_start, after_start = output.partition(f"{token}S".encode())
+        if seen_start:
+            output = after_start.partition(b"\n")[2]
+        while b"\n" not in trailing:
+            # The status digits can straddle the chunk that carried the marker.
+            chunk = await self.read(timeout_s=5.0)
+            if not chunk:
+                break
+            trailing += chunk
+        exit_text = trailing.split(b"\n", 1)[0].strip()
+        # Pipe mode splits live (attached) stderr onto its own queue; fold any
+        # of it into the merged result, ordering best-effort.
+        stderr = bytearray()
+        try:
+            while chunk := await self.read_stderr(timeout_s=0.05):
+                stderr.extend(chunk)
+        except (TimeoutError, asyncio.TimeoutError):
+            pass
+        return bytes(output + stderr), int(exit_text) if exit_text.isdigit() else None
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         # Settle the exit future before the pump can observe our own close.
         if not self._exit.done():
-            self._exit.set_exception(SandboxPtyError("PTY session closed before process exit"))
+            self._exit.set_exception(self._failure("PTY session closed before process exit"))
             self._exit.exception()  # retrieved; silences never-retrieved warnings
         self._pump_task.cancel()
         # Let the pump's finally run before tearing the socket down.
         await asyncio.gather(self._pump_task, return_exceptions=True)
+        if self._detached:
+            # The detach-time pump skipped finalization; readers still need EOF.
+            await self._output.put(None)
+            await self._stderr.put(None)
         try:
             await self._ws.close()
             if self._owned:
@@ -316,6 +545,8 @@ async def open_pty_session(
     headers: dict[str, str],
     spec: SandboxPtySpec,
     request_timeout_s: float | None,
+    sandbox_id: str | None = None,
+    diagnose: Callable[[BaseException], Awaitable[NgFailureEvent]] | None = None,
 ) -> OpenSandboxPtySession:
     """Create an execd PTY session and attach its WebSocket.
 
@@ -345,16 +576,26 @@ async def open_pty_session(
                         session_id = (await response.json())["session_id"]
                         break
                     detail = f"HTTP {response.status}: {(await response.text()).strip()}"
+                    failure = opensandbox_failure(
+                        operation="create_pty",
+                        sandbox_id=sandbox_id,
+                        http_status=response.status,
+                        reason=f"PTY create failed with {detail}",
+                    )
+                    observe_failure(failure)
                     if response.status not in (404, 502, 503) or delay is None:
-                        raise SandboxPtyError(f"PTY create failed with {detail}")
+                        raise failure
             except aiohttp.ClientConnectorError as e:
+                failure = opensandbox_failure(operation="create_pty", sandbox_id=sandbox_id, cause=e)
+                observe_failure(failure)
                 if delay is None:
-                    raise SandboxPtyError(f"PTY create failed with connect error: {e}") from e
+                    raise failure from e
             await asyncio.sleep(delay)
         assert session_id is not None
 
         try:
             ws = await _connect_ws(
+                sandbox_id=sandbox_id,
                 client=client,
                 base_url=base_url,
                 headers=headers,
@@ -368,12 +609,14 @@ async def open_pty_session(
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
             raise
-    except SandboxPtyError:
+    except NgFailureEvent:
         await client.close()
         raise
     except Exception as e:
         await client.close()
-        raise SandboxPtyError(f"Failed to open PTY session: {e}") from e
+        raise opensandbox_failure(
+            operation="create_pty", sandbox_id=sandbox_id, cause=e, reason=f"Failed to open PTY session: {e}"
+        ) from e
     except BaseException:
         await client.close()
         raise
@@ -385,6 +628,8 @@ async def open_pty_session(
         session_id=session_id,
         headers=headers,
         request_timeout_s=request_timeout_s,
+        sandbox_id=sandbox_id,
+        diagnose=diagnose,
     )
     # execd hardcodes 80x24 at spawn; size is only settable post-attach.
     if spec.pty and (spec.rows, spec.cols) != (24, 80):
@@ -405,6 +650,8 @@ async def attach_pty_session(
     takeover: bool = True,
     since: int | None = None,
     request_timeout_s: float | None,
+    sandbox_id: str | None = None,
+    diagnose: Callable[[BaseException], Awaitable[NgFailureEvent]] | None = None,
 ) -> OpenSandboxPtySession:
     """Attach to an existing execd PTY session. Owns ``client`` as above."""
     query: dict[str, str] = {}
@@ -414,6 +661,7 @@ async def attach_pty_session(
         query["since"] = str(since)
     try:
         ws = await _connect_ws(
+            sandbox_id=sandbox_id,
             client=client,
             base_url=base_url,
             headers=headers,
@@ -421,19 +669,17 @@ async def attach_pty_session(
             query=query,
             request_timeout_s=request_timeout_s,
         )
-    except SandboxPtyError:
+    except NgFailureEvent:
         await client.close()
         raise
-    except aiohttp.WSServerHandshakeError as e:
-        await client.close()
-        if e.status == 409:
-            raise SandboxPtyError(
-                f"PTY session {session_id} already has an attached client (pass takeover=True to evict)"
-            ) from e
-        raise SandboxPtyError(f"Failed to attach to PTY session {session_id}: {e}") from e
     except Exception as e:
         await client.close()
-        raise SandboxPtyError(f"Failed to attach to PTY session {session_id}: {e}") from e
+        raise opensandbox_failure(
+            operation="attach_pty",
+            sandbox_id=sandbox_id,
+            cause=e,
+            reason=f"Failed to attach to PTY session {session_id}: {e}",
+        ) from e
     except BaseException:
         await client.close()
         raise
@@ -445,6 +691,9 @@ async def attach_pty_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=False,
+        takeover=takeover,
+        sandbox_id=sandbox_id,
+        diagnose=diagnose,
     )
 
 
@@ -456,6 +705,7 @@ async def _connect_ws(
     session_id: str,
     query: dict[str, str],
     request_timeout_s: float | None,
+    sandbox_id: str | None = None,
 ) -> aiohttp.ClientWebSocketResponse:
     ws_url = f"ws{base_url.removeprefix('http')}/pty/{session_id}/ws"
     if query:
@@ -464,15 +714,32 @@ async def _connect_ws(
     # definitive answers (404 gone, 409 held) propagate immediately.
     for delay in (*_PTY_RETRY_DELAYS, None):
         try:
-            return await asyncio.wait_for(client.ws_connect(ws_url, headers=headers), timeout=request_timeout_s)
+            return await asyncio.wait_for(
+                client.ws_connect(ws_url, headers=headers, heartbeat=_PTY_WS_HEARTBEAT_S),
+                timeout=request_timeout_s,
+            )
         except aiohttp.WSServerHandshakeError as e:
+            failure = opensandbox_failure(
+                operation="attach_pty",
+                sandbox_id=sandbox_id,
+                cause=e,
+                failure_kind=PROVIDER_PTY_BUSY if e.status == 409 else None,
+                reason=(
+                    f"PTY session {session_id} already has an attached client (pass takeover=True to evict)"
+                    if e.status == 409
+                    else f"Failed to attach to PTY session {session_id}: HTTP {e.status}"
+                ),
+            )
+            observe_failure(failure)
             if e.status not in (502, 503) or delay is None:
-                raise
-        except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
+                raise failure from e
+        except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, asyncio.TimeoutError) as e:
+            failure = opensandbox_failure(operation="attach_pty", sandbox_id=sandbox_id, cause=e)
+            observe_failure(failure)
             if delay is None:
-                raise
+                raise failure from e
         await asyncio.sleep(delay)
-    raise SandboxPtyError("unreachable")  # the loop always returns or raises
+    raise RuntimeError("unreachable")  # the loop always returns or raises
 
 
 async def _start_session(
@@ -484,6 +751,9 @@ async def _start_session(
     headers: dict[str, str],
     request_timeout_s: float | None,
     owned: bool = True,
+    takeover: bool = False,
+    sandbox_id: str | None = None,
+    diagnose: Callable[[BaseException], Awaitable[NgFailureEvent]] | None = None,
 ) -> OpenSandboxPtySession:
     session = OpenSandboxPtySession(
         client=client,
@@ -493,9 +763,17 @@ async def _start_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=owned,
+        takeover=takeover,
+        sandbox_id=sandbox_id,
+        diagnose=diagnose,
     )
     try:
         await session._wait_connected(request_timeout_s)
+    except Exception as error:
+        await session.close()
+        if isinstance(error, NgFailureEvent):
+            raise
+        raise opensandbox_failure(operation="attach_pty", sandbox_id=sandbox_id, cause=error) from error
     except BaseException:
         await session.close()
         raise

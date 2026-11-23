@@ -14,12 +14,24 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
+
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.utils.exception_inspection import error_to_http_status
+
+
+# How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
+# and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
+# above the provider's budget, so the provider can report what it found before the caller gives up.
+ORPHAN_REAP_TIMEOUT_S = 60.0
 
 
 class SandboxStatus(str, Enum):
@@ -27,6 +39,7 @@ class SandboxStatus(str, Enum):
 
     STARTING = "starting"
     RUNNING = "running"
+    PAUSED = "paused"
     STOPPED = "stopped"
     ERROR = "error"
     UNKNOWN = "unknown"
@@ -62,14 +75,26 @@ class SandboxEndpoint:
 
 
 @dataclass(frozen=True)
-class SandboxResources:
-    """Provider-neutral resource request."""
+class SandboxResourceAmounts:
+    """Provider-neutral quantities: CPU cores, MiB, GiB and GPU count.
+
+    Missing values are unspecified/unknown, never zero. Fractional memory and disk
+    preserve observed allocations; gpu_type is a selector rather than an amount.
+    """
 
     cpu: float | None = None
-    memory_mib: int | None = None
-    disk_gib: int | None = None
+    memory_mib: float | None = None
+    disk_gib: float | None = None
     gpu: int | None = None
     gpu_type: str | None = None
+
+
+@dataclass(frozen=True)
+class SandboxResources(SandboxResourceAmounts):
+    """Provider-neutral creation request, retaining integer memory/disk inputs."""
+
+    memory_mib: int | None = None
+    disk_gib: int | None = None
 
     @classmethod
     def from_mapping(cls, resources: Mapping[str, Any] | None) -> "SandboxResources":
@@ -90,6 +115,55 @@ class SandboxResources:
         )
 
 
+# The resources a scheduler compares request against limit for; ``gpu_type`` is a selector, not a quantity.
+SCHEDULABLE_RESOURCE_KEYS = ("cpu", "memory_mib", "disk_gib", "gpu")
+
+
+def clamp_resource_requests(
+    requests: Mapping[str, Any] | SandboxResources,
+    limits: Mapping[str, Any] | SandboxResources,
+) -> tuple[dict[str, Any], dict[str, tuple[Any, Any]]]:
+    """Cap each scheduling request at the limit the spec declares for the same key.
+
+    Kubernetes never schedules a pod whose request exceeds its limit, and OpenSandbox reports such a
+    sandbox only as "pending allocation", so a request above a task's declared limit must not reach the
+    create call. Returns the requests with the offending keys set to their limit, and
+    ``{key: (request, limit)}`` for the keys that changed so the caller can log a warning naming them.
+    Keys the limits do not declare pass through untouched.
+    """
+    requested = requests if isinstance(requests, SandboxResources) else SandboxResources.from_mapping(requests)
+    limited = limits if isinstance(limits, SandboxResources) else SandboxResources.from_mapping(limits)
+    clamped = dict(requests.__dict__ if isinstance(requests, SandboxResources) else requests)
+    changed: dict[str, tuple[Any, Any]] = {}
+    for key in SCHEDULABLE_RESOURCE_KEYS:
+        request, limit = getattr(requested, key), getattr(limited, key)
+        if request is None or limit is None or request <= limit:
+            continue
+        changed[key] = (clamped[key], limit)
+        clamped[key] = limit
+    return clamped, changed
+
+
+@dataclass(frozen=True)
+class SandboxSidecarSpec:
+    """An extra container started with the sandbox from its own image.
+
+    The sidecar has its own filesystem. Start services in it with ``AsyncSandbox.sidecar(name).exec``.
+    How the sandbox reaches a sidecar over the network is provider-specific.
+    """
+
+    name: str
+    image: str
+    env: dict[str, str] = field(default_factory=dict)
+    resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.image:
+            raise ValueError("A sandbox sidecar needs a name and an image")
+        if not isinstance(self.resources, SandboxResources):
+            object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+
+
 @dataclass(frozen=True)
 class SandboxSpec:
     """Sandbox creation request."""
@@ -99,16 +173,35 @@ class SandboxSpec:
     ready_timeout_s: int | float | None = None
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)
+    # Uploaded at startup, keyed by remote path.
+    # A str is written as UTF-8 text and bytes are written unchanged, so binary files such as images fit too.
+    files: dict[str, str | bytes] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
     ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
+    # Extra containers started with the sandbox (mappings are accepted); needs a provider that
+    # implements `SupportsSandboxSidecars`.
+    sidecars: tuple[SandboxSidecarSpec, ...] | list[SandboxSidecarSpec | Mapping[str, Any]] = field(
+        default_factory=tuple
+    )
+    # The user commands run as when an exec names none (a Dockerfile's final ``USER``). Providers that
+    # cannot set a container default apply it per exec through the sandbox facade.
+    user: str | int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if not isinstance(self.sidecars, (list, tuple)):
+            raise TypeError("Sandbox sidecars must be a list or tuple of sidecar specs or mappings")
+        sidecars = tuple(
+            sidecar if isinstance(sidecar, SandboxSidecarSpec) else SandboxSidecarSpec(**sidecar)
+            for sidecar in self.sidecars
+        )
+        if len({sidecar.name for sidecar in sidecars}) != len(sidecars):
+            raise ValueError("Sandbox sidecar names must be unique")
+        object.__setattr__(self, "sidecars", sidecars)
         if not isinstance(self.ports, (list, tuple)):
             raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
         normalized_ports: list[int] = []
@@ -151,6 +244,10 @@ class SandboxExecResult:
     command. Providers may use a non-process sentinel with ``error_type`` set
     when the sandbox runtime reports an execution failure without a process
     exit code.
+
+    ``error_type="user_switch_unavailable"`` means the provider confirmed that
+    credential switching prevented process launch. Helpers that allow the image's
+    default user can choose that branch without reporting a failure event.
     """
 
     stdout: str | None
@@ -189,12 +286,108 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+def sandbox_credentials_rejected(
+    error: BaseException,
+    *,
+    operation: str,
+    details: SandboxFailureDetails | None = None,
+    stage: FailureStage | None = None,
+    sdk_message: str | None = None,
+) -> NgFailureEvent | None:
+    """A sandbox-boundary failure for an observed HTTP 401/403, caused by ``error``; else ``None``.
+
+    The kind comes from the status only, never from the error's text. ``sdk_message`` is the diagnostic
+    the caller selected for the provider's SDK (see ``sdk_error_details``).
+    """
+    status = error_to_http_status(error)
+    if status not in (401, 403):
+        return None
+    rejected = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+        details=details,
+        failure_reason=f"Sandbox provider refused the credentials (HTTP {status})",
+        operation=operation,
+        stage=stage,
+        http_status=status,
+        foreign_error=sdk_error_details(error, message=sdk_message),
+    )
+    rejected.__cause__ = error
+    return rejected
+
+
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
 
 class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
+
+
+class SandboxSnapshotError(RuntimeError):
+    """Raised when a provider cannot complete an operation on a snapshot; ``snapshot_id`` names it when known.
+
+    The base of every snapshot error, so ``except SandboxSnapshotError`` handles any snapshot failure.
+    """
+
+    def __init__(self, message: str, *, snapshot_id: str | None = None) -> None:
+        super().__init__(message)
+        self.snapshot_id = snapshot_id
+
+
+class SandboxSnapshotNotFoundError(SandboxSnapshotError, LookupError):
+    """Raised when a provider has no snapshot with the requested id.
+
+    The snapshot may be deleted, or not yet visible on every replica of a snapshot store that is not fully shared.
+    """
+
+
+class SandboxSnapshotFailedError(SandboxSnapshotError):
+    """Raised when a snapshot failed on the provider or did not become ready in time; it cannot create sandboxes."""
+
+
+class SandboxSnapshotInUseError(SandboxSnapshotError):
+    """Raised when a provider refuses to delete a snapshot because something still uses it."""
+
+
+# What a snapshot of a sandbox can keep.
+SnapshotContent = Literal["files", "processes"]
+
+
+@dataclass(frozen=True)
+class SandboxCapabilities:
+    """What a provider class can do, declared as its ``capabilities`` class attribute.
+
+    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none.
+
+    Attributes:
+        snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots. With
+            ``"processes"``, a snapshot saves memory and running processes, and a sandbox created from it
+            continues them.
+    """
+
+    snapshot_keeps: frozenset[SnapshotContent] = frozenset()
+
+
+def provider_capabilities(provider: object) -> SandboxCapabilities:
+    """The capabilities ``provider`` declares; the defaults for a provider that declares none."""
+    capabilities = getattr(provider, "capabilities", None)
+    return capabilities if isinstance(capabilities, SandboxCapabilities) else SandboxCapabilities()
+
+
+@dataclass(frozen=True)
+class SandboxSnapshotInfo:
+    """One snapshot in a provider's listing.
+
+    ``name`` is the name the snapshot was taken with, and ``None`` only for one taken without a name. ``state`` is
+    the provider's own lifecycle word, lowercased, and ``sandbox_id`` the sandbox the snapshot was taken from;
+    either is ``None`` when the provider does not report it.
+    """
+
+    snapshot_id: str
+    name: str | None
+    state: str | None = None
+    sandbox_id: str | None = None
 
 
 class SandboxProvider(Protocol):
@@ -206,9 +399,10 @@ class SandboxProvider(Protocol):
         """Create a ready sandbox and return a provider-neutral handle.
 
         Providers must return only after the sandbox is healthy enough to run
-        commands and transfer files. If the sandbox cannot become ready before
-        the configured timeout, providers should raise ``SandboxCreateError``
-        or a provider-specific subclass.
+        commands and transfer files. New and migrated providers must report allocation
+        and readiness failures as ``NgFailureEvent`` with ``boundary="sandbox"`` and a registered kind.
+        Providers awaiting migration still expose creation exceptions; see the
+        sandbox documentation's required provider migrations.
         """
         ...
 
@@ -247,11 +441,260 @@ class SandboxProvider(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxBackgroundServices(Protocol):
+    """Optional execution override for services needed by a later command."""
+
+    async def exec_with_background_services(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
+class SupportsSandboxExecScopedProcesses(Protocol):
+    """Optional: processes cannot outlive the exec that started them, and the provider can prove it.
+
+    ``exec_processes_terminated`` returns True only when no process started by any
+    exec of the sandbox can still run: every exec has returned, none is queued or
+    starting, and every process tree an exec started is gone. A caller that lost
+    track of a command it started can then confirm from the provider side that
+    nothing of it is left.
+    """
+
+    async def exec_processes_terminated(self, handle: SandboxHandle) -> bool: ...
+
+
+@runtime_checkable
+class SupportsSandboxNetwork(Protocol):
+    """Optional direct networking between sandboxes, preserving service ports."""
+
+    def validate_networking(self) -> None: ...
+
+    async def network_address(self, handle: SandboxHandle) -> str: ...
+
+    async def set_hosts(self, handle: SandboxHandle, hosts: Mapping[str, str]) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxRuntimeRequirements(Protocol):
+    """Optional validation and setup of task-declared runtime requirements."""
+
+    def validate_runtime_requirements(
+        self, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> dict[str, str] | None:
+        """Validate support and return any required create-time metadata."""
+        ...
+
+    async def configure_runtime(
+        self, handle: SandboxHandle, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxPortForwarding(Protocol):
+    """Optional loopback TCP forwarding, running until cancellation."""
+
+    def validate_port_forwarding(self) -> None: ...
+
+    async def forward_ports(
+        self, handle: SandboxHandle, target_address: str, ports: tuple[int, ...], *, ready_file: str
+    ) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxSharedStorage(Protocol):
+    """Optional shared filesystem provisioned by the operator's provider config.
+
+    ``shared_volume_options`` returns provider options containing a ``volumes``
+    list of opaque mount descriptors. Collections concatenate these lists.
+    ``source`` is relative to the configured shared root; ``None`` mounts that
+    root for initialization and cleanup. Metadata supplies placement settings.
+    """
+
+    def shared_volume_options(self, source: str | None, target: str, *, read_only: bool = False) -> dict[str, Any]: ...
+
+    def shared_volume_metadata(self) -> dict[str, str]: ...
+
+
+# The per-service container settings a Compose file may declare behind ``SupportsSandboxServiceOptions``.
+COMPOSE_SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+
+
+@runtime_checkable
+class SupportsSandboxServiceOptions(Protocol):
+    """Optional container settings a Compose service declares: ``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``.
+
+    ``SERVICE_OPTION_FIELDS`` names the subset the provider can apply; it is a class attribute so prepare
+    can check a task against a provider by name, without instantiating it. ``service_options`` returns
+    the ``provider_options`` that apply the given values at create time (an empty mapping when none are
+    given) and raises ``ValueError`` for a value it cannot express.
+    """
+
+    SERVICE_OPTION_FIELDS: frozenset[str]
+
+    def service_options(
+        self,
+        *,
+        tmpfs: tuple[str, ...] = (),
+        ulimits: Mapping[str, Any] | None = None,
+        sysctls: Mapping[str, str] | None = None,
+        security_opt: tuple[str, ...] = (),
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxPullPolicy(Protocol):
+    """Optional per-sandbox image pull policy: ``always``, ``missing`` or ``never`` (Compose's ``pull_policy``).
+
+    ``pull_policy_options`` returns the ``provider_options`` that apply it at create time. A provider
+    without this capability leaves the pull behaviour to the deployment's default.
+    """
+
+    def pull_policy_options(self, policy: str) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxIndependentUploads(Protocol):
+    """Optional provider capability: a file upload never waits for capacity that running commands hold.
+
+    A provider that bounds its concurrent operations with one limit shared by commands and file transfers
+    (CLI slots, worker threads, pooled connections) cannot promise this: once long-running commands hold every
+    slot, an upload waits until one of them ends. ``SandboxSession.expire`` needs it to stop a running harness,
+    because the stop is a file the harness's supervisor watches for. The answer may depend on configuration.
+    """
+
+    def uploads_independent_of_execs(self) -> bool: ...
+
+
+@runtime_checkable
 class SupportsSandboxEndpoint(Protocol):
     """Optional provider capability for resolving declared service ports."""
 
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxSidecars(Protocol):
+    """Optional provider capability to run sidecar containers next to the sandbox.
+
+    The provider creates the sidecars declared in ``SandboxSpec.sidecars`` together with the sandbox, then runs
+    commands in them and reads files from them through these calls. Commands run as an argv without a shell,
+    because sidecar images can be distroless.
+    """
+
+    async def sidecar_exec(
+        self,
+        handle: SandboxHandle,
+        sidecar: str,
+        argv: list[str],
+        *,
+        timeout_s: int | float,
+        on_stdout: Callable[[str], None] | None = None,
+    ) -> SandboxExecResult:
+        """Run ``argv`` in ``sidecar``; ``on_stdout`` receives stdout text as it arrives, for long-running services."""
+        ...
+
+    async def download_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: str, target_path: Path
+    ) -> None:
+        """Download one file from ``sidecar`` to the local filesystem."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxPauseResume(Protocol):
+    """Optional provider capability to pause and resume a sandbox.
+
+    What survives a pause beyond the filesystem is backend-specific.
+    """
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause a sandbox while preserving its state."""
+        ...
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume a paused sandbox and refresh its handle."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxSnapshot(Protocol):
+    """Optional provider capability to snapshot a running sandbox into a durable, independent copy.
+
+    A snapshot is a restore point: ``create_from_snapshot`` builds a new sandbox from it, however the source sandbox
+    changed or ended since. Deleting the source sandbox leaves the snapshot; only ``delete_snapshot`` removes it.
+
+    A provider must keep the name a snapshot is taken with and return it from ``list_snapshots``. A caller finds
+    its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
+    other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
+
+    What a snapshot keeps depends on the provider, which declares it as ``capabilities.snapshot_keeps``
+    (:class:`SandboxCapabilities`); read it with ``provider_capabilities(provider).snapshot_keeps``. A provider whose
+    snapshots save memory and running processes, so that a sandbox created from one continues them, declares
+    ``"processes"`` beside ``"files"``.
+    """
+
+    async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
+        """Start a snapshot of the sandbox and return its id at once; it may not be usable yet.
+
+        ``name``, when given, is stored with the snapshot and is the name ``list_snapshots`` matches and returns.
+        """
+        ...
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        """Return once the snapshot can create sandboxes.
+
+        Raises ``SandboxSnapshotFailedError`` when the snapshot failed or is not ready in time, and
+        ``SandboxSnapshotNotFoundError`` when the provider has no snapshot ``snapshot_id``.
+        """
+        ...
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete a snapshot; a snapshot the provider confirms is already gone is not an error.
+
+        Raises ``SandboxSnapshotInUseError`` when the provider refuses because something still uses the snapshot,
+        and ``SandboxSnapshotError`` when the delete fails otherwise.
+        """
+        ...
+
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
+        """Every snapshot whose name starts with ``prefix``, each with the name it was taken with.
+
+        Raises ``SandboxSnapshotError`` if the listing fails; never returns a partial listing.
+        """
+        ...
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        """Create a sandbox from a snapshot in place of ``spec``'s image, with the rest of ``spec``.
+
+        Raises ``SandboxSnapshotNotFoundError`` when the provider has no snapshot ``snapshot_id``.
+        """
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxCheckpointPolling(Protocol):
+    """Optional scoped speed-up of command completion checks while a harness is stopped for a checkpoint."""
+
+    def checkpoint_exec_polling(self, handle: SandboxHandle) -> AbstractContextManager[None]:
+        """Wake pending command polls of the sandbox and poll them often until the scope exits."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxParkedPolling(Protocol):
+    """Optional scoped hold of command completion checks while a harness in the sandbox is paused for a checkpoint."""
+
+    def parked_exec_polling(self, handle: SandboxHandle) -> AbstractContextManager[None]:
+        """Hold pending command polls of the sandbox without asking it, and ask again once the scope exits."""
         ...
 
 
@@ -273,8 +716,9 @@ class SandboxPtySession(Protocol):
     async def read(self, *, timeout_s: float | None = None) -> bytes:
         """Return the next output chunk (all terminal output in PTY mode;
         stdout only in pipe mode). ``b""`` means the process exited and the
-        stream is drained. Raises ``TimeoutError`` on timeout and
-        ``SandboxPtyError`` if the session died without exiting.
+        stream is drained. Raises ``TimeoutError`` when this wait expires;
+        that alone does not mean the command failed. Report session death as
+        ``NgFailureEvent``; providers awaiting migration use ``SandboxPtyError``.
         """
         ...
 
@@ -308,7 +752,18 @@ class SandboxPtySession(Protocol):
         ...
 
     async def wait_exit(self, *, timeout_s: float | None = None) -> int:
-        """Block until the process exits and return its exit code."""
+        """Block until the process exits and return its exit code.
+
+        Raises ``TimeoutError`` when this wait expires; that alone does not mean
+        the command failed. Session failures follow the same contract as ``read``.
+        """
+        ...
+
+    async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:
+        """Run one command holding the transport only for brief completion
+        polls; returns ``(merged output, exit code or None)``. The server
+        retains a bounded window of output between polls, and exceeding it
+        raises rather than returning truncated output."""
         ...
 
     async def close(self) -> None:

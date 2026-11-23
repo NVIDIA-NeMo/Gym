@@ -1,0 +1,901 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Model transport observations preserve retries, cancellation and readable HTTP responses."""
+
+import asyncio
+import socket
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import aiohttp
+import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+
+import nemo_gym.client.http_client as http_client
+import nemo_gym.client.openai_client as openai_client
+from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON, NeMoGymAsyncOpenAI, PermanentEndpointError
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.typed_exceptions import failure_report_for
+
+
+@pytest.mark.parametrize("error_type", [aiohttp.ServerDisconnectedError, aiohttp.ClientOSError])
+async def test_a_recovered_transport_attempt_is_observed_without_an_episode_failure(monkeypatch, error_type):
+    success = SimpleNamespace(status=200, headers={})
+    error = error_type("sensitive connection text")
+    wire = SimpleNamespace(request=AsyncMock(side_effect=[error, success]))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client.asyncio, "sleep", AsyncMock())
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test", max_connection_retries=3)
+
+    with RequestFailureLog.capture() as log:
+        assert await model._request(method="POST", url="http://model.test/responses") is success
+        report = log.reply_report(None)
+
+    assert wire.request.await_count == 2 and report.failure_id is None
+    assert len(report.events) == 1
+    event = next(event for event in report.events.values() if event.boundary is FailureBoundary.MODEL)
+    assert event.failure_kind == MODEL_REQUEST_ERROR and event.http_status is None
+    assert event.cause_id is None
+    assert event.foreign_error.exception_type == f"{error_type.__module__}.{error_type.__qualname__}"
+    assert event.foreign_error.http_status is None
+    assert event.attempt_id.startswith(event.operation_id)
+    assert FailureHeader.decode(FailureHeader.encode(report)) == report
+
+
+@pytest.mark.parametrize("error_type", [aiohttp.ServerDisconnectedError, aiohttp.ClientOSError, TimeoutError])
+async def test_a_terminal_transport_attempt_is_observed_without_an_extra_retry(monkeypatch, error_type):
+    error = error_type("selected transport message")
+    error.request_payload = "private request"
+    wire = SimpleNamespace(request=AsyncMock(side_effect=error))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test", max_num_tries=1)
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(error_type) as caught:
+            await model._request(method="POST", url="http://model.test/responses")
+
+    assert caught.value is error and wire.request.await_count == 1
+    assert len(log.report.events) == 1
+    event = next(event for event in log.report.events.values() if event.boundary is FailureBoundary.MODEL)
+    assert event.cause_id is None
+    assert event.foreign_error.exception_type.endswith(error_type.__qualname__)
+    assert "private" not in log.report.model_dump_json()
+
+
+async def test_model_cancellation_is_neither_retried_nor_observed(monkeypatch):
+    wire = SimpleNamespace(request=AsyncMock(side_effect=asyncio.CancelledError()))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(asyncio.CancelledError):
+            await model._request(method="POST", url="http://model.test/responses")
+    assert wire.request.await_count == 1 and not log.report.events
+
+
+async def test_an_oversized_report_through_the_gym_http_client_keeps_body_status_and_one_call(monkeypatch):
+    event = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="界" * 2000)
+    report = FailureReport(failure_id=event.event_id, events={event.event_id: event})
+    hits = 0
+
+    async def endpoint(request):
+        nonlocal hits
+        hits += 1
+        return web.Response(status=503, text="original reply", headers=FailureHeader.encode(report))
+
+    app = web.Application()
+    app.router.add_get("/failure", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        response = await http_client.request(method="GET", url=str(server.make_url("/failure")), _max_num_tries=3)
+        assert response.status == 503
+        assert FailureHeader.decode(response.headers) == FailureReport(omitted=True)
+        with pytest.raises(aiohttp.ClientResponseError) as caught:
+            await http_client.raise_for_status(response)
+    assert caught.value.status == 503 and caught.value.response_content == b"original reply"
+    assert hits == 1
+
+
+async def test_the_raised_transport_error_names_the_attempt_it_ended_on(monkeypatch):
+    recovered, final = aiohttp.ClientOSError("first"), TimeoutError()
+    wire = SimpleNamespace(request=AsyncMock(side_effect=[recovered, TimeoutError(), final]))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client.asyncio, "sleep", AsyncMock())
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test", max_connection_retries=2)
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(TimeoutError) as caught:
+            await model._request(method="POST", url="http://model.test/responses")
+        report = log.reply_report(caught.value)
+
+    assert caught.value is final and wire.request.await_count == 3
+    first, _, last = sorted(report.events.values(), key=lambda event: event.attempt_id)
+    assert report.failure_id == last.event_id == failure_report_for(caught.value).failure_id
+    assert last.foreign_error.exception_type == "TimeoutError"
+    assert first.operation_id == last.operation_id and first.foreign_error.exception_type.endswith("ClientOSError")
+
+
+def _never_accepting_listener() -> tuple[socket.socket, list[socket.socket], int]:
+    """A listener whose accept queue is full, so a new connection is never established."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(0)
+    port = listener.getsockname()[1]
+    queued = []
+    for _ in range(4):
+        pending = socket.socket()
+        pending.setblocking(False)
+        try:
+            pending.connect(("127.0.0.1", port))
+        except BlockingIOError:
+            pass
+        queued.append(pending)
+    return listener, queued, port
+
+
+@pytest.fixture
+def timeout_transport(monkeypatch):
+    @asynccontextmanager
+    async def open_transport(*, connect_timeout=None, request_class=aiohttp.ClientRequest):
+        upload_received = asyncio.Event()
+        release_response = asyncio.Event()
+
+        async def never_answer(request):
+            await request.read()
+            upload_received.set()
+            await release_response.wait()
+            return web.json_response({})
+
+        app = web.Application()
+        app.router.add_post("/v1/responses", never_answer)
+        async with (
+            asyncio.timeout(30),  # Bound stuck I/O, not the timeout being asserted.
+            TestServer(app) as server,
+            aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit_per_host=1), request_class=request_class
+            ) as session,
+        ):
+            monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+            monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+            model = NeMoGymAsyncOpenAI(
+                api_key="test",
+                base_url=str(server.make_url("/v1")),
+                max_num_tries=1,
+                request_timeout_seconds=0.5,
+                connect_timeout_seconds=connect_timeout,
+            )
+            try:
+                yield SimpleNamespace(
+                    model=model,
+                    session=session,
+                    url=str(server.make_url("/v1/responses")),
+                    upload_received=upload_received,
+                )
+            finally:
+                release_response.set()
+
+    return open_transport
+
+
+@pytest.fixture
+def expire_total_timeout(monkeypatch):
+    total_timer = None
+
+    class ControlledTotalTimeout(aiohttp.client.TimeoutHandle):
+        def start(self):
+            nonlocal total_timer
+            total_timer = self
+            # Keep aiohttp's real cancellation, but expire only at the intended upload boundary.
+            return None
+
+    def expire():
+        assert total_timer is not None
+        asyncio.get_running_loop().call_soon(total_timer)
+
+    monkeypatch.setattr(aiohttp.client, "TimeoutHandle", ControlledTotalTimeout)
+    return expire
+
+
+async def _timeout_report(model, url, **payload):
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(TimeoutError) as caught:
+            await model._request(method="POST", url=url, **payload)
+        return log.reply_report(caught.value)
+
+
+def _assert_timeout_observation(report, waited_for_response):
+    [attempt] = report.events.values()
+    assert report.failure_id == attempt.event_id
+    assert (attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON) is waited_for_response
+    assert (attempt.details.request_upload_complete is True) is waited_for_response
+
+
+@pytest.mark.parametrize(
+    "connect_timeout",
+    [
+        pytest.param(None, id="sent-and-never-answered"),
+        pytest.param(5.0, id="sent-and-never-answered-with-a-connect-timeout"),
+    ],
+)
+async def test_timeout_after_completed_upload_is_a_response_timeout(
+    timeout_transport, expire_total_timeout, connect_timeout
+):
+    class RequestWithTimeoutAfterUpload(aiohttp.ClientRequest):
+        async def write_bytes(self, writer, conn, content_length=None):
+            await super().write_bytes(writer, conn, content_length)
+            expire_total_timeout()
+
+    async with timeout_transport(
+        connect_timeout=connect_timeout, request_class=RequestWithTimeoutAfterUpload
+    ) as transport:
+        report = await _timeout_report(transport.model, transport.url, json={"model": "m"})
+
+    _assert_timeout_observation(report, True)
+
+
+async def test_timeout_during_upload_is_not_a_response_timeout(timeout_transport, expire_total_timeout):
+    async def unfinished_body():
+        yield b"started"
+        expire_total_timeout()
+        await asyncio.Event().wait()
+
+    async with timeout_transport() as transport:
+        report = await _timeout_report(transport.model, transport.url, data=unfinished_body())
+
+    _assert_timeout_observation(report, False)
+
+
+@pytest.mark.parametrize(
+    "connect_timeout",
+    [
+        pytest.param(None, id="never-connected"),
+        pytest.param(0.2, id="connect-timeout"),
+    ],
+)
+async def test_timeout_before_connection_is_not_a_response_timeout(timeout_transport, connect_timeout):
+    listener, queued, port = _never_accepting_listener()
+    try:
+        async with timeout_transport(connect_timeout=connect_timeout) as transport:
+            report = await _timeout_report(
+                transport.model, f"http://127.0.0.1:{port}/v1/responses", json={"model": "m"}
+            )
+    finally:
+        listener.close()
+        for pending in queued:
+            pending.close()
+
+    _assert_timeout_observation(report, False)
+
+
+async def test_timeout_waiting_for_pool_is_not_a_response_timeout(timeout_transport):
+    async with timeout_transport() as transport:
+        held = asyncio.create_task(transport.session.post(transport.url, data=b"x"))
+        try:
+            await transport.upload_received.wait()
+            report = await _timeout_report(transport.model, transport.url, json={"model": "m"})
+        finally:
+            held.cancel()
+            await asyncio.gather(held, return_exceptions=True)
+
+    _assert_timeout_observation(report, False)
+
+
+def _reply(status: int, *, headers: dict | None = None, body: bytes = b"") -> SimpleNamespace:
+    return SimpleNamespace(
+        status=status, headers=headers or {}, content=SimpleNamespace(read=AsyncMock(return_value=body))
+    )
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_a_final_non_retryable_status_is_the_calls_observed_attempt(monkeypatch, status):
+    reply = _reply(status, body=b'{"error": {"code": "budget_exceeded"}}')
+    wire = SimpleNamespace(request=AsyncMock(return_value=reply))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        returned = await model._request(method="POST", url="http://model.test/responses")
+
+    # Not retried, and handed back for the caller to raise or handle.
+    assert returned is reply and wire.request.await_count == 1
+    [event] = log.report.events.values()
+    assert (event.boundary, event.failure_kind, event.operation, event.http_status) == (
+        FailureBoundary.MODEL,
+        MODEL_REQUEST_ERROR,
+        "model_request",
+        status,
+    )
+    assert event.attempt_id == f"{event.operation_id}-1" and log.report.failure_id is None
+
+
+async def test_a_failure_a_gym_server_forwarded_is_not_recorded_twice(monkeypatch):
+    forwarded = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="upstream")
+    report = FailureReport(failure_id=forwarded.event_id, events={forwarded.event_id: forwarded})
+    wire = SimpleNamespace(request=AsyncMock(return_value=_reply(422, headers=FailureHeader.encode(report))))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        await model._request(method="POST", url="http://model.test/responses")
+
+    assert list(log.report.events) == [forwarded.event_id]
+
+
+async def test_a_successful_call_records_nothing(monkeypatch):
+    wire = SimpleNamespace(request=AsyncMock(return_value=_reply(200)))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        await model._request(method="POST", url="http://model.test/responses")
+
+    assert not log.report.events
+
+
+async def _scripted_model(monkeypatch, replies: list[tuple[int, bytes, dict]]):
+    """A real local model endpoint that answers each POST /v1/responses with the next scripted reply."""
+    script = list(replies)
+
+    async def endpoint(request):
+        status, body, headers = script.pop(0)
+        return web.Response(status=status, body=body, headers=headers, content_type="application/json")
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", endpoint)
+    server = TestServer(app)
+    await server.start_server()
+    session = aiohttp.ClientSession()
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client.asyncio, "sleep", AsyncMock())
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url=str(server.make_url("/v1")), max_rate_limit_wait_seconds=0)
+    return model, script, server, session
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        pytest.param(400, b'{"error": {"message": "bad request"}}', id="400"),
+        pytest.param(401, b'{"error": {"message": "denied for this request"}}', id="401-not-permanent"),
+        pytest.param(403, b'{"error": {"message": "forbidden"}}', id="403-not-permanent"),
+        pytest.param(
+            422, b'{"error": {"type": "budget_exceeded", "message": "Budget has been exceeded"}}', id="422-budget-body"
+        ),
+    ],
+)
+async def test_the_error_raised_for_a_final_non_retryable_status_names_that_attempt(monkeypatch, status, body):
+    model, script, server, session = await _scripted_model(monkeypatch, [(status, body, {})])
+    try:
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(aiohttp.ClientResponseError) as caught:
+                await model.create_response(model="m", input="x")
+            report = log.reply_report(caught.value)
+    finally:
+        await session.close()
+        await server.close()
+
+    [attempt] = report.events.values()
+    assert not script and caught.value.status == status
+    assert report.failure_id == attempt.event_id and attempt.http_status == status
+    assert attempt.attempt_id == f"{attempt.operation_id}-1" and attempt.cause_id is None
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        pytest.param(401, b'{"error": {"code": "invalid_api_key"}}', id="401-permanent-auth"),
+        pytest.param(429, b'{"error": {"code": "insufficient_quota"}}', id="429-permanent-quota"),
+    ],
+)
+async def test_a_permanent_trip_names_the_attempt_that_tripped_it_and_later_calls_name_none(monkeypatch, status, body):
+    model, script, server, session = await _scripted_model(monkeypatch, [(status, body, {})])
+    try:
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(PermanentEndpointError) as tripped:
+                await model.create_response(model="m", input="x")
+            report = log.reply_report(tripped.value)
+        with RequestFailureLog.capture() as later_log:
+            with pytest.raises(PermanentEndpointError) as later:
+                await model.create_response(model="m", input="x")
+            later_report = later_log.reply_report(later.value)
+    finally:
+        await session.close()
+        await server.close()
+
+    [attempt] = report.events.values()
+    assert report.failure_id == attempt.event_id and attempt.http_status == status
+    # No request was sent for the later call, so it has no attempt and no cause.
+    assert not script and later_report.failure_id is None and not later_report.events
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        pytest.param([(429, b'{"error": {"code": "rate_limit_exceeded"}}', {"Retry-After": "0"})], id="recovered-429"),
+        pytest.param([], id="handled-400"),
+    ],
+)
+async def test_an_earlier_operations_attempt_never_becomes_a_later_operations_cause(monkeypatch, earlier):
+    replies = [*earlier, (200, b"{}", {})] if earlier else [(400, b"{}", {})]
+    model, script, server, session = await _scripted_model(monkeypatch, [*replies, (422, b"{}", {})])
+    try:
+        with RequestFailureLog.capture() as log:
+            if earlier:
+                assert await model.create_response(model="m", input="x") == {}
+            else:
+                handled = await model._request(method="POST", url=f"{model.base_url}/responses", json={})
+                assert handled.status == 400
+            [before] = log.report.events.values()
+            assert log.reply_report(None).failure_id is None
+            with pytest.raises(aiohttp.ClientResponseError) as caught:
+                await model.create_response(model="m", input="x")
+            report = log.reply_report(caught.value)
+    finally:
+        await session.close()
+        await server.close()
+
+    current = report.events[report.failure_id]
+    assert not script and current.http_status == 422 and current.operation_id != before.operation_id
+    assert current.cause_id is None and report.events[before.event_id] == before
+
+
+async def test_a_forwarded_gym_failure_stays_the_cause_and_no_attempt_is_added(monkeypatch):
+    forwarded = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="upstream")
+    header = FailureHeader.encode(FailureReport(failure_id=forwarded.event_id, events={forwarded.event_id: forwarded}))
+    model, script, server, session = await _scripted_model(monkeypatch, [(422, b"{}", header)])
+    try:
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(aiohttp.ClientResponseError) as caught:
+                await model.create_response(model="m", input="x")
+            report = log.reply_report(caught.value)
+    finally:
+        await session.close()
+        await server.close()
+
+    assert not script and report.failure_id == forwarded.event_id and list(report.events) == [forwarded.event_id]
+
+
+async def test_a_recovered_response_timeout_keeps_its_confirmed_upload_observation(monkeypatch):
+    calls = 0
+    responses_started = 0
+    uploads = []
+    first_upload = asyncio.Event()
+    release_first_response = asyncio.Event()
+
+    async def endpoint(request):
+        nonlocal calls
+        calls += 1
+        uploads.append(await request.json())
+        if calls == 1:
+            first_upload.set()
+            await release_first_response.wait()
+        return web.json_response({})
+
+    class TimeoutAfterUpload(aiohttp.ClientResponse):
+        async def start(self, connection):
+            nonlocal responses_started
+            responses_started += 1
+            if responses_started == 1:
+
+                async def timeout_read():
+                    await first_upload.wait()
+                    raise TimeoutError("controlled response timeout after upload")
+
+                # Keep aiohttp's response path real; fail its external read after the server receives the upload.
+                with monkeypatch.context() as boundary:
+                    boundary.setattr(connection.protocol, "read", timeout_read)
+                    return await super().start(connection)
+            return await super().start(connection)
+
+    app = web.Application()
+    app.router.add_post("/responses", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession(response_class=TimeoutAfterUpload) as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(api_key="test", base_url=str(server.make_url("/")), max_connection_retries=2)
+        try:
+            async with asyncio.timeout(30):  # Bound stuck I/O, not the intended first-attempt timeout.
+                with RequestFailureLog.capture() as log:
+                    response = await model._request(
+                        method="POST", url=str(server.make_url("/responses")), json={"input": "fixture"}
+                    )
+                    assert response.status == 200
+                    await response.read()
+                    report = log.reply_report(None)
+        finally:
+            release_first_response.set()
+    assert calls == responses_started == 2 and report.failure_id is None
+    assert uploads == [{"input": "fixture"}, {"input": "fixture"}]
+    [attempt] = report.events.values()
+    assert attempt.boundary is FailureBoundary.MODEL and attempt.failure_kind == MODEL_REQUEST_ERROR
+    assert attempt.details.request_upload_complete is True
+    assert attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+    assert attempt.foreign_error.exception_type == "TimeoutError"
+    assert attempt.operation_id and attempt.attempt_id
+    assert FailureHeader.decode(FailureHeader.encode(report)) == report
+
+
+async def test_failed_body_upload_never_reports_a_response_wait_timeout(monkeypatch):
+    async def endpoint(request):
+        await request.read()
+        return web.json_response({})
+
+    async def broken_body():
+        yield b"prefix"
+        raise OSError("controlled upload failure")
+
+    app = web.Application()
+    app.router.add_post("/responses", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test", base_url=str(server.make_url("/")), max_num_tries=1, request_timeout_seconds=0.2
+        )
+        with RequestFailureLog.capture() as log:
+            with pytest.raises((aiohttp.ClientError, OSError)) as caught:
+                await model._request(method="POST", url=str(server.make_url("/responses")), data=broken_body())
+            report = log.reply_report(caught.value)
+    [attempt] = report.events.values()
+    assert attempt.details.request_upload_complete is False
+    assert attempt.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON
+
+
+def _body_failure_client(monkeypatch, session, mode):
+    """Keep real HTTP headers, then fail the body read without a whole-request deadline."""
+    now = [100.0]
+    monkeypatch.setattr(openai_client, "monotonic", lambda: now[0])
+
+    async def request(**kwargs):
+        response = await session.request(**kwargs)
+        if mode != "complete":
+            read = type(response.content).read
+
+            async def read_body(stream, *args, **kwargs):
+                if stream is response.content:
+                    now[0] += 0.25
+                    if mode == "timeout":
+                        raise TimeoutError("response body read timed out")
+                return await read(stream, *args, **kwargs)
+
+            monkeypatch.setattr(type(response.content), "read", read_body)
+        return response
+
+    wire = SimpleNamespace(request=AsyncMock(side_effect=request))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    return wire
+
+
+@pytest.mark.parametrize("mode", ["truncated", "timeout", "complete"])
+async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode):
+    hits = 0
+
+    async def endpoint(request):
+        nonlocal hits
+        hits += 1
+        if mode != "truncated":
+            return web.json_response({"id": "reply", "output": []})
+        response = web.StreamResponse(headers={"Content-Type": "application/json", "Content-Length": "1000"})
+        await response.prepare(request)
+        await response.write(b'{"id":')
+        request.transport.close()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/responses", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        wire = _body_failure_client(monkeypatch, session, mode)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("")).rstrip("/"),
+            max_num_tries=1,
+        )
+        with RequestFailureLog.capture() as log:
+            if mode == "complete":
+                assert (await model.create_response(input=[]))["id"] == "reply"
+                assert not log.report.events
+                [operation] = log.model_operations.values()
+                assert operation.outcome == "completed" and operation.failure_id is None
+            else:
+                with pytest.raises((aiohttp.ClientPayloadError, TimeoutError)) as caught:
+                    await model.create_response(input=[])
+                report = log.reply_report(caught.value)
+                assert report.failure_id is not None
+                event = report.events[report.failure_id]
+                assert event.failure_kind == MODEL_REQUEST_ERROR
+                assert event.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON
+                assert event.http_status == 200
+                assert event.attempt_id.startswith(event.operation_id)
+                assert len(report.events) == 1
+                [operation] = log.model_operations.values()
+                assert operation.operation_id == event.operation_id
+                assert operation.final_attempt_id == event.attempt_id
+                assert operation.outcome == "failed" and operation.failure_id == event.event_id
+                assert caught.value.__cause__.event_id == event.event_id
+                assert operation.request_elapsed_ms == 250
+                assert isinstance(caught.value, TimeoutError if mode == "timeout" else aiohttp.ClientPayloadError)
+            assert operation.http_attempts == 1
+            assert operation.transport_failures == 0 and operation.retry_wait_s == 0
+    assert hits == 1
+    assert wire.request.await_count == 1
+
+
+@pytest.mark.parametrize("forwarded", [False, True])
+@pytest.mark.parametrize("mode", ["truncated", "timeout"])
+@pytest.mark.parametrize("status", [401, 422, 503])
+async def test_a_failed_error_body_read_selects_the_attempt_that_returned_it(monkeypatch, status, mode, forwarded):
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
+
+    hits = 0
+    remote = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason="remote model server failure",
+        operation="model_request",
+        operation_id="remote-op",
+        attempt_id="remote-op-1",
+        http_status=status,
+    )
+
+    async def endpoint(request):
+        nonlocal hits
+        hits += 1
+        headers = {"Content-Type": "application/json", "Content-Length": "1000"}
+        if forwarded:
+            headers.update(FailureHeader.encode(failure_report_for(remote)))
+        if mode == "timeout":
+            headers.pop("Content-Length")
+            return web.Response(status=status, headers=headers, body=b'{"error":')
+        response = web.StreamResponse(status=status, headers=headers)
+        await response.prepare(request)
+        await response.write(b'{"error":')
+        request.transport.close()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/responses", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        wire = _body_failure_client(monkeypatch, session, mode)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("")).rstrip("/"),
+            max_num_tries=1,
+        )
+        with RequestFailureLog.capture() as log:
+            with pytest.raises((aiohttp.ClientPayloadError, TimeoutError)) as caught:
+                await model.create_response(input=[])
+            report = log.reply_report(caught.value)
+    assert hits == 1, "a failed body read sends no second request"
+    assert wire.request.await_count == 1
+    assert isinstance(caught.value, TimeoutError if mode == "timeout" else aiohttp.ClientPayloadError)
+    assert report.failure_id is not None
+    event = report.events[report.failure_id]
+    assert event.http_status == status
+    assert event.failure_kind == MODEL_REQUEST_ERROR
+    assert event.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON
+    assert event.operation_id and event.attempt_id
+    if forwarded:
+        assert report.failure_id == remote.event_id, "the forwarded failure keeps its original ids"
+        assert list(report.events) == [remote.event_id], "no local attempt is added beside it"
+    else:
+        assert len(report.events) == 1
+
+
+def _vllm_metrics(waiting: float, running: float) -> str:
+    """A vLLM /metrics page as Prometheus text, with one engine."""
+    return (
+        "# HELP vllm:num_requests_waiting Number of requests waiting to be processed.\n"
+        f'vllm:num_requests_waiting{{engine="0",model_name="m"}} {waiting}\n'
+        "# HELP vllm:num_requests_running Number of requests in model execution batches.\n"
+        f'vllm:num_requests_running{{engine="0",model_name="m"}} {running}\n'
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "metrics", "expected"),
+    [
+        pytest.param(True, (62.0, 1.0), (62, 1), id="queued-server"),
+        pytest.param(True, (0.0, 4.0), (0, 4), id="an-empty-queue-is-recorded-too"),
+        pytest.param(True, None, (None, None), id="no-metrics-page"),
+        pytest.param(False, (62.0, 1.0), (None, None), id="not-requested"),
+    ],
+)
+async def test_a_response_timeout_records_the_servers_queue_when_asked(monkeypatch, record, metrics, expected):
+    metrics_reads = 0
+
+    async def responses(request):
+        await asyncio.sleep(0.5)
+        return web.json_response({})
+
+    async def metrics_page(request):
+        nonlocal metrics_reads
+        metrics_reads += 1
+        return web.Response(text=_vllm_metrics(*metrics))
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", responses)
+    if metrics is not None:
+        app.router.add_get("/metrics", metrics_page)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("/v1")),
+            max_num_tries=1,
+            request_timeout_seconds=0.1,
+            record_server_queue=record,
+        )
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(TimeoutError) as caught:
+                await model._request(method="POST", url=str(server.make_url("/v1/responses")), json={"model": "m"})
+            report = log.reply_report(caught.value)
+
+    [attempt] = report.events.values()
+    assert report.failure_id == attempt.event_id
+    assert attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+    assert attempt.details.request_upload_complete is True
+    assert (attempt.details.server_requests_waiting, attempt.details.server_requests_running) == expected
+    assert metrics_reads == (1 if record and metrics is not None else 0)
+
+
+def test_the_queue_counts_read_only_the_exact_gauges():
+    metrics = (
+        "# TYPE vllm:num_requests_waiting gauge\n"
+        'vllm:num_requests_waiting{engine="0",model_name="m"} 3.0\n'
+        'vllm:num_requests_waiting_by_reason{engine="0",reason="capacity"} 2.0\n'
+        'vllm:num_requests_waiting_by_reason{engine="0",reason="deferred"} 5.0\n'
+        'vllm:num_requests_waiting{engine="1",model_name="m"} 4.0 1730000000000\n'
+        "vllm:num_requests_running 2.0\n"
+        'vllm:num_requests_running_total{engine="0"} 9.0\n'
+    )
+    assert openai_client._vllm_queue_counts(metrics) == (7, 2)
+    assert openai_client._vllm_queue_counts('vllm:num_requests_waiting_by_reason{reason="x"} 2.0\n') is None
+
+
+QUEUES = [(5, 1), (0, 2), (7, 3), (9, 4), (1, 1), (2, 2)]
+
+
+async def _timeouts_then(monkeypatch, queues, answers_after: int, connection_retries: int):
+    """One model call whose first ``answers_after`` attempts time out; each timeout reads the next of ``queues``."""
+    reads = iter(queues)
+    sent = 0
+
+    async def responses(request):
+        nonlocal sent
+        sent += 1
+        if sent > answers_after:
+            return web.json_response({})
+        await asyncio.sleep(5)
+        return web.json_response({})
+
+    async def metrics_page(request):
+        return web.Response(text=_vllm_metrics(*next(reads)))
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", responses)
+    app.router.add_get("/metrics", metrics_page)
+    server = TestServer(app)
+    await server.start_server()
+    session = aiohttp.ClientSession()
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(
+        api_key="test",
+        base_url=str(server.make_url("/v1")),
+        max_connection_retries=connection_retries,
+        request_timeout_seconds=0.1,
+        record_server_queue=True,
+    )
+    try:
+        with RequestFailureLog.capture() as log:
+            try:
+                response = await model._request(
+                    method="POST", url=str(server.make_url("/v1/responses")), json={"model": "m"}
+                )
+                outcome = response
+            except Exception as error:
+                outcome = error
+            return outcome, log
+    finally:
+        await session.close()
+        await server.close()
+
+
+def _queue_of(event) -> tuple[int | None, int | None]:
+    return event.details.server_requests_waiting, event.details.server_requests_running
+
+
+async def test_each_timeout_the_transport_recovered_from_records_its_own_queue(monkeypatch):
+    outcome, log = await _timeouts_then(monkeypatch, [(5, 1), (0, 2), (7, 3)], answers_after=2, connection_retries=5)
+    assert not isinstance(outcome, Exception)
+    attempts = list(log.report.events.values())
+    assert [_queue_of(event) for event in sorted(attempts, key=lambda event: event.attempt_id)] == [(5, 1), (0, 2)]
+    assert {event.failure_reason for event in attempts} == {MODEL_RESPONSE_TIMEOUT_REASON}
+    assert len({event.operation_id for event in attempts}) == 1
+
+
+async def test_the_failure_that_ends_the_call_is_the_last_timeout_with_its_queue(monkeypatch):
+    outcome, log = await _timeouts_then(monkeypatch, QUEUES, answers_after=99, connection_retries=3)
+    assert isinstance(outcome, TimeoutError)
+    report = log.reply_report(outcome)
+    attempts = sorted(report.events.values(), key=lambda event: event.attempt_id)
+    assert len(attempts) >= 2
+    assert [_queue_of(event) for event in attempts] == QUEUES[: len(attempts)]
+    assert report.failure_id == attempts[-1].event_id, "the call ends on its last attempt, with that attempt's reading"
+    assert outcome.__cause__ is not None and outcome.__cause__.event_id == attempts[-1].event_id
+
+
+async def test_cancelling_a_call_cancels_its_pending_queue_reads(monkeypatch):
+    cancelled = []
+    started = asyncio.Event()
+
+    async def hanging_queue(metrics_url):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(metrics_url)
+            raise
+
+    async def never_answers(request):
+        await asyncio.sleep(30)
+        return web.json_response({})
+
+    monkeypatch.setattr(openai_client, "_server_queue", hanging_queue)
+    app = web.Application()
+    app.router.add_post("/v1/responses", never_answers)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("/v1")),
+            max_connection_retries=3,
+            request_timeout_seconds=0.1,
+            record_server_queue=True,
+        )
+        call = asyncio.create_task(
+            model._request(method="POST", url=str(server.make_url("/v1/responses")), json={"model": "m"})
+        )
+        await asyncio.wait_for(started.wait(), 5)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+    await asyncio.sleep(0)
+    assert len(cancelled) == 1
+
+
+async def test_a_failed_metrics_read_releases_its_pool_connection(monkeypatch):
+    """A non-200 /metrics reply with a body larger than the read buffer must not keep its connection."""
+    healthy = "vllm:num_requests_waiting 3\nvllm:num_requests_running 5\n"
+    replies = iter([web.Response(status=503, body=b"x" * (1 << 20)), web.Response(status=200, text=healthy)])
+
+    async def metrics(_request):
+        return next(replies)
+
+    app = web.Application()
+    app.router.add_get("/metrics", metrics)
+    async with (
+        TestServer(app) as server,
+        aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1, limit_per_host=1)) as session,
+    ):
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        url = str(server.make_url("/metrics"))
+        assert await openai_client._server_queue(url) is None
+        # With the only pool slot still held, this read would wait for a connection until its timeout.
+        assert await openai_client._server_queue(url) == (3, 5)

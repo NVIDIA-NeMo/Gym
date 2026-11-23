@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Free-form tasks, graded by an LLM judge, so there is no answer-format contract to add. The
+# instruction is task-defining here ("summarize ... in one sentence", the required CSV headers)
+# and is passed through with only the "do not output other characters" clause removed.
+
+system: |-
+  {instruction}
+
+user: |-
+  {problem}

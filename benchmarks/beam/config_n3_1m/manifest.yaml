@@ -1,0 +1,31 @@
+name: beam/config_n3_1m
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: long_context
+description: BEAM long-term-memory probing questions (all splits) whose full chat fits
+  1048576 Nemotron-3 tokens; longer questions are dropped (no truncation).
+modality: text
+licensing: CC-BY-SA-4.0
+authors:
+- chsieh
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_n3_1m.yaml
+resources_server: beam
+agent_server: simple_agent
+datasets:
+- name: beam_n3_1m
+  type: benchmark
+  jsonl_fpath: benchmarks/beam/data/beam_n3_1m_benchmark.jsonl
+  prepare_script: benchmarks/beam/prepare_n3_1m.py
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

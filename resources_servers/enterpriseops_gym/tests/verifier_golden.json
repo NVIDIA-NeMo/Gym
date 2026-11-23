@@ -1,0 +1,4197 @@
+{
+ "source": "ServiceNow/EnterpriseOps-Gym@271f2c357f763376997dfd16807fcde2474ae41b benchmark/verifier.py",
+ "extraction": [
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "cnt": 1
+     }
+    ],
+    "row_count": 1
+   },
+   "value": 1
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "cnt": 0
+     }
+    ]
+   },
+   "value": 0
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "COUNT(*)": 3
+     }
+    ]
+   },
+   "value": 3
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "state": "in_progress"
+     }
+    ]
+   },
+   "value": "in_progress"
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "flag": true
+     }
+    ]
+   },
+   "value": true
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "value": null
+     }
+    ]
+   },
+   "value": null
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "amount": 12.5
+     }
+    ]
+   },
+   "value": 12.5
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "id": "INC_024",
+      "state": "closed"
+     }
+    ]
+   },
+   "value": {
+    "id": "INC_024",
+    "state": "closed"
+   }
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": [
+     {
+      "id": 1
+     },
+     {
+      "id": 2
+     }
+    ]
+   },
+   "value": [
+    {
+     "id": 1
+    },
+    {
+     "id": 2
+    }
+   ]
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": []
+   },
+   "value": []
+  },
+  {
+   "answer": {
+    "success": true,
+    "data": null
+   },
+   "value": null
+  },
+  {
+   "answer": {
+    "success": true,
+    "message": "Query executed successfully. 0 rows affected.",
+    "type": "write",
+    "rows_affected": 0
+   },
+   "value": {
+    "success": true,
+    "message": "Query executed successfully. 0 rows affected.",
+    "type": "write",
+    "rows_affected": 0
+   }
+  }
+ ],
+ "comparison": [
+  {
+   "actual": 0,
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": 0,
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": 1,
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": 1,
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": true,
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": true,
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": false,
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": "0",
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": "0",
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": "1",
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": true
+  },
+  {
+   "actual": "in_progress",
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 0,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 1,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 3,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "0",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "1",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "2",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": true,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "in_progress",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "check",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": null,
+   "comparison_type": "equals",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 1,
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 2,
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 2,
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 2,
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 5,
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 5,
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 5,
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 5,
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 12.5,
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 12.5,
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 12.5,
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": 12.5,
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": true,
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "1",
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "in_progress",
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "in_progress",
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "in_progress",
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "in_progress",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "in_progress",
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "open",
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "open",
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "open",
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "open",
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "open",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "open",
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 0,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 1,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 3,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "0",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "1",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "2",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": true,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "in_progress",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "check",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": null,
+   "comparison_type": "greater_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": 0,
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": 0,
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": 0,
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": 1,
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": 2,
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": true,
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": false,
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": false,
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": false,
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "0",
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "0",
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "0",
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "0",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "0",
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "1",
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "1",
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "1",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "1",
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 0,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 1,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 3,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "0",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "1",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "2",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": true,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "in_progress",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "check",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": null,
+   "comparison_type": "less_than",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": 0,
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 0,
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": 1,
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 1,
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": 2,
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 2,
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 5,
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": 12.5,
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": 12.5,
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": 12.5,
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": true,
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": false,
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": null,
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": "0",
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "0",
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": "1",
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "1",
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": "in_progress",
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "in_progress",
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "open",
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": "2026-01-15 11:00:00",
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": [],
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 0,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 1,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": 3,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "0",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "1",
+   "comparison_type": "contains",
+   "passed": true
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "2",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": true,
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "in_progress",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "check",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": "2026-01-15T11:00:00",
+   "comparison_type": "contains",
+   "passed": false
+  },
+  {
+   "actual": {
+    "id": 1
+   },
+   "expected": null,
+   "comparison_type": "contains",
+   "passed": false
+  }
+ ]
+}

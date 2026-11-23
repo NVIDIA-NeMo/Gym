@@ -1,0 +1,48 @@
+# Terminal-Bench-Science v0.1 with mini-SWE 2.4.6, run through the Harbor environment server on the pinned task
+# folders of environments/harbor/terminal_bench_science (`gym dataset pull terminal_bench_science` fetches them). The
+# server owns each task sandbox, its Compose group and the separate no-network verifier, and lends the sandbox to
+# mini_swe_agent's agent session; each row carries the official instruction and the task's own agent budget.
+# The run refuses while preparation skips a task, so exclude the three unsupported Compose tasks (README.md, "Run").
+# The relay preset is miniswe_legacy_agent.yaml. See README.md, "Profile".
+harbor_target: terminal_bench_science
+config_paths:
+- responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml
+
+mini_swe_agent:
+  responses_api_agents:
+    mini_swe_agent:
+      # Harbor's built-in mini-swe-agent defaults, as the relay preset: no step limit and the 30-second
+      # LocalEnvironment command timeout.
+      step_limit: ${oc.select:tbsci_max_steps,0}
+      step_timeout: ${oc.select:tbsci_step_timeout_sec,30}
+      # The longest agent run. A smaller value caps smoke runs; each task's own 8-hour budget can only shorten it.
+      sandbox_runner_timeout_seconds: ${oc.select:tbsci_agent_max_timeout_sec,28800}
+      # Collecting an 8-hour trajectory at close can take longer than the default 60 s, as for Codex.
+      session_close_timeout_seconds: 300
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      # An episode runs under its task's budget, capped here: the sandbox-ready wait (1200 s), harness setup
+      # (900 s), the 8-hour agent budget, the separate verifier's start (another ready wait) and the slowest
+      # verifier (12000 s) with its grace, 44130 s in all and 46755 s with every image-pull retry. The server's
+      # default cap (21600 s) would cut a long run short.
+      default_episode_timeout_seconds: ${oc.select:tbsci_episode_timeout_sec,46800}
+      # mini-SWE's seed install may take up to its sandbox_install_timeout_seconds (900 s); the server's default
+      # allowance (300 s) would end a slow install, a full agent run and a long verifier as a task deadline.
+      harness_setup_allowance_s: 900
+      # Lazily pulled task images (some carry a 6 GB Mathlib) can take longer than the server's default 900 s.
+      sandbox_ready_timeout_s: 1200
+      # The labels the resources server's preset sets (README.md, "Execution"): OpenSandbox's custom resources, a
+      # Docker-like single-process OOM kill instead of ending the sandbox, and no shared S3 mount at /mnt/s3-data.
+      sandbox_metadata:
+        nemo.nvidia.com/resources: custom
+        nemo.nvidia.com/oom-kill: process
+        nemo.nvidia.com/s3-hostpath: 'false'
+      # The resources server's 100 GiB disk (every package's storage_mb is at most 20 GiB, and OpenSandbox evicts a
+      # sandbox that writes past its limit) and its request-equals-limit scheduling, for every sandbox the server
+      # starts, the verifier's included. The override replaces only disk_gib.
+      sandbox_resources_override:
+        disk_gib: ${oc.select:tbsci_min_disk_gib,100}
+      sandbox_provider_options:
+        resource_requests: limits

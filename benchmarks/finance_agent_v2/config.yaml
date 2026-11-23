@@ -17,6 +17,13 @@ config_paths:
 # Isolated copy of the resource server for this benchmark.
 finance_agent_v2_benchmark_resources_server:
   _inherit_from: finance_agent_v2_resources_server
+  resources_servers:
+    finance_agent_v2:
+      edgar_search_mode: live
+      # Unset to match Vals: retrieval uses the model's full generation budget.
+      retrieval_max_output_tokens: null
+      # Unset to match Vals, whose only limit is the agent's max_time_seconds.
+      max_rollout_time_seconds: null
 
 # Benchmark agent — inherits the finance_agent_v2 instance, overrides the dataset
 # to the frozen benchmark split and points at the isolated resources server above.
@@ -26,6 +33,11 @@ finance_agent_v2_benchmark_agent:
     finance_agent:
       resources_server:
         name: finance_agent_v2_benchmark_resources_server
+      # Unset to match Vals, which bounds the run only by max_time_seconds,
+      # checked between turns: a hung tool call stalls its rollout indefinitely.
+      tool_call_timeout: null
+      # Vals has no turn cap. 50 cuts off long but legitimate rollouts; 200 only stops a looping model.
+      max_steps: 200
       datasets:
       - name: finance_agent_v2
         type: benchmark
@@ -41,3 +53,10 @@ finance_agent_v2_benchmark_agent:
         # from. BenchmarkDatasetConfig does not validate this field, but it is
         # the only place the dataset's provenance is recorded.
         license: MIT
+
+finance_agent_v2_benchmark_environment_server:
+  _inherit_from: finance_agent_v2_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: finance_agent_v2_benchmark_agent

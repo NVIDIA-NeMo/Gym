@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Select, install, and report harness probes in GitHub Actions."""
+
+import argparse
+import importlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from scripts.check_suites.github_actions import (
+    COMPARE_BRANCH,
+    COMPARE_MODES,
+    CompareMode,
+    annotation_data,
+    changed_paths,
+    tested_sha,
+    write_ci_result,
+)
+
+from .feedback import failure_details, reproduction
+from .registry import HARNESSES
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def select_harnesses(paths: list[str]) -> list[str]:
+    """Select adapters and shared probe dependencies, skipping unrelated components."""
+    selected = set()
+    for path in paths:
+        adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
+        if adapter:
+            selected.add(adapter)
+        elif path.startswith(("nemo_gym/orchestration/", "nemo_gym/cli/", "nemo_gym/eval/", "nemo_gym/environment/")):
+            continue
+        elif path.startswith("nemo_gym/data/tasks/"):
+            # Probes construct their own rows and call the collector directly.
+            continue
+        elif path.startswith(
+            (
+                "nemo_gym/",
+                "environment_servers/legacy_agent/",
+                "environment_servers/single_agent_turn/",
+                "environment_servers/single_agent_turn_legacy/",
+                "scripts/harness_conformance/",
+                "tests/unit_tests/rollouts/harness_capabilities/",
+                "tests/unit_tests/tooling/test_harness_conformance",
+            )
+        ):
+            return list(HARNESSES)
+        elif path in (
+            "tests/__init__.py",
+            "tests/conftest.py",
+            "tests/unit_tests/__init__.py",
+            "tests/unit_tests/conftest.py",
+        ):
+            # Checker tests inherit these fixtures and import through these packages.
+            return list(HARNESSES)
+        elif (
+            path.startswith(
+                (
+                    "resources_servers/",
+                    "responses_api_agents/",
+                    "responses_api_models/",
+                    "environment_servers/",
+                    "tests/",
+                    "benchmarks/",
+                    "environments/",
+                    "docker/",
+                    ".agents/",
+                    "scripts/environment_server_compliance/",
+                    "fern/",
+                    "docs/",
+                )
+            )
+            or ("/" not in path and path.endswith(".md"))
+            or path in ("LICENSE", ".gitignore")
+            or (
+                path.startswith(".github/workflows/")
+                and path not in (".github/workflows/harness-conformance.yml", ".github/workflows/cicd-main.yml")
+            )
+        ):
+            continue
+        else:
+            # Keep unknown code, dependency files, and CI setup conservative.
+            return list(HARNESSES)
+    return [name for name in HARNESSES if name in selected]
+
+
+def changed_harnesses(base: str, *, root: Path = ROOT, compare: CompareMode = COMPARE_BRANCH) -> list[str]:
+    """Select the harnesses affected by the paths changed from `base` (see `changed_paths`)."""
+    paths = changed_paths(base, root=root, subject="registered harnesses", compare=compare)
+    return list(HARNESSES) if paths is None else select_harnesses(paths)
+
+
+def _build_crewai_sandbox_runtime() -> None:
+    """Build CrewAI's sandbox runtime before the probes run.
+
+    The runtime, CrewAI and its dependencies for the sandbox's platform, takes longer to build than one probe episode
+    lasts, so the probes' first seed would time out building it. Installing it once into a throwaway local sandbox
+    leaves it in Gym's cache and under the local provider's ``/tmp``, where every probe seed finds it.
+    """
+    import asyncio
+    import tempfile
+
+    from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
+    from responses_api_agents.crewai_agent.sandbox import RUNTIME
+
+    async def build() -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            sandbox = AsyncSandbox(create_provider({"local": {}}))
+            await sandbox.start(SandboxSpec(workdir=workdir))
+            try:
+                await RUNTIME.install(sandbox, timeout_s=600)
+            finally:
+                await sandbox.stop()
+
+    asyncio.run(build())
+
+
+def install_runtime(harness: str) -> None:
+    """Install the adapter's pinned runtime into this CI job's isolated environment."""
+    import yaml
+
+    adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
+    subprocess.run(
+        ["uv", "sync", "--locked", "--inexact", "--no-dev", "--project", str(adapter)],
+        env=os.environ | {"UV_PROJECT_ENVIRONMENT": sys.prefix},
+        cwd=adapter,
+        check=True,
+    )
+    definition = HARNESSES[harness]
+    if definition.install_module:
+        subprocess.run([sys.executable, "-m", definition.install_module], cwd=ROOT, check=True)
+    if definition.prepare_runtime:
+        definition.prepare_runtime()
+    if definition.npm_version_key is None:
+        # Locked dependencies or agent-session setup own the runtime installation.
+        return
+    defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
+    config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
+    version_key = definition.npm_version_key
+    if definition.npm_version_default:
+        module, attribute = definition.npm_version_default.split(":")
+        config.setdefault(version_key, getattr(importlib.import_module(module), attribute))
+    version = config[version_key]
+    if not version:
+        raise ValueError(f"{harness} needs a pinned runtime version")
+    setup = importlib.import_module(f"responses_api_agents.{harness}_agent.setup_{harness}")
+    # Explicit install: ensure_* accepts existing binaries, which could bypass the pin.
+    setup._npm_install("npm", str(version))
+
+
+def report(harness: str, *, output: Path, exit_code: int) -> str:
+    """Render completed measurements separately from unavailable/incomplete checks."""
+    summary_path = output / "conformance_summary.json"
+    try:
+        summary = json.loads(summary_path.read_text())
+        complete = (
+            summary["runner_status"] == "completed"
+            and summary["full_suite"] is True
+            and set(summary["harnesses"]) == {harness}
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        complete = False
+    if exit_code not in (0, 1) or not complete:
+        status = "unavailable"
+        message = f"{harness}: conformance could not be evaluated (setup, tests, execution, or checker error)."
+        warning_title = "Harness conformance unavailable"
+    elif exit_code == 1:
+        status = "failed"
+        message = f"{harness}: P0 conformance requirements are not fulfilled."
+        warning_title = "Harness conformance"
+    else:
+        status = "passed"
+        message = f"{harness}: P0 conformance requirements are fulfilled; additional checks are reported below."
+    write_ci_result(output, subject=harness, status=status, subject_key="harness")
+    markdown = f"## Harness conformance: {harness}\n\n{message}\n\n"
+    count, first = failure_details(harness, output)
+    markdown += f"**Failed scenario checks:** {count}\n\n**First failure:** {first}\n\n"
+    if status != "passed":
+        detail = f"{message} Failed scenario checks: {count}. First failure: {first}"
+        print(f"::warning title={warning_title}::{annotation_data(detail)}")
+    markdown += f"Source: `{tested_sha()}`\n\n"
+    report_path = output / "conformance_report.md"
+    if report_path.exists():
+        markdown += report_path.read_text() + "\n"
+    markdown += reproduction([harness])
+    return markdown
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    select = commands.add_parser("select")
+    select.add_argument("--base", default="")
+    select.add_argument("--compare", choices=COMPARE_MODES, default=COMPARE_BRANCH)
+    install = commands.add_parser("install")
+    install.add_argument("--harness", choices=HARNESSES, required=True)
+    publish = commands.add_parser("report")
+    publish.add_argument("--harness", choices=HARNESSES, required=True)
+    publish.add_argument("--output", type=Path, required=True)
+    publish.add_argument("--exit-code", type=int, required=True)
+    args = parser.parse_args()
+    if args.command == "select":
+        harnesses = changed_harnesses(args.base, compare=args.compare)
+        print(f"Selected harnesses: {harnesses}")
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a") as handle:
+            handle.write(f"harnesses={json.dumps(harnesses)}\n")
+            matrix = {
+                "include": [
+                    {
+                        "harness": name,
+                        "container": HARNESSES[name].ci_container or "",
+                        "packages": " ".join(HARNESSES[name].ci_packages),
+                        "requires_root": HARNESSES[name].requires_root,
+                    }
+                    for name in harnesses
+                ]
+            }
+            handle.write(f"matrix={json.dumps(matrix)}\n")
+    elif args.command == "install":
+        install_runtime(args.harness)
+    else:
+        markdown = report(args.harness, output=args.output, exit_code=args.exit_code)
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as handle:
+            handle.write(markdown)
+
+
+if __name__ == "__main__":
+    main()

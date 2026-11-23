@@ -168,6 +168,9 @@ Set `runner_name` in the agent config or pass an override to `gym env start`.
 See the [agent runtime README](../../responses_api_agents/osworld_agent/README.md#supported-runners)
 for the complete runner registry and prompt/action contracts. Prefer selecting
 the maintained model/agent composition with `prepare.py --profile`.
+See [model isolation, switching, and regression](#model-isolation-switching-and-regression)
+for returning to an older model, running two models concurrently, and adding
+a new generation without replacing existing protocols.
 
 ### Pointer Agent with Opus 4.7
 
@@ -198,9 +201,94 @@ Docker daemon on the environment host validates that the device is available.
 
 ### Nemotron 3 Nano Omni with vLLM
 
-Start the checkpoint through the deployment layer on a model host with enough
-GPU memory. After its OpenAI-compatible endpoint is reachable from the Gym
-host, prepare the benchmark with the Nano Omni profile:
+This section applies to Nemotron 3 Nano Omni, the Omni v3 checkpoint
+`nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` at revision
+`24e67ea000b7c2837fc8f9488aa2008524fac8ba`. The `nano_omni` profile reproduces
+the tested benchmark only together with the serving configuration below. The
+profile fixes the agent side: the
+`NemotronV3NanoOmniAgent` prompt and response parser, 100 steps, the fixed
+three-image history, temperature 0.6, top_p 0.95, and a 4096-token output limit
+per step. The model server must use the same chat template and reasoning parser.
+
+#### Serve the checkpoint
+
+| Item | Value |
+| --- | --- |
+| Checkpoint | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` at revision `24e67ea000b7c2837fc8f9488aa2008524fac8ba`, with its own tokenizer and processor |
+| vLLM | 0.23.0 |
+| Chat template | `chat_template.jinja` from `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`, SHA-256 `ab7813c3abdd9cb655905a410728b26c7884eca45ddfab8d9f931553485a7862` |
+| Reasoning parser | `nano_v3`, from `nano_v3_reasoning_parser.py` in the same repository, SHA-256 `aafb12208054504f619cbdd01837e1532a482ad937ed987bfe9a13fb812ae2b7` |
+| Chat template arguments | `truncate_history_thinking=true`, set in the profile's `chat_template_kwargs` |
+| Context length | 64,000 tokens |
+
+The checkpoint embeds this template in its `tokenizer_config.json`, but vLLM
+serves the checkpoint's separate `chat_template.jinja` (SHA-256
+`41428e0c65e312c359df2495ef5284769a9520b15a693deda4c34a1538208faa`) unless
+`--chat-template` is given. Do not replace `nano_v3` with vLLM's built-in
+`nemotron_v3` parser. Keep the checkpoint's own tokenizer: the text-only
+tokenizer in the 30B repository does not match the Omni processor's image
+placeholders.
+
+The tokenizer, chat template and reasoning parser belong to this checkpoint
+revision and change as the models evolve. A later revision of this checkpoint,
+or another Nemotron generation such as Nemotron 3.5 Super or Nemotron 4, ships
+its own tokenizer and chat template and may need a different reasoning parser.
+For example, the Nemotron 3.5 Super launchers in
+`benchmarks/nemotron_3.5_super/vllm_configs/` serve that checkpoint's own
+template with vLLM's `nemotron_v3` parser. Take each model's tokenizer, template
+and parser from its own checkpoint and model card, and record their digests as
+in the table above. Do not reuse this section's files, digests or reference
+scores for another model. Validate the `nano_omni` profile before using it with
+one: its `model_protocol_id` (`nano-omni-v3-osworld-v1`), prompt and response
+parser were validated on Omni v3 only.
+
+With the checkpoint's default template and the built-in parser, many responses
+put a literal `\n` before `## Action`. An agent with a strict action parser
+scored about 20% raw with that serving and about 48% with the configuration
+below. This profile's parser tolerates the escaped newline, but every reference
+score in this section uses the configuration below.
+
+`truncate_history_thinking=true` is the template's own default. With it, the
+template renders each earlier assistant message as an empty `<think></think>`
+followed by the turn's Action, so the image-backed history turns carry no
+reasoning. Turns folded into the text history still include their
+`## Thought`. Every reference score in this section was measured this way, and
+the profile sets the argument explicitly so that it cannot drift. Sending
+`truncate_history_thinking=false` keeps the reasoning in those turns. NVIDIA's
+[computer-use cookbook for this model](https://github.com/NVIDIA-NeMo/Nemotron/tree/main/usage-cookbook/Nemotron-3-Nano-Omni/computer-use-agent-with-omni)
+does that by default, but it changes the model input, so validate it as a
+separate recipe before comparing its scores with these.
+
+```bash
+hf download nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+  chat_template.jinja nano_v3_reasoning_parser.py \
+  --revision cbd3fa9f933d55ef16a84236559f4ee2a0526848 \
+  --local-dir nano-v3-serving
+sha256sum nano-v3-serving/chat_template.jinja nano-v3-serving/nano_v3_reasoning_parser.py
+
+vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 \
+  --revision 24e67ea000b7c2837fc8f9488aa2008524fac8ba \
+  --served-model-name SERVED_NANO_OMNI_MODEL \
+  --trust-remote-code \
+  --tensor-parallel-size 8 \
+  --max-model-len 64000 \
+  --chat-template nano-v3-serving/chat_template.jinja \
+  --reasoning-parser-plugin nano-v3-serving/nano_v3_reasoning_parser.py \
+  --reasoning-parser nano_v3 \
+  --mamba-ssm-cache-dtype float32 \
+  --structured-outputs-config.backend=xgrammar \
+  --structured-outputs-config.enable_in_reasoning=false
+```
+
+The reference runs used tensor parallelism 8 on 8×H100; parallelism changes
+throughput, not the recipe. `tools/probe_model_endpoint.py` checks the served
+model name and a three-image request. It does not check the template or the
+parser, so compare the `vllm serve` arguments with the table above.
+
+#### Prepare and run
+
+After the endpoint is reachable from the Gym host, prepare the 361-task set
+described in [Datasets](#datasets) with the Nano Omni profile:
 
 ```bash
 cd benchmarks/osworld
@@ -208,6 +296,7 @@ python3 prepare.py \
   --profile nano_omni \
   --execution-backend gym_sandbox \
   --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_nogdrive.jsonl \
   --policy-base-url http://MODEL_HOST:8000/v1 \
   --policy-model-name SERVED_NANO_OMNI_MODEL
 ```
@@ -215,16 +304,307 @@ python3 prepare.py \
 Then use `tools/start_control.sh` and `tools/run_eval.sh` exactly as shown in
 the quickstart.
 
-The default overlay sends the current screenshot plus at most two historical
-screenshots and compacts older interactions into text. For an endpoint limited
-to one image per request, use the same class and set
-`agent_kwargs.max_image_history_length: 1`; no alternate agent class is
-required.
+`prepare.py` writes `--temperature`, `--top-p` and `--max-output-tokens` into
+`env.yaml` only when they are passed. A value written there overrides the
+profile for every request, so pass these flags only to change the recipe on
+purpose.
+
+#### Tune the output limit
+
+The per-step output limit is tunable. The profile uses 4096 tokens, and the
+AgentENV reference runs passed `--max-output-tokens 16384`. Both values
+produced the reference scores below; they were not compared in isolation.
+
+Reasoning tokens count against the limit. A response that reaches it ends with
+`finish_reason='length'`, and the agent rejects it as unfinished and samples
+again. A rollout whose retries also reach the limit ends with
+`termination_reason=model_output_truncated`. To choose a value:
+
+1. Run a representative sample of tasks with the profile's value.
+2. Count the model calls whose `finish_reason` is `length` and the rollouts
+   that end with `model_output_truncated`. Each rollout's trajectory record and
+   the [full model I/O log](#full-model-io) record `finish_reason` for every
+   model call.
+3. If more than a small share of calls stop at the limit, raise it with
+   `--max-output-tokens`. At 16384, one AgentENV run had 1 of its 15,565 model
+   calls stop at the limit.
+4. Keep the longest prompt plus the limit within the server's
+   `--max-model-len`. With three screenshots, prompts in the reference runs
+   reached about 38,000 tokens at most (P99 about 24,000), so 16384 fits in
+   64,000.
+5. Report the value with the results.
+
+#### Reference scores for Omni v3
+
+Use these Omni v3 results on the 361 tasks to check that a deployment follows
+the recipe. Repeated runs of one configuration have differed by 1.2 to 2.8
+points.
+
+| Backend | Proxy-required tasks | Output limit | Raw reward rate | Binary success rate |
+| --- | --- | ---: | ---: | ---: |
+| OpenSandbox Pool | proxy enabled | 4096 | 50.97% | 48.48% |
+| AgentENV | proxy disabled | 16384 | 44.61–48.13% (4 runs) | 42.66–45.98% |
+
+Both rows use the serving configuration and profile above with 100 steps, on
+Gym revisions from August to October 2026. The AgentENV runs passed
+`--max-output-tokens 16384`. The proxy and output-limit differences were not
+measured in isolation. A result several points below these ranges usually means
+a serving or sampling mismatch.
+
+The default overlay uses the explicit fixed policy and sends the current
+screenshot plus at most two historical screenshots, compacting older
+interactions into text. For an endpoint limited to one image per request, use
+the same class with `history_policy: {name: fixed, params: {keep_images: 1}}`;
+no alternate agent class is required.
+
+Longer training rollouts can opt into a low/high-water snapshot window without
+changing standalone benchmark defaults:
+
+```yaml
+history_policy:
+  name: hysteresis
+  params: {low_water: 3, high_water: 10}
+```
+
+This accumulates 1 through 10 live screenshots, then compacts the old prefix
+into text and falls back to 3: `1, 2, ..., 10, 3, 4, ..., 10, 3`. Each exact
+model-call record includes the policy identity, snapshot count, window start,
+min/max settings, and whether that call triggered compaction. The legacy
+`max_trajectory_length: 3` plus `agent_kwargs.max_live_images: 10` form remains
+compatible and resolves to the same identity.
 
 Nano Omni history contains Thought and Action only; previously executed Code is
 not repeated. This prompt contract is implemented directly by the standard
 `NemotronV3NanoOmniAgent`, so deployments must not stage a Python subclass or
 extend `PYTHONPATH` with a reproduction overlay.
+
+### Nemotron Super 3.5 VL with tool XML
+
+After starting a compatible Super 3.5 VL endpoint that accepts at least four
+images per request:
+
+```bash
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile super35 \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name nemotron-3.5-super-vl
+```
+
+Start control and evaluation with the normal wrappers. The profile selects
+`nemotron_super35_agent` and `nemotron-super35-tool-xml-v3`, initial-plus-recent
+four-image history, 100 steps, 4096 output tokens, temperature 0.6, and top_p
+0.95. It preserves historical thinking and full assistant tool calls. See the
+[protocol and model extension guide](../../responses_api_agents/osworld_agent/README.md#super-35-vl-tool-xml)
+for tool syntax, model-server request forwarding, and profile compatibility.
+This explicit tool-XML profile does not change the existing Nano Omni
+profile or the scaffolds pinned by published Nemotron recipes.
+
+`prepare.py` preserves these profile sampling defaults when sampling flags are
+omitted. Override them explicitly for another experiment, for example
+`--max-output-tokens 100000 --temperature 0.6 --top-p 0.95`. The output budget
+includes thinking. A changed budget or protocol requires a new run and must not
+overwrite an earlier score. The endpoint must accept the protocol's API tools,
+including dotted function names; qualify this request shape before a full run.
+
+The [Super 3.5 serving checks and R6 settings](tools/README.md#super-35-reasoning-boundary)
+include an optional vLLM 0.32.0 reasoning plugin that preserves repeated
+thinking delimiters in action content. They also record the distinct
+fixed-three-image, 100,000-output-token, no-MTP, 128-worker experiment. That
+experiment used the registered runner through a standalone controller; it
+does not establish end-to-end validation of these Gym service wrappers.
+
+### Model isolation, switching, and regression
+
+Model-specific behavior is selected explicitly by the profile and its
+`model_protocol_id`. The model name sent to an HTTP endpoint does not select a
+Gym prompt, parser, history policy, or serving parser automatically. Switching
+from Super 3.5 back to Nano Omni v3 means restoring that model's complete
+configuration and serving recipe.
+
+The following table describes the **checked-in defaults**, not every experiment
+run with these models. In particular, the Super 3.5 R6 experiment used fixed
+three-image history and 100,000 output tokens; those overrides did not replace
+the default profile.
+
+| Setting | Nano Omni v3 | Super 3.5 VL |
+| --- | --- | --- |
+| Preparation profile | `--profile nano_omni` | `--profile super35` |
+| Profile file | [`configs/osworld_agent_nano_omni.yaml`](configs/osworld_agent_nano_omni.yaml) | [`configs/osworld_agent_super35.yaml`](configs/osworld_agent_super35.yaml) |
+| Agent instance | `osworld_nano_omni_agent` | `osworld_super35_agent` |
+| Runner | `nemotron_v3_nano_omni_agent` | `nemotron_super35_agent` |
+| Model protocol ID | `nano-omni-v3-osworld-v1` | `nemotron-super35-tool-xml-v3` |
+| Gym action parser ID | `nemotron-v3-nano-omni-parser-v1` | `nemotron-super35-tool-xml-parser-v1` |
+| Response contract | Markdown Thought/Action/Code; explicit Code section | Function/parameter XML for `exec_py`, `computer.wait`, `computer.terminate` |
+| Assistant history | Thought and Action; previously executed Code is omitted | Thinking, action description and complete tool calls |
+| `truncate_history_thinking` | `true` in the model transport; see the distinction between image-backed turns and text history above | `false`, forwarded with per-request `enable_thinking` |
+| API tool definitions | The Markdown protocol adds none | All three tool schemas, with `tool_choice: none` |
+| XML delimiter preservation | No Super 3.5 request override | `skip_special_tokens: false`; native tool calls rejected |
+| Serving reasoning parser | Pinned `nano_v3` plugin and template from the Nano Omni recipe above | Optional `nemotron_v3_lossless_nonstream` plugin qualified on vLLM 0.32.0; see the serving guide |
+| Screenshot policy | `fixed`, `keep_images: 3`, including current | `sink_window`, `sink: 1`, `low_water: 4`, `high_water: 4`, including current |
+| Step cap | 100 | 100 |
+| Per-step output budget, including thinking | 4096 | 4096 |
+| Temperature / top_p | 0.6 / 0.95 | 0.6 / 0.95 |
+| Post-action delay | 5 seconds | 5 seconds |
+| Per-task timeout | 7200 seconds | 7200 seconds |
+
+The `v3` suffix in `nemotron-super35-tool-xml-v3` is the **third revision of the
+Super 3.5 wire protocol**. It does not select the Nano Omni v3 model. Likewise,
+vLLM's built-in `nemotron_v3` parser name is not a Gym model-selection switch.
+The Super 3.5 plugin registers the distinct name
+`nemotron_v3_lossless_nonstream` with `force=False`; it does not replace that
+built-in parser. Select it explicitly on the Super 3.5 serving process. The
+Nano Omni endpoint retains its own `nano_v3` parser and pinned chat template.
+
+The two Gym adapters share the `OSWorldProtocolAgent` execution loop, model
+transport, history-selection implementation and desktop/evaluator integration.
+Each agent instance selects its own protocol and maintains its own history
+state. Super's API tools, message renderer, raw-response handling and `exec(...)`
+execution convention are enabled through its protocol fields. Consequently,
+adding a separate protocol does not automatically change existing profiles,
+but a change to shared code still requires regression checks across the models
+that consume it. The [runtime extension guide](../../responses_api_agents/osworld_agent/README.md#adding-a-model-protocol)
+describes these boundaries and the required checks.
+
+#### Switch back to Nano Omni v3
+
+For a historical score regression, recover the original checkpoint revision,
+Gym and OSWorld commits, tokenizer/template/parser digests, VM identity, task
+JSONL, sampling, image history, retry budget, output budget, step cap and
+timeouts. Preserve the old run directory. A current profile with a matching
+model name does not establish that the historical recipe has been restored.
+
+Start the Nano Omni endpoint using [Serve the checkpoint](#serve-the-checkpoint).
+Use a fresh run root and `env.yaml` for the client. The following commands run
+from the Gym checkout root and select the current Nano Omni profile with its
+defaults; add only the explicit overrides required by the frozen run you are
+reproducing. `POLICY_API_KEY`, if required, must belong to this endpoint.
+
+```bash
+export GYM_ROOT=/absolute/path/to/Gym
+export OSWORLD_RUN_ROOT=/absolute/runs/nano-v3-regression-001
+export OSWORLD_RUN_ID=nano-v3-regression-001
+export OSWORLD_ENV_FILE="$OSWORLD_RUN_ROOT/config/env.yaml"
+cd "$GYM_ROOT"
+
+python3 benchmarks/osworld/prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_nogdrive.jsonl \
+  --output "$OSWORLD_RUN_ROOT/results/$OSWORLD_RUN_ID/rollouts.jsonl" \
+  --env-file "$OSWORLD_ENV_FILE" \
+  --head-port 11000 \
+  --server-venv-root "$OSWORLD_RUN_ROOT/server-venvs" \
+  --policy-base-url http://NANO_MODEL_HOST:8000/v1 \
+  --policy-model-name SERVED_NANO_OMNI_MODEL
+```
+
+Run the exact `gym env prefetch` and optional-runtime-package installation
+commands printed by preparation. They refer to this run's config directory
+and managed venv. Then, with the same exports, start control:
+
+```bash
+bash "$GYM_ROOT/benchmarks/osworld/tools/start_control.sh" "$OSWORLD_RUN_ROOT"
+```
+
+After control is ready, run eval in a second terminal or supervisor with the
+same `GYM_ROOT`, `OSWORLD_RUN_ROOT`, `OSWORLD_RUN_ID`, `OSWORLD_ENV_FILE` and
+backend environment settings:
+
+```bash
+bash "$GYM_ROOT/benchmarks/osworld/tools/run_eval.sh" "$OSWORLD_RUN_ROOT"
+```
+
+Preparation keeps an existing `env.yaml` unless `--force-env` is supplied.
+Choose a fresh directory instead of forcing an overwrite of an old experiment.
+The wrappers require the basename `env.yaml`; `--env-file` tells preparation
+where to write it, while `OSWORLD_ENV_FILE` tells both wrappers which one to
+read. Supplying the first without the second can launch the default config
+from `benchmarks/osworld/env.yaml`.
+
+The same preparation mechanism supports Super 3.5 with `--profile super35`.
+The execution backend is a separate choice: Docker requires `--vm-path`;
+`gym_agentenv` and `gym_opensandbox` use the selected template or Pool and
+reject that argument. Record the actual guest image identity independently
+of the model profile. The full R6 result qualifies its recorded standalone
+runner/direct-vLLM deployment; it does not qualify every Gym backend or a
+different profile automatically.
+
+#### Run v3 and Super 3.5 concurrently
+
+Use independent control/eval instances with their own configuration. Both
+profiles define the common `policy_model` configuration key, so composing
+both YAML profiles into one `env.yaml` can override one model's transport
+with the other's settings. Prepare one profile per environment file.
+
+For Super 3.5, start its separately configured endpoint using the
+[serving guide](tools/README.md#super-35-reasoning-boundary). In a fresh shell,
+prepare a second client run:
+
+```bash
+export GYM_ROOT=/absolute/path/to/Gym
+export OSWORLD_RUN_ROOT=/absolute/runs/super35-comparison-001
+export OSWORLD_RUN_ID=super35-comparison-001
+export OSWORLD_ENV_FILE="$OSWORLD_RUN_ROOT/config/env.yaml"
+cd "$GYM_ROOT"
+
+python3 benchmarks/osworld/prepare.py \
+  --profile super35 \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_nogdrive.jsonl \
+  --output "$OSWORLD_RUN_ROOT/results/$OSWORLD_RUN_ID/rollouts.jsonl" \
+  --env-file "$OSWORLD_ENV_FILE" \
+  --head-port 11100 \
+  --server-venv-root "$OSWORLD_RUN_ROOT/server-venvs" \
+  --policy-base-url http://SUPER35_MODEL_HOST:8000/v1 \
+  --policy-model-name nemotron-3.5-super-vl
+```
+
+Complete the printed prefetch/package setup and use the same two wrapper
+commands as above with this shell's exports. This example uses the default
+four-image/4096-token Super 3.5 profile. To run R6's fixed-three/100k settings,
+make an explicit new configuration as described in the serving guide and
+freeze it as a separate run.
+
+Keep the following items separate when both models are running:
+
+| Item | Required separation or permitted sharing |
+| --- | --- |
+| Model endpoint | Each model gets its own correctly configured serving instance. If they share a model host, choose distinct ports and GPU assignments. Changing the request's model name does not switch a vLLM process's startup parser/template. |
+| Gym control endpoint | Distinct `--head-port` values; also separate any component ports explicitly pinned by local overrides. |
+| Configuration | Distinct directories containing `env.yaml`; set `OSWORLD_ENV_FILE` in each control and eval supervisor. |
+| Model credentials | Set `POLICY_API_KEY` or the prepared configuration for the selected endpoint in each shell. Preparation's common `POLICY_*` values can override profile-specific defaults. |
+| Run ownership | Distinct `OSWORLD_RUN_ID`; use a distinct `NEMO_GYM_RUN_ID` if explicitly set. |
+| Outputs and evidence | Distinct output JSONL, run roots, task artifacts and model I/O logs. Recheck explicit `OSWORLD_TASK_ARTIFACT_ROOT`, `OSWORLD_RESOURCES_IO_LOG` and `OSWORLD_VM_EXEC_LOG` overrides inherited from a previous shell. |
+| Managed environments | The examples use distinct `--server-venv-root` directories. An already provisioned identical environment may be reused deliberately; do not concurrently rebuild a shared environment or change it during a frozen run. |
+| Source and task assets | The same immutable checkout, canonical task input and verified asset cache may be shared. Do not edit a checkout used by an active frozen run. |
+| Desktop backend | A Docker host, Pool or AgentENV service may be shared if it has combined capacity. Tasks must have separate desktop instances and run attribution. |
+| Comparison task set | Each model runs the complete selected task set. Shard within each model when necessary; do not divide the task set between models and report it as a paired full-suite comparison. |
+
+Independent protocols prevent model-format settings from being selected
+implicitly. They do not reserve GPU, CPU, memory, storage or desktop capacity.
+Set each run's `--concurrency` for the combined capacity and preserve timeout
+and infrastructure-failure records when interpreting simultaneous runs.
+
+#### Add a new model such as v4
+
+There is currently no `--profile v4` or registered v4 protocol. A future v4
+checkpoint must be qualified against its actual prompt and response format.
+Use the [model-protocol extension procedure](../../responses_api_agents/osworld_agent/README.md#adding-a-model-protocol)
+to add a versioned protocol, runner registration and profile. Register new
+identities instead of replacing the v3 or Super 3.5 entries. If the model needs
+a different planning/execution loop, implement a separate runner through the
+existing extension points.
+
+The release check must include the new model and the existing models affected
+by any shared changes. Unit tests for a synthetic registered protocol prove
+the extension mechanism; they do not establish compatibility with a real v4
+checkpoint. A new real-model smoke and raw-output audit are required before
+claiming support. A score requires a separately frozen benchmark run.
 
 ### OpenSandbox Pool backend
 
@@ -274,7 +654,7 @@ python3 prepare.py \
   --force-env
 ```
 
-The managed OSWorld agent's default `requirements.txt` respects Gym's global
+The managed OSWorld agent's `pyproject.toml` and `uv.lock` preserve Gym's global
 security and codec exclusions. After `prepare.py` writes `env.yaml`, run the
 exact path-aware next steps that it prints. They pre-create the isolated agent
 environment and explicitly install the runtime packages that OSWorld imports
@@ -286,12 +666,15 @@ bash ../../responses_api_agents/osworld_agent/install_optional_runtime_deps.sh \
   /absolute/run/root/server-venvs/responses_api_agents/osworld_agent/.venv
 ```
 
-The script uses `--no-config` only for that named agent venv and installs
-cryptography, headless OpenCV, and the matching torchvision wheel. It is
-idempotent, but skips installation only when the required versions are both
-present and importable. It also reasserts the normal agent's `numpy<2`
-constraint because the OpenCV 4.8 wheel uses NumPy's 1.x ABI. These are runtime
-imports for OSWorld's desktop stack,
+The script synchronizes the separate `runtime/uv.lock` with
+`uv sync --locked --inexact` into that named agent venv, preserving the base
+agent packages while adding cryptography, headless OpenCV, and the matching
+torchvision wheel. It is idempotent, but skips installation only when the
+required versions are both present and importable. The runtime manifest retains
+the agent's `numpy>=2.1,<2.5` constraint and binds both Torch wheels to the CPU
+index. It locks the OpenCV 4.10 abi3 wheel so the managed Python 3.13 environment
+does not need to build OpenCV from source. Commit both the runtime manifest and
+lock when changing these optional packages. These are runtime imports for OSWorld's desktop stack,
 but repository policy excludes them from managed package and container
 resolution. `skip_venv_if_present: true` in the generated config then lets
 `gym env start` reuse the prepared environment. `tools/start_control.sh` checks
@@ -340,6 +723,53 @@ run-unique `OSWORLD_RUN_ID` and run the exact-ID cleanup above after an abnormal
 exit or create timeout. Once the SDK returns a handle, Gym performs normal
 `kill()` and local `close()` cleanup directly.
 
+### AgentENV backend
+
+The `gym_agentenv` backend restores each task's desktop from an AgentENV
+(kvcache-ai/AgentENV) template and drives it through Gym's E2B provider, because
+AgentENV implements the E2B control-plane API. The template must contain the
+OSWorld guest, so there is no qcow2 to pass. `configs/osworld_agentenv.yaml`
+documents the provider settings, including the gateway routing
+(`connection.port_routing`) that `E2BProvider.endpoint()` uses to reach the
+guest's service ports.
+
+```bash
+export AGENTENV_URL=https://AGENTENV_CONTROL_PLANE
+export AGENTENV_API_KEY=YOUR_AGENTENV_API_KEY
+export AGENTENV_TEMPLATE=YOUR_OSWORLD_TEMPLATE
+
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_agentenv \
+  --input /absolute/path/to/test_nogdrive.jsonl \
+  --output /absolute/run/root/results/rollouts.jsonl \
+  --server-venv-root /absolute/run/root/server-venvs \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name SERVED_NANO_OMNI_MODEL \
+  --force-env
+```
+
+- The reference runs used the E2B SDK 2.46.0, which creates sandboxes with
+  `POST /sandboxes`. The managed OSWorld agent's `uv.lock` currently selects
+  E2B 2.58.0, whose create call uses `POST /v2/sandboxes`; confirm that your
+  AgentENV deployment accepts that endpoint before running this recipe. The
+  root Gym lock still selects 2.46.0, but the agent runs in its own environment,
+  so the root SDK version does not establish compatibility. For a deployment
+  that supports only `POST /sandboxes`, prepare a separate agent manifest and
+  lock selecting 2.46.0 and record them with the run. Do not rely on
+  `UV_CONSTRAINT` or an ad hoc install after locked setup to select the SDK.
+  An SDK change requires a new compatibility check; the historical scores do
+  not validate the current managed lock.
+- For a control plane whose certificate comes from a private CA, point
+  `SSL_CERT_FILE` at a bundle that includes the CA; the E2B SDK and aiohttp read
+  it. OSWorld's guest forwarder uses `requests` with `trust_env=False` and
+  verifies only against the agent environment's `certifi` bundle, so that
+  bundle needs the CA as well. Keep certificate verification enabled.
+- If the guests cannot reach your proxy, leave the proxy disabled, which is the
+  adapter default. The 45 proxy-required tasks then run direct and usually score
+  lower.
+
 ## Multi-environment runs
 
 Set concurrency and data selection during preparation, then use the same two
@@ -365,11 +795,11 @@ tools/run_eval.sh /absolute/run/root
 
 ### Deterministic task sharding
 
-`prepare.py` owns task splitting. Use the same canonical input on every
-agent/control host and select one zero-based shard per host:
+`prepare.py` owns task splitting. Use the same canonical input for every
+agent/control profile and select one zero-based shard per profile:
 
 ```bash
-# Agent/control host A
+# Agent/control profile A
 python3 prepare.py \
   --profile nano_omni \
   --execution-backend gym_sandbox \
@@ -380,8 +810,8 @@ python3 prepare.py \
   --shard-index 0 \
   --force-env
 
-# Agent/control host B uses the same command with --shard-index 1 and its own
-# output directory.
+# Agent/control profile B uses the same command with --shard-index 1 and its
+# own output directory.
 ```
 
 Non-empty input rows are assigned by `row_index % num_shards`. This is stable,
@@ -397,8 +827,22 @@ create a shard file or manifest. Any positive shard count works; two is only
 the deployment example below.
 
 The repository includes ready-to-use example and small inputs under `data/`.
-Larger inputs passed with `--input` must use the same JSONL schema; no
-untracked conversion helper is part of the public workflow.
+Generate larger canonical inputs from the exact pinned OSWorld checkout with
+`tools/convert_osworld_tasks.py`; do not silently reuse a historical JSONL
+after the OSWorld revision changes. The converter writes
+`<output>.manifest.json` with the OSWorld commit (when the source is a Git
+checkout), source/output hashes, row count, and task-ID digest. A production
+run should fail admission if that recorded commit does not match the runtime
+OSWorld pin.
+
+For example:
+
+```bash
+python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
+  --osworld-root /absolute/path/to/JeffPengCoder-OSWorld \
+  --manifest test_all \
+  --output /absolute/path/to/test_all.jsonl
+```
 
 ### Split agent and OSWorld environment hosts
 
@@ -479,6 +923,94 @@ to `127.0.0.1`. A persistent `--server-venv-root` reuses complete server
 environments on retries; remove that run-owned directory after dependency
 changes to force a rebuild.
 
+### One agent with multiple environment hosts
+
+One agent host can run multiple shards against different environment hosts and
+a shared model endpoint. Use one checkout, but give every profile a distinct
+run root, `env.yaml`, run ID, and head port. `OSWORLD_ENV_FILE` tells the public
+wrappers which run-specific configuration to load.
+
+```mermaid
+flowchart LR
+    INPUT[Canonical task JSONL]
+
+    subgraph AGENT[Single agent / control host]
+        PA[Profile A<br/>prepare + control + eval<br/>shard 0 / head port A]
+        PB[Profile B<br/>prepare + control + eval<br/>shard 1 / head port B]
+        AA[OSWorld logic +<br/>Gym Sandbox adapter A]
+        AB[OSWorld logic +<br/>Gym Sandbox adapter B]
+        PA --> AA
+        PB --> AB
+    end
+
+    subgraph ENVA[Environment host A]
+        DA[Docker daemon]
+        SA[Ephemeral Gym Sandbox<br/>one per active task]
+        VA[QEMU/KVM desktop VM]
+        QA[(Read-only qcow2 baseline)]
+        DA --> SA --> VA
+        QA --> VA
+    end
+
+    subgraph ENVB[Environment host B]
+        DB[Docker daemon]
+        SB[Ephemeral Gym Sandbox<br/>one per active task]
+        VB[QEMU/KVM desktop VM]
+        QB[(Read-only qcow2 baseline)]
+        DB --> SB --> VB
+        QB --> VB
+    end
+
+    MODEL[Shared VLM endpoint<br/>OpenAI-compatible API]
+
+    INPUT -- row index modulo shard count --> PA
+    INPUT -- row index modulo shard count --> PB
+    AA -. Docker SSH lifecycle .-> DA
+    AB -. Docker SSH lifecycle .-> DB
+    AA -- published desktop HTTP endpoints --> VA
+    AB -- published desktop HTTP endpoints --> VB
+    AA -- model requests --> MODEL
+    AB -- model requests --> MODEL
+```
+
+The dashed links are lifecycle control through Docker's SSH transport. The
+solid environment links are direct OSWorld controller, observation, action,
+and evaluator HTTP traffic. The two profiles share neither `env.yaml` nor head
+port, but they may share the same checkout, input, model endpoint, and verified
+VM identity.
+
+For profile A, prepare and launch with:
+
+```bash
+export RUN_ROOT=/absolute/run/a
+export OSWORLD_RUN_ID=shard-a
+export OSWORLD_ENV_FILE=${RUN_ROOT}/config/env.yaml
+export DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_A
+export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_A
+
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /same/absolute/path/on/all/hosts/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_all.jsonl \
+  --output ${RUN_ROOT}/results/${OSWORLD_RUN_ID}/rollouts.jsonl \
+  --num-shards 2 \
+  --shard-index 0 \
+  --head-port 11000 \
+  --env-file ${OSWORLD_ENV_FILE} \
+  --force-env
+
+tools/start_control.sh ${RUN_ROOT}
+# After control is ready, in a second supervisor with the same exports:
+tools/run_eval.sh ${RUN_ROOT}
+```
+
+Run profile B in two other supervisors with its own run root, `shard-index 1`,
+head port `11001`, `ENV_HOST_B`, and run ID. Both profiles may use the same
+`POLICY_BASE_URL`; task assignment remains disjoint and exhaustive. A single
+profile still uses the unchanged defaults and does not require
+`OSWORLD_ENV_FILE`.
+
 ## Configuration
 
 `benchmarks/osworld/config.yaml` is the default benchmark config. It chains the
@@ -492,10 +1024,13 @@ benchmark-local config.
 The [agent configuration reference](../../responses_api_agents/osworld_agent/README.md#configuration)
 documents the shared environment, runner, timeout, cache, proxy, evaluation,
 and sampling fields. Per-task `responses_create_params` override YAML sampling
-defaults, and explicit CLI overrides have the highest priority.
+defaults, and explicit CLI overrides have the highest priority. `prepare.py`
+writes `responses_create_params` into `env.yaml` only for the sampling flags
+passed to it, so a profile's own values apply otherwise.
 
-The Nano Omni overlay uses the tested three-image window, a 4096-token response
-limit, a five-second post-action wait, and parser retries. Optional parser-error
+The Nano Omni overlay, tested with the Omni v3 checkpoint, uses the
+three-image window, a 4096-token response limit, a five-second post-action
+wait, and parser retries. Optional parser-error
 feedback, repeated-action guidance, and a pre-DONE checklist are available in
 `agent_kwargs` without requiring another agent class.
 
@@ -503,7 +1038,8 @@ Its `temperature=0.6` and `top_p=0.95` values follow NVIDIA's thinking-mode
 recommendation in the
 [checkpoint model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/blob/24e67ea000b7c2837fc8f9488aa2008524fac8ba/README.md#model-parameters).
 The 4096-token output limit is the tested OSWorld agent setting rather than the
-model card's longer general-purpose reasoning budget; these values are
+model card's longer general-purpose reasoning budget, and it can be tuned as
+described in [Tune the output limit](#tune-the-output-limit); these values are
 model-specific and do not change defaults for other runners.
 
 ### Proxy-required tasks
@@ -511,7 +1047,7 @@ model-specific and do not change defaults for other runners.
 Proxy policy belongs to the Gym OSWorld adapter; VM setup belongs to the pinned
 OSWorld `nv-gym` runtime. The integration lines are independent Git refs in
 different repositories. Gym connects them only through the immutable OSWorld
-commit in `responses_api_agents/osworld_agent/requirements.txt`. That OSWorld
+commit in `responses_api_agents/osworld_agent/pyproject.toml`. That OSWorld
 commit merges upstream main `83e85344` and retains the `nv-gym` integration
 overlay.
 
@@ -519,9 +1055,9 @@ overlay.
 
 | Consumer workflow | Required OSWorld version |
 | --- | --- |
-| Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/requirements.txt`. |
+| Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/pyproject.toml`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
-| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `dc23424e9f6316b181bde149e0dc9bc3c5ff78c9` or a documented successor. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5` or a reviewed successor that preserves the selected task corpus. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
 | Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
 
@@ -530,14 +1066,13 @@ For a direct integration of the tested version:
 ```bash
 git clone https://github.com/JeffPengCoder/OSWorld.git
 cd OSWorld
-git checkout dc23424e9f6316b181bde149e0dc9bc3c5ff78c9
+git checkout f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5
 ```
 
-Use an immutable SHA in a lockfile or deployment manifest. The `nv-gym`
-branch is the integration line that follows upstream main, but its tip can
-move as new upstream changes are merged.
+Use an immutable SHA in a lockfile or deployment manifest. The integration
+branch may move; a recipe always records the exact revision it actually ran.
 
-This pinned revision also prevents OSWorld's Chrome setup DEBUG logging from
+This pinned revision prevents OSWorld's Chrome setup DEBUG logging from
 serializing the complete worker environment into task artifacts. Model and
 proxy credentials must remain runtime secrets and are never useful setup
 diagnostics.
@@ -584,7 +1119,12 @@ Task setup commands may optionally declare `expected_returncodes` and
 than model behavior: an allowed return code continues normally, while
 `score_zero` records a valid evaluator score of zero instead of masking the
 rollout as a harness failure. Tasks that omit both fields continue through the
-pinned upstream setup implementation unchanged.
+pinned upstream setup implementation unchanged, including its best-effort
+handling of non-zero command results. Absence of a policy must not be inferred
+as `expected_returncodes: [0]`, and evaluator type must not be used to guess a
+setup contract. Gym-owned setup that is required for runtime correctness must
+declare its expected return codes explicitly; the adapter must not rewrite a
+canonical task to make an implicit strict policy pass.
 
 The Docker port-allocation lock wait is configurable because concurrent VM
 startup can legitimately take longer than the pinned upstream default. Raising
@@ -611,6 +1151,41 @@ OSWorld aggregate metrics report both `osworld/binary_success_rate` and
 raw reward preserves fractional evaluator credit. Both rates use the same
 completed-rollout denominator and are reported regardless of `reward_mode`,
 which continues to control the training reward returned by each rollout.
+
+An infeasible task scores only when the model itself ends the episode with
+`FAIL`; for Nano Omni that is `computer.terminate(status="failure")`. The
+adapter does not append `FAIL` when a rollout reaches `max_steps`, and it never
+turns a malformed response into `FAIL`. Some harnesses append `FAIL` at the step
+limit, which also credits infeasible tasks that ran out of steps. Rescoring
+three recent Nano Omni runs that way raised their raw rates by 0.55 to 2.77
+points, so compare results only under the same rule.
+
+## Source composition and external capability patches
+
+The OSWorld integration branch contains only changes owned by that branch.
+Third-party or still-unmerged fixes are not copied into it. A complete
+runtime may instead use a separate integration branch that contains the exact
+external commits as ancestors, preserving their authorship and review history.
+Record the final integration commit in every run manifest.
+
+External source requirements are capability-scoped in
+`runtime_dependencies.toml`. For example, Pointer running through Gym Sandbox
+currently requires Michal Bien's exact runtime-hardening commit, while Nano
+Omni training does not:
+
+```bash
+python benchmarks/osworld/tools/check_runtime_dependencies.py --list
+python benchmarks/osworld/tools/check_runtime_dependencies.py \
+  --repo-root "$PWD" \
+  --capability pointer-gym-sandbox
+```
+
+The second command intentionally fails on the plain OSWorld integration
+branch. Fetch the named source branch and merge its exact commit only into a
+separate runtime branch, resolve integration conflicts there, then rerun the
+checker. Do not copy or squash the external patch into the OSWorld feature
+branch. The checker is read-only and never performs a fetch, checkout, merge,
+or cherry-pick.
 
 ## Logs and artifacts
 
@@ -677,6 +1252,21 @@ The repository includes:
 Additional inputs may be supplied with `prepare.py --input`; each JSONL row
 must follow the same `verifier_metadata.osworld_task` contract as the committed
 examples. Generated full datasets are intentionally not committed.
+
+Nano Omni results in this README use the 361 tasks of OSWorld's
+`test_nogdrive` manifest: the 369 tasks of `test_all` without the 8 that need
+private Google Drive credentials. Build that input from the OSWorld revision
+pinned in `responses_api_agents/osworld_agent/pyproject.toml`:
+
+```bash
+python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
+  --osworld-root /absolute/path/to/JeffPengCoder-OSWorld \
+  --manifest test_nogdrive \
+  --output /absolute/path/to/test_nogdrive.jsonl
+```
+
+Report raw and binary rates over all 361 tasks. Rerun a task that was masked by
+an infrastructure failure instead of scoring it as zero or dropping it.
 
 ## Troubleshooting
 

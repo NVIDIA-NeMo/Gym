@@ -310,7 +310,7 @@ Evidence to collect:
 - line counts for source, materialized, rollout, and profiling files
 - sample rows showing task/rollout keys
 - reward and usage field summary
-- target `nemo_gym/reward_profile.py`
+- target `nemo_gym/metrics/reward_profile.py`
 
 Next actions:
 

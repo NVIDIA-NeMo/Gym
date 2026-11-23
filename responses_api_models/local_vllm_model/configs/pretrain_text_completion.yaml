@@ -17,7 +17,11 @@ policy_model:
       hf_home: null
       debug: false
       show_vllm_engine_stats: true
-      vllm_serve_env_vars: {}
+      # Required by `app.py::_configure_vllm_serve`; an empty mapping here means
+      # this profile cannot start at all. `strict` matches every other config in
+      # this directory and suits the single-instance defaults below.
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
       vllm_serve_kwargs:
         data_parallel_size: 1
         tensor_parallel_size: 1

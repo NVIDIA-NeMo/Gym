@@ -29,3 +29,143 @@ gym eval run \
 ```
 
 See `benchmarks/gdpval/README.md` for the full run recipe.
+
+## Task tools
+
+The server serves the agent's task tools as `POST` routes. `finish` and `abandon_task_finish` record how the
+agent ended the task. `web_search` searches with Tavily and `fetch_web_page` extracts a page as markdown.
+Set `tavily_api_key` (the shipped configs read `TAVILY_API_KEY`).
+
+GDPval's gold deliverables and many models' submissions are public, so an agent with web access can find the
+task and copy its answer (seen with Kimi K2.6 on task `11dcc268`, which found other submissions on Hugging Face).
+`web_search` and `fetch_web_page` therefore refuse queries and URLs that match `blocked_web_patterns`
+(by default the benchmark's name in any spelling and `deliverable_files`) or contain the current task id, and
+drop matching search results. Redirects are checked too.
+
+They also refuse whole sites listed in `search_exclusions.json`, which has the format of
+`benchmarks/hle/search_exclusions.json` (`domain` and `url_substring` rules): by default Hugging Face (`huggingface.co`,
+`hf.co`) and the sites that host GDPval submissions. These domains are also sent to Tavily as `exclude_domains`, so a
+search still returns its full set of results. Set `web_exclusions_fpath` to use another file. The rest of the web stays
+open, because the tasks need it for regulations, statistics and product documentation.
+
+This does not cover the sandbox: commands the agent runs there still reach the open internet, which is how
+that agent downloaded the files once it had found them. Gym's sandbox providers have no egress control, so
+block these hosts at the sandbox's network layer where the result must be trusted.
+
+## Sandbox image
+
+Each task runs in its own sandbox, started from `sandbox_config.image` through the provider named by
+`sandbox_provider` (e.g. `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`). The image is the
+GDPval-AA v2 environment that `containers/Dockerfile` defines. Gym ships the Dockerfile, not an image, so build and
+push one before running:
+
+```bash
+IMAGE=<registry>/gdpval-sandbox:<tag>
+docker build -t "$IMAGE" resources_servers/gdpval/containers
+docker run --rm "$IMAGE" python /opt/gdpval/verify_gdpval_sandbox.py
+docker push "$IMAGE"
+export GDPVAL_SANDBOX_IMAGE="$IMAGE"
+```
+
+The verifier audits the image against the vendored GDPval-AA v2 manifests and exercises the toolchain. Build for the
+architecture your sandboxes run on; an arm64 build leaves out the pins in
+`containers/gdpval_aa_v2_arm64_exclusions.txt`. For a private registry, also set
+`sandbox_config.provider_options.image_auth: {username: ..., password: ...}`, and select the architecture with
+`sandbox_config.provider_options.platform: {os: linux, arch: arm64}` when it is not the provider's default.
+
+## Office to PDF conversion
+
+The judge reads Office deliverables as PDFs that LibreOffice renders. Comparison mode preconverts them beside the
+source files (`preconvert_office_to_pdf`), and rubric mode renders the ones without a PDF into a temp directory. By
+default the server runs `libreoffice` from `PATH`, and with `preconvert_office_to_pdf: true` startup installs it and a
+Java runtime with `apt-get` on Linux when they are missing or broken. Startup then converts a small workbook with a
+formula and a chart, and fails in comparison mode if that conversion fails.
+
+To render in the task sandbox instead, set `sandbox_libreoffice_command: [libreoffice]`. The sandbox image built from
+`containers/Dockerfile` has LibreOffice and the fonts. Before `/verify` stops the sandbox, it renders every collected
+Office file, submitted or a task input under `reference_files/`, to a `<name>.pdf` sidecar there. The server then
+needs no LibreOffice: startup skips the install and its check, and both modes judge the sidecars. A file that fails to
+render, or whose render does not finish cleanly, gets no sidecar and is judged as it would be without LibreOffice.
+Rendering one rollout's files takes at most `sandbox_render_budget_s` (default 600) in all, and one LibreOffice run at
+most 150 s; files left when the budget runs out are judged without a render too. Use
+this when the server runs without root, or should not open model-written Office files with LibreOffice itself.
+
+In comparison mode the server then converts nothing, even when the host has LibreOffice. Comparison references are
+judged only from the PDFs they carry, so a reference set must ship a PDF for every Office deliverable, as one made by a
+run with `persist_deliverables_dir` does. A task whose reference deliverable has an Office file without a PDF is not
+judged: it fails as `gdpval:reference_unrendered` instead of being scored against an empty reference. Rubric mode still
+renders a file without a sidecar on the host, if the host has LibreOffice.
+
+The render is only as trustworthy as the agent's sandbox. LibreOffice runs in the sandbox the agent just worked in,
+where the agent is root and can replace the `libreoffice` executable, so an agent that does so chooses the PDF the judge
+sees for its own Office files. An agent can also submit its own `<name>.pdf` beside an Office file, as with host
+conversion. Use sandbox rendering where that risk is acceptable, such as evaluating a fixed checkpoint, and not as a
+grading boundary for a policy under training.
+
+To run LibreOffice from a container or a wrapper script instead, set `libreoffice_command` to the command that replaces
+`libreoffice`. For example, to use Apptainer, set it like this in `configs/gdpval.yaml`, next to
+`persist_deliverables_dir`:
+
+```yaml
+libreoffice_command: [apptainer, exec, --bind, /path/to/data, --bind, /tmp, /path/to/libreoffice.sif, libreoffice]
+```
+
+`/path/to/libreoffice.sif` can be any Apptainer image that has LibreOffice. To make one from a Docker image, run
+`apptainer build libreoffice.sif docker://<image>`.
+
+The command must see these directories at the same absolute paths:
+
+- `persist_deliverables_dir`;
+- the reference deliverables;
+- the temp directory (`TMPDIR`, or `/tmp`);
+- any other deliverables directory that `/verify` gets, such as an earlier run's when `gym eval reverify` re-judges it.
+
+Startup runs the command with `--version` and converts a small workbook in the temp directory, under
+`persist_deliverables_dir` and under each reference `deliverables_dir`. It fails if any of these fails, if the
+conversion leaves files that the server cannot delete, or if a reference `deliverables_dir` does not exist. A reference
+directory that the server cannot write is not checked, so its Office files need their PDFs already, and neither are
+other deliverables directories. If the command cannot see one of them, `.docx`, `.xlsx` and `.pptx` files
+there can still convert, without a warning, from a copy that a Python library re-saves and that can lose content such
+as shapes in a workbook; `.doc`, `.xls` and `.ppt` files can fail. The `apt-get` install is skipped when the command is
+set.
+
+The PDFs depend on the command's LibreOffice version and fonts, so they can look different from a host install's.
+Comparison mode keeps each PDF next to its source file and reuses it in later runs.
+
+A Docker command also needs:
+
+- `--user` with the server's uid and gid, so that LibreOffice does not run as root and leave files that the server
+  cannot delete. Leave it out with rootless Docker or Podman, which already run containers as your user;
+- `--rm`, so that each conversion's container is deleted;
+- a time limit inside the container, such as `timeout -k 5 100`, and `--init`, without which the container may not stop
+  when that limit fires. Gym gives each LibreOffice run 120 s, but when that runs out it stops only the `docker`
+  client, and the container keeps running.
+
+For example, with Docker:
+
+```yaml
+libreoffice_command: [docker, run, --rm, --init, --user, "<uid>:<gid>", -v, /path/to/data:/path/to/data, -v, /tmp:/tmp,
+                      libreoffice-image, timeout, -k, "5", "100", libreoffice]
+```
+
+## Judge failure telemetry
+
+Comparison judging can optionally write structured request and failure metadata:
+
+```yaml
+judge_telemetry_output_dir: /path/to/run/judge_telemetry
+```
+
+Each resources-server process writes a separate `judge-events.<pid>.jsonl` file.
+Events correlate preflight exclusions, provider attempts, retries, recovery, and
+invalid responses with the task, reference, judge, request size, file counts,
+relative file labels, media types, and attachment sizes. Prompts, attachment
+contents, base64 payloads, credentials, and absolute paths are never recorded.
+Telemetry is best-effort and does not alter judge routing, retries, scores, or
+ELO calculation.
+
+Summarize one file or a directory of process-local files with:
+
+```bash
+python -m resources_servers.gdpval.judge_telemetry /path/to/run/judge_telemetry
+```

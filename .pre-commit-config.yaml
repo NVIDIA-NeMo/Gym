@@ -33,6 +33,11 @@ repos:
       args: ["check", "--select", "I", "--fix"]
     - id: ruff-format
 
+  - repo: https://github.com/NVIDIA-NeMo/FW-CI-templates
+    rev: 7dd05d1e00c28bde40d5f90cd0b494e57bf52ce0 # v1.15.1
+    hooks:
+    - id: guardwords-check
+
   - repo: local
     hooks:
       - id: no-underscore-md
@@ -62,4 +67,13 @@ repos:
         language: python
         entry: python scripts/update_env_list.py
         additional_dependencies: [pyyaml]
+        pass_filenames: false
+        require_serial: true
         files: ^README\.md$|^benchmarks/.*/config\.yaml$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$
+      - id: import-linter
+        name: Check package layering (import-linter)
+        language: python
+        entry: lint-imports
+        additional_dependencies: ["import-linter==2.15"]
+        files: ^nemo_gym/.*\.py$|^pyproject\.toml$
+        pass_filenames: false

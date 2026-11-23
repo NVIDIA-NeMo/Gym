@@ -106,7 +106,7 @@ Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_pa
 5. **Wait for the eval container** to finish or hit `swebench_tests_timeout` (default 30 min). It produces a `report.json` whose location is dataset-specific.
 6. **Postprocess** the report (per-dataset; e.g. SWE-rebench / NV-internal / SWE-bench-Ext do their parsing host-side because the eval images may not have python3).
 7. **Decide `mask_sample`** (GRPO) — see [GRPO masking and failure modes](#grpo-masking-and-failure-modes).
-8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `VLLMConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
+8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `ChatCompletionsConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
 
 If `verify_golden_patch=true`, step 2–4 are skipped: the dataset's golden patch (`instance_dict["patch"]`) is written directly as the prediction and the eval container is the only thing that runs. This is a sanity check that a dataset sample's golden patch actually resolves under our local eval. Supported for `swe-bench-ext`, the SWE-bench / SWE-bench_Multilingual families (e.g. `princeton-nlp/SWE-bench_Verified`, `SWE-bench/SWE-bench_Multilingual`), and `SWE-rebench`. See [Golden-patch validation](#golden-patch-validation).
 
@@ -153,7 +153,7 @@ Key details:
 - **Commit sync on startup.** On every server start, if the existing checkout's `HEAD` differs from `agent_framework_commit`, the wrapper hard-resets the working tree to that commit (`git fetch --all --tags --prune && git reset --hard HEAD && git clean -fd && git checkout --force <commit>`). The YAML is treated as the golden truth — local edits in `swe_openhands_setup/OpenHands/` are discarded (gitignored paths like `.venv` are preserved). Bump `agent_framework_commit` in the config to roll the fork forward.
 - **Inside the container** the agent driver is `OpenHands/evaluation/benchmarks/swe_bench/scripts/run_infer.sh`, parametrized by `agent_cls`, `agent_max_turns`, dataset name + split, and the per-instance dataset JSONL.
 - **LLM config** is generated per-run by reading `configs/oh_config.toml`, overriding `llm.model.{model,base_url,temperature,top_p}` from the request, dumping it back as a TOML string, and writing it to `/tmp/config_<run_id>.toml` inside the container.
-- **NeMo-Gym wiring** — `NEMO_GYM_METRICS_FPATH`, `NEMO_GYM_CONFIG_DICT`, and `NEMO_GYM_MODEL_SERVER_NAME` are exported into the agent container so the OpenHands fork can call back into the model server registered with this NeMo-Gym instance instead of using a raw HTTP base URL.
+- **NeMo-Gym wiring** — `NEMO_GYM_METRICS_FPATH`, `NEMO_GYM_CONFIG_DICT`, and `NEMO_GYM_MODEL_SERVER_NAME` are exported into the agent container so the OpenHands fork can call back into the model server registered with this NeMo-Gym instance instead of using a raw HTTP base URL. The whole config goes into that one variable, and Linux refuses a variable over 32 memory pages (128 KiB with 4 KiB pages), so the server stops at start with a `ConfigError` when the config is longer.
 - **Workspace safety** — for datasets where the SIF does *not* bake `/workspace`, the agent script aborts if `/workspace` is mounted, because OpenHands' default behaviour deletes everything in `/workspace`. This check is intentionally skipped for `SWE-rebench*`, `nv-internal-1`, and `swe-bench-ext` whose images legitimately use `/workspace` or the agent works in `/{repo_name}` / `/app`.
 - **`cryptography<43` shim** — for `nv-internal-1` and `swe-bench-ext`, a `cryptography<43` wheel is installed into a temp dir and prepended to `PYTHONPATH`. This works around openssl/cryptography ABI mismatches in older base images.
 - **R2E-Gym test hiding** — when running the *agent* (not eval) under R2E-Gym, the wrapper deletes `/r2e_tests` and `/run_tests.sh` from `/`, `/root`, and `/testbed` so the agent can't peek at the held-out tests.
@@ -320,7 +320,7 @@ The OpenHands harness supports resuming a partial trajectory: the request's `bod
 
 **How it's plumbed.** In `SWEBenchWrapper._setup_params`:
 
-1. `_maybe_build_replay_messages(body)` scans `body.input` for any `function_call` / `function_call_output` items. If none are present, the request is treated as a normal seed and replay support is a no-op. If any are present, the input is converted to OpenAI chat-completion message format via the shared `VLLMConverter` and stashed on `problem_info["replay_messages"]` as a JSON string (metadata is typed `Dict[str, str]`).
+1. `_maybe_build_replay_messages(body)` scans `body.input` for any `function_call` / `function_call_output` items. If none are present, the request is treated as a normal seed and replay support is a no-op. If any are present, the input is converted to OpenAI chat-completion message format via the shared `ChatCompletionsConverter` and stashed on `problem_info["replay_messages"]` as a JSON string (metadata is typed `Dict[str, str]`).
 2. `OpenHandsHarnessProcessor.get_run_command` writes the JSON to `<persistent_dir>/replay_messages.json`, bind-mounts it into the agent container, and forwards the mounted path as positional arg #18 (`REPLAY_MESSAGES_PATH`) to `run_infer.sh`. Positional args 13..17 are emitted as empty-string placeholders so the right shift index lands.
 3. The replay's own system message is extracted and written to `<persistent_dir>/replay_system_prompt.j2`, then pinned as `resolved_system_prompt_template` so the standard mount logic bind-mounts it over OpenHands' `system_prompt.j2`. This is **unconditional** — it overrides any `agent_prompt_overrides` selection. Reason: OpenHands' `replay_utils.messages_to_replay_events()` drops system messages, so without this the resumed run would render OpenHands' own `system_prompt.j2` and drift from the recorded conversation.
 
@@ -409,7 +409,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `apptainer_memory_limit_mb`        | `65536` (64 GiB)                                  | Cumulative tree-RSS limit enforced by the gym-side memory watchdog (no cgroups in the enroot sandbox — see [Memory watchdog](#memory-watchdog-oom-handling)). `<= 0` disables it. |
 | `memory_watchdog_enabled`          | `true`                                            | Enable the RSS memory watchdog for the agent and eval containers.       |
 | `memory_watchdog_poll_interval_s`  | `1.0`                                             | Watchdog poll interval (seconds); bounds worst-case RSS overshoot of a fast allocator. |
-| `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container.               |
+| `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container. Exported as both `COMMAND_EXEC_TIMEOUT` (caps explicit per-action timeouts) and `SANDBOX_TIMEOUT` (default for actions without one; requires an OpenHands checkout whose eval sandbox config reads `SANDBOX_TIMEOUT`). |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
 | `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |
@@ -667,13 +667,21 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 
 ## GRPO masking and failure modes
 
-`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when:
+`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when one of these happens. The verify response carries `mask_sample` too, with a `failure_kind` and `failure_reason` for the first match in this order:
 
-1. The patch resolved the tests **but** the agent terminated in a `max_iteration` or `context_window` error — the reward is accidental.
-2. The eval container hit `swebench_tests_timeout` — reward is unreliable.
-3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
-4. The memory watchdog killed the **agent** container (OOM).
-5. The memory watchdog killed the **eval** container (OOM).
+| Condition | `failure_kind` |
+|---|---|
+| The evaluator failed before its startup marker, so no reward was measured | `provider_unavailable` |
+| The memory watchdog killed the **agent** container (OOM) | `provider_oom_killed` |
+| The memory watchdog killed the **eval** container (OOM) | `provider_oom_killed` |
+| The eval container hit `swebench_tests_timeout` | `swe_agents:eval_timeout` |
+| The agent hit `swebench_agent_timeout` (wall-clock) | `agent_timeout` |
+| The agent ended in a `max_iteration` error | `agent_limit` |
+| The agent ended in a `context_window` error | `model_context_limit` |
+
+Each condition masks regardless of `resolved`. A patch that resolves the tests after the agent hit its iteration limit or context window is accidental.
+
+Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not reported as a measured policy failure. An eval timeout gets its own `swe_agents:` name because the model's patch can make the tests hang, and so can a slow host.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 

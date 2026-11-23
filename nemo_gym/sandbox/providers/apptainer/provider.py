@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
@@ -41,7 +42,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
 
 LOGGER = logging.getLogger(__name__)
@@ -51,9 +54,17 @@ INSTANCE_NAME_PREFIX = "nemo-gym-"
 READY_PROBE_COMMAND = "printf apptainer-sandbox-ready"
 READY_PROBE_EXPECTED = "apptainer-sandbox-ready"
 SANDBOX_RUNTIME_RETURN_CODE = 125
-# Best-effort stderr markers indicating apptainer itself (not the user's command)
-# failed to run the command. Apptainer prefixes its own fatal errors with "FATAL:".
-APPTAINER_RUNTIME_ERROR_MARKERS = ("fatal:", "no instance found", "instance not found", "does not exist")
+# Exit code apptainer uses when it fails on its own (CLI / starter error).
+APPTAINER_FATAL_RETURN_CODE = 255
+# Apptainer logs its own failures as lines starting with "FATAL:" / "ERROR:" (the
+# starter pads the level, e.g. "FATAL   :"). Match that line format only: plain
+# substrings such as "fatal:" or "does not exist" also appear in the user's own
+# stderr (git, test runners) and would turn ordinary command failures into
+# sandbox errors. "ERROR:" lines are also printed by pip / pytest, so they only
+# count together with apptainer's exit code.
+APPTAINER_FATAL_LINE = re.compile(r"^FATAL\s*:\s", re.MULTILINE)
+APPTAINER_ERROR_LINE = re.compile(r"^ERROR\s*:\s", re.MULTILINE)
+APPTAINER_RUNTIME_ERROR_MARKERS = ("no instance found", "instance not found")
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
@@ -111,6 +122,7 @@ class ApptainerExecConfig:
     """Settings for running commands inside an Apptainer sandbox."""
 
     default_timeout_s: float | None = 180
+    timeout_grace_s: float = 15
     fakeroot_for_root: bool = True
     default_binds: list[str] = field(default_factory=list)
     extra_exec_args: list[str] = field(default_factory=list)
@@ -119,6 +131,8 @@ class ApptainerExecConfig:
     def __post_init__(self) -> None:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
+        if self.timeout_grace_s < 0:
+            raise ValueError("exec.timeout_grace_s must be >= 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
 
@@ -197,10 +211,19 @@ def _to_sandbox_status(state: str | None) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-def _is_runtime_failure(stderr: str) -> bool:
-    """Best-effort: did apptainer itself fail to run the command (vs the command failing)?"""
+def _is_runtime_failure(stderr: str, return_code: int | None = None) -> bool:
+    """Best-effort: did apptainer itself fail to run the command (vs the command failing)?
+
+    Only apptainer's own output counts: a ``FATAL:`` line, a missing-instance message,
+    or an ``ERROR:`` line together with apptainer's exit code 255. Anything the user's
+    command prints (git ``fatal: ...``, ``... does not exist``) is a command failure.
+    """
+    if APPTAINER_FATAL_LINE.search(stderr):
+        return True
     low = stderr.lower()
-    return any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS)
+    if any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS):
+        return True
+    return return_code == APPTAINER_FATAL_RETURN_CODE and APPTAINER_ERROR_LINE.search(stderr) is not None
 
 
 def _is_missing_instance(stderr: str) -> bool:
@@ -321,25 +344,41 @@ class ApptainerProvider:
             if daemonize:
                 return await self._run_daemonizing(argv, timeout_s=timeout_s)
 
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                env=self._subprocess_env,
-            )
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    proc.communicate(input=stdin),
-                    timeout=timeout_s,
+            # Output goes to files, not pipes: a process the command leaves running in the instance
+            # (`tmux new-session -d`, `server &`) can keep the write end of an output pipe open, and reading
+            # the pipe to EOF then waits until that process exits. Under uvloop, the event loop of Gym's
+            # servers, Terminus 2's tmux start never returned. With files, the command's exit ends the wait.
+            with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+                    stdout=out_f,
+                    stderr=err_f,
+                    start_new_session=True,
+                    env=self._subprocess_env,
                 )
-            except asyncio.TimeoutError as e:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await proc.wait()
-                raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                try:
+                    await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+                except asyncio.CancelledError:
+                    await kill_cancelled_command(proc)
+                    raise
+                except asyncio.TimeoutError as e:
+                    # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                    # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                    # handler), THEN SIGKILL if it hasn't exited.
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    with contextlib.suppress(asyncio.TimeoutError, Exception):
+                        await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                    if proc.returncode is None:  # still alive after grace -> hard kill
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        with contextlib.suppress(Exception):
+                            await proc.wait()
+                    raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                out_f.seek(0)
+                err_f.seek(0)
+                stdout_b, stderr_b = out_f.read(), err_f.read()
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
             return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
@@ -362,11 +401,22 @@ class ApptainerProvider:
             )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            except asyncio.CancelledError:
+                await kill_cancelled_command(proc)
+                raise
             except asyncio.TimeoutError as e:
+                # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                # handler), THEN SIGKILL if it hasn't exited.
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                with contextlib.suppress(asyncio.TimeoutError, Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                if proc.returncode is None:  # still alive after grace -> hard kill
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
                 raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
 
             out_f.seek(0)
@@ -430,6 +480,14 @@ class ApptainerProvider:
         for bind in extra_binds:
             argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
+        if any(arg in {"--contain", "--containall", "-c", "-C"} for arg in start_args) and not any(
+            arg in {"--workdir", "-W"} or arg.startswith("--workdir=") for arg in start_args
+        ):
+            # Containment must not move large compiler temporaries into Apptainer's small
+            # session tmpfs. Keep /tmp, /var/tmp, and home private and disk-backed instead.
+            private_workdir = staging_dir / ".apptainer-workdir"
+            private_workdir.mkdir(mode=0o700)
+            start_args += ["--workdir", str(private_workdir)]
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
@@ -537,6 +595,54 @@ class ApptainerProvider:
             )
         shutil.rmtree(inst.staging_dir, ignore_errors=True)
 
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Share a local instance with another Gym worker on the same host/UID.
+
+        This is a trusted control-plane descriptor, not a portable lease. The
+        receiving worker needs the same staging filesystem and Apptainer config.
+        Either handle can stop the instance; callers must coordinate ownership.
+        """
+        inst = handle.raw
+        return {
+            "provider": self.name,
+            "sandbox_id": inst.name,
+            "hostname": socket.gethostname(),
+            "uid": os.getuid(),
+            "staging_dir": str(inst.staging_dir),
+            "mount_point": inst.mount_point,
+            "image": inst.image,
+            "env": dict(inst.env),
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        if descriptor.get("provider") != self.name:
+            raise ValueError("Apptainer requires a full serialized descriptor, not a bare sandbox id")
+        if descriptor.get("hostname") != socket.gethostname() or descriptor.get("uid") != os.getuid():
+            raise ValueError("Apptainer reconnect requires the same host and UID as the creator")
+        name = descriptor["sandbox_id"]
+        staging = Path(descriptor["staging_dir"])
+        if not staging.is_absolute() or not staging.is_dir():
+            raise ValueError("Apptainer staging directory is unavailable")
+        mount_point = descriptor["mount_point"]
+        if not isinstance(mount_point, str) or not mount_point.startswith("/"):
+            raise ValueError("Invalid Apptainer mount point")
+        env = dict(descriptor.get("env", {}))
+        _serialize_env_file(env)  # Validate keys and values before accepting the descriptor.
+        handle = SandboxHandle(
+            sandbox_id=name,
+            provider_name=self.name,
+            raw=_ApptainerInstance(
+                name=name,
+                staging_dir=staging,
+                mount_point=mount_point,
+                image=descriptor["image"],
+                env=env,
+            ),
+        )
+        if await self.status(handle) != SandboxStatus.RUNNING:
+            raise RuntimeError(f"Apptainer instance {name} is not running")
+        return handle
+
     async def exec(
         self,
         handle: SandboxHandle,
@@ -597,7 +703,7 @@ class ApptainerProvider:
                 error_type="timeout",
             )
 
-        if code != 0 and _is_runtime_failure(err):
+        if code != 0 and _is_runtime_failure(err, code):
             return SandboxExecResult(
                 stdout=out,
                 stderr=err,
@@ -716,7 +822,7 @@ class ApptainerProvider:
 
         # Always best-effort remove the host staging dir, even if stop failed.
         try:
-            shutil.rmtree(inst.staging_dir, ignore_errors=False)
+            _remove_writable_tree(inst.staging_dir)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
 

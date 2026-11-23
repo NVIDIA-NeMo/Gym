@@ -5,7 +5,7 @@
 With num_repeats > 1, all rollouts of a task share _ng_task_index, so the old
 snap path (sample_{task_index}/attempt_{a}_*) made concurrent rollouts clobber
 and interleave each other's snapshot files — per-reset context extraction was
-unattributable (found on a mercor x4 collection run). The fix keys
+unattributable (found on a 4-rollout collection run). The fix keys
 the sample dir by rollout too: sample_{task_index}_r{rollout_index}, while
 single-rollout runs (no rollout_index in metadata) keep the legacy naming
 byte-for-byte.
@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentRunRequest
 from responses_api_agents.browsecomp_agent.tests.test_app import (
     _make_config,

@@ -1,0 +1,33 @@
+# Pi preset on the 728 text-only HLE-Diamond questions: pi_agent sessions under the benchmark's
+# single_agent_turn_legacy Environment Server. Each session creates its own sandbox from the offline science image
+# (the judge has none to lend), with the shared settings of benchmarks/hle/pi.yaml in
+# responses_api_agents/pi_agent/configs/profiles/offline_science.yaml, and the HLE judge grades the final answer.
+# pi_legacy_agent.yaml keeps pi_sandboxed_agent on the deprecated legacy_agent relay. The two harnesses are configured
+# differently, so do not compare their scores as the same measurement; the README lists what differs.
+config_paths:
+- benchmarks/hle_diamond/config.yaml
+- responses_api_agents/pi_agent/configs/profiles/offline_science.yaml
+hle_diamond_pi_agent:
+  _inherit_from: pi_agent
+  responses_api_agents:
+    pi_agent:
+      resources_server:
+        type: resources_servers
+        name: hle_diamond_equivalence_llm_judge_resources_server
+      datasets:
+      - name: hle_diamond_text
+        type: benchmark
+        jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl
+        prompt_config: benchmarks/hle_diamond/prompts/opencode.yaml
+        prepare_script: benchmarks/hle_diamond/prepare_text.py
+        num_repeats: 1
+equivalence_llm_judge_simple_agent: null
+hle_diamond_equivalence_llm_judge_simple_agent: null
+
+# Keep the benchmark's routing name and its single_agent_turn_legacy server, bound to this agent. The judge serves
+# no tools, so the server grants the agent none.
+hle_diamond_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: hle_diamond_pi_agent

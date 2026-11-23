@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Agent-visible tool access contracts."""
+
+from typing import Annotated, Literal
+
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+
+
+# Direct HTTP has no field for a tool's error result, which MCP reports as `isError`, so a tool route that answers a
+# call with an error result sets this header to "true".
+TOOL_ERROR_HEADER = "X-NeMo-Gym-Tool-Error"
+
+# The ID the model gave a tool call (its `call_id`), which an agent may send with a direct HTTP call, so the server can
+# join its record to the agent's trajectory.
+TOOL_CALL_ID_HEADER = "X-NeMo-Gym-Tool-Call-Id"
+
+# A tool route sets this header to "true" when its reply asks the agent to end its activation: ``simple_agent`` finishes
+# the tool calls of the current model response and returns, without calling the model again. Other agents ignore the
+# header and call the model again. MCP has no field for it.
+END_ACTIVATION_HEADER = "X-NeMo-Gym-End-Activation"
+
+
+class DirectHTTPToolAccess(BaseModel):
+    """Connect a trusted Python agent to typed tool routes.
+
+    A route answers a call whose result is an error with ``X-NeMo-Gym-Tool-Error: true`` (``TOOL_ERROR_HEADER``),
+    even when its status is 200. An agent may send the model's ``call_id`` in ``X-NeMo-Gym-Tool-Call-Id``
+    (``TOOL_CALL_ID_HEADER``). A reply with ``X-NeMo-Gym-End-Activation: true`` (``END_ACTIVATION_HEADER``) asks
+    the agent to end its activation: ``simple_agent`` runs the rest of the model response's tool calls and
+    returns without another model call. Other agents ignore the header and call the model again.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["direct_http"] = "direct_http"
+    name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    required: bool
+    base_url: AnyHttpUrl
+    cookies: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class MCPStreamableHTTPConnection(BaseModel):
+    """Connect to an MCP server over an absolute HTTP endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["streamable_http"] = "streamable_http"
+    url: AnyHttpUrl
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class MCPToolAccess(BaseModel):
+    """Describe one named MCP server that an agent adapter must configure.
+
+    Names are session-wide identifiers. Agent session requests reject duplicate names,
+    and adapters must also reject collisions with their static tool configuration.
+    Failure to establish a required server fails session seeding; an optional server may
+    be skipped. On agent-session close, adapters disconnect clients without stopping the
+    remote server.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["mcp"] = "mcp"
+    name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    required: bool
+    connection: MCPStreamableHTTPConnection
+
+
+ToolAccess = Annotated[
+    DirectHTTPToolAccess | MCPToolAccess,
+    Field(discriminator="kind"),
+]

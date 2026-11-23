@@ -1,0 +1,12 @@
+{
+    "mechanism_rxn": [
+        {
+            "step": "1",
+            "mapped_rxn": "[CH3:1][C:2]([CH3:3])([CH3:4])[Cl:5]>>C[C+](C)C.[Cl-]"
+        },
+        {
+            "step": "2",
+            "mapped_rxn": "C[C+](C)C.[Cl-]>>C=C(C)C.[OH3+]"
+        }
+    ]
+}

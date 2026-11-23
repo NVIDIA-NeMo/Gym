@@ -1,0 +1,237 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import re
+import tomllib
+from pathlib import Path
+
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
+
+
+ROOT = Path(__file__).resolve().parents[3]
+OSWORLD_AGENT_REQUIREMENTS = ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
+OSWORLD_AGENT_UV_CONFIG = ROOT / "responses_api_agents/osworld_agent/uv.toml"
+OSWORLD_AGENT_PUBLIC_OVERRIDES = ROOT / "responses_api_agents/osworld_agent/pyproject.toml"
+OSWORLD_RESOURCES_PROJECT = ROOT / "resources_servers/osworld/pyproject.toml"
+OSWORLD_RESOURCES_PYTHON = ROOT / "resources_servers/osworld/.python-version"
+OSWORLD_AGENT_README = ROOT / "responses_api_agents/osworld_agent/README.md"
+OSWORLD_BENCHMARK_README = ROOT / "benchmarks/osworld/README.md"
+OSWORLD_AGENT_PYTHON = ROOT / "responses_api_agents/osworld_agent/.python-version"
+OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES = {
+    "alibabacloud-ecs20140526",
+    "alibabacloud-tea-openapi",
+    "alibabacloud-tea-util",
+    "azure-identity",
+    "azure-mgmt-compute",
+    "azure-mgmt-network",
+    "volcengine-python-sdk",
+}
+# Declared by OSWorld but never imported; paddlepaddle has no aarch64 Linux wheel.
+OSWORLD_UNUSED_PADDLE_DEPENDENCIES = {"paddleocr", "paddlepaddle"}
+
+
+def _uv_config() -> dict:
+    with (ROOT / "pyproject.toml").open("rb") as f:
+        return tomllib.load(f)["tool"]["uv"]
+
+
+def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
+    with OSWORLD_AGENT_UV_CONFIG.open("rb") as f:
+        server_config = tomllib.load(f)
+    project_config = _uv_config()
+
+    public_project = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text())
+    assert server_config["constraint-dependencies"] == public_project["tool"]["uv"]["constraint-dependencies"]
+    assert set(project_config["constraint-dependencies"]) <= set(server_config["constraint-dependencies"])
+    with (OSWORLD_AGENT_REQUIREMENTS.parent / "uv.lock").open("rb") as f:
+        packages = tomllib.load(f)["package"]
+    with (ROOT / "uv.lock").open("rb") as f:
+        parent_packages = tomllib.load(f)["package"]
+    # Locks record the default parent's Ray, but arbitrary parents are propagated
+    # at setup time. Do not freeze that version into this independent policy.
+    ray_version = next(package["version"] for package in parent_packages if package["name"] == "ray")
+    assert not any(Requirement(value).name == "ray" for value in server_config["constraint-dependencies"])
+    assert next(package["version"] for package in packages if package["name"] == "ray") == ray_version
+    assert set(server_config["override-dependencies"]) == set(public_project["tool"]["uv"]["override-dependencies"])
+    project_overrides = set(project_config["override-dependencies"])
+    server_overrides = set(server_config["override-dependencies"])
+    assert project_overrides <= server_overrides
+    assert server_overrides - project_overrides == {
+        "grpcio-status==1.71.2",
+        "protobuf==5.29.6",
+        *(set(public_project["tool"]["uv"]["override-dependencies"]) - project_overrides),
+    }
+    project_exclusions = set(project_config["exclude-dependencies"])
+    server_exclusions = set(server_config["exclude-dependencies"])
+    assert project_exclusions <= server_exclusions
+    assert server_exclusions == (
+        set(public_project["tool"]["uv"]["exclude-dependencies"])
+        | OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES
+        | OSWORLD_UNUSED_PADDLE_DEPENDENCIES
+    )
+    # OSWorld's ag2 dependency also advertises an optional AGP client, which is
+    # excluded from this runtime alongside unsupported cloud VM providers.
+    assert server_exclusions - project_exclusions == (
+        OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES | OSWORLD_UNUSED_PADDLE_DEPENDENCIES | {"agp-client"}
+    )
+    required_version = SpecifierSet(server_config["required-version"])
+    assert Version("0.13.3") not in required_version
+    assert Version("0.13.4") in required_version
+    assert server_config["required-version"] == public_project["tool"]["uv"]["required-version"]
+    assert "managed" not in server_config
+    assert "python-preference" not in server_config
+    assert server_config["pip"]["torch-backend"] == "cpu"
+
+
+def test_osworld_runtime_consumers_share_one_pinned_revision() -> None:
+    revision_pattern = re.compile(r"OSWorld/archive/([0-9a-f]{40})\.tar\.gz")
+    agent_match = revision_pattern.search(OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8"))
+    resources_match = revision_pattern.search(OSWORLD_RESOURCES_PROJECT.read_text(encoding="utf-8"))
+
+    assert agent_match, "The OSWorld agent must pin an immutable OSWorld archive revision"
+    assert resources_match, "The OSWorld Resources Server must pin an immutable OSWorld archive revision"
+    assert agent_match.group(1) == resources_match.group(1)
+    revision = agent_match.group(1)
+    assert f"commit `{revision}`" in OSWORLD_AGENT_README.read_text(encoding="utf-8")
+    benchmark_readme = OSWORLD_BENCHMARK_README.read_text(encoding="utf-8")
+    assert f"pinned to `{revision}`" in benchmark_readme
+    assert f"git checkout {revision}" in benchmark_readme
+
+
+def test_osworld_resources_server_locks_a_compatible_cpu_torchvision_pair() -> None:
+    with OSWORLD_RESOURCES_PROJECT.open("rb") as f:
+        resources_project = tomllib.load(f)
+    resource_uv = resources_project["tool"]["uv"]
+    overrides = {Requirement(value).name: Requirement(value) for value in resource_uv["override-dependencies"]}
+    assert str(overrides["torchvision"].specifier) == "==0.26.0"
+    assert overrides["torchvision"].marker is None
+    assert resource_uv["sources"]["torch"] == resource_uv["sources"]["torchvision"] == {"index": "pytorch-cpu"}
+    assert {"name": "pytorch-cpu", "url": "https://download.pytorch.org/whl/cpu", "explicit": True} in resource_uv[
+        "index"
+    ]
+    with OSWORLD_RESOURCES_PROJECT.with_name("uv.lock").open("rb") as f:
+        packages = tomllib.load(f)["package"]
+    for name, version in (("torch", "2.11.0"), ("torchvision", "0.26.0")):
+        locked = [package for package in packages if package["name"] == name]
+        assert locked
+        assert all(Version(package["version"]).base_version == version for package in locked)
+        assert all(package["source"] == {"registry": "https://download.pytorch.org/whl/cpu"} for package in locked)
+
+
+def test_osworld_resources_server_owns_a_python_313_wheel_compatible_runtime() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as f:
+        parent_python = tomllib.load(f)["project"]["requires-python"]
+    with OSWORLD_RESOURCES_PROJECT.open("rb") as f:
+        resources_project = tomllib.load(f)
+
+    assert resources_project["project"]["requires-python"] == parent_python
+    resource_python = SpecifierSet(OSWORLD_RESOURCES_PYTHON.read_text(encoding="utf-8").strip())
+    assert Version(parent_python.removeprefix(">=")) in resource_python
+    assert Version("3.14") not in resource_python
+    assert resources_project["tool"]["uv"]["pip"]["torch-backend"] == "cpu"
+
+    direct = {Requirement(value).name: Requirement(value) for value in resources_project["project"]["dependencies"]}
+    overrides = {
+        Requirement(value).name: Requirement(value)
+        for value in resources_project["tool"]["uv"]["override-dependencies"]
+    }
+    for package, rejected, admitted in (
+        ("numpy", "1.26.4", "2.4.6"),
+        ("opencv-python-headless", "4.8.1.78", "4.10.0.84"),
+        ("Pillow", "11.0.0", "12.3.0"),
+        ("matplotlib", "3.7.5", "3.10.6"),
+    ):
+        assert Version(rejected) not in direct[package].specifier
+        assert Version(admitted) in direct[package].specifier
+        if package != "numpy":
+            assert Version(rejected) not in overrides[package].specifier
+            assert Version(admitted) in overrides[package].specifier
+
+    # The fork metadata supports NumPy 2 on Python 3.13. Resolve its actual
+    # requirements rather than hiding a stale NumPy pin with an override.
+    assert "numpy" not in overrides
+
+    assert Version("2.5.1") not in overrides["torch"].specifier
+    assert Version("2.11.0") in overrides["torch"].specifier
+
+
+def test_osworld_agent_dependency_overrides() -> None:
+    requirements = OSWORLD_AGENT_REQUIREMENTS.read_text(encoding="utf-8")
+    with OSWORLD_AGENT_UV_CONFIG.open("rb") as config_file:
+        agent_overrides = tomllib.load(config_file)["override-dependencies"]
+    public_overrides = tomllib.loads(OSWORLD_AGENT_PUBLIC_OVERRIDES.read_text())["tool"]["uv"]["override-dependencies"]
+
+    assert "grpcio-status==1.71.2" in agent_overrides
+    assert "protobuf==5.29.6" in agent_overrides
+    assert all(Requirement(value).name != "numpy" for value in agent_overrides)
+    assert "torch==2.11.0" in public_overrides
+    assert "numpy==2.5.1" not in agent_overrides
+    assert "opencv-python-headless==5.0.0.93" not in agent_overrides
+    assert "numpy>=2.1,<2.5" in requirements
+
+
+def test_server_ray_version_is_owned_by_parent_process() -> None:
+    # global_config.py injects the parent process's exact Ray version into
+    # every server installation. Static overrides must not drag a current
+    # source checkout back to whichever Ray happened to ship in a base image.
+    ray_override = re.compile(r"^ray(?:\[default\])?\s*[<>=!~]", re.IGNORECASE)
+    with OSWORLD_AGENT_UV_CONFIG.open("rb") as config_file:
+        agent_overrides = tomllib.load(config_file)["override-dependencies"]
+    with OSWORLD_RESOURCES_PROJECT.open("rb") as config_file:
+        resource_overrides = tomllib.load(config_file)["tool"]["uv"]["override-dependencies"]
+    for requirement in (*agent_overrides, *resource_overrides):
+        assert ray_override.search(requirement) is None
+
+
+def test_role_runtime_policy_uses_standard_uv_files() -> None:
+    legacy_markers = {
+        "uv-managed-python.txt",
+        "uv-overrides.txt",
+        "uv-python-version.txt",
+        "uv-torch-backend.txt",
+    }
+    tracked_role_dirs = (
+        ROOT / "responses_api_agents/osworld_agent",
+        ROOT / "resources_servers/osworld",
+    )
+
+    assert not [path for role_dir in tracked_role_dirs for path in role_dir.iterdir() if path.name in legacy_markers]
+
+
+def test_nemo_rl_servers_use_a_compatible_python_range() -> None:
+    with (ROOT / "pyproject.toml").open("rb") as f:
+        python_floor = tomllib.load(f)["project"]["requires-python"].removeprefix(">=")
+
+    for python_policy in (OSWORLD_AGENT_PYTHON,):
+        supported = SpecifierSet(python_policy.read_text(encoding="utf-8").strip())
+        assert Version(python_floor) in supported
+        assert Version("3.14") not in supported
+
+
+def test_opt_in_runtime_lock_preserves_overlapping_agent_requirements() -> None:
+    agent = tomllib.loads(OSWORLD_AGENT_REQUIREMENTS.read_text())
+    runtime = tomllib.loads((OSWORLD_AGENT_REQUIREMENTS.parent / "runtime/uv.lock").read_text())
+    versions = {package["name"]: package["version"] for package in runtime["package"] if "version" in package}
+    overlapping = set()
+    for value in agent["project"]["dependencies"]:
+        requirement = Requirement(value)
+        name = requirement.name.lower().replace("_", "-")
+        if name not in versions or requirement.marker and not requirement.marker.evaluate():
+            continue
+        overlapping.add(name)
+        assert Version(versions[name]) in requirement.specifier, f"runtime lock violates {value}: {versions[name]}"
+    assert {"pillow", "numpy"} <= overlapping

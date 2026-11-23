@@ -31,14 +31,14 @@ from typing import Any, Literal, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, model_validator
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -52,9 +52,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
+from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
@@ -96,6 +98,7 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
+    provider_headers: Optional[dict[str, str]] = None
     openclaw_provider_timeout_seconds: Optional[int] = None
     openclaw_agent_timeout_seconds: Optional[int] = None
     openclaw_judge_timeout_seconds: Optional[int] = None
@@ -204,8 +207,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             if self.config.model_server is not None
             else self.config.model_base_url
         )
+        # A training framework trains the agent, not the judge, which keeps its own sampling.
         judge_base_url = (
-            self.resolve_model_base_url(self.config.judge_model_server.name, rollout_id)
+            self.resolve_model_base_url(self.config.judge_model_server.name, rollout_id, trained=False)
             if self.config.judge_model_server is not None
             else self.config.judge_base_url
         )
@@ -227,6 +231,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         }
         if self.config.openclaw_provider_timeout_seconds:
             env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
+        if self.config.provider_headers is not None:
+            env["PINCHBENCH_PROVIDER_HEADERS"] = json.dumps(self.config.provider_headers)
         if self.config.openclaw_agent_timeout_seconds:
             env["PINCHBENCH_AGENT_TIMEOUT_SECONDS"] = str(self.config.openclaw_agent_timeout_seconds)
         if self.config.openclaw_judge_timeout_seconds:
@@ -318,6 +324,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             api_key = os.environ.get("MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
             max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "65536"))
             context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "131072"))
+            provider_headers = (
+                json.loads(os.environ["PINCHBENCH_PROVIDER_HEADERS"])
+                if os.environ.get("PINCHBENCH_PROVIDER_HEADERS")
+                else None
+            )
             provider_timeout_s = int(os.environ["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"]) if os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS") else None
             agent_timeout_s = (
                 int(os.environ["PINCHBENCH_AGENT_TIMEOUT_SECONDS"])
@@ -364,6 +375,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             }
             if provider_timeout_s is not None:
                 custom_provider["timeoutSeconds"] = provider_timeout_s
+            if provider_headers is not None:
+                custom_provider["headers"] = provider_headers
             models = cfg.setdefault("models", {})
             models["mode"] = "merge"
             models.setdefault("providers", {})["custom"] = custom_provider
@@ -562,7 +575,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
     def _usage_from_transcript(events: list[dict]) -> NeMoGymResponseUsage:
         input_tokens = 0
         output_tokens = 0
-        cached_tokens = 0
+        cached_tokens: Optional[int] = None
+        cache_measured = True
         reasoning_tokens = 0
 
         def as_int(value) -> int:
@@ -579,24 +593,40 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
                 continue
             usage = message.get("usage")
             if not isinstance(usage, dict):
+                # An assistant call without usage has no measured cache count either.
+                cache_measured = False
                 continue
             input_tokens += as_int(usage.get("input") or usage.get("input_tokens") or usage.get("prompt_tokens"))
             output_tokens += as_int(
                 usage.get("output") or usage.get("output_tokens") or usage.get("completion_tokens")
             )
-            cached_tokens += as_int(usage.get("cacheRead"))
             input_details = usage.get("input_tokens_details")
             if not isinstance(input_details, dict):
                 input_details = {}
             output_details = usage.get("output_tokens_details")
             if not isinstance(output_details, dict):
                 output_details = {}
-            cached_tokens += as_int(input_details.get("cached_tokens"))
+            # OpenClaw's provider layer writes cacheRead=0 when the backend reported no cache details, so only a
+            # positive cacheRead is a measurement. It takes precedence over the nested detail, which a call reporting
+            # both carries the same count in; otherwise the nested detail, a measured zero included, counts.
+            cache_read = usage.get("cacheRead")
+            if type(cache_read) is int and cache_read > 0:
+                call_cached = cache_read
+            else:
+                cache_read = input_details.get("cached_tokens")
+                call_cached = cache_read if type(cache_read) is int and cache_read >= 0 else None
+            # One call without a measured cache count makes the rollout's sum unknown, not a subtotal.
+            if call_cached is None:
+                cache_measured = False
+            elif cache_measured:
+                cached_tokens = (cached_tokens or 0) + call_cached
             reasoning_tokens += as_int(usage.get("reasoning") or output_details.get("reasoning_tokens"))
 
         return NeMoGymResponseUsage(
             input_tokens=input_tokens,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(
+                cached_tokens=cached_tokens if cache_measured else None
+            ),
             output_tokens=output_tokens,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
             total_tokens=input_tokens + output_tokens,
@@ -907,3 +937,6 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     PinchBenchAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PinchBenchAgent.run_webserver()  # noqa: F401

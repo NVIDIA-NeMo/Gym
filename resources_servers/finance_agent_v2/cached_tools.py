@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,14 +43,9 @@ from finance_agent.tools import (
     _validate_date_format,
 )
 
+from resources_servers.sec_local_index.cache import ToolCache
+from resources_servers.sec_local_index.sec_urls import parse_sec_archives_url
 
-# Support both package import (tests: resources_servers.finance_agent_v2.cached_tools)
-# and flat script execution (the nemo-gym entrypoint runs app.py directly, so app.py
-# imports this module flat as `cached_tools`, and a relative import would fail here).
-try:
-    from .cache import ToolCache
-except ImportError:  # pragma: no cover - exercised only under flat entrypoint execution
-    from cache import ToolCache
 
 logger = logging.getLogger(__name__)
 
@@ -230,50 +226,45 @@ class CachedEDGARSearch(EDGARSearch):
 # ============================================================================
 
 
-# Matches a SEC EDGAR Archives *document* URL:
-#   https://www.sec.gov/Archives/edgar/data/<CIK>/<ACCESSION_NODASH>/<filename>
-_SEC_DOC_RE = re.compile(r"sec\.gov/Archives/edgar/data/(\d+)/([0-9A-Za-z]+)/(.+)$")
-
-
 class CachedParseHtmlPage(ParseHtmlPage):
     """ParseHtmlPage that caches parsed text for sec.gov filing URLs.
 
     Only SEC EDGAR Archives document URLs are cached (immutable per accession);
     every other URL falls through to the untouched upstream fetch+parse. The
-    on-disk layout is the corrected nested form (the V1 server used a flat
-    ``<accession>.txt`` filename, conflating a filing's multiple documents):
-        sec_filings/<cik_padded>/<accession_nodash>/<primary-doc-filename>.txt
+    on-disk layout is shared with the finance_sec_search server:
+        filings/<cik_padded>/<accession_nodash>/<percent-encoded-document>.txt
     """
 
-    _NAMESPACE = "sec_filings"
+    _NAMESPACE = "filings"
 
     def __init__(self, cache: ToolCache) -> None:
         super().__init__()
         self._cache = cache
+        self.read_sources: Counter[str] = Counter()
+
+    def _record_read(self, source: str) -> None:
+        self.read_sources[source] += 1
 
     def _doc_path(self, url: str) -> Optional[Path]:
-        clean = url.split("?", 1)[0].split("#", 1)[0]
-        m = _SEC_DOC_RE.search(clean)
-        if not m:
+        parsed = parse_sec_archives_url(url)
+        if parsed is None or not parsed.cache_filename:
             return None
-        cik = m.group(1).zfill(10)
-        accession = m.group(2)
-        filename = m.group(3).strip("/").replace("/", "_")
-        if not filename:
-            return None
-        return self._cache.path(self._NAMESPACE, cik, accession, f"{filename}.txt")
+        return self._cache.path(self._NAMESPACE, parsed.padded_cik, parsed.accession, f"{parsed.cache_filename}.txt")
 
     async def _parse_html_page(self, url: str) -> str:
         cache = self._cache
         path = self._doc_path(url) if cache.enabled else None
         if path is None:
             # Non-SEC URL (or cache disabled): identical to upstream, uncached.
+            self._record_read("live")
             return await super()._parse_html_page(url)
 
         cached = cache.read_text(path)
         if cached is not None:
+            self._record_read("cache")
             return cached
 
+        self._record_read("live")
         text = await super()._parse_html_page(url)
         if text:
             cache.write_text(path, text)

@@ -16,13 +16,14 @@ from unittest.mock import MagicMock
 
 from pytest import approx
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.equivalence_rule.app import (
     EquivalenceRuleResourcesServer,
     EquivalenceRuleResourcesServerConfig,
@@ -62,6 +63,10 @@ def _make_server(grading_rule: GradingRule = GradingRule.EXACT) -> EquivalenceRu
         grading_rule=grading_rule,
     )
     return EquivalenceRuleResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+async def test_reverify_mode() -> None:
+    assert await _make_server().get_reverify_mode() == ReverifyMode.STATELESS
 
 
 class TestNormalize:

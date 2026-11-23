@@ -1,0 +1,27 @@
+name: example_single_tool_call
+version: 0.1.0
+experimental: false
+kind: environment
+integration_profile: custom-gym-verifier
+domain: agent
+description: Single-step environment that rewards invoking the get_weather tool.
+modality: text
+licensing: Apache-2.0
+authors:
+- fsiino-nvidia
+- bxyu-nvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: example_single_tool_call
+agent_server: simple_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: resources_servers/example_single_tool_call/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

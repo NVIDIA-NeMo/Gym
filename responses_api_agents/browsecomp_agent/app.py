@@ -12,33 +12,51 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import hashlib
 import json
+import logging
+import os
 import re
+import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, ClassVar, List, Optional
+from uuid import uuid4
 
 import aiohttp
-from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from fastapi import HTTPException, Request, Response
+from pydantic import ConfigDict, Field, JsonValue, ValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionConflictError,
+    AgentSessionSetupError,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
+from nemo_gym.client import request as http_request
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -48,9 +66,38 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_models.vllm_model.app import VLLMConverter
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    DirectHTTPToolAccess,
+    MCPToolAccess,
+)
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.browsecomp_agent.sandbox import (
+    _ERROR_DETAIL_CHARS,
+    BrowsecompSandboxSession,
+    SandboxIsolationError,
+)
+
+
+LOG = logging.getLogger(__name__)
+
+
+# Connection retries for the sandboxed loop's model, tool and token-count calls. Gym's client waits 0.5 s between
+# resends, so this rides out about 90 s of outage; a longer one ends in an error receipt, a retryable activation
+# failure, instead of running into the rollout deadline and scoring as a timed-out zero.
+_SANDBOX_LOOP_CONNECTION_RETRIES = 180
 
 
 def _qid(text: str) -> str:
@@ -58,14 +105,13 @@ def _qid(text: str) -> str:
     return hashlib.sha256((text or "").encode()).hexdigest()[:10]
 
 
-# --- Progress board (ported from bc_frankie_bash_tool_w_progress_tracking
-# commits 43e59bc / 5099589 / 8cdd075) ---
+# --- Progress board ---
 # An update_progress tool whose board is OVERWRITTEN on each call (not
 # appended) and persists in the system prompt across context resets. The board
-# is framed as a ledger of SETTLED state (not the live hypothesis): a kimi26
-# A/B showed a hypothesis-anchored board REGRESSED BrowseComp-400 61.2% ->
-# 49.5%; the settled-state slots + post-reset re-derivation rule below are the
-# de-anchoring fixes from that study.
+# is framed as a ledger of SETTLED state (not the live hypothesis): an A/B
+# study showed a hypothesis-anchored board REGRESSED BrowseComp accuracy by
+# more than 10 points; the settled-state slots + post-reset re-derivation rule
+# below are the de-anchoring fixes from that study.
 
 PROGRESS_TOOL = {
     "type": "function",
@@ -139,16 +185,27 @@ _ANSWER_COMMIT_RE = re.compile(
 
 
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
+    allow_host_execution: bool = False
+    sandbox_provider: str | None = None
+    sandbox_config: dict[str, JsonValue] = Field(
+        default_factory=lambda: {"image": "python:3.13-slim", "workdir": "/sandbox"}
+    )
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+    sandbox_runner_timeout_seconds: float = Field(default=3600, gt=0, allow_inf_nan=False)
     max_steps: int = 400
+    # Wall-clock budget per rollout, measured from the start of the rollout loop. Past it the loop
+    # stops, the response carries `timed_out`, and the harness scores the sample 0 without
+    # a judge call. None keeps the loop bounded by max_steps only.
+    rollout_timeout_s: Optional[float] = Field(default=None, ge=0)
     keep_rounds: int = 9999
     nudge_steps: bool = True
     max_context_tokens: int = 196608
     context_reset_pct: float = 0.3
     # Absolute token threshold for context reset. When > 0 it OVERRIDES
     # max_context_tokens * context_reset_pct. 50000 = the token-based reset
-    # standard (matches the bc_frankie_bash_tool baselines).
+    # standard (matches the reference harness baselines).
     context_reset_tokens: int = 0
     context_reset_keep_rounds: int = 3
     max_run_retries: int = 1
@@ -168,7 +225,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # the board. When the context crosses the reset threshold the model gets
     # ONE warned turn (a save-the-board [SYSTEM NOTE] on its latest tool
     # result) before the reset fires; without progress the reset fires
-    # immediately as before. (ported from bc_frankie w_progress_tracking)
+    # immediately as before. (ported from the reference harness)
     progress: bool = False
 
 
@@ -182,6 +239,29 @@ class BrowsecompAgentVerifyRequest(BaseVerifyRequest):
 
 class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+class _RolloutDeadline(Exception):
+    """A model or tool call was still running when the rollout's wall-clock limit ran out."""
+
+
+async def _before_deadline(deadline: Optional[float], awaitable):
+    # Bounds a single in-flight call: the per-step check alone cannot stop a call that hangs.
+    if deadline is None:
+        return await awaitable
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        awaitable.close()
+        raise _RolloutDeadline()
+    limit = asyncio.timeout(remaining)
+    try:
+        async with limit:
+            return await awaitable
+    except TimeoutError as e:
+        # A TimeoutError raised by the call itself is not the rollout deadline.
+        if limit.expired():
+            raise _RolloutDeadline() from e
+        raise
 
 
 def _is_infrastructure_failure(exc: BaseException) -> bool:
@@ -201,12 +281,27 @@ def _is_infrastructure_failure(exc: BaseException) -> bool:
     return isinstance(exc, (aiohttp.ClientConnectionError, TimeoutError))
 
 
+@dataclass
+class BrowsecompAgentSessionState(AgentSessionState):
+    """An Environment Server episode: its grant to the resources server and the cookie jar its tool calls carry."""
+
+    tool_access: DirectHTTPToolAccess | None
+    resources_cookies: dict[str, str]
+
+
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    """Flatten a plain dict or an aiohttp cookie jar of morsels into name-to-value pairs."""
+    return {str(name): str(getattr(value, "value", value)) for name, value in (cookies or {}).items()}
+
+
 class BrowsecompAgent(SimpleResponsesAPIAgent):
     config: BrowsecompAgentConfig
+    calls_model_from_sandbox: ClassVar[bool] = True
     _policy_model_openai_client: Optional[NeMoGymAsyncOpenAI] = None
 
     def setup_webserver(self):
         app = super().setup_webserver()
+        app.post("/v1/browsecomp/token_count")(self._session_token_count)
         # For the /tokenize-based pre-call token estimation we need a direct
         # client to the policy model's vLLM /tokenize endpoint. Built only when
         # the feature is enabled. (ported from gym-gitlab b66e37c6)
@@ -234,7 +329,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
     @staticmethod
     def _last_message_text(response: NeMoGymResponse) -> str:
         """Text of the most-recent assistant message item that has non-empty content, walking
-        back from the end of the trajectory. Mirrors bc_frankie (browsecomp_agent.py:1054-1059):
+        back from the end of the trajectory. Mirrors the reference harness:
         the empty-answer retry keys on the LAST content-bearing assistant turn, NOT the
         concatenation of every assistant turn (NeMoGymResponse.output_text). So a final
         think-only turn triggers a retry even when an earlier turn emitted a real answer.
@@ -252,25 +347,314 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        """Serve an agent session's single activation in its sandbox, or the host loop when explicitly allowed.
+
+        A session request must use the seeded attempt-qualified rollout path (else 409). The first activation starts
+        the sandboxed loop; an identical retry waits for and replays its result, and a different request answers 409.
+        Disconnecting does not cancel the loop; close does. A request without a session answers 422 unless
+        ``allow_host_execution`` is true.
+        """
         # Thin diagnostic wrapper around the real implementation. A full-400 eval lost 6
         # samples to a 500 out of THIS endpoint with NO traceback anywhere in the log — not
-        # even the `🚨` marker that exception_handling_middleware prints for ordinary app
+        # even the `🚨` marker that the exception middleware prints for ordinary app
         # exceptions (the malformed-JSON bug printed a full ExceptionGroup). With nothing
         # logged the cause can only be bounded, never named. Print whatever escapes, then
         # RE-RAISE unchanged so run()'s containment behaves exactly as before.
         # Grep the next run for [browsecomp][responses_exc].
         try:
-            return await self._responses_impl(request, response, body)
+            agent_session_id = self._agent_session_id_from_request(request)
+            if agent_session_id is None:
+                if not self.config.allow_host_execution:
+                    raise HTTPException(
+                        422, "BrowseComp requires an agent session and a sandbox; host execution is disabled"
+                    )
+                return await self._responses_impl(request, response, body)
+            state = self._require_agent_session(agent_session_id)
+            if not isinstance(state, BrowsecompSandboxSession):
+                raise TypeError("Expected BrowseComp agent session state")
+            if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+                raise AgentSessionConflictError("Agent sessions require the seeded attempt-qualified rollout path")
+            if state.task is None:
+                state.activation_request = body.model_copy(deep=True)
+                state.task = asyncio.create_task(self._sandbox_responses(request, body, state))
+            elif body != state.activation_request:
+                raise AgentSessionConflictError("BrowseComp sessions support one activation; retry the same request")
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
         except Exception as e:
             print(f"[browsecomp][responses_exc] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
             traceback.print_exc()
             raise
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> BrowsecompSandboxSession:
+        if self.config.snap_dir:
+            raise AgentSeedRejectedError("snap_dir is supported only by the explicit host compatibility path")
+        accesses = self.effective_tool_accesses(body)
+        unsupported = [access.name for access in accesses if isinstance(access, MCPToolAccess) and access.required]
+        if unsupported:
+            raise AgentSeedRejectedError(
+                f"BrowseComp agent does not support required MCP tool access: {', '.join(unsupported)}"
+            )
+        direct_accesses = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
+        if len(direct_accesses) > 1:
+            raise AgentSeedRejectedError(
+                "BrowseComp agent supports at most one direct HTTP tool access; "
+                "set resources_tool_transports: [direct_http] for a tool-using benchmark"
+            )
+        tool_access = next(iter(direct_accesses), None)
+        owns_sandbox = body.sandbox_access is None
+        if owns_sandbox:
+            provider_ref = self.config.sandbox_provider
+            workdir = self.config.sandbox_config.get("workdir")
+            if provider_ref is None:
+                raise AgentSeedRejectedError("BrowseComp requires sandbox_access or sandbox_provider")
+        else:
+            connection = body.sandbox_access.connection
+            if not isinstance(connection, DirectSandboxConnection):
+                raise AgentSeedRejectedError("BrowseComp supports only direct sandbox connections")
+            if body.sandbox_access.user is not None or body.sandbox_access.env:
+                raise AgentSeedRejectedError("BrowseComp does not support task-specific sandbox users or environment")
+            provider_ref = connection.provider_config_ref
+            workdir = body.sandbox_access.workdir
+        if not isinstance(workdir, str) or not workdir.startswith("/"):
+            raise AgentSeedRejectedError("BrowseComp requires an absolute sandbox workdir")
+        try:
+            provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+            if owns_sandbox:
+                SandboxSpec(**self.config.sandbox_config)
+        except (TypeError, ValueError) as error:
+            # Every seed would fail the same way, so a retryable 500 would only repeat it for each episode.
+            raise AgentSeedRejectedError(f"BrowseComp sandbox provider is not usable: {error}") from error
+        provider_name = next(iter(provider_config), None)
+        if provider_name == "local":
+            raise AgentSeedRejectedError(
+                "BrowseComp sessions require an isolated sandbox provider; local is not isolated"
+            )
+        try:
+            # Every URL the sandboxed loop calls: the model, the tool grant and this agent's token counting.
+            sandbox_urls = [
+                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+                str(tool_access.base_url) if tool_access is not None else None,
+                self._token_count_url(),
+            ]
+            for url in filter(None, sandbox_urls):
+                assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
+        except ValueError as error:
+            raise AgentSeedRejectedError(str(error)) from error
+        try:
+            provider = create_provider(provider_config)
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(f"BrowseComp sandbox provider is not usable: {error}") from error
+        if owns_sandbox:
+            sandbox = AsyncSandbox(provider)
+        else:
+            try:
+                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+        state = BrowsecompSandboxSession(
+            request=body,
+            session=SandboxSession(
+                sandbox=sandbox,
+                workdir=workdir,
+                session_dir=f"/tmp/nemo-gym-browsecomp-sessions/{uuid4().hex}",
+                owns_sandbox=owns_sandbox,
+                harness="BrowseComp",
+            ),
+            tool_access=tool_access,
+            resources_cookies=dict(tool_access.cookies) if tool_access else {},
+        )
+        try:
+            if owns_sandbox:
+                spec = dict(self.config.sandbox_config)
+                spec["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, get_global_config_dict()),
+                    **(spec.get("metadata") or {}),
+                    "agent_session_id": body.agent_session_id[:63],
+                }
+                spec.setdefault(
+                    "ttl_s",
+                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
+                )
+                # Retain ownership before start: failed file delivery can also fail its automatic stop.
+                started = time.monotonic()
+                await sandbox.start(SandboxSpec(**spec))
+                state.started_at = time.monotonic()
+                LOG.info(
+                    "[browsecomp][sandbox_start] role=agent session=%s provider=%s id=%s start_s=%.3f",
+                    body.agent_session_id,
+                    sandbox.provider_name,
+                    sandbox.sandbox_id,
+                    state.started_at - started,
+                )
+            await state.install_runtime(timeout=self.config.sandbox_install_timeout_seconds)
+        except BaseException as error:
+            try:
+                await state.close(timeout=self.config.session_close_timeout_seconds)
+            except BaseException:
+                raise AgentSessionSetupError(state, error=error) from error
+            if isinstance(error, SandboxIsolationError):
+                # Every retry would get a sandbox from the same provider.
+                raise AgentSeedRejectedError(str(error)) from error
+            raise
+        return state
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, BrowsecompSandboxSession):
+            raise TypeError("Expected BrowseComp agent session state")
+        await state.close(timeout=self.config.session_close_timeout_seconds)
+        artifacts = state.session.artifacts
+        if artifacts is not None and isinstance(artifacts.get("resources_cookies"), dict):
+            state.resources_cookies = _cookie_values(artifacts["resources_cookies"])
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            resources_cookies=state.resources_cookies,
+            agent_observations=AgentObservationBundle(
+                source="browsecomp",
+                gaps=[
+                    ObservationGap(
+                        code="native_turn_evidence_unavailable" if artifacts else "observation_capture_failed",
+                        detail="Evaluation capability: model captures and raw output are retained; native invocation/turn records are not emitted.",
+                    )
+                ],
+            ),
+        )
+
+    async def _session_token_count(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+    ) -> dict[str, int]:
+        """Count a session's prompt without copying the upstream API credential into its sandbox."""
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            raise AgentSessionConflictError("Token counting requires an active agent session")
+        self._require_agent_session(session_id)
+        if not self.config.save_model_call_using_vllm_tokenize_endpoint:
+            raise HTTPException(422, "vLLM token counting is disabled")
+        return {"count": await self._count_prompt_tokens(body)}
+
+    def _token_count_url(self) -> str | None:
+        """This agent's token-count endpoint, which a sandboxed loop calls instead of the upstream model."""
+        if not self.config.save_model_call_using_vllm_tokenize_endpoint:
+            return None
+        return f"{self.server_client._resolve_base_url(self.config.name)}/v1/browsecomp/token_count"
+
+    async def _sandbox_responses(
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming, state: BrowsecompSandboxSession
+    ) -> NeMoGymResponse:
+        if body.tools and state.tool_access is None:
+            raise HTTPException(422, "Tool-using BrowseComp requests require a direct HTTP tool grant")
+        timeout = self.config.sandbox_runner_timeout_seconds
+        if state.request.agent_timeout_sec is not None:
+            timeout = min(timeout, state.request.agent_timeout_sec)
+        # Keep the native timeout response/zero-reward semantics; the supervisor has a small receipt grace.
+        config = self.config.model_dump(mode="json", exclude={"tool_accesses", "sandbox_config", "sandbox_provider"})
+        config["rollout_timeout_s"] = min(
+            self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else timeout, timeout
+        )
+        payload = {
+            "seed": state.request.model_copy(update={"sandbox_access": None, "tool_accesses": []}).model_dump(
+                mode="json"
+            ),
+            "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
+            "body": body.model_dump(mode="json", exclude_unset=True),
+            "config": config,
+            "model_url": self.resolve_model_base_url(
+                self.config.model_server.name, state.request.episode_id.capture_key
+            ),
+            "token_count_url": self._token_count_url(),
+            "agent_cookies": dict(request.cookies),
+        }
+        output = await state.session.execute(
+            stage_activation=lambda: state.stage_activation(payload),
+            collect=state.collect,
+            timeout=timeout + 30,
+            close_timeout=self.config.session_close_timeout_seconds,
+        )
+        if output.get("error"):
+            if output.get("traceback"):
+                print(
+                    f"[browsecomp][sandbox_error][{state.request.agent_session_id}]\n{output['traceback']}",
+                    flush=True,
+                )
+            raise RuntimeError(f"BrowseComp sandbox failed: {output['error']}")
+        state.resources_cookies = _cookie_values(output.get("resources_cookies"))
+        return NeMoGymResponse.model_validate(output["response"])
+
+    async def _run_session_loop(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        state: BrowsecompAgentSessionState,
+        *,
+        started_at: float | None = None,
+    ) -> NeMoGymResponse:
+        """Run an Environment Server's one activation, with the empty-answer retries run() makes around it.
+
+        Like run(), a retry keeps the session's resources state; it does not seed again. A model call that fails with
+        an HTTP error returns a failed response that names its status, for the Environment Server's outcome policy.
+        ``started_at`` is when the activation began, if before this call (``time.monotonic()``).
+        """
+        attempts = max(1, self.config.max_run_retries)
+        # rollout_timeout_s bounds the whole activation, so every retry counts from the activation's start.
+        if started_at is None:
+            started_at = time.monotonic()
+        for attempt in range(attempts):
+            try:
+                model_response = await self._responses_impl(
+                    request, response, body, session=state, started_at=started_at
+                )
+            except aiohttp.ClientResponseError as error:
+                return self._model_request_failure(body, error)
+            answer = re.sub(r"<think>.*?</think>", "", self._last_message_text(model_response), flags=re.DOTALL)
+            if answer.strip() or getattr(model_response, "timed_out", False) or attempt == attempts - 1:
+                return model_response
+            print(
+                f"[browsecomp][retry][{state.request.episode_id.capture_key}] attempt={attempt + 1}/{attempts} "
+                f"reason=empty_output_after_think_strip",
+                flush=True,
+            )
+
+    def _model_request_failure(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, error: aiohttp.ClientResponseError
+    ) -> NeMoGymResponse:
+        """A failed response for a model call that answered with an HTTP error.
+
+        run() scored a 4xx 0 and set a 5xx aside as an infrastructure failure. The Environment Server's default
+        outcome policy verifies 400, 413 and 422, retries 408, 425, 429 and 5xx, and fails the episode on the rest.
+        The output is empty, as run() scored no partial answer.
+        """
+        content = getattr(error, "response_content", b"")
+        detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+        # The rollout row carries this message, so an upstream error page stays bounded.
+        detail = detail[:_ERROR_DETAIL_CHARS]
+        return NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=time.time(),
+            model=body.model or self.config.model_server.name,
+            object="response",
+            output=[],
+            status="failed",
+            error={"code": "server_error", "message": f"Model HTTP {error.status}: {detail or error.message}"},
+            tools=body.tools,
+            tool_choice=body.tool_choice,
+            parallel_tool_calls=body.parallel_tool_calls,
+            metadata={
+                **(body.metadata or {}),
+                AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                    failure_kind=MODEL_REQUEST_ERROR, status_code=error.status
+                ).model_dump_json(),
+            },
+        )
 
     async def _responses_impl(
         self,
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        session: Optional[BrowsecompAgentSessionState] = None,
+        started_at: Optional[float] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
 
@@ -284,11 +668,17 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         model_server_cookies = None  # update the cookies on every model response
-        resources_server_cookies = request.cookies  # update the cookies on every resources server response
+        # update the cookies on every resources server response
+        resources_server_cookies = request.cookies if session is None else dict(session.resources_cookies)
 
         reset_threshold = self._reset_threshold(self.config)
+        loop_started = time.monotonic() if started_at is None else started_at
+        deadline = loop_started + self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else None
+        timed_out = False
+        stop_reason = None  # why the loop ended: answered / max_steps / max_output_tokens / context_full / timeout
+        model_response = None
 
-        # --- Progress board state (ported from bc_frankie w_progress_tracking) ---
+        # --- Progress board state (ported from the reference harness) ---
         # The board lives in the system prompt and is re-rendered only at the
         # initial build and on each context reset — never mid-segment.
         progress_board = ""
@@ -312,7 +702,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             return "your progress board"
 
         if self.config.progress:
-            # bc_frankie parity: active_tools = TOOLS + [PROGRESS_TOOL] (+ BASH_TOOL
+            # reference-harness parity: active_tools = TOOLS + [PROGRESS_TOOL] (+ BASH_TOOL
             # last), so update_progress goes BEFORE bash_command in the rendered
             # prompt. Tool order changes the materialized prompt bytes.
             tools = list(body.tools)
@@ -352,6 +742,19 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         max_reset_count = self.config.max_reset_count
 
         while True:
+            if (
+                self.config.rollout_timeout_s is not None
+                and step > 0
+                and time.monotonic() - loop_started > self.config.rollout_timeout_s
+            ):
+                print(
+                    f"[browsecomp][timeout][{qid}] step={step} "
+                    f"elapsed_min={(time.monotonic() - loop_started) / 60:.1f} "
+                    f"limit_min={self.config.rollout_timeout_s / 60:.1f}",
+                    flush=True,
+                )
+                timed_out = True
+                break
             step += 1
 
             if self.config.keep_rounds is not None and new_outputs:
@@ -364,7 +767,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # threshold, reset now and skip the (otherwise wasted) generation.
             # (ported from gym-gitlab b66e37c6)
             if self.config.save_model_call_using_vllm_tokenize_endpoint:
-                pre_prompt_tokens = await self._count_prompt_tokens(new_body)
+                try:
+                    pre_prompt_tokens = await _before_deadline(deadline, self._count_prompt_tokens(new_body))
+                except _RolloutDeadline:
+                    print(f"[browsecomp][timeout][{qid}] step={step} in=tokenize", flush=True)
+                    timed_out = True
+                    break
                 if (
                     reset_threshold
                     and pre_prompt_tokens > reset_threshold
@@ -374,7 +782,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         # The model cannot see the reset coming. Warn it on its
                         # latest tool result and give it this one turn to save the
                         # board; the armed reset fires on the next iteration's
-                        # pre-call check. (ported from bc_frankie 8cdd075)
+                        # pre-call check. (ported from an internal reference harness)
                         reset_armed = True
                         pre_reset_warning_steps.append(step)
                         print(
@@ -414,21 +822,37 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         for n in range(self.config.context_reset_keep_rounds, -1, -1):
                             cand = self._extract_last_rounds(new_outputs, n=n)
                             cand_body = body.model_copy(update={"input": body.input + cand})
-                            if await self._count_prompt_tokens(cand_body) <= reset_threshold:
+                            try:
+                                cand_tokens = await _before_deadline(deadline, self._count_prompt_tokens(cand_body))
+                            except _RolloutDeadline:
+                                print(f"[browsecomp][timeout][{qid}] step={step} in=tokenize", flush=True)
+                                timed_out = True
+                                break
+                            if cand_tokens <= reset_threshold:
                                 chosen = cand
                                 break
+                        if timed_out:
+                            break
                         new_outputs = chosen if chosen is not None else []
                         continue
 
-            model_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
-                json=new_body,
-                cookies=model_server_cookies,
-            )
-            # We raise for status here since we expect model calls to always work.
-            await raise_for_status(model_response)
-            model_response_json = await get_response_json(model_response)
+            async def _model_call():
+                response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path=self.url_path_for_request("/v1/responses", request),
+                    json=new_body,
+                    cookies=model_server_cookies,
+                )
+                # We raise for status here since we expect model calls to always work.
+                await raise_for_status(response)
+                return response, await get_response_json(response)
+
+            try:
+                model_response, model_response_json = await _before_deadline(deadline, _model_call())
+            except _RolloutDeadline:
+                print(f"[browsecomp][timeout][{qid}] step={step} in=model_call", flush=True)
+                timed_out = True
+                break
             model_server_cookies = model_response.cookies
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
@@ -449,7 +873,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 if self.config.progress and not reset_armed:
                     # One warned turn: process this completion normally, inject the
                     # save-the-board warning after its tool results, and reset at
-                    # the end of the NEXT turn. (ported from bc_frankie 8cdd075)
+                    # the end of the NEXT turn. (ported from an internal reference harness)
                     reset_armed = True
                     pre_reset_nudge_due = True
                     pre_reset_warning_steps.append(step)
@@ -484,6 +908,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                # The cut is the model's own when it used the whole requested output budget. Otherwise the context
+                # window filled: the model server answers a context overflow with an empty, length-cut response.
+                # The model server echoes the budget it applied, which a training framework's per-call cap
+                # (`_ng_model_sampling`) can lower or set when the request has none.
+                output_budget = model_response.max_output_tokens or new_body.max_output_tokens
+                output_tokens = model_response.usage.output_tokens if model_response.usage else None
+                if output_budget and output_tokens is not None and output_tokens >= output_budget:
+                    stop_reason = "max_output_tokens"
+                else:
+                    stop_reason = "context_full"
                 break
 
             # --- If the model decided to answer (no tool calls), we are done ---
@@ -492,13 +926,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
             if not all_fn_calls and all_output_messages:
+                stop_reason = "answered"
                 break
 
             # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
                 num_tool_calls += 1
-                # The model can emit syntactically invalid JSON for `arguments` (seen on
-                # Inkling-Small: a call truncated mid-object). Parse once, up front, and
+                # The model can emit syntactically invalid JSON for `arguments` (observed
+                # in practice: a call truncated mid-object). Parse once, up front, and
                 # treat a failure the same way a >=400 tool response is treated below —
                 # report it back to the model — instead of letting it raise out of this
                 # handler, which 500s the agent and kills the ENTIRE rollout collection
@@ -520,6 +955,21 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         f"Invalid JSON in the arguments of your '{output_function_call.name}' tool "
                         f"call: {tool_args_error}. Re-issue the call with valid JSON arguments."
                     )
+                elif (
+                    self.config.progress
+                    and output_function_call.name == "update_progress"
+                    and not isinstance(tool_args, dict)
+                ):
+                    # Valid JSON that is not an object (a list, a string, null) is the model's mistake, like
+                    # invalid JSON above: it reads the error and may retry, so the rollout keeps its score.
+                    print(
+                        f"[browsecomp][tool_fail][{qid}] step={step} tool=update_progress status=bad_arguments_type",
+                        flush=True,
+                    )
+                    tool_output = (
+                        "Arguments of 'update_progress' must be a JSON object with a 'board' string; "
+                        "re-issue the call."
+                    )
                 elif self.config.progress and output_function_call.name == "update_progress":
                     # Board writes are handled by the agent itself — the board is
                     # per-trajectory agent state, not a resources-server tool.
@@ -538,21 +988,48 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             "Progress board updated (%d chars). It persists in the "
                             "system prompt across context resets." % len(progress_board)
                         )
+                elif session is not None and session.tool_access is None:
+                    # A tool-free pairing has no grant to send the call to; answer as an unknown tool would.
+                    tool_output = f"Tool '{output_function_call.name}' is not available in this session."
                 else:
-                    api_response = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=tool_args,
-                        cookies=resources_server_cookies,
-                    )
-                    # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
-                    resources_server_cookies = api_response.cookies
 
-                    tool_output = (await api_response.content.read()).decode()
-                    # bc_frankie parity: the resources server wraps every tool result in a one-field
+                    async def _tool_call():
+                        if session is None:
+                            response = await self.server_client.post(
+                                server_name=self.config.resources_server.name,
+                                url_path=f"/{output_function_call.name}",
+                                json=tool_args,
+                                cookies=resources_server_cookies,
+                            )
+                        else:
+                            # An Environment Server episode reaches its resources session only through the grant.
+                            response = await http_request(
+                                method="POST",
+                                url=f"{str(session.tool_access.base_url).rstrip('/')}/{output_function_call.name}",
+                                json=tool_args,
+                                cookies=resources_server_cookies,
+                                headers=dict(session.tool_access.headers),
+                                _internal=True,
+                                _max_connection_retries=_SANDBOX_LOOP_CONNECTION_RETRIES,
+                            )
+                        return response, (await response.content.read()).decode()
+
+                    try:
+                        api_response, tool_output = await _before_deadline(deadline, _tool_call())
+                    except _RolloutDeadline:
+                        print(f"[browsecomp][timeout][{qid}] step={step} in=tool_call", flush=True)
+                        timed_out = True
+                        break
+                    # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
+                    if session is None:
+                        resources_server_cookies = api_response.cookies
+                    else:
+                        resources_server_cookies = resources_server_cookies | _cookie_values(api_response.cookies)
+                        session.resources_cookies = resources_server_cookies
+                    # reference-harness parity: the resources server wraps every tool result in a one-field
                     # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
                     # model then sees a single escaped line instead of raw multi-line text. This was
-                    # the last remaining materialized-prompt difference vs the bc_frankie harness.
+                    # the last remaining materialized-prompt difference vs the reference harness.
                     # Unwrap it so the model sees the raw text. Error bodies (different JSON shape)
                     # and non-JSON payloads are left untouched.
                     try:
@@ -582,6 +1059,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 )
                 new_outputs.append(tool_response)
                 full_trajectory.append(tool_response)
+            if timed_out:
+                break
 
             # --- Pre-reset warning: last chance to save the progress board ---
             if pre_reset_nudge_due and new_outputs and new_outputs[-1].type == "function_call_output":
@@ -659,9 +1138,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
+                stop_reason = "max_steps"
                 break
 
-        # --- Board-answer fallback (ported from bc_frankie 5099589): if the run
+        # --- Board-answer fallback (ported from an internal reference harness): if the run
         # ends without an answer commit in the last content-bearing assistant
         # message but the board contains one, surface the board's answer line so
         # the judge can extract it. Appends only — a trajectory that already
@@ -708,7 +1188,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 reset_count=None,
                 is_final=True,
             )
-            # Full untrimmed conversation (bc_frankie parity: one trajectory.jsonl per sample).
+            # Full untrimmed conversation (reference-harness parity: one trajectory.jsonl per sample).
             self._save_trajectory(
                 input_messages=body.input,
                 full_trajectory=full_trajectory,
@@ -721,9 +1201,27 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
 
         # Propogate any extra cookies necessary for downstream verification
-        for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
+        if session is None:
+            downstream_cookies = (*resources_server_cookies.items(), *(model_server_cookies or {}).items())
+        else:
+            # The Environment Server takes the resources cookies from the session's close, not from this reply.
+            session.resources_cookies = resources_server_cookies
+            downstream_cookies = (model_server_cookies or {}).items()
+        for k, v in downstream_cookies:
             response.set_cookie(k, v)
 
+        if model_response is None:
+            # The first model call was still running at the limit: there is no response to extend.
+            model_response = NeMoGymResponse(
+                id=f"resp_timeout_{qid}",
+                created_at=time.time(),
+                model=body.model or "",
+                object="response",
+                output=[],
+                parallel_tool_calls=False,
+                tool_choice="auto",
+                tools=[],
+            )
         model_response.output = full_trajectory
         model_response.usage = usage
         # Surface counters for downstream analysis (ported from gym-gitlab fe9845ee).
@@ -731,9 +1229,25 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.reset_count = reset_count
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
+        model_response.timed_out = timed_out
+        # For training-side filters; nothing in Gym reads it.
+        model_response.stop_reason = "timeout" if timed_out else stop_reason
+        if timed_out:
+            model_response.status = "incomplete"
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
+        """Seed, answer and verify one row on the host; a development-only path.
+
+        Answers 422 unless ``allow_host_execution`` is true and ``resources_server`` is set. Benchmark configs use
+        agent sessions through ``single_agent_turn_legacy`` instead. An empty answer is retried up to
+        ``max_run_retries`` times, and a timed-out rollout scores 0 without the judge. Any error scores 0 with
+        ``agent_error``; an infrastructure error is also marked ``kill_shaped`` for resume.
+        """
+        if not self.config.allow_host_execution or self.config.resources_server is None:
+            raise HTTPException(
+                422, "Legacy /run requires allow_host_execution=true and resources_server; use agent sessions"
+            )
         cookies = request.cookies
 
         question_text = getattr(body, "question", None) or ""
@@ -780,20 +1294,38 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 cookies = response.cookies
 
                 # Retry if the model's LAST content-bearing turn was empty after <think>-strip.
-                # (Keyed on the last assistant message, matching bc_frankie, NOT the concatenated
+                # (Keyed on the last assistant message, matching the reference harness, NOT the concatenated
                 # output_text — a final think-only turn retries even if an earlier turn had text.)
                 response_json = await get_response_json(response)
                 last_response_json = response_json
                 raw_output_text = self._last_message_text(NeMoGymResponse.model_validate(response_json))
                 cleaned_output_text = re.sub(r"<think>.*?</think>", "", raw_output_text, flags=re.DOTALL).strip()
                 # Need to get last_verify_response if all attempts are exhausted
-                if not cleaned_output_text and attempt != self.config.max_run_retries - 1:
+                # A timed-out rollout is final: retrying would spend the budget twice.
+                if (
+                    not cleaned_output_text
+                    and not response_json.get("timed_out")
+                    and attempt != self.config.max_run_retries - 1
+                ):
                     print(
                         f"[browsecomp][retry][{qid}] attempt={attempt + 1}/{self.config.max_run_retries} "
                         f"reason=empty_output_after_think_strip",
                         flush=True,
                     )
                     continue
+
+                if response_json.get("timed_out"):
+                    # Past rollout_timeout_s: wrong by construction, so the judge is not called.
+                    last_verify_response = BrowsecompAgentVerifyResponse.model_validate(
+                        body.model_dump()
+                        | {
+                            "response": response_json,
+                            "reward": 0.0,
+                            "num_tool_calls": response_json.get("num_tool_calls", 0),
+                            "reset_count": response_json.get("reset_count", 0),
+                        }
+                    )
+                    break
 
                 verify_request = BrowsecompAgentVerifyRequest.model_validate(
                     body.model_dump() | {"response": response_json}
@@ -812,6 +1344,11 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 )
                 break
 
+            if last_verify_response is not None:
+                # Every row carries timed_out, so its mean is the share of samples stopped by the limit.
+                last_verify_response = last_verify_response.model_copy(
+                    update={"timed_out": int(bool((last_response_json or {}).get("timed_out")))}
+                )
             reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
             outcome = "success" if (reward is not None and reward > 0) else "failure"
             print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}", flush=True)
@@ -825,9 +1362,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 flush=True,
             )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
-            # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
-            # and every remaining sample dies with it — that cost two full 8-node allocations,
-            # one dying at 34/400 and one at 167/400, on one bad sample each.
+            # the collector treats as fatal (raise_for_status in nemo_gym/rollouts/rollout_collection.py)
+            # and every remaining sample dies with it — that cost two full multi-node
+            # allocations, each dying part-way through a run on one bad sample.
             #
             # Score it 0, but carry `agent_error` so the failure stays COUNTABLE in the results
             # instead of being indistinguishable from a genuine wrong answer. Always check that
@@ -844,12 +1381,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     tool_choice="none",
                     tools=[],
                 ).model_dump()
-            # EXCEPT when the HARNESS is what broke. Then nothing about this sample failed, so
-            # scoring it 0 is wrong, and persisting a row is worse: _load_from_cache keys on
-            # (task_index, rollout_index) and would treat it as permanently done. NG_NO_PERSIST_KEY
-            # writes no row at all (nemo_gym/rollout_collection.py), so resume's set-difference
-            # re-dispatches it on the next chain-hop. The 4h cluster cap makes chain-hops
-            # unavoidable on a 1266-sample run, so this path is load-bearing, not a corner case.
+            # A harness failure is not a scored model outcome. Gym's manifest-backed collector
+            # persists nonterminal kill_shaped in the failure sidecar without charging the
+            # counted-failure budget, leaving it eligible for resume. Retain NG_NO_PERSIST_KEY
+            # for legacy consumers.
             # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.
             routing = {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "kill_shaped"} if infra else {}
             return BrowsecompAgentVerifyResponse.model_validate(
@@ -858,6 +1393,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     "response": last_response_json,
                     "reward": 0.0,
                     "agent_error": f"{type(e).__name__}: {str(e)[:300]}",
+                    "timed_out": 0,
                 }
                 | routing
             )
@@ -957,7 +1493,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """Save the FULL untrimmed conversation for one sample to
         {snap_dir}/sample_{task_index}/attempt_{attempt}_trajectory.jsonl.
         Line 1 = metadata header; remaining lines = input prefix + every model/tool item, in order
-        (never trimmed at context resets). (bc_frankie parity: one trajectory.jsonl per sample.)"""
+        (never trimmed at context resets). (reference-harness parity: one trajectory.jsonl per sample.)"""
         sample_dir = Path(f"{self.config.snap_dir}/sample_{task_index}")
         sample_dir.mkdir(parents=True, exist_ok=True)
         path = f"{sample_dir}/attempt_{attempt}_trajectory.jsonl"
@@ -983,7 +1519,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """Hit the policy model's vLLM /tokenize endpoint and return the prompt
         token count (used to decide context reset without a full generation).
         (ported from gym-gitlab b66e37c6)"""
-        converter = VLLMConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         chat_completion_create_params = converter.responses_to_chat_completion_create_params(body)
         chat_completion_create_params = chat_completion_create_params.model_dump()
         # Same projection as vllm_model/app.py's tokenize path.
@@ -992,8 +1528,41 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             if key in chat_completion_create_params:
                 tokenize_body_dict[key] = chat_completion_create_params[key]
         tokenize_response = await self._policy_model_openai_client.create_tokenize(**tokenize_body_dict)
-        return len(tokenize_response["tokens"])
+        return _prompt_tokens_from_tokenize_response(tokenize_response)
+
+
+def _prompt_tokens_from_tokenize_response(tokenize_response: dict) -> int:
+    """Prompt token count from a vLLM /tokenize response.
+
+    The response shape varies across vLLM versions: mainstream builds
+    (>=0.19.1) return {"count": N, "max_model_len": ...} and only include the
+    "tokens" list when token ids are requested, while older builds return just
+    {"tokens": [...]}. Prefer the explicit count and fall back to the token
+    list, so the agent works against both.
+    """
+    count = tokenize_response.get("count")
+    if count is not None:
+        return int(count)
+    tokens = tokenize_response.get("tokens")
+    if tokens is not None:
+        return len(tokens)
+    raise KeyError(f"/tokenize response has neither 'count' nor 'tokens'; got keys: {sorted(tokenize_response)}")
+
+
+def _configure_logging() -> None:
+    """Show this server's INFO diagnostics (sandbox lifecycle, cache and phase lines) by default.
+
+    Root stays at WARNING: at INFO the HTTP client logs a line per call. NEMO_GYM_LOG_LEVEL overrides
+    the level of this server's own loggers, for example WARNING to silence the diagnostics."""
+    logging.basicConfig(level=logging.WARNING)
+    for logger_name in (__name__, "responses_api_agents.browsecomp_agent"):
+        logging.getLogger(logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
 
 
 if __name__ == "__main__":
+    _configure_logging()
     BrowsecompAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    _configure_logging()
+    app = BrowsecompAgent.run_webserver()  # noqa: F401

@@ -1,0 +1,218 @@
+{
+  "type": "object",
+  "properties": {
+    "item_id": {
+      "type": "string"
+    },
+    "benchmark_mode": {
+      "type": "string",
+      "enum": [
+        "native_replay",
+        "transcript_text_replay",
+        "single_turn_text_replay"
+      ]
+    },
+    "scoring_scope": {
+      "type": "string",
+      "enum": [
+        "native_next_turn",
+        "transcript_text_constraint_proxy",
+        "single_turn_text_observable_constraints"
+      ]
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "constraint_id": {
+            "type": "string"
+          },
+          "subtype": {
+            "type": "string",
+            "enum": [
+              "IF-FORMAT",
+              "IF-COVERAGE",
+              "IF-CITE",
+              "IF-PLAN",
+              "IF-REASONACT",
+              "IF-LANG",
+              "IF-TOOLPREF",
+              "IF-TOOLGROUND",
+              "IF-SCHEMA",
+              "IF-NEWINSTR",
+              "IF-SCOPE",
+              "IF-LENGTH"
+            ]
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail"
+            ]
+          },
+          "response_evidence": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "conflicting_span",
+                  "missing_required_element",
+                  "satisfying_span",
+                  "absence_of_prohibited_element"
+                ]
+              },
+              "field": {
+                "type": "string",
+                "enum": [
+                  "content",
+                  "refusal",
+                  "tool_calls"
+                ]
+              },
+              "quote": {
+                "type": "string"
+              },
+              "expected": {
+                "type": "string",
+                "minLength": 1
+              },
+              "observation": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind",
+              "field",
+              "quote",
+              "expected",
+              "observation"
+            ],
+            "additionalProperties": false
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "support_quote": {
+            "type": "string",
+            "minLength": 1
+          },
+          "support_origin": {
+            "type": "string",
+            "enum": [
+              "input",
+              "response_reasoning"
+            ]
+          },
+          "violation_established": {
+            "type": "boolean"
+          },
+          "deviation_severity": {
+            "type": "string",
+            "enum": [
+              "none",
+              "minor",
+              "major",
+              "not_assessed"
+            ]
+          }
+        },
+        "required": [
+          "constraint_id",
+          "subtype",
+          "verdict",
+          "response_evidence",
+          "rationale",
+          "support_quote",
+          "support_origin",
+          "violation_established"
+        ],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "verdict": {
+                  "const": "fail"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "violation_established": {
+                  "const": true
+                },
+                "deviation_severity": {
+                  "enum": [
+                    "minor",
+                    "major",
+                    "not_assessed"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "violation_established": {
+                  "const": false
+                },
+                "deviation_severity": {
+                  "const": "none"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "minItems": 1
+    },
+    "item_verdict": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail"
+      ]
+    },
+    "policy_version": {
+      "type": "string",
+      "enum": [
+        "agentic-if-generated-response-judge-v2.2-strict"
+      ]
+    },
+    "input_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "response_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "constraint_contract_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "benchmark_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  },
+  "required": [
+    "item_id",
+    "benchmark_mode",
+    "scoring_scope",
+    "constraints",
+    "item_verdict",
+    "policy_version",
+    "input_sha256",
+    "response_sha256",
+    "constraint_contract_sha256",
+    "benchmark_manifest_sha256"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agentic IF generated-response judge v2.2 strict: any established violation fails"
+}

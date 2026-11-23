@@ -1,0 +1,15 @@
+toolsandbox_agent:
+  responses_api_agents:
+    toolsandbox_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 30
+      # Emit a single flat trajectory (list of output items), not per-step
+      # transition snapshots. response.output is consumed as a flat list;
+      # transitions (list-of-lists) break downstream text extraction.
+      return_transitions: false

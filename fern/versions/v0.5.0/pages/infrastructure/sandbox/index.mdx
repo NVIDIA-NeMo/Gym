@@ -80,7 +80,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 provider_config = {"apptainer": {}}
 
 spec = SandboxSpec(
-    image="docker://python:3.12-slim",
+    image="docker://python:3.13.14-slim",
     ttl_s=1800,
     ready_timeout_s=300,
     workdir="/sandbox",
@@ -295,7 +295,7 @@ from nemo_gym.sandbox import rewrite_image
 
 
 image = rewrite_image(
-    "docker.io/library/python:3.12-slim",
+    "docker.io/library/python:3.13.14-slim",
     [{"from": "docker.io/", "to": "mirror.example.com/dockerhub/"}],
 )
 ```

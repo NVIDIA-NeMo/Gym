@@ -1,6 +1,6 @@
 ---
 title: "Environments"
-description: "Environments define tasks, verification, tools, and state for evaluation and training."
+description: "Environments decompose into dataset, agent harness, verifier, and state — unifying evaluation, agent optimization, and training."
 position: 1.5
 ---
 
@@ -16,12 +16,13 @@ The term *environment* comes from reinforcement learning, where it describes the
 
 The concept is the same today but the usage of environments has expanded beyond RL to include much more, such as model evaluation, agent evaluation, agent harness optimization, and synthetic data generation.
 
-Accordingly, an environment defines the world an agent acts on:
+Accordingly, an environment contains everything required for an agent to complete a task:
 - Dataset
+- Agent Harness
 - Verifier
-- Tools and state
+- State
 
-The model and agent harness are external to the environment. The harness drives the model's actions against the environment; the environment updates its state, returns observations, and produces a reward.
+The model powering the agent is external to the environment. It generates a response (actions), which the environment processes. The environment updates its internal state, returns observations (tool results, error messages, state changes), and produces a reward (a numerical score of how well the agent performed).
 
 ## Anatomy of an Environment
 
@@ -31,9 +32,9 @@ A collection of tasks (prompts for the agent to solve), along with metadata and 
 
 Tasks can vary structurally: single-turn question answering, multi-step tool use, multi-turn dialogue, agentic workflows with sandboxed execution, and more.
 
-### Agent Harness (Agent Side)
+### Agent Harness
 
-Agent = model + agent harness. The harness is composed with an environment but is not owned by it. Language models perform stateless inference; the harness turns a model into an agent by looping model calls, routing tool use, managing context, and deciding when the task is done.
+Agent = model + agent harness. The agent harness defines how the model interacts with the environment. Language models perform stateless inference; the harness is what turns a model into an agent — it loops model calls, routes tool use, manages context, and decides when the task is done.
 
 Harnesses exist on a spectrum. A simple harness just loops model calls until the task is complete. Other harnesses like Claude Code or OpenClaw include tools, planning, memory, self-correction, skills and more.
 
@@ -55,6 +56,18 @@ Per-task state that changes as the agent takes actions. Each task attempt starts
 Some environments have minimal state (e.g., math — just input and output). Others have rich state that evolves across turns: file systems being modified, databases being updated, code repositories being patched, game boards advancing.
 
 Runtimes and sandboxes host and run the environment. A runtime is the execution infrastructure (e.g. local process, Docker, Apptainer). A sandbox is a runtime with isolated execution — for example, a container per episode — providing security boundaries when the agent can execute arbitrary code.
+
+## Two ways to define a task
+
+NeMo Gym accepts tasks in two shapes. Both produce rollouts with rewards; they differ in where the verifier and the state live.
+
+| | JSONL rows and a Resources Server | Task folders |
+| --- | --- | --- |
+| Task | One JSONL row: the input messages plus task-specific fields for the verifier | One folder in the Harbor format: `task.toml` and usually `instruction.md`, `environment/`, `tests/` and `solution/` |
+| Verifier and state | A Resources Server: Python `verify()`, environment tools and per-task sessions | The task's `tests/` (or the dataset's shared `verifier.py`), run in the task's sandbox, or in a fresh one for separate verification |
+| Runs on | An Environment Server that pairs an agent with the Resources Server | The `harbor` Environment Server, with a harness that runs agent sessions in the sandbox the server hands it, such as `opencode_agent` |
+
+Use JSONL rows when tasks share one environment or need no sandbox, as in math or tool-calling benchmarks. Use task folders when each task brings its own software environment and its verifier checks what the agent left in it, as in Terminal-Bench. To build the Resources Server path, see [Build Environments](/main/environment-tutorials). To write task folders, see [Author Task Folders](/main/data/task-folders/harbor-tasks). [Prepare Tasks](/main/data#two-kinds-of-task-formats) compares the two in more detail.
 
 
 ## Environments Unify Agent Improvement

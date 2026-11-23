@@ -65,8 +65,18 @@ row = {
     ),
     "SciCode": v("scicode_benchmark_agent", "subtask_accuracy"),
     "AA-LCR": v("aalcr_benchmark_simple_agent", "mean/reward"),
-    "AA-Omniscience (OmniIndex)": v("omniscience_omniscience_simple_agent", "mean/reward"),
+    "AA-Omniscience (OmniIndex)": to_pct(-v("omniscience_omniscience_simple_agent", "omniscience_index")),
+    "AA-Omniscience Non-Hall": to_pct(1 - v("is_hallucination", "mean/reward", is_pct=False)),
     "GPQA Diamond": v("gpqa_mcqa_simple_agent", "mean/reward"),
+    "CritPT": "",
+    "HLE w/o tool (text)": v("hle_benchmark_equivalence_llm_judge_simple_agent", "mean/reward"),
+    "BrowseComp": "",
+    "GDPVal-AA-V2": "",
+    "SWE Bench Verified": "",
+    "SWE Bench Multilingual": "",
+    "SWE Bench Pro": "",
+    "Terminal Bench 2.1": "",
+    "LM Arena proxy 2.0": v("lmarena_260311_benchmark_agent", "mean/reward"),
 }
 
 with open(csv_fpath, "w") as f:

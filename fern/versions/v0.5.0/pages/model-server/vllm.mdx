@@ -37,7 +37,7 @@ If you want NeMo Gym to manage the vLLM server lifecycle for you instead, see [L
 ### Install vLLM
 Please run the steps below in a separate terminal than your NeMo Gym terminal! The installation will take a few minutes.
 ```bash
-uv venv --python 3.12 --seed .venv
+uv venv --python 3.13.14 --seed .venv
 source .venv/bin/activate
 # hf_transfer for faster model download
 uv pip install hf_transfer vllm --torch-backend=auto

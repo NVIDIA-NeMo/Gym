@@ -1,0 +1,337 @@
+{
+  "dataset": "terminal-bench/terminal-bench",
+  "ref": "sha256:5881c1b1c74a96f07baef00a7c869e09802704bc0dc912c870e7acccc11440da",
+  "source_commit": "4070d6cef56a7d20cb5dc98d5e10ada88a6b9440",
+  "tasks": [
+    {
+      "name": "atrx-vep-crispr",
+      "ref": "sha256:81050619444198001d1b40ff2415d4043283433c8d4efd70e8e160af99f57620",
+      "category": "cpu"
+    },
+    {
+      "name": "batched-eval-parity",
+      "ref": "sha256:75aa17c7ae108855cf6fc86387a5e1c05ce2fd32625af39535b6390e258b12fe",
+      "category": "cpu"
+    },
+    {
+      "name": "biped-contact-dynamics",
+      "ref": "sha256:559ced12fc4fd3221b427e156deed810b98158c270db7dd3416bc0d266ff6e79",
+      "category": "cpu"
+    },
+    {
+      "name": "bun-sourcemap-leak",
+      "ref": "sha256:84c731731981e3583617c23c6b95597ff9b992bc0a4954c6cfc5ad57060c925b",
+      "category": "cpu"
+    },
+    {
+      "name": "cad-model",
+      "ref": "sha256:75264fb8e309eda38c1f25c31d8757385caa944a9a44252d7ec59d448f5e7eae",
+      "category": "cpu"
+    },
+    {
+      "name": "cargo-flight-dispatch",
+      "ref": "sha256:a5ee048cbb791bbebc7e71652f26faf4438bf86c9ca2f231a50ba859a7e423ed",
+      "category": "cpu"
+    },
+    {
+      "name": "coq-block-bound",
+      "ref": "sha256:d191cc72b8c8fb9dfc833061ecd158b13833dbc435b3507177d2cea2678d7cfd",
+      "category": "cpu"
+    },
+    {
+      "name": "ctr-optimization",
+      "ref": "sha256:d2985cbed0efdb4a0e1afb9661f8e1e5667a7a776e3f06ae235d219e245cc408",
+      "category": "compose"
+    },
+    {
+      "name": "cumulative-layout-shift",
+      "ref": "sha256:1efe0a63bbdc3f71dd6fbdf6313ab33ce3f71159a05ad79dd18278d9217a672c",
+      "category": "compose"
+    },
+    {
+      "name": "data-anonymization",
+      "ref": "sha256:4f73e8a9125909be284c14c0b50a3f23a6f3dfa0685623af04715a6670b24072",
+      "category": "cpu"
+    },
+    {
+      "name": "distributed-dedup",
+      "ref": "sha256:3e0bac6d5050ca614eb365244ec6243cd429f13fbc214bf64d12696c68d197aa",
+      "category": "cpu"
+    },
+    {
+      "name": "embedding-drift-monitor",
+      "ref": "sha256:09a36ce8531a9ffa87db44c94a71449c5d8717072e07a135dce6eee8e5c0c003",
+      "category": "cpu"
+    },
+    {
+      "name": "fin-saccr-rwa",
+      "ref": "sha256:38095e449bc3eccc2bdc0b61c0899f0d6dad547d3705951c054d9d65ba732e74",
+      "category": "cpu"
+    },
+    {
+      "name": "foodstuff-beta-activity",
+      "ref": "sha256:514596800045a3cff0b21e842c373aed21905ad97f441e150b9cfd8dbe124fdb",
+      "category": "cpu"
+    },
+    {
+      "name": "formal-crypto",
+      "ref": "sha256:ece838102904d9e13b161931f69ace2e1b4ed8d13d0d2db9ca92c7b1ae391b77",
+      "category": "cpu"
+    },
+    {
+      "name": "fp8-rmsnorm-gemm",
+      "ref": "sha256:8dfc163c166eda02b4fa8c0f66435bed8d5afa0f22500bed7125c8c5a986a063",
+      "category": "gpu"
+    },
+    {
+      "name": "freecad-impeller",
+      "ref": "sha256:725192587745bd89c06c50fe2fc740a306e7d8eea21afabd846523d1840e255f",
+      "category": "cpu"
+    },
+    {
+      "name": "freecad-platform-drawing",
+      "ref": "sha256:20ac3e2458c2253077dd89a17852bf46db4f753c203bf5d201bc842c42f8a860",
+      "category": "cpu"
+    },
+    {
+      "name": "freecad-spring-clip",
+      "ref": "sha256:e1fe21fc0c02c357b4462d23697cba247e069621b3800e6f173f02a4cde5d704",
+      "category": "cpu"
+    },
+    {
+      "name": "freight-dispatch-shift",
+      "ref": "sha256:5f6e51724b93f5c5fdfbd8836cd6bd84962c51f2242ff52f4067a6ba4085d9df",
+      "category": "compose"
+    },
+    {
+      "name": "glycan-ms2-elucidation",
+      "ref": "sha256:252bb8507ce685e1c453b8601cec6a125255883986bc1a9edf4d8b9cf489a1b2",
+      "category": "cpu"
+    },
+    {
+      "name": "gsea-proteomics",
+      "ref": "sha256:e35f61b7e319fa7eaabaf52636dd2ec0b102bd16e69a13665d1c19d92b7b510e",
+      "category": "cpu"
+    },
+    {
+      "name": "heat-pump-warranty",
+      "ref": "sha256:f48a86ded307b9a08951cc9dc02af04ef52e8686010f1f0318c08731ccd99b59",
+      "category": "compose"
+    },
+    {
+      "name": "hof-topology-interpenetration",
+      "ref": "sha256:46353b47672f2ac6c7e3cbf66a9cddc78c92d63e6bf4c5ffe1baca67c1c08bd0",
+      "category": "cpu"
+    },
+    {
+      "name": "html-js-filter",
+      "ref": "sha256:7dbe36e64d4fdf1d8206bad74aa3fffefd66a01b3508b983bc8156f09d642ff1",
+      "category": "cpu"
+    },
+    {
+      "name": "interleaved-vigenere",
+      "ref": "sha256:bf6936b5ee34569c556255505260dbdabad26fb2c4eb2ba0e9aed35dd93180d9",
+      "category": "cpu"
+    },
+    {
+      "name": "intrastat-meldung",
+      "ref": "sha256:e793fac95d60ea3ef9a44e309a139e35472c7bab8ddc03347e67eb4a8583ee24",
+      "category": "compose"
+    },
+    {
+      "name": "jax-speedrun-gpu",
+      "ref": "sha256:88bdda76523ae13ee15c0d1048e1c1a3d03552af63a8becdf7c35bc1d4ff0751",
+      "category": "gpu"
+    },
+    {
+      "name": "ks-solver-cpp",
+      "ref": "sha256:91822b59bf137ea4da2ebfd2ce08989868c468f0f90ee3d912e8b9741d7c5be6",
+      "category": "cpu"
+    },
+    {
+      "name": "kv-live-surgery",
+      "ref": "sha256:3a37f52e4c30d1f88ba8dfe624d738552977e27975d77256f9506e5b6e3323ae",
+      "category": "compose"
+    },
+    {
+      "name": "lake-temp-glm",
+      "ref": "sha256:b36250ebb7996d3695cb5227dbb64c8efb48c3986acb04aa11ec5df18b5ca9ee",
+      "category": "cpu"
+    },
+    {
+      "name": "layout-config-recreation",
+      "ref": "sha256:8e33516f94610f26130a8de335c9713af082dc2e17c883e8d47ee1aeed70ed62",
+      "category": "cpu"
+    },
+    {
+      "name": "layout-config-recreation2",
+      "ref": "sha256:b894daadcf180377a644232c646f4baf9b9045c957672bc76ed5607094e9fa56",
+      "category": "cpu"
+    },
+    {
+      "name": "legacy-utility-triage",
+      "ref": "sha256:e0a63b8004f81264ee72a8846e69f359d069a9a5afba7cf8e865c1ac0ec62807",
+      "category": "compose"
+    },
+    {
+      "name": "live-database-cutover",
+      "ref": "sha256:db85fc249c46b88b08f55f111f5796732aaf8ef03aca33c604bc6284a126f84f",
+      "category": "compose"
+    },
+    {
+      "name": "math-eval-grader",
+      "ref": "sha256:f2935fa7d8d47b20cd9541a585b31d19cd0aecd7dd0318479dc35020269dfc1d",
+      "category": "gpu"
+    },
+    {
+      "name": "medical-claims-processing",
+      "ref": "sha256:162a6ca4f95cc057821e3c6bfbdc56c062ffd441ae0d017bd410f3e746fd427d",
+      "category": "compose"
+    },
+    {
+      "name": "mp-checkpoint-consolidation",
+      "ref": "sha256:78ab5f7f10b06302408c0c25d9a41d525ebd21cb5961bea6f13da2c1a5d91904",
+      "category": "cpu"
+    },
+    {
+      "name": "music-harmony",
+      "ref": "sha256:b77713c760d519822ee4f0da9e555c9e124241c2544d0e759a11b52eb7d26c24",
+      "category": "cpu"
+    },
+    {
+      "name": "mvcc-lsm-compaction",
+      "ref": "sha256:a72c20ba467d6cd8e855ca0cfb00512dc53464ea02d26042e9eb4adc1cb276ce",
+      "category": "cpu"
+    },
+    {
+      "name": "nextjs-performance",
+      "ref": "sha256:97046f1a4f40db96759f01f92763e53fc87ef09347d8a7408920a4009892b5ac",
+      "category": "compose"
+    },
+    {
+      "name": "ontology-kg-querying",
+      "ref": "sha256:8e1da61bec7c4a35dce988fa59b300ce79699e8ffb602265cf06d7ec42a60988",
+      "category": "cpu"
+    },
+    {
+      "name": "payments-pipeline-fix",
+      "ref": "sha256:6bbdef6a878cd5b34e951623d0e404adb19ea2f4699cfa89a803ec91b08398a7",
+      "category": "compose"
+    },
+    {
+      "name": "photonic-waveguide-routing",
+      "ref": "sha256:a4801300795de243b36566833ed1f6ea5bbbbeb9645db0c9ed91dde36bb9444c",
+      "category": "cpu"
+    },
+    {
+      "name": "pretrain-shard-corruption",
+      "ref": "sha256:8af52917fd976e328805a0d68319d49b4510e9834eb27003f02bd491e85501c6",
+      "category": "cpu"
+    },
+    {
+      "name": "production-planning",
+      "ref": "sha256:7f7237a15a5a8a677a9ddee8d13e5c1576839f3a06202c45f745d1ffada447da",
+      "category": "cpu"
+    },
+    {
+      "name": "protein-autointerp-disulfide",
+      "ref": "sha256:66cf088f53a27f89a1e88bc4dff3d804c74a606ca96274aabd3b14f69fd8cf6a",
+      "category": "cpu"
+    },
+    {
+      "name": "react-lead-form",
+      "ref": "sha256:1127f3bf27b4b15441623eb07a28e4f4007f8115f8764e4289d10f1bcd894779",
+      "category": "cpu"
+    },
+    {
+      "name": "retro-console-soc",
+      "ref": "sha256:79361cf9b5f7af1966a1707a21e5b4528c6f638ababe8710e7b99cb7766e3046",
+      "category": "cpu"
+    },
+    {
+      "name": "risk-scorer-replay",
+      "ref": "sha256:8817c0b4a542b3f6802a8e4fa72d450a5ae5fb22b15f4cdc9d95b7128af9a955",
+      "category": "cpu"
+    },
+    {
+      "name": "roy-polymorph-cn",
+      "ref": "sha256:358642adec89de562eb01a0e543d8da3bacf60d3fb591cef9eec7920830926be",
+      "category": "cpu"
+    },
+    {
+      "name": "rs-archive-clone",
+      "ref": "sha256:3ce4ecae3481bd5177dc33eeb057fe1486ac4050016fe0ce765cde3f0d2138bf",
+      "category": "cpu"
+    },
+    {
+      "name": "satb-audio-transcription",
+      "ref": "sha256:134c71221d0ee432bd8c9235242f4727ca55a1cc960adb34538dd8f07f2e9adc",
+      "category": "cpu"
+    },
+    {
+      "name": "session-window-debug",
+      "ref": "sha256:2f1a6389c24ab58d0ca4765031fe7c8799ba31284f0af9c7fcd203ad652bfa45",
+      "category": "cpu"
+    },
+    {
+      "name": "sglang-qwen-burst",
+      "ref": "sha256:9af4c258e9cd709b82c97e91a9a27920c2f411cfbf609c70277aaa1466b5a430",
+      "category": "cpu"
+    },
+    {
+      "name": "shadow-relay",
+      "ref": "sha256:baf97deb06f62f91235d01d72ce34187f8147c726c60f961bb486d9e1252b1da",
+      "category": "cpu"
+    },
+    {
+      "name": "sound-change-cascade",
+      "ref": "sha256:65d43e3fe13768e8983f31bf7b9d265d1a15c4d6a721e5cff469c39cbebf2367",
+      "category": "cpu"
+    },
+    {
+      "name": "takens-embedding-lean",
+      "ref": "sha256:e5c338cf7f6330f7b7fdf052042763b0aad4b830163a95d062a5fa03541c4f3d",
+      "category": "cpu"
+    },
+    {
+      "name": "telecom-entity-resolution",
+      "ref": "sha256:fd037ff5d13efd33dceb4f23f621122ff1f1b0dda8fe9d75dfe5e3164a9e7e20",
+      "category": "cpu"
+    },
+    {
+      "name": "uefi-bootkit",
+      "ref": "sha256:0fcc21a9caa2e68f61d69612e1e0095b96830824c01768f62c8632a393b859f3",
+      "category": "cpu"
+    },
+    {
+      "name": "vba-userform-port",
+      "ref": "sha256:bb2c3e8769cb334b52b69b0cb0dcf964e10cf13eb1d0c2f15d74e407e62be651",
+      "category": "cpu"
+    },
+    {
+      "name": "vf2-speedup-networkx",
+      "ref": "sha256:180215f27a59c91af95176c47c9cd41a158b5709f75a62ab519482a90123b527",
+      "category": "cpu"
+    },
+    {
+      "name": "vllm-deepseek-streaming",
+      "ref": "sha256:5b64c30e3d43e6b138351df02858d09f795f6af4cc48f80d25113fe46f7c499b",
+      "category": "cpu"
+    },
+    {
+      "name": "vpp-loss-divergence",
+      "ref": "sha256:8c4071ec1b7ff23009b572515d7eb4f10216d3b5c8b9c3c955f9274413b16109",
+      "category": "cpu"
+    },
+    {
+      "name": "wal-recovery-ordering",
+      "ref": "sha256:79ba48ef2fcf2a9f06243b66ae332eafa93b929a2475a2c6203e71708b41c6e5",
+      "category": "cpu"
+    },
+    {
+      "name": "wdm-design",
+      "ref": "sha256:1cc948e21fdbd149b77d77d3a016dd1a395e87a08f0f89da4f8de74496a85f76",
+      "category": "cpu"
+    }
+  ]
+}

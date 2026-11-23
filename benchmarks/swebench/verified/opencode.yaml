@@ -1,25 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SWE-bench Verified with OpenCode agent sessions under single_agent_turn. The Resources Server starts the task
+# sandbox, lends it to opencode_agent, and grades the captured patch in a fresh sandbox after the agent closes.
+# opencode_legacy_agent.yaml keeps opencode_sandboxed_agent on the legacy_agent relay; the two harnesses are
+# configured differently, so do not compare their scores as the same measurement.
+#
+# With partial-rollout checkpointing (a top-level `checkpoint:` block, usually set by the training framework),
+# a checkpoint pauses OpenCode in place, snapshots the task sandbox, and a restore forks the snapshot and resumes
+# OpenCode without adding a turn. That needs:
+#   - a sandbox provider that can snapshot (OpenSandbox); on any other provider episodes restart after a crash;
+#   - `checkpoint.state_dir` on a filesystem every restart of the run reads, where the SWE-bench server indexes the
+#     snapshots it takes so a `release` can delete them.
+#
+#   checkpoint:
+#     enabled: true
+#     control_auth_token: ${oc.env:GYM_CHECKPOINT_TOKEN}
+#     # Absolute; one per job and its restarts; on Lustre, mount with -o flock.
+#     state_dir: /shared/<job id>/gym_checkpoint_state
+
 config_paths:
-- responses_api_agents/opencode_sandboxed_agent/configs/opencode_agent.yaml
-- resources_servers/swebench/configs/swebench.yaml
+  - resources_servers/swebench/configs/swebench.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
 
-opencode_swebench_verified_resources_server:
+environment_routing_mode: taskset
+environment_server_routes:
+  "swebench:verified": swebench_verified_opencode_single_agent_turn
+
+swebench_verified_opencode_agent_resources_server:
   _inherit_from: swebench_resources_server
-
   resources_servers:
     swebench:
+      allowed_agents: [opencode_agent]
+      num_workers: 1
       # For SWE Bench Verified, the repos are already clean.
       apply_anti_cheating: false
-
-opencode_sandboxed_agent_swebench_verified:
-  _inherit_from: opencode_sandboxed_agent
-  responses_api_agents:
-    opencode_sandboxed_agent:
-      resources_server:
-        type: resources_servers
-        name: opencode_swebench_verified_resources_server
+      sandbox_config:
+        # Outlive the episode (default_episode_timeout_seconds, 21600), the time it may spend paused for checkpoints
+        # (the agent's checkpoint_pause_allowance_seconds, 3600), patch extraction, and final cleanup. The resources
+        # session expires with the sandbox, and a verify after that is masked as SESSION_EXPIRED.
+        ttl_s: 28800
       datasets:
         - name: swebench_verified
           type: benchmark
+          taskset: "swebench:verified"
           jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
           prepare_script: benchmarks/swebench/verified/prepare.py
           num_repeats: 3
+
+swebench_verified_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      resources_server: null
+
+swebench_verified_opencode_single_agent_turn:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: swebench_verified_opencode_agent_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: swebench_verified_opencode_agent
+      resources_tool_transports: []
