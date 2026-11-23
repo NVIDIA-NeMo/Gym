@@ -154,8 +154,8 @@ PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
 class SandboxSidecarSpec:
     """An extra container started with the sandbox from its own image.
 
-    The sidecar has its own filesystem. Start services in it with ``AsyncSandbox.sidecar(name).exec``.
-    How the sandbox reaches a sidecar over the network is provider-specific.
+    The image is used as a root filesystem; start services in it with ``AsyncSandbox.sidecar(name).exec``.
+    The sidecar has its own filesystem; how the sandbox reaches it over the network is provider-specific.
     """
 
     name: str
