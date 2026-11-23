@@ -11,7 +11,8 @@ Hermes, Pi and Codex over MCP; see [the benchmark README](../../benchmarks/autom
   through Gym's `automationbench_env` (`api_fetch` takes `params` and `body` as JSON objects). The model gets each
   tool's text as it is, and an unknown tool, bad arguments or a failing call as error text, as under verifiers.
   With `expose_tools_over_mcp: true`, the server's `/mcp` endpoint lists the same three tools, with the names,
-  descriptions and schemas the prepared rows send, and dispatches each call to the same handler.
+  descriptions and schemas the prepared rows send, and dispatches each call to the same handler, which returns the
+  same text.
 - **`/verify`** scores the final world with the benchmark's rubric. The reward is `aa_headline` by default: the share
   of objectives met, or 0 when any guardrail broke. The response also carries upstream's `partial_credit`,
   `task_completed_correctly`, the guardrail and objective counts, `task_name` and `domain`. A rubric that raises
@@ -22,14 +23,17 @@ Configuration (`configs/automationbench.yaml`):
 
 - `reward_fn`: `aa_headline` (default) or `partial_credit`. Both are reported either way.
 - `export_assertion_results`: add every assertion's verdict to the verify response as `assertion_results`.
+- `rows_carry_tools` (default `true`): set `false` only for rows without tools whose agent takes the tools from the
+  MCP grant, as the benchmark's session harness presets do with `prepare_harness_neutral.py`'s rows. It needs
+  `expose_tools_over_mcp: true`.
 
 A row whose `responses_create_params` carries no tools was prepared before this server existed. `/seed_session` refuses
 it with HTTP 422 before any model call, reading the params the typed seed carries beside `task_data`, and the message
 says to re-run `gym eval prepare --benchmark automationbench`. A seed without those params, from a caller that does not
-send them, is served, and `/verify` masks such a row's sample as `verifier_error` instead. With
-`expose_tools_over_mcp: true` the agent takes the tools from its MCP grant, not from the row, so neither check applies:
-the session harnesses refuse a tool list in the request, and their presets clear it. A task whose `info.initial_state`
-does not build a world is refused at seed with HTTP 422 as well.
+send them, is served, and `/verify` masks such a row's sample as `verifier_error` instead. Neither check applies with
+`rows_carry_tools: false`: exposing the tools over MCP alone keeps both, since the seed does not say which transport
+the episode's agent was granted. A task whose `info.initial_state` does not build a world is refused at seed with HTTP
+422 as well.
 
 Sessions are kept in the worker's memory and are not exported to partial-rollout checkpoints: an episode interrupted
 by a crash starts over. The server runs with `num_workers > 1`: each session's requests are routed to the worker that

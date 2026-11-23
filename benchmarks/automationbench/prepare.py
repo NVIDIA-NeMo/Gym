@@ -43,8 +43,12 @@ def prepare(
     size: int = -1,
     max_turns: int = 50,
     out: Path | None = None,
+    harness_neutral: bool = False,
 ) -> Path:
     """Write the taskset to JSONL and return the path written.
+
+    ``harness_neutral`` writes the rows the session harness presets run (``prepare_harness_neutral.py``): without the
+    tool list and the output budget, to ``automationbench-<n>-harness-neutral.jsonl`` by default.
 
     `gym eval prepare` imports this module and calls `prepare(**prepare_script_args)`,
     requiring the returned path to equal the dataset's `jsonl_fpath`, so this is
@@ -68,7 +72,8 @@ def prepare(
     tools = responses_tools(env)
     n = len(dataset) if size < 0 else min(size, len(dataset))
 
-    out = out or Path(__file__).parent / "data" / f"automationbench-{n}.jsonl"
+    suffix = "-harness-neutral" if harness_neutral else ""
+    out = out or Path(__file__).parent / "data" / f"automationbench-{n}{suffix}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
 
     with out.open("w") as f:
@@ -83,7 +88,11 @@ def prepare(
                 "task_id": f"{info['task_name']}/{row['example_id']}",
                 "vf_env_id": VF_ENV_ID,
                 # simple_agent sends these; verifiers_agent takes its tools and budget from its environment and config.
-                "responses_create_params": {"input": prompt, "tools": tools, "max_output_tokens": MAX_OUTPUT_TOKENS},
+                "responses_create_params": (
+                    {"input": prompt}
+                    if harness_neutral
+                    else {"input": prompt, "tools": tools, "max_output_tokens": MAX_OUTPUT_TOKENS}
+                ),
                 "question": prompt[-1]["content"] if prompt else "",
                 "answer": row.get("answer", ""),
                 "example_id": row["example_id"],
@@ -101,9 +110,18 @@ def main() -> None:
     parser.add_argument("--size", type=int, default=-1, help="number of tasks (-1 for the full taskset)")
     parser.add_argument("--max-turns", type=int, default=50)
     parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--harness-neutral", action="store_true", help="rows without the tools and the output budget, for the presets"
+    )
     args = parser.parse_args()
 
-    prepare(domains=args.domains, size=args.size, max_turns=args.max_turns, out=args.out)
+    prepare(
+        domains=args.domains,
+        size=args.size,
+        max_turns=args.max_turns,
+        out=args.out,
+        harness_neutral=args.harness_neutral,
+    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The session harness presets run their harness on config.yaml's resources server, rows and datasets, over MCP."""
+"""The session harness presets run their harness on config.yaml's resources server and tasks, over MCP."""
 
 from pathlib import Path
 
@@ -23,9 +23,9 @@ HARNESSES = {
 }
 
 
-def _merged(path: Path):
+def _merged(*paths: Path):
     parser = GlobalConfigDictParser()
-    _, configs = parser.load_extra_config_paths([str(path)])
+    _, configs = parser.load_extra_config_paths([str(path) for path in paths])
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
     return config
@@ -41,14 +41,15 @@ def test_a_preset_binds_its_harness_over_mcp_to_the_config_yaml_resources_server
     assert _benchmark_config_name(path.relative_to(ROOT / "benchmarks")) == f"automationbench/{preset}"
     benchmark = BenchmarkConfig.from_config_path(path, strict=False)
     assert benchmark is not None and benchmark.agent_name == instance
-    # simple_agent is gone, and the environment server runs the harness with the tools granted over MCP.
-    assert config.automationbench is None
-    environment = config.automationbench_environment_server.environment_servers.single_agent_turn_legacy
+    # simple_agent and its environment server are gone; the preset's own environment server runs the harness with
+    # the tools granted over MCP.
+    assert (config.automationbench, config.automationbench_environment_server) == (None, None)
+    environment = config[f"automationbench_{preset}_environment_server"].environment_servers.single_agent_turn_legacy
     assert (environment.agent_server.name, list(environment.resources_tool_transports)) == (instance, ["mcp"])
     assert environment.resources_server.name == "automationbench_resources_server"
-    # The same resources server, now serving its tools over MCP, and the same datasets as config.yaml.
+    # The same resources server, now serving its tools over MCP and the harness-neutral rows without them.
     resources = OmegaConf.to_container(config.automationbench_resources_server.resources_servers.automationbench)
-    assert resources.pop("expose_tools_over_mcp") is True
+    assert (resources.pop("expose_tools_over_mcp"), resources.pop("rows_carry_tools")) == (True, False)
     assert resources == OmegaConf.to_container(
         baseline.automationbench_resources_server.resources_servers.automationbench
     )
@@ -57,15 +58,34 @@ def test_a_preset_binds_its_harness_over_mcp_to_the_config_yaml_resources_server
     # From the harness's configs/profiles/benchmark.yaml: a sandbox the agent creates, here from the preset's image.
     assert (agent.entrypoint, agent.sandbox_provider) == ("app.py", "sandbox")
     assert (agent.sandbox_config.image, agent.sandbox_config.ready_timeout_s) == ("python:3.12", 1200)
-    assert OmegaConf.to_container(agent.datasets) == OmegaConf.to_container(
-        baseline.automationbench.responses_api_agents.simple_agent.datasets
-    )
-    # The harnesses refuse a tool list, an output budget and sampling in the request.
-    assert OmegaConf.to_container(config.responses_create_params) == {
-        "tools": [],
-        "max_output_tokens": None,
-        "temperature": None,
-        "top_p": None,
+    # config.yaml's benchmark dataset, but the rows without the tool list and the output budget, which the harnesses
+    # refuse in the request.
+    (dataset,) = OmegaConf.to_container(agent.datasets)
+    (baseline_dataset,) = [
+        entry
+        for entry in OmegaConf.to_container(baseline.automationbench.responses_api_agents.simple_agent.datasets)
+        if entry["type"] == "benchmark"
+    ]
+    neutral = {
+        "jsonl_fpath": "benchmarks/automationbench/data/automationbench-600-harness-neutral.jsonl",
+        "prepare_script": "benchmarks/automationbench/prepare_harness_neutral.py",
     }
+    assert dataset == baseline_dataset | neutral
+    # config.yaml's run-level sampling, which the harnesses refuse, is deleted rather than cleared: the run overrides
+    # no request field of any row.
+    assert not config.get("responses_create_params")
     # The sandbox calls the resources server's /mcp by address.
     assert "resources_servers" in config.absolute_ip_server_types
+
+
+def test_the_presets_load_together_and_each_environment_server_runs_its_own_harness() -> None:
+    config = _merged(*(BENCHMARK / f"{preset}.yaml" for preset in HARNESSES))
+
+    bound = {
+        preset: config[
+            f"automationbench_{preset}_environment_server"
+        ].environment_servers.single_agent_turn_legacy.agent_server.name
+        for preset in HARNESSES
+    }
+    assert bound == {preset: f"automationbench_{preset}_agent" for preset in HARNESSES}
+    assert config.automationbench_environment_server is None

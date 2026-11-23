@@ -97,12 +97,12 @@ and the agent logs a warning.
 ## Session harnesses
 
 `opencode.yaml`, `openclaw.yaml`, `hermes.yaml`, `pi.yaml` and `codex.yaml` run that harness in place of
-`simple_agent`, with the same resources server, rows and `aa_headline` scoring as `config.yaml`. They have no
+`simple_agent`, with the same resources server, tasks and `aa_headline` scoring as `config.yaml`. They have no
 manifest and are not AA-comparable runs: the harness's own loop, tools and limits replace `simple_agent`'s. For
 example, with Pi:
 
 ```bash
-gym eval prepare --benchmark automationbench
+gym eval prepare --benchmark automationbench/pi
 gym eval run \
     --model-type vllm_model \
     --benchmark automationbench/pi \
@@ -116,15 +116,17 @@ gym eval run \
 
 - The tools reach the harness over MCP: these harnesses refuse a direct HTTP tool grant. Each preset sets
   `expose_tools_over_mcp: true` on the resources server, which then lists `api_search`, `api_fetch` and
-  `base64_encode` with the names, descriptions and schemas the rows send, and the environment server grants them
-  with `resources_tool_transports: [mcp]`. Each harness shows them to the model under its own name, such as
+  `base64_encode` with the names, descriptions and schemas `config.yaml`'s rows send, and the preset's own
+  environment server (`automationbench_<harness>_environment_server`, so one run can load several presets) grants
+  them with `resources_tool_transports: [mcp]`. Each harness shows them to the model under its own name, such as
   `automationbench_resources_server_api_fetch` (OpenCode) or `mcp__automationbench_resources_server__api_fetch`
-  (Pi). A tool's text reaches the model as over direct HTTP, except that a JSON reply comes back without its
-  whitespace.
-- The rows are `config.yaml`'s; prepare them with `--benchmark automationbench`. The harnesses refuse a tool list,
-  an output budget and sampling in the request, so each preset clears the rows' `tools` and `max_output_tokens` and
-  `config.yaml`'s `temperature` and `top_p` for the run (`responses_create_params`). With `expose_tools_over_mcp`,
-  the resources server serves and scores a row without tools; without it, it still refuses one at seed.
+  (Pi). A tool's text reaches the model unchanged, as over direct HTTP.
+- The harnesses refuse a tool list, an output budget and sampling in the request. The presets run the rows that
+  `prepare_harness_neutral.py` writes (`automationbench-600-harness-neutral.jsonl`; `gym eval prepare --benchmark
+  automationbench/<harness>`): `config.yaml`'s tasks without the tools and the output budget. The resources server
+  serves those rows because the presets set `rows_carry_tools: false`; with the default, it refuses a row without
+  tools at seed, MCP or not. The presets also delete `config.yaml`'s run-level `temperature` and `top_p`, so the run
+  changes no request field of any row, another workload's included.
 - Each harness runs in a sandbox it creates through the `sandbox` provider, as set up by the agent's
   `configs/profiles/benchmark.yaml` (OpenSandbox). The task needs no files in it, so the presets use `python:3.12`;
   any Linux glibc image with `bash`, `curl`, `tar`, `gzip` and CA certificates works, for example

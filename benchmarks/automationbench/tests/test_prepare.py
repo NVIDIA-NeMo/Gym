@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import TypeAdapter
 
-from benchmarks.automationbench import prepare
+from benchmarks.automationbench import prepare, prepare_harness_neutral
 from nemo_gym.data import validate_jsonl_rows
 from responses_api_agents.verifiers_agent.task_data import TaskData
 
@@ -42,12 +42,12 @@ TOOL_DEFS = [
 ]
 
 
-def _prepared_rows(tmp_path: Path) -> list[dict]:
+def _prepared_rows(tmp_path: Path, preparer=prepare) -> list[dict]:
     fake_env_module = types.ModuleType("automationbench_env")
     fake_env_module.load_environment = lambda **kwargs: types.SimpleNamespace(dataset=SOURCE_ROWS, tool_defs=TOOL_DEFS)
 
     with patch.dict("sys.modules", {"automationbench_env": fake_env_module}):
-        output_fpath = prepare.prepare(out=tmp_path / "automationbench.jsonl")
+        output_fpath = preparer.prepare(out=tmp_path / "automationbench.jsonl")
     return [json.loads(line) for line in output_fpath.read_text().splitlines()]
 
 
@@ -83,6 +83,30 @@ def test_prepared_rows_carry_the_environment_tools_and_output_budget(tmp_path: P
             }
         ]
         assert params["max_output_tokens"] == prepare.MAX_OUTPUT_TOKENS
+
+
+def test_harness_neutral_rows_are_the_same_rows_without_the_tools_and_output_budget(tmp_path: Path) -> None:
+    rows = _prepared_rows(tmp_path)
+    neutral = _prepared_rows(tmp_path, preparer=prepare_harness_neutral)
+
+    assert [row["responses_create_params"] for row in neutral] == [
+        {"input": row["responses_create_params"]["input"]} for row in rows
+    ]
+    for neutral_row, row in zip(neutral, rows, strict=True):
+        assert neutral_row | {"responses_create_params": None} == row | {"responses_create_params": None}
+    assert _validate(neutral).clean
+
+
+def test_harness_neutral_rows_go_to_their_own_file_by_default(tmp_path: Path) -> None:
+    fake_env_module = types.ModuleType("automationbench_env")
+    fake_env_module.load_environment = lambda **kwargs: types.SimpleNamespace(dataset=SOURCE_ROWS, tool_defs=TOOL_DEFS)
+
+    with (
+        patch.dict("sys.modules", {"automationbench_env": fake_env_module}),
+        patch.object(prepare, "__file__", str(tmp_path / "prepare.py")),
+    ):
+        assert prepare_harness_neutral.prepare().name == "automationbench-3-harness-neutral.jsonl"
+        assert prepare.prepare().name == "automationbench-3.jsonl"
 
 
 def test_task_ids_are_unique_when_example_ids_repeat_across_domains(tmp_path: Path) -> None:

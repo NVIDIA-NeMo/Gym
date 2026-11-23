@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
@@ -328,8 +329,9 @@ class _MCPClient(TestClient):
         return self
 
 
-def _mcp_client() -> _MCPClient:
-    server = _server(expose_tools_over_mcp=True)
+def _mcp_client(**overrides) -> _MCPClient:
+    """The server as the session harness presets configure it, unless overridden."""
+    server = _server(**{"expose_tools_over_mcp": True, "rows_carry_tools": False} | overrides)
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
     return _MCPClient(app, cookies=_StatelessCookieJar())
@@ -344,9 +346,9 @@ def _rpc(client: TestClient, method: str, params: dict[str, Any], token: str) ->
 
 
 def _toolless(task: dict[str, Any] = TASK) -> dict[str, Any]:
-    """The row as the session harness presets send it: without the tools, the output budget and the sampling."""
-    params = {key: value for key, value in task["responses_create_params"].items() if key != "max_output_tokens"}
-    return task | {"responses_create_params": params | {"tools": []}}
+    """The row as prepare_harness_neutral.py writes it: without the tools and the output budget."""
+    params = task["responses_create_params"]
+    return task | {"responses_create_params": {key: params[key] for key in params if key == "input"}}
 
 
 def test_mcp_serves_the_tools_the_rows_send_and_their_calls_change_the_world_verify_scores() -> None:
@@ -382,14 +384,47 @@ def test_mcp_serves_the_tools_the_rows_send_and_their_calls_change_the_world_ver
     assert result["reward"] == result["aa_headline"] == pytest.approx(1 / 3)
 
 
-def test_without_mcp_a_toolless_row_is_still_refused(client):
-    response = _post_seed(client, _seed(task=_toolless()))
+@pytest.mark.parametrize("expose_tools_over_mcp", [False, True], ids=["direct_http", "mcp_exposed"])
+def test_a_toolless_row_is_refused_unless_the_config_says_the_rows_carry_none(expose_tools_over_mcp):
+    # Exposing the tools over MCP alone keeps the check: the same server may still serve a direct HTTP agent.
+    server = _server(expose_tools_over_mcp=expose_tools_over_mcp)
+    with TestClient(server.setup_webserver()) as client:
+        response = _post_seed(client, _seed(task=_toolless()))
 
     assert response.status_code == 422
     assert "gym eval prepare --benchmark automationbench" in response.json()["detail"]
 
 
-@pytest.mark.parametrize("body", [b"{not json", b"\xff"], ids=["malformed", "not_utf8"])
+def test_rows_without_tools_need_the_tools_over_mcp():
+    with pytest.raises(ValidationError, match="needs expose_tools_over_mcp"):
+        _server(rows_carry_tools=False)
+
+
+def test_mcp_returns_each_tool_text_as_direct_http_does() -> None:
+    # 56e7 is the base64 of the UTF-8 bytes of this character, and would read as a JSON number.
+    calls = [
+        ("base64_encode", {"text": "\u79fb"}),
+        ("base64_encode", {"text": "hi"}),
+        ("api_search", {"query": "salesforce opportunity"}),
+        ("api_fetch", {"method": "GET", "url": OPPORTUNITY_URL, "params": {}, "body": {}}),
+    ]
+    with _mcp_client() as client:
+        seeded = _post_seed(client, _seed(task=_toolless()))
+        token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+        direct = [client.post(f"/{name}", json=arguments, cookies=seeded.cookies) for name, arguments in calls]
+        over_mcp = [
+            _rpc(client, "tools/call", {"name": name, "arguments": arguments}, token) for name, arguments in calls
+        ]
+
+    assert direct[0].text == "56e7"
+    assert all(response.headers["content-type"] == "text/plain; charset=utf-8" for response in direct)
+    assert [result["content"][0]["text"] for result in over_mcp] == [response.text for response in direct]
+    assert all(result["isError"] is False for result in over_mcp)
+
+
+@pytest.mark.parametrize(
+    "body", [b"{not json", b"\xff", b"[" * 100_000], ids=["malformed", "not_utf8", "nested_too_deeply"]
+)
 def test_tool_arguments_that_are_not_json_are_refused(client, body):
     _post_seed(client, _seed())
 
@@ -403,3 +438,13 @@ def test_an_empty_body_reaches_the_tool_argument_check(client):
     _post_seed(client, _seed())
 
     assert client.post("/api_search").text.startswith("Expected tool arguments to be a dict, got NoneType")
+
+
+def test_a_body_of_another_media_type_reaches_the_tool_argument_check_as_bytes(client):
+    # As FastAPI reads a body parameter: only a JSON media type, or none, is parsed.
+    _post_seed(client, _seed())
+
+    response = client.post("/base64_encode", content=b'{"text": "hi"}', headers={"Content-Type": "text/plain"})
+
+    assert response.text.startswith("Expected tool arguments to be a dict, got bytes")
+    assert client.post("/base64_encode", content=b'{"text": "hi"}').text == "aGk="

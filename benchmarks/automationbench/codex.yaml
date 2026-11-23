@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# AutomationBench with Codex in place of simple_agent: the same resources server, rows and aa_headline scoring as
+# AutomationBench with Codex in place of simple_agent: the same resources server, tasks and aa_headline scoring as
 # config.yaml. Codex runs in a sandbox it creates and calls the api tools over MCP. See "Session harnesses" in
 # README.md for the run command, the sandbox image and the model server settings.
 config_paths:
@@ -10,21 +10,21 @@ config_paths:
 # The sandbox reaches the resources server's MCP endpoint by address, so the resources servers leave loopback too.
 absolute_ip_server_types: [responses_api_models, resources_servers]
 
-# The harness takes the tools from its MCP grant and refuses a tool list in the request, so the run drops the rows'
-# tools, and with them their output budget and config.yaml's sampling: set sampling on the model server.
+# Codex refuses sampling in the request: drop config.yaml's run-level temperature and top_p, and set sampling on the
+# model server. Deleted, not cleared, so the other workloads of a run keep their rows' values.
 responses_create_params:
-  tools: []
-  max_output_tokens: null
-  temperature: null
-  top_p: null
+  _delete_key: temperature,top_p
 
-# Drop simple_agent; the environment server below runs Codex.
+# Drop simple_agent and its environment server; automationbench_codex_environment_server below runs Codex.
 automationbench: null
+automationbench_environment_server: null
 
 automationbench_resources_server:
   resources_servers:
     automationbench:
       expose_tools_over_mcp: true
+      # The harness-neutral rows below carry no tools: Codex takes them from its MCP grant.
+      rows_carry_tools: false
 
 automationbench_codex_agent:
   _inherit_from: codex_agent
@@ -46,21 +46,25 @@ automationbench_codex_agent:
       model_auto_compact_token_limit: 196608
       timeout: 3600
       datasets:
-        - name: example
-          type: example
-          jsonl_fpath: benchmarks/automationbench/data/example.jsonl
-          license: MIT
+        # The tasks without the tool list and the output budget, which Codex refuses in the request
+        # (prepare_harness_neutral.py; `gym eval prepare --benchmark automationbench/codex`).
         - name: automationbench
           type: benchmark
-          jsonl_fpath: benchmarks/automationbench/data/automationbench-600.jsonl
-          prepare_script: benchmarks/automationbench/prepare.py
+          jsonl_fpath: benchmarks/automationbench/data/automationbench-600-harness-neutral.jsonl
+          prepare_script: benchmarks/automationbench/prepare_harness_neutral.py
           prepare_project: benchmarks/automationbench
           num_repeats: 1
           license: MIT
 
-automationbench_environment_server:
+# Its own environment server rather than config.yaml's rebound, so a run that loads several of these presets binds
+# each harness.
+automationbench_codex_environment_server:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: automationbench_resources_server
       agent_server:
         type: responses_api_agents
         name: automationbench_codex_agent
