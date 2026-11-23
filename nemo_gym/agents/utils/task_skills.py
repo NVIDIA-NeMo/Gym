@@ -36,12 +36,15 @@ _READ_TIMEOUT_S = 30
 _COPY_TIMEOUT_S = 120
 
 
-async def stage_task_skills(sandbox: AsyncSandbox, destination: str) -> str | None:
+async def stage_task_skills(sandbox: AsyncSandbox, destination: str, *, skills_dir: str | None = None) -> str | None:
     """Copy the skills folder the task declares to ``destination``, inside the sandbox.
 
     Reads ``skills_dir`` from ``/tmp/.nemo-gym/task.json`` in the sandbox and copies that folder's contents into
     ``destination``, created if it is missing. Returns the ``skills_dir`` it copied, or ``None`` when the task
     declares none, so a task without skills (or a sandbox the Environment Server did not seed) is left untouched.
+    A caller that already knows the folder passes it as ``skills_dir``, and ``task.json`` is not read: a session
+    re-bound after a checkpoint restore copies the folder its seed staged, because a fork that lost the session's
+    files under ``/tmp`` has usually lost ``task.json`` too.
 
     An unusable task is refused with :class:`AgentSeedRejectedError`: a ``task.json`` that is not a JSON object, a
     ``skills_dir`` that is not an absolute path (the server makes a relative one absolute from the working directory,
@@ -51,6 +54,33 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str) -> str | No
     A read or copy that did not report an exit code (a timeout or a provider failure) raises ``RuntimeError``,
     which a seed answers as a retryable failure.
     """
+    declared: object = skills_dir if skills_dir is not None else await _declared_skills_dir(sandbox)
+    if declared is None:
+        return None
+    if not isinstance(declared, str) or not declared.startswith("/"):
+        raise AgentSeedRejectedError(
+            f"The task's skills_dir {declared!r} is not an absolute path, so its skills cannot be staged for the CLI"
+        )
+    source, target = shlex.quote(declared), shlex.quote(destination)
+    copied = await sandbox.exec(
+        f"[ -d {source} ] || {{ echo 'not a folder in the sandbox' >&2; exit 2; }}; "
+        f"mkdir -p -- {target} && cp -R -- {source}/. {target}/",
+        cwd="/",
+        timeout_s=_COPY_TIMEOUT_S,
+    )
+    if copied.error_type is not None:
+        raise RuntimeError(f"Could not copy the task's skills_dir {declared!r}: {copied.error_type}")
+    if copied.return_code != 0:
+        details = (copied.stderr or copied.stdout or "").strip()
+        raise AgentSeedRejectedError(
+            f"Could not stage the task's skills_dir {declared!r} to {destination!r} "
+            f"(exit {copied.return_code}): {details[-2000:]}"
+        )
+    return declared
+
+
+async def _declared_skills_dir(sandbox: AsyncSandbox) -> object:
+    """The ``skills_dir`` the sandbox's ``task.json`` names, as written, or ``None`` when it names none."""
     context_path = shlex.quote(TASK_CONTEXT_FILE)
     # A file that exists but cannot be read fails the read instead of passing for an absent one.
     read = await sandbox.exec(
@@ -68,25 +98,4 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str) -> str | No
     if not isinstance(context, dict):
         raise AgentSeedRejectedError(f"{TASK_CONTEXT_FILE} is not a JSON object")
     skills_dir = context.get("skills_dir")
-    if skills_dir is None or skills_dir == "":
-        return None
-    if not isinstance(skills_dir, str) or not skills_dir.startswith("/"):
-        raise AgentSeedRejectedError(
-            f"The task's skills_dir {skills_dir!r} is not an absolute path, so its skills cannot be staged for the CLI"
-        )
-    source, target = shlex.quote(skills_dir), shlex.quote(destination)
-    copied = await sandbox.exec(
-        f"[ -d {source} ] || {{ echo 'not a folder in the sandbox' >&2; exit 2; }}; "
-        f"mkdir -p -- {target} && cp -R -- {source}/. {target}/",
-        cwd="/",
-        timeout_s=_COPY_TIMEOUT_S,
-    )
-    if copied.error_type is not None:
-        raise RuntimeError(f"Could not copy the task's skills_dir {skills_dir!r}: {copied.error_type}")
-    if copied.return_code != 0:
-        details = (copied.stderr or copied.stdout or "").strip()
-        raise AgentSeedRejectedError(
-            f"Could not stage the task's skills_dir {skills_dir!r} to {destination!r} "
-            f"(exit {copied.return_code}): {details[-2000:]}"
-        )
-    return skills_dir
+    return None if skills_dir == "" else skills_dir

@@ -1560,8 +1560,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     plugin_dependencies=self._pinned_file("plugin_dependencies"),
                 )
                 if state.task_skills is not None:
-                    # The fork may lack the skills the seed copied under the session root as well: copy them again.
-                    state.task_skills = await stage_task_skills(sandbox, f"{root}/config/opencode/skills")
+                    # The fork may lack the skills the seed copied under the session root as well: copy them again
+                    # from the folder the checkpoint names. task.json is under /tmp too, so the fork has usually lost
+                    # it, and reading it would leave the session without its skills.
+                    await stage_task_skills(sandbox, f"{root}/config/opencode/skills", skills_dir=state.task_skills)
         except BaseException:
             # The seed that re-binds is retried: do not leave one connection behind per attempt.
             try:

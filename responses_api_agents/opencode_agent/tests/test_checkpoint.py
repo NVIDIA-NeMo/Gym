@@ -1290,8 +1290,9 @@ async def test_a_re_bind_that_fails_releases_its_sandbox_connection(monkeypatch:
     assert state.session is None and state.restored == {"session": {}}
 
 
+@pytest.mark.parametrize("task_json", ["kept", "lost"])
 async def test_a_re_bind_that_installs_the_session_files_again_stages_the_task_skills_again(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, task_json: str
 ) -> None:
     sandbox = MagicMock(sandbox_id="fork")
 
@@ -1300,7 +1301,9 @@ async def test_a_re_bind_that_installs_the_session_files_again_stages_the_task_s
             # The fork lacks the session's files, so they are installed again.
             return SandboxExecResult(stdout="", stderr="", return_code=1)
         if "task.json" in command:
-            return SandboxExecResult(stdout=json.dumps({"skills_dir": "/workspace/skills"}), stderr="", return_code=0)
+            # A fork that lost /tmp has usually lost /tmp/.nemo-gym/task.json with the session's files.
+            stdout = json.dumps({"skills_dir": "/workspace/skills"}) if task_json == "kept" else ""
+            return SandboxExecResult(stdout=stdout, stderr="", return_code=0)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     sandbox.exec = AsyncMock(side_effect=run)
@@ -1314,10 +1317,13 @@ async def test_a_re_bind_that_installs_the_session_files_again_stages_the_task_s
 
     assert await agent._rebind_restored_agent_session_state(state, body) is state
 
-    # The skills go back into OpenCode's skills folder under the session root, where the seed put them.
-    copies = [call.args[0] for call in sandbox.exec.await_args_list if " cp -R -- " in call.args[0]]
+    # The skills go back into OpenCode's skills folder under the session root, where the seed put them, copied from
+    # the folder the checkpoint names: the re-bind does not depend on task.json.
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    copies = [command for command in commands if " cp -R -- " in command]
     assert len(copies) == 1 and copies[0].endswith(" /sessions/s/config/opencode/skills/")
     assert "cp -R -- /workspace/skills/. " in copies[0]
+    assert not any("task.json" in command for command in commands)
     assert state.task_skills == "/workspace/skills" and state.session is session
 
 
