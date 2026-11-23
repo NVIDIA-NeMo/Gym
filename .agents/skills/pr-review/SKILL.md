@@ -111,6 +111,25 @@ Apply the checks for the areas the diff touches.
   environments a reward profile is optional, not a merge gate (see
   CONTRIBUTING.md); behavior-changing verifier or agent code there needs the
   representative real smoke-rollout evidence AGENTS.md requires instead.
+- **Manifests (`manifest.yaml`).** A new manifest completes its authored
+  metadata and selection fields (`maintainers`, `intended_use`,
+  `capabilities`, `domains`, `primary_metric` for benchmarks, and
+  `requirements`).
+  Follow the [field reference](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx#field-reference);
+  the literal `unknown` is supported by `capabilities`, `domains`,
+  `requirements.gpu` and `requirements.network`. Check that `capabilities`
+  and `domains` match what the tasks exercise and need; validation only
+  checks that each value is in the capability taxonomy or domain list. An empty list means none
+  applies, which is a claim to check, not a default. New or modified metadata must not leave scaffold
+  `TODO` values. For an existing manifest, review the affected declarations
+  without requiring unrelated metadata backfilling. A config that only
+  changes the harness is a run preset and gets no manifest; one that changes
+  the prompt, scoring, task limits or tools gets its own. A `*_legacy_agent`
+  config gets no new manifest. A preset's agent is added to a declared
+  `allowed_agents` only with a representative rollout that shows the pairing
+  works, as the
+  [Terminal Bench 2.1 note](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#swap-the-agent-or-the-benchmark)
+  describes; until then the preset runs with `--allow-unsupported-pairing`.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
   presence and drift coverage against the dataset's owner, which is not

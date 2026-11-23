@@ -12,6 +12,7 @@ from nemo_gym.config.config_types import ConfigError, Domain
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     IntegrationProfile,
+    IntendedUse,
     ManifestError,
     dump_manifest,
     load_manifest,
@@ -515,3 +516,245 @@ def test_an_environment_without_a_target_needs_its_datasets(backend: str) -> Non
     else:
         with pytest.raises(ValidationError, match="datasets"):
             EnvironmentManifest.model_validate(raw)
+
+
+CATALOG_FIELDS = (
+    "maintainers",
+    "intended_use",
+    "capabilities",
+    "domains",
+    "overlaps_with",
+    "primary_metric",
+    "requirements",
+)
+
+
+def test_catalog_fields_are_unknown_by_default_and_left_out_of_dumps() -> None:
+    manifest = EnvironmentManifest.model_validate(_manifest())
+
+    assert all(getattr(manifest, field) is None for field in CATALOG_FIELDS)
+    dumped = yaml.safe_load(dump_manifest(manifest))
+    assert not set(CATALOG_FIELDS) & set(dumped)
+
+
+def test_catalog_fields_round_trip() -> None:
+    raw = _manifest(kind="benchmark")
+    raw.update(
+        maintainers=["alice-nv"],
+        intended_use=["evaluation", "training"],
+        capabilities=["coding/code_generation", "reasoning"],
+        domains=["finance", "law"],
+        overlaps_with=["gpqa"],
+        primary_metric="pass@1",
+        requirements={"gpu": False, "network": "allowlist"},
+    )
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.intended_use == [IntendedUse.EVALUATION, IntendedUse.TRAINING]
+    assert manifest.capabilities == ["coding/code_generation", "reasoning"]
+    # The main domain stays first.
+    assert manifest.domains == ["finance", "law"]
+    assert manifest.requirements is not None and manifest.requirements.network == "allowlist"
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize(
+    ("written", "stored"),
+    [("true", True), ("false", False), ("yes", True), ("no", False), ("unknown", "unknown")],
+)
+def test_gpu_takes_a_boolean_or_an_explicit_unknown(written: str, stored: object) -> None:
+    # YAML reads a bare `yes` or `no` as a boolean; "unknown" says the value hasn't been established.
+    raw = _manifest() | yaml.safe_load(f"requirements: {{gpu: {written}}}\n")
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.requirements is not None
+    assert manifest.requirements.gpu == stored
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize("gpu", [1, 0, "false", "true"])
+def test_gpu_takes_no_number_or_string_but_unknown(gpu: object) -> None:
+    # Gym and the JSON Schema accept the same values, so a manifest that loads in Gym passes a schema-based editor.
+    raw = _manifest() | {"requirements": {"gpu": gpu}}
+
+    with pytest.raises(ValidationError, match="gpu"):
+        EnvironmentManifest.model_validate(raw)
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize("login", ["alice-nv", "mona-cat_octo", "octo_admin"])
+def test_maintainers_take_github_logins_including_managed_users(login: str) -> None:
+    # GitHub appends an underscore and the enterprise's 3- to 8-character shortcode to a managed user's login.
+    raw = _manifest() | {"maintainers": [login]}
+
+    assert EnvironmentManifest.model_validate(raw).maintainers == [login]
+    assert not _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    "login",
+    [
+        "_x",
+        "mona-cat_octo_octo",
+        "mona-cat_",
+        "mona-cat_ab",
+        # A managed login is at most 39 characters with its suffix too.
+        "a" * 35 + "_octo",
+    ],
+)
+def test_maintainers_reject_what_is_not_a_github_login(login: str) -> None:
+    raw = _manifest() | {"maintainers": [login]}
+
+    with pytest.raises(ValidationError, match="maintainers"):
+        EnvironmentManifest.model_validate(raw)
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize("level", ["no-network", "allowlist", "public", "unknown"])
+def test_network_takes_a_harbor_network_mode_or_unknown(level: str) -> None:
+    raw = _manifest() | {"requirements": {"network": level}}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.requirements is not None and manifest.requirements.network == level
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("maintainers", ["alice", "alice"]),
+        ("maintainers", ["Alice Smith"]),
+        ("maintainers", []),
+        ("intended_use", ["serving"]),
+        ("intended_use", ["training", "training"]),
+        ("capabilities", ["reasoning", "reasoning"]),
+        # One value is still a list; only `unknown` stands alone.
+        ("capabilities", "reasoning"),
+        ("domains", ["finance", "finance"]),
+        ("domains", "finance"),
+        ("domains", "Unknown"),
+        ("overlaps_with", ["gpqa", "gpqa"]),
+        ("requirements", {"gpu": True, "vram_gb": 80}),
+        ("requirements", {"network": "sometimes"}),
+        # Network access is a level, not a yes or no, and `internet` is not a field.
+        ("requirements", {"network": True}),
+        ("requirements", {"internet": True}),
+    ],
+)
+def test_catalog_fields_reject_invalid_values(field: str, value: object) -> None:
+    raw = _manifest() | {field: value}
+
+    with pytest.raises(ValidationError):
+        EnvironmentManifest.model_validate(raw)
+
+
+def _schema_errors(raw: dict) -> list[str]:
+    return [error.message for error in Draft202012Validator(manifest_json_schema()).iter_errors(raw)]
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        ["reasoning"],
+        ["coding/code_generation"],
+        ["tool_and_computer_use/mcp_tool_use", "coding"],
+        # None applies, for example a speed benchmark that tests no model skill.
+        [],
+        "unknown",
+    ],
+)
+def test_capabilities_are_a_list_of_capabilities_or_specializations_or_unknown(capabilities: object) -> None:
+    raw = _manifest() | {"capabilities": capabilities}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.capabilities == capabilities
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("capability", "message"),
+    [
+        ("codng", "'codng' is not in the capability taxonomy .* Did you mean `coding`\\?"),
+        ("codng/code_generation", "Did you mean `coding/code_generation`\\?"),
+        # A specialization is only valid under its own capability.
+        ("reasoning/code_generation", "'code_generation' is not a specialization of 'reasoning'.* causal_reasoning"),
+        ("coding/code_gen", "Its specializations are: code_understanding, code_generation, code_editing"),
+        ("coding/code_generation/python", "not a specialization of 'coding'"),
+    ],
+)
+def test_an_unknown_capability_is_rejected_with_the_values_it_could_be(capability: str, message: str) -> None:
+    raw = _manifest() | {"capabilities": ["reasoning", capability]}
+
+    with pytest.raises(ValidationError, match=message) as error:
+        EnvironmentManifest.model_validate(raw)
+    # One error for the field, not one per branch of `list | unknown`.
+    assert [issue["loc"] for issue in error.value.errors()] == [("capabilities",)]
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize("domains", [["finance"], ["medicine", "law"], ["general"], ["other"], [], "unknown"])
+def test_domains_are_a_list_from_the_domain_list_or_unknown(domains: object) -> None:
+    raw = _manifest() | {"domains": domains}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.domains == domains
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("domain", "message"),
+    [
+        ("financ", "'financ' is not in the domain list .* Did you mean `finance`\\?"),
+        # Gym's own `domain` categories are not in the domain list.
+        ("coding", "'coding' is not in the domain list"),
+    ],
+)
+def test_an_unknown_domain_is_rejected_with_a_suggestion(domain: str, message: str) -> None:
+    raw = _manifest() | {"domains": ["finance", domain]}
+
+    with pytest.raises(ValidationError, match=message) as error:
+        EnvironmentManifest.model_validate(raw)
+    assert [issue["loc"] for issue in error.value.errors()] == [("domains",)]
+    assert "capabilities_and_domains.yaml" in str(error.value)
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capabilities", ["unknown"]),
+        ("capabilities", ["coding", "unknown"]),
+        ("domains", ["unknown"]),
+        ("domains", ["general", "unknown"]),
+    ],
+)
+def test_unknown_is_the_whole_value_never_a_list_item(field: str, value: list[str]) -> None:
+    raw = _manifest() | {field: value}
+
+    with pytest.raises(ValidationError, match=f"as in `{field}: unknown`, not an item in a list") as error:
+        EnvironmentManifest.model_validate(raw)
+    assert [issue["loc"] for issue in error.value.errors()] == [(field,)]
+    assert _schema_errors(raw)
+
+
+def test_the_schema_lists_exactly_the_values_validation_accepts() -> None:
+    properties = manifest_json_schema()["properties"]
+    capabilities = properties["capabilities"]["anyOf"][0]["items"]["enum"]
+    domains = properties["domains"]["anyOf"][0]["items"]["enum"]
+    raw = _manifest() | {"capabilities": capabilities, "domains": domains}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.capabilities == capabilities and manifest.domains == domains
+    assert {"coding", "coding/code_generation", "safety/agentic_action_safety"} <= set(capabilities)
+    # `domains: unknown` is how a manifest says it does not know, so the list has no `unknown` domain.
+    assert {"general", "other"} <= set(domains) and "unknown" not in domains
