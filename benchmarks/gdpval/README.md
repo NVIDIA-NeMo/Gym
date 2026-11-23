@@ -493,6 +493,19 @@ gym eval run \
   the calls by the tool name alone, such as `finish`. Codex keeps about 12 KB of each tool result, so the model sees
   only the start and end of a long `fetch_web_page` result.
 - `extra_body` pins the Stirrup agent's temperature and top_p and limits each model call to 32,768 output tokens.
+- To run Codex with `--model-type vllm_model`, replace **both** `openai_model` overrides at the end of the command
+  above. For a model that reads images, use these two lines to send the image in the tool message and keep the same
+  sampling settings and output limit.
+
+  ```bash
+      ++policy_model.responses_api_models.vllm_model.inline_tool_output_images=true \
+      '++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature: 1.0, top_p: 0.95, max_tokens: 32768}'
+  ```
+
+  For a text-only model, use `++policy_model.responses_api_models.vllm_model.drop_unrepresentable_request_fields=true`
+  as the first override to send a text placeholder. With both image settings off, the Responses-to-Chat conversion
+  rejects the image when Codex uses `view_image` to inspect a chart. The episode fails with a retryable
+  `environment_server_failed` and skips grading.
 - Codex checks `model_auto_compact_token_limit` after each reply that calls a tool, so the context can pass it by
   about a reply and its tool output before Codex compacts, and the compaction call reserves 32,768 tokens for its own
   reply. So keep the limit at about the window minus twice the output limit or lower: `codex.yaml` uses 196,608 for
@@ -563,6 +576,18 @@ Replace `opencode` with `openclaw` for OpenClaw.
   after about 300 seconds, Bun's default `fetch` timeout, so a slower `fetch_web_page` fails at about 300 s.
 - Change a harness setting with `++gdpval_opencode_agent.responses_api_agents.opencode_agent.<key>=<value>` or
   `++gdpval_openclaw_agent.responses_api_agents.openclaw_agent.<key>=<value>`.
+
+`benchmarks/gdpval/nooa.yaml` runs [NOOA](../../responses_api_agents/nooa_agent/README.md) in the task sandbox the
+resources server lends it. Follow the [NOOA GDPval tutorial](../../fern/versions/latest/pages/evaluation-tutorials/nooa-gdpval.mdx)
+to configure the policy model, prepare the data, and run the benchmark.
+NOOA calls the task tools as methods in its Python cell, such as `await self.finish(reason=..., paths=[...])`, through
+the resources server's HTTP routes.
+
+- NOOA's own task instruction ends a run with `return_result(TaskResult(...))`, which submits no files. The rows
+  therefore use `prompts/nooa.yaml`: `prompts/harness-neutral.yaml` plus one sentence that names `self.finish` and says
+  to call it before `return_result`. A run that ends with `return_result` alone is judged as an empty submission.
+- As for the other harnesses, the prompt and the harness differ from the certified Stirrup setup, so these are not
+  AA v2 scores.
 
 `benchmarks/gdpval/openhands.yaml` runs [OpenHands](../../responses_api_agents/openhands_agent/README.md) (the
 OpenHands Software Agent SDK) the same way:

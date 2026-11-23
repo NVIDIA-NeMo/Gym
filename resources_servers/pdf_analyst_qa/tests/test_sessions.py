@@ -144,7 +144,7 @@ async def test_seed_retries_reuse_one_sandbox_and_close_without_cookie(server):
     close = ResourcesCloseSessionRequest(resources_session_id="session-1", episode_id=seed().episode_id)
     await resource.close_resources_session(close)
     await resource.close_resources_session(close)
-    sandboxes[0].stop.assert_awaited_once()
+    sandboxes[0].stop.assert_awaited_once_with(timeout_s=resource.config.cleanup_timeout_s)
     with pytest.raises(Exception):
         await resource.seed_session(request(), seed())
 

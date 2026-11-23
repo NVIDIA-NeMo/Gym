@@ -73,6 +73,8 @@ def build_collateral(rollouts_path: str, output_dir: Path) -> dict:
             if not line.strip():
                 continue
             rollout = json.loads(line)
+            if rollout.get("mask_sample") or rollout.get("evaluation_completed") is False:
+                raise ValueError("CVDP reports require measured rollouts; input contains an inconclusive verification")
 
             task_id = rollout.get("task_id")
             if not task_id:

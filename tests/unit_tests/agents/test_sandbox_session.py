@@ -23,7 +23,7 @@ from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failu
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.core.failure_records import SandboxFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent
-from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
 from nemo_gym.sandbox.providers import SupportsSandboxIndependentUploads
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
@@ -98,14 +98,28 @@ async def test_completed_execution_captures_once_before_release(session, owned):
     assert session.closed
     if owned:
         session.sandbox.stop.assert_awaited_once()
+        # The close's own limit reaches the sandbox's stop, which is otherwise bounded only by its default.
+        assert 0 < session.sandbox.stop.await_args.kwargs["timeout_s"] <= 1
         session.sandbox.disconnect.assert_not_awaited()
         assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     else:
         session.sandbox.stop.assert_not_awaited()
         session.sandbox.disconnect.assert_awaited_once()
+        assert 0 < session.sandbox.disconnect.await_args.kwargs["timeout_s"] <= 1
         assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     with pytest.raises(RuntimeError, match="closing or already activated"):
         await execute(session)
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_release_receives_a_close_limit_longer_than_the_stop_default(session, owned):
+    # A caller that allows longer than STOP_TIMEOUT_S gets that limit on either release, not the 120 s default.
+    session.owns_sandbox = owned
+    await execute(session)
+    await session.close(timeout=300)
+    release = session.sandbox.stop if owned else session.sandbox.disconnect
+    release.assert_awaited_once()
+    assert release.await_args.kwargs["timeout_s"] > STOP_TIMEOUT_S
 
 
 @pytest.mark.parametrize("owned", [False, True])
@@ -134,8 +148,8 @@ async def test_interruption_captures_before_transport_cancellation_and_release(s
         return "partial transcript"
 
     session.sandbox.exec.side_effect = provider_exec
-    session.sandbox.stop.side_effect = lambda: events.append("stop_sandbox")
-    session.sandbox.disconnect.side_effect = lambda: events.append("disconnect")
+    session.sandbox.stop.side_effect = lambda **_: events.append("stop_sandbox")
+    session.sandbox.disconnect.side_effect = lambda **_: events.append("disconnect")
     collector = AsyncMock(side_effect=collect)
     running = asyncio.create_task(execute(session, collect=collector))
     await asyncio.wait_for(launched.wait(), 2)
@@ -613,7 +627,7 @@ async def test_close_during_supervisor_upload_joins_staging_before_release(sessi
 
     session.sandbox.upload.side_effect = upload
     release = session.sandbox.stop if owned else session.sandbox.disconnect
-    release.side_effect = lambda: events.append("release")
+    release.side_effect = lambda **_: events.append("release")
     collector = AsyncMock()
     running = asyncio.create_task(execute(session, collect=collector))
     await asyncio.wait_for(uploading.wait(), 2)
@@ -646,7 +660,7 @@ async def test_supervisor_upload_failure_preserves_error_and_allows_close(sessio
 async def test_cancelled_close_stays_closing_and_can_retry(session):
     release_started = asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         release_started.set()
         await asyncio.Future()
 
@@ -698,6 +712,44 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.cleanup == RECEIPT
     await session.close(timeout=1)
     assert session.closed
+
+
+@pytest.mark.parametrize("provider_proves", [True, False])
+async def test_supervisor_without_receipt_after_normal_exit(session, receipt_reader, provider_proves):
+    # Seen in a real run: the launch exec returned, but cleanup.json never appeared.
+    receipt_reader.side_effect = FileNotFoundError("cleanup.json")
+    killed = SandboxExecResult(stdout="", stderr="", return_code=137)
+    claimed = SandboxExecResult(stdout="launch\n", stderr="", return_code=0)
+
+    def exec_(command, **kwargs):
+        if "--receipt" in command:
+            return killed
+        return claimed if command.startswith("readlink ") else OK
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.exec_processes_terminated = AsyncMock(return_value=provider_proves)
+    if provider_proves:
+        assert await execute(session) == "transcript"
+        # The receipt itself says the supervisor's own one is missing, so no consumer reads it as a clean stop.
+        assert session.cleanup == {
+            "cleanup_confirmed": True,
+            "return_code": None,
+            "error": None,
+            "timed_out": False,
+            "receipt_missing": True,
+        }
+        assert session.cleanup_receipt_missing and session.launch_return_code == 137
+        # Nothing left to stop: only the launch and the claim check ran.
+        assert session.sandbox.exec.await_count == 2
+        await session.close(timeout=1)
+        assert session.closed
+    else:
+        with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+            await execute(session)
+        assert session.cleanup is None and not session.cleanup_receipt_missing
+        with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+            await session.close(timeout=1)
+        assert not session.closed
 
 
 async def test_expire_while_running_requests_the_timeout_path_once(session, receipt_reader):
@@ -1014,6 +1066,8 @@ async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, 
     "name,options,independent",
     [
         ("local", {}, True),
+        # Uploads are host-side copies in a worker thread; only commands take the exec semaphore.
+        ("bwrap", {"bwrap_path": "/bin/sh", "ro_binds": ["/usr"]}, True),
         ("opensandbox", {"operations": {"background_exec": True}}, True),
         # A running foreground command holds one of the shared HTTP pool's connections.
         ("opensandbox", {"operations": {"background_exec": False}}, False),

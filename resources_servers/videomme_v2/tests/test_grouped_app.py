@@ -11,9 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 from resources_servers.videomme_v2.app import (
     CohortManifest,
     VideoMMEV2ResourcesServer,
@@ -147,6 +146,26 @@ async def test_result_metadata_must_match_frozen_group_and_level(tmp_path) -> No
         row["verifier_metadata"].update(updates)
         with pytest.raises(ValueError, match=message):
             await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[row]))
+
+
+async def test_questions_of_one_group_keep_their_own_levels(tmp_path) -> None:
+    value = group("mixed", 3, group_type="logic", group_structure="[1,2,3,4]")
+    levels = dict(zip(value.task_ids, (1, 1, 2, 3)))
+    server = make_server(
+        tmp_path, task_ids=list(value.task_ids), groups=[value.model_dump(mode="json")], task_levels=levels
+    )
+    rows = []
+    for index, correct in enumerate((True, False, True, True)):
+        payload = request(server, value, index, correct).model_dump()
+        payload["verifier_metadata"]["level"] = levels[value.task_ids[index]]
+        row = (await server.verify(VideoMMEV2VerifyRequest.model_validate(payload))).model_dump()
+        rows.append({**row, TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0})
+    with pytest.raises(ValueError, match="level"):
+        await server.verify(request(server, value, 0))
+    metrics = (await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).key_metrics
+    assert [metrics[f"Video_MME_v2/L{level}/raw_acc"] for level in (1, 2, 3)] == [50, 100, 100]
+    assert metrics["Video_MME_v2/L3/nonlinear_score"] == 6.25
+    assert metrics["Video_MME_v2/L1/nonlinear_available"] is False
 
 
 async def test_actual_http_aggregation_exposes_both_metrics(tmp_path) -> None:

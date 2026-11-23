@@ -46,10 +46,17 @@ if TYPE_CHECKING:
         GenerationCutReceipt,
     )
     from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
+    from nemo_gym.server_runtime._checkpoint.sandbox import (
+        SandboxCheckpointConfig,
+        SandboxCheckpointError,
+        SandboxSessionCheckpointer,
+        checkpoint_state_dir,
+    )
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
         seed_rebinds_tool_accesses,
+        seed_resources_session_id,
         seed_restarts,
         seed_verify_step_type,
     )
@@ -137,6 +144,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
+        END_ACTIVATION_HEADER,
         TOOL_CALL_ID_HEADER,
         TOOL_ERROR_HEADER,
         DirectHTTPToolAccess,
@@ -219,6 +227,9 @@ _PUBLIC_API = {
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
     "SHUTDOWN_STOP_CONCURRENCY": "sandbox_lending",
     "STOP_TIMEOUT_S": "sandbox_lending",
+    "SandboxCheckpointConfig": "_checkpoint.sandbox",
+    "SandboxCheckpointError": "_checkpoint.sandbox",
+    "SandboxSessionCheckpointer": "_checkpoint.sandbox",
     "ServedTools": "base_environment_server",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
@@ -231,6 +242,7 @@ _PUBLIC_API = {
     "StaleAttemptError": "_checkpoint.errors",
     "StepType": "_checkpoint.steps",
     "TOKEN_HEADER": "mcp_auto_exposure",
+    "END_ACTIVATION_HEADER": "tool_access",
     "TOOL_CALL_ID_HEADER": "tool_access",
     "TOOL_ERROR_HEADER": "tool_access",
     "ToolAccess": "tool_access",
@@ -240,6 +252,7 @@ _PUBLIC_API = {
     "ToolSpec": "episode_tools",
     "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
+    "checkpoint_state_dir": "_checkpoint.sandbox",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
     "episode_tool": "episode_tools",
@@ -261,6 +274,7 @@ _PUBLIC_API = {
     "require_rollout": "_checkpoint.agent",
     "seed_rebinds_tool_accesses": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
+    "seed_resources_session_id": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
     "write_participant_state": "_checkpoint.store",

@@ -112,9 +112,9 @@ def stopped(monkeypatch: pytest.MonkeyPatch) -> list[AsyncSandbox]:
     stopped: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stopped.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     return stopped
@@ -549,11 +549,11 @@ def test_a_close_whose_stop_fails_keeps_the_sandbox_for_a_retried_close(workdir,
     attempts: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         attempts.append(self)
         if len(attempts) == 1:
             raise RuntimeError("the provider refused the stop")
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
 
@@ -2280,16 +2280,22 @@ async def _seed_episode(server: SearchResourcesServer) -> None:
 
 
 def _record_finished_stops(monkeypatch: pytest.MonkeyPatch) -> list[AsyncSandbox]:
-    """Make every stop await once before it stops its sandbox, as a provider's request does, and record each sandbox
-    whose stop finished. A cancellation delivered at that await cuts short a stop that is not shielded."""
+    """Make every provider close await once, as a provider's request does, and record each sandbox whose stop finished.
+    A cancellation delivered at that await cuts short a stop that is not shielded."""
     finished: list[AsyncSandbox] = []
+    real_close = LocalProvider.close
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def close(self: LocalProvider, handle: Any) -> None:
         await anyio.sleep(0)
-        await real_stop(self)
+        await real_close(self, handle)
+
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
+        # No await of its own before the real stop, so the cancellation meets the stop's own shield.
+        await real_stop(self, **kwargs)
         finished.append(self)
 
+    monkeypatch.setattr(LocalProvider, "close", close)
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     return finished
 
@@ -2388,16 +2394,16 @@ async def test_an_agent_run_stop_finishes_when_its_release_is_cancelled(workdir,
 
 
 async def test_an_agent_run_stop_that_hangs_times_out_and_keeps_its_sandbox(workdir, monkeypatch) -> None:
-    """A provider stop that never returns would hold a re-seed, a verify or the shutdown forever. It gives up after
-    STOP_TIMEOUT_S, the bound LentSandboxes applies, and the server keeps the sandbox for a later stop."""
+    """A provider stop that never returns would hold a re-seed, a verify or the shutdown forever. AsyncSandbox.stop
+    gives up after its time limit with TimeoutError, as the provider's close does here, and the server keeps the
+    sandbox for a later stop."""
     server = _server(None)
     sandbox = await _seed_agent_run(server)
-    monkeypatch.setattr("resources_servers.opencode_search.app.STOP_TIMEOUT_S", 0.05)
 
-    async def stop(self: AsyncSandbox) -> None:
-        await asyncio.Event().wait()
+    async def close(self: LocalProvider, handle: Any) -> None:
+        raise TimeoutError
 
-    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(LocalProvider, "close", close)
 
     release = asyncio.create_task(server.release_session_state("run"))
     done, _ = await asyncio.wait({release}, timeout=5)
@@ -2421,11 +2427,11 @@ def test_a_verify_whose_stop_fails_keeps_its_grade_and_the_stop_is_retried(
     attempts: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         attempts.append(self)
         if len(attempts) <= 2:
             raise RuntimeError("the provider refused the stop")
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     with TestClient(app, raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
@@ -2459,10 +2465,10 @@ async def test_a_verify_cancelled_while_it_stops_its_sandbox_still_stops_it(work
     finished: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stopping.set()
         await cancelled.wait()
-        await real_stop(self)
+        await real_stop(self, **kwargs)
         finished.append(self)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
@@ -2565,11 +2571,11 @@ def test_a_stop_that_fails_at_shutdown_is_logged_and_the_other_sandboxes_still_s
     attempts: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         attempts.append(self)
         if self is started[0][0]:
             raise RuntimeError("the provider refused the stop: the sandbox is gone")
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     with caplog.at_level("ERROR"), TestClient(server.setup_webserver()) as client:
         for _ in range(2):
