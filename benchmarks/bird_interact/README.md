@@ -116,14 +116,15 @@ grades it as it grades the query of any agent.
 2. Prepare and run:
 
    ```bash
-   gym eval prepare --config benchmarks/bird_interact/auto_ontology_agent.yaml
+   gym eval prepare --config benchmarks/bird_interact/auto_ontology_agent.yaml ++auto_ontology_api_key=<embedding key>
    gym eval run --config benchmarks/bird_interact/auto_ontology_agent.yaml --model-type vllm_model --split benchmark \
      --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
      --output results/bird_interact_lite_c_auto_ontology.jsonl ++auto_ontology_api_key=<embedding key>
    ```
 
    `auto_ontology_api_key` is the key of the embedding endpoint that the catalog was built with. Retrieval calls it
-   for each search.
+   for each search. The agent's config requires it, so `prepare` needs it too, although `prepare` does not call the
+   endpoint.
 
 Auto Ontology's interactive pipeline, the one auto-ontology-eval runs on BIRD-Interact, runs in place of its ReAct
 agent with `auto_ontology_interactive.yaml` (Lite) and `full_auto_ontology_interactive.yaml` (Full) in c-Interact, and

@@ -5,7 +5,7 @@
 # the images built for it. See README.md, "Auto Ontology".
 #
 #   benchmarks/bird_interact/auto_ontology/build_image.sh full <models env>
-#   gym eval prepare --config benchmarks/bird_interact/full_auto_ontology_agent.yaml
+#   gym eval prepare --config benchmarks/bird_interact/full_auto_ontology_agent.yaml ++auto_ontology_api_key=<key>
 #   gym eval run --config benchmarks/bird_interact/full_auto_ontology_agent.yaml --model-type vllm_model \
 #     --split benchmark --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
 #     --output results/bird_interact_full_c_auto_ontology.jsonl ++auto_ontology_api_key=<key>
