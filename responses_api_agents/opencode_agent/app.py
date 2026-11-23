@@ -463,6 +463,15 @@ class _StoppedLaunch:
             setattr(state, name, value)
 
 
+def _ended_by_itself(receipt: CleanupReceipt) -> bool:
+    """Whether a restored launch's receipt says OpenCode ended on its own.
+
+    Not when a stop or an abandon ended it, or when its held pause expired before the take-over: the supervisor then
+    ended OpenCode as at its time limit, and the conversation is not finished.
+    """
+    return not receipt.get("stopped", False) and not receipt.get("pause_expired", False)
+
+
 class _PauseClock:
     """An activation's park handle that adds up the time spent parked, so a relaunch keeps the unspent budget."""
 
@@ -1610,7 +1619,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 # The seed is retried, and the retry must decide again: a session left re-bound would skip the
                 # check and relaunch beside the launch the restore brought back.
                 state.session = None
-                state.adoption = None
+                state.adoption, state.adoption_ended = None, False
                 try:
                     await sandbox.disconnect()
                 except Exception:
@@ -1624,9 +1633,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
         Only a launch whose supervisor held a confirmed pause at the checkpoint can still run. It is taken over
         when its supervisor, its pause and its model relay all survived the restore, and also when it had already
-        ended (its cleanup receipt is there): the take-over then just collects what it left. Otherwise it is
-        ended, without letting it run again, and the next launch reprompts the saved conversation as after a
-        files-only restore.
+        ended (its cleanup receipt is there): the take-over then just collects what it left, without the relay.
+        Otherwise it is ended, without letting it run again, and the next launch reprompts the saved conversation as
+        after a files-only restore. A check that cannot run twice fails the re-bind, so the retried seed checks again.
         """
         pause_seq, identity = saved.get("pause_seq"), saved.get("supervisor_identity")
         if pause_seq is None or identity is None:
@@ -1655,8 +1664,21 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 verdict.detail,
             )
             verdict = await check()
+        if isinstance(verdict, NotResumable) and verdict.reason == "check_failed":
+            # Still nothing known about the launch: ending it could end one that is resumable.
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.setup",
+                stage="seed",
+                failure_reason=(
+                    f"OpenCode could not check the restored launch of session {state.request.agent_session_id}: "
+                    f"{verdict.detail}"
+                ),
+            )
         if isinstance(verdict, RestoredLaunch) or verdict.reason == "launch_finished":
             state.adoption = RestoredLaunch(pause_seq=pause_seq, identity=identity)
+            state.adoption_ended = isinstance(verdict, NotResumable)
             return
         LOG.log(
             logging.INFO if verdict.reason in _EXPECTED_RESTORE_FALLBACKS else logging.WARNING,
@@ -2292,6 +2314,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 else None,
             )
         adoption, state.adoption = state.adoption, None
+        state.adoption_ended = False
         if adoption is not None:
             # Never taken over: end it, so nothing of it runs on in the sandbox handed back to its owner.
             await self._abandon_restored_launch(state, adoption.identity, reason="closed")
@@ -2750,15 +2773,21 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             interrupted = 0
             adoption, state.adoption = state.adoption, None
             if adoption is not None:
+                launch_had_ended, state.adoption_ended = state.adoption_ended, False
                 launch = state.launch_count
                 try:
                     outcome = await self._adopt_restored_launch(
-                        state, adoption, clock, timeout=timeout, close_timeout=close_timeout
+                        state,
+                        adoption,
+                        clock,
+                        launch_had_ended=launch_had_ended,
+                        timeout=timeout,
+                        close_timeout=close_timeout,
                     )
                 except Exception as error:
                     receipt = state.require_session().cleanup
                     ended = receipt is not None and receipt["cleanup_confirmed"]
-                    if ended and not receipt.get("stopped", False):
+                    if ended and _ended_by_itself(receipt):
                         # Taken over, and it ended by itself: its failure is the activation's, as after `execute`.
                         raise
                     LOG.warning(
@@ -2774,9 +2803,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 # Taken over where it was: it is the launch the checkpoint held, reprompted or not as it was then.
                 reprompted = state.reprompted_conversation
                 receipt = state.require_session().cleanup
-                if isinstance(outcome, LaunchFinished) and receipt is not None and receipt.get("stopped", False):
-                    # Ended by a stop or an earlier abandon, not by itself: relaunch, as after a files-only restore.
+                if isinstance(outcome, LaunchFinished) and receipt is not None and not _ended_by_itself(receipt):
+                    # Ended by a stop, an earlier abandon or a held pause that expired before the take-over, not by
+                    # itself: relaunch, as after a files-only restore.
                     outcome = LaunchStopped(receipt=receipt)
+                elif not launch_had_ended:
+                    # The take-over continued the launch: only now has it resumed in place.
+                    LOG.warning(
+                        "OpenCode resumed in place: session %s, launch %d, pause %d, relay generation %d",
+                        state.request.agent_session_id,
+                        launch,
+                        adoption.pause_seq,
+                        state.relay_gen,
+                    )
             else:
                 # What the stopped launch produced, kept until its relaunch has started its harness: preparing the
                 # relaunch clears it, and the reply is built from it if the budget runs out before then.
@@ -2862,24 +2901,34 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         adoption: RestoredLaunch,
         clock: _PauseClock,
         *,
+        launch_had_ended: bool,
         timeout: float,
         close_timeout: float,
     ) -> LaunchFinished[str] | LaunchStopped:
         """Point the restored launch's relay at this attempt's model URL, then continue the launch and finish it.
 
         The relay is re-pointed before the continue: it holds the launch's model calls until then, and re-sends the
-        one the checkpoint cut, byte for byte, under the replacement attempt.
+        one the checkpoint cut, byte for byte, under the replacement attempt. A launch that had ended calls no
+        model, so its relay is left alone, and the take-over only collects its receipt and what it left.
         """
         launch = state.launch_count
-        upstream = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
-        await state.point_relay(upstream)
-        LOG.warning(
-            "OpenCode resumed in place: session %s, launch %d, pause %d, relay generation %d",
-            state.request.agent_session_id,
-            launch,
-            adoption.pause_seq,
-            state.relay_gen,
-        )
+        if launch_had_ended:
+            LOG.info(
+                "OpenCode collecting a restored launch that had ended: session %s, launch %d, pause %d",
+                state.request.agent_session_id,
+                launch,
+                adoption.pause_seq,
+            )
+        else:
+            upstream = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+            await state.point_relay(upstream)
+            LOG.info(
+                "OpenCode taking over a restored launch: session %s, launch %d, pause %d, relay generation %d",
+                state.request.agent_session_id,
+                launch,
+                adoption.pause_seq,
+                state.relay_gen,
+            )
         return await run_with_checkpoint_pauses(
             state.require_session(),
             clock,

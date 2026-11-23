@@ -264,6 +264,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     keeps_processes: bool = False
     relay_gen: int = 0
     adoption: RestoredLaunch | None = None
+    # The restored launch had ended before the re-bind checked it: its take-over only collects what it left.
+    adoption_ended: bool = False
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
     )

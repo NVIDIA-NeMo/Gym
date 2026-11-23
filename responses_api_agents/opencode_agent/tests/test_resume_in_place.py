@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.agents import AgentSeedSessionRequest, LaunchFinished, NotResumable, RestoredLaunch, SandboxSession
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxCapabilities
 from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent import runtime as opencode_runtime
@@ -423,6 +423,8 @@ async def test_a_restored_launch_is_taken_over_or_ended(
 
     assert checks[0]["pause_seq"] == 3 and checks[0]["relay_status_path"].endswith("/launch-1/relay-status.json")
     assert (state.adoption == RestoredLaunch(pause_seq=3, identity="10.20")) is adopted
+    # A launch that had ended is only collected: its take-over leaves the relay alone.
+    assert state.adoption_ended is (adopted and isinstance(verdict, NotResumable))
     assert ended == (["10.20"] if abandoned else [])
 
 
@@ -483,6 +485,27 @@ async def test_a_restored_launch_check_that_could_not_run_is_made_once_more(
 
     assert verdicts == [] and state.adoption == RestoredLaunch(pause_seq=3, identity="10.20")
     assert "restored-launch check failed for session s (exit 255); checking once more" in caplog.text
+
+
+async def test_a_restored_launch_check_that_cannot_run_twice_fails_the_re_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    checks: list[str] = []
+
+    async def check(sandbox: Any, session_dir: str, **kwargs: Any) -> Any:
+        checks.append(session_dir)
+        return NotResumable("check_failed", "exit 255")
+
+    monkeypatch.setattr(opencode_app, "check_restored", check)
+    monkeypatch.setattr(opencode_app, "abandon_launch", MagicMock(side_effect=AssertionError("not abandoned")))
+
+    with pytest.raises(NgFailureEvent, match="could not check the restored launch of session s: exit 255"):
+        await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+
+    # Nothing is known about the launch: it is neither taken over nor ended, and the retried seed checks again.
+    assert len(checks) == 2 and state.adoption is None and not state.adoption_ended
 
 
 async def test_a_restored_launch_that_cannot_be_ended_is_reported_and_not_taken_over(
@@ -603,19 +626,30 @@ async def test_a_take_over_that_fails_ends_the_restored_launch_before_its_relaun
     assert state.adoption is None and state.launch_count == 2
     [record] = state.launch_records
     assert record["launch"] == 2 and record["reprompted"] is True and "resumed_in_place" not in record
-    assert "reason adopt_failed" in caplog.text
+    assert "reason adopt_failed" in caplog.text and "resumed in place" not in caplog.text
 
 
 @pytest.mark.parametrize(
     "receipt, relaunched",
     [
         ({"stopped": True, "abandoned": True, "cleanup_confirmed": True, "return_code": None}, True),
+        # The held pause outlasted --max-pause before the take-over: the supervisor ended OpenCode at its limit.
+        (
+            {
+                "stopped": False,
+                "timed_out": True,
+                "pause_expired": True,
+                "cleanup_confirmed": True,
+                "return_code": 143,
+            },
+            True,
+        ),
         ({"stopped": False, "cleanup_confirmed": True, "return_code": 0}, False),
     ],
-    ids=["stopped", "ended_by_itself"],
+    ids=["stopped", "pause_expired", "ended_by_itself"],
 )
 async def test_a_launch_taken_over_after_it_was_stopped_is_relaunched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt: dict, relaunched: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, receipt: dict, relaunched: bool
 ) -> None:
     agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
     state = _session_state(agent, tmp_path, keeps_processes=True)
@@ -635,13 +669,17 @@ async def test_a_launch_taken_over_after_it_was_stopped_is_relaunched(
 
     monkeypatch.setattr(OpenCodeSandboxSession, "point_relay", point_relay)
     monkeypatch.setattr(OpenCodeSandboxSession, "adopt", adopt)
+    caplog.set_level(logging.WARNING)
 
     await agent._run_launches(
         state, MagicMock(), lambda: {"command": ["opencode", "run"]}, prompt="fix the bug", timeout=10, deadline=None
     )
 
-    # A stop or an abandon ended it, not OpenCode: its conversation is not finished, and a relaunch resumes it.
+    # A stop, an abandon or the pause's limit ended it, not OpenCode: its conversation is not finished, and a relaunch
+    # resumes it. Only a launch that ran on after the take-over resumed in place.
     assert events == (["prepare 2", "reprompt"] if relaunched else [])
+    resumed = "OpenCode resumed in place: session s, launch 1, pause 1, relay generation 1" in caplog.text
+    assert resumed is not relaunched
     outcomes = [
         (record["launch"], record.get("resumed_in_place", False), record["reprompted"], record["outcome"])
         for record in state.launch_records
@@ -684,6 +722,75 @@ async def test_a_take_over_of_a_launch_that_ended_by_itself_fails_the_activation
         )
 
     assert events == []
+
+
+async def test_a_failed_take_over_of_a_launch_whose_held_pause_expired_relaunches_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _session_state(agent, tmp_path, keeps_processes=True)
+    state.launch_count = 1
+    state.adoption = RestoredLaunch(pause_seq=1, identity="10.20")
+    events: list[str] = []
+    _relaunching(monkeypatch, events)
+
+    async def point_relay(self: OpenCodeSandboxSession, upstream: str) -> None:
+        pass
+
+    async def adopt(self: OpenCodeSandboxSession, **kwargs: Any) -> str:
+        self.session.launch_started = True
+        self.session.cleanup = {
+            "stopped": False,
+            "timed_out": True,
+            "pause_expired": True,
+            "cleanup_confirmed": True,
+            "return_code": 143,
+        }
+        raise RuntimeError("OpenCode exited with code 143")
+
+    monkeypatch.setattr(OpenCodeSandboxSession, "point_relay", point_relay)
+    monkeypatch.setattr(OpenCodeSandboxSession, "adopt", adopt)
+
+    await agent._run_launches(
+        state, MagicMock(), lambda: {"command": ["opencode", "run"]}, prompt="fix the bug", timeout=10, deadline=None
+    )
+
+    # The supervisor ended it at the pause's limit, not OpenCode: nothing is left to abandon, and a relaunch resumes it.
+    assert events == ["prepare 2", "reprompt"]
+
+
+async def test_a_restored_launch_that_had_ended_is_collected_without_pointing_its_relay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _session_state(agent, tmp_path, keeps_processes=True)
+    state.launch_count = 1
+    state.adoption = RestoredLaunch(pause_seq=1, identity="10.20")
+    state.adoption_ended = True
+    events: list[str] = []
+    _relaunching(monkeypatch, events)
+
+    async def point_relay(self: OpenCodeSandboxSession, upstream: str) -> None:
+        raise ConnectionError("502 Bad Gateway")
+
+    async def adopt(self: OpenCodeSandboxSession, **kwargs: Any) -> str:
+        self.session.launch_started = True
+        self.session.cleanup = {"stopped": False, "cleanup_confirmed": True, "return_code": 0}
+        return ""
+
+    monkeypatch.setattr(OpenCodeSandboxSession, "point_relay", point_relay)
+    monkeypatch.setattr(OpenCodeSandboxSession, "adopt", adopt)
+    caplog.set_level(logging.INFO)
+
+    await agent._run_launches(
+        state, MagicMock(), lambda: {"command": ["opencode", "run"]}, prompt="fix the bug", timeout=10, deadline=None
+    )
+
+    # Its result is collected as it was left: no relay upload that could fail, no abandon, no relaunch.
+    assert events == [] and not state.adoption_ended
+    assert [(record["launch"], record["outcome"]) for record in state.launch_records] == [(1, "finished")]
+    assert "collecting a restored launch that had ended: session s, launch 1, pause 1" in caplog.text
+    assert "resumed in place" not in caplog.text
 
 
 async def test_closing_a_session_whose_restored_launch_was_not_taken_over_ends_that_launch(

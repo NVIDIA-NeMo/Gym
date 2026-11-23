@@ -715,17 +715,19 @@ relaunched when it need not be:
 - **After a crash** the restored sandbox is still running the launch. The re-bind checks, in one command, that its
   supervisor, its held pause and its relay survived. If so, the activation points the relay at the replacement
   attempt's model URL, continues the pause and waits for the launch to finish: the relay re-sends the call the
-  checkpoint cut, byte for byte, and OpenCode sees only a slow call. A launch that had already ended is collected the
-  same way. Otherwise the launch is killed, nothing of it continuing, and relaunched as above.
+  checkpoint cut, byte for byte, and OpenCode sees only a slow call. A launch that had already ended is only collected,
+  and its relay is left alone; one that a stop ended, or whose held pause expired before the take-over, is relaunched.
+  If the check cannot run twice, the re-bind fails and its retry checks again. Otherwise the launch is killed, nothing
+  of it continuing, and relaunched as above.
 - **If the relay does not come up** OpenCode calls the model server directly, and a restore relaunches it; this is logged
   as a warning (`relay_unavailable`), since every image can run the relay.
 - **The wall clock** is the provider's to keep: OpenCode orders a conversation by message IDs it makes from the clock,
   so a clock that jumps while OpenCode runs can put a message out of order. On AgentENV set the provider's
   `snapshots.keep_guest_clock`, and a restored sandbox continues from the clock its snapshot was taken at.
 
-The agent logs `OpenCode resumed in place:`, `OpenCode cannot resume in place:` and `OpenCode abandoned a restored
-launch:` at WARNING, except that for a checkpoint taken before the launch's relay started (`relay_gone`) the last two
-are at INFO.
+The agent logs `OpenCode resumed in place:` once a take-over has continued the launch, and `OpenCode cannot resume
+in place:` and `OpenCode abandoned a restored launch:`, all at WARNING, except that for a checkpoint taken before the
+launch's relay started (`relay_gone`) the last two are at INFO.
 
 These sessions are restart-only, so their episodes start over after a crash: sandboxes the agent owns, multi-turn
 continuation sessions, sessions that continue an imported conversation (`session_import_path`), and OpenCode 2
