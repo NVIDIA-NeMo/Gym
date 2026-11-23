@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: opencode_multimodal_benchmarks/agentx
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: agent
+description: 605 non-generative image/video tasks scored with an independent reference-answer judge.
+modality: image and video
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+dataset_owner: opencode_multimodal_benchmarks
+resources_server: opencode_multimodal_benchmarks
+agent_server: opencode_agent
+datasets:
+- name: agentx
+  type: benchmark
+  jsonl_fpath: benchmarks/opencode_multimodal_benchmarks/data/agentx.jsonl
+  prepare_script: benchmarks/opencode_multimodal_benchmarks/agentx_prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: non_generative
+prompt_source: prepared

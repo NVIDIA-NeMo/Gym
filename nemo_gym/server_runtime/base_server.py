@@ -38,7 +38,7 @@ from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
-from pydantic import BaseModel, PositiveInt, model_validator
+from pydantic import BaseModel, PositiveInt, ValidationError, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
@@ -151,9 +151,29 @@ class BaseServer(BaseModel):
         server_config_dict = get_first_server_config_dict(global_config_dict, config_path_str)
 
         server_config_cls: Type[BaseRunServerInstanceConfig] = cls.model_fields["config"].annotation
-        server_config = server_config_cls.model_validate(
-            OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
-        )
+        try:
+            server_config = server_config_cls.model_validate(
+                OmegaConf.to_container(server_config_dict, resolve=True) | {"name": config_path_str}
+            )
+        except ValidationError as exc:
+            # Name the source setting when a required field interpolates an unset value.
+            unresolved = OmegaConf.to_container(server_config_dict, resolve=False)
+            missing = set()
+            for error in exc.errors():
+                if error.get("input") is None and error["loc"]:
+                    source = unresolved.get(error["loc"][0])
+                    if isinstance(source, str) and source.startswith("${") and source.endswith("}"):
+                        key = source[2:-1]
+                        if key in global_config_dict and global_config_dict[key] is None:
+                            missing.add(key)
+            if missing:
+                settings = ", ".join(sorted(missing))
+                overrides = " ".join(f"++{key}=<value>" for key in sorted(missing))
+                raise ValueError(
+                    f"Required settings for {config_path_str} are unset: {settings}. "
+                    f"Provide them in a config file or via CLI overrides: {overrides}"
+                ) from None
+            raise
 
         return server_config
 

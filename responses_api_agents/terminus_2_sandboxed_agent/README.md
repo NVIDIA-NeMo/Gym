@@ -20,10 +20,11 @@ the NeMo Gym resources server. It adapts the small Harbor environment interface
 that Terminus uses (`exec` and `is_dir`) to `AsyncSandbox`; task state therefore
 remains owned by the resources server.
 
-Terminus 2 drives only its terminal. An episode session whose seed carries a required tool grant, such as the
-MCP servers a Harbor task declares (the `harbor` environment server grants them as required), is
-refused with a terminal 422 that names the grants, instead of running the task without its tools. Use a harness that
-takes MCP tool grants, such as `codex_agent`, for those tasks.
+The agent drives only its tmux terminal. An episode session that is seeded with a required tool
+grant (an MCP or direct HTTP tool from the environment server) is refused with HTTP 422 at seed, so the
+episode fails once instead of running without the tool. Optional grants are ignored. The `harbor` environment
+server grants the MCP servers a Harbor task declares as required, so such a task is refused with a terminal 422
+that names the grants; use a harness that takes MCP tool grants, such as `codex_agent`, for those tasks.
 
 Before launching, complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
 for sandbox credentials, endpoint configuration, and resource limits.

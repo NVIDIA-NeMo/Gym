@@ -1,0 +1,42 @@
+# MM-Lifelong v1.1 (day_test, week_test, month_val: 1,023 questions about a recorded day, week and month), single
+# turn: one model call per question with the split's video as num_frames frames from the dataset's frame cache, graded
+# 0-5 against the question's frozen rubric by the dataset's grader (video_qa_rubric's reference_levels protocol,
+# grading.yaml). The dataset's overall score pools all 1,023 questions (mean/rubric_score); the mean of the three
+# split scores is a separate metric.
+# Data: prepare.py downloads the annotations at a pinned revision into mm_lifelong_v1_1_data_dir, which must hold the
+# dataset's frame cache (frames/), and writes one MP4 per split into mm_lifelong_v1_1_frames_dir. The model server
+# reads those MP4s at mm_lifelong_v1_1_frames_url_dir (vLLM: --allowed-local-media-path covering it and
+# --media-io-kwargs '{"video": {"num_frames": 256}}', so that it keeps every frame).
+config_paths:
+  - resources_servers/video_qa_rubric/configs/video_qa_rubric.yaml
+  - benchmarks/mm_lifelong_v1_1/grading.yaml
+
+mm_lifelong_v1_1_data_dir: null
+mm_lifelong_v1_1_num_frames: 256
+mm_lifelong_v1_1_frames_dir: ${mm_lifelong_v1_1_data_dir}/frames_${mm_lifelong_v1_1_num_frames}
+mm_lifelong_v1_1_frames_url_dir: ${mm_lifelong_v1_1_frames_dir}
+prepare_script_args:
+  data_dir: ${mm_lifelong_v1_1_data_dir}
+  frames_dir: ${mm_lifelong_v1_1_frames_dir}
+  frames_url_dir: ${mm_lifelong_v1_1_frames_url_dir}
+  num_frames: ${mm_lifelong_v1_1_num_frames}
+
+video_qa_rubric:
+  resources_servers:
+    video_qa_rubric:
+      reference_levels: ${mm_lifelong_v1_1_grading}
+      judge_chat_completion_create_params:
+        messages: []
+        n: 1
+
+video_qa_rubric_single_turn:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: mm_lifelong_v1_1
+        type: benchmark
+        jsonl_fpath: benchmarks/mm_lifelong_v1_1/data/mm_lifelong_v1_1_benchmark.jsonl
+        prepare_script: benchmarks/mm_lifelong_v1_1/prepare.py
+        # prepare.py reads the LMDB frame cache and writes the MP4s with libx264; a dev install of Gym lacks these.
+        prepare_dependencies: [av==19.0.2, lmdb==3.0.0, pillow==13.0.0]
+        num_repeats: 1

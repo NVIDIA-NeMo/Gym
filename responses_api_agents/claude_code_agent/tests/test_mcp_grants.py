@@ -459,7 +459,7 @@ def test_parsing_keeps_the_statuses_of_the_first_init_event():
 # The init-event check inside the sandbox, run with the shared bash runner as the sandbox runs it
 
 
-def staged_command(tmp_path: Path, code: str, required: list[str]) -> list[str]:
+def staged_command(tmp_path: Path, code: str, required: list[str], *, prompt: str | None = None) -> list[str]:
     async def upload(source, target):
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
@@ -481,6 +481,8 @@ def staged_command(tmp_path: Path, code: str, required: list[str]) -> list[str]:
         "required_mcp_servers": required,
         "skills_path": None,
     }
+    if prompt is not None:
+        payload["prompt"] = prompt
     return asyncio.run(state.stage_activation(payload)).argv
 
 
@@ -553,6 +555,16 @@ def test_the_check_lets_a_run_with_its_required_servers_finish(tmp_path, init):
     assert completed.returncode == 7, completed.stderr
     assert '{"type":"after_init"}' in (tmp_path / "events.jsonl").read_text()
     assert "stopping Claude Code" not in (tmp_path / "stderr.log").read_text()
+
+
+@needs_bash
+def test_the_check_passes_the_instruction_on_stdin_to_the_cli(tmp_path):
+    # instruction_on_stdin sends the instruction on stdin; bash would give the backgrounded CLI /dev/null instead.
+    code = stub_cli(compact(init_event(magic="connected")), then="os.write(1, sys.stdin.read().encode())")
+    completed, _ = run_staged(staged_command(tmp_path, code, ["magic"], prompt="solve the task"))
+    assert "require_mcp_servers.sh" in (tmp_path / "params.sh").read_text()
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "events.jsonl").read_text().endswith('{"type":"after_init"}\nsolve the task')
 
 
 @needs_bash

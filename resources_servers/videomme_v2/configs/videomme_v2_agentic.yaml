@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic Video-MME v2: OpenCode answers each question in a sandbox that holds the video, with the video tools
+# watch_video (frames of a time window, as JPEG images with their sampling times) and view_image, besides its own
+# tools. The verifier scores the final answer as the single-turn setting does, under Video_MME_v2_agentic.
+#
+# opencode_agent runs each task in its own sandbox, through the Environment Server, as an agent session. The resources
+# server lends that sandbox: each episode's seed starts one through the `sandbox` provider, uploads the row's video to
+# /testbed/<video_binding.sandbox_path> and checks it, and the episode's close stops it. The benchmark's data is for
+# evaluation only (see the README).
+#
+# Needs a sandbox image built from resources_servers/video_mcqa/sandbox_image/Dockerfile (VIDEO_MCQA_SANDBOX_IMAGE),
+# the OpenSandbox provider settings (OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY), agentic rows and their cohort
+# (videomme_v2_agentic_cohort_manifest), and the host directories of their videos (videomme_v2_agentic_video_roots).
+# The sandbox reaches only the policy model server's host, by address.
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+# The sandbox calls the policy model server by address, and its egress rule opens every port of that host. So every
+# other server sets host 127.0.0.1: the agent (a request without a session runs OpenCode on this host), and the
+# resources and Environment Servers (they start sandboxes and episodes). All their callers run on this host.
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+
+videomme_v2_agentic:
+  resources_servers:
+    videomme_v2:
+      entrypoint: app.py
+      host: 127.0.0.1
+      domain: other
+      verified: false
+      description: VideoMME-v2 agentic video MCQA in an OpenCode sandbox with frame tools, fixed-cohort accuracy.
+      cohort_manifest: ${videomme_v2_agentic_cohort_manifest}
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:VIDEO_MCQA_SANDBOX_IMAGE,null}
+        # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        resources: {cpu: 4, memory_mib: 12288, disk_gib: 30}
+        # OpenCode's shell tool runs commands with the shell that SHELL names (bash when it is unset) and names that
+        # shell in its description: sh, as in the sandbox our agentic video training data was generated in.
+        env: {SHELL: /bin/sh}
+      # WORKDIR of the sandbox image, inside the media root that the rows name the video under.
+      sandbox_workdir: /testbed/work
+      sandbox_media_root: /testbed
+      # The lent sandbox reaches only the model server, so the model cannot look answers up. It cannot download
+      # OpenCode either, so the image carries the binary (sandbox_executable_path below).
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Host directories of the rows' videos; a seed uploads no other file.
+      video_roots: ${videomme_v2_agentic_video_roots}
+
+videomme_v2_agentic_opencode:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      host: 127.0.0.1
+      description: Agentic Video-MME v2 with OpenCode and the video tools in a sandbox session
+      resources_server:
+        type: resources_servers
+        name: videomme_v2_agentic
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      concurrency: 16
+      # Adds `opencode run --thinking`, which only shows reasoning in OpenCode's own output. The policy's serving
+      # setup decides whether the model reasons (for example vllm_model's chat_template_kwargs).
+      thinking: true
+      # The only hard stop besides the context window: OpenCode itself has no turn cap.
+      timeout: 3600
+      context_window: 262144
+      max_output_tokens: 32768
+      session_close_timeout_seconds: 90
+      # watch_video and view_image return images, and OpenCode passes tool images on only when image input is declared.
+      image_input: true
+      # The video tools: an OpenCode plugin in the sandbox image (resources_servers/video_mcqa/sandbox_image).
+      plugins:
+        - /opt/video-mcqa/video_tools.mjs
+      # The resources server lends the sandbox and sets its network, so the agent keeps network_access inherit and
+      # needs no sandbox_provider of its own. The lent sandbox cannot download OpenCode, so the image carries the
+      # binary, pinned by its SHA-256.
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      # OpenCode's plugin dependencies, from the same image. Without them, OpenCode tries to install them from npm at
+      # each start, and an offline start waits about 70 s before its first model call.
+      sandbox_plugin_dependencies_path: /opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
+      # The model is offered OpenCode's own tools as in our agentic video training data, except webfetch: the sandbox
+      # reaches only the model server, so every webfetch call fails. OpenCode 1.17.11 offers websearch only with a
+      # search provider enabled, and a task call runs its subagent in an OpenCode session of its own.
+      opencode_config:
+        tools:
+          webfetch: false
+        permission:
+          bash: allow
+          edit: allow
+          # OpenCode asks before it reads or writes outside the working directory, as for the video under
+          # /testbed/videos. `opencode run` rejects every request that would ask, and a rejection ends the run with
+          # no answer. The sandbox holds only this task, so allow every path.
+          external_directory: allow
+          # OpenCode also asks when one model response calls a tool a third time in a row with identical input
+          # (doom_loop), and that rejection ends the run too, as in the rollouts of our agentic video training data.
+          doom_loop: ask
+        compaction:
+          # Automatic compaction continues from a summary, in model calls that training cannot join to the scored
+          # call. With it off, a run that fills the context ends with a context-limit error, scored 0.
+          auto: false
+
+# The Environment Server runs each episode as an agent session: it seeds the session, sends the task, and closes it.
+videomme_v2_agentic_environment:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      host: 127.0.0.1
+      resources_server:
+        type: resources_servers
+        name: videomme_v2_agentic
+      agent_server:
+        type: responses_api_agents
+        name: videomme_v2_agentic_opencode
+      # Admit episodes at the agent's rate (its concurrency). Each seed lends a sandbox and uploads a video, so an
+      # episode admitted beyond it would wait for OpenCode with its sandbox started and its deadline running.
+      max_concurrent_episodes: 16
+      queue_timeout_seconds: 86400
+      # Above the sandbox start (ready_timeout_s), the video upload, OpenCode's run (timeout) and grading; below the
+      # sandbox's ttl_s.
+      default_episode_timeout_seconds: 6600

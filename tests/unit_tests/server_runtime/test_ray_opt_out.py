@@ -30,7 +30,6 @@ DIRECT_RAY_COMPONENTS = {
         "code_fim",
         "evalplus",
         "longmt_eval",
-        "spider2_lite",
         "swerl_gen",
         "wmt_translation",
     },
