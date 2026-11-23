@@ -146,6 +146,46 @@ def test_cached_runtime_needs_no_package_installation(sandbox: tuple[Path, dict[
     assert not (root / "download.log").exists()
 
 
+@pytest.mark.parametrize("libc", ["glibc", "musl"])
+@pytest.mark.parametrize("bad_digest", [False, True])
+def test_verified_binary_uses_the_task_libc_and_checks_its_digest(sandbox, libc, bad_digest):
+    root, env = sandbox
+    # Control the libc probe independently of the host running pytest.
+    (root / "bin/getconf").unlink()
+    for tool, script in {"getconf": f"test {libc} = glibc", "ldd": "echo musl >&2; exit 1"}.items():
+        path = root / "bin" / tool
+        path.write_text(f"#!/bin/bash\n{script}\n")
+        path.chmod(0o755)
+    pins = {}
+    for flavor in ("glibc", "musl"):
+        path = root / f"{flavor} binary"
+        path.write_text(f"#!/bin/bash\n# {flavor}\necho 1.17.11\n")
+        pins[flavor] = [str(path), hashlib.sha256(path.read_bytes()).hexdigest()]
+    if bad_digest:
+        pins[libc][1] = "0" * 64
+    command = [
+        str(root / "bin/bash"),
+        str(root / "install.sh"),
+        str(root / "runtime"),
+        "1.17.11",
+        *pins["glibc"],
+        "",
+        "",
+        "--musl-executable",
+        *pins["musl"],
+    ]
+    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+    installed = root / "runtime/opencode"
+    if bad_digest:
+        assert result.returncode != 0
+        assert "digest mismatch" in result.stderr
+        assert not installed.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert installed.read_bytes() == Path(pins[libc][0]).read_bytes()
+    assert not (root / "download.log").exists()
+
+
 @pytest.mark.parametrize("musl", [False, True])
 @pytest.mark.parametrize(
     ("requested", "reported", "valid"),

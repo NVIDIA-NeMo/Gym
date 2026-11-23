@@ -660,6 +660,9 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, tmp_path, ou
 @pytest.mark.parametrize(
     "settings",
     [
+        {"sandbox_musl_executable_path": "/mounted/musl"},
+        {"sandbox_musl_executable_sha256": "a" * 64},
+        {"sandbox_musl_executable_path": "/mounted/musl", "sandbox_musl_executable_sha256": "a" * 64},
         {"remote_opencode_binary_path": "/mounted/opencode"},
         {"remote_opencode_install_script_path": "/mounted/install.sh"},
         {"remote_opencode_musl_binary_path": "/mounted/opencode-musl"},

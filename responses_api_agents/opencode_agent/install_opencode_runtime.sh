@@ -11,9 +11,6 @@ path_prefix=${5:-}
 # Optional SHA-256 of each release download, as "<asset arch>=<digest>" words, for example
 # "x64-baseline=89a6... arm64=c168...". When set, a download whose asset has no digest here is refused.
 release_digests=${6:-}
-cached_install_script=${7:-}
-cached_binary=${8:-}
-cached_musl_binary=${9:-}
 if [ -n "$path_prefix" ]; then export PATH="$path_prefix:$PATH"; fi
 # OpenCode 1.x prints the bare version; 2.x prints "opencode v<version>".
 is_requested_version() {
@@ -86,7 +83,16 @@ else
 fi
 mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
 export HOME="$runtime/home" XDG_CACHE_HOME="$runtime/cache" XDG_DATA_HOME="$runtime/data" XDG_CONFIG_HOME="$runtime/config"
-if [ -n "$cached_install_script" ]; then
+# After the release digests, accept either a verified musl alternative or the mounted installer and its arguments.
+if [ "${7:-}" = --musl-executable ]; then
+  if [[ $arch == *-musl ]]; then
+    source_binary=${8:?missing musl executable}
+    source_sha256=${9:?missing musl executable digest}
+  fi
+elif [ -n "${7:-}" ]; then
+  cached_install_script=$7
+  cached_binary=$8
+  cached_musl_binary=${9:-}
   if [ -n "$cached_musl_binary" ]; then
     bash "$cached_install_script" --glibc-binary "$cached_binary" --musl-binary "$cached_musl_binary"
   else

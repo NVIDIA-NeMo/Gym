@@ -1217,6 +1217,10 @@ async def test_a_re_bind_into_a_sandbox_without_the_runtime_installs_it_from_the
     agent, state, body = _restored(
         monkeypatch,
         sandbox,
+        sandbox_executable_path="/pins/opencode",
+        sandbox_executable_sha256="1" * 64,
+        sandbox_musl_executable_path="/pins/opencode-musl",
+        sandbox_musl_executable_sha256="C" * 64,
         sandbox_ripgrep_path="/pins/rg",
         sandbox_ripgrep_sha256="A" * 64,
         sandbox_plugin_dependencies_path="/pins/plugin-dependencies.tar",
@@ -1249,10 +1253,17 @@ async def test_a_re_bind_into_a_sandbox_without_the_runtime_installs_it_from_the
             "/app",
             "/rt",
             None,
-            {"checkpointed": True, "ripgrep": ripgrep, "plugin_dependencies": dependencies},
+            {
+                "checkpointed": True,
+                "musl_executable": _PinnedFile(digest="c" * 64, sandbox_path="/pins/opencode-musl"),
+                "ripgrep": ripgrep,
+                "plugin_dependencies": dependencies,
+            },
         )
     ]
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
+
+    assert any(f"--musl-executable /pins/opencode-musl {'c' * 64}" in command for command in commands)
 
     def ran(start: str) -> int:
         return sum(command.startswith(start) for command in commands)

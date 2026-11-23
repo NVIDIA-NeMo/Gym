@@ -744,6 +744,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_path_prefix: list[str] = Field(default_factory=list)
     sandbox_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # On musl task images an optional second verified pin replaces the primary executable.
+    sandbox_musl_executable_path: str | None = None
+    sandbox_musl_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     # Existing benchmark images mount this installer and its libc-specific binaries.
     remote_opencode_install_script_path: str | None = None
     remote_opencode_binary_path: str | None = None
@@ -1545,6 +1548,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     access.workdir,
                     state.runtime,
                     checkpointed=True,
+                    musl_executable=self._pinned_file("musl_executable"),
                     ripgrep=self._pinned_file("ripgrep"),
                     plugin_dependencies=self._pinned_file("plugin_dependencies"),
                 )
@@ -1683,6 +1687,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "A cached OpenCode installer requires its script and binary paths together")
         if cached_installer and self.config.sandbox_executable_path:
             raise HTTPException(422, "Choose a cached OpenCode installer or a verified executable, not both")
+        musl_executable = self._pinned_file("musl_executable")
+        if musl_executable and not self._pinned_file("executable"):
+            raise AgentSeedRejectedError("A musl OpenCode pin requires a verified primary sandbox_executable_path")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
             raise AgentSeedRejectedError("OpenCode plugins must be absolute, normalized paths inside the sandbox")
         if self.config.export_dir is not None and (
@@ -1813,6 +1820,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 workdir,
                 runtime,
                 checkpointed=checkpointed,
+                musl_executable=musl_executable,
                 ripgrep=ripgrep,
                 plugin_dependencies=plugin_dependencies,
             )
@@ -2001,6 +2009,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         runtime: str,
         *,
         checkpointed: bool,
+        musl_executable: "_PinnedFile | None" = None,
         ripgrep: "_PinnedFile | None" = None,
         plugin_dependencies: "_PinnedFile | None" = None,
     ) -> None:
@@ -2039,7 +2048,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self.config.sandbox_executable_sha256 or "",
             ":".join(self.config.sandbox_path_prefix),
         ]
-        if self._opencode2 or self.config.remote_opencode_install_script_path:
+        if self._opencode2 or self.config.remote_opencode_install_script_path or musl_executable:
             # The sixth script argument is reserved for OpenCode 2 release digests.
             digests = OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {}) if self._opencode2 else {}
             install_args.append(" ".join(f"{arch}={digest}" for arch, digest in digests.items()))
@@ -2051,6 +2060,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self.config.remote_opencode_musl_binary_path or "",
                 ]
             )
+        elif musl_executable:
+            install_args.extend(["--musl-executable", musl_executable.sandbox_path, musl_executable.digest])
         command += "bash " + shlex.join(install_args)
         # The installer serializes concurrent runs and skips a runtime already in place, so running it again is safe.
         result = await exec_idempotent(
