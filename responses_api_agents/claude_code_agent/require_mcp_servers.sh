@@ -24,7 +24,9 @@ while (($#)) && [[ $1 != -- ]]; do
 done
 shift
 
-"$@" &
+# Without job control bash gives a background command /dev/null as stdin; <&0 keeps the instruction that
+# instruction_on_stdin sends there.
+"$@" <&0 &
 cli=$!
 trap 'kill -TERM "$cli" 2>/dev/null' TERM INT
 

@@ -91,6 +91,48 @@ class TestServerUtils:
         assert 0 == actual_config.port
         assert "my entrypoint" == actual_config.entrypoint
 
+    @mark.parametrize("missing", ["base_url", "api_key", "model", "all", None])
+    def test_unset_model_settings_name_the_source_config(self, monkeypatch: MonkeyPatch, missing) -> None:
+        class EndpointConfig(BaseRunServerInstanceConfig):
+            base_url: str | list[str]
+            api_key: str
+            model: str
+
+        class EndpointServer(BaseServer):
+            config: EndpointConfig
+
+        aliases = {
+            "base_url": "support_model_base_url",
+            "api_key": "support_model_api_key",
+            "model": "support_model_name",
+        }
+        values = {"base_url": "https://extractor.example.invalid/v1", "api_key": "secret", "model": "extractor"}
+        config = OmegaConf.create(
+            {
+                **{alias: None if missing in (field, "all") else values[field] for field, alias in aliases.items()},
+                "support_model": {
+                    "responses_api_models": {
+                        "vllm_model": {
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                            "entrypoint": "app.py",
+                            **{field: "${" + alias + "}" for field, alias in aliases.items()},
+                        }
+                    }
+                },
+            }
+        )
+        monkeypatch.setenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, "support_model")
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "get_global_config_dict", lambda: config)
+        if missing is None:
+            assert EndpointServer.load_config_from_global_config().model == "extractor"
+        else:
+            with raises(ValueError, match="Required settings for support_model are unset") as error:
+                EndpointServer.load_config_from_global_config()
+            for field, alias in aliases.items():
+                assert (f"++{alias}=<value>" in str(error.value)) == (missing in (field, "all"))
+            assert "secret" not in str(error.value)
+
     def test_HeadServer_setup_webserver_sanity(self) -> None:
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
         head_server.setup_webserver()

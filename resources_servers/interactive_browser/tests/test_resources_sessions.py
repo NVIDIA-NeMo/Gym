@@ -20,6 +20,7 @@ from itertools import count
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import anyio
 import app as app_module
 import pytest
 from app import InteractiveBrowserConfig, InteractiveBrowserResourcesServer
@@ -542,5 +543,129 @@ class TestShutdown:
                     assert client.post("/seed_session", json=_seed_json(session_id)).status_code == 200
 
         assert [browser.closed for browser in created] == [1, 1]
-        assert server._session_id_to_state == {}
+        # The browser whose close failed is still held, so the server keeps its record.
+        assert list(server._session_id_to_state) == ["failing"]
         assert "could not close the browser for session failing" in caplog.text
+
+
+class _SlowClosingBrowser(_Browser):
+    """A browser whose close has to await before it finishes, so a close the caller cancels never finishes."""
+
+    async def close(self) -> None:
+        await asyncio.sleep(0.01)
+        await super().close()
+
+
+class TestReleaseUnderCancellation:
+    """A client that disconnects cancels its request; the browser the request was closing must still close."""
+
+    async def test_a_release_in_a_cancelled_request_still_closes_the_browser_and_drops_its_record(self) -> None:
+        server = _server()
+        browser = _SlowClosingBrowser()
+        server._session_id_to_state["session"] = app_module._SessionState(backend=browser, gt={})
+
+        with anyio.fail_after(5):
+            # A disconnect cancels the request's cancel scope, and anyio then cancels every later await in it.
+            with anyio.CancelScope() as request_scope:
+                request_scope.cancel()
+                await server._release("session")
+
+        assert browser.closed == 1
+        assert server._session_id_to_state == {}
+
+
+class TestReseedAfterAFailedClose:
+    async def test_a_reseed_never_replaces_a_browser_whose_close_failed(self, browsers) -> None:
+        server = _server()
+        stuck = _FailingBrowser()
+        server._session_id_to_state["session"] = app_module._SessionState(backend=stuck, gt={})
+
+        with pytest.raises(HTTPException) as refused:
+            await server._open_session("session", app_module.BrowserSeedSessionRequest.model_validate(_TASK_DATA))
+
+        assert refused.value.status_code == 503
+
+        assert server._session_id_to_state["session"].backend is stuck
+        assert browsers.created == [], "no second browser was opened"
+
+
+class _FailsOnceBrowser(_Browser):
+    async def close(self) -> None:
+        await super().close()
+        if self.closed == 1:
+            raise RuntimeError("provider unreachable")
+
+
+@pytest.fixture
+def fails_once(monkeypatch) -> list[_FailsOnceBrowser]:
+    created: list[_FailsOnceBrowser] = []
+
+    def _create_backend(config, session_metadata=None):
+        created.append(_FailsOnceBrowser())
+        return created[-1]
+
+    monkeypatch.setattr(app_module, "create_backend", _create_backend)
+    return created
+
+
+class TestCloseAfterAFailedBrowserClose:
+    """A close is acknowledged only once the browser closed; until then it is not fenced and can be retried."""
+
+    def test_a_typed_close_whose_browser_close_fails_is_retried(self, fails_once) -> None:
+        from test_verify_reporting import _body
+
+        server = _server()
+        client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+        assert client.post("/seed_session", json=_seed_json()).status_code == 200
+
+        assert client.post("/close_session", json=_close_json()).status_code == 503
+        assert server._session_id_to_state["resources-session"].backend is fails_once[0]
+        assert server._episode_identity["resources-session"][0] == EpisodeId(**_EPISODE)
+        assert server._fences.get("resources-session") is None
+
+        other = {"rollout_id": "another-rollout", "attempt": 0}
+        assert client.post("/close_session", json=_close_json(episode=other)).status_code == 409
+
+        assert client.post("/close_session", json=_close_json()).status_code == 200
+        assert fails_once[0].closed == 2 and "resources-session" not in server._session_id_to_state
+        assert client.post("/close_session", json=_close_json()).status_code == 200
+        assert fails_once[0].closed == 2
+
+        verdict = asyncio.run(server.verify(SimpleNamespace(session={SESSION_ID_KEY: "resources-session"}), _body()))
+        assert (verdict.reward, verdict.mask_sample, verdict.failure_kind) == (0.0, True, SESSION_LOST)
+
+    def test_an_empty_close_whose_browser_close_fails_is_retried(self, fails_once) -> None:
+        server = _server()
+        client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+        client.post("/seed_session", json={"initial_url": "https://example.com/"})
+
+        assert client.post("/close_session").status_code == 503
+        assert len(server._session_id_to_state) == 1
+        assert client.post("/close_session").status_code == 200
+        assert fails_once[0].closed == 2 and server._session_id_to_state == {}
+
+
+class _HeldBrowser(_Browser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closing = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def close(self) -> None:
+        self.closing.set()
+        await self.release.wait()
+        await super().close()
+
+
+async def test_a_close_keeps_the_record_of_the_browser_a_reseed_installed_meanwhile() -> None:
+    server = _server()
+    old = _HeldBrowser()
+    server._session_id_to_state["session"] = app_module._SessionState(backend=old, gt={})
+    releasing = asyncio.create_task(server._release("session"))
+    await asyncio.wait_for(old.closing.wait(), 5)
+    new_state = app_module._SessionState(backend=_Browser(), gt={})
+    server._session_id_to_state["session"] = new_state
+    old.release.set()
+    await asyncio.wait_for(releasing, 5)
+
+    assert server._session_id_to_state.get("session") is new_state

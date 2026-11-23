@@ -578,7 +578,8 @@ class RolloutStore:
             reservations.append((row, identity, attempt))
             next_attempt[identity] = attempt + 1
         manifest = self.manifest.model_copy(update={"next_attempt": next_attempt})
-        manifest.write(manifest_path_for(self.output))
+        # A reservation leaves the configuration identity as opening the store saved it.
+        manifest.write(manifest_path_for(self.output), write_config_identity=False)
         # Publish in memory only after all reservations are durable.
         self.manifest = self._state.manifest = manifest
         for row, identity, attempt in reservations:
@@ -699,6 +700,14 @@ class RolloutStore:
     def disposition(self, row: dict) -> str:
         """Return the newest allocated attempt's disposition for this rollout."""
         return self._state.disposition(logical_rollout_id(row))
+
+    def masked_retryable(self, row: dict) -> bool:
+        """Whether this rollout's selected success is masked by infrastructure and a resume will run it again."""
+        return self._state.masked_retryable(logical_rollout_id(row))
+
+    def settled(self, row: dict) -> bool:
+        """Whether this rollout's outcome is final and measured where it succeeded (``RolloutRecords.settled``)."""
+        return self._state.settled(logical_rollout_id(row))
 
     def selected(self, disposition: str) -> list[dict]:
         """Load selected payloads; use selected_records for metadata-only access."""
