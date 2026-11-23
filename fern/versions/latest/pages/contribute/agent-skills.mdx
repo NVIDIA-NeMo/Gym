@@ -1,10 +1,10 @@
 ---
 title: "Agent Skills"
-description: "Install the evaluation skill or use NeMo Gym's checkout workflows with an AI coding assistant."
+description: "Vetted workflows for AI coding assistants bundled with NeMo Gym."
 position: 5
 ---
 
-NeMo Gym ships **agent skills** — curated instruction files that teach AI coding assistants endorsed workflows for running evaluations, adding benchmarks, debugging rollouts, and maintaining the docs site.
+NeMo Gym ships **agent skills** — curated instruction files that teach AI coding assistants how to work effectively in this repository. They encode endorsed workflows for common tasks like adding benchmarks, debugging rollouts, and maintaining the docs site, so agents can follow project conventions without guesswork.
 
 Skills are versioned with the repo and kept up to date as Gym evolves. Gym will continue to add skills as new workflows stabilize.
 
@@ -12,38 +12,15 @@ Skills are versioned with the repo and kept up to date as Gym evolves. Gym will 
 
 | Directory | Assistants |
 |---|---|
-| [`skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/skills) | Canonical content for independently installable product skills |
-| [`.agents/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills) | Checkout workflows and compatibility entrypoints |
+| [`.agents/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills) | Canonical cross-agent skills |
 | [`.claude/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.claude/skills) | Claude Code compatibility links |
 | [`.codex/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.codex/skills) | Codex compatibility links |
 
-The evaluation workflow has one source of truth under `skills/nemo-gym-run-and-babysit-eval/`. Its model-configuration procedure is a bundled reference. The existing `run-and-babysit-eval` and `add-model-eval-config` entrypoints delegate to that content; other checkout workflows remain under `.agents/skills/`. Claude Code and Codex retain their existing compatibility links.
+Skills have one source of truth under `.agents/skills/`. Claude Code and Codex reach that same content through their native discovery paths, so references, scripts, and instructions cannot drift between copies.
 
 <Info>
 Assistants discover skills automatically when they are pointed at a local Gym checkout. No extra install step is required beyond cloning the repository.
 </Info>
-
-## Install the Evaluation Skill
-
-Install only the evaluation skill from the Gym repository with the current skills CLI:
-
-```bash
-npx skills@latest add NVIDIA-NeMo/Gym --skill nemo-gym-run-and-babysit-eval --yes
-```
-
-Ask your assistant to run an evaluation or invoke `$nemo-gym-run-and-babysit-eval`. This first publication covers self-hosted vLLM models on Slurm, including model configuration, submission, recovery, and verification of the reported result. The assistant follows the bundled model-configuration reference when needed; a second skill installation is unnecessary.
-
-<Note>
-Installing the skill does not install Gym or provision a cluster. Follow the skill's pinned Gym checkout prerequisite and provide your cluster, serving image, checkpoint, and output settings. PyPI `0.7.0` lacks the recovery commands used by this workflow. Local runs, existing API endpoints, and task folders are follow-up coverage.
-</Note>
-
-After the signed skill is registered in the NVIDIA catalog, it can also be installed with:
-
-```bash
-npx skills@latest add nvidia/skills --skill nemo-gym-run-and-babysit-eval --yes
-```
-
-Confirm your assistant lists the installed skill before running an evaluation. The checkout aliases remain available: `$run-and-babysit-eval` runs the Slurm workflow, while `$add-model-eval-config` prepares and validates configuration without submitting a job unless you request a smoke run.
 
 ## Available Skills
 
@@ -51,7 +28,6 @@ Confirm your assistant lists the installed skill before running an evaluation. T
 |---|---|
 | [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) | End-to-end workflow for adding a new benchmark or training environment |
 | [`add-harness`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-harness) | Adding or updating an agent harness adapter: session contract, pairing, conformance, real runs, and exit checks |
-| [`nemo-gym-run-and-babysit-eval`](https://github.com/NVIDIA-NeMo/Gym/tree/main/skills/nemo-gym-run-and-babysit-eval) | Independently installable Slurm evaluation workflow, with model configuration and result acceptance in one skill |
 | [`run-and-babysit-eval`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/run-and-babysit-eval) | Taking an evaluation from a ready config to a trusted result: submit, resume, recover from saved evidence, health and acceptance gates, stopping a chain |
 | [`add-model-eval-config`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-model-eval-config) | Serving a new model for evaluations: the vLLM policy service, the reasoning switch, a complete eval config from each benchmark's own Gym config, with the environment and config values the benchmark needs, validation, a smoke run, and what must stay fixed for a fair comparison |
 | [`nemo-gym-reward-profiling`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-reward-profiling) | `gym env start`, `gym eval run`, and `gym eval profile` baselining |
@@ -66,7 +42,7 @@ Confirm your assistant lists the installed skill before running an evaluation. T
 | [`nemo-gym-release-publish`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-release-publish) | Dry-running, publishing, and verifying a release with the release workflow |
 | [`gh-stack`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/gh-stack) | Stacked pull request workflows with the `gh-stack` CLI extension |
 
-Checkout entrypoints and compatibility links preserve the existing skill names. Install the public evaluation skill when working outside a Gym checkout.
+Compatible agents discover skills from the canonical tree directly. Native-path links provide compatibility for agents that require their own directory.
 
 ## Using Skills
 
@@ -81,12 +57,6 @@ Follow .agents/skills/add-benchmark/SKILL.md to integrate this benchmark.
 <Tip>
 The [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs) skill mirrors the procedures in the [Fern docs README](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/README.md) — use it when contributing documentation changes.
 </Tip>
-
-## Maintain the Published Evaluation Skill
-
-Edit the canonical skill and its references rather than copying procedures into the checkout entrypoints. When preparing a Gym release, review those commands against the released CLI, rerun the skill evaluations with and without the skill on Claude Code and Codex, and update its tested installation prerequisite.
-
-Before catalog publication, validate with `skillevaluator validate --external`, keep the CI evaluation set within the runner's one-hour limit, and record extended Slurm evaluations separately. A maintainer or admin must authorize NVSkills CI with `/nvskills-ci` on the source PR. Verify the resulting `BENCHMARK.md`, `skill-card.md`, and `skill.oms.sig` against the final content; changing signed content requires evaluation and signing again. Team publication approvals and the catalog registration are separate from merging the source files.
 
 ---
 
