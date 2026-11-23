@@ -628,6 +628,42 @@ async def test_an_unbound_or_unfinished_grade_saves_no_grading_record(result):
     assert "grading_record" not in invocation
 
 
+@pytest.mark.parametrize("override,expected", [(None, 0.0), (2.5, 2.5)], ids=["default", "override"])
+def test_the_resources_route_gives_a_judge_failure_the_servers_placeholder_reward(override, expected):
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            raise JudgeError("judge unavailable")
+
+    if override is not None:
+        Resources.judge_failure_reward = lambda self: override
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
+    server = Resources(
+        config=BaseResourcesServerConfig(name="placeholder", host="127.0.0.1", port=12345, entrypoint="app.py"),
+        server_client=client,
+    )
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/placeholder/verify",
+        json={
+            "responses_create_params": {"input": "task"},
+            "response": {
+                "id": "response",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["reward"], body["mask_sample"], body["failure_kind"]) == (expected, True, JUDGE_FAILED)
+
+
 def test_the_resources_route_names_its_server_in_the_grading_record():
     class Resources(SimpleResourcesServer):
         async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
