@@ -7,7 +7,8 @@ it with no Resources Server. Other uses of `math_with_judge` (judge on, other pr
 adapter.
 
 Run every command below from the repository root, in the Python environment Gym is installed in (the adapter needs
-PyYAML beyond the standard library; Gym installs it). `<data>` is a folder outside the repository. The tools are
+PyYAML and `nemo_gym`, to check each row against the template's `TaskData`; that environment has both). `<data>` is
+a folder outside the repository. The tools are
 described in [`harbor_conversion_checks`](../../../scripts/harbor_conversion_checks/README.md) and
 [`harbor_parity`](../../../scripts/harbor_parity/README.md); the task-folder format is in
 [the task-folder docs](../../../fern/versions/latest/pages/data/task-folders/).
@@ -35,7 +36,9 @@ positive number, and an agent `timeout`, `thinking` or `opencode_version` that d
 `configs/harbor_arm_harness.yaml`) or is not set. To run another value, change it on both sides first. It also
 exits 2 for malformed YAML, a non-empty `--output-dir`, an ids file with no ids, a duplicate or unknown id, and a
 row that is not a JSON object holding one plain-text user message and a string `expected_answer`, or whose
-`responses_create_params` holds anything besides `input` (a per-row `metadata.agent_timeout_sec`, sampling).
+`responses_create_params` holds anything besides `input` (a per-row `metadata.agent_timeout_sec`, sampling). A row
+whose task fields the template's `TaskData` (`task-template/task_data.py`) refuses also exits 2, checked the way Gym
+checks it at prepare.
 
 The adapter does not check the other harness settings of `configs/harbor_arm_harness.yaml`: `sandbox_model_id`,
 `argv_prompt_quoting`, `max_output_tokens` and `opencode_config.permission`, nor the session defaults the file

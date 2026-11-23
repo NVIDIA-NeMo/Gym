@@ -47,6 +47,8 @@ from pathlib import Path
 
 import yaml
 
+from nemo_gym.data.tasks.harbor import TaskDataError, load_task_data_schema
+
 
 HERE = Path(__file__).resolve().parent
 TEMPLATE_DIR = HERE / "task-template"
@@ -385,7 +387,7 @@ def convert(
     With ``ids`` only those rows are converted, in that order. ``native_rows_out`` also writes the same rows, in the
     same order, each line unchanged apart from its line ending (written as LF), for the native arm of a parity run;
     ``id_map_out`` writes ``{line in native_rows_out: task id}``, which pairs native rollouts (``_ng_task_index``)
-    with Harbor tasks.
+    with Harbor tasks. Every row is validated against the template's ``task_data.py`` before anything is written.
     """
     if output_dir.exists() and (not output_dir.is_dir() or any(output_dir.iterdir())):
         raise AdapterError(f"{output_dir} is not an empty folder; choose a new --output-dir")
@@ -407,6 +409,16 @@ def convert(
     missing = [index for index in order if index not in selected]
     if missing:
         raise AdapterError(f"{len(missing)} ids name no row of {rows.name}: {missing[:5]}")
+    # Gym checks every row against the template's TaskData when it prepares the dataset; refuse here, before any
+    # output, a row it would refuse there.
+    try:
+        schema = load_task_data_schema(TEMPLATE_DIR)
+        if schema is None:
+            raise AdapterError(f"{TEMPLATE_DIR} ships no task_data.py")
+        for index in order:
+            schema.validate(selected[index][0], task_id=task_id_for_index(index))
+    except TaskDataError as error:
+        raise AdapterError(str(error)) from None
 
     commit = gym_commit()
     grader = grader_source(commit=commit, **grading)

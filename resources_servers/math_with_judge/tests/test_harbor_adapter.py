@@ -9,6 +9,8 @@ import hashlib
 import importlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -26,9 +28,12 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.data.tasks.harbor import load_task_data_schema
+from nemo_gym.server_runtime import BaseRunRequest
 from resources_servers.math_with_judge.app import (
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
+    LibraryJudgeMathRunRequest,
     LibraryJudgeMathVerifyRequest,
 )
 from resources_servers.math_with_judge.harbor import adapter
@@ -299,6 +304,79 @@ def test_non_utf8_rows_are_refused(tmp_path: Path) -> None:
     result = _run("--rows", str(rows), "--output-dir", str(tmp_path / "out"))
     assert result.returncode == 2
     assert "adapter:" in result.stderr
+
+
+def _template_with_task_data(tmp_path: Path, old: str, new: str) -> Path:
+    template = tmp_path / "template"
+    shutil.copytree(adapter.TEMPLATE_DIR, template, ignore=shutil.ignore_patterns("__pycache__"))
+    source = (template / "task_data.py").read_text(encoding="utf-8")
+    assert old in source
+    (template / "task_data.py").write_text(source.replace(old, new), encoding="utf-8")
+    return template
+
+
+@pytest.mark.parametrize(
+    ("drift", "message"),
+    [
+        # The shipped schema changes and the adapter still writes the old shape.
+        ("template", "expected_answer: Input should be a valid integer"),
+        # The adapter writes a value of another type than the schema declares.
+        ("value", "expected_answer: Input should be a valid string"),
+        # The adapter writes a key the schema does not declare.
+        ("key", "keys ['answer']"),
+    ],
+)
+def test_rows_the_shipped_task_data_refuses_fail_before_output(
+    tmp_path: Path, rows_file: Path, monkeypatch, capsys, drift: str, message: str
+) -> None:
+    to_task_data = adapter.task_data_for_row
+    if drift == "template":
+        template = _template_with_task_data(tmp_path, "expected_answer: str", "expected_answer: int")
+        monkeypatch.setattr(adapter, "TEMPLATE_DIR", template)
+    elif drift == "value":
+        monkeypatch.setattr(adapter, "task_data_for_row", lambda row: {**to_task_data(row), "expected_answer": 5})
+    else:
+        monkeypatch.setattr(
+            adapter, "task_data_for_row", lambda row: {**to_task_data(row), "answer": row["expected_answer"]}
+        )
+    assert adapter.main(["--rows", str(rows_file), "--output-dir", str(tmp_path / "out")]) == 2
+    assert message in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_generated_rows_load_with_the_shipped_task_data(tmp_path: Path, rows_file: Path) -> None:
+    assert _run("--rows", str(rows_file), "--output-dir", str(tmp_path / "out")).returncode == 0
+    schema = load_task_data_schema(tmp_path / "out")
+    assert (tmp_path / "out" / "task_data.py").read_bytes() == (adapter.TEMPLATE_DIR / "task_data.py").read_bytes()
+    records = [json.loads(line) for line in (tmp_path / "out" / "tasks.jsonl").read_text().splitlines()]
+    assert len(records) == len(QUESTIONS)
+    for record in records:
+        schema.validate(record["task_data"], task_id=record["task_id"])
+
+
+def test_task_data_contract_ties_owner_and_readers(tmp_path: Path, rows_file: Path) -> None:
+    """TaskData carries exactly the native verify request's own fields, typed alike, and each is read in the task."""
+    assert _run("--rows", str(rows_file), "--output-dir", str(tmp_path / "out")).returncode == 0
+    fields = {
+        name: field.annotation for name, field in load_task_data_schema(tmp_path / "out").model.model_fields.items()
+    }
+    owner = {
+        name: field.annotation
+        for name, field in LibraryJudgeMathRunRequest.model_fields.items()
+        if name not in BaseRunRequest.model_fields
+    }
+    assert fields == owner
+    # The instruction reads the question, the oracle and the verifier the expected answer; nothing reads another key.
+    readers = {
+        "instruction.template.md": {"question"},
+        "solution/answer.template.md": {"expected_answer"},
+        "tests/verifier.py": {"expected_answer"},
+    }
+    for name, expected in readers.items():
+        text = (tmp_path / "out" / name).read_text(encoding="utf-8")
+        read = {dotted or indexed for dotted, indexed in re.findall(r'task_data(?:\.(\w+)|\["(\w+)"\])', text)}
+        assert read == expected, name
+    assert set().union(*readers.values()) == set(fields)
 
 
 def test_grader_segments_are_byte_copies_of_app_py(tmp_path: Path) -> None:
