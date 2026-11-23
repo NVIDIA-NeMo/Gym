@@ -155,6 +155,35 @@ calling process: call `nemo_gym.telemetry.setup.init_telemetry` first.
 `RolloutOutcome.raw` holds Gym's raw `/run` response (the failure record for a failed `/run`). Its keys are not part
 of the contract: depend on the other fields, and use `raw` for debugging.
 
+### Harbor-backed benchmarks
+
+A benchmark whose config sets `harbor_target` declares no dataset: `gym eval run --benchmark NAME` reads the target's
+task folders into rows and writes the run config that starts the Harbor environment server. `plan_benchmark` and
+`serve_benchmark` do the same from Python:
+
+```python
+planned = plan_benchmark(
+    "terminal_bench_2_1/opencode", task_ids=["fix-git"], sandbox="opensandbox", work_dir=Path("work")
+)
+with serve_benchmark("terminal_bench_2_1/opencode", model_type="vllm_model", overrides=overrides, planned=planned) as registry_server:
+    runner = TaskRunner(planned.rows, registry_server=registry_server)
+    outcome = await runner.run_task("fix-git")
+```
+
+- `task_ids` selects tasks of the target by exact id. An id the target does not have, or a task that cannot load, is a
+  `ConfigError`.
+- `sandbox` names the sandbox provider, as `--sandbox` does. The `builds:` and sandbox blocks the preparation reads come
+  from the benchmark's config with `overrides` merged on top.
+- `work_dir` is required. It holds the rows and the configuration files the servers start from, so it must outlive
+  `serve_benchmark`.
+- The plan lists each task once, whatever `num_repeats` the benchmark sets; each `run_task` call runs one rollout.
+- `PlannedBenchmark.harbor` records the target, the dataset digests, the images and the configuration files. The task
+  digests change with a task folder's content, and every row carries the digest of its whole dataset, so a change to any
+  task of the dataset changes every task's digest. Compare `harbor.dataset_digest` and `harbor.images` to detect a moved
+  dataset or image reference.
+- `serve_benchmark` requires the `planned` benchmark and refuses one planned for another target or whose configuration
+  files are not on this machine: plan again in the process that serves.
+
 ### Constraints
 
 - `serve_benchmark` sets the process's Gym configuration, as `gym env start` does, so serve one benchmark per process.

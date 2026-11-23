@@ -3965,7 +3965,9 @@ class TestComposeVolumeSourcesAtPrepare:
             "  volume_sources:\n    pgdata: datasets/pgdata\n"
         )
         monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider)
+        monkeypatch.setattr("nemo_gym.data.tasks.harbor.settings.resolve_sandbox_config", lambda name: provider)
         monkeypatch.setattr(cli_eval, "resolve_sandbox_config", lambda name: provider)
+        monkeypatch.setattr("nemo_gym.data.tasks.harbor.settings.resolve_sandbox_config", lambda name: provider)
         monkeypatch.delenv("M22_UNSET_KEY", raising=False)
         return dotenv, provider
 
@@ -4103,6 +4105,7 @@ class TestComposeVolumeSourcesAtPrepare:
             "          password: ${gitlab_registry_password}\n"
         )
         monkeypatch.setattr(cli_eval, "resolve_sandbox_config", lambda name: provider)
+        monkeypatch.setattr("nemo_gym.data.tasks.harbor.settings.resolve_sandbox_config", lambda name: provider)
 
         from nemo_gym.cli.eval import registry_credentials_from_overrides
 

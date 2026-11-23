@@ -87,6 +87,7 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
         ("task_ids", _KEYWORD, None),
         ("overrides", _KEYWORD, None),
         ("work_dir", _KEYWORD, None),
+        ("sandbox", _KEYWORD, None),
     ],
     "TaskRunner.__init__": [
         ("self", _POSITIONAL, _REQUIRED),
@@ -104,6 +105,7 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
         ("model_type", _KEYWORD, "openai_model"),
         ("overrides", _KEYWORD, None),
         ("registry_port", _KEYWORD, None),
+        ("planned", _KEYWORD, None),
     ],
     "PlannedBenchmark.task_ids": [("self", _POSITIONAL, _REQUIRED)],
     "PlannedBenchmark.task_digests": [("self", _POSITIONAL, _REQUIRED)],
@@ -113,7 +115,7 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
 
 # The fields of the result types. The API is experimental, so a change is allowed; update this list in the same change.
 EXPECTED_IN_PROCESS_RESULT_FIELDS = {
-    "PlannedBenchmark": ["plan", "rows"],
+    "PlannedBenchmark": ["plan", "rows", "harbor"],
     "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output", "raw"],
     "TaskFailure": [
         "kind",
