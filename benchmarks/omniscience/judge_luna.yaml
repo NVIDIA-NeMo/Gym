@@ -1,0 +1,14 @@
+# Default judge: GPT-5.6 Luna at reasoning effort medium, the grader Artificial Analysis uses for v1.1.
+# Set JUDGE_API_KEY. To use another endpoint, key or model id, set omniscience_judge_base_url,
+# omniscience_judge_api_key or omniscience_judge_model_name at the top level of your config.
+genrm_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:omniscience_judge_base_url,'https://inference-api.nvidia.com/v1'}
+      openai_api_key: ${oc.select:omniscience_judge_api_key,${oc.env:JUDGE_API_KEY,null}}
+      openai_model: ${oc.select:omniscience_judge_model_name,openai/openai/gpt-5.6-luna}
+      extra_body:
+        reasoning_effort: medium
+      # At most 32 judge calls in flight; lower it if your endpoint rate-limits.
+      max_concurrent_requests: 32

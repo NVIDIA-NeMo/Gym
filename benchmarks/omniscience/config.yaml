@@ -1,11 +1,16 @@
 # Chain to the omniscience resource server + agent config + default judge
 config_paths:
   - resources_servers/omniscience/configs/omniscience.yaml
-  - benchmarks/omniscience/judge_gptoss20b.yaml
+  - benchmarks/omniscience/judge_luna.yaml
 
 # Isolated benchmark instances via _inherit_from
 omniscience_omniscience_resources_server:
   _inherit_from: omniscience
+  resources_servers:
+    omniscience:
+      judge_responses_create_params:
+        # Room for Luna to reason before it grades, as in EFB and nemotron_recipes/super-3.5.
+        max_output_tokens: 32768
 
 omniscience_omniscience_simple_agent:
   _inherit_from: omniscience_simple_agent

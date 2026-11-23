@@ -50,10 +50,19 @@ policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
 
 # Keep the reference request limit separate from the shared model connection.
+# The AA-Omniscience judge here is Gemini (shared_model_endpoints.yaml): keep its request without
+# the Luna default's reasoning effort and with the 2048-token cap it was run with.
 genrm_model:
   responses_api_models:
     openai_model:
+      _delete_key: extra_body
       max_concurrent_requests: 16
+
+omniscience_omniscience_resources_server:
+  resources_servers:
+    omniscience:
+      judge_responses_create_params:
+        max_output_tokens: 2048
 
 policy_model:
   responses_api_models:

@@ -75,7 +75,7 @@ genrm_model:
       # At most 32 judge calls in flight; lower it if your endpoint rate-limits.
       max_concurrent_requests: 32
 
-# Judge output cap (the benchmark default is 2048).
+# Judge output cap, as in the published run.
 omniscience_omniscience_resources_server:
   resources_servers:
     omniscience:
