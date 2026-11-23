@@ -6,9 +6,10 @@ The adapter writes OpenCode 2's own schema for what it owns (provider, model, pl
 and passes the session's ``opencode_config`` keys (``permission``, ``tools``, ``compaction``, ``agent``) in the
 OpenCode 1 form the agent configuration and ``configs/permissions/default.yaml`` use. OpenCode 2 reads that form
 and migrates it: ``bash`` rules apply to ``shell``, ``task`` rules to ``subagent``, ``agent.build.steps`` stays the
-build agent's step limit and ``agent.build.prompt`` its system prompt. ``attachment`` is renamed to ``media``. The
-compaction buffer is the exception: OpenCode 2 reads ``compaction.buffer``, and the agent config refuses OpenCode 1's
-``compaction.reserved`` when it loads. The seed refuses any other ``opencode_config`` key, for both versions
+build agent's step limit and ``agent.build.prompt`` its system prompt. ``attachment`` is renamed to ``media`` and
+``snapshot`` to ``snapshots``. The compaction buffer is the exception: OpenCode 2 reads ``compaction.buffer``, and the
+agent config refuses OpenCode 1's ``compaction.reserved`` when it loads. The seed refuses any other
+``opencode_config`` key, for both versions
 (``app._session_opencode_config_error``). Code Mode is off (``code_mode_off``).
 """
 
@@ -124,6 +125,8 @@ def session_config(
         config["media"] = copy.deepcopy(UNRESTRICTED_MEDIA)
     if "attachment" in opencode_config:
         config["media"] = copy.deepcopy(opencode_config["attachment"])
+    if "snapshot" in opencode_config:
+        config["snapshots"] = opencode_config["snapshot"]
     for key in ("tools", "compaction"):
         if opencode_config.get(key):
             config[key] = copy.deepcopy(opencode_config[key])

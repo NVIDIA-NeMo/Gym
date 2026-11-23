@@ -154,6 +154,21 @@ async def test_configured_image_input_and_limits_reach_opencode_2(opencode2, att
     assert "attachment" not in config
 
 
+@pytest.mark.parametrize("snapshot", [None, False, True])
+async def test_snapshot_setting_reaches_opencode_2_without_changing_its_default(opencode2, snapshot):
+    agent, sandbox = opencode2
+    if snapshot is not None:
+        agent.config.opencode_config = {**agent.config.opencode_config, "snapshot": snapshot}
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    if snapshot is None:
+        assert "snapshots" not in config
+    else:
+        assert config["snapshots"] is snapshot
+    assert "snapshot" not in config
+
+
 async def test_sampling_steps_and_a_replaced_prompt_reach_opencode_2(opencode2):
     agent, sandbox = opencode2
     agent.config.system_prompt = "Be {careful}."
