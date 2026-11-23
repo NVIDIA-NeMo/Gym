@@ -68,6 +68,7 @@ from nemo_gym.sandbox.attribution import (  # noqa: F401
 )
 from nemo_gym.sandbox.providers.base import (
     ORPHAN_REAP_TIMEOUT_S,
+    SandboxCapabilities,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -1186,6 +1187,8 @@ class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API."""
 
     name = "opensandbox"
+    # A snapshot is a filesystem image: a sandbox created from it starts its processes anew.
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(snapshot_keeps=frozenset({"files"}))
 
     def __init__(
         self,
