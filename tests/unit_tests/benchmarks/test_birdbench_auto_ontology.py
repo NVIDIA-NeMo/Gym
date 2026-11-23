@@ -8,7 +8,7 @@ from pathlib import Path
 from benchmarks.birdbench.auto_ontology.build_catalog import column_descriptions
 
 
-AUTO_ONTOLOGY_DIR = Path(__file__).resolve().parents[1] / "auto_ontology"
+AUTO_ONTOLOGY_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "birdbench" / "auto_ontology"
 
 
 def test_auto_ontology_is_pinned_to_a_full_commit():
