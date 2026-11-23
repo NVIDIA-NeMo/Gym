@@ -57,6 +57,9 @@ as a map, not as evidence.
   still be fixed by a guard above it.
 - Re-run the failing case the comment described: the test, the reproduction, or the mutation. The
   check runs at the new head, in a fresh worktree and venv (SKILL.md §1.6).
+- For a requested smoke, check that the evidence covers the trigger and expected outcome in the
+  original review. If the fix is present but that run is missing, mark the thread partly fixed
+  and tell the author which case still needs a smoke.
 - If the comment's wording is met but the underlying need is not, the thread is partly fixed.
 
 ## 4. Separate the author's change from changes on main

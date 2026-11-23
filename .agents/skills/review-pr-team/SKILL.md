@@ -325,7 +325,9 @@ The lead decides; it does not just add up votes.
 - Drop disputed findings and lower downgraded ones.
 - Keep an unconfirmed finding only if it would matter when true, and phrase it as a question to the
   author, as the rubric asks.
-- Drop findings already raised on this PR, a related PR, or by a bot.
+- Drop findings already raised on this PR, a related PR, or by a bot. If a thread already describes
+  a failure, link it in the verdict while smoke evidence is missing. Propose asking the author in
+  that thread if nobody has requested the run yet.
 - Deduplicate: the same file, the same lines, and the same issue are one finding.
 - Grade each surviving finding with the rubric's BLOCKER, RISK, or NOTE.
 
@@ -340,6 +342,11 @@ For each finding:
   existed.
 - **Fix:** one recommended change, not a menu of options. It covers every problem the comment
   names. If it covers only some, narrow the comment to those or split it.
+- When a reviewer identifies a reachable runtime failure, ask the author for a smoke run on the
+  PR head using the input and configuration that trigger it. Ask for the command or config and
+  a log or rollout showing that the affected path ran and produced the expected result. For
+  example, if a pinned executable may fail on Alpine, ask to see a session start on an affected
+  Alpine task image with that pin. Reuse existing evidence when it covers those conditions.
 - Link every claim about other code or a library, pinned to a commit.
 - Use a ```` ```suggestion ```` block when the fix is a single edit to the anchored lines. Otherwise
   give the concrete change and say in one clause why it is not a suggestion.
