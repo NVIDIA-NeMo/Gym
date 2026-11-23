@@ -41,6 +41,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -816,10 +817,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         if agent_session_id is not None:
             rollout_id = self._rollout_id(request)
             if not isinstance(rollout_id, str):
-                raise HTTPException(409, "Agent sessions require an attempt-qualified rollout path")
+                raise AgentSessionConflictError("Agent sessions require an attempt-qualified rollout path")
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
-                raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+                raise AgentSessionConflictError("Agent-session episode_id does not match the rollout route")
             if state.task is None:
                 self._refuse_episode_output_budget(body)
                 prepared, instruction = self._prepare_request(body)
@@ -841,7 +842,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     self._run_sandbox_activation(state, prepared, instruction=instruction, chat_params=chat_params)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "Terminus 2 sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "Terminus 2 sandbox sessions support one activation; retry the same request"
+                )
             # A disconnected HTTP waiter must not cancel the shared activation. Session close owns cancellation;
             # identical retries join this task or replay its result or error.
             return (await asyncio.shield(state.task)).model_copy(deep=True)

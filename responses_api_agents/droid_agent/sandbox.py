@@ -63,6 +63,11 @@ class DroidSandboxSession(AgentSessionState):
         """Droid's private state directory (``FACTORY_HOME_OVERRIDE``), outside the task repo and home."""
         return self.session.session_dir + "/home"
 
+    @property
+    def fallback_bin(self) -> str:
+        """The runtime's directory of stand-ins for tools Droid needs and the image may lack (``ps``)."""
+        return self.runtime + "/fallback-bin"
+
     async def close(self, timeout: float) -> None:
         """Join captured-artifact parsing before returning observations, within a bound."""
         await self.session.close(timeout=timeout)
@@ -108,6 +113,8 @@ class DroidSandboxSession(AgentSessionState):
             await upload_text(sandbox, path=f"{directory}/system.txt", text=payload["system"])
         # Regular files avoid waiting for detached task services to close inherited pipes.
         params = {
+            # Last on PATH, so the image's own ps is used when it has one.
+            "setup": 'export PATH="${PATH:+$PATH:}"' + quote(self.fallback_bin),
             "cwd": self.session.workdir,
             "command": payload["command"],
             "env": payload["env"],

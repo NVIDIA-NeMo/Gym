@@ -28,7 +28,6 @@ from pydantic import ValidationError
 
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import otel as obs_module
-from nemo_gym.orchestration.executors import slurm as slurm_module
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
@@ -40,9 +39,12 @@ from nemo_gym.orchestration.executors.otel import (
     resolve_token,
     scrape_targets,
 )
-from nemo_gym.orchestration.executors.resume_script import render_resume_epilogue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.executors.slurm_script import _collector_command, build_sbatch_script
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+from nemo_gym.orchestration.executors.slurm.resume_script import render_resume_epilogue
+from nemo_gym.orchestration.executors.slurm.script import _collector_command, build_sbatch_script
 from nemo_gym.orchestration.jobs import RESOLVED_CONFIG_NAME
 
 
@@ -830,8 +832,10 @@ class _FakeConnection(LocalConnection):
 
 
 def _install(monkeypatch, conn, tmp_path):
-    monkeypatch.setattr(slurm_module, "get_connection", lambda hostname: conn)
-    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda hostname: conn)
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda hostname: conn)
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda hostname: conn)
+    monkeypatch.setattr(slurm_executor, "_validate_mounts", lambda config, connection: None)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
 

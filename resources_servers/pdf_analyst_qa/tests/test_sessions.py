@@ -136,7 +136,7 @@ async def test_seed_retries_reuse_one_sandbox_and_close_without_cookie(server):
     close = ResourcesCloseSessionRequest(resources_session_id="session-1", episode_id=seed().episode_id)
     await resource.close_resources_session(close)
     await resource.close_resources_session(close)
-    sandboxes[0].stop.assert_awaited_once()
+    sandboxes[0].stop.assert_awaited_once_with(timeout_s=resource.config.cleanup_timeout_s)
     with pytest.raises(Exception):
         await resource.seed_session(request(), seed())
 
@@ -337,7 +337,7 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
         "egress": [{"action": "allow", "target": "10.2.3.4"}],
     }
     assert "volumes" not in spec.provider_options
-    assert spec.provider_options["resource_requests"] == {"cpu": 0.75, "memory_mib": 2048, "disk_gib": 10}
+    assert spec.provider_options["resource_requests"] == {"cpu": 0.75, "memory_mib": 2048, "disk_gib": 24}
     assert spec.files and spec.env["OPENCODE_CONFIG"] == "/opt/cli/opencode-model.json"
     assert sandbox.exec.await_args.kwargs["user"] == 0
     sandbox.set_default_user.assert_called_once_with(65534)

@@ -14,7 +14,7 @@ When you run `gym env start`, the system starts up in four phases:
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333', 'primaryColor': '#e3f2fd', 'secondaryColor': '#f5f5f5'}}}%%
 flowchart LR
     A[Parse CLI] --> B[Load Configs]
-    B --> C[Init Ray]
+    B --> C[Init Ray if a server uses it]
     C --> D[Start Servers]
 ```
 
@@ -92,7 +92,13 @@ flowchart TB
 2. **Server Subprocesses**: Each configured server is spawned as an independent OS process:
    - Each server has its own Python virtual environment in order to isolate dependencies.
    - Each runs uvicorn with a FastAPI application listening on `http://{host}:{port}`.
-   - The global config is passed via environment variable `NEMO_GYM_CONFIG_DICT`.
+   - The global config is passed via environment variable `NEMO_GYM_CONFIG_DICT`. A config over 120 KiB, near the
+     length Linux refuses in one environment variable, is written to a file that only the user can read, and
+     `NEMO_GYM_CONFIG_DICT_FILE` names it. A venv reused with `skip_venv_if_present` can hold a Gym that reads only
+     the variable: the config then stays in the variable for every server, and the run stops before any server
+     starts when the operating system does not accept it there. The file is removed when the servers shut down,
+     also when SIGTERM stops `gym env start`. The command then exits with status 143, or with 15 when a server
+     uses Ray and the signal arrives while the servers start, where Ray's own handler is in place.
    - The specific server identity is passed via `NEMO_GYM_CONFIG_PATH`.
    - Server URLs are registered in the global config, allowing other servers to discover and call them.
 

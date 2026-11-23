@@ -266,8 +266,11 @@ all = [
 ray = [
     # Ray: Used for distributed processing
     # Updated Mon Sep 28, 2026 with ray[default]>=2.58.0 (CVE mitigation: httpcore5 bundled in ray_dist.jar)
+    # Upper bound <2.60: Ray Serve 2.60 imports grpc_reflection without declaring it, and grpcio-reflection
+    # needs protobuf 7, which conflicts with vLLM's protobuf<7.
+    # Updated Thu Nov 19, 2026 with ray[default]>=2.58.0,<2.60
     # License: Apache 2.0 https://github.com/ray-project/ray/blob/master/LICENSE
-    "ray[default]>=2.58.0",
+    "ray[default]>=2.58.0,<2.60",
 
     # jinja2: Ray Serve's HAProxy-based ingress (ray.serve._private.haproxy, since ray 2.57)
     # imports jinja2 unconditionally, but ray[default] doesn't declare it (only ray[serve] does).
@@ -342,10 +345,12 @@ sandbox = [
     # E2B SDK: used by the E2B sandbox provider for create/exec/kill and file operations.
     # Also drives any e2b-compatible gateway via connection.api_url/sandbox_url.
     # Lower bound 2.46.0: gateway port routing requires ConnectionConfig.sandbox_headers.
-    # Upper bound <3.0.0: the provider depends on the E2B 2.x SDK contract.
-    # Updated: Wed Sep 23, 2026 with e2b>=2.46.0,<3.0.0
+    # Upper bound <2.51.0: 2.51 stopped defaulting pause() to keep memory, and 2.52 removed
+    # client_async.get_envd_transport, which nemo_gym/sandbox/providers/e2b/_sdk.py replaces.
+    # Raise it once the provider handles both.
+    # Updated: Thu Nov 19, 2026 with e2b>=2.46.0,<2.51.0
     # License: MIT https://github.com/e2b-dev/E2B/blob/e2b@2.46.0/packages/python-sdk/LICENSE
-    "e2b>=2.46.0,<3.0.0",
+    "e2b>=2.46.0,<2.51.0",
 
     # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
     # CodeBuild/S3/SSM/Secrets Manager calls.
@@ -887,10 +892,12 @@ layers = [
     "nemo_gym.environment",
     # Shared web benchmark browser, session and task contracts.
     "nemo_gym.web",
-    # eval/
-    "nemo_gym.eval",
+    # eval/ (above orchestration, except the recovery policy below)
+    "nemo_gym.eval.comparison : nemo_gym.eval.eval_plan : nemo_gym.eval.rollout_compare : nemo_gym.eval.rollout_reverification",
     # orchestration/
     "nemo_gym.orchestration",
+    # eval/recovery/: the recovery policy that orchestration's executors call; it never imports orchestration
+    "nemo_gym.eval.recovery",
     # rollouts/
     "nemo_gym.rollouts",
     # data/
@@ -937,4 +944,18 @@ ignore_imports = [
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",
     "nemo_gym.sandbox.compose_config -> nemo_gym.data.tasks.harbor.digest",
     "nemo_gym.telemetry.setup -> nemo_gym.sandbox.observability",
+]
+
+# orchestration is a Gym-aware orchestrator, not a home for core functionality: only the CLI entrypoint imports it.
+# Every module directly under nemo_gym is a source (`nemo_gym.*`), so a new package is checked without being listed;
+# the exceptions below are the whole list.
+[[tool.importlinter.contracts]]
+name = "only the CLI entrypoint imports orchestration"
+type = "forbidden"
+source_modules = ["nemo_gym.*"]
+forbidden_modules = ["nemo_gym.orchestration"]
+allow_indirect_imports = true
+ignore_imports = [
+    "nemo_gym.cli.main -> nemo_gym.orchestration.**",
+    "nemo_gym.orchestration.** -> nemo_gym.orchestration.**",
 ]

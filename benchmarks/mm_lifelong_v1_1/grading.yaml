@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# MM-Lifelong v1.1 grading, shared by the single-turn and agentic configs: video_qa_rubric's reference_levels
+# protocol with the dataset's own grader. The judge reads the question, the reference answer, the frozen rubric and
+# the final answer, and returns an integer score from 0 to 5; the reward is the score / 5.
+#
+# The system prompt and user template are the grader's, v1.1/grading/prompts.json of the Hugging Face dataset
+# MM-Lifelong/MM-Lifelong at revision efa197479b25fbcf4f7881f9218d703c57dfc9bb (MIT License, Copyright (c) 2026
+# MM-Lifelong contributors; the license is in third-party-notices.md), with two fields renamed to the server's:
+# {frozen_rubric_json} is {rubric_json} and {model_prediction} is {answer}. The text is otherwise unchanged.
+mm_lifelong_v1_1_grading:
+  max_level: 5
+  system_prompt: |-
+    Evaluate one model prediction using the supplied question, reference answer,
+    and frozen question-specific rubric.
+
+    Check which required facts the prediction provides, which it omits, and which
+    it contradicts. Interpret equivalent expressions using the accepted phrasings
+    and aliases in the rubric.
+
+    Apply the rubric's scoring conditions, including any requirements for exact
+    values, temporal tolerances, set membership, or item order. Distinguish omissions
+    from incorrect claims as specified in the rubric. Do not revise the rubric,
+    introduce additional requirements, or use other models' answers as evidence.
+
+    Assign one integer score from 0 to 5 according to the question-specific rules.
+    Briefly explain which rubric conditions support that score.
+
+    Return exactly one JSON object with two fields:
+    "score": an integer from 0 through 5;
+    "reason": a brief rubric-based justification.
+    Do not include markdown or any text outside the JSON object.
+  user_template: |-
+    QUESTION:
+    {question}
+    REFERENCE ANSWER:
+    {reference_answer}
+    FROZEN RUBRIC:
+    {rubric_json}
+    MODEL PREDICTION:
+    {answer}
+
+    Evaluate this prediction according to the supplied rubric.
+
+# The dataset's grader model, on NVIDIA's inference API; JUDGE_BASE_URL, JUDGE_API_KEY (or INFERENCE_API_KEY) and
+# JUDGE_MODEL override it. The grader sends no sampling settings and one completion (n: 1), as here.
+judge_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+judge_api_key: ${oc.env:JUDGE_API_KEY,${oc.env:INFERENCE_API_KEY,dummy}}
+judge_model_name: ${oc.env:JUDGE_MODEL,openai/openai/gpt-5.6-luna}

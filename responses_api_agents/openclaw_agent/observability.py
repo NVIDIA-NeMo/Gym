@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 from collections import Counter
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -10,14 +11,16 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponseInputItem
+from nemo_gym.core import NeMoGymResponseInputItem, NeMoGymResponseUsage
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
+    ModelCallRecord,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
+    join_agent_model_calls,
 )
 
 
@@ -174,6 +177,7 @@ def build_openclaw_observation_tree(
     ],
     *,
     model_ref: ModelServerRef | None = None,
+    runtime_log: str = "",
 ) -> AgentObservationBundle:
     """Combine per-session observations after exact store-based lineage discovery."""
     combined = AgentObservationBundle(source=OPENCLAW_OBSERVATION_SOURCE)
@@ -257,6 +261,7 @@ def build_openclaw_observations(
     prefer_openclaw_session_id: bool = True,
     capture_correlated: bool = False,
     model_ref: ModelServerRef | None = None,
+    runtime_log: str = "",
 ) -> AgentObservationBundle:
     events = list(events)
     openclaw_session_id = next(
@@ -313,6 +318,20 @@ def build_openclaw_observations(
         )
 
     bundle.gaps = [gap for gap in bundle.gaps if gap.code != "context_compaction_unavailable"]
+    # Verified against OpenClaw 2026.6.11 (the adapter runtime pin). This is a
+    # diagnostic log format, not a stable API; recheck it on runtime upgrades.
+    # Unmatched logs leave the trigger unknown rather than assuming automatic.
+    completed = re.findall(
+        r"embedded run auto-compaction complete: runId=(\S+) reason=(?:overflow|threshold) "
+        r"compactionCount=(\d+) willRetry=(?:true|false)",
+        runtime_log,
+    )
+    compaction_count = sum(event.get("type") == "compaction" for event in events)
+    automatic = (
+        bool(completed)
+        and len({run_id for run_id, _ in completed}) == 1
+        and [int(count) for _, count in completed] == list(range(1, compaction_count + 1))
+    )
     visible_tools = _model_visible_tool_calls(conversation)
     tool_counts = Counter(call_id for call_id, _ in visible_tools)
     tool_metadata = {call_id: tool_name for call_id, tool_name in visible_tools if tool_counts[call_id] == 1}
@@ -391,7 +410,11 @@ def build_openclaw_observations(
         compaction = ContextCompactionObservation(
             invocation_id=invocation_id,
             observed_at=_timestamp(event.get("timestamp")),
-            trigger=event.get("reason") if isinstance(event.get("reason"), str) else None,
+            trigger=event.get("reason")
+            if isinstance(event.get("reason"), str)
+            else "automatic"
+            if automatic
+            else None,
             tokens_before=tokens_before if type(tokens_before) is int and tokens_before >= 0 else None,
             tokens_after=tokens_after if type(tokens_after) is int and tokens_after >= 0 else None,
             outcome="completed",
@@ -443,3 +466,115 @@ def build_openclaw_observations(
                 )
             )
     return bundle
+
+
+def reconcile_openclaw_calls(
+    bundle: AgentObservationBundle, calls: list[ModelCallRecord]
+) -> tuple[AgentObservationBundle, NeMoGymResponseUsage | None]:
+    """Resolve native summaries and measured usage using session-owned captured exchanges."""
+    bundle = join_agent_model_calls(bundle, calls)
+    owners = {record.invocation_id for record in bundle.records if isinstance(record, AgentInvocation)}
+    calls = [call for call in calls if call.client_session_id in owners and call.model_call_id]
+    if not calls or len({call.model_call_id for call in calls}) != len(calls):
+        return bundle, None
+    compactions = [record for record in bundle.records if isinstance(record, ContextCompactionObservation)]
+    candidates = []
+    for event in compactions:
+        matches = []
+        for call in calls:
+            choices = (call.response or {}).get("choices") or []
+            text = (choices[0].get("message") or {}).get("content") if len(choices) == 1 else None
+            if (
+                call.client_session_id == event.invocation_id
+                and call.status_code == 200
+                and not call.error_category
+                and not call.tool_calls
+                and not (call.request or {}).get("tools")
+                and isinstance(text, str)
+                and text.strip()
+                and event.summary
+                and (
+                    event.summary == text.strip()
+                    or event.summary.endswith("\n\n**Turn Context (split turn):**\n\n" + text.strip())
+                )
+                and event.observed_at is not None
+                and call.completed_at is not None
+                and call.completed_at <= event.observed_at
+            ):
+                matches.append(call)
+        candidates.append(matches)
+    counts = Counter(call.model_call_id for matches in candidates for call in matches)
+    for event, matches in zip(compactions, candidates):
+        event.model_calls = []
+        if len(matches) == 1 and counts[matches[0].model_call_id] == 1:
+            call = matches[0]
+            event.model_calls = [
+                ModelCallRef(
+                    model_call_id=call.model_call_id,
+                    model_ref=call.model_ref,
+                    response_id=call.response_id,
+                )
+            ]
+        else:
+            bundle.gaps.append(
+                ObservationGap(
+                    code="compaction_model_call_match_ambiguous"
+                    if matches
+                    else "compaction_model_call_reference_unavailable",
+                    invocation_id=event.invocation_id,
+                )
+            )
+    unresolved = {event.invocation_id for event in compactions if not event.model_calls}
+    bundle.gaps = [
+        gap
+        for gap in bundle.gaps
+        if gap.code != "compaction_model_call_boundary_unavailable" or gap.invocation_id in unresolved
+    ]
+
+    # ResponseUsage requires numeric totals: retain the measured subtotal and an
+    # explicit gap for unknown attempts. Per-call unknowns remain untouched.
+    measured = [
+        call
+        for call in calls
+        if any(value is not None for value in (call.tokens_in, call.tokens_out, call.tokens_total))
+    ]
+    if not measured:
+        return bundle, None
+    usage = NeMoGymResponseUsage.sum_from_list(
+        [
+            NeMoGymResponseUsage(
+                input_tokens=call.tokens_in or 0,
+                output_tokens=call.tokens_out or 0,
+                total_tokens=call.tokens_total
+                if call.tokens_total is not None
+                else (call.tokens_in or 0) + (call.tokens_out or 0),
+                input_tokens_details={"cached_tokens": call.cached_tokens},
+                output_tokens_details={"reasoning_tokens": call.tokens_reasoning},
+            )
+            for call in measured
+        ]
+    )
+    bundle.gaps = [
+        gap
+        for gap in bundle.gaps
+        if gap.code
+        not in {
+            "auxiliary_model_usage_unavailable",
+            "model_call_usage_identity_unavailable",
+            "model_call_usage_unavailable",
+        }
+    ]
+    if any(value is None for call in calls for value in (call.tokens_in, call.tokens_out, call.tokens_total)):
+        bundle.gaps.append(
+            ObservationGap(
+                code="model_call_usage_unavailable",
+                detail="Response usage is the measured subtotal; some captured attempts have unknown usage",
+            )
+        )
+        usage.input_tokens_details.cached_tokens = None
+        usage.output_tokens_details.reasoning_tokens = None
+    if usage.input_tokens_details.cached_tokens is not None:
+        bundle.gaps = [gap for gap in bundle.gaps if gap.code != "cached_token_usage_unavailable"]
+    if usage.output_tokens_details.reasoning_tokens is not None:
+        bundle.gaps = [gap for gap in bundle.gaps if gap.code != "reasoning_token_usage_unavailable"]
+    return bundle, usage

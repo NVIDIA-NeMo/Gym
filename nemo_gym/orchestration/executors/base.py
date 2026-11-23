@@ -13,30 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
 import yaml
 from pydantic import BaseModel
 
+from nemo_gym.eval.recovery.budgets import OperatorBudget
+from nemo_gym.eval.recovery.decision import (
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryOutcome,
+)
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
 from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
     RESOLVED_CONFIG_NAME,
-    BenchmarkJob,
     SubmissionEnvironment,
     SubmissionRecord,
     SubmissionTelemetry,
-)
-from nemo_gym.orchestration.recovery import (
-    CollectedEvidence,
-    OperatorBudget,
-    RecoveryAction,
-    RecoveryDecision,
-    RecoveryOutcome,
-    RecoveryOutcomePolicyConfig,
 )
 
 
@@ -52,7 +52,17 @@ class SchedulerRefusedError(RuntimeError):
         self.detail = detail
 
 
+logger = logging.getLogger(__name__)
+
+
 class BaseExecutor(ABC):
+    """What a new executor extends: implement `run` and it can submit.
+
+    Everything else is opt-in. `executors/capabilities.py` has an interface for each further feature
+    (`Resubmittable`, `Inspectable`, `Terminable`, `LogReadable`); an executor lists the ones it
+    supports in its bases and implements every abstract method of each.
+    """
+
     # Whether this executor can auto-resubmit a benchmark that gets killed by
     # the scheduler (time limit, preemption, node failure). False means asking
     # for `resumable` on this executor is a config error, not a silent no-op.
@@ -161,38 +171,6 @@ class BaseExecutor(ABC):
         when the executor has no such limit to check."""
         return None
 
-    @abstractmethod
-    def resubmit(
-        self,
-        record: SubmissionRecord,
-        benchmark: str,
-        *,
-        keep_budget: bool = False,
-        accounted_walltime_s: float | None = None,
-        accounting_snapshot: Mapping[str, str | None] | None = None,
-        accounting_reconciled: bool = False,
-        repin: str | None = None,
-        repin_reason: str | None = None,
-        extend_retries: int = 0,
-        extend_attempts: int = 0,
-        max_walltime: str | None = None,
-        walltime_reason: str | None = None,
-        fresh_restart: bool = False,
-        rerun_masked: Mapping[str, Any] | None = None,
-    ) -> BenchmarkJob:
-        """Queue `benchmark` of `record` again, in place, and return its updated entry.
-
-        ``keep_budget`` (used by recovery) keeps the run's spent retry, walltime and attempt budget instead of
-        starting a fresh one. ``fresh_restart`` (used by recovery of a run with no task inventory) starts a fresh
-        one with the longer ``max_walltime``. ``rerun_masked`` (with ``keep_budget``) is the approval to run again the
-        masked results it names (``reason`` and ``identities``), journaled with the run's artifacts before the job is
-        queued and undone if it is not.
-
-        Refuses while a job of that benchmark is still active, so two jobs never write one run.
-        Persists the updated record before returning. An executor that cannot do this raises
-        `UnsupportedOperationError`.
-        """
-
     @staticmethod
     def submission_environment(
         config: SubmitConfig, *, required_env: list[str], forwarded_env: list[str]
@@ -228,6 +206,11 @@ class BaseExecutor(ABC):
             ),
         )
 
+    # The primitives job management is built on. Each one is the only place an executor talks to its
+    # scheduler, and each raises `UnsupportedOperationError` until the executor implements it, so an
+    # executor without them keeps working. They are not abstract: that would break every subclass that
+    # only submits.
+
     def persist(
         self,
         record: SubmissionRecord,
@@ -255,6 +238,17 @@ class BaseExecutor(ABC):
         The jobs are queued by the time this runs, so a failure has to name them
         or they are stranded with no record anywhere.
         """
+        from nemo_gym.rollouts.provenance import build_provenance
+
+        # Capture submission-time settings; materialized input hashes are added by each run. The resolved
+        # config is left out here because it is written once, beside the manifest, below.
+        try:
+            record.provenance = build_provenance(
+                config.model_dump(mode="json", context={HOST_ENV_REFS: True})
+            ).model_dump(mode="json", exclude={"resolved_config"})
+        except Exception as error:
+            logger.warning("Submission provenance unavailable (%s).", type(error).__name__)
+            record.provenance = {}
 
         def write_resolved_config() -> None:
             # `host:` values are written as their references, so the record is safe for other readers

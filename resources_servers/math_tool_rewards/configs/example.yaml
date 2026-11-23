@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+math_tool_rewards:
+  resources_servers:
+    math_tool_rewards:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: math_with_judge training verification with configurable tool penalties
+      should_use_judge: false
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/math_tool_rewards/data/example.jsonl
+
+# Required reference inherited from the math grader; symbolic-only examples do not call it.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py

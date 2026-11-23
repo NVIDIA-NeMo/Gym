@@ -9,7 +9,9 @@ version = "1.0"
 [environment]
 docker_image = "{docker_image}"
 workdir = "/app"
-## FIXME: Native Harbor Singularity environment does not support allowlist.
+cpus = 2
+memory_mb = 65536
+## NOTE: Only docker environment supports allowlist.
 # network_mode = "allowlist"
 # allowed_hosts = {allowed_domains}
 

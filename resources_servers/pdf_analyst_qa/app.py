@@ -93,7 +93,7 @@ class PdfAnalystQaResourcesServerConfig(BaseResourcesServerConfig):
     mounted_documents: MountedDocumentsConfig
     sandbox_cpu: float = Field(default=2, gt=0)
     sandbox_memory_mib: int = Field(default=8192, gt=0)
-    sandbox_disk_gib: int = Field(default=10, gt=0)
+    sandbox_disk_gib: int = Field(default=24, gt=0)
     sandbox_request_cpu: float = Field(default=0.5, gt=0)
     sandbox_request_memory_mib: int = Field(default=1024, gt=0)
     sandbox_ready_timeout_s: float = Field(default=180, gt=0)
@@ -319,8 +319,7 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
         if state is None:
             return
         if state.sandbox is not None:
-            async with asyncio.timeout(self.config.cleanup_timeout_s):
-                await state.sandbox.stop()
+            await state.sandbox.stop(timeout_s=self.config.cleanup_timeout_s)
             state.sandbox = None
         if state.owns_slot:
             self._sandbox_slots.release()
