@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BEAVER text-to-SQL resources server: execution-based verification on BEAVER's MySQL databases, scored with BEAVER's
+# official execution accuracy (ex_acc). Needs a MySQL 8.0 server; see resources_servers/beaver_sql/README.md.
+
+beaver_sql_resources_server:
+  resources_servers:
+    beaver_sql:
+      entrypoint: app.py
+      # The grader's read-only user. Keep the password off the command line, for example
+      # `+beaver_sql_resources_server.resources_servers.beaver_sql.mysql_dsn='${oc.env:BEAVER_MYSQL_DSN}'`.
+      mysql_dsn: mysql://beaver_reader@127.0.0.1:3306
+      # Set to load the data and create the grader's user at startup (`${oc.env:BEAVER_MYSQL_ADMIN_DSN}`).
+      mysql_admin_dsn: null
+      databases: [dw]
+      cache_dir: resources_servers/beaver_sql/.beaver
+      max_concurrency: 8
+      query_timeout_s: 10.0
+      connection_timeout_s: 10
+      domain: coding
+      verified: false
+      description: Text-to-SQL on BEAVER's enterprise data warehouses (MySQL), scored with BEAVER's official execution accuracy.
+      value: Measure text-to-SQL on large, real enterprise schemas with execution-based binary reward and no LLM judge.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/beaver_sql/data/example.jsonl
+        num_repeats: 1
+
+beaver_sql_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: beaver_sql_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+beaver_sql_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: beaver_sql_simple_agent
