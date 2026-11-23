@@ -15,7 +15,8 @@
 #   curl -s "$MINIMAX_BASE_URL/models"                # confirm it's up
 #
 # ── STEP 2: run multi-stage ELO through the benchmark's driver. The benchmark
-#            config loads the multistage orchestrator + policy model + dataset;
+#            config loads the multistage orchestrator + dataset, and
+#            `--model-type vllm_model` defines the `policy_model` they use;
 #            this overlay, loaded after it, swaps in comparison mode + the
 #            MiniMax judge; the ++multistage.* flags opt into staged ELO. Pass
 #            the benchmark config with --config, before this file: `gym eval run`

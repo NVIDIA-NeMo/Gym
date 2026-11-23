@@ -853,7 +853,7 @@ gym eval run \
     --split benchmark \
     --output results/gdpval_minimax_judge.jsonl \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-    ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+    ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/path/to/reference/output
 ```
 
 The overlay repoints the benchmark's existing `gdpval_judge_model` proxy at your
@@ -900,7 +900,14 @@ gym eval run --model-type vllm_model \
     --config resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml \
     --split benchmark --output results/gdpval_kimi_judge.jsonl \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-    ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+    ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/path/to/reference/output
+```
+
+With `KIMI_CHECKPOINT_PATH` set, the model server sends that path as the request's `model`, so add it to the
+engine's served model names as well, or vLLM answers 404 to every judge request:
+
+```bash
+    "++gdpval_judge_model_local.responses_api_models.local_vllm_model.vllm_serve_kwargs.served_model_name=[moonshotai/Kimi-K2.6,$KIMI_CHECKPOINT_PATH]"
 ```
 
 Pass the benchmark config with `--config` before the overlay, as above, not with `--benchmark gdpval`. `gym eval run`

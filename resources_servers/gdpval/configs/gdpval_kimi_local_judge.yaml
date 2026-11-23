@@ -11,7 +11,7 @@
 #     --config resources_servers/gdpval/configs/gdpval_kimi_local_judge.yaml \
 #     --split benchmark --output results/gdpval_kimi_judge.jsonl \
 #     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-#     ++gdpval_resources_server.resources_servers.gdpval.reference_models...=...
+#     ++gdpval_resources_server.resources_servers.gdpval.reference_deliverables_dir=/path/to/reference/output
 #
 # Pass the benchmark config with --config, before this file. `gym eval run` loads
 # --config files before --benchmark files, so `--benchmark gdpval` would put the
@@ -65,6 +65,8 @@ gdpval_judge_model_local:
         tensor_parallel_size: 8
         pipeline_parallel_size: 1
         gpu_memory_utilization: 0.80
+        # With KIMI_CHECKPOINT_PATH set, add that path here as well (README shows
+        # the ++ flag): this server sends `model` above as the request's model.
         served_model_name: [moonshotai/Kimi-K2.6]
         # `--language-model-only` intentionally OMITTED → vision tower loads.
         enable_expert_parallel: true
