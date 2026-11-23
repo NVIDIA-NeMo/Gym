@@ -170,6 +170,41 @@ class TestTomlDumps:
         parsed = tomllib.loads(toml_dumps({"a b": 'quo"te\nnl', "list": ["x", "y"]}))
         assert parsed == {"a b": 'quo"te\nnl', "list": ["x", "y"]}
 
+    def test_round_trips_stdio_servers_whatever_text_they_hold(self) -> None:
+        # A task writes a stdio grant's command, args and env: ASCII, Basic Multilingual Plane and supplementary
+        # characters, quotes, backslashes, newlines, DEL and other control characters.
+        server = {
+            "command": "/opt/\U0001f34d/server.py",
+            "args": ["--plain", "caf\u00e9 \u2615 \u6f22\u5b57", "/data/\U0001d54f/in.json", 'say "hi" \\ now'],
+            "env": {
+                "PLAIN": "value",
+                "BMP": "\u00f1 \u6f22\u5b57 \ufffd",
+                "SUPPLEMENTARY": "\U00010000 \U0001f34d \U0010ffff",
+                "CONTROL": "line1\nline2\r\n\ttab\b\f\x00\x1b\x1f del\x7f",
+                "quoted key \U0001f34d": 'a"b\\c',
+            },
+            "required": False,
+        }
+        text = toml_dumps({"mcp_servers": {"magic": server}})
+        assert tomllib.loads(text) == {"mcp_servers": {"magic": server}}
+        # Printable ASCII only, whatever the locale encoding the file is written in.
+        assert text.isascii()
+
+    def test_writes_a_supplementary_character_as_one_escape(self) -> None:
+        text = toml_dumps({"args": ["/opt/\U0001f34d/server.py"], "k\U0010ffff": "\U00010000"})
+        assert text == 'args = ["/opt/\\U0001F34D/server.py"]\n"k\\U0010FFFF" = "\\U00010000"'
+
+    def test_writes_basic_multilingual_plane_text_as_json_escapes_it(self) -> None:
+        # Configurations without supplementary characters stay byte-identical to the JSON-escaped form written before.
+        text = "".join(map(chr, range(0xD800))) + "".join(map(chr, range(0xE000, 0x10000)))
+        written = toml_dumps({"key": text, text: 1})
+        assert written == f"key = {json.dumps(text)}\n{json.dumps(text)} = 1"
+        assert tomllib.loads(written) == {"key": text, text: 1}
+
+    def test_refuses_an_unpaired_surrogate_that_toml_cannot_hold(self) -> None:
+        with pytest.raises(ValueError, match="unpaired surrogate U\\+D83C"):
+            toml_dumps({"args": ["/opt/\ud83c/server.py"]})
+
 
 class TestBuildCommand:
     def test_command_shape(self) -> None:

@@ -302,10 +302,35 @@ def _mcp_grant_secrets(access: MCPToolAccess) -> list[str]:
     return list((connection.env if isinstance(connection, MCPStdioConnection) else connection.headers).values())
 
 
+# What a TOML basic string from _toml_string escapes: quotes, backslashes and every character outside printable ASCII.
+_TOML_ESCAPED_CHARACTER = re.compile(r'["\\]|[^ -~]')
+
+
+def _toml_escape(match: re.Match[str]) -> str:
+    code = ord(match.group())
+    if code > 0xFFFF:
+        # JSON writes it as a UTF-16 surrogate pair, which TOML rejects.
+        return f"\\U{code:08X}"
+    if 0xD800 <= code <= 0xDFFF:
+        raise ValueError(f"TOML cannot hold the unpaired surrogate U+{code:04X}")
+    # Within the Basic Multilingual Plane, TOML reads JSON's escapes the same way.
+    return json.dumps(match.group())[1:-1]
+
+
+def _toml_string(value: str) -> str:
+    """``value`` as a TOML basic string of printable ASCII, escaped as JSON escapes it but for characters outside the
+    Basic Multilingual Plane, each written as one ``\\UXXXXXXXX``.
+
+    Raises:
+        ValueError: ``value`` holds an unpaired surrogate, which no TOML string can hold.
+    """
+    return '"' + _TOML_ESCAPED_CHARACTER.sub(_toml_escape, value) + '"'
+
+
 def _toml_key(key: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9_-]+", key):
         return key
-    return json.dumps(key)
+    return _toml_string(key)
 
 
 def _toml_value(value: Any) -> str:
@@ -314,8 +339,7 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        # JSON string escaping is a valid TOML basic string.
-        return json.dumps(value)
+        return _toml_string(value)
     if isinstance(value, list):
         return "[" + ", ".join(_toml_value(v) for v in value) + "]"
     raise TypeError(f"Unsupported TOML value type: {type(value).__name__}")

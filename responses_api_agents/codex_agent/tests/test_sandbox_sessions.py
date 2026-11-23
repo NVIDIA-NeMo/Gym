@@ -510,6 +510,30 @@ def test_a_stdio_grant_reaches_the_codex_config_as_a_command_codex_starts(setup)
     }
 
 
+def test_a_stdio_grant_reaches_the_codex_config_whatever_text_it_holds(setup):
+    """A task's stdio command, args and env reach config.toml unchanged, so no optional grant can make the whole
+    configuration unreadable."""
+    agent, sandbox = setup
+    connection = {
+        "transport": "stdio",
+        "command": "/opt/\U0001f34d/server.py",
+        "args": ["caf\u00e9 \u6f22\u5b57", "/data/\U0001d54f/in.json", 'say "hi" \\ now', "line1\nline2", "del\x7f"],
+        "env": {"MAGIC_LOG": "/tmp/\U0001f34d.log", "GREETING": "\u00f1\t\U0010ffff", "quoted key \u00e9": 'a"b'},
+    }
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [{"kind": "mcp", "name": "magic", "required": False, "connection": connection}]
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=body).json()["agent_session_id"]
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+        text = sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"]
+        client.post("/v1/agent_sessions/close", json=close_body(session_id))
+    entry = tomllib.loads(text)["mcp_servers"]["magic"]
+    assert {key: entry[key] for key in ("command", "args", "env")} == {
+        key: connection[key] for key in ("command", "args", "env")
+    }
+    assert "required" not in entry
+
+
 def test_an_optional_sse_grant_is_left_out_with_a_gap(setup):
     agent, sandbox = setup
     body = seed().model_dump(mode="json")
