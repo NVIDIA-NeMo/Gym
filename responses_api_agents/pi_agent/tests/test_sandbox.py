@@ -1664,6 +1664,22 @@ def test_optional_usage_details_preserve_unknown_contributors(setup, cache_read,
     assert response["output"][0]["type"] == "reasoning"
 
 
+@pytest.mark.parametrize("cache_write, written", [(None, 0), (0, 0), (40, 40), (-1, 0), ("40", 0), (True, 0)])
+def test_prompt_tokens_include_cache_writes(setup, cache_write, written):
+    """Pi leaves the prompt tokens a call wrote to the cache out of its `input`; they are still prompt tokens."""
+    agent, sandbox = setup
+    recorded = [json.loads(line)[1] for line in events().splitlines()]
+    if cache_write is not None:
+        recorded[0]["message"]["usage"]["cacheWrite"] = cache_write
+    recorded[2]["message"]["usage"]["cacheRead"] = 3
+    response, _ = sandbox_event_response(agent, sandbox, recorded)
+    # Uncached input 10 + 5, cache reads 2 + 3, and the first call's cache writes.
+    assert response["usage"]["input_tokens"] == 20 + written
+    assert response["usage"]["total_tokens"] == 25 + written
+    # Cached tokens stay cache reads only.
+    assert response["usage"]["input_tokens_details"]["cached_tokens"] == 5
+
+
 def test_defaulted_cache_zero_remains_unknown(setup):
     agent, sandbox = setup
     recorded = [json.loads(line)[1] for line in events().splitlines()]

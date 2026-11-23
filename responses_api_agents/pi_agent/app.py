@@ -312,8 +312,11 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int | Non
                 usage = {}
             cache_read = usage.get("cacheRead")
             input_tokens += int(usage.get("input") or 0)
-            if type(cache_read) is int and cache_read >= 0:
-                input_tokens += cache_read
+            # Pi splits a call's prompt into uncached `input`, cache reads and cache writes (its Chat Completions
+            # parser subtracts both cache counts from prompt_tokens), so the prompt tokens are all three.
+            for cache_count in (cache_read, usage.get("cacheWrite")):
+                if type(cache_count) is int and cache_count >= 0:
+                    input_tokens += cache_count
             # Pi also emits zero when backend cache details are absent; zero has no measured provenance.
             if type(cache_read) is not int or cache_read <= 0:
                 cache_measured = False
