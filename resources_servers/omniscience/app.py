@@ -168,6 +168,7 @@ def parse_judge_grade(judge_text: str) -> str | None:
         return last_line
 
     candidates: set[str] = set()
+    suspects: set[str] = set()
     for line in cleaned.splitlines():
         clauses = line.split(";")
         first = _EXPLICIT_GRADE_RE.match(clauses[0])
@@ -183,17 +184,20 @@ def parse_judge_grade(judge_text: str) -> str | None:
         # A malformed alternative must not turn a matching prefix into a completed grade.
         if any(_UNPARSED_ALTERNATIVE_RE.match(rest) for rest in rests):
             return None
-        if not _VERDICT_TAIL_RE.match(rests[0]):
-            continue  # Prose that starts like a verdict ("CORRECT answer would be ...") is not one.
-        if not all(_VERDICT_TAIL_RE.match(rest) for rest in rests[1:]):
-            return None
+        letters: set[str] = set()
         for match in matches:
             if letter := match.group("letter"):
-                candidates.add(letter)
-            candidates.update(
+                letters.add(letter)
+            letters.update(
                 _GRADE_KEYWORDS.get(token, token) for token in _GRADE_TOKEN_RE.findall(match.group("grades"))
             )
-    if len(candidates) == 1:
+        if not _VERDICT_TAIL_RE.match(rests[0]):
+            suspects |= letters  # Not a verdict on its own, but it may contradict one.
+            continue
+        if not all(_VERDICT_TAIL_RE.match(rest) for rest in rests[1:]):
+            return None
+        candidates |= letters
+    if len(candidates) == 1 and suspects <= candidates:
         record_parsed_judge_verdict()
         return candidates.pop()
 
