@@ -5,7 +5,7 @@
 [project]
 name = "gym-multi-object-tracking"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = ["nemo-gym[dev]"]
 
 [tool.uv]

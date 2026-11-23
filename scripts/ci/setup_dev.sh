@@ -18,8 +18,8 @@ gym_ci_setup_dev() {
     setup_ci_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     setup_repo_root="$(cd "${setup_ci_dir}/../.." && pwd)"
     setup_python_version="$(<"${setup_repo_root}/.python-version")"
-    setup_uv_install_url="https://astral.sh/uv/0.13.4/install.sh"
-    setup_uv_bin_dir="${setup_repo_root}/.cache/nemo-gym-ci/uv-0.13.4"
+    setup_uv_install_url="https://astral.sh/uv/0.13.7/install.sh"
+    setup_uv_bin_dir="${setup_repo_root}/.cache/nemo-gym-ci/uv-0.13.7"
     setup_dev_venv_dir="${GYM_CI_DEV_VENV_DIR:-${setup_repo_root}/.venv}"
     if [[ "${setup_dev_venv_dir}" != /* || "${setup_dev_venv_dir}" == "/" ]]; then
         echo "GYM_CI_DEV_VENV_DIR must be an absolute non-root path: ${setup_dev_venv_dir}" >&2
@@ -27,7 +27,7 @@ gym_ci_setup_dev() {
     fi
 
     cd "${setup_repo_root}"
-    if command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == "0.13.4" ]]; then
+    if command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == "0.13.7" ]]; then
         # uv is already present at the pinned version (the baked CI image, or a
         # runner/image that ships it): do not download or install anything.
         # In the container (NEMO_GYM_CONTAINER=1) resolve from the pre-populated
@@ -49,7 +49,7 @@ gym_ci_setup_dev() {
             env UV_UNMANAGED_INSTALL="${setup_uv_bin_dir}" sh "${setup_uv_installer}"
         )
         export PATH="${setup_uv_bin_dir}:${PATH}"
-        test "$(uv --version | awk '{print $2}')" = "0.13.4"
+        test "$(uv --version | awk '{print $2}')" = "0.13.7"
         setup_uv_sync_args=()
     fi
     # Resolve uv's default when the CI provider did not supply a cache directory, then export the

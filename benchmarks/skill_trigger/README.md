@@ -30,10 +30,10 @@ The task has a 120-second Harbor agent timeout. Agent defaults govern reasoning,
 
 ## Prepare
 
-Use Linux with Docker, uv, and Python 3.13.14. The configurations and adapters are tested with Harbor 0.25.0. Install Gym's existing Harbor component and pin that runtime:
+Use Linux with Docker, uv, and Python 3.13.18. The configurations and adapters are tested with Harbor 0.25.0. Install Gym's existing Harbor component and pin that runtime:
 
 ```sh
-uv sync --project responses_api_agents/harbor_agent_general --python 3.13.14 --no-default-groups
+uv sync --project responses_api_agents/harbor_agent_general --python 3.13.18 --no-default-groups
 uv pip install --python responses_api_agents/harbor_agent_general/.venv/bin/python 'harbor[opensandbox]==0.25.0'
 source responses_api_agents/harbor_agent_general/.venv/bin/activate
 ```

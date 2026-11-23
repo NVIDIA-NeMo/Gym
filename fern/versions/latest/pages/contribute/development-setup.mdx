@@ -13,7 +13,7 @@ git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
-uv venv --python 3.13.14
+uv venv --python 3.13.18
 source .venv/bin/activate
 uv sync --extra dev
 
@@ -274,7 +274,7 @@ For GPG instead of SSH: generate a key, set `user.signingkey` to the key ID, lea
 ### Testing Issues
 
 **Problem**: Tests fail locally but not in CI
-- Check Python version (3.13.14+ required)
+- Check Python version (3.13.18+ required)
 - Ensure all dependencies installed: `uv sync --extra dev`
 - Run in clean environment
 

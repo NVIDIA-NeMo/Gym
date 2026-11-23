@@ -404,12 +404,23 @@ async def test_the_python_build_is_downloaded_once_and_checked_on_every_use(pyth
     assert path.read_bytes() == python_build.body
     assert await sandbox_python._python_archive(platform) == path
     assert python_build.urls == [
-        "https://github.com/astral-sh/python-build-standalone/releases/download/20260805/"
-        "cpython-3.13.14%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+        "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/"
+        "cpython-3.13.18%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
     ]
     path.write_bytes(b"replaced")
     with pytest.raises(RuntimeError, match="does not match its pinned checksum"):
         await sandbox_python._python_archive(platform)
+
+
+async def test_python_3_14_is_downloaded_from_the_release_that_publishes_it(python_build, monkeypatch) -> None:
+    monkeypatch.setattr(sandbox_python, "_PYTHON_314_SHA256", {"x86_64/gnu": python_build.pinned})
+
+    await sandbox_python._python_archive(SandboxPlatform("x86_64", "gnu", 35), version="3.14.7")
+
+    assert python_build.urls == [
+        "https://github.com/astral-sh/python-build-standalone/releases/download/20260805/"
+        "cpython-3.14.7%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    ]
 
 
 async def test_a_python_build_that_does_not_match_its_pin_is_not_cached(python_build, tmp_path) -> None:
@@ -447,8 +458,8 @@ async def test_the_python_build_comes_through_the_hosts_proxy_and_mirror(python_
     await sandbox_python._python_archive(SandboxPlatform("x86_64", "gnu", 35))
 
     assert python_build.urls == [
-        "https://mirror.internal/python-build-standalone/20260805/"
-        "cpython-3.13.14%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+        "https://mirror.internal/python-build-standalone/20261026/"
+        "cpython-3.13.18%2B20261026-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
     ]
     assert python_build.requests[0]["proxy"] == "http://proxy.internal:3128"
 

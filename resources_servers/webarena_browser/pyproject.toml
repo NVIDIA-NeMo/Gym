@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nemo-gym-webarena-browser"
 version = "0.1.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
   # Reuse Gym's browser-session, lifecycle, action, and artifact contracts.
   # Install the parent closure without its dev extra so this component cannot

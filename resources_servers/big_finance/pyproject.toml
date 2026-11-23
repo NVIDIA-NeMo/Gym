@@ -4,7 +4,7 @@
 [project]
 name = "gym-resources-servers-big-finance"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "nemo-gym[dev]",
     "big-finance-harness @ git+https://github.com/wowowoxuan1994/big-finance-benchmark.git@dffb39459dbfc96a7b38d179fec420900d616a69",

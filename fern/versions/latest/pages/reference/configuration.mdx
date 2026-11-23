@@ -42,7 +42,7 @@ Servers that pre-staged setup trees next to the package (the layout before `cach
 
 A server directory can carry two standard uv files:
 
-- **`.python-version`** selects the Python for that server's venv. If the request admits the Python that runs `gym` (for example `>=3.13.14,<3.14`), the venv uses exactly that version, because Ray refuses to connect processes on different patch releases. A request that excludes it (for example `3.12`) is passed to uv unchanged; a server built that way cannot join the parent's Ray cluster.
+- **`.python-version`** selects the Python for that server's venv. If the request admits the Python that runs `gym` (for example `>=3.13.18,<3.14`), the venv uses exactly that version, because Ray refuses to connect processes on different patch releases. A request that excludes it (for example `3.12`) is passed to uv unchanged; a server built that way cannot join the parent's Ray cluster.
 - **`uv.toml`** is passed to `uv venv` and `uv pip install` with `--config-file`. Its resolver settings (for example `[pip] torch-backend = "cpu"`) apply to that venv only, and an enclosing uv workspace contributes none of its own.
 
 Every server venv also installs the packages the parent pins, such as its `openai` version (unless `allow_openai_version_skew` is set) and any telemetry or plugin packages, as ordinary requirements. A server that pins a conflicting version therefore fails setup rather than running with a mismatched client, unless the server's own `overrides.txt` replaces that package on purpose. The parent's Ray version is applied as both a constraint and an override: a server gets Ray only if its dependencies need it, and then at exactly the parent's version, even when a dependency pins another one.

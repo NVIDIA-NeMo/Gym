@@ -49,16 +49,18 @@ from nemo_gym.sandbox.api import AsyncSandbox
 
 LOG = logging.getLogger(__name__)
 
-PYTHON_VERSION = "3.13.14"
-_PYTHON_RELEASE = "20260805"
+PYTHON_VERSION = "3.13.18"
+_PYTHON_RELEASE = "20261026"
 # Published with the immutable python-build-standalone release:
-# https://github.com/astral-sh/python-build-standalone/releases/tag/20260805
+# https://github.com/astral-sh/python-build-standalone/releases/tag/20261026
 _PYTHON_SHA256 = {
-    "x86_64/gnu": "39e82d05926bdcd206732026bcd878d9f00e288cd227d91c1fabf379b6ea4fa5",  # pragma: allowlist secret
-    "aarch64/gnu": "f1cda716f5595a97e79f760f81da7150e4f6b4ae9dc49968b4ce5d6d64bba058",  # pragma: allowlist secret
-    "x86_64/musl": "c6b77767b2c97ce77c21496909396b6e056b96220b2cda45f2c93b654376dd93",  # pragma: allowlist secret
-    "aarch64/musl": "960738ebde53abeceb5452b71c2217d50452023e3baf2439dc57290d07930637",  # pragma: allowlist secret
+    "x86_64/gnu": "df15fe60d3ff55bf9dcf25824b5572756bb8816ff93865a273d3301d7066a8b7",  # pragma: allowlist secret
+    "aarch64/gnu": "578d9da1983463ffb0c8c98ab0da2f18177f44069328eb0af847860c1eb05c3e",  # pragma: allowlist secret
+    "x86_64/musl": "d997b3bd2d0651cfba6dd43c18c31b35d3a142819015fd5c35338c2ea27d4ceb",  # pragma: allowlist secret
+    "aarch64/musl": "61d02dd9a1b9631723c7c5d593021cde684cafc31b18a535b9584377a7b54038",  # pragma: allowlist secret
 }
+# Python 3.14.7 stays on the release that published it; the 20261026 release no longer ships that build.
+_PYTHON_314_RELEASE = "20260805"
 _PYTHON_314_SHA256 = {
     "x86_64/gnu": "a3a4e4b81b138960c7c546694df8a77578c0b6aa46d47e96f49b9e10e8f860c9",  # pragma: allowlist secret
     "aarch64/gnu": "f278d66c15e81f6c77719892e3eb32ff4bca5fc4ab424e171d14bc12bb88b4ee",  # pragma: allowlist secret
@@ -186,6 +188,11 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _python_release(version: str) -> str:
+    """The python-build-standalone release that publishes the pinned build of ``version``."""
+    return _PYTHON_314_RELEASE if version == "3.14.7" else _PYTHON_RELEASE
+
+
 async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VERSION) -> Path:
     """Return the host-cache path to the target platform's Python archive after checking its published SHA-256."""
     checksums = {PYTHON_VERSION: _PYTHON_SHA256, "3.14.7": _PYTHON_314_SHA256}.get(version)
@@ -194,8 +201,9 @@ async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VE
     expected = checksums.get(f"{platform.arch}/{platform.libc}")
     if expected is None:
         raise RuntimeError(f"No pinned Python build for {platform.arch}/{platform.libc}")
-    name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=version, arch=platform.arch, libc=platform.libc)
-    url = f"{(os.environ.get('UV_PYTHON_INSTALL_MIRROR') or _PYTHON_DOWNLOADS).rstrip('/')}/{_PYTHON_RELEASE}/{name}"
+    release = _python_release(version)
+    name = _PYTHON_FILE.format(release=release, version=version, arch=platform.arch, libc=platform.libc)
+    url = f"{(os.environ.get('UV_PYTHON_INSTALL_MIRROR') or _PYTHON_DOWNLOADS).rstrip('/')}/{release}/{name}"
     # A host that cannot download it can be given the file here.
     path = _cache_dir() / name.replace("%2B", "+")
 
@@ -294,7 +302,13 @@ class SandboxPythonRuntime:
         Server's environment, so a runtime baked into an image is reused only by an Agent Server environment with
         exactly those versions. The adapter may keep its own harness files here, beside ``python/``.
         """
-        inputs = [self.python_version, _PYTHON_RELEASE, self.requirements, self.overrides, self.pins]
+        inputs = [
+            self.python_version,
+            _python_release(self.python_version),
+            self.requirements,
+            self.overrides,
+            self.pins,
+        ]
         key = hashlib.sha256(json.dumps(inputs).encode()).hexdigest()[:16]
         return f"/tmp/nemo-gym-{self.harness}-runtime-{key}"
 

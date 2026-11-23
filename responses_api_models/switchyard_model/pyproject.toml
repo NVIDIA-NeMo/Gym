@@ -16,7 +16,7 @@
 [project]
 name = "switchyard-model"
 version = "0.1.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     ########################################
     # Every dependency listed here contains the following information:

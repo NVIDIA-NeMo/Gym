@@ -4,7 +4,7 @@
 [project]
 name = "gym-resources-servers-tales"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "nemo-gym[dev]",
     "tale-suite@ git+https://github.com/microsoft/tale-suite.git@ef349ba7cfdebf339e9aedcd09d89d6c917f86e5",

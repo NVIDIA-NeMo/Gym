@@ -134,7 +134,7 @@ def test_longmt_scoring_dependencies_are_isolated() -> None:
     assert scorer in managed_projects()
     wrapper_lock = tomllib.loads((wrapper / "uv.lock").read_text())
     scorer_lock = tomllib.loads((scorer / "uv.lock").read_text())
-    assert wrapper_lock["requires-python"] == ">=3.13.14"
+    assert wrapper_lock["requires-python"] == ">=3.13.18"
     assert scorer_lock["requires-python"] == "==3.12.*"
     wrapper_names = {package["name"] for package in wrapper_lock["package"]}
     scorer_names = {package["name"] for package in scorer_lock["package"]}

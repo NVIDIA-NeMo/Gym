@@ -11,7 +11,7 @@ SDK in any benchmark's task sandbox, and the benchmark's Resources Server verifi
 | | |
 | --- | --- |
 | Harness | `openhands-sdk` and `openhands-tools` 1.59.0, with every dependency at the version `uv.lock` pins for the Agent Server |
-| Python in the sandbox | Standalone CPython 3.13.14 with the harness installed, built on the Agent Server host and uploaded |
+| Python in the sandbox | Standalone CPython 3.13.18 with the harness installed, built on the Agent Server host and uploaded |
 | Execution | Agent sessions only, in a borrowed task sandbox or an agent-owned one (`sandbox_provider`). No host path, no `/run` |
 | Model API | Chat Completions through the rollout-prefixed Gym Model Server URL |
 | Tools | OpenHands' terminal, file editor, task tracker, `finish` and `think`, plus the tools of the episode's MCP grants. Direct HTTP grants are not supported |
@@ -94,7 +94,7 @@ sources share (for example a benchmark's `finish` without `finish_tool_names`) m
 Seed then installs the runtime, or reuses a healthy one, and uploads the runner.
 
 **Runtime installation** uses Gym's `SandboxPythonRuntime`. The Agent Server host builds the runtime with `uv`:
-a pinned python-build-standalone CPython 3.13.14 and the OpenHands packages for the sandbox's platform, at the
+a pinned python-build-standalone CPython 3.13.18 and the OpenHands packages for the sandbox's platform, at the
 versions installed in the Agent Server's own environment. The sandbox needs no network, no `uv` and no Python
 of its own, only Linux x86_64 or aarch64 with glibc 2.28 or later, bash, tar with gzip, and a writable `/tmp`.
 The first build for each glibc level takes minutes and is cached on the host under Gym's `cache_dir`; later

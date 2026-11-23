@@ -6,8 +6,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-export PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"
-export PBS_RELEASE="${PBS_RELEASE:-20260610}"
+export PYTHON_VERSION="${PYTHON_VERSION:-3.13.18}"
+export PBS_RELEASE="${PBS_RELEASE:-20261026}"
 source "${PORTABLE_PYTHON_SH:-$SCRIPT_DIR/_portable_python.sh}"
 
 : "${DEPS_DIR:?DEPS_DIR must be set}"

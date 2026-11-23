@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-FROM python:3.13.14-slim-bookworm
+FROM python:3.13.18-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash curl git ripgrep poppler-utils tesseract-ocr libglib2.0-0 libgl1 \
     && rm -rf /var/lib/apt/lists/*

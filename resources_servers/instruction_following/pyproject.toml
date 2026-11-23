@@ -4,7 +4,7 @@
 [project]
 name = "gym-resources-servers-instruction-following"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "nemo-gym[dev]",
     "verifiable-instructions@ git+https://github.com/abukharin-nv/verifiable-instructions.git@f46a5ac87b1400a4f8973039844b6be9b56e3faf",

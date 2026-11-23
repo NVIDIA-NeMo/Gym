@@ -108,13 +108,13 @@ benchmark setting there would silently replace the published one.
 
 ## Prerequisites
 
-- **Python 3.13.14 or newer**
+- **Python 3.13.18 or newer**
 - **[uv](https://docs.astral.sh/uv/getting-started/installation/) on your `PATH`** — Gym
   builds every server's virtualenv with it, so nothing starts without it.
 - **Gym installed**, from the repo root:
 
   ```bash
-  uv venv --python 3.13.14 && source .venv/bin/activate
+  uv venv --python 3.13.18 && source .venv/bin/activate
   uv sync
   ```
 

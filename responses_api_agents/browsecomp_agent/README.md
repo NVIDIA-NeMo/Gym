@@ -1,6 +1,6 @@
 # BrowseComp agent
 
-The repository-native research loop runs inside a task sandbox through an agent session. Its version is the Gym source revision: seed uploads that exact source and a private Python 3.13.14 runtime with dependencies pinned to the Agent Server environment. It preserves the progress board, tool-result compaction, context resets, empty-answer retries, and Responses API model calls.
+The repository-native research loop runs inside a task sandbox through an agent session. Its version is the Gym source revision: seed uploads that exact source and a private Python 3.13.18 runtime with dependencies pinned to the Agent Server environment. It preserves the progress board, tool-result compaction, context resets, empty-answer retries, and Responses API model calls.
 
 ## Execution and composition
 

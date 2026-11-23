@@ -101,7 +101,7 @@ services:
       - ${oc.env:CACHE_DIR}:/cache
 
 driver:
-  container: ${oc.env:GYM_DRIVER_IMAGE} # Python 3.13.14 or newer; the default python:3.12 is older
+  container: ${oc.env:GYM_DRIVER_IMAGE} # Python 3.13.18 or newer; the default python:3.12 is older
   policy_model: policy
   policy_model_type: vllm_model
   gym_install:

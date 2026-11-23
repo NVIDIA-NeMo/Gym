@@ -5,7 +5,7 @@
 name = "gym-resources-servers-code-gen"
 version = "0.0.0"
 # NumPy 2.2.6 and the sandbox-matched Pandas pin require Python below 3.14.
-requires-python = ">=3.13.14,<3.14"
+requires-python = ">=3.13.18,<3.14"
 dependencies = [
     "nemo-gym[dev,sandbox]",
     "numpy==2.2.6",

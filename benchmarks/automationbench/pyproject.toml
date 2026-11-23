@@ -1,7 +1,7 @@
 [project]
 name = "automationbench-env"
 version = "0.1.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "nemo-gym",
     "automation-bench @ git+https://github.com/zapier/AutomationBench.git@4a8e1061254004d9dac807054eed33fad7d1ff14",

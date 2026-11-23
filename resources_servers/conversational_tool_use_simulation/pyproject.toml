@@ -16,7 +16,7 @@
 [project]
 name = "conversational-tool-use-simulation"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "json-repair==0.53.0",
     "nemo-gym[dev]",

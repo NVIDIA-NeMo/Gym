@@ -80,17 +80,17 @@ def _stage_runtime_artifacts(
 
 
 _RUNTIME_ROOT = "/opt/nemo-gym-nooa"
-_PYTHON_VERSION = "3.13.14"
-_PYTHON_RELEASE = "20260805"
+_PYTHON_VERSION = "3.13.18"
+_PYTHON_RELEASE = "20261026"
 _INSTALLER_PATH = "responses_api_agents/nooa_agent/install_nooa_runtime.sh"
-# Expected digests published with the immutable Astral PBS 20260805 release.
-# https://github.com/astral-sh/python-build-standalone/releases/tag/20260805
+# Expected digests published with the immutable Astral PBS 20261026 release.
+# https://github.com/astral-sh/python-build-standalone/releases/tag/20261026
 _PYTHON_SHA256 = {
-    "x86_64/gnu": "9f9ebf776b2d4913fe5a91508ab42e6ce17d266138f76a7782c05fa1c3cba1d1",  # pragma: allowlist secret
-    "aarch64/gnu": "4777d7df2edb47b96e53abad5e1b9df1b2a1a9b2f7bdba12b5c0122163b3fed9",  # pragma: allowlist secret
+    "x86_64/gnu": "126343c54daff4068efc1ac269518d0cc202d57857794948103dd1454e8881be",  # pragma: allowlist secret
+    "aarch64/gnu": "b48451865bde9a39e2f3e71d7fdcbf1f32615f50f24d78dc50d04ede6501cf81",  # pragma: allowlist secret
 }
 _IMPORT_CHECK = (
-    "import sys; assert sys.version_info[:3] == (3,13,14); "
+    "import sys; assert sys.version_info[:3] == (3,13,18); "
     "import nooa, nooa_cli; from nooa_bench.bench_agent import BenchAgent; "
     "import responses_api_agents.nooa_agent.sandbox_entrypoint; "
     "from responses_api_agents.nooa_agent.resource_tools import ResourceToolDispatcher; "

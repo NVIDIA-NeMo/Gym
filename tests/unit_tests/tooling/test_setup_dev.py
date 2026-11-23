@@ -93,7 +93,7 @@ def test_setup_dev_download_retries_and_cleanup(
 uv() {
     case "$1" in
         --version)
-            if [[ -f "$INSTALLER_MARKER" ]]; then echo 'uv 0.13.4'; else echo 'uv 0.0.0'; fi ;;
+            if [[ -f "$INSTALLER_MARKER" ]]; then echo 'uv 0.13.7'; else echo 'uv 0.0.0'; fi ;;
         cache) echo "$UV_CACHE_DIR" ;;
         lock|sync) return 0 ;;
         *) return 99 ;;
@@ -104,7 +104,7 @@ source "$1"
 
     with _installer_server(download_fails=download_fails, installer_status=installer_status) as (url, requests):
         source = (ROOT / "scripts" / "ci" / "setup_dev.sh").read_text()
-        source = source.replace("https://astral.sh/uv/0.13.4/install.sh", url).replace("--retry 5", "--retry 1")
+        source = source.replace("https://astral.sh/uv/0.13.7/install.sh", url).replace("--retry 5", "--retry 1")
         setup_dev = ci_dir / "setup_dev.sh"
         setup_dev.write_text(source)
         result = subprocess.run(

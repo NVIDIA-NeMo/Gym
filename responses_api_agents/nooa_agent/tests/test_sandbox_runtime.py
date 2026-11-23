@@ -292,8 +292,8 @@ async def test_unhealthy_runtime_stages_verified_archives_and_installs(
     scratch = script.removesuffix(".sh")
     expected = sandbox_runtime._PYTHON_SHA256["x86_64/gnu"]
     portable_download.assert_awaited_once_with(
-        "https://github.com/astral-sh/python-build-standalone/releases/download/20260805/"
-        "cpython-3.13.14%2B20260805-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/"
+        "cpython-3.13.18%2B20261026-x86_64-unknown-linux-gnu-install_only.tar.gz",
         sha256=expected,
     )
     assert set(sandbox.uploaded) == {script, f"{scratch}/source.tar.gz", f"{scratch}/python.tar.gz"}

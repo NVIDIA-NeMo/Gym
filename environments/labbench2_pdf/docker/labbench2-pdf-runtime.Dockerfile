@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Shared direct-PDF runtime for LitQA3, FigQA2, and TableQA2 Harbor tasks.
-FROM python:3.13.14-slim-bookworm
+FROM python:3.13.18-slim-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     MPLBACKEND=Agg \

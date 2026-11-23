@@ -4,7 +4,7 @@
 [project]
 name = "gym-resources-servers-math-with-judge"
 version = "0.0.0"
-requires-python = ">=3.13.14"
+requires-python = ">=3.13.18"
 dependencies = [
     "nemo-gym[dev]",
     "math-verify==0.8.0",

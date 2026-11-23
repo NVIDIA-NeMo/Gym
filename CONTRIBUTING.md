@@ -108,7 +108,7 @@ git remote add upstream https://github.com/NVIDIA-NeMo/Gym.git
 
 # With write access, use https://github.com/NVIDIA-NeMo/Gym.git as the clone URL
 # and omit the `git remote add upstream` step.
-uv venv --python 3.13.14 && source .venv/bin/activate
+uv venv --python 3.13.18 && source .venv/bin/activate
 uv sync --extra dev --extra telemetry --extra mlflow --extra wandb
 pre-commit install
 ```
