@@ -116,14 +116,21 @@ def _implementation_name(server: Any) -> str:
 
 
 def _manifest_dataset(dataset: Any) -> ManifestDataset:
-    values = dataset.model_dump(mode="json", exclude_none=True)
-    return ManifestDataset.model_validate(
-        {
-            key: values[key]
-            for key in ("name", "type", "jsonl_fpath", "prepare_script", "prompt_config", "num_repeats")
-            if key in values
-        }
-    )
+    fields = ("name", "type", "jsonl_fpath", "prepare_script", "prompt_config", "num_repeats")
+    try:
+        # Read only fields the manifest consumes. Extra runtime settings remain deferred.
+        values = (
+            {key: dataset[key] for key in fields if key in dataset}
+            if isinstance(dataset, DictConfig)
+            else {
+                key: value
+                for key, value in dataset.model_dump(mode="json", exclude_none=True).items()
+                if key in fields
+            }
+        )
+    except InterpolationResolutionError as error:
+        raise translate_interpolation_error(error) from error
+    return ManifestDataset.model_validate(values)
 
 
 def _catalog_directory(path: Path) -> Path | None:
@@ -221,6 +228,11 @@ class _StaticWiringParser(GlobalConfigDictParser):
             (("*", "responses_api_agents", "*", "sandbox_config", "image"), "static-validation-image"),
             (("*", "responses_api_models", "openai_model", "openai_base_url"), "https://judge.invalid/v1"),
             (("*", "responses_api_models", "openai_model", "openai_api_key"), "static-validation"),
+            # A model server's endpoint, key and model name are deployment settings: those of the policy and of any
+            # other model the environment runs, such as a user simulator.
+            (("*", "responses_api_models", "vllm_model", "base_url"), "https://model.invalid/v1"),
+            (("*", "responses_api_models", "vllm_model", "api_key"), "static-validation"),
+            (("*", "responses_api_models", "vllm_model", "model"), "static-validation"),
             (("*", "opensandbox", "connection", "domain"), "sandbox.invalid"),
             (("*", "opensandbox", "connection", "api_key"), "static-validation"),
         )
@@ -230,6 +242,11 @@ class _StaticWiringParser(GlobalConfigDictParser):
             if not pattern:
                 if node == "???" or (isinstance(node, str) and re.fullmatch(r"\$\{oc\.env:[^{}]+\}", node)):
                     OmegaConf.update(global_config_dict, ".".join(path), value)
+                elif isinstance(node, str) and (top_level := re.fullmatch(r"\$\{(\w+)\}", node)):
+                    # The leaf names a top-level setting that the deployment must supply.
+                    key = top_level.group(1)
+                    if isinstance(raw, dict) and raw.get(key) == "???":
+                        OmegaConf.update(global_config_dict, key, value)
                 return
             if not isinstance(node, dict):
                 return
@@ -390,12 +407,8 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
     agent_server = _implementation_name(selected_agent)
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
     owner = wiring.dataset_rs if wiring.dataset_rs is not None else selected_agent
-    # Dataset models retain interpolation text; resolve declarations in their owning config context.
-    declared = owner.get_inner_run_server_config_dict().get("datasets") or []
-    datasets = tuple(
-        _manifest_dataset(type(dataset).model_validate(OmegaConf.to_container(raw, resolve=True)))
-        for dataset, raw in zip(owner.datasets or [], declared, strict=True)
-    )
+    owner_config = get_first_server_config_dict(wiring.resolved, owner.name)
+    datasets = tuple(_manifest_dataset(dataset) for dataset in (owner_config.get("datasets") or []))
     grading_mode = None
     if resources_instance is not None:
         grading_mode = resources_instance.get_inner_run_server_config_dict().get("grading_mode")

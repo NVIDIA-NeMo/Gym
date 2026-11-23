@@ -44,8 +44,9 @@ item's content. Before validating provider responses, this server changes that
 part's discriminator to `reasoning_text` only when it contains a string `text`
 and no other fields except optional empty `annotations: []`. Text, encrypted
 content, item order and other response fields are preserved without modifying
-the provider's response object. Unknown or malformed shapes still go through
-validation unchanged. Requests and continuation replay are unchanged.
+the provider's response object. A reasoning item whose `summary` is missing or
+`null` gets an empty `summary` list. Other unknown or malformed shapes still go
+through validation unchanged. Requests and continuation replay are unchanged.
 
 ## Set Your Credentials
 
