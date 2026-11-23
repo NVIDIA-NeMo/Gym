@@ -17707,6 +17707,25 @@ async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(
     assert member["failures_by_class"] == {}
 
 
+@pytest.mark.parametrize(
+    "status",
+    [None, {"schema_version": "1", "tracking": "disabled", "reason": "ConfigError", "members": {}}],
+    ids=["no-status", "disabled-status"],
+)
+def test_recounting_run_status_leaves_a_run_without_live_status_alone(tmp_path: Path, status) -> None:
+    """A run that kept no status gets none, and a disabled one keeps the reason it was disabled."""
+    from nemo_gym.rollouts.rollout_collection import refresh_run_status
+
+    output = tmp_path / "rollouts.jsonl"
+    status_fpath = tmp_path / "rollouts_batch_status.json"
+    if status is not None:
+        status_fpath.write_bytes(orjson.dumps(status))
+
+    refresh_run_status(output)
+
+    assert (orjson.loads(status_fpath.read_bytes()) if status_fpath.exists() else None) == status
+
+
 async def test_run_status_ends_current_when_a_step_after_collection_fails(tmp_path, empty_global_config, monkeypatch):
     """Results persisted inside the write throttle reach the status file even when aggregation fails afterwards."""
     import nemo_gym.rollouts.batch_status as batch_status

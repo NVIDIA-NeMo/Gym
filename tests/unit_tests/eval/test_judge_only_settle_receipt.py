@@ -16,9 +16,11 @@ from nemo_gym.eval.rollout_reverification import (
     due_judge_failures,
     read_settle_receipt,
 )
-from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper
+from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper, refresh_run_status
 from nemo_gym.rollouts.rollout_records import materialized_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.utils.path_utils import batch_status_path_for
+from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _run as _run_with_judge_failures
 from tests.unit_tests.eval.test_reverify_saved_results import (
     ANSWER,
     _run,
@@ -172,6 +174,23 @@ def test_the_job_settles_refreshes_the_run_and_ends_with_a_receipt(tmp_path, mon
     assert digests["rollouts_jsonl_fpath"] == hashlib.sha256(output.read_bytes()).hexdigest()
     assert summary["run"]["artifacts"]["expected"] == 2
     assert due_judge_failures(output) == []
+
+
+def test_the_settled_run_recounts_its_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
+    """The run status counts the rows as collection left them; the job settles rows after that, so it recounts them."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=1)
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    refresh_run_status(output)
+    before = json.loads(status.read_text())["members"]["agent"]
+    config = _job_config(output, settle_source_snapshot_json=_snapshot(output))
+
+    eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"], "health_check_workers": 1}, config)
+
+    after = json.loads(status.read_text())["members"]["agent"]
+    assert (before["completed_rollout_count"], before["failures_by_class"]) == (2, {"judge_failed": 1})
+    assert (after["completed_rollout_count"], after["failures_by_class"]) == (3, {})
 
 
 def test_a_job_that_cannot_judge_leaves_a_failed_receipt_and_the_run_as_it_was(

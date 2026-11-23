@@ -1227,7 +1227,8 @@ manifest carries the count, failure and aggregation keys only; the manifest-only
 metric expectations, repeat policy) belong to `batch_status.json`.
 The directory command lists every stem-derived status file and the legacy `batch_status.json` when present. Progress is
 written at initialization, on the first durable result, at most every five seconds thereafter,
-and at completion. Counts report completed and remaining rollouts and the
+and at completion. The end-of-run re-judge pass and the judge-only recovery job recount it from the saved rows they
+settle; a manifest-backed `batch_status.json` is not recounted. Counts report completed and remaining rollouts and the
 latest outstanding failures by class and by failure kind, plus the model-final results by kind (an
 answered agent deadline, or a failure its producer settled as a scored zero): these are reported as
 facts and never counted as completed. A successful retry clears its earlier failure from

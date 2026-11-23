@@ -3042,6 +3042,57 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         )
 
 
+def _run_status_rows(
+    rows: Iterable[Mapping[str, Any]], agent_refs: Dict[Tuple[int, int], Dict]
+) -> Iterator[Dict[str, Any]]:
+    """The run status rows of materialized rows, recording each rollout's member in ``agent_refs``. A row routed by
+    Environment Server names its dispatch target as the member. Rows are compacted as they are read, so no task
+    payload is retained."""
+    for row in rows:
+        status_row = _batch_status_row(row, {})
+        if AGENT_REF_KEY_NAME not in status_row:
+            status_row[AGENT_REF_KEY_NAME] = {"name": RolloutCollectionHelper._dispatch_name(row)}
+        agent_refs[(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])] = status_row[AGENT_REF_KEY_NAME]
+        yield status_row
+
+
+def refresh_run_status(output_fpath: Path) -> None:
+    """Recount a run's saved status from its Store after rows were saved outside collection.
+
+    Collection writes the status last when it ends; the end-of-run re-judge pass and the judge-only recovery job settle
+    saved rows after that. The counts are rebuilt as collection seeds them on resume, from the Store's selected
+    attempts, and each member keeps the aggregation status the run's aggregation recorded. A run that kept no status,
+    or whose status is disabled, is left alone. Best-effort like the status itself: a recount that fails disables the
+    status rather than leave its old counts.
+    """
+    status_fpath = batch_status_path_for(output_fpath)
+    try:
+        status = orjson.loads(status_fpath.read_bytes())
+        if status.get("tracking") != "enabled":
+            return
+        with materialized_path_for(output_fpath).open("rb") as handle:
+            rows = [orjson.loads(line) for line in handle if line.strip()]
+        agent_refs: Dict[Tuple[int, int], Dict] = {}
+        tracker = RunStatusTracker(status_fpath, _run_status_rows(rows, agent_refs))
+        store = RolloutStore.read(output_fpath, import_legacy=False)
+        if store is None:
+            raise RuntimeError(f"{output_fpath} has no Store to recount its status from.")
+        recounted = tracker.build_status(
+            [_batch_status_row(record.read(), agent_refs) for record in store.selected_records("success").values()],
+            [_batch_status_row(row, agent_refs) for row in store.failures()],
+        )
+        previous = status.get("members") or {}
+        for agent, member in recounted["members"].items():
+            # The run's aggregation, not this recount, decides whether a member aggregated.
+            member["aggregation_status"] = previous.get(agent, member)["aggregation_status"]
+        _atomic_write_json(status_fpath, recounted)
+    except FileNotFoundError:
+        if status_fpath.exists():
+            disable_run_status(status_fpath, RuntimeError(f"{output_fpath} lost the files its status counts."))
+    except Exception as error:
+        disable_run_status(status_fpath, error)
+
+
 def _refresh_shard_status_aggregation(
     input_paths: List[str],
     aggregate_metrics_fpath: Optional[Path],
@@ -4503,26 +4554,14 @@ executions → not run again (left to recovery)
                 }
                 return
             # Every other run reports its saved progress too, best-effort: a tracker that cannot be built records
-            # why it is disabled and collection goes on. A row routed by Environment Server names its dispatch
-            # target as the member. Rows are compacted as they are read, so no task payload is retained.
+            # why it is disabled and collection goes on.
             status_fpath = batch_status_path_for(output_fpath)
             agent_refs: Dict[Tuple[int, int], Dict] = {}
-
-            def status_rows():
-                for row in rows:
-                    status_row = _batch_status_row(row, {})
-                    if AGENT_REF_KEY_NAME not in status_row:
-                        status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
-                    agent_refs[(row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])] = status_row[
-                        AGENT_REF_KEY_NAME
-                    ]
-                    yield status_row
-
             try:
                 if not config.resume_from_cache:
                     # Do not present a previous run's counts if tracker setup fails.
                     status_fpath.unlink(missing_ok=True)
-                batch_tracker = RunStatusTracker(status_fpath, status_rows())
+                batch_tracker = RunStatusTracker(status_fpath, _run_status_rows(rows, agent_refs))
                 batch_agent_refs = agent_refs
             except Exception as error:
                 disable_run_status(status_fpath, error)
