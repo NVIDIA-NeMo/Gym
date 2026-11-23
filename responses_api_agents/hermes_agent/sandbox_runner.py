@@ -35,6 +35,17 @@ def _use_model_server(base_url: str, api_key: str = _MODEL_API_KEY) -> None:
     os.environ["OPENAI_API_KEY"] = api_key
 
 
+def _install_request_gzip(model_base_url: str, context_compression_base_url: str) -> None:
+    if __package__:
+        from .request_gzip import install_request_gzip
+    else:
+        from request_gzip import install_request_gzip
+
+    install_request_gzip(model_base_url)
+    if context_compression_base_url != model_base_url:
+        install_request_gzip(context_compression_base_url)
+
+
 def _connect_mcp_servers(required: list[str]) -> None:
     """Refresh this episode's MCP tools and verify that every required server connected."""
     from tools.mcp_tool_discovery import discover_mcp_tools, get_mcp_status
@@ -77,15 +88,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     os.environ["TERMINAL_ENV"] = payload.get("terminal_backend", "local")
     os.environ["TERMINAL_TIMEOUT"] = str(payload["terminal_timeout"])
     if payload.get("gzip_requests_enabled"):
-        if __package__:
-            from .request_gzip import install_request_gzip
-        else:
-            from request_gzip import install_request_gzip
-
-        install_request_gzip(payload["model_base_url"])
-        context_compression_base_url = config["auxiliary"][_COMPRESSION_CONFIG_KEY]["base_url"]
-        if context_compression_base_url != payload["model_base_url"]:
-            install_request_gzip(context_compression_base_url)
+        _install_request_gzip(payload["model_base_url"], config["auxiliary"][_COMPRESSION_CONFIG_KEY]["base_url"])
     _use_model_server(payload["model_base_url"], api_key)
 
     try:

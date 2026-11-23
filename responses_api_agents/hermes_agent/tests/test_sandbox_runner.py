@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gzip
 import json
 import os
 import signal
@@ -124,11 +125,13 @@ class _ModelServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 if not self.path.endswith("/chat/completions"):
                     self.send_error(404)
                     return
-                server.requests.append(body)
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                if self.headers.get("Content-Encoding") == "gzip":
+                    body = gzip.decompress(body)
+                server.requests.append(json.loads(body))
                 server.request_headers.append(dict(self.headers))
                 answer = server.answers[min(len(server.requests), len(server.answers)) - 1]
                 payload = json.dumps(answer).encode()
@@ -994,24 +997,36 @@ def test_delegated_child_records_the_delegate_task_call_that_spawned_it(tmp_path
     assert [child["spawned_by_tool_call_id"] for child in children] == ["call-delegate"]
 
 
-def test_gzip_registers_a_shared_model_route_once(tmp_path, restore_process_globals, monkeypatch):
-    installed_urls = []
-    monkeypatch.setattr("responses_api_agents.hermes_agent.request_gzip.install_request_gzip", installed_urls.append)
-
+def test_worker_sends_gzip_to_model_server(tmp_path):
+    prompt = " ".join(["task"] * 1024)
     with _ModelServer([_completion({"content": "done"})]) as server:
-        _run(_payload(server.base_url, gzip_requests_enabled=True), tmp_path)
-
-    assert installed_urls == [server.base_url]
-
-
-def test_gzip_registers_primary_and_auxiliary_model_routes(tmp_path, restore_process_globals, monkeypatch):
-    installed_urls = []
-    monkeypatch.setattr("responses_api_agents.hermes_agent.request_gzip.install_request_gzip", installed_urls.append)
-    compression_url = "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
-
-    with _ModelServer([_completion({"content": "done"})]) as server:
-        _run(
-            _payload(server.base_url, compression_model_base_url=compression_url, gzip_requests_enabled=True), tmp_path
+        output = _run(
+            _payload(server.base_url, gzip_requests_enabled=True, max_turns=4, user_message=prompt), tmp_path
         )
 
-    assert installed_urls == [server.base_url, compression_url]
+    assert output["result"]["completed"]
+    assert len(server.requests) == 1
+    headers = {name.lower(): value for name, value in server.request_headers[0].items()}
+    assert headers.get("content-encoding") == "gzip"
+    assert [message["content"] for message in server.requests[0]["messages"] if message["role"] == "user"] == [prompt]
+
+
+def test_gzip_registers_a_shared_model_route_once(monkeypatch):
+    installed_urls = []
+    monkeypatch.setattr("responses_api_agents.hermes_agent.request_gzip.install_request_gzip", installed_urls.append)
+    model_url = "http://model:8000/ng-rollout/episode-a1/v1"
+
+    sandbox_runner._install_request_gzip(model_url, model_url)
+
+    assert installed_urls == [model_url]
+
+
+def test_gzip_registers_primary_and_auxiliary_model_routes(monkeypatch):
+    installed_urls = []
+    monkeypatch.setattr("responses_api_agents.hermes_agent.request_gzip.install_request_gzip", installed_urls.append)
+    model_url = "http://model:8000/ng-rollout/episode-a1/v1"
+    compression_url = "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
+
+    sandbox_runner._install_request_gzip(model_url, compression_url)
+
+    assert installed_urls == [model_url, compression_url]

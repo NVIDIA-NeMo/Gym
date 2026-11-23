@@ -249,7 +249,9 @@ def test_connection_error_answers_502_and_records_the_error(tmp_path):
 @pytest.mark.parametrize("gzip_enabled", [False, True], ids=["plain", "gzip"])
 def test_launcher_starts_codex_behind_the_forwarder(tmp_path, gzip_enabled):
     requests = []
-    body = json.dumps({"input": "task " * 1024}).encode()
+    body = json.dumps(
+        {"client_metadata": {"session_id": "root", "thread_id": "child"}, "input": "task " * 1024}
+    ).encode()
     launcher = shutil.copyfile(LAUNCHER, tmp_path / LAUNCHER.name)
     shutil.copyfile(REQUEST_GZIP_SCRIPT, tmp_path / REQUEST_GZIP_SCRIPT.name)
 
@@ -295,7 +297,7 @@ def test_launcher_starts_codex_behind_the_forwarder(tmp_path, gzip_enabled):
     assert len(requests) == 2
     for path, invocation_id, encoding, request_body in requests:
         assert path == "/v1/responses"
-        assert invocation_id == "launcher-invocation.unattributed"
+        assert invocation_id == "launcher-invocation.child"
         assert encoding == ("gzip" if gzip_enabled else None)
         assert (gzip.decompress(request_body) if gzip_enabled else request_body) == body
     assert [json.loads(line)["status"] for line in (tmp_path / "model_attempts.jsonl").read_text().splitlines()] == [
