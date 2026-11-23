@@ -30,6 +30,8 @@ codex_agent:
       features:  # config.toml [features]; null leaves a feature at the CLI default
         multi_agent: false
         code_mode: false
+      model_catalog_json: null  # config.toml model_catalog_json: absolute path of a model catalog file where Codex runs
+      agents_enabled: null  # config.toml [agents] enabled (false: no subagent tools); needs a Codex that knows the key (see README)
       tool_pid_namespace: false  # task-sandbox sessions only: tool commands in a nested pid namespace (README)
       failure_artifacts_dir: null  # agent-host dir that keeps a failed activation's session logs (README)
       tool_pid_namespace_bwrap_path: null  # null -> the bwrap sandbox provider's bwrap_path

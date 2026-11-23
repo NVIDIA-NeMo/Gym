@@ -676,6 +676,16 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # applies its own default; that is how a launch with no Gym config (such as Harbor's) runs. Unlike
     # extra_config, this also applies to sandbox sessions.
     features: dict[str, Optional[bool]] = Field(default_factory=lambda: {"multi_agent": False, "code_mode": False})
+    # The base config's `model_catalog_json`: a model catalog file that replaces Codex's bundled one, so
+    # a `model` the bundled catalog does not list gets that file's metadata. The file must exist where
+    # Codex runs (in a sandbox session, inside the sandbox); the adapter does not write it. Absolute,
+    # because Codex resolves a relative path against the per-run CODEX_HOME. None leaves the key out.
+    # Unlike extra_config, this also applies to sandbox sessions.
+    model_catalog_json: str | None = Field(default=None, pattern=r"^/")
+    # The `enabled` key of the base config's [agents] table; false removes Codex's subagent tools.
+    # None leaves the table out, so the CLI applies its own default. Unlike extra_config, this also
+    # applies to sandbox sessions.
+    agents_enabled: bool | None = None
     # Sandbox sessions, which run without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with
     # per-call token counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session
     # directory is removed. Point it at a directory the resources server collects, such as /logs/agent for
@@ -1729,10 +1739,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
         model = self._effective_model()
         if model:
             config["model"] = model
-        for name in ("model_context_window", "model_auto_compact_token_limit"):
+        for name in ("model_context_window", "model_auto_compact_token_limit", "model_catalog_json"):
             value = getattr(self.config, name)
             if value is not None:
                 config[name] = value
+        if self.config.agents_enabled is not None:
+            config["agents"] = {"enabled": self.config.agents_enabled}
         if self.config.reasoning_effort:
             config["model_reasoning_effort"] = self.config.reasoning_effort
         if developer_instructions:

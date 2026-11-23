@@ -120,6 +120,11 @@ class TestSanity:
             _config(model_context_window=40960, model_auto_compact_token_limit=36865)
         assert _config(model_context_window=40960, model_auto_compact_token_limit=36864).model_context_window == 40960
 
+    def test_model_catalog_path_must_be_absolute(self) -> None:
+        # Codex resolves a relative path against its per-run CODEX_HOME, which no caller can name.
+        with pytest.raises(ValidationError, match="model_catalog_json"):
+            _config(model_catalog_json="catalog.json")
+
     @pytest.mark.parametrize(
         "settings",
         [{}, {"model_context_window": 40960}, {"model_auto_compact_token_limit": 32768}],
