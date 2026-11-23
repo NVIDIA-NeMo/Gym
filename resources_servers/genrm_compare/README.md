@@ -146,6 +146,7 @@ for the input format, explicit group IDs, and recovery limits.
 | `num_judges_per_comparison` | int | `1` | Number of judge passes per pair (for majority voting) |
 | `use_principle` | bool | `false` | Enable principle-based comparison |
 | `default_principle` | string | *(see config)* | Default principle when none provided in request |
+| `default_rubric_ids` | list of integers or null | `null` | Expected IDs for the judge’s built-in rubric when `use_principle` is `false` |
 | `aggregator_method` | string | `"simple_tiebreaker"` | Score aggregation method |
 | `score_source` | string | `"overall"` | Use the GenRM overall score (`"overall"`) or the equal-weight mean of rubric scores (`"rubric_mean"`) |
 | `reasoning_bonus` | float | `0.0` | Bonus for shortest reasoning among top performers |
@@ -171,13 +172,15 @@ Set `comparison_mode: fixed_baseline` to compare each rollout with the reference
 `responses_create_params.metadata.baseline_response`. Set `num_rollouts_per_prompt` to the actual
 rollouts per group and admit all members concurrently; a singleton still calls the judge.
 
-Set `score_source: rubric_mean` to use equal-weight rubric scores. Each task row must provide a
-top-level `expected_rubric_ids` list, and the prompt or principle must define the rubrics.
-All group members must share the same baseline and rubric ID set; ID order does not matter.
+For `score_source: rubric_mean`, provide `expected_rubric_ids` per row or configure
+`default_rubric_ids` with `use_principle: false`. The configured IDs must match the judge’s built-in
+rubric and replace row IDs for every agent sharing the verifier. Group members must share the same
+baseline and effective rubric IDs, in any order.
 
 These options work independently or together. Defaults use rollout-cohort comparisons and overall
-scores. `/compare` ignores `comparison_mode` and always compares the submitted responses with each
-other; it still requires `expected_rubric_ids` when using rubric scoring.
+scores. `/compare` ignores `comparison_mode` and compares the submitted responses with each other.
+For `rubric_mean`, it uses `default_rubric_ids` when configured and `use_principle` is `false`.
+Otherwise, the caller supplies `expected_rubric_ids`.
 
 For example, with `expected_rubric_ids: [1, 2]`, the judge must return:
 
@@ -321,6 +324,9 @@ Successful legacy groups are removed; failed legacy groups reject reuse and requ
 group ID for replacement. The caller coordinates replacements; an HTTP 200 masked failure does not
 automatically trigger an RL retry.
 
+The verifier forwards user images and videos in order and keeps text from other message roles.
+Use a judge that supports the media in your prompts.
+
 ## GenRM Comparison Groups
 
 The `genrm_compare` resources server compares several answers to one prompt using a generative reward
@@ -338,9 +344,16 @@ whether to replace a failed attempt. The server does not generate answers or sch
 | `_ng_group_id` | Required for safe replacement attempts and replay. Unique across runs and prompt occurrences. |
 | `_ng_group_attempt` | Nonnegative integer shared by every member of an attempt; defaults to zero. |
 | `_ng_rollout_index` | Required member slot from zero through `num_rollouts_per_prompt - 1`. |
+| `group_answer_length_penalty_coeff` | Optional nonnegative, finite answer length coefficient for `/verify`. |
+| `group_reasoning_length_penalty_coeff` | Optional nonnegative, finite reasoning length coefficient for `/verify`. |
 
-All members must carry the same prompt and principle. Responses echo these coordinates; group attempt
-numbers and other private metadata are excluded from reward metrics. Shared judge calls run outside any
+Overrides require at least two trainable rollouts. Omitted coefficients use server defaults, and
+explicit zero disables that penalty. Members and retries of an explicit group must agree on both
+effective values (HTTP 409 on mismatch). Successful override requests echo both applied values.
+Replays with overrides return HTTP 409 if the saved result lacks the requested pair.
+
+All members must carry the same prompt and effective principle. Responses echo these coordinates.
+Reward metrics exclude group attempt numbers and other private metadata. Shared judge calls run outside any
 individual member's token capture context. This also drops the arriving member's OpenTelemetry parent;
 judge spans are separate traces until cohort-level tracing is implemented.
 

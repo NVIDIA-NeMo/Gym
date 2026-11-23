@@ -1,0 +1,31 @@
+name: videomme_v2_agentic
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: Video-MME v2 answered by OpenCode in a sandbox that holds the video, with frame-sampling video tools;
+  a judge model reads the chosen option and the official group rating scores it.
+modality: video
+licensing: MIT
+authors:
+- Guo Chen
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: videomme_v2
+agent_server: opencode_agent
+datasets:
+- name: videomme_v2_agentic
+  type: benchmark
+  jsonl_fpath: benchmarks/videomme_v2_agentic/data/videomme_v2_agentic_benchmark.jsonl
+  prepare_script: benchmarks/videomme_v2_agentic/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

@@ -19,9 +19,11 @@ from nemo_gym.config.secret_utils import (
     MASKED_VALUE,
     hide_secrets_in_container,
     hide_secrets_in_overrides,
+    is_credential_name,
     mask_credentials,
     mask_url_passwords,
     recursively_hide_secrets,
+    url_without_credentials,
 )
 
 
@@ -71,6 +73,38 @@ def test_text_without_a_url_password_is_left_alone(text: str) -> None:
 
 def test_an_interpolated_user_name_is_not_cut_in_two() -> None:
     assert mask_url_passwords("https://${oc.env:DB_USER}:literal@h") == "https://${oc.env:DB_USER}:****@h"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "https://user:secret@host.example/v1?token=secret#frag",  # pragma: allowlist secret
+            "https://host.example/v1",
+        ),
+        ("//user:secret@host.example/v1?token=secret", "//host.example/v1"),  # pragma: allowlist secret
+        ("user:p@ss@host/model", "host/model"),  # pragma: allowlist secret
+        ("user:secret@host/model?token=secret", "host/model"),  # pragma: allowlist secret
+        ("ghp_TOKEN@github.com/org/repo", "github.com/org/repo"),
+        ("ghp_TOKEN@localhost:8080/model", "localhost:8080/model"),
+        ("nvidia-eval-factory-benchmarking/configs/benchmarks/gpqa@v3", None),
+        ("model@v3", None),
+        ("meta/llama-3.1-70b-instruct", None),
+        ("/checkpoints/super-3/step-900", None),
+    ],
+)
+def test_a_recorded_name_keeps_no_url_credentials(value: str, expected: str | None) -> None:
+    assert url_without_credentials(value) == (value if expected is None else expected)
+
+
+@pytest.mark.parametrize("name", ["api_key", "X-Api-Key", "auth", "Authorization", "secrets", "HF_TOKEN", "cookie"])
+def test_a_credential_is_named_as_one(name: str) -> None:
+    assert is_credential_name(name)
+
+
+@pytest.mark.parametrize("name", ["max_tokens", "author", "authors", "reference_key", "vllm_serve_env_vars", "env"])
+def test_a_setting_is_not_named_as_a_credential(name: str) -> None:
+    assert not is_credential_name(name)
 
 
 def test_masking_twice_changes_nothing() -> None:

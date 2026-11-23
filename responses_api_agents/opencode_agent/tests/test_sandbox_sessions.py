@@ -924,6 +924,31 @@ def test_rejected_request_does_not_consume_activation(setup):
     sandbox.launch.assert_awaited_once()
 
 
+@pytest.mark.parametrize("interrupted", [0, 2])
+def test_tool_calls_that_a_relaunch_interrupted_are_a_gap_of_the_captured_observations(setup, tmp_path, interrupted):
+    agent, sandbox = setup
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        # What the relaunches of a checkpointed session count when they reprompt its conversation.
+        active_sessions(agent)[session_id].interrupted_tool_calls = interrupted
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    gaps = closed.json()["agent_observations"]["gaps"]
+    assert not any(gap["code"] == "observation_capture_failed" for gap in gaps)
+    details = [gap["detail"] for gap in gaps if gap["code"] == "tool_call_interrupted_by_relaunch"]
+    if interrupted:
+        assert details == [
+            "2 tool call(s) were running when a launch ended; OpenCode reported them to the model as interrupted"
+        ]
+    else:
+        assert details == []
+
+
 async def activate(agent, sandbox):
     request = Request(
         {"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "opencode-smoke-a2"}}
@@ -1039,7 +1064,7 @@ def test_cleanup_receipt_is_required():
 def test_instructions_and_text_parts_reach_opencode(setup, mode):
     agent, sandbox = setup
     agent.config.system_prompt_mode = mode
-    agent.config.opencode_config = {"tools": {"*": False}, "permission": {"bash": "deny"}}
+    agent.config.opencode_config = {"tools": {"*": False}, "permission": {"bash": "deny"}, "snapshot": False}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         result = client.post(
@@ -1057,6 +1082,7 @@ def test_instructions_and_text_parts_reach_opencode(setup, mode):
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["tools"] == {"*": False}
         assert config["permission"] == {"bash": "deny"}
+        assert config["snapshot"] is False
         if mode == "replace":
             assert payload["command"][payload["command"].index("--agent") + 1] == "build"
             assert config["agent"]["build"]["prompt"] == "outer\n\nsystem"
@@ -1465,7 +1491,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
 
-    async def disconnect():
+    async def disconnect(**_):
         clock[0] = 200.0
 
     sandbox.disconnect.side_effect = disconnect
@@ -1482,7 +1508,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -1684,6 +1710,17 @@ def test_invalid_seed_never_connects(setup, option):
         agent.config.opencode_config = {"provider": {"other": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
         assert client.post("/v1/agent_sessions", json=body).status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("value", ["false", 0, None, {}])
+def test_invalid_snapshot_setting_is_rejected_before_connecting(setup, value):
+    agent, sandbox = setup
+    agent.config.opencode_config = {"snapshot": value}
+    with TestClient(agent.setup_webserver()) as client:
+        reply = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert reply.status_code == 422
+        assert "snapshot must be a boolean" in reply.json()["detail"]
     sandbox.exec.assert_not_awaited()
 
 
@@ -2517,7 +2554,7 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, tmp_path
         await asyncio.wait_for(sandbox.started.wait(), 2)
         assert f"{directory}/process_supervisor.sh" in sandbox.files
 
-        async def release():
+        async def release(**_: object):
             assert state.session.cleanup["cleanup_confirmed"] is True
             assert state.session.artifacts is not None
             sandbox.files.clear()
@@ -2725,6 +2762,13 @@ def test_provider_report_does_not_hide_other_execution_outcomes(change):
     assert not OpenCodeAgent._reported_model_error(native, cleanup)
 
 
+def test_only_context_overflow_is_reported_on_exit_zero():
+    cleanup = {"return_code": 0, "timed_out": False, "error": None}
+    overflow = {"error": {"name": "ContextOverflowError"}, "finish": "error", "time": {"completed": 1}}
+    assert OpenCodeAgent._reported_model_error(overflow, cleanup)
+    assert not OpenCodeAgent._reported_model_error({"error": {"name": "APIError"}, "time": {"completed": 1}}, cleanup)
+
+
 @pytest.mark.parametrize(
     "message, code",
     [
@@ -2766,8 +2810,12 @@ def test_statusless_error_without_native_retry_flag_remains_unknown(setup, retry
     assert outcome.failure_kind == "unknown"
 
 
+# OpenCode 1.15.x exits 0 when compaction itself overflows; 1.17.x exits 1.
+@pytest.mark.parametrize("return_code", [0, 1])
 @pytest.mark.parametrize("cleanup_error", [None, "cleanup failed"])
-async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failure(setup, tmp_path, cleanup_error):
+async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failure(
+    setup, tmp_path, cleanup_error, return_code
+):
     from nemo_gym.agents import OutcomeAction, agent_outcome_policy
 
     agent, sandbox = setup
@@ -2779,7 +2827,7 @@ async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failu
         "data": {"message": "context is too large", "responseBody": "provider detail"},
     }
     sandbox.events = json.dumps(export)
-    sandbox.result.update(return_code=1, error=cleanup_error)
+    sandbox.result.update(return_code=return_code, error=cleanup_error)
     capture_observations(sandbox, tmp_path)
     request, session_id, task = await activate(agent, sandbox)
     if cleanup_error:
@@ -2837,3 +2885,58 @@ def test_explicit_native_model_and_runtime_paths_are_passed_to_the_harness(setup
         assert config["provider"]["nemo_gym"]["models"]["gpt-5.5"]["reasoning"] is True
         # The runner puts the preinstalled runtime first and keeps the image PATH after it.
         assert params["setup"].endswith("PATH=/runtime/bin:$PATH\n")
+
+
+def test_a_seed_retries_setup_commands_a_new_sandbox_failed_to_run(setup):
+    """A new sandbox can refuse its first commands (a gateway 502); the seed's idempotent setup is run again."""
+    agent, sandbox = setup
+    original = sandbox.run_exec
+    failed = []
+
+    async def flaky(command, **kwargs):
+        step = next(
+            (name for name in ("install_opencode_runtime.sh", "OpenCode task workdir") if name in command), None
+        )
+        if step is not None and step not in failed:
+            failed.append(step)
+            raise ConnectionError("502: The sandbox could not be reached")
+        return await original(command, **kwargs)
+
+    sandbox.exec.side_effect = flaky
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    assert failed == ["OpenCode task workdir", "install_opencode_runtime.sh"]
+
+
+def test_a_failed_launch_that_saved_nothing_is_reported_in_one_line(setup, caplog):
+    agent, sandbox = setup
+    sandbox.result["return_code"] = 1
+    original = sandbox.run_exec
+
+    async def no_database(command, **kwargs):
+        if "opencode.db-wal" in command:
+            return SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+        return await original(command, **kwargs)
+
+    sandbox.exec.side_effect = no_database
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+    captured = [r for r in caplog.records if "captured nothing" in r.getMessage()]
+    assert captured and captured[0].levelname == "WARNING" and captured[0].exc_info is None
+    assert "exit 1" in captured[0].getMessage()
+    assert not [r for r in caplog.records if "artifact capture failed" in r.getMessage()]
+
+
+def test_a_database_without_a_root_session_raises_the_typed_error(tmp_path: Path) -> None:
+    from responses_api_agents.opencode_agent.snapshot import NoRootSessionError, snapshot
+
+    database = tmp_path / "opencode.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("create table session (id text, parent_id text, time_created integer)")
+    with pytest.raises(NoRootSessionError, match="found 0"):
+        snapshot(database, tmp_path, harness_session_id=None, previous_message_ids=())

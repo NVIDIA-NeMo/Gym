@@ -825,6 +825,38 @@ def test_render_driver_entrypoint_with_gym_install():
     assert '"${GYM_CMD[@]}"' in out
 
 
+@pytest.mark.parametrize("failed_command", ["clone", "checkout"])
+def test_driver_checkout_failure_stops_before_environment_setup(tmp_path: Path, failed_command: str) -> None:
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    marker = tmp_path / "uv-was-run"
+    scripts = {
+        "curl": "#!/bin/bash\nexit 0\n",
+        "git": (
+            "#!/bin/bash\n"
+            f"if [[ $1 == {shlex.quote(failed_command)} ]]; then exit 73; fi\n"
+            'if [[ $1 == clone ]]; then mkdir -p "${@: -1}"; fi\n'
+            "exit 0\n"
+        ),
+        "uv": f"#!/bin/bash\ntouch {shlex.quote(str(marker))}\nexit 0\n",
+    }
+    for name, content in scripts.items():
+        path = tools / name
+        path.write_text(content)
+        path.chmod(0o755)
+    entrypoint = render_driver_entrypoint("https://example.invalid/gym", "pinned-ref", None, cleanup=True)
+    result = subprocess.run(
+        ["bash", "-c", "GYM_CMD=(true); " + entrypoint],
+        cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": f"{tools}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 73, result.stderr
+    assert not marker.exists()
+
+
 def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
     # The uv installer does not write $HOME/.local/bin/env when that directory is
     # already on PATH, so sourcing it would abort the `set -e` preamble.
@@ -861,10 +893,10 @@ def _run_private_uv_entrypoint(
         shared.chmod(0o755)
     # The clone declares the extras the entrypoint asks for, and `python` is the one that reads them.
     (tools / "git").write_text(
-        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "$3"; '
+        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "${@: -1}"; '
         'printf "[tool.uv]\\n%b[project.optional-dependencies]\\nray = []\\n" '
         + shlex.quote(f'required-version = "{required_version}"\\n' if required_version else "")
-        + ' > "$3/pyproject.toml"; fi\nexit 0\n'
+        + ' > "${@: -1}/pyproject.toml"; fi\nexit 0\n'
     )
     (tools / "python").symlink_to(sys.executable)
     curl_log = tmp_path / "curl.log"
@@ -964,7 +996,7 @@ def test_a_private_uv_reader_never_bases_its_venv_on_a_shared_python_on_path(tmp
     shutil.copy(shutil.which("uv"), home / ".local/bin/uv")
     shared_python = home / ".local/bin" / f"python{sys.version_info[0]}.{sys.version_info[1]}"
     shared_python.symlink_to(Path(sys.executable).resolve())
-    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "${@: -1}"\nexit 0\n')
     (tools / "git").chmod(0o755)
     report = "python -c 'import sys; print(\"BASE=\" + sys.base_prefix)'"
     out = render_driver_entrypoint(
@@ -2074,7 +2106,7 @@ def test_gym_install_does_not_clone_into_the_job_directory():
     entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
 
     assert "mktemp -d /tmp/gym-install-" in entrypoint
-    assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
+    assert 'git clone --filter=blob:none --no-checkout https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
 
 
 def test_gym_install_runs_from_the_install_root():
@@ -3557,3 +3589,162 @@ def test_planned_locations_keep_the_job_id_open_for_the_reader(tmp_path):
 
     assert locations[0] == "logs/driver-{job_id}.log"
     assert all("{job_id}" in location and "$SLURM_JOB_ID" not in location for location in locations)
+
+
+def _target_config(tmp_path, **benchmark):
+    return SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {
+                "container": "efb:latest",
+                "benchmarks": {
+                    "bmb": {
+                        "prepare": {"config_paths": ["extra.yaml"]},
+                        "run": {"num_samples_in_parallel": 8},
+                        **benchmark,
+                    }
+                },
+            },
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+def _render_target(tmp_path, **benchmark):
+    config = _target_config(tmp_path, **benchmark)
+    return build_sbatch_script(
+        config, "bmb", config.driver.benchmarks["bmb"], config.compute["hsg"], tmp_path / "jobs" / "x" / "bmb"
+    )
+
+
+def _gym_cmd(script: str) -> list[str]:
+    return script[script.index("GYM_CMD=(") :].split("\n)", 1)[0].split()
+
+
+def test_a_task_target_leads_the_run_and_prepare_runs_as_configured(tmp_path):
+    """The target, harness and sandbox go to `gym eval run` only. `prepare` keeps its own settings, so a dataset
+    adapter it names still writes the task folders the target reads."""
+    script = _render_target(tmp_path, target="/data/bmb", agent="opencode_agent", sandbox="opensandbox")
+    root = tmp_path / "jobs" / "x" / "bmb" / "artifacts" / "harbor"
+
+    prepare = next(line for line in script.splitlines() if "gym eval prepare" in line)
+    assert "+config_paths=[extra.yaml]" in prepare
+    for target_word in ("/data/bmb", "--agent", "--sandbox", "harbor_output_root"):
+        assert target_word not in prepare
+    run = _gym_cmd(script)
+    assert run[:9] == [
+        "GYM_CMD=(",
+        "gym",
+        "eval",
+        "run",
+        "/data/bmb",
+        "--agent",
+        "opencode_agent",
+        "--sandbox",
+        "opensandbox",
+    ]
+    assert run[9] == f"+harbor_output_root={root}"
+    assert run[10].startswith("+output_jsonl_fpath=")
+    assert "+num_samples_in_parallel=8" in run
+
+
+def test_a_task_target_without_a_sandbox_names_only_the_agent(tmp_path):
+    script = _render_target(tmp_path, target="harbor:org/set@1.0", agent="opencode_agent")
+
+    assert _gym_cmd(script)[4:7] == ["harbor:org/set@1.0", "--agent", "opencode_agent"]
+    assert "--sandbox" not in script
+
+
+def test_a_task_target_with_an_empty_prepare_runs_no_separate_preparation(tmp_path):
+    script = _render_target(
+        tmp_path,
+        target="/data/bmb",
+        agent="opencode_agent",
+        prepare={},
+        run={"allow_unsupported_pairing": True},
+    )
+
+    assert "gym eval prepare" not in script
+    run = _gym_cmd(script)
+    assert run[:6] == ["GYM_CMD=(", "gym", "eval", "run", "/data/bmb", "--agent"]
+    assert "+allow_unsupported_pairing=True" in run
+
+
+def test_a_task_target_is_shell_quoted():
+    from nemo_gym.orchestration.executors.utils import render_target_args
+
+    assert render_target_args("/data/my tasks", agent="opencode_agent", sandbox=None, output_root="/jobs/a b") == [
+        "'/data/my tasks'",
+        "--agent",
+        "opencode_agent",
+        "'+harbor_output_root=/jobs/a b'",
+    ]
+    assert render_target_args(None, agent=None, sandbox=None, output_root="/jobs") == []
+
+
+@pytest.mark.parametrize(
+    "root", ["/jobs/a/artifacts/harbor", "/jobs/a b/artifacts/harbor", "/jobs/(x) 'y'/harbor", "/jobs/a=b,c/harbor"]
+)
+def test_a_rendered_output_root_is_the_same_path_after_the_shell_and_hydra(root):
+    from nemo_gym.data.tasks.harbor.prepare import output_root_from_overrides
+    from nemo_gym.orchestration.executors.utils import render_target_args
+
+    words = shlex.split(
+        " ".join(render_target_args("/data/t", agent="opencode_agent", sandbox=None, output_root=root))
+    )
+    token = next(word for word in words if word.startswith("+harbor_output_root="))
+
+    assert str(output_root_from_overrides([token])) == root
+
+
+def test_a_benchmark_without_a_target_renders_no_target_arguments(tmp_path):
+    script = _render_target(tmp_path)
+
+    assert "--agent" not in script
+    assert "harbor_output_root" not in script
+
+
+@pytest.mark.parametrize(
+    ("benchmark", "message"),
+    [
+        ({"agent": "opencode_agent"}, "without a `target`"),
+        ({"sandbox": "opensandbox"}, "without a `target`"),
+        ({"target": "/data/bmb"}, "without an `agent`"),
+        (
+            {"target": "/data/bmb", "agent": "opencode_agent", "command": "harness", "run": {}},
+            "both `command` and `target`",
+        ),
+        ({"target": "", "agent": "opencode_agent"}, "at least 1 character"),
+        ({"target": "/data/bmb", "agent": ""}, "at least 1 character"),
+        ({"target": "/data/bmb", "agent": "opencode_agent", "run": {"exclude_tasks": "bad-*"}}, "`exclude_tasks`"),
+        (
+            {"target": "/data/bmb", "agent": "opencode_agent", "run": {"only_tasks": "a", "skip_unloadable": True}},
+            "`only_tasks`, `skip_unloadable`",
+        ),
+    ],
+)
+def test_a_task_target_needs_an_agent_and_not_a_command(tmp_path, benchmark, message):
+    with pytest.raises(ValueError, match=message):
+        _target_config(tmp_path, **benchmark)
+
+
+def test_a_benchmark_without_a_target_saves_the_config_it_always_did(tmp_path):
+    saved = _target_config(tmp_path).driver.benchmarks["bmb"].model_dump()
+    assert not {"target", "agent", "sandbox"} & set(saved)
+
+    with_target = _target_config(tmp_path, target="/data/bmb", agent="opencode_agent").driver.benchmarks["bmb"]
+    assert with_target.model_dump()["target"] == "/data/bmb"
+    assert (
+        SubmitConfig.model_validate(
+            {
+                "services": {},
+                "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+                "driver": {"container": "efb:latest", "benchmarks": {"bmb": with_target.model_dump()}},
+                "job": {"output_path": str(tmp_path / "jobs")},
+            }
+        )
+        .driver.benchmarks["bmb"]
+        .target
+        == "/data/bmb"
+    )

@@ -66,7 +66,8 @@ def test_a_run_of_answers_truncated_at_the_output_cap_passes_evaluation_health_w
     assert task["failures"]["response_failures"]["by_cause"]["truncated"] == {"count": 123, "rate": 0.123}
     assert task["health_verdict"] == (
         "evaluation health: PASS; response failures: 12.30% (truncated 123 of 1000); "
-        "trial failures: 0.00% (none of 1000); metric over 1000 of 1000 trials"
+        "trial failures: 0.00% (none of 1000); length cutoffs: 123 policy calls in 123 trials; "
+        "metric over 1000 of 1000 trials"
     )
     assert "model_health" not in task
 
@@ -98,7 +99,8 @@ def test_a_mixed_run_fails_on_its_evaluation_share_and_reports_both_classes():
     )
     assert task["health_verdict"] == (
         "evaluation health: FAIL; response failures: 5.00% (truncated 5 of 100); "
-        "trial failures: 10.00% (request 10 of 100); metric over 100 of 100 trials"
+        "trial failures: 10.00% (request 10 of 100); length cutoffs: 5 policy calls in 5 trials; "
+        "metric over 100 of 100 trials"
     )
 
 
@@ -172,7 +174,8 @@ def test_response_failures_are_reported_and_never_a_second_verdict():
     assert passed is True, reason
     assert task["health_verdict"] == (
         "evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); "
-        "trial failures: 0.00% (none of 1000); metric over 1000 of 1000 trials"
+        "trial failures: 0.00% (none of 1000); length cutoffs: 41 policy calls in 41 trials; "
+        "metric over 1000 of 1000 trials"
     )
     assert task["failures"]["response_failures"]["rate"] == 0.047
     assert not _health_errors(task) and "PASS" not in str(task["failures"])
