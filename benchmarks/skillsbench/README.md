@@ -202,6 +202,17 @@ not enforce network isolation, so this config explicitly permits its execution
 with cluster-default egress. That condition differs from the official sandbox
 policy and must be resolved before claiming comparable scores.
 
+Java verifiers download their dependencies from Maven Central at check time,
+and many sandboxes at once get HTTP 429 from it. The OpenSandbox environment
+therefore writes `/root/.m2/settings.xml` at sandbox start, pointing Maven at
+the read-through Google mirror of Central that the SWE servers already use
+(`responses_api_agents/swe_agents/maven_mirror/settings.xml`). An existing
+settings file from the task image or the provider is kept. Set the environment
+kwarg `maven_mirror: false` to turn this off.
+
+`fix-build-google-auto` keeps Maven Central: its OpenJDK 7 build cannot download
+from the mirror, so with it every build fails and scores a false zero.
+
 ### Run locally
 
 Docker and an OpenAI-compatible policy endpoint are required. Run one task first:

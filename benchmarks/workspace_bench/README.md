@@ -24,4 +24,6 @@ Set these before running:
   Anthropic-compatible judge. Keep the judge fixed across compared runs.
 - `WORKSPACE_BENCH_IMAGE` for an image built from upstream `evaluation/docker/Dockerfile` at commit
   `3fbd0f1a136720fece86786545983e26642c3db2`. It also needs that commit's `evaluation/` directory at
-  `/workspace/Workspace-Bench/evaluation` with `npm ci` run there, and `python3` with Gym's dependencies.
+  `/workspace/Workspace-Bench/evaluation` with `npm ci` run there, and `python3` with Gym's dependencies. For
+  `hermes`, it also needs the Hermes worker; see "Presets that run this agent's host path" in
+  `responses_api_agents/hermes_agent/README.md`.

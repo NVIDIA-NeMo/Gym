@@ -5078,3 +5078,97 @@ def test_a_task_shipping_harbors_seed_trajectory_loads_for_the_oracle_and_the_fi
     assert is_covered("trajectory.json") and content_hash(root) != before
     # The package store's hash (what a fetch verifies) covers the file as the folder digest does.
     assert archive_hash(root) == content_hash(root)
+
+
+class TestHarborOutputRoot:
+    """`+harbor_output_root=DIR` moves a task TARGET's prepared rows and run config out of the working directory."""
+
+    def _target_args(self, tmp_path):
+        import argparse
+
+        def fail(message):
+            raise SystemExit(message)
+
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        return argparse.Namespace(
+            target=str(folder), agent="hermes_agent", sandbox="opensandbox", _parser=argparse.Namespace(error=fail)
+        )
+
+    def _prepare(self, args, overrides, sandbox="opensandbox"):
+        agent = resolve_agent("hermes_agent")
+        prepared = cli_eval._prepare_for_agent(args, overrides, agent, sandbox)
+        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
+        return prepared, config_path, tokens
+
+    def test_prepared_rows_do_not_depend_on_the_working_directory_when_the_output_root_is_set(
+        self, tmp_path, monkeypatch
+    ):
+        """A submitted run prepares in a fresh checkout on every allocation. The run config names the rows file, and a
+        continuation compares that config with the saved run's, so with the output root set (to a folder in the job
+        directory) two preparations from different working directories must write the same config."""
+        args = self._target_args(tmp_path)
+        root = tmp_path / "job" / "artifacts" / "harbor"
+        overrides = [f"+harbor_output_root={root}"]
+        configs = []
+        for name in ("checkout_a", "checkout_b"):
+            checkout = tmp_path / name
+            checkout.mkdir()
+            monkeypatch.chdir(checkout)
+            prepared, config_path, tokens = self._prepare(args, overrides)
+            assert config_path.parent == root / "ds" and prepared.rows_path.is_relative_to(root)
+            assert not any("harbor_output_root" in token for token in tokens)
+            configs.append(config_path.read_text())
+            assert not (checkout / "results").exists()
+        assert configs[0] == configs[1]
+        assert str(root / "ds") in configs[0]
+
+    @pytest.mark.parametrize("quoted", ["'{root}'", "{root}"])
+    def test_a_hydra_quoted_output_root_is_the_path_it_spells(self, tmp_path, monkeypatch, quoted):
+        """`+harbor_output_root='/tmp/prepared rows'` is the folder `/tmp/prepared rows`, not a name with quotes in
+        it that lands beneath the working directory."""
+        from nemo_gym.data.tasks.harbor.prepare import output_root_from_overrides
+
+        root = tmp_path / "prepared rows"
+        overrides = ["+harbor_output_root=" + quoted.format(root=root)]
+        assert output_root_from_overrides(overrides) == root
+        monkeypatch.chdir(tmp_path)
+        prepared, config_path, _ = self._prepare(self._target_args(tmp_path), overrides, sandbox=None)
+        assert config_path.parent == root / "ds" and prepared.rows_path.is_relative_to(root)
+        assert not any(path.name.startswith("'") for path in tmp_path.iterdir())
+
+    def test_an_empty_output_root_is_the_default_and_a_non_path_is_refused(self, tmp_path, monkeypatch):
+        from nemo_gym.data.tasks.harbor.prepare import DEFAULT_OUTPUT_ROOT, output_root_from_overrides
+
+        assert output_root_from_overrides([]) == DEFAULT_OUTPUT_ROOT
+        assert output_root_from_overrides(["+harbor_output_root=''"]) == DEFAULT_OUTPUT_ROOT
+        with pytest.raises(ValueError, match="path string"):
+            output_root_from_overrides(["+harbor_output_root=3"])
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit, match="path string"):
+            self._prepare(self._target_args(tmp_path), ["+harbor_output_root=3"])
+
+    @pytest.mark.parametrize("overrides", [[], ["+harbor_output_root={root}"]])
+    def test_the_oracle_run_prepares_under_the_output_root(self, tmp_path, monkeypatch, overrides):
+        """`gym eval run TARGET --agent harbor_oracle_agent` goes through the validation path; with the output root set
+        it prepares and renders there too, keeping its own validation/ folder, so a submitted oracle run does not
+        write into the checkout."""
+        root = tmp_path / "job" / "artifacts" / "harbor"
+        overrides = [token.format(root=root) for token in overrides]
+        seen = {}
+
+        class Stop(Exception):
+            pass
+
+        def capture(target, **kwargs):
+            seen.update(kwargs)
+            raise Stop
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cli_eval, "prepare_target", capture)
+        args = self._target_args(tmp_path)
+        with pytest.raises(Stop):
+            cli_eval.validate_target(args, overrides, agent=resolve_agent("harbor_oracle_agent"))
+        expected = root if overrides else Path("results/harbor")
+        assert seen["output_root"] == expected / "validation"
+        assert seen["render_root"] == expected
