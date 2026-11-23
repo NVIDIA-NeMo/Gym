@@ -116,6 +116,8 @@ calls `/close_session`.
 | `opencode.yaml` | `opencode_agent` | its own shell, Python and read tool | lent, with the task images |
 | `opencode_server_tools.yaml` | `opencode_agent` | on this server, over MCP | lent, empty |
 
+The base config allows only `agentic_mme_agent` (`allowed_agents`); the configs above set their own value. A config that pairs this server with another agent must set `allowed_agents` itself.
+
 The seed that an agent's `/run` sends through a `legacy_agent` relay still works, for compatibility.
 
 ## Run
