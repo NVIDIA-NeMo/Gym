@@ -8,7 +8,7 @@ This Environment Server runs both of its modes with no Resources Server. It is a
 which serves the episode's tools. Its `run` seeds the agent session (`agent_session.py`), runs the turns and
 grades them. Each episode holds one task:
 
-- a sandbox with the task's SQLite database, with `preprocess_sql` applied (see [Database sandbox](#database-sandbox));
+- a sandbox with the task's database (SQLite, or PostgreSQL in the sandbox image), with `preprocess_sql` applied (see [Database sandbox](#database-sandbox));
 - the two-stage user simulator, which calls the `user_model` server;
 - the grader, the current phase, the SQL attempts and the reward;
 - in a-Interact, the BIRD-COIN budget and the nine tools.
@@ -17,7 +17,7 @@ grades them. Each episode holds one task:
 
 | `mode` | Turns | Agent's tools | User side |
 |---|---|---|---|
-| `c_interact` | Up to `max_turns`. The agent must resume its session across turns. | None | The reply is the text of the turn's last message. A reply with a ```` ```sql ```` or ```` ```sqlite ```` block is a submission; any other reply is a question. The next user message is the simulator's answer, the debug prompt or the follow-up question. |
+| `c_interact` | Up to `max_turns`. The agent must resume its session across turns. | None | The reply is the text of the turn's last message. A reply with a ```` ```sql ````, ```` ```sqlite ````, ```` ```postgresql ```` or ```` ```postgres ```` block is a submission; any other reply is a question. The next user message is the simulator's answer, the debug prompt or the follow-up question. |
 | `a_interact` | One (`max_turns: 1`). | Nine tools that the server serves for the episode, over each of `tool_transports`: `ask`, `submit`, `execute`, `get_schema`, `get_all_column_meanings`, `get_column_meaning`, `get_all_external_knowledge_names`, `get_knowledge_definition`, `get_all_knowledge_definitions` | `Stop("agent_finished")` |
 
 The first turn's request has the instructions and the user's ambiguous request. In c-Interact it also has the schema,
@@ -70,11 +70,12 @@ is retried, and a client error, such as a 4xx from the user model, fails it for 
 
 The episode starts a sandbox and stops it when the episode ends, on every path; at shutdown the server finishes
 the cleanups of episodes still running, and `sandbox_config.ttl_s` lets the provider reclaim a sandbox that a
-crashed server left. The server uploads `grading.py` and the database source and runs
-`python3 grading.py <setup|execute|grade> <request.json>` there, so the image needs only `python3` 3.10 or newer
-(default `python:3.12-slim`). The agent's SQL and the grading run in the sandbox, never in the server process, and the
-agent never gets the sandbox itself. `grading.py` deletes each request file once it has read it, so the solution SQL
-in a grade request does not stay in the sandbox.
+crashed server left. The server uploads `grading.py`, and for SQLite the database source, and runs
+`python3 grading.py <setup|execute|grade> <request.json>` there. For SQLite the image needs only `python3` 3.10 or
+newer (default `python:3.12-slim`); for PostgreSQL see [PostgreSQL (Lite and Full)](#postgresql-lite-and-full). The
+agent's SQL and the grading run in the sandbox, never in the server process, and the agent never gets the sandbox
+itself. `grading.py` deletes each request file once it has read it, so the solution SQL in a grade request does not
+stay in the sandbox.
 
 `sandbox_provider: sandbox` names the provider block that a provider config binds, such as
 `nemo_gym/sandbox/providers/docker/configs/docker.yaml`. The local provider
@@ -89,8 +90,10 @@ retried, and a-Interact masks the sample with `failure_kind: bird_interact:sandb
 ## Grading
 
 `grading.py` is an independent implementation of BIRD-Interact's default test case. It removes comments, `DISTINCT`
-and `ROUND(...)` from both queries, runs each on a scratch copy of the episode's database, rounds floats to two
-places, and compares rows in order when `conditions.order` is set, or as sets otherwise. An empty result fails.
+and `ROUND(...)` from both queries and runs each without changing the episode's database: on a scratch copy for
+SQLite, in a transaction it rolls back for PostgreSQL. It rounds floats and decimals to two places (decimals half-up),
+compares dates and timestamps as `YYYY-MM-DD` and JSON values as sorted JSON, and compares rows in order when
+`conditions.order` is set, or as sets otherwise. An empty result fails.
 
 ## Harnesses
 
@@ -122,7 +125,7 @@ and Codex, in a-Interact over `mcp`, have run BIRD with a model; the other rows 
 `database_dir` holds one directory for each database, in the BIRD-Interact layout:
 
 ```text
-<db>/<db>.sqlite (or <db>.sql)
+<db>/<db>.sqlite (or <db>.sql), for SQLite only
 <db>/<db>_schema.txt
 <db>/<db>_column_meaning_base.json
 <db>/<db>_kb.jsonl
@@ -139,12 +142,24 @@ The agent's config declares the file once for each mode's taskset, `bird_interac
 The public BIRD-Interact releases (Mini-Interact, Lite, Full) withhold `sol_sql` and `test_cases`. The authors
 send them on request. A row without `sol_sql` fails the episode at seed, for good. Mini-Interact uses SQLite, so its
 databases work as downloaded from [`birdsql/mini-interact`](https://huggingface.co/datasets/birdsql/mini-interact),
-after the ground truth is merged into the rows.
+after the ground truth is merged into the rows. Lite and Full use PostgreSQL.
+
+## PostgreSQL (Lite and Full)
+
+With `database_engine: postgresql`, a task's database is `<db>_template` in the PostgreSQL server of the sandbox
+image, and each episode starts its own sandbox from that image. `setup` starts the server and applies
+`preprocess_sql`; after that, each query runs in a transaction that is rolled back, so a write in one query or episode
+never reaches another. The image holds the release's databases already restored, so an episode starts PostgreSQL
+instead of restoring dumps.
+
+[`benchmarks/bird_interact`](../../benchmarks/bird_interact/README.md) builds the image, prepares the Lite or Full
+data with the ground truth, and runs the benchmark.
 
 ## Not supported yet
 
-- Rows with custom `test_cases` (BIRD-Interact's management tasks). The episode fails at seed, for good.
-- PostgreSQL (Lite and Full).
+- Rows with custom `test_cases`, for the task or its follow-up (BIRD-Interact's management tasks). The episode fails
+  at seed, for good.
+- PostgreSQL dollar-quoted bodies (`$$ ... $$`) in the agent's SQL: a semicolon inside one splits the statement.
 - Database changes that carry over from phase 1 to phase 2. Each submission runs on a scratch copy.
 - The data and catalog checks that `gym env test` runs for a Resources Server.
 

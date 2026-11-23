@@ -69,7 +69,6 @@ bird_interact_c_interact:
         name: user_model
       sandbox_provider: sandbox
       sandbox_config:
-        image: python:3.12-slim
         ttl_s: 7200
         resources:
           cpu: 1
@@ -98,7 +97,6 @@ bird_interact_a_interact:
         name: user_model
       sandbox_provider: sandbox
       sandbox_config:
-        image: python:3.12-slim
         ttl_s: 7200
         resources:
           cpu: 1
