@@ -198,6 +198,37 @@ async def test_a_pass_settles_judge_failures_of_both_classes_in_one_batch(tmp_pa
     assert sorted(posted) == [0, 1]  # a second pass makes no verifier call
 
 
+async def test_a_repeat_judge_failure_with_a_retained_classification_is_saved_and_counted(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+    output, (failure,) = _run(tmp_path, judge_failures=1, rollouts=1, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+
+    async def reply(task, json):
+        # The judge fails again: the same saved answer, a fresh failure, the canonical class and the retained one.
+        event = {"event_id": "judge-again", "boundary": "resources_server", "failure_kind": "judge_failed"}
+        return json | {
+            "_ng_failure_events": {"judge-again": event},
+            "_ng_failure_id": "judge-again",
+            "_ng_failure_class": "judge_unparseable",
+            "_ng_failure_legacy_class": "judge_failed",
+            "failure_kind": "judge_failed",
+            "mask_sample": True,
+            "reward": 0.0,
+        }
+
+    posted = _verifier(monkeypatch, reply)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert posted == [0]
+    store = RolloutStore.read(output, import_legacy=False)  # reopened from disk
+    (saved,) = store.failures()
+    assert saved["_ng_failure_id"] == "judge-again"  # the new failure persisted, it was not withdrawn
+    assert saved["_ng_rejudged_failure_id"] == failure["_ng_failure_id"]
+    assert len(store.failures()) == 1 and store.manifest.pending_rejudge == {}
+    assert due_judge_failures(output) == []  # both attempts are spent
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert posted == [0]  # a second pass makes no verifier call
+
+
 @pytest.mark.parametrize("fields", [{}, _UNPARSEABLE_JUDGE_FAILURE], ids=["judge_failed", "judge_unparseable"])
 def test_a_judge_failure_of_either_class_binds_its_rejudgment_and_a_repeat_failure(tmp_path, fields):
     _, (first, *_) = _run(tmp_path, judge_failures=1, failure_fields=fields)
