@@ -144,6 +144,17 @@ class TestPromptAndVerdictParsing:
         passed, reason = parse_judge_verdict("[reason]\nIt is true that 4 is close to 3.\n[judge]\nFalse")
         assert passed is False
         assert reason == "It is true that 4 is close to 3."
+        assert parse_judge_verdict("[reason]\nExact.\n[judge]\n  true  ")[0] is True
+        assert parse_judge_verdict("[reason]\nMismatch.\n[judge]\nFALSE")[0] is False
+
+    @pytest.mark.parametrize(
+        "non_boolean_verdict",
+        ["Not true", "not False", "The answer is true.", "True or False", "True (exact match)"],
+        ids=["not_true", "not_false", "prose", "both_tokens", "trailing_prose"],
+    )
+    def test_non_boolean_verdicts_raise_parse_error(self, non_boolean_verdict: str) -> None:
+        with pytest.raises(JudgeParseError, match="expected exact True or False"):
+            parse_judge_verdict(f"[reason]\nExplanation.\n[judge]\n{non_boolean_verdict}")
 
     def test_leading_judge_thinking_block_is_stripped(self) -> None:
         passed, reason = parse_judge_verdict("<think>comparing 3 and 3</think>\n[reason]\nExact match.\n[judge]\nTrue")
@@ -263,13 +274,21 @@ class TestVerify:
 
     @pytest.mark.parametrize(
         "unusable_reply",
-        ["no markers at all", "[reason]\ncut off\n[judge]\n", "[reason]\nboth\n[judge]\nTrue or False", ""],
-        ids=["no_markers", "empty_verdict", "ambiguous_verdict", "blank"],
+        [
+            "no markers at all",
+            "[reason]\ncut off\n[judge]\n",
+            "[reason]\nboth\n[judge]\nTrue or False",
+            "[reason]\nThe candidate is incorrect.\n[judge]\nNot true",
+            "[reason]\nNot wrong.\n[judge]\nnot False",
+            "[reason]\nMatches.\n[judge]\nThe answer is true.",
+            "",
+        ],
+        ids=["no_markers", "empty_verdict", "ambiguous_verdict", "not_true", "not_false", "prose_verdict", "blank"],
     )
     async def test_exhausted_unparseable_judge_replies_mask_row(self, unusable_reply: str) -> None:
         server, client = _make_server(max_attempts=3)
         client.post = AsyncMock(return_value=fixture_judge_reply(unusable_reply))
-        row = await _verify_through_failsafe(server, _make_request("3"))
+        row = await _verify_through_failsafe(server, _make_request("4", answer="3"))
         assert row["reward"] == 0.0
         assert row["mask_sample"] is True
         assert row["failure_kind"] == "judge_failed"
@@ -321,7 +340,13 @@ class TestMetricsAndSchema:
             return {
                 "extra": model.model_config.get("extra"),
                 "fields": {
-                    name: (info.annotation, info.is_required(), info.default)
+                    name: (
+                        info.annotation,
+                        info.is_required(),
+                        info.default,
+                        info.default_factory,
+                        tuple(info.metadata),
+                    )
                     for name, info in model.model_fields.items()
                     if name != "task_id"
                 },

@@ -68,8 +68,7 @@ _UNCLOSED_THINK_RE = re.compile(r"<(?:think|thinking)\b|<\|channel>thought\b", r
 _ORPHAN_CLOSE_THINK_RE = re.compile(r"</(?:think|thinking)\s*>|<channel\|>", re.IGNORECASE)
 _LEADING_THINK_RE = re.compile(r"^\s*<(think|thinking)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 _PLACEHOLDER_RE = re.compile(r"\{(problem|assistant_answer|reference_answer)\}")
-_TRUE_TOKEN_RE = re.compile(r"\btrue\b", re.IGNORECASE)
-_FALSE_TOKEN_RE = re.compile(r"\bfalse\b", re.IGNORECASE)
+_BOOLEAN_VERDICT_RE = re.compile(r"^(true|false)$", re.IGNORECASE)
 
 
 class JudgeParseError(ValueError):
@@ -139,11 +138,10 @@ def parse_judge_verdict(raw_text: str) -> tuple[bool, str]:
         raise JudgeParseError("[reason] marker must precede [judge] marker")
     reason = before_judge.rsplit("[reason]", 1)[-1].strip()
     verdict = verdict_part.strip()
-    has_true = bool(_TRUE_TOKEN_RE.search(verdict))
-    has_false = bool(_FALSE_TOKEN_RE.search(verdict))
-    if has_true == has_false:
-        raise JudgeParseError(f"expected unambiguous True or False after [judge], got {verdict!r}")
-    return has_true, reason[:200]
+    match = _BOOLEAN_VERDICT_RE.fullmatch(verdict)
+    if match is None:
+        raise JudgeParseError(f"expected exact True or False after [judge], got {verdict!r}")
+    return match.group(1).lower() == "true", reason[:200]
 
 
 class PerceptionbenchVerifierMetadata(BaseModel):
