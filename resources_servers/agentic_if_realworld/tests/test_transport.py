@@ -906,3 +906,48 @@ def test_evidence_ids_unicode_and_omission(judge_payload):
     decoded, _ = evidence.decode_review(raw, judge_payload)
     assert decoded["constraints"][0]["response_evidence"]["quote"] == ""
     assert decoded["constraints"][0]["support_quote"] == judge_payload["constraints"][0]["support_quotes"][0]
+
+
+@pytest.mark.parametrize("extra,expected", [(0, "evidence_ids_v1"), (1, "quotes")])
+def test_adaptive_transport_preserves_request_at_boundary(judge_payload, tmp_path, monkeypatch, extra, expected):
+    from resources_servers.agentic_if_realworld.benchmark import scoring
+
+    judge_payload["response"]["message"]["content"] = "x" * (527 * 250 + extra)
+    sha = judge.sha(judge_payload["response"])
+    judge_payload["response_sha256"] = judge_payload["inference_binding"]["response_sha256"] = sha
+    requests = []
+
+    async def capture(body, **kwargs):
+        requests.append(body)
+        raise RuntimeError("captured before dispatch")
+
+    monkeypatch.setattr(scoring, "wire_call", capture)
+    for transport in (expected, "evidence_ids_or_quotes_v1"):
+        with pytest.raises(RuntimeError, match="captured before dispatch"):
+            asyncio.run(
+                score(
+                    judge_payload,
+                    directory=tmp_path,
+                    policy_prompt=SYNTHETIC_PROMPT,
+                    endpoint="http://synthetic.invalid",
+                    evidence_transport=transport,
+                )
+            )
+    assert requests[0] == requests[1]
+    assert len(list((tmp_path / "judges").iterdir())) == 2
+    selection = read(next(tmp_path.glob("judges/*/transport_selection.json")))
+    assert selection == {"policy": "evidence_ids_or_quotes_v1", "span_count": 527 + extra, "selected": expected}
+
+    selection_path = next(tmp_path.glob("judges/*/transport_selection.json"))
+    write(selection_path, {**selection, "span_count": 0})
+    with pytest.raises(ValueError, match="transport selection changed"):
+        asyncio.run(
+            score(
+                judge_payload,
+                directory=tmp_path,
+                policy_prompt=SYNTHETIC_PROMPT,
+                endpoint="http://synthetic.invalid",
+                evidence_transport="evidence_ids_or_quotes_v1",
+                validate_only=True,
+            )
+        )

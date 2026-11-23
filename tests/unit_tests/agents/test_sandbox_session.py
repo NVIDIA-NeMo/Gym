@@ -915,11 +915,22 @@ async def test_failed_expire_write_keeps_the_stop_only_if_the_marker_landed(sess
     await session.close(timeout=1)
 
 
-async def test_expire_write_failing_during_finalization_still_keeps_a_landed_stop(session, receipt_reader):
+async def test_expire_write_failing_during_finalization_still_keeps_a_landed_stop(
+    session, receipt_reader, monkeypatch
+):
     # The marker lands, the harness ends at the stop, and the write fails only once finalization has begun.
-    launched, landed, fail_write = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    launched, landed, finalizing = asyncio.Event(), asyncio.Event(), asyncio.Event()
     finish = asyncio.Event()
     written = set()
+    confirm_expiry = session._confirm_unacknowledged_expiry
+
+    async def confirm_during_write(*, timeout):
+        assert not activation.done()
+        assert session._expire_write is not None and not session._expire_write.done()
+        finalizing.set()
+        await confirm_expiry(timeout=timeout)
+
+    monkeypatch.setattr(session, "_confirm_unacknowledged_expiry", confirm_during_write)
 
     async def exec_(command, **_):
         if "--expire-file" in command:
@@ -934,7 +945,7 @@ async def test_expire_write_failing_during_finalization_still_keeps_a_landed_sto
         if target == EXPIRE_MARKER:
             written.add(target)
             landed.set()
-            await fail_write.wait()
+            await finalizing.wait()
             raise ConnectionError("acknowledgment lost")
 
     session.sandbox.exec.side_effect = exec_
@@ -944,10 +955,7 @@ async def test_expire_write_failing_during_finalization_still_keeps_a_landed_sto
         await asyncio.wait_for(landed.wait(), 2)
         receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
         finish.set()
-        # Finalization waits for the write still in flight instead of reconciling past it.
-        await asyncio.sleep(0.1)
-        assert not activation.done()
-        fail_write.set()
+        # Fail the write only when finalization reaches expiry confirmation, without racing a timer.
         with pytest.raises(RuntimeError, match="Could not request test expiry"):
             await asyncio.wait_for(stop, 2)
         assert await asyncio.wait_for(activation, 5) == "transcript"
