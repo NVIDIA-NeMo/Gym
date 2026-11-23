@@ -1063,3 +1063,35 @@ async def test_a_pause_or_continue_gives_its_request_what_the_wait_for_another_l
     result = await asyncio.wait_for(getattr(session, request_name)(timeout=10), 5)
     assert result.status == "confirmed" and not session._control.locked()
     assert len(budgets) == 1 and 5 < budgets[0] <= 9.6
+
+
+@pytest.mark.parametrize("text", ["", "not a receipt", "[]"])
+async def test_a_receipt_that_is_no_json_object_ends_the_wait_as_unreadable(text: str) -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SandboxExecResult(stdout=text, stderr=None, return_code=0)
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
+    assert (result.return_code, result.error_type) == (-1, "unreadable_receipt") and sandbox.exec.await_count == 1
+
+
+async def test_a_lost_launch_whose_sandbox_answers_with_no_receipt_fails_with_the_lost_connection() -> None:
+    # The sandbox says the supervisor started, then hands back nothing for its receipt: the outcome is unknown,
+    # so the launch fails as it would have without the recovery, with the error that lost its connection.
+    lost = TimeoutError("lost launch response")
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [
+        lost,
+        SandboxExecResult(stdout="", stderr="", return_code=0),
+        SandboxExecResult(stdout="", stderr="", return_code=0),
+    ]
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    with pytest.raises(TimeoutError) as raised:
+        await session._exec_launch("launch", provider_timeout=600)
+    assert raised.value is lost
+
+
+async def test_a_start_probe_whose_answer_cannot_be_read_counts_as_not_started() -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0)  # no error_type: not a result the session can read
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    assert await session._supervisor_started() is False

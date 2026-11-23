@@ -67,6 +67,8 @@ _RECEIPT_POLL_FAILURE_S = 60.0
 _ADOPT_CONTINUE_ATTEMPTS = 3
 # Each receipt poll is one command of at most this many seconds; a longer one could outlive a provider's stream limit.
 _RECEIPT_POLL_WINDOW_S = 50.0
+# The ``error_type`` of a receipt wait whose sandbox answered with something that is no receipt.
+_UNREADABLE_RECEIPT = "unreadable_receipt"
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -487,8 +489,11 @@ class SandboxSession[Artifacts]:
             result = await self._wait_for_receipt(
                 deadline=launched_at + provider_timeout, window_s=_RECEIPT_POLL_WINDOW_S
             )
-            # A wait that found no receipt fails the launch, and names the error that lost the connection as its
-            # cause. A receipt answers for the launch, so the lost connection is not reported.
+            # A receipt answers for the launch, so the lost connection is not reported. An answer that is no receipt
+            # leaves the launch's outcome unknown, and the lost connection stands as its error. A wait that found
+            # no receipt fails the launch, and names the lost connection as its cause.
+            if result.error_type == _UNREADABLE_RECEIPT:
+                raise
             if result.error_type == "timeout":
                 raise TimeoutError(f"{self.harness} sandbox supervisor exceeded its execution deadline") from error
             if result.error_type:
@@ -514,10 +519,11 @@ class SandboxSession[Artifacts]:
                 cwd=control_cwd(session_dir=self.session_dir, workdir=self.workdir),
                 timeout_s=30,
             )
+            return probe.return_code == 0 and not probe.error_type
         except Exception:
+            # Whatever goes wrong here, the error that lost the launch's connection is the one to report.
             LOG.warning("%s could not check whether its supervisor started", self.harness, exc_info=True)
             return False
-        return probe.return_code == 0 and not probe.error_type
 
     async def adopt(
         self,
@@ -590,7 +596,7 @@ class SandboxSession[Artifacts]:
         """Poll for the launch's cleanup receipt until ``deadline``.
 
         The result's code is the launch command's: 0 when the receipt confirms the cleanup, whatever the harness
-        returned, and 1 otherwise.
+        returned, and 1 otherwise. A receipt that is no JSON object ends the wait as ``unreadable_receipt``.
         """
         receipt = quote(f"{self.session_dir}/{CLEANUP_RECEIPT_FILE}")
         failures = 0
@@ -613,10 +619,19 @@ class SandboxSession[Artifacts]:
                 result = SandboxExecResult(stdout=None, stderr=repr(error), return_code=-1, error_type="poll_failed")
             if result.return_code == 0 and not result.error_type:
                 try:
-                    confirmed = json.loads(result.stdout or "{}").get("cleanup_confirmed") is True
-                except (ValueError, AttributeError):
-                    confirmed = False
+                    receipt = json.loads(result.stdout or "")
+                except ValueError:
+                    receipt = None
+                if not isinstance(receipt, dict):
+                    # The supervisor writes its receipt whole, so reading again would not change it.
+                    return SandboxExecResult(
+                        stdout=None,
+                        stderr=f"the cleanup receipt is no JSON object: {(result.stdout or '')[:200]!r}",
+                        return_code=-1,
+                        error_type=_UNREADABLE_RECEIPT,
+                    )
                 # As the launch command ends: 0 once the supervisor confirmed the cleanup.
+                confirmed = receipt.get("cleanup_confirmed") is True
                 return SandboxExecResult(stdout="", stderr=None, return_code=0 if confirmed else 1)
             if result.return_code != 3 or result.error_type:
                 if self._pause_seq > self._continued_seq:
