@@ -29,6 +29,7 @@ from environment_servers.harbor.app import (
     HarborTasksetConfig,
 )
 from environment_servers.harbor.session import HarborSession
+from nemo_gym import PARENT_DIR
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.data.tasks.harbor import HarborTask, HarborTurn
@@ -118,7 +119,11 @@ class LegalAgentBenchEnvironmentServer(HarborEnvironmentServer):
             not self.config.tasksets
             or not self.config.tasksets.get("legal_agent_bench", HarborTasksetConfig(folder=".", tasks={})).tasks
         ):
+            # Gym starts each server in its own folder; a relative path (the benchmark config's default) is the
+            # repository's.
             mapping = Path(self.config.prepared_tasksets_file)
+            if not mapping.is_absolute():
+                mapping = PARENT_DIR / mapping
             if not mapping.is_file():
                 raise ValueError(
                     "Prepare LAB tasks with `gym eval prepare --config benchmarks/legal_agent_bench/config.yaml` first"

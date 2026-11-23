@@ -11,9 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.data.tasks.harbor import DIGEST_KEY, load_task
+from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, DIGEST_KEY, MAIN_SERVICE, context_digest, load_task
+from resources_servers.legal_agent_bench import environment_prepare
 from resources_servers.legal_agent_bench.environment_prepare import prepare_environment
-from resources_servers.legal_agent_bench.prepare import LAB_SOURCE_REVISION
+from resources_servers.legal_agent_bench.prepare import _DOCKERFILE, LAB_SOURCE_REVISION, _task_toml
 
 
 @pytest.fixture
@@ -76,6 +77,50 @@ def test_materialization_preserves_identity_params_and_isolates_rubric(assets, t
     source = cache / "_corpora/firm/document.txt"
     assert os.path.samefile(folder / "one/environment/vdr/document.txt", source)
     assert os.path.samefile(folder / "two/environment/vdr/document.txt", source)
+
+
+def test_default_preparation_takes_the_tools_image_from_the_build_record(assets, tmp_path, monkeypatch):
+    """Without a prebuilt image, preparation builds the cache task's tools image and records it. The image is read
+    from that record: the cache task itself declares a separate verifier with no image of its own, which the Harbor
+    loader refuses, so loading the task to read its image would fail."""
+    cache, skills = assets
+    built = "registry.example/lab-tools@sha256:" + "a" * 64
+    for name in ("one", "two"):
+        task = cache / name
+        config = json.loads((task / "task.json").read_text())
+        (task / "task.toml").write_text(_task_toml(config, name))
+        (task / "instruction.md").write_text(config["instructions"])
+        (task / "environment").mkdir()
+        (task / "environment/Dockerfile").write_text(_DOCKERFILE)
+    calls = []
+
+    def record_build(folder, *, builder):
+        calls.append(Path(folder))
+        record = {context_digest(Path(folder) / "environment"): {"services": {MAIN_SERVICE: {"image": built}}}}
+        (cache / BUILT_IMAGES_FILE).write_text(json.dumps({**record, "tool": "docker", "pushed": True}))
+        return []
+
+    monkeypatch.setattr(environment_prepare, "build_images", record_build)
+    output = tmp_path / "rows.jsonl"
+    prepare_environment(
+        tasks_dir=cache, skills_dir=skills, rows=[{"instance_id": "legal_agent_bench::one"}], output=output
+    )
+    assert calls == [(cache / "one").resolve()]
+    mapping = json.loads(Path(str(output) + ".tasksets.json").read_text())["legal_agent_bench"]
+    folder = Path(mapping["folder"])
+    assert load_task(folder / "one", root=folder).image == built
+
+
+def test_default_preparation_without_a_recorded_image_asks_for_one(assets, tmp_path, monkeypatch):
+    cache, skills = assets
+    monkeypatch.setattr(environment_prepare, "build_images", lambda folder, *, builder: [])
+    with pytest.raises(ValueError, match="LAB tools image was not built"):
+        prepare_environment(
+            tasks_dir=cache,
+            skills_dir=skills,
+            rows=[{"instance_id": "legal_agent_bench::one"}],
+            output=tmp_path / "rows.jsonl",
+        )
 
 
 def test_preparation_refuses_external_symlinks_without_publishing(assets, tmp_path):

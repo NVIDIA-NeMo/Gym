@@ -64,8 +64,9 @@ Then run against them from a second activated terminal:
 
 ```bash
 gym eval run --no-serve \
+  --model-type vllm_model \
   --benchmark legal_agent_bench \
-  --agent legal_agent_bench_benchmark_harbor_agent \
+  --agent legal_agent_bench_benchmark_agent \
   --input benchmarks/legal_agent_bench/data/legal_agent_bench_benchmark.jsonl \
   --output results/legal_agent_bench_benchmark.jsonl \
   --concurrency 1 \
@@ -80,7 +81,7 @@ pass rate instead, add this override to `gym env start` or the one-shot
 `gym eval run` command:
 
 ```bash
-+legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench.reward_mode=criteria_pass_rate
++lab.reward_mode=criteria_pass_rate
 ```
 
 This changes only the reported reward; it does not change the tasks, agent, or
