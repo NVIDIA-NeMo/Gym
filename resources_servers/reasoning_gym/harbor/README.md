@@ -5,15 +5,19 @@
 `task-template/` plus one `tasks.jsonl` row per selected native row, run by the `harbor` Environment Server with no
 Resources Server. It reads `environments/opencode_reasoning_gym/config.yaml` (or `--native-config`) and refuses,
 with exit 2, what a task cannot reproduce: an agent entrypoint other than `legacy_app.py`, `system_prompt_mode`
-other than `append`, a row with more than one user message or with sampling or tools in `responses_create_params`,
-a row without `metadata.source_dataset` or a `question` string, a row without a reference answer (it has no
-oracle), a line of `--rows` that is not JSON, and an `--ids-file` entry that is not a 0-based row index.
+other than `append`, an agent `timeout`, `thinking` or `opencode_version` other than the Harbor arm's (the
+template's `task.toml`, `configs/harbor_arm_harness.yaml`, else the sandbox session's default version), a row with
+more than one user message or with sampling or tools in `responses_create_params`, a row without
+`metadata.source_dataset` or a `question` string, a row without a reference answer (it has no oracle), a row whose
+task fields `task-template/task_data.py` refuses (the check Gym runs when it prepares the dataset), a line of
+`--rows` that is not JSON, and an `--ids-file` entry that is not a 0-based row index.
 
 This conversion was produced as a dry run of the `convert-env-to-harbor` skill: it was written from the skill alone,
 then taken through the skill's gates and a full parity run (below).
 
 Run every command below from the repository root, in the Python environment Gym is installed in. `adapter.py` needs
-only PyYAML, which Gym installs; `prepare.py` also needs reasoning-gym (see "Regenerate"). The tools are described in
+PyYAML and `nemo_gym` (to check each row against the template's `TaskData`), which that environment has; `prepare.py`
+also needs reasoning-gym (see "Regenerate"). The tools are described in
 [harbor_conversion_checks](../../../scripts/harbor_conversion_checks/README.md) and
 [harbor_parity](../../../scripts/harbor_parity/README.md), the task-folder format in
 [the task-folder docs](../../../fern/versions/latest/pages/data/task-folders/).

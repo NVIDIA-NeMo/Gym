@@ -19,7 +19,10 @@ What the conversion keeps from the native path:
 
 A task's id is ``rg-<n>``, ``n`` the 0-based line of the row in ``--rows`` zero-padded to 5 digits (row 98 is
 ``rg-00098``; the rows have no id field). Exit codes: 0 done, 2 a native setting or input the dataset cannot
-reproduce. Output is deterministic.
+reproduce, among them an agent ``timeout``, ``thinking`` or ``opencode_version`` other than the Harbor arm's (the
+template's ``task.toml``, ``configs/harbor_arm_harness.yaml`` and the sandbox session's default) and a row whose task
+fields the template's ``task_data.py`` refuses (the check ``gym`` runs when it prepares the dataset). Both are
+refused before anything is written. Output is deterministic.
 """
 
 import argparse
@@ -31,10 +34,13 @@ import json
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
+
+from nemo_gym.data.tasks.harbor import TaskDataError, load_task_data_schema
 
 
 HERE = Path(__file__).resolve().parent
@@ -45,6 +51,9 @@ REPO_ROOT = HERE.parents[2]
 DEFAULT_NATIVE_CONFIG = REPO_ROOT / "environments" / "opencode_reasoning_gym" / "config.yaml"
 NATIVE_AGENT_INSTANCE = "opencode_reasoning_gym_agent"
 NATIVE_AGENT_ENTRYPOINT = "legacy_app.py"
+HARNESS_CONFIG = HERE / "configs" / "harbor_arm_harness.yaml"
+# The sandbox session's default opencode_version, used when harbor_arm_harness.yaml pins none.
+SESSION_RUNTIME = REPO_ROOT / "responses_api_agents" / "opencode_agent" / "runtime.py"
 TASK_ID_PREFIX = "rg-"
 GRADER_MODULE = "reasoning_gym_grader.py"
 SERVER_CLASS = "ReasoningGymResourcesServer"
@@ -116,6 +125,48 @@ def native_system_prompt(config_path: Path) -> str:
     if "{{" in prompt:
         raise AdapterError("system_prompt contains '{{', which the template renderer would read as a placeholder")
     return prompt
+
+
+def harbor_agent_settings() -> dict:
+    """The ``timeout``, ``thinking`` and ``opencode_version`` the Harbor arm runs the agent with: the template's
+    ``[agent].timeout_sec``, then ``configs/harbor_arm_harness.yaml``, else the sandbox session's default version."""
+    harness = yaml.safe_load(HARNESS_CONFIG.read_text(encoding="utf-8"))["opencode_agent"]["responses_api_agents"][
+        "opencode_agent"
+    ]
+    version = harness.get("opencode_version")
+    if version is None:
+        tree = ast.parse(SESSION_RUNTIME.read_text(encoding="utf-8"))
+        version = next(
+            (
+                node.value.value
+                for node in tree.body
+                if isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                and any(isinstance(target, ast.Name) and target.id == "OPENCODE_VERSION" for target in node.targets)
+            ),
+            None,
+        )
+        if version is None:
+            raise AdapterError(f"{SESSION_RUNTIME} no longer defines OPENCODE_VERSION; update the adapter")
+    return {
+        "timeout": tomllib.loads((TEMPLATE_DIR / "task.toml").read_text(encoding="utf-8"))["agent"]["timeout_sec"],
+        "thinking": harness["thinking"],
+        "opencode_version": version,
+    }
+
+
+def check_native_agent_settings(config_path: Path) -> None:
+    """Refuse a native agent whose ``timeout``, ``thinking`` or ``opencode_version`` the Harbor arm does not use.
+
+    An absent key is refused too: the native agent's default may differ."""
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    agent = config[NATIVE_AGENT_INSTANCE]["responses_api_agents"]["opencode_agent"]
+    harbor = harbor_agent_settings()
+    native = {key: agent.get(key) for key in harbor}
+    if native != harbor:
+        raise AdapterError(
+            f"{config_path}: the Harbor arm runs the agent with {harbor}, but the native agent sets {native}"
+        )
 
 
 def file_sha256(path: Path) -> str:
@@ -271,6 +322,10 @@ def convert(
     if output_dir.exists() and any(output_dir.iterdir()):
         raise AdapterError(f"{output_dir} is not empty; choose a new --output-dir")
     instruction = native_system_prompt(native_config)
+    check_native_agent_settings(native_config)
+    schema = load_task_data_schema(TEMPLATE_DIR)
+    if schema is None:
+        raise AdapterError(f"{TEMPLATE_DIR} has no task_data.py to check the rows against")
     wanted = None if ids is None else set(ids)
     selected: dict[int, tuple[dict, str]] = {}
     row_count = 0
@@ -279,9 +334,11 @@ def convert(
         if wanted is not None and index not in wanted:
             continue
         try:
-            selected[index] = (task_data_for_row(row), line)
-        except AdapterError as error:
+            task_data = task_data_for_row(row)
+            schema.validate(task_data, task_id=task_id_for_index(index))
+        except (AdapterError, TaskDataError) as error:
             raise AdapterError(f"row {index}: {error}") from None
+        selected[index] = (task_data, line)
     order = sorted(selected) if ids is None else ids
     missing = [index for index in order if index not in selected]
     if missing:

@@ -3,6 +3,7 @@
 """Tests of the reasoning_gym Harbor adapter: deterministic output, refusals, the id map, what the agent sees, the
 generated Dockerfile, and the copied grader scoring like the Resources Server itself."""
 
+import ast
 import base64
 import copy
 import gzip
@@ -26,12 +27,14 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.data.tasks.harbor import load_task_data_schema
 from resources_servers.reasoning_gym.app import (
     ReasoningGymResourcesServer,
     ReasoningGymResourcesServerConfig,
     ReasoningGymVerifyRequest,
 )
 from resources_servers.reasoning_gym.harbor import adapter
+from resources_servers.reasoning_gym.task_data import TaskData as ServerTaskData
 
 
 SYSTEM_MESSAGE = "Put only your final answer inside <answer></answer> tags or \\boxed{...}."
@@ -105,6 +108,10 @@ def test_non_empty_output_is_refused(tmp_path: Path, rows_file: Path) -> None:
         (lambda agent: agent.update(entrypoint="app.py"), "local CLI path"),
         (lambda agent: agent.update(system_prompt_mode="replace"), "system_prompt_mode"),
         (lambda agent: agent.update(system_prompt="{{ x }}"), "placeholder"),
+        (lambda agent: agent.update(timeout=30), "the Harbor arm runs the agent with"),
+        (lambda agent: agent.pop("timeout"), "the Harbor arm runs the agent with"),
+        (lambda agent: agent.update(thinking=True), "the Harbor arm runs the agent with"),
+        (lambda agent: agent.update(opencode_version="1.17.10"), "the Harbor arm runs the agent with"),
     ],
 )
 def test_native_settings_the_task_cannot_reproduce_are_refused(tmp_path, rows_file, change, message) -> None:
@@ -115,6 +122,80 @@ def test_native_settings_the_task_cannot_reproduce_are_refused(tmp_path, rows_fi
     result = _run("--rows", str(rows_file), "--output-dir", str(tmp_path / "out"), "--native-config", str(config_path))
     assert result.returncode == 2
     assert message in result.stderr
+    assert not (tmp_path / "out").exists()
+
+
+def test_harbor_arm_runs_the_agent_as_the_default_pairing() -> None:
+    config = yaml.safe_load(adapter.DEFAULT_NATIVE_CONFIG.read_text())
+    native = config[adapter.NATIVE_AGENT_INSTANCE]["responses_api_agents"]["opencode_agent"]
+    harbor = adapter.harbor_agent_settings()
+    assert harbor == {key: native[key] for key in ("timeout", "thinking", "opencode_version")}
+    assert harbor == {"timeout": 900, "thinking": False, "opencode_version": "1.17.11"}
+
+
+@pytest.mark.parametrize("answer", [7, ["a"]], ids=["int", "list"])
+def test_rows_the_template_schema_refuses_exit_2_before_output(tmp_path, entries, answer) -> None:
+    row = _row(entries[0])
+    row["answer"] = answer
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(json.dumps(row) + "\n")
+    result = _run("--rows", str(rows), "--output-dir", str(tmp_path / "out"))
+    assert result.returncode == 2, result.stderr
+    assert "row 0: task 'rg-00000': task_data does not satisfy TaskData" in result.stderr
+    assert "answer" in result.stderr
+    assert not (tmp_path / "out").exists()
+
+
+def test_generated_rows_load_with_the_shipped_schema(tmp_path: Path, rows_file: Path) -> None:
+    out = tmp_path / "out"
+    adapter.convert(rows_file, out)
+    schema = load_task_data_schema(out)
+    rows = [json.loads(line) for line in (out / "tasks.jsonl").read_text().splitlines()]
+    assert len(rows) == 4
+    for row in rows:
+        schema.validate(row["task_data"], task_id=row["task_id"])
+        # Reasoning Gym's metadata stays open: each task's own keys pass through.
+        assert {"source_dataset", "solution"} <= set(row["task_data"]["metadata"])
+
+
+def test_task_data_contract_ties_adapter_template_server_and_verifier(tmp_path: Path, rows_file: Path) -> None:
+    out = tmp_path / "out"
+    adapter.convert(rows_file, out)
+    fields = {name: field.annotation for name, field in load_task_data_schema(out).model.model_fields.items()}
+    # Adapter -> template: every row carries exactly the declared fields.
+    for line in (out / "tasks.jsonl").read_text().splitlines():
+        assert set(json.loads(line)["task_data"]) == set(fields)
+    # Template -> owners: the grading fields are the native verify request's own fields, with the same types, and the
+    # fields the server's task_data.py declares for its rows.
+    base = ReasoningGymVerifyRequest.__mro__[1].model_fields
+    owned = {
+        name: field.annotation for name, field in ReasoningGymVerifyRequest.model_fields.items() if name not in base
+    }
+    assert {name: kind for name, kind in fields.items() if name != "user_message"} == owned
+    assert set(ServerTaskData.model_fields) == set(owned)
+    # Template -> readers: the verifier reads the grading fields, the instruction the user message.
+    verifier = ast.parse((out / "tests" / "verifier.py").read_text())
+    reads = {
+        node.slice.value
+        for node in ast.walk(verifier)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "task_data"
+        and isinstance(node.slice, ast.Constant)
+    }
+    reads |= {
+        node.args[0].value
+        for node in ast.walk(verifier)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "task_data"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert reads == set(owned)
+    assert re.findall(r"task_data\.(\w+)", (out / "instruction.template.md").read_text()) == ["user_message"]
 
 
 @pytest.mark.parametrize(
