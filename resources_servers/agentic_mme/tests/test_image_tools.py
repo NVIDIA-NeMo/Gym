@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageFilter, ImageOps
 
+from resources_servers.agentic_mme import image_tools
 from resources_servers.agentic_mme.image_tools import (
     IMAGE_TOOLS,
     MAX_MODEL_IMAGE_PIXELS,
@@ -143,13 +144,65 @@ def test_refused_inputs_are_input_image_errors(url) -> None:
 
 @pytest.mark.parametrize("max_pixels", [16_000_000, 64_000_000])
 def test_encoded_size_limit_follows_the_pixel_limit(max_pixels) -> None:
-    # Any encoding of an RGB image at the pixel limit fits: a 50 Mpx photo inlined as PNG (over 48 MB of
-    # image data, past the former fixed 64,000,000-character cap) loads when max_pixels allows 50 Mpx.
+    # An RGB PNG at the pixel limit fits: a 50 Mpx photo inlined as PNG (over 48 MB of image data, past the
+    # former fixed 64,000,000-character cap) loads when max_pixels allows 50 Mpx.
     assert ImageWorkspace(max_pixels=max_pixels).max_input_bytes >= 3 * max_pixels
     workspace = ImageWorkspace(max_pixels=1)
     encoded = "A" * ((workspace.max_input_bytes + 8) * 4 // 3)
     with pytest.raises(InputImageError, match="MB encoded"):
         workspace.load("data:image/png;base64," + encoded)  # refused before decoding
+
+
+def test_encoded_size_cap_keeps_the_former_allowance() -> None:
+    # At a small pixel limit the cap is never below the former fixed 48,000,000 bytes.
+    assert ImageWorkspace(max_pixels=1).max_input_bytes == image_tools._MIN_INPUT_BYTES == 48_000_000
+    assert ImageWorkspace(max_pixels=64_000_000).max_input_bytes > 48_000_000
+
+
+def test_dense_jpeg_over_four_bytes_per_pixel_loads(monkeypatch) -> None:
+    # A noise JPEG at quality 100 without chroma subsampling takes more than 4 bytes per pixel, so the per-pixel
+    # bound alone would refuse it; the allowance floor accepts it. Scaled down: no 1 MiB overhead, and a floor
+    # just above this JPEG (the real-size case is 3300x3300, 44.8 MB, under the 48 MB floor).
+    stream = BytesIO()
+    rng = np.random.default_rng(0)
+    Image.fromarray(rng.integers(0, 256, (300, 300, 3), dtype=np.uint8)).save(
+        stream, format="JPEG", quality=100, subsampling=0
+    )
+    data = stream.getvalue()
+    assert len(data) > 4 * 300 * 300
+    url = "data:image/jpeg;base64," + base64.b64encode(data).decode()
+    monkeypatch.setattr(image_tools, "_ENCODING_OVERHEAD_BYTES", 0)
+    monkeypatch.setattr(image_tools, "_MIN_INPUT_BYTES", 0)
+    with pytest.raises(InputImageError, match="MB encoded"):
+        ImageWorkspace(max_pixels=300 * 300).load(url)
+    monkeypatch.setattr(image_tools, "_MIN_INPUT_BYTES", len(data) + 1)
+    workspace = ImageWorkspace(max_pixels=300 * 300)
+    workspace.load(url)
+    assert workspace.get(0).size == (300, 300)
+
+
+def test_source_over_the_input_ceiling_is_refused_before_decoding(monkeypatch) -> None:
+    # With downscaling on, the input ceiling is Pillow's decompression-bomb limit; a source over it is refused
+    # from its header, before the raster is decoded or downscaled.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1_000_000)
+    workspace = ImageWorkspace(max_pixels=10_000, downscale_inputs=True)
+    assert workspace.max_input_pixels == 1_000_000
+    decoded = []
+    monkeypatch.setattr(image_tools, "fit_to_pixels", lambda *args: decoded.append(args))
+    with pytest.raises(InputImageError, match="input image 1500x1000: image dimensions exceed the 1,000,000-pixel"):
+        workspace.load(image_data_url(Image.new("RGB", (1500, 1000), "red")))
+    assert decoded == [] and workspace.images == []
+    # With Pillow's own limit disabled, the ceiling is Pillow's default rather than none.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", None)
+    assert workspace.max_input_pixels == image_tools._PILLOW_DEFAULT_MAX_IMAGE_PIXELS
+
+
+@pytest.mark.parametrize("size", [(10_000, 1), (1, 10_000)], ids=["wide", "tall"])
+def test_elongated_input_is_downscaled_within_the_budget(size) -> None:
+    workspace = ImageWorkspace(max_pixels=100, downscale_inputs=True)
+    workspace.load(image_data_url(Image.new("RGB", size, "red")))
+    width, height = workspace.get(0).size
+    assert width * height <= 100 and min(width, height) >= 1
 
 
 def test_oversized_input_is_refused_with_its_size() -> None:
