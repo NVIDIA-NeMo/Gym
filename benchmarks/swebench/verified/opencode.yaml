@@ -5,6 +5,19 @@
 # sandbox, lends it to opencode_agent, and grades the captured patch in a fresh sandbox after the agent closes.
 # opencode_legacy_agent.yaml keeps opencode_sandboxed_agent on the legacy_agent relay; the two harnesses are
 # configured differently, so do not compare their scores as the same measurement.
+#
+# With partial-rollout checkpointing (a top-level `checkpoint:` block, usually set by the training framework),
+# a checkpoint pauses OpenCode in place, snapshots the task sandbox, and a restore forks the snapshot and resumes
+# OpenCode without adding a turn. That needs:
+#   - a sandbox provider that can snapshot (OpenSandbox); on any other provider episodes restart after a crash;
+#   - `checkpoint.state_dir` on a filesystem every restart of the run reads, where the SWE-bench server indexes the
+#     snapshots it takes so a `release` can delete them.
+#
+#   checkpoint:
+#     enabled: true
+#     control_auth_token: ${oc.env:GYM_CHECKPOINT_TOKEN}
+#     # Absolute; one per job and its restarts; on Lustre, mount with -o flock.
+#     state_dir: /shared/<job id>/gym_checkpoint_state
 
 config_paths:
   - resources_servers/swebench/configs/swebench.yaml
@@ -24,9 +37,10 @@ swebench_verified_opencode_agent_resources_server:
       # For SWE Bench Verified, the repos are already clean.
       apply_anti_cheating: false
       sandbox_config:
-        # Outlive the episode (default_episode_timeout_seconds, 21600), patch extraction, and final cleanup. The
-        # resources session expires with the sandbox, and a verify after that is masked as SESSION_EXPIRED.
-        ttl_s: 25200
+        # Outlive the episode (default_episode_timeout_seconds, 21600), the time it may spend paused for checkpoints
+        # (the agent's checkpoint_pause_allowance_seconds, 3600), patch extraction, and final cleanup. The resources
+        # session expires with the sandbox, and a verify after that is masked as SESSION_EXPIRED.
+        ttl_s: 28800
       datasets:
         - name: swebench_verified
           type: benchmark
