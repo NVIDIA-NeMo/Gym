@@ -109,8 +109,8 @@ from responses_api_agents.hermes_agent.sandbox import (
 )
 
 
-# The MCP transports the pinned Hermes client speaks (tools/mcp_tool.py): a `command` entry over stdio, a `url` entry
-# over streamable HTTP. It has no SSE transport.
+# The MCP transports Gym configures for Hermes: a `command` entry over stdio, a `url` entry over streamable HTTP. The
+# pinned Hermes client also has an SSE transport, but Gym does not configure SSE grants for Hermes yet.
 HERMES_MCP_TRANSPORTS = frozenset({"stdio", "streamable_http"})
 
 
@@ -487,8 +487,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         unsupported = unusable_required_grants(tool_accesses, HERMES_MCP_TRANSPORTS)
         if unsupported:
             raise AgentSeedRejectedError(
-                "Hermes Agent supports only stdio and streamable HTTP MCP tool grants (its MCP client has no SSE "
-                "transport); required grants it cannot use: " + ", ".join(unsupported)
+                "Hermes Agent supports only stdio and streamable HTTP MCP tool grants (Gym does not configure SSE "
+                "grants for Hermes yet); required grants it cannot use: " + ", ".join(unsupported)
             )
         # Hermes exposes each MCP server it configures as a toolset of the same name, so such a name must not shadow a
         # built-in one. An optional grant over a transport Hermes cannot use is left out at activation, so it is not

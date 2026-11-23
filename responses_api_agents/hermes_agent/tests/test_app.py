@@ -434,8 +434,8 @@ class TestSanity:
             )
         assert error.value.status_code == 422
         assert error.value.detail == (
-            "Hermes Agent supports only stdio and streamable HTTP MCP tool grants (its MCP client has no SSE "
-            "transport); required grants it cannot use: memory (sse)"
+            "Hermes Agent supports only stdio and streamable HTTP MCP tool grants (Gym does not configure SSE "
+            "grants for Hermes yet); required grants it cannot use: memory (sse)"
         )
         hermes._initialize_agent_session_state.assert_not_awaited()
         await hermes.seed_agent_session(
