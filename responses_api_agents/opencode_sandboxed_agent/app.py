@@ -746,6 +746,49 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     )
 
 
+# Stops the OpenCode agent and everything it started, then confirms none of it is left. A provider's command
+# deadline can end only the client side of the exec (the Docker provider kills its local client), so the agent
+# may keep changing task files while they are exported and graded. The bracket in the pattern keeps this
+# script from matching its own command line.
+TERMINATE_AGENT_COMMAND = r"""
+# nemo-gym-terminate-agent: stop the OpenCode agent process tree and confirm it is gone
+self=$$
+table=""
+targets=""
+for d in /proc/[0-9]*; do
+  pid=${d#/proc/}
+  [ "$pid" = "$self" ] && continue
+  stat=$(cat "$d/stat" 2>/dev/null) || continue
+  rest=${stat##*) }
+  set -- $rest
+  table="$table $pid:$2"
+  cmd=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null) || continue
+  case "$cmd" in
+    *opencod[e]\ run*) targets="$targets $pid" ;;
+  esac
+done
+changed=1
+while [ "$changed" = 1 ]; do
+  changed=0
+  for entry in $table; do
+    pid=${entry%%:*}
+    ppid=${entry##*:}
+    case " $targets " in *" $pid "*) continue ;; esac
+    case " $targets " in *" $ppid "*) targets="$targets $pid"; changed=1 ;; esac
+  done
+done
+for pid in $targets; do kill -KILL "$pid" 2>/dev/null; done
+sleep 1
+for pid in $targets; do
+  stat=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
+  rest=${stat##*) }
+  set -- $rest
+  [ "$1" = Z ] || exit 1
+done
+exit 0
+"""
+
+
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
     # The harness runs inside the task sandbox and calls the model server from there.
@@ -953,6 +996,25 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             command="opencode_run",
             **facts,
         )
+
+    async def _confirm_agent_terminated(self, sandbox: AsyncSandbox) -> None:
+        """After a command deadline, stop the agent process tree and confirm it is gone, or fail before grading."""
+        try:
+            stopped = await sandbox.exec(command=TERMINATE_AGENT_COMMAND, timeout_s=60)
+            confirmed = stopped.return_code == 0 and stopped.error_type is None
+        except NgFailureEvent:
+            raise
+        except Exception:
+            confirmed = False
+        if not confirmed:
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.terminate",
+                failure_reason=self._agent_sandbox_facts(sandbox)
+                + "OpenCode could not be confirmed stopped after its command deadline; refusing to export and grade "
+                "a run that may still be changing the task files",
+            )
 
     def _agent_sandbox_observation(
         self,
@@ -1552,6 +1614,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             raise agent_route_failure(
                 provider_failure, operation="opencode.execute", stage="agent"
             ) from provider_failure
+        if result.error_type == "timeout":
+            await self._confirm_agent_terminated(sandbox)
         result_stdout = result.stdout or ""
         stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
         # A confirmed command deadline is the agent reaching its time limit. A provider that returns no output for the
@@ -1851,13 +1915,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # makes the check independent of that.
         run_output = (result_stdout or "") + (result_stderr or "")
         plugins_loaded = "[nemo-gym-plugin] loaded" in run_output
-        if self.config.opencode_plugins and not plugins_loaded and run_output.strip():
-            # Hard-fail only when we actually captured a transcript and the marker is still absent
-            # — that is a genuine silent plugin failure and must never be scored.
+        if self.config.opencode_plugins and not plugins_loaded:
+            # Hard-fail whenever the marker is absent — that is a silent plugin failure and must never
+            # be scored. A deadline that returned no output has no marker either, and a valid session
+            # export proves assistant activity, not that the plugins loaded, so it fails here too.
             #
             # Missing launch output or capture already raises an ungraded harness failure above.
-            # A confirmed command deadline does not establish a usable capture. With an intact capture,
-            # the verifier and its configured policy own grading after a timeout.
             # Carry a slice of the transcript into the exception. The failures sidecar keeps only
             # the exception body -- no response, no trajectory -- so without this a rejected row
             # records WHICH question failed and nothing about why, leaving the affected rows of
