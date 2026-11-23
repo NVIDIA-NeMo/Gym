@@ -1,0 +1,29 @@
+spatialclaw_agent:
+  responses_api_agents:
+    spatialclaw_agent:
+      entrypoint: app.py
+      resources_server: null
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      spatialclaw_url: ${oc.env:SPATIALCLAW_SOURCE_URL,""}
+      spatialclaw_commit: ${oc.env:SPATIALCLAW_COMMIT,""}
+      spatialclaw_root: ${oc.env:SPATIALCLAW_ROOT,null}
+      source_cache_root: null
+      dataset_config: ???
+      model_config_path: ${oc.env:SPATIALCLAW_MODEL_CONFIG,null}
+      model_name: ${policy_model_name}
+      video_root: ???
+      gpu_server_registry: ${oc.env:SPATIALCLAW_GPU_SERVER_REGISTRY,null}
+      config_overrides:
+        sam3_max_video_frames: null
+      max_output_tokens: null
+      concurrency: 1
+      timeout: 1800
+      workspace_root: ${oc.env:SPATIALCLAW_WORKSPACE_ROOT,outputs/spatialclaw_agent}
+      frame_cache_root: ${oc.env:SPATIALCLAW_FRAME_CACHE_ROOT,outputs/spatialclaw_frame_cache}
+      keep_workspaces: true
+      enable_logging: true
+      # Session presets declare datasets on Resources; keep this template unbound.
+      datasets: []

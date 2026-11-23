@@ -45,6 +45,7 @@ migration = load_migration()
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
+        "spatialclaw_agent",
         "kilocode_agent",
         "claude_code_agent",
         "cline_agent",
