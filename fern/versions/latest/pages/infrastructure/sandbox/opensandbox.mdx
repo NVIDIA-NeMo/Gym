@@ -417,7 +417,31 @@ A public sandbox therefore cannot be switched to a restricted policy once it run
 | `metadata` | Passed to OpenSandbox create after provider-specific normalization. |
 | `resources` | Mapped to OpenSandbox resource quantities. |
 | `entrypoint` | Passed to OpenSandbox create when set. |
+| `sidecars` | Each sidecar is created as a sandbox of its own. See [Sidecars](#sidecars). |
 | `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `network_policy`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
+
+### Sidecars
+
+OpenSandbox has no second container in a sandbox, so the provider creates each entry of `SandboxSpec.sidecars` as a
+separate sandbox from the sidecar's image, environment and resources. It is created before the main sandbox, with the
+same `ttl_s`, `ready_timeout_s`, metadata and `network_policy`, none of the main sandbox's other provider options, and
+the default keep-alive entrypoint. Closing the main sandbox deletes its sidecars.
+
+- The main sandbox and its sidecars carry one `nemo.nvidia.com/placement-group` label, so a
+  [multi-cell front end](#multi-cell-front-ends) creates them on one cell. A group the spec's metadata already names
+  is kept; otherwise the provider makes one per sandbox.
+- With `networking.enabled: true`, the main sandbox resolves each sidecar by its name through `/etc/hosts`, which
+  needs root in the main sandbox. The two do not share a loopback interface. Without it the sidecar is reachable only
+  through `sandbox.sidecar(name)`.
+- A sidecar has the main sandbox's [egress policy](#network-policy), so a host a sidecar must reach goes into that
+  policy. With `networking.enabled: true`, the main sandbox's policy also gets a leading allow rule for each sidecar's
+  IP, so a deny-by-default main sandbox still reaches its sidecars. A sidecar under a deny-by-default policy cannot
+  open a connection to the main sandbox.
+- `sandbox.sidecar(name).exec(*argv)` quotes the argv into one shell command, so the sidecar image needs a POSIX
+  shell. With `on_stdout`, the command runs on one streamed request for as long as it runs, also when
+  `operations.background_exec` is set, and stdout arrives one line at a time.
+- A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.
+- A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs.
 
 ## Resource Mapping
 

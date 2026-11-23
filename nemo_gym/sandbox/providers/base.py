@@ -144,6 +144,12 @@ def clamp_resource_requests(
     return clamped, changed
 
 
+# Sandboxes that must run together carry this label with a shared placement group: the services of one Compose
+# project, or a sandbox and its sidecars. Members reach each other by pod IP and may share storage, so a multi-cell
+# front end (cell-router) routes every create with the same value to one cell.
+PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
+
+
 @dataclass(frozen=True)
 class SandboxSidecarSpec:
     """An extra container started with the sandbox from its own image.
