@@ -108,8 +108,9 @@ gym eval run --no-serve --agent finance_agent_v2_benchmark_agent \
 
 `reward` is **Partial Credit**: the severity-weighted share of rubric criteria
 passed, forced to 0.0 if any criterion marked `must_pass` failed. `rubric_all_pass`
-is the stricter every-criterion-passed flag, and `judge_error` marks rows the judge
-could not score — filter those out rather than reading them as zeros.
+is the stricter every-criterion-passed flag. A row the judge could not score is
+masked: it leaves the score and goes to the failures sidecar, so it never reads as
+a zero.
 
 `mean/rubric_partial_credit` and `mean/rubric_all_pass` match the *definitions* of
 the Vals leaderboard's Accuracy and All-Pass columns, but not their numbers: this

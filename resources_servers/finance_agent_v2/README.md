@@ -39,6 +39,12 @@ can route around it.
 | `local` | Local SQLite index | Cache, then the filing corpus, then sec.gov | `local_edgar_index_path`; `sec_dump_path` for corpus reads |
 | `live` | sec-api.io | Cache, then sec.gov | `sec_api_key` |
 
+With `local_edgar_stage_dir` set (off by default), the server copies the local
+index, its metadata sidecar and its WAL into that node-local folder at startup and
+reads the copy. Use it when the index is on shared storage. A copy whose size and
+modification time match the source is reused, so only the first server on a node
+copies it.
+
 The benchmark config sets `live`. Asking for `local` without an index fails at
 startup. The
 mode in use, and in local mode the date range the index covers, is logged at
@@ -385,8 +391,8 @@ whole row is then masked (`mask_sample: true`, `failure_kind: judge_failed`), so
 it leaves training and the score means and lands in the failures sidecar. A row
 with no rubric at all, or a server with no judge configured, is masked with
 `failure_kind: verifier_error` and `judge_error` set, so the agent and tools can
-still be validated before labels exist. A rollout that never called `submit_final_result` is the model's failure
-and scores 0, unmasked.
+still be validated before labels exist. A rollout that never called
+`submit_final_result` is the model's failure and scores 0, unmasked.
 
 The agent records why its loop ended in `response.metadata.stop_reason`
 (`done_tool`, `max_turns`, `max_time`, `max_output_tokens`, `error`). Under

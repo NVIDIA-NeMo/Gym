@@ -51,7 +51,7 @@ finance_agent_v2_resources_server:
       judge_call_timeout: 60.0
       # 3 parsed verdicts per criterion decide it by majority; up to 10 calls to
       # get them (API errors and unparseable replies are retried). A criterion
-      # that never reaches 3 is left unresolved and flags the whole question.
+      # that never reaches 3 is left unresolved, and the whole question is masked.
       judge_required_successes: 3
       judge_max_attempts: 10
       judge_max_concurrency: 4
