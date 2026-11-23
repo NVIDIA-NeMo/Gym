@@ -24,7 +24,19 @@ gdpval_nooa_agent:
     nooa_agent:
       nooa:
         agent_class: nooa_atom.gym:AtomHarness
-        invocation_adapter: responses_api_agents.nooa_agent.atom_adapter:invoke_atom
+        invocation_adapter: responses_api_agents.nooa_agent.atom_adapter:invoke_atom_with_submission
         execution_mode: sandboxed
         init_kwargs:
           turn_method: handle_batch
+
+# Atom has no `finish` tool: prompts/atom.yaml has it save files to /root/outputs/, and the adapter submits them.
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      datasets:
+        - name: gdpval
+          type: benchmark
+          jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
+          prompt_config: benchmarks/gdpval/prompts/atom.yaml
+          prepare_script: benchmarks/gdpval/prepare.py
+          num_repeats: 1

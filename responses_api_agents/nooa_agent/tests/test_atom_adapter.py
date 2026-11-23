@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from responses_api_agents.nooa_agent import atom_adapter
 from responses_api_agents.nooa_agent.atom_adapter import invoke_atom
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
 from responses_api_agents.nooa_agent.invocation import validate_invocation
@@ -246,8 +247,53 @@ def test_atom_benchmark_configs_route_every_benchmark_dataset_to_atom(
             assert agent_class is atom_gym.AtomHarness, (
                 f"{dataset.get('name')} -> {agent_name} runs {agent.nooa.agent_class}"
             )
-            assert adapter is invoke_atom
+            # GDPval has Atom save its files for the adapter to submit; the other benchmarks grade in the sandbox.
+            assert adapter is (atom_adapter.invoke_atom_with_submission if "gdpval" in config_path else invoke_atom)
             assert agent.nooa.execution_mode == "sandboxed"
             assert agent.nooa.init_kwargs == {"turn_method": "handle_batch"}
             resolved.append((str(dataset.get("name")), agent_name))
     assert resolved, f"{config_path} declares no benchmark dataset"
+
+
+class _FinishingAgent:
+    def __init__(self) -> None:
+        self.finish = AsyncMock(return_value="ok")
+
+
+@pytest.mark.asyncio
+async def test_submission_adapter_finishes_with_the_saved_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "report.pdf").write_bytes(b"%PDF")
+    (tmp_path / "sub" / "data.csv").write_text("a,b")
+    result = SimpleNamespace(report="Made the report", solution_description="unused")
+    monkeypatch.setattr(atom_adapter, "SUBMIT_DIR", tmp_path)
+    monkeypatch.setattr(atom_adapter, "invoke_atom", AsyncMock(return_value=result))
+    agent = _FinishingAgent()
+
+    assert await atom_adapter.invoke_atom_with_submission(agent, None) is result
+
+    agent.finish.assert_awaited_once_with(
+        reason="Made the report", paths=[str(tmp_path / "report.pdf"), str(tmp_path / "sub" / "data.csv")]
+    )
+
+
+@pytest.mark.asyncio
+async def test_submission_adapter_submits_nothing_for_an_empty_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(atom_adapter, "SUBMIT_DIR", tmp_path / "outputs")
+    empty = SimpleNamespace(report="", solution_description="x")
+    monkeypatch.setattr(atom_adapter, "invoke_atom", AsyncMock(return_value=empty))
+    agent = _FinishingAgent()
+
+    await atom_adapter.invoke_atom_with_submission(agent, None)
+
+    agent.finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_submission_adapter_requires_a_finish_tool() -> None:
+    with pytest.raises(RuntimeError, match="finish"):
+        await atom_adapter.invoke_atom_with_submission(SimpleNamespace(), None)
