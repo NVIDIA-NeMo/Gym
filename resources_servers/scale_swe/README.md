@@ -139,5 +139,5 @@ names the session for `/verify`, and `/close_session` ends it.
 
 The cookie path that an Agent's `/run` uses grades and masks the same way: a verification without a verdict
 (including a capture lost to infrastructure) is masked with a `failure_kind`, and a repository the agent broke
-scores a completed 0. It does not replay, the stops inside its requests are not bounded, and the sandboxes it
-still holds at shutdown are left to the provider's TTL.
+scores a completed 0. It does not replay. Its task sandbox stop gets the same bounded wait, but its verifier
+sandbox stops do not. The sandboxes it still holds at shutdown are left to the provider's TTL.
