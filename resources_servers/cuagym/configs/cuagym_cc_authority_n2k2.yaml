@@ -1,0 +1,127 @@
+
+# CUA-Gym with context compaction in AUTHORITY mode — the training config.
+#
+# Identical to cuagym.yaml except the agent's legacy max_recent_screenshots
+# pruning is replaced by the context_history client (the two knobs are
+# mutually exclusive). The recency policy keeps the screenshot conditioning
+# the next action plus the last 2 historical groups — the same 3 visible
+# screenshots as the legacy default — and rewrites the historical base every
+# 2 recorded actions (turn-chunked schedule), bounding physical-trace splits.
+#
+# Pair with responses_api_models/vllm_model/configs/vllm_model.yaml (token
+# capture is framework-owned; return_token_id_information is not needed).
+
+cuagym_resources_server:
+  resources_servers:
+    cuagym:
+      entrypoint: app.py
+      domain: e2e
+      num_workers: 1
+      verified: false
+      description: Multimodal CUA-Gym-Hub mock-app browser environment with session-isolated state
+      value: Improve visual browser-use with parallel-safe, state-injected mock applications
+      # Hub deployment. The base URL is substituted into the rows' inlined
+      # setup/reward programs at episode time — rotating the (ephemeral) hub
+      # IP is a one-line change here, never a dataset reconversion.
+      hub_base_url: ${oc.env:CUA_GYM_HUB_URL,http://localhost}
+      hub_base_port: ${oc.env:CUA_GYM_HUB_BASE_PORT,8000}
+      # Setup runs inside the seed call, which the agent-facing server bounds
+      # by browser_operation_timeout_seconds; keep it comfortably below that
+      # so a slow setup surfaces as its own error instead of a seed timeout.
+      setup_timeout_seconds: 90
+      # Verification is bounded by browser_evaluation_timeout_seconds.
+      reward_timeout_seconds: 120
+      terminate_properly_reward: 0.0
+      viewport_width: 1920
+      viewport_height: 1080
+      screenshot_format: PNG
+      screenshot_jpeg_quality: 100
+      post_action_screenshot_delay_seconds: 4
+      max_browser_workers: 16
+      initial_browser_workers: ${.max_browser_workers}
+      browser_actor_num_cpus: 1
+      browser_actor_resources: {}
+      node_placement_strategy: spread_all
+      browser_startup_concurrency: 1
+      browser_startup_stagger_seconds: 10
+      browser_startup_timeout_seconds: 60
+      browser_pool_wait_timeout_seconds: 300
+      browser_operation_timeout_seconds: 180
+      browser_evaluation_timeout_seconds: 300
+      browser_session_max_seconds: 1800
+      # Browser egress allowlist (2026-10-17, egress.py): Chromium fails DNS for every host except the hub
+      # (hub_base_url + $CUA_GYM_ENDPOINTS_YAML endpoints), loopback and the map site's public dependencies.
+      # false = open internet (the behaviour before 2026-10-17).
+      egress_allowlist: true
+      egress_allow_extra_hosts: []
+      # Endpoints that are not websites (the launcher's judge proxy on the Ray head node) stay out of the allowlist.
+      egress_exclude_endpoint_apps: [webarena_judge]
+      # Every tab on a hub origin gets the episode sid (session_sid.py), so tabs the agent opens itself stay
+      # in the scored session. false = sid only on the start URL (the behaviour before 2026-10-17).
+      propagate_sid_to_new_tabs: true
+      # `type` action (2026-10-17, webarena/x11_typing.py): keycode and Shift come from the same keymap binding
+      # ('<' is no longer typed as '>'). Characters missing from the keymap (é, ™, CJK, emoji):
+      # insert_text = Playwright insert_text into the page's focused field (the omnibox never gets
+      # them) | remap = re-bound spare keycode (Chromium ignores it: lost) | drop = skipped.
+      # typing_backend: pyautogui = the old pyautogui.write path (what the real eval harness still uses).
+      typing_backend: xkeymap
+      typing_unmapped_chars: insert_text
+      # key_press names as the real eval harness normalizes them (webarena/key_names.py): lower case, cmd/command/
+      # control -> ctrl, option -> alt. false = names passed to pyautogui unchanged (the behaviour before 2026-10-17).
+      normalize_key_names: true
+      # Top-level navigations to the hub's state endpoints (/go, /state, /post), its data bundles (/assets/*.js),
+      # view-source: of hub pages and file: URLs answer net::ERR_BLOCKED_BY_CLIENT (internals_guard.py); the
+      # apps' own requests are untouched. false = no guard (the behaviour before 2026-10-17).
+      block_mock_internals: true
+      # When to call bring_to_front (CDP Page.bringToFront also gives the keyboard focus to the page):
+      # page_change = episode start, navigate, tabs_create, tabs_focus only, as the real eval harness does,
+      # so the address bar, the find bar or a new tab keeps the focus into the next computer call |
+      # every_computer_call = also before every computer call (the behaviour before 2026-10-18).
+      bring_to_front: page_change
+
+cuagym_agent:
+  responses_api_agents:
+    webarena_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: cuagym_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 50
+      return_transitions: false
+      # Step 1 already carries the task instruction with the initial screenshot.
+      include_initial_request_input: false
+      rollout_timeout_seconds: 1200
+      finalization_reserve_seconds: 360
+      resource_request_timeout_seconds: 510
+      # Context compaction (nemo_gym.agents.context_management). Recency policy:
+      # the screenshot conditioning the next action plus the last 2 historical
+      # image groups stay visible (n=2); the history base is rewritten every
+      # 2 recorded actions (turn-chunked schedule, k=2) -> "n2k2".
+      context_history:
+        enabled: true
+        policy:
+          type: recency
+          config:
+            images:
+              enabled: true
+              protect_initial_context: true
+              keep_last_groups: 2
+              omission_marker: null
+        schedule:
+          type: turn_chunked_recency
+          actions_per_chunk: 2
+        # Hard admission limit measured by the model server before every call
+        # (/context/measure, requires source_history parent resolution). Sized for a 32k serving window, reserving
+        # 2048 tokens for generation.
+        guards:
+          max_total_tokens: 32768
+          reserved_generation_tokens: 2048
+        max_response_retries: 0
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/cuagym/data/example.jsonl
+          num_repeats: 1

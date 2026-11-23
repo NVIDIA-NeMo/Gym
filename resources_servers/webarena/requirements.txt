@@ -1,0 +1,12 @@
+-e nemo-gym[dev] @ ../../
+# The browser pool runs Ray actors. Not the nemo-gym[ray] extra: the head server constrains ray to the
+# parent's version, which may predate the extra's lower bound.
+ray[default]
+Pillow
+# Pin playwright so all web server venvs resolve the same Chromium revision
+# from the shared cache (matches resources_servers/cuagym).
+playwright==1.62.0
+pyautogui
+# Keep the Xlib distribution expected by pyautogui explicit and deterministic.
+# Do not add python-xlib: both distributions install the same Xlib/* files.
+python3-xlib==0.15
