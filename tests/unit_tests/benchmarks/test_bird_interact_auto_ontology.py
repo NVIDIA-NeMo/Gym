@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """The Auto Ontology pairing of BIRD-Interact: its catalog image's inputs and the configs that run it."""
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -67,11 +70,54 @@ def test_each_release_runs_its_prepared_rows_on_its_own_image(config: str, relea
     # build_image.sh tags the image for the release, as the Lite config names it.
     lite = yaml.safe_load((BENCHMARK_DIR / "auto_ontology_agent.yaml").read_text())
     assert lite["auto_ontology_image"] == "nemo-gym/bird-interact-catalog:${bird_interact_release}"
-    # A catalog with the column meanings gets its own tag, so it never stands in for the one without.
-    assert (
-        'TAG="${3:-nemo-gym/bird-interact-catalog:$RELEASE$([[ $COLUMN_MEANINGS == true ]] && echo -meanings)}"'
-        in (BUILD_IMAGE)
+
+
+@pytest.mark.parametrize(
+    ("args", "tag", "column_meanings"),
+    [
+        (["lite"], "nemo-gym/bird-interact-catalog:lite", "false"),
+        (["full"], "nemo-gym/bird-interact-catalog:full", "false"),
+        # A catalog with the column meanings gets its own tag, so it never stands in for the one without.
+        (["--column-meanings", "full"], "nemo-gym/bird-interact-catalog:full-meanings", "true"),
+        (["lite", "TAG"], "custom/catalog:tag", "false"),
+        (["--column-meanings", "lite", "TAG"], "custom/catalog:tag", "true"),
+    ],
+)
+def test_each_documented_build_reaches_docker_with_its_tag(
+    tmp_path: Path, args: list[str], tag: str, column_meanings: str
+):
+    """build_image.sh, run with a fake docker in a copy of the repository's layout, builds once with the right tag."""
+    if shutil.which("bash") is None:
+        pytest.skip("build_image.sh needs bash")
+    root = tmp_path / "gym"
+    for benchmark in ("bird_interact", "birdbench"):
+        script = root / "benchmarks" / benchmark / "auto_ontology" / "build_image.sh"
+        script.parent.mkdir(parents=True)
+        shutil.copy(BENCHMARK_DIR.parent / benchmark / "auto_ontology" / "build_image.sh", script)
+    release = next(arg for arg in args if arg in ("lite", "full"))
+    (root / "benchmarks" / "bird_interact" / "data" / release / "databases").mkdir(parents=True)
+    models_env = tmp_path / "models.env"
+    models_env.write_text("DEFAULT_MODELS_API_KEY=test\n")
+    calls = tmp_path / "docker_calls"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "docker").write_text(f'#!/bin/sh\necho "$*" >> {calls}\n')
+    (fake_bin / "docker").chmod(0o755)
+    command = [arg if arg != "TAG" else "custom/catalog:tag" for arg in args]
+    command.insert(command.index(release) + 1, str(models_env))
+
+    result = subprocess.run(
+        ["bash", str(root / "benchmarks" / "bird_interact" / "auto_ontology" / "build_image.sh"), *command],
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=False,
     )
+
+    assert result.returncode == 0, result.stderr
+    [build] = [call for call in calls.read_text().splitlines() if call.startswith("build ")]
+    assert f"--tag {tag} " in build
+    assert f"--build-arg COLUMN_MEANINGS={column_meanings} " in build
 
 
 def test_the_pairing_runs_c_interact_on_the_auto_ontology_agent_alone():

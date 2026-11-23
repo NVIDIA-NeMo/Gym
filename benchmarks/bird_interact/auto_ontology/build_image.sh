@@ -23,11 +23,12 @@ ROOT="$(cd "$HERE/../../.." && pwd)"
 # The one Auto Ontology that Gym runs, as the BIRD dev image's build script pins it.
 eval "$(grep -E '^AUTO_ONTOLOGY_(REPOSITORY|COMMIT)=' "$ROOT/benchmarks/birdbench/auto_ontology/build_image.sh")"
 COLUMN_MEANINGS=false
-if [[ "${1:-}" == --column-meanings ]]; then COLUMN_MEANINGS=true; shift; fi
+TAG_SUFFIX=""
+if [[ "${1:-}" == --column-meanings ]]; then COLUMN_MEANINGS=true; TAG_SUFFIX=-meanings; shift; fi
 USAGE="usage: build_image.sh [--column-meanings] RELEASE MODELS_ENV [TAG]"
 RELEASE="${1:?$USAGE}"
 MODELS_ENV="${2:?$USAGE}"
-TAG="${3:-nemo-gym/bird-interact-catalog:$RELEASE$([[ $COLUMN_MEANINGS == true ]] && echo -meanings)}"
+TAG="${3:-nemo-gym/bird-interact-catalog:$RELEASE$TAG_SUFFIX}"
 [[ "$RELEASE" == lite || "$RELEASE" == full ]] || { echo "build_image.sh: RELEASE is lite or full" >&2; exit 1; }
 [[ -f "$MODELS_ENV" ]] || { echo "build_image.sh: no $MODELS_ENV" >&2; exit 1; }
 DATABASE_IMAGE="benchmarks/bird_interact:$RELEASE"
