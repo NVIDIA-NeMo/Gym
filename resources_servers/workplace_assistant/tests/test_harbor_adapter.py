@@ -8,16 +8,19 @@ import copy
 import filecmp
 import hashlib
 import json
+import re
 import runpy
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict
 
 import pytest
 from fastapi.encoders import jsonable_encoder
 from starlette.responses import JSONResponse
 
-from resources_servers.workplace_assistant.app import WorkbenchResponse
+from nemo_gym.data.tasks.harbor import load_task_data_schema
+from resources_servers.workplace_assistant.app import WorkbenchResponse, WorkbenchVerifyRequest
 from resources_servers.workplace_assistant.harbor import adapter
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
 
@@ -131,6 +134,74 @@ def test_tasks_native_rows_and_id_map_follow_the_ids_file(tmp_path: Path, rows_f
     assert id_map == {"12": "wa-validation-0012", "7": "wa-validation-0007"}
 
 
+def test_every_converted_row_satisfies_the_datasets_own_task_data(tmp_path: Path, rows_file: Path) -> None:
+    out = tmp_path / "out"
+    assert _run("--rows", rows_file, "--output-dir", out).returncode == 0
+    schema = load_task_data_schema(out)
+    tasks = [json.loads(line) for line in (out / "tasks.jsonl").read_text().splitlines()]
+    assert len(tasks) == len(ROWS)
+    for task in tasks:
+        # Gym's own check (strict types, unknown keys refused); every declared field is written, defaulted or not.
+        schema.validate(task["task_data"], task_id=task["task_id"])
+        assert set(task["task_data"]) == set(schema.model.model_fields)
+
+
+# The contract of each TaskData field: the native row value it carries, and the template files that read it. id,
+# category and environment_name are provenance: no task file reads them.
+FIELD_OWNERS = {
+    "system_prompt": lambda row: row["responses_create_params"]["input"][0]["content"],
+    "prompt": lambda row: row["responses_create_params"]["input"][1]["content"],
+    "ground_truth": lambda row: row["ground_truth"],
+    "id": lambda row: row["id"],
+    "category": lambda row: row["category"],
+    "environment_name": lambda row: row["environment_name"],
+}
+FIELD_READERS = {
+    "system_prompt": ["instruction.template.md"],
+    "prompt": ["instruction.template.md"],
+    "ground_truth": ["solution/calls.template.json", "tests/ground_truth.template.json"],
+    "id": [],
+    "category": [],
+    "environment_name": [],
+}
+# Gym's two placeholder spellings, {{ task_data.key }} and {{ key }}, in the files it renders (*.template*).
+PLACEHOLDER = re.compile(r"\{\{\s*(?:task_data\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+
+def test_each_task_field_carries_its_native_owner_to_the_files_that_read_it() -> None:
+    template = adapter.TEMPLATE_DIR
+    schema = load_task_data_schema(template)
+    # Types: TaskData's against the native verify request's, which owns the four carried fields.
+    fields = schema.model.model_fields
+    template_types = {name: field.annotation for name, field in fields.items()}
+    native_types = {
+        name: WorkbenchVerifyRequest.model_fields[name].annotation
+        for name in ("ground_truth", "id", "category", "environment_name")
+    }
+    assert all(field.is_required() for field in fields.values())
+    assert template_types == {
+        "system_prompt": str,
+        "prompt": str,
+        **native_types,
+        "ground_truth": list[dict[str, str]],
+    }
+    # The native request also accepts ground_truth as JSON text; the tasks carry only the list form (the adapter
+    # refuses text).
+    assert native_types["ground_truth"] == list[Dict[str, str]] | str
+    assert set(FIELD_OWNERS) == set(FIELD_READERS) == set(schema.model.model_fields)
+    assert adapter.task_data(ROWS[2]) == {name: owner(ROWS[2]) for name, owner in FIELD_OWNERS.items()}
+    readers: dict[str, list[str]] = {name: [] for name in FIELD_READERS}
+    for path in sorted(template.rglob("*.template*")):
+        for name in PLACEHOLDER.findall(path.read_text(encoding="utf-8")):
+            readers.setdefault(name, []).append(path.relative_to(template).as_posix())
+    assert readers == FIELD_READERS
+    # The oracle and the verifier json.load the rendered files, so each holds the ground truth alone: the native list.
+    for reader in FIELD_READERS["ground_truth"]:
+        assert (template / reader).read_text(encoding="utf-8").strip() == "{{ task_data.ground_truth }}"
+    assert 'replay.py" http://tools:8000/mcp "$here/calls.json"' in (template / "solution" / "solve.sh").read_text()
+    assert 'grade.py" "$journal" "$tests/ground_truth.json"' in (template / "tests" / "test.sh").read_text()
+
+
 def test_non_empty_output_is_refused(tmp_path: Path, rows_file: Path) -> None:
     out = tmp_path / "out"
     out.mkdir()
@@ -165,6 +236,14 @@ def _no_category(row: dict) -> None:
     del row["category"]
 
 
+def _null_category(row: dict) -> None:
+    row["category"] = None
+
+
+def _environment_name_not_text(row: dict) -> None:
+    row["environment_name"] = ["workplace_assistant"]
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
@@ -174,6 +253,8 @@ def _no_category(row: dict) -> None:
         (_temperature, "temperature 0.2"),
         (_ground_truth_dict_arguments, "ground_truth is not a list"),
         (_no_category, "no ['category']"),
+        (_null_category, "task-template/task_data.py: category: Input should be a valid string"),
+        (_environment_name_not_text, "environment_name: Input should be a valid string"),
     ],
 )
 def test_rows_the_tasks_do_not_reproduce_are_refused(tmp_path: Path, change, message: str) -> None:

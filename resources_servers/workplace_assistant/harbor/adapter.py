@@ -32,6 +32,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nemo_gym.data.tasks.harbor import TaskDataError, load_task_data_schema
+
 
 HERE = Path(__file__).resolve().parent
 SERVER_DIR = HERE.parent
@@ -334,8 +336,12 @@ def main(argv: list[str] | None = None) -> int:
         rows = [row for row, _ in selected]
         if not rows:
             raise AdapterError(f"no rows selected from {args.rows.name}")
+        # Each row as written, checked against the dataset's own TaskData the way Gym checks it at prepare.
+        schema = load_task_data_schema(TEMPLATE_DIR)
+        if schema is None:
+            raise AdapterError(f"{TEMPLATE_DIR}/task_data.py is missing")
         for row in rows:
-            task_data(row)
+            schema.validate(task_data(row), task_id=task_id(row["id"], args.task_prefix))
         commit = gym_commit()
         ids_note = (
             f"ids file `{args.ids_file.name}`, sha256 `{hashlib.sha256(args.ids_file.read_bytes()).hexdigest()}`"
@@ -369,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
             if path is not None:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(content)
-    except (AdapterError, OSError) as error:
+    except (AdapterError, TaskDataError, OSError) as error:
         print(f"adapter: {error}", file=sys.stderr)
         if created and args.output_dir.is_dir() and not any(args.output_dir.iterdir()):
             args.output_dir.rmdir()

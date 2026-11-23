@@ -5,8 +5,9 @@ or `../data/example.jsonl`) into a parameterized Harbor dataset: `task-template/
 native row. `gym eval run` and `gym dataset validate` render one task folder per row. This environment is the
 example for Resources-Server tools with per-session state: the tools and their tables move into a per-episode sidecar.
 
-Run every command from the repository root, in the Python environment Gym is installed in. The adapter itself
-needs only the standard library. Tools used below:
+Run every command from the repository root, in the Python environment Gym is installed in. The adapter imports
+`nemo_gym` to check each row against the template's `TaskData`, and nothing else beyond the standard library. Tools
+used below:
 [harbor_conversion_checks](../../../scripts/harbor_conversion_checks/README.md) and
 [harbor_parity](../../../scripts/harbor_parity/README.md). Task-folder docs:
 [data/task-folders](../../../fern/versions/latest/pages/data/task-folders/).
@@ -54,8 +55,9 @@ python resources_servers/workplace_assistant/harbor/adapter.py --rows <rows.json
   `responses_create_params`, or a row the tasks do not reproduce: roles other than one system and one user
   message, message content that is not plain text, a request field other than `input`, `tools`,
   `parallel_tool_calls` and `temperature`, a temperature other than 1.0, or a ground truth that is not a list of
-  `{name, arguments}`. A write that fails partway through the dataset also exits
-  2, and can leave a partial output folder.
+  `{name, arguments}`. It also exits 2 for a row whose task fields the template's `TaskData`
+  (`task-template/task_data.py`) refuses, checked the way Gym checks it at prepare. A write that fails partway
+  through the dataset also exits 2, and can leave a partial output folder.
 - The rows' tools list is not read: every task serves the 27 tools of get_tools(TOOLKITS), as the native OpenCode arm
   does through mcp_tools(); a row offering a different set would be converted without notice.
 - `<dataset dir>/README.md` records the rows file's name, sha256 and line count, the task count, the ids file's name
@@ -194,9 +196,10 @@ OpenSandbox, the same agent image and a 900 s agent timeout. The rows are the Hu
 sha256 `6cce92f9cd8807983c4aa8f1006d5fab5e8c4f16ae28b90222739d98905df01b`). To rebuild the parity tasks:
 
 ```bash
+REVISION=f674d9bba17820d90f14eefe9156fdc018a0db60  # pragma: allowlist secret
 python -c "from huggingface_hub import hf_hub_download; print(hf_hub_download(
     'nvidia/Nemotron-RL-agent-workplace_assistant', 'validation.jsonl', repo_type='dataset',
-    revision='f674d9bba17820d90f14eefe9156fdc018a0db60', local_dir='<rows dir>'))"
+    revision='$REVISION', local_dir='<rows dir>'))"
 python resources_servers/workplace_assistant/harbor/adapter.py --rows <rows dir>/validation.jsonl \
     --output-dir <dataset dir> --ids-file resources_servers/workplace_assistant/harbor/configs/parity_ids.txt \
     --native-rows-out <native rows.jsonl> --id-map-out <id map.json> \
