@@ -373,6 +373,34 @@ The server that sets `dynamo_frontend: true` also needs `return_token_id_informa
 - Every admitted call carries an `x-dynamo-session-id` header set to the rollout's capture key. With session affinity enabled on the frontend (ai-dynamo 1.7 or later), the router keeps a rollout's calls on one engine, whose KV cache holds the rollout's prefix.
 - Dynamo forwards only an error's status and message. A capture call refused for its context length is therefore acknowledged at the end of the error message instead of in the `x-ng-capture-refused` header. VLLMModel moves the acknowledgement back to that header before the refusal is settled, and the harness receives the message without it.
 
+## End a run from the model server (opt-in)
+
+`vllm_model_with_guards` is `VLLMModel` plus guards for a model that keeps calling tools after the harness tells it to stop (for example an SFT checkpoint under OpenCode that ignores the "maximum steps reached" notice). Keep `VLLMModel` as the default; use this server only for that case. Every guard is off until you set it, and with none set it behaves like `VLLMModel`.
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model_with_guards:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      guard_identical_tool_calls: 3
+```
+
+The shipped config is `responses_api_models/vllm_model_with_guards/configs/vllm_model_with_guards.yaml`; set one or more guards in it:
+
+| Guard | What happens |
+|---|---|
+| `guard_text_only_after_assistant_turns: N` | From N assistant turns on, requests go to the engine with `tool_choice: "none"`, so the model's reply is text. This is the engine's own reply. |
+| `guard_max_assistant_turns: N` | At N assistant turns the server answers with a fixed final text message and does not call the engine. |
+| `guard_identical_tool_calls: N` | When the last N assistant turns made the identical tool call, the server answers as above. |
+
+The last two are locally synthesized stops, recorded as `local_response_reason: harness_guard`. A harness's own step-limit notice (such as OpenCode's) is not counted as a model turn, and a compaction-summary request is passed to the engine unchanged. Restrictions: the server does not support `is_responses_native: true`; `guard_text_only_after_assistant_turns` needs `use_completions_api: false` and no `tool_choice` entry in `sampling_overrides` other than `"none"`. Enabling a guard changes how episodes end and can change evaluation results, so report it with the results.
+
 ## Context Length Exceeded Handling
 
 When a conversation exceeds the vLLM model's maximum context length (`max_seq_length`), VLLMModel handles the error gracefully instead of crashing the entire rollout collection.

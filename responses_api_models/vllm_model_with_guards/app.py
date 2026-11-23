@@ -8,10 +8,10 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import Body, Request
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.models import start_model_execution
+from nemo_gym.models import start_model_execution, trailing_harness_note
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
@@ -37,6 +37,21 @@ class VLLMModelWithGuardsConfig(VLLMModelConfig):
     guard_max_assistant_turns: Optional[int] = Field(default=None, ge=1)
     # Stop when the last this-many assistant turns made the identical tool call (same tool, same arguments).
     guard_identical_tool_calls: Optional[int] = Field(default=None, ge=2)
+
+    @model_validator(mode="after")
+    def _validate_text_only_guard(self) -> "VLLMModelWithGuardsConfig":
+        if self.guard_text_only_after_assistant_turns is None:
+            return self
+        if self.use_completions_api:
+            # /v1/completions renders the tools into the prompt and has no tool_choice, so "none" would be dropped.
+            raise ValueError("guard_text_only_after_assistant_turns requires use_completions_api=false")
+        pin = (self.sampling_overrides or {}).get("tool_choice", "none")
+        if pin != "none":
+            # A sampling pin is applied after the guard sets tool_choice, so it would undo the guard.
+            raise ValueError(
+                "guard_text_only_after_assistant_turns requires no tool_choice sampling pin, or a pin of 'none'"
+            )
+        return self
 
 
 def _tool_call_signature(message: Dict[str, Any]) -> Optional[tuple]:
@@ -115,10 +130,15 @@ class VLLMModelWithGuards(VLLMModel):
                 self.config.guard_identical_tool_calls,
             )
         )
-        if not guarded:
+        # A compaction summary is not a turn of the task: it keeps the parent's bounded, checked summary.
+        if not guarded or self._is_compaction_summary(request):
             return await super().chat_completions(request, body)
 
         messages = body.model_dump(exclude_unset=True).get("messages") or []
+        # The harness's own step-limit notice is not a model turn: it neither counts as one nor breaks a streak.
+        # Only the guards' view drops it; the body forwarded upstream is unchanged.
+        if trailing_harness_note(messages) is not None:
+            messages = messages[:-1]
         reason = self._guard_stop_reason(messages)
         if reason is not None:
             LOG.warning("`%s` ended a conversation: %s", self.config.name, reason)

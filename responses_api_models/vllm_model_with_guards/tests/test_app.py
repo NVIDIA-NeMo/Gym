@@ -14,6 +14,8 @@ from nemo_gym.core import (
     NeMoGymChatCompletionMessage,
     NeMoGymChoice,
 )
+from nemo_gym.models.token_capture.harness_notes.opencode import OPENCODE_MAX_STEPS_PROMPT
+from responses_api_models.vllm_model.app import VLLMModel
 from responses_api_models.vllm_model_with_guards.app import VLLMModelWithGuards, VLLMModelWithGuardsConfig
 
 
@@ -73,7 +75,9 @@ def _custom_messages(*calls: tuple[str, str]) -> list[dict]:
     return messages
 
 
-async def _chat(messages: list[dict], **guards: Any) -> tuple[NeMoGymChatCompletion, AsyncMock]:
+async def _chat(
+    messages: list[dict], headers: dict | None = None, **guards: Any
+) -> tuple[NeMoGymChatCompletion, AsyncMock]:
     server = _make_model(**guards)
     upstream = NeMoGymChatCompletion(
         id="chtcmpl-up",
@@ -93,7 +97,7 @@ async def _chat(messages: list[dict], **guards: Any) -> tuple[NeMoGymChatComplet
     server._clients = [client]
     request = MagicMock()
     request.session = {SESSION_ID_KEY: "session-1"}
-    request.headers = {}
+    request.headers = headers or {}
     result = await server.chat_completions(request, NeMoGymChatCompletionCreateParamsNonStreaming(messages=messages))
     return result, client.create_chat_completion
 
@@ -241,3 +245,106 @@ async def test_parallel_calls_mixing_function_and_custom_keep_their_order() -> N
     result, upstream = await _chat(messages, guard_identical_tool_calls=2)
     assert "same tool call" in result.choices[0].message.content
     upstream.assert_not_awaited()
+
+
+@pytest.mark.parametrize("as_parts", [False, True], ids=["string notice", "text-part notice"])
+async def test_the_harness_step_limit_notice_is_not_a_model_turn(as_parts: bool) -> None:
+    """OpenCode appends its step-limit notice as a trailing assistant message; it must not hide a loop or add a turn."""
+    notice: Any = [{"type": "text", "text": OPENCODE_MAX_STEPS_PROMPT}] if as_parts else OPENCODE_MAX_STEPS_PROMPT
+    with_notice = [*_messages("true", "true"), {"role": "assistant", "content": notice}]
+
+    result, upstream = await _chat(with_notice, guard_identical_tool_calls=2)
+    assert "same tool call" in result.choices[0].message.content
+    upstream.assert_not_awaited()
+
+    # Two real turns plus the notice stay below a limit of three.
+    result, upstream = await _chat(with_notice, guard_max_assistant_turns=3)
+    assert result.choices[0].message.content == "from the engine"
+    # ... and the body sent upstream still carries the notice.
+    assert upstream.await_args.kwargs["messages"][-1]["content"] == notice
+
+
+@pytest.mark.parametrize(
+    "last",
+    [
+        {"role": "assistant", "content": OPENCODE_MAX_STEPS_PROMPT + " (edited)"},
+        {"role": "assistant", "content": "I will keep going."},
+        {
+            "role": "assistant",
+            "content": OPENCODE_MAX_STEPS_PROMPT,
+            "tool_calls": [
+                {"id": "c", "type": "function", "function": {"name": "bash", "arguments": '{"command": "x"}'}}
+            ],
+        },
+    ],
+    ids=["near match", "ordinary text", "notice text with a tool call"],
+)
+async def test_other_trailing_assistant_messages_still_count_and_break_the_streak(last: dict) -> None:
+    messages = [*_messages("true", "true"), last]
+
+    result, upstream = await _chat(messages, guard_identical_tool_calls=2)
+    assert result.choices[0].message.content == "from the engine"  # the streak is broken by the last message
+    upstream.assert_awaited_once()
+
+    result, upstream = await _chat(messages, guard_max_assistant_turns=3)
+    assert "3 assistant turns" in result.choices[0].message.content
+    upstream.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "pin",
+    [{"tool_choice": "required"}, {"tool_choice": "auto"}, {"tool_choice": None}, {"tool_choice": {"type": "x"}}],
+)
+def test_text_only_guard_rejects_a_tool_choice_pin_that_would_undo_it(pin: dict) -> None:
+    with pytest.raises(ValueError, match="no tool_choice sampling pin"):
+        _make_model(guard_text_only_after_assistant_turns=1, sampling_overrides=pin)
+
+
+@pytest.mark.parametrize("pins", [None, {}, {"tool_choice": "none"}, {"temperature": 0.2, "max_tokens": 100}])
+async def test_text_only_guard_accepts_no_pin_none_or_unrelated_pins(pins: dict | None) -> None:
+    result, upstream = await _chat(_messages("a"), guard_text_only_after_assistant_turns=1, sampling_overrides=pins)
+
+    assert result.choices[0].message.content == "from the engine"
+    assert upstream.await_args.kwargs.get("tool_choice") == "none"
+
+
+def test_a_tool_choice_pin_is_fine_without_the_text_only_guard() -> None:
+    _make_model(guard_max_assistant_turns=3, sampling_overrides={"tool_choice": "required"})
+    _make_model(sampling_overrides={"tool_choice": "required"})
+
+
+def test_text_only_guard_rejects_the_completions_backend() -> None:
+    with pytest.raises(ValueError, match="requires use_completions_api=false"):
+        _make_model(guard_text_only_after_assistant_turns=1, use_completions_api=True)
+
+
+def test_other_guards_keep_the_completions_backend_available() -> None:
+    _make_model(guard_max_assistant_turns=3, guard_identical_tool_calls=2, use_completions_api=True)
+
+
+async def test_a_compaction_summary_request_is_not_stopped_by_the_task_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parent produces and checks the summary; a local stop here would answer OpenCode's compaction with no state."""
+    delegated = AsyncMock(return_value="parent summary")
+    monkeypatch.setattr(VLLMModel, "chat_completions", delegated)
+    headers = {"X-NeMo-Gym-OpenCode-Agent": "compaction"}
+    server = _make_model(guard_max_assistant_turns=1, compaction_summary_max_tokens=512)
+    request = MagicMock()
+    request.headers = headers
+
+    result = await server.chat_completions(
+        request, NeMoGymChatCompletionCreateParamsNonStreaming(messages=_messages("a", "b"))
+    )
+    assert result == "parent summary"
+    delegated.assert_awaited_once()
+
+    # Without the header, or without the cap, the same history is still stopped locally.
+    for hdrs, cap in (({}, 512), ({"X-NeMo-Gym-OpenCode-Agent": "build"}, 512), (headers, None)):
+        delegated.reset_mock()
+        server = _make_model(guard_max_assistant_turns=1, compaction_summary_max_tokens=cap)
+        request.headers = hdrs
+        request.session = {SESSION_ID_KEY: "s"}
+        result = await server.chat_completions(
+            request, NeMoGymChatCompletionCreateParamsNonStreaming(messages=_messages("a", "b"))
+        )
+        assert "1 assistant turns" in result.choices[0].message.content, (hdrs, cap)
+        delegated.assert_not_awaited()

@@ -67,7 +67,7 @@ if TYPE_CHECKING:
         split_dynamo_capture_refusal,
         validate_framework_context_options,
     )
-    from nemo_gym.models.token_capture.harness_notes import HARNESS_NOTES
+    from nemo_gym.models.token_capture.harness_notes import HARNESS_NOTES, trailing_harness_note
     from nemo_gym.models.token_capture.harness_notes.base import HarnessNote
 
 
@@ -109,6 +109,7 @@ _PUBLIC_API = {
     "start_model_execution": "model_call_capture",
     "synthesize_chat_completion_sse": "chat_streaming",
     "synthesize_responses_sse": "responses_streaming",
+    "trailing_harness_note": "token_capture.harness_notes",
     "validate_framework_context_options": "token_capture.external_capture",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
