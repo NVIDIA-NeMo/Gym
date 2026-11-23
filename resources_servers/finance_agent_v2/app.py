@@ -67,8 +67,6 @@ from starlette.requests import Request
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
-    JUDGE_FAILED,
-    JUDGE_UNPARSEABLE,
     VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -1310,13 +1308,10 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         judgements = await asyncio.gather(*(judge_one(c) for c in criteria))
 
         # An unresolved criterion is a judge failure, so the row has no valid reward.
-        # judge_failsafe masks it; unparseable when every failed call got a reply.
+        # judge_failsafe masks it as judge_failed; the message keeps the first cause.
         unresolved = [j for j in judgements if j.score is None]
         if unresolved:
-            raise JudgeError(
-                f"{len(unresolved)}/{len(judgements)} criteria unresolved (e.g. {unresolved[0].error})",
-                failure_kind=JUDGE_UNPARSEABLE if all(j.api_failures == 0 for j in unresolved) else JUDGE_FAILED,
-            )
+            raise JudgeError(f"{len(unresolved)}/{len(judgements)} criteria unresolved (e.g. {unresolved[0].error})")
 
         scores = aggregate_rubric_scores(judgements)
 

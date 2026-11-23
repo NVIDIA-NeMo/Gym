@@ -36,7 +36,6 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     JUDGE_FAILED,
-    JUDGE_UNPARSEABLE,
     VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -1074,32 +1073,33 @@ class TestVerifyRubricJudge:
     @pytest.mark.asyncio
     async def test_exhausted_attempts_leave_criterion_unresolved(self, no_sleep) -> None:
         """Never reaching 3 verdicts is a judge failure, not a miss: the judge
-        answered every time without a verdict, so verify raises an unparseable
-        JudgeError for judge_failsafe to mask, rather than scoring the row."""
+        answered every time without a verdict, so verify raises a JudgeError
+        for judge_failsafe to mask, rather than scoring the row."""
         server, stub = _rubric_server({_C1: [1, 1] + ["garbage"] * 20, _C2: [1, 1, 1]})
         with pytest.raises(JudgeError) as raised:
             await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
 
         assert stub.calls[_C1] == 10  # judge_max_attempts, then gives up
-        assert raised.value.failure_kind == JUDGE_UNPARSEABLE
         assert "1/2 criteria unresolved" in str(raised.value)
         assert "no integer 0/1 score" in str(raised.value)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "replies",
+        "replies, cause",
         [
-            [RuntimeError("connection reset")] * 20,  # judge transport down
-            [TimeoutError()] * 20,
-            [_Starved()] * 20,  # judge output cut at its own max_output_tokens
+            # judge transport down
+            ([RuntimeError("connection reset")] * 20, "judge call failed: RuntimeError: connection reset"),
+            ([TimeoutError()] * 20, "judge call failed: TimeoutError"),
+            # judge output cut at its own max_output_tokens
+            ([_Starved()] * 20, "judge reply incomplete (incomplete_details.reason=max_output_tokens)"),
         ],
     )
-    async def test_judge_outage_is_a_judge_failure(self, no_sleep, replies) -> None:
+    async def test_judge_outage_is_a_judge_failure(self, no_sleep, replies, cause) -> None:
         server, _ = _rubric_server({_C1: replies, _C2: [1, 1, 1]})
         with pytest.raises(JudgeError) as raised:
             await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
 
-        assert raised.value.failure_kind == JUDGE_FAILED
+        assert f"1/2 criteria unresolved (e.g. {cause}" in str(raised.value)
 
     @pytest.mark.asyncio
     async def test_judge_reply_truncated_mid_verdict_is_unparseable(self, no_sleep) -> None:
@@ -1108,7 +1108,7 @@ class TestVerifyRubricJudge:
         with pytest.raises(JudgeError) as raised:
             await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
 
-        assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+        assert "1/1 criteria unresolved (e.g. judge reply had no integer 0/1 score)" in str(raised.value)
 
     @pytest.mark.asyncio
     async def test_unresolved_dealbreaker_is_masked_not_zeroed(self, no_sleep) -> None:
@@ -1126,7 +1126,7 @@ class TestVerifyRubricJudge:
     async def test_judge_failsafe_masks_an_unresolved_row(self, no_sleep) -> None:
         """The served verify (wrapped in judge_failsafe) returns the row masked, out of training."""
         server, _ = _rubric_server({_C1: [RuntimeError("judge down")] * 20})
-        wrapped = judge_failsafe(server.verify, placeholder_reward=server.judge_failure_reward())
+        wrapped = judge_failsafe(server.verify)
         res = await wrapped(request=_mock_request(), body=_submitted_request(_rubric(_C1)))
 
         row = json.loads(res.body)

@@ -381,12 +381,11 @@ unweighted dataset scores as a plain pass fraction.
 
 A criterion the judge never resolved (failed calls, no parseable verdict, or a
 reply cut at the judge's own output limit) is a judge failure, not a miss. The
-whole row is then masked (`mask_sample: true`, `failure_kind: judge_failed`, or
-`judge_unparseable` when every failed call got a reply), so it leaves training and
-the score means and lands in the failures sidecar. A row with no rubric at all, or
-a server with no judge configured, is masked with `failure_kind: verifier_error`
-and `judge_error` set, so the agent and tools can still be validated before labels
-exist. A rollout that never called `submit_final_result` is the model's failure
+whole row is then masked (`mask_sample: true`, `failure_kind: judge_failed`), so
+it leaves training and the score means and lands in the failures sidecar. A row
+with no rubric at all, or a server with no judge configured, is masked with
+`failure_kind: verifier_error` and `judge_error` set, so the agent and tools can
+still be validated before labels exist. A rollout that never called `submit_final_result` is the model's failure
 and scores 0, unmasked.
 
 The agent records why its loop ended in `response.metadata.stop_reason`
