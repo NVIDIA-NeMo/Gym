@@ -299,22 +299,24 @@ async def test_abandon_launch_raises_when_it_failed_beside_the_receipt_of_a_fini
     assert not isinstance(raised.value, NgFailureEvent)
 
 
-# abandon() over a scripted process table: the harness (marked) and its unmarked child are seen once, the harness
-# then exits, and the child is reparented. $6 says what becomes of the child. kill is recorded, never sent.
+# abandon() over a scripted process table: the harness (marked) and its unmarked child are seen in the first round,
+# the harness then exits, and the child is reparented. $6 says what becomes of the child. The table changes only
+# between rounds (the sleep that ends one), so every read in a round agrees. kill is recorded, never sent.
 ABANDON_REPARENTED = r"""
 source "$1"
-receipt=$2 cleanup=$3 harness_pid=$4 child_pid=$5 later=$6 killed=0 seen=0
-kill() { echo "$2" >>"$receipt.kills"; killed=1; }
+receipt=$2 cleanup=$3 harness_pid=$4 child_pid=$5 later=$6 round=0
+kill() { echo "$2" >>"$receipt.kills"; }
+sleep() { ((++round)); command sleep "$@"; }
 marked() { [[ $1 == "$harness_pid" ]]; }
 stat_fields() {
     fields=()
-    if [[ $1 == "$harness_pid" ]] && ((!killed)); then
+    if [[ $1 == "$harness_pid" ]] && ((!round)); then
         fields[0]=S fields[1]=0 fields[2]=$1 fields[19]=100
-    elif [[ $1 == "$child_pid" ]] && ((!killed)); then
+    elif [[ $1 == "$child_pid" ]] && ((!round)); then
         fields[0]=S fields[1]=$harness_pid fields[2]=$harness_pid fields[19]=200
     elif [[ $1 == "$child_pid" && $later == stuck ]]; then
         fields[0]=D fields[1]=1 fields[2]=$harness_pid fields[19]=200
-    elif [[ $1 == "$child_pid" && $later == exits ]] && ((seen++ < 3)); then
+    elif [[ $1 == "$child_pid" && $later == exits ]] && ((round <= 3)); then
         fields[0]=D fields[1]=1 fields[2]=$harness_pid fields[19]=200
     elif [[ $1 == "$child_pid" && $later == reused ]]; then
         fields[0]=S fields[1]=1 fields[2]=$1 fields[19]=300
@@ -323,6 +325,25 @@ stat_fields() {
     fi
 }
 abandon "$harness_pid.100"
+"""
+
+# abandon() over a scripted process table: the scan reads a marked process, and every later read finds its PID
+# handed on to a process that started later, as when it exits between the scan and the signal. kill is recorded.
+ABANDON_REUSED_BEFORE_SIGNAL = r"""
+source "$1"
+receipt=$2 cleanup=$3 target=$4 supervisor=$5 reads=0
+kill() { echo "$2" >>"$receipt.kills"; }
+marked() { [[ $1 == "$target" && $2 == 100 ]]; }
+stat_fields() {
+    fields=()
+    [[ $1 == "$target" ]] || return 1
+    if ((reads++ == 0)); then
+        fields[0]=S fields[1]=1 fields[2]=$1 fields[19]=100
+    else
+        fields[0]=S fields[1]=1 fields[2]=$1 fields[19]=300
+    fi
+}
+abandon "$supervisor.100"
 """
 
 
@@ -365,6 +386,28 @@ def test_abandon_keeps_a_process_it_reached_after_its_parent_exited(
         assert kills.count(child) > 2
     else:
         assert kills.count(child) == child_kills
+
+
+def test_abandon_does_not_signal_a_pid_reused_between_its_scan_and_the_signal(tmp_path: Path) -> None:
+    # A real process lends its PID, so the scan of /proc lists it; what abandon reads about it is scripted.
+    lender = subprocess.Popen(["sleep", "60"])
+    receipt = tmp_path / CLEANUP_RECEIPT_FILE
+    try:
+        result = subprocess.run(
+            ["bash", "-c", ABANDON_REUSED_BEFORE_SIGNAL, "abandon", str(SUPERVISOR_SCRIPT), str(receipt), "200"]
+            + [str(lender.pid), str(_dead_pid())],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert lender.poll() is None, "no signal was sent"
+    finally:
+        lender.kill()
+        lender.wait()
+    assert result.returncode == 0, result.stderr
+    assert json.loads(receipt.read_text())["cleanup_confirmed"] is True
+    # The process that now holds the PID started after the scan: it is not the one abandon reached.
+    assert not Path(f"{receipt}.kills").exists()
 
 
 # -- check_restored --------------------------------------------------------------------------------------------------
@@ -1063,6 +1106,61 @@ async def test_a_pause_or_continue_gives_its_request_what_the_wait_for_another_l
     result = await asyncio.wait_for(getattr(session, request_name)(timeout=10), 5)
     assert result.status == "confirmed" and not session._control.locked()
     assert len(budgets) == 1 and 5 < budgets[0] <= 9.6
+
+
+async def _never_answer(*args, **kwargs) -> SandboxExecResult:
+    await asyncio.sleep(3600)
+    raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize("request_name", ["pause_harness", "continue_harness"])
+async def test_a_pause_or_continue_the_sandbox_does_not_answer_is_unconfirmed_at_its_timeout(
+    request_name: str,
+) -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = _never_answer
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    session._pause_seq = 1  # So a continue has a pause to continue.
+    asked = monotonic()
+    # The request's own wait would give the sandbox command 10 s more than the timeout.
+    result = await asyncio.wait_for(getattr(session, request_name)(timeout=0.3), 5)
+    waited = monotonic() - asked
+    assert result.status == "unconfirmed" and "did not answer the request within the 0.3s timeout" in (
+        result.error or ""
+    )
+    assert 0.25 <= waited < 3
+    assert sandbox.exec.await_count == 1 and not session._control.locked()
+
+
+async def test_a_pause_gives_its_request_what_the_wait_for_staging_left_and_ends_at_its_timeout() -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = _never_answer
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    session._stage_task = asyncio.create_task(asyncio.sleep(0.2))
+    asked = monotonic()
+    result = await asyncio.wait_for(session.pause_harness(timeout=0.4), 5)
+    waited = monotonic() - asked
+    assert result.status == "unconfirmed" and "did not answer the request" in (result.error or "")
+    assert 0.35 <= waited < 1.5
+    # The request command got what staging left of the 0.4 s (about 0.2 s), plus its 10 s of exec headroom.
+    assert sandbox.exec.await_args.kwargs["timeout_s"] < 10.3
+    assert not session._control.locked()
+
+
+@pytest.mark.parametrize("request_name", ["pause_harness", "continue_harness"])
+async def test_a_timeout_the_request_raises_itself_is_raised(
+    monkeypatch: pytest.MonkeyPatch, request_name: str
+) -> None:
+    session = SandboxSession(sandbox=AsyncMock(), session_dir="/s", workdir="/w", harness="test", pausable=True)
+
+    async def request(*, timeout: float) -> SimpleNamespace:
+        raise TimeoutError("the request's own")
+
+    monkeypatch.setattr(session, "_pause", request)
+    monkeypatch.setattr(session, "_continue", request)
+    with pytest.raises(TimeoutError, match="the request's own"):
+        await getattr(session, request_name)(timeout=10)
+    assert not session._control.locked()
 
 
 @pytest.mark.parametrize("text", ["", "not a receipt", "[]"])

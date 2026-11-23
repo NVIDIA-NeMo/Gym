@@ -448,7 +448,8 @@ abandon() {
         ((${#doomed[@]})) || break
         for pid in "${!doomed[@]}"; do
             reached[pid]=${start[pid]}
-            kill -KILL "$pid" 2>/dev/null
+            # A process that exited since the scan can have handed its PID on: signal only the process it reached.
+            stat_fields "$pid" && [[ ${fields[19]} == "${start[pid]}" ]] && kill -KILL "$pid" 2>/dev/null
         done
         now
         if ((NOW >= limit)); then

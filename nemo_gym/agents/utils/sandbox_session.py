@@ -748,7 +748,7 @@ class SandboxSession[Artifacts]:
         launch until ``continue_harness``. Pausing again before a continue requests the same pause again.
 
         ``timeout`` covers the whole call: the wait for another pause or continue request of this session to end,
-        then the request, which gets what is left. Unconfirmed when the other request outlasts it.
+        then the request, which gets what is left. Unconfirmed when the timeout passes first, in either wait.
         """
         if not self.pausable:
             raise RuntimeError(f"{self.harness} sandbox session was not launched pausable")
@@ -767,14 +767,28 @@ class SandboxSession[Artifacts]:
                 status="unconfirmed",
                 error=f"another pause or continue request held the session for the whole {timeout:g}s timeout",
             )
+        remaining = max(0.0, deadline - monotonic())
+        # The request's own waits give its sandbox command time beyond ``remaining``: the deadline ends it instead.
+        limit = asyncio.timeout(remaining)
         try:
-            return await request(timeout=max(0.0, deadline - monotonic()))
+            async with limit:
+                return await request(timeout=remaining)
+        except TimeoutError:
+            if not limit.expired():
+                raise
+            if request == self._pause and self.staging:
+                # The pause spent its timeout waiting for staging, as when its own wait for staging ends first.
+                return HarnessPauseResult(status="unconfirmed", error=_STILL_STAGING)
+            return HarnessPauseResult(
+                status="unconfirmed", error=f"the sandbox did not answer the request within the {timeout:g}s timeout"
+            )
         finally:
             self._control.release()
 
     async def _pause(self, *, timeout: float) -> HarnessPauseResult:
         if self.cleanup is not None or self.sandbox_stopped or self.closing:
             return HarnessPauseResult(status="finished")
+        deadline = monotonic() + timeout
         stage = self._stage_task
         if stage is not None and not stage.done():
             # Staging writes into the sandbox and ends in the launch command. Let it finish, so a snapshot does not
@@ -785,7 +799,7 @@ class SandboxSession[Artifacts]:
             if not stage.done():
                 # A pause request would only hold the launch command: staging itself would keep writing while
                 # the sandbox is snapshotted. The caller stops this launch instead, which cancels the staging.
-                return HarnessPauseResult(status="unconfirmed", error="the launch is still staging its files")
+                return HarnessPauseResult(status="unconfirmed", error=_STILL_STAGING)
         if self._pause_seq <= self._continued_seq:
             self._pause_seq = self._continued_seq + 1
         # Once the launch command was sent, its supervisor reads this request as it starts and holds the launch: the
@@ -796,7 +810,8 @@ class SandboxSession[Artifacts]:
             session_dir=self.session_dir,
             workdir=self.workdir,
             seq=self._pause_seq,
-            timeout=timeout,
+            # What the wait for staging left of the timeout.
+            timeout=max(0.0, deadline - monotonic()),
             launch_sent=self.launch_started,
         )
         if outcome == "not_launched" and self.launch_started and self.pause_mode == "hold":
@@ -1094,6 +1109,9 @@ class SandboxSession[Artifacts]:
 
 
 _CHECKPOINT_STATE = TypeAdapter(SandboxSessionCheckpoint)
+
+
+_STILL_STAGING = "the launch is still staging its files"
 
 
 def _pause_result(
