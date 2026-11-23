@@ -12,7 +12,13 @@ import pytest
 from fastapi import HTTPException
 
 import nemo_gym.client.http_client
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentCloseSessionRequest, AgentOutcome, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionRequest,
+    AgentOutcome,
+    AgentSeedSessionRequest,
+    check_agent_seed_rejected,
+)
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -779,7 +785,9 @@ class TestNativeSessions:
             GlobalConfigDictParserConfig(
                 initial_global_config_dict=OmegaConf.merge(
                     GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-                    DictConfig({"config_paths": [str(root / "benchmarks/terminal_bench_2_1/terminus_2.yaml")]}),
+                    DictConfig(
+                        {"config_paths": [str(root / "benchmarks/terminal_bench_2_1/terminus_2_legacy_agent.yaml")]}
+                    ),
                 ),
                 skip_load_from_cli=True,
                 skip_load_from_dotenv=True,
@@ -923,7 +931,9 @@ class TestNativeSessions:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):
             response = client.post("/v1/agent_sessions", json=_seed_body(tool_accesses=grants))
 
-        detail = "Terminus 2 runs only its terminal; required tool grants it cannot use: a-server, b-server"
+        detail = (
+            "Terminus 2 sessions drive only their terminal and cannot use required tool grants: a-server, b-server"
+        )
         assert response.status_code == 422
         assert response.json()["detail"] == detail
         # Logged as an agent seed rejection, which only AgentSeedRejectedError is.
@@ -984,6 +994,30 @@ class TestNativeSessions:
         sandbox.disconnect.assert_awaited_once()
         assert not hasattr(sandbox, "stop") or not getattr(sandbox.stop, "await_count", 0)
         assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 409
+
+    @pytest.mark.parametrize("required", [True, False])
+    @pytest.mark.parametrize("configured", [True, False])
+    @pytest.mark.parametrize("kind", ["mcp", "direct_http"])
+    def test_required_tool_grants_refused_before_connecting(self, monkeypatch, required, configured, kind):
+        # Terminus 2 drives only its tmux terminal, so a required grant would run the task without its tool.
+        agent, client, sandbox, connect = self._client(monkeypatch)
+        body = _seed_body()
+        access = {"name": "gdpval_finish", "required": required, "kind": kind}
+        if kind == "mcp":
+            access["connection"] = {"transport": "streamable_http", "url": "http://resources/mcp"}
+        else:
+            access["base_url"] = "http://resources"
+        body["tool_accesses"] = [access]
+        if configured:
+            agent.config.tool_accesses = AgentSeedSessionRequest.model_validate(body).tool_accesses
+            body["tool_accesses"] = []
+        if required:
+            detail = check_agent_seed_rejected(client.app, AgentSeedSessionRequest.model_validate(body))
+            assert "gdpval_finish" in detail
+            connect.assert_not_awaited()
+        else:
+            assert client.post("/v1/agent_sessions", json=body).status_code == 200
+            connect.assert_awaited_once()
 
 
 class TestSessionActivation:

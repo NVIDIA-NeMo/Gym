@@ -271,3 +271,26 @@ def test_install_runtime_syncs_committed_lock_in_job_environment(monkeypatch, ha
     assert options["env"]["UV_PROJECT_ENVIRONMENT"] == sys.prefix
     assert options["check"] is True
     assert options["cwd"] == adapter
+
+
+def test_selection_emits_runtime_requirements_before_dependencies_are_installed(tmp_path):
+    import os
+    import sys
+
+    output = tmp_path / "outputs"
+    subprocess.run(
+        [sys.executable, "-S", "-m", "scripts.harness_conformance.ci", "select", "--base", ""],
+        env=os.environ | {"GITHUB_OUTPUT": str(output)},
+        cwd=Path(__file__).resolve().parents[3],
+        check=True,
+    )
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    matrix = json.loads(values["matrix"])["include"]
+    assert [row["harness"] for row in matrix] == json.loads(values["harnesses"]) == list(HARNESSES)
+    rows = {row["harness"]: row for row in matrix}
+    assert rows["nooa"]["container"] == {"image": "python:3.13.14-slim", "options": "--init"}
+    assert rows["nooa"]["packages"] == "git curl"
+    assert rows["terminus_2_sandboxed"]["packages"] == "tmux"
+    assert rows["terminus_2_sandboxed"]["requires_root"] is True
+    assert rows["simple"]["container"] == rows["simple"]["packages"] == ""
+    assert rows["simple"]["requires_root"] is False

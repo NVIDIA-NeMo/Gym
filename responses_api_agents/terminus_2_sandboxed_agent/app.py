@@ -35,6 +35,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -663,12 +664,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> Terminus2SessionState:
         """Borrow the resources server's sandbox for this episode."""
-        required = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        required = sorted(access.name for access in self.effective_tool_accesses(body) if access.required)
         if required:
-            # Terminus 2 drives only its terminal, so a required grant would be run without: the episode would score
-            # a silent zero for the missing tools instead of failing its seed.
             raise AgentSeedRejectedError(
-                "Terminus 2 runs only its terminal; required tool grants it cannot use: " + ", ".join(sorted(required))
+                "Terminus 2 sessions drive only their terminal and cannot use required tool grants: "
+                + ", ".join(required)
             )
         if body.sandbox_access is None:
             raise HTTPException(422, "Terminus 2 needs sandbox_access from the resources server")
@@ -1007,7 +1007,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
                 state.task = asyncio.create_task(activate())
             elif body != state.activation_request:
-                raise HTTPException(409, "Terminus 2 sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("Terminus 2 sessions support one activation; retry the same request")
             # A disconnected HTTP waiter must not cancel the shared run; close owns cancellation, and
             # identical retries join this task or replay its result or error.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
