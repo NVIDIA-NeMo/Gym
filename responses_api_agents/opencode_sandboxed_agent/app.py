@@ -85,6 +85,7 @@ from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
+    SandboxExecResult,
     SandboxResources,
     SandboxSpec,
     cpu_cap_env,
@@ -1513,6 +1514,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
         run_error_type = None
+        exec_started = monotonic()
         try:
             result = await sandbox.exec(
                 command=command,
@@ -1590,6 +1592,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 stage="agent",
             ) from error
 
+        if (
+            result.error_type is None
+            and result.return_code == -1
+            and monotonic() - exec_started >= self.config.sandbox_timeout
+        ):
+            # A provider that lets its own backstop timer end the command reports the kill only as a signal death,
+            # with no error type. A signal death that arrives only after the whole time limit has passed is the
+            # agent reaching that limit, so it takes the deadline path below instead of the provider kind that
+            # reruns the trial. The clock starts before the command is submitted, so a real deadline never
+            # reads as shorter than the limit.
+            result = SandboxExecResult(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                return_code=124,
+                error_type="timeout",
+            )
         if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
             # The provider returned a result that does not say how the command ended: an error type, or the -1
             # signal-death sentinel. That is sandbox evidence, not a contradiction inside the harness, so it keeps

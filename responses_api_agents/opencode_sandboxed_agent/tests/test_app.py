@@ -3302,10 +3302,11 @@ async def test_ripgrep_queue_shares_the_existing_setup_budget(tmp_path, monkeypa
     sandbox.upload.assert_not_awaited()
 
 
+@mark.parametrize("signal_death", [False, True])
 @mark.parametrize("plugins", [False, True])
 @mark.parametrize("force_zero", [False, True])
 async def test_agent_deadline_without_output_is_graded_once_and_scores_zero_when_configured(
-    tmp_path, monkeypatch, force_zero, plugins
+    tmp_path, monkeypatch, force_zero, plugins, signal_death
 ):
     from fastapi import Request
 
@@ -3335,6 +3336,8 @@ async def test_agent_deadline_without_output_is_graded_once_and_scores_zero_when
     sandbox = MagicMock(stop=AsyncMock(), upload=AsyncMock())
     agent_runs = []
     order = []
+    clock = [0.0]
+    monkeypatch.setattr(app_module, "monotonic", lambda: clock[0])
 
     async def execute(command, **kwargs):
         if "nemo-gym-terminate-agent" in command:
@@ -3344,6 +3347,11 @@ async def test_agent_deadline_without_output_is_graded_once_and_scores_zero_when
             return SimpleNamespace(return_code=0, error_type=None, stdout='[{"id":"session"}]', stderr="")
         if "opencode run" in command:
             agent_runs.append(command)
+            clock[0] += config.sandbox_timeout + 30
+            if signal_death:
+                # The provider's own backstop timer ended the command: a signal death with no error type, after
+                # the whole time limit has passed.
+                return SimpleNamespace(return_code=-1, error_type=None, stdout="Shell: bash\npartial", stderr="")
             # The provider reports the deadline but returns no output for the killed command.
             return SimpleNamespace(return_code=124, error_type="timeout", stdout=None, stderr="")
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
