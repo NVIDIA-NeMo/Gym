@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass to every `gym dataset validate` and `gym eval run` of the converted dataset (--config <this file>).
+#
+# Reward safety needs no server option here: every task sets `environment_mode = "separate"` in its task.toml, so
+# the verifier always runs in a fresh sandbox of the row's image, and grade.py protects the reward path inside it
+# (see ../README.md, "Reward safety"). The tasks declare no `artifacts`, so `separate_verifier_for_artifacts` would
+# change nothing and is left at its default.
+#
+# The values below are the harbor server settings the parity run used (its defaults at the time), pinned so both arms
+# keep the same episode bound if a default moves.
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      # single_agent_turn's default_episode_timeout_seconds on the native arm.
+      default_episode_timeout_seconds: 21600
+      # The parity run used the harbor default (900 s); the native server waits up to 1200 s
+      # (sandbox_config.ready_timeout_s in configs/scale_swe.yaml). Raise it if large images start slowly.
+      sandbox_ready_timeout_s: 900
+      # The native server also asks the provider for a scheduling floor (sandbox_config.provider_options
+      # .resource_requests: cpu 1, memory_mib 4096, disk_gib 20). The parity run set none on this arm; to match the
+      # native arm's scheduling, add it here as sandbox_provider_options: {resource_requests: {...}}.

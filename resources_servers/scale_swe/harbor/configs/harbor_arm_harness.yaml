@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass to `gym eval run` of the converted dataset only (with --agent opencode_agent). The native pairing
+# (configs/scale_swe_opencode.yaml) runs opencode_agent as a sandbox session with its shipped defaults
+# (permissions/default.yaml, no thinking or sandbox_model_id override), which is what `--agent opencode_agent` runs on
+# the Harbor arm too: in the parity run every opencode_agent setting of the two arms was equal except
+# token_id_capture, which native_arm.yaml turns off. The one key below restates the agent budget both arms used, so
+# they stay pinned together if the default moves; each task's [agent].timeout_sec carries the same value.
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      timeout: 10800

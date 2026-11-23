@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The native arm of a parity run: pass after configs/scale_swe_opencode.yaml and your sandbox provider's config.
+#
+#   gym eval run --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml \
+#       --config nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml \
+#       --config resources_servers/scale_swe/harbor/configs/native_arm.yaml \
+#       ++scale_swe_native_rows=<absolute path to the adapter's --native-rows-out file> \
+#       <model flags> --split train --output <run dir>/rollouts.jsonl
+#
+# OpenCode runs in a remote sandbox and must reach the policy model: advertise a routable address. Without it every
+# episode waits silently for the episode timeout.
+use_absolute_ip: true
+
+scale_swe_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      # The pairing records token ids for training; the Harbor arm does not. Off, the two agent configs are equal.
+      token_id_capture: false
+
+scale_swe_resources_server:
+  resources_servers:
+    scale_swe:
+      verified: false
+      datasets:
+        - name: scale_swe
+          type: train
+          taskset: scale_swe
+          # You supply this: ++scale_swe_native_rows=<absolute path>, the rows the adapter wrote with
+          # --native-rows-out for the same --ids-file as the Harbor dataset.
+          jsonl_fpath: ${scale_swe_native_rows}
+          num_repeats: 1
+          license: TBD
