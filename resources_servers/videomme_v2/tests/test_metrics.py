@@ -218,10 +218,28 @@ def test_group_ids_can_be_scoped_by_level() -> None:
     assert result.overall.metrics()["nonlinear_score"] == 100
 
 
-def test_known_levels_must_match_group_levels() -> None:
+def test_known_levels_are_returned() -> None:
     value = group()
     levels = {task_id: 1 for task_id in value.task_ids}
     assert validate_metric_cohort(value.task_ids, groups=[value], task_levels=levels) == levels
+
+
+def test_questions_keep_their_levels_and_groups_score_at_the_last_questions_level() -> None:
+    value = group("mixed", 3)
+    levels = dict(zip(value.task_ids, (1, 2, 3, 3)))
+    assert validate_metric_cohort(value.task_ids, groups=[value], task_levels=levels) == levels
+    rows = [
+        replace(row, outcome="incorrect", predicted_answer="A", reward=0.0)
+        if row.task_id == value.task_ids[1]
+        else row
+        for row in attempts(value)
+    ]
+    result = summarize(rows, [value], task_levels=levels)
+    assert (result.levels[1].metrics()["raw_acc"], result.levels[2].metrics()["raw_acc"]) == (100, 0)
+    assert (result.levels[3].metrics()["raw_acc"], result.levels[3].metrics()["expected_groups"]) == (100, 1)
+    assert result.levels[1].metrics()["nonlinear_available"] is False
+    with pytest.raises(ValueError, match="last question"):
+        validate_metric_cohort(value.task_ids, groups=[value], task_levels={**levels, value.task_ids[3]: 2})
 
 
 def test_underlying_protocol_validation_is_preserved() -> None:

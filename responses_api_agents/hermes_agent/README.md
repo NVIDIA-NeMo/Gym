@@ -147,8 +147,16 @@ Host and sandbox execution use the same request rules. User tasks remain user me
 Request `model` must match the configured model. Unsupported non-default controls return
 HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
 `max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
-Config `max_tokens` limits each model call. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it); unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes 128,000 tokens. `developer` messages
+Config `max_tokens` limits each model call, including the truncation retries where Hermes would otherwise
+double it, so a truncated tool call is retried at the same budget before the turn ends as an agent limit. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it, raised to at least 0.75 below 512,000 tokens; `compression_threshold_tokens` sets an absolute trigger below that). Hermes refuses windows under 64,000 tokens. Unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes its built-in window for a model name it recognizes, else 256,000 tokens (the previous pin assumed 128,000), so set it for models with a smaller window. `developer` messages
 are rejected.
+
+Hermes ends a failed turn with a `failure_reason`. Gym reports `truncated` as `agent_limit`, and
+`context_overflow` as `model_context_limit` when compression ran out of room or is turned off; both keep their
+partial trajectory for verification. A compression call that timed out and an output cap the endpoint rejected
+carry the same reason but stay infrastructure failures. When Hermes stops
+continuing a truncated reply, Gym keeps each continuation fragment (with its token IDs) instead of the single
+stitched reply Hermes writes.
 
 Images: user messages, earlier user turns included, may hold base64 data-URI `input_image` parts (PNG, JPEG, GIF
 or WebP). Each is checked with `nemo_gym.core.MediaFile`, and its media type is corrected to match its bytes. Hermes
@@ -170,9 +178,19 @@ Remove unsupported fields that older versions silently ignored.
 
 Sandbox sessions live in the memory of the worker that seeded them. With several agent workers, session routing sends each session's requests to the worker that seeded it. Calling the agent's `/run` directly keeps no session.
 
-Each sandbox session installs the Hermes version pinned in `pyproject.toml`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<key>/python`, for example because an earlier session in the same sandbox installed it. The key covers the Python build, the Hermes requirement and this server's package versions. The Agent Server builds the runtime for the sandbox's architecture and C library: a pinned standalone CPython plus Hermes and its dependencies at this server's versions, cached under `sandbox_python` in Gym's `cache_dir`. Building needs `uv` and outbound access to GitHub and the Python package index on the Agent Server; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python build can be given the file in that cache directory. The sandbox needs only x86_64 or aarch64 Linux, `bash`, `tar` with gzip and glibc 2.17 or musl, with no network or Python of its own. Hermes calls the Model Server directly from the sandbox, so the sandbox must reach the Model Server at its configured host and port.
+Training and evaluation use Hermes v0.23.2 (`ae2a81ccc00e`), pinned in this agent's `pyproject.toml`. The Gym server uses its own Python environment. The Hermes worker uses the same Python 3.14.7 on the host and in the sandbox, alongside the upstream release's frozen dependency lock, including MCP. On the first host run, the server fetches the pinned source into Gym's cache and runs `uv sync`.
 
-Sessions use MCP tool grants and reject other required grants. Each granted MCP server is added to that session's Hermes configuration, so the sandbox must reach it at the granted URL, usually the Resources Server's `/mcp` endpoint. An activation fails before its first model call when a required server does not connect. Hermes names MCP tools `mcp_<server>_<tool>`; the response reports them as `mcp__<server>__<tool>`, the form Gym strips before verification, while captured model calls keep Hermes' names. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
+Presets that run this agent's host path inside a task image (`harness_agent` with `agent: hermes`, the AnySWE,
+AnyTerminal and CVDP bundles) need that worker beside the image's Gym interpreter, at `<sys.prefix>/hermes-runtime`.
+The AnySWE, AnyTerminal and CVDP deps scripts build it. For a `harness_agent` image or bundle, run
+`python -m responses_api_agents.hermes_agent.scripts.prepare_portable --prefix <that interpreter's sys.prefix>
+--target x86_64-unknown-linux-gnu` from a Gym checkout. Without it, every rollout installs Hermes on first use, which
+needs `git`, `uv`, and network access in the task sandbox. The previous pin only needed Gym's dependencies there. The
+runtime needs glibc 2.28 or newer, so musl images such as Alpine cannot run it.
+
+At seed time the Agent Server stages a standalone Python interpreter, the upstream source (including runtime assets), and hash-verified wheels for the sandbox architecture and C library. It caches archives under `sandbox_python` and reuses an installed runtime after an import check. The Agent Server needs `git`, `uv`, and access to GitHub and the package index. The task sandbox needs Linux, `bash`, `tar` with gzip, and access to the configured Model Server. On glibc-based images the release requires glibc 2.28 or newer for its locked wheels. A seed on an older or undetected glibc is refused with a 422 that names the detected version, so the episode is not retried. Musl uses a separate wheel target.
+
+Sessions use MCP tool grants and reject other required grants. Each granted MCP server is added to that session's Hermes configuration, so the sandbox must reach it at the granted URL, usually the Resources Server's `/mcp` endpoint. An activation fails before its first model call when a required server does not connect. Hermes v0.23.2 exposes MCP tools as `mcp__<server>__<tool>`, the form Gym strips before verification. Built-in tool names can change between releases (for example, `todo` became `todo_list`). The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
 
 The Hermes runner and the model's terminal tool execute as the same user in the same sandbox. The host reads the final result, including token IDs, from `/tmp/nemo-gym-hermes-sessions/<session-id>/output.json`; commands issued by the model can also write that file. Sandbox mode is suitable for evaluation, but it must not be used to produce RL training data until results are returned through a channel the model cannot modify.
 
