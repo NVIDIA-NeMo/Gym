@@ -475,6 +475,10 @@ Other providers, including OpenSandbox, report no usage yet.
   commands run in another process; its `procfs_*` measurement still covers them.
 - `shared_step` is a cgroup the sandbox shares with Gym and its sibling sandboxes, such as a Slurm job step.
   Its `cpu_usage_usec_delta` is everything in that cgroup while the sandbox lived; never one sandbox's cost.
+- An Enroot sandbox's processes descend from the Gym server that started it, so CPU measured over that server's
+  process tree already includes them: the sandbox's CPU is a breakdown of that total, not an addition to it.
+  Apptainer instances daemonize and Docker containers run under the Docker daemon, so their CPU is mostly outside
+  the server's process tree.
 
 Totals come from the read in `stop()`. Each summary's `final_read` says whether that read measured it; when it did
 not, `cpu_usage_usec_total`, `cpu_usage_usec_delta` and `memory_peak_bytes` are empty rather than the create-time
