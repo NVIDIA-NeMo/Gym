@@ -1,0 +1,31 @@
+name: bird_interact
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: BIRD-Interact Lite or Full, interactive text-to-SQL with a simulated user in c-Interact or a-Interact,
+  on PostgreSQL database sandboxes; Lite c-Interact by default.
+modality: text
+licensing: CC-BY-SA-4.0
+authors:
+- Felipe Vieira Frujeri
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: null
+agent_server: simple_agent
+datasets:
+- name: bird_interact_lite_c_interact
+  type: benchmark
+  jsonl_fpath: benchmarks/bird_interact/data/lite/c_interact.jsonl
+  prepare_script: benchmarks/bird_interact/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+# The Environment Server writes each prompt from the task; there is no prompt template.
+prompt_source: prepared
