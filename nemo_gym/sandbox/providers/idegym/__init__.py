@@ -24,10 +24,8 @@ from nemo_gym.sandbox.providers.idegym.config import (
     IdeGymPollingConfig,
     IdeGymVerifyConfig,
     TransportBackend,
-    UserMode,
 )
 from nemo_gym.sandbox.providers.idegym.errors import (
-    IdeGymCommandTooLongError,
     IdeGymCreateError,
     IdeGymCreateVerificationError,
     IdeGymError,
@@ -37,17 +35,12 @@ from nemo_gym.sandbox.providers.idegym.errors import (
 )
 from nemo_gym.sandbox.providers.idegym.provider import IdeGymProvider
 from nemo_gym.sandbox.providers.idegym.session import IdeGymBashResult, IdeGymServerRef, IdeGymSession
-from nemo_gym.sandbox.providers.idegym.shell import BashScriptBuilder
 from nemo_gym.sandbox.providers.idegym.spec import IdeGymProviderOptions, ServerRequestTranslator
-from nemo_gym.sandbox.providers.idegym.transfer import Base64BashFileTransfer
 
 
 __all__ = [
-    "BashScriptBuilder",
-    "Base64BashFileTransfer",
     "IdeGymAttributionConfig",
     "IdeGymBashResult",
-    "IdeGymCommandTooLongError",
     "IdeGymConnectionConfig",
     "IdeGymCreateConfig",
     "IdeGymCreateError",
@@ -67,5 +60,4 @@ __all__ = [
     "IdeGymUnknownServerError",
     "ServerRequestTranslator",
     "TransportBackend",
-    "UserMode",
 ]

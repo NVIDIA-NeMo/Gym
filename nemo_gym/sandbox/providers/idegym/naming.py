@@ -20,7 +20,8 @@ a job in the dashboard. A *server* name is one of the filters IdeGYM matches on 
 ``RESTART``/``RESET`` reuse strategy sends it looking for a server to reuse, and it
 prefixes the Kubernetes resource name, so it must satisfy RFC-1035 syntax with room
 left for the ``-<server_id>`` suffix the orchestrator appends. It need not be unique:
-that suffix is what makes the Kubernetes name unique.
+that suffix is what makes the Kubernetes name unique. The server name is only a readable
+hint for operators; the pod labels carry the metadata.
 """
 
 import re

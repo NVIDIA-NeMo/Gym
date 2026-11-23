@@ -14,8 +14,10 @@
 
 """The registered IdeGYM client shared by every sandbox in a process.
 
-The only module that imports the ``idegym`` SDK, so everything above works in the
+The only module that calls the ``idegym`` SDK, so everything above works in the
 provider-owned types declared here and the tests have one seam to fake.
+(:mod:`~nemo_gym.sandbox.providers.idegym.errors` also imports the SDK's exception
+types, lazily, to classify what these calls raise.)
 
 *One client per process, not per sandbox.* An IdeGYM client is a heartbeating owner of
 N server pods; registering one takes a table-level lock on the orchestrator's database,
@@ -23,9 +25,10 @@ and the resource quota is matched against its name. Sharing then forces the refe
 count: stopping a client also terminates every server it owns, so it may only be
 unregistered once the last provider has let go.
 
-*The client lives on a private event loop* in a daemon thread. It is loop-bound -- an
-httpx session plus a heartbeat task -- while the sync ``Sandbox`` facade gives every
-sandbox a loop of its own.
+*The client lives on the SDK's own loop thread.* It is loop-bound -- an httpx session
+plus a heartbeat task -- while the sync ``Sandbox`` facade gives every sandbox a loop of
+its own, so it is driven through ``SharedIdeGYMClient``, which owns a loop in a daemon
+thread and marshals every call onto it.
 """
 
 import asyncio
@@ -35,6 +38,7 @@ import math
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TypeVar
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
@@ -42,9 +46,13 @@ from nemo_gym.sandbox.providers.idegym.config import (
     IdeGymAttributionConfig,
     IdeGymConnectionConfig,
     IdeGymPollingConfig,
-    TransportBackend,
 )
-from nemo_gym.sandbox.providers.idegym.errors import IdeGymError, IdeGymUnknownServerError
+from nemo_gym.sandbox.providers.idegym.errors import (
+    IdeGymError,
+    IdeGymInvalidRequestError,
+    IdeGymUnknownServerError,
+)
+from nemo_gym.sandbox.providers.idegym.http import build_transport
 from nemo_gym.sandbox.providers.idegym.naming import clamp_client_name, sanitize_name
 
 
@@ -53,8 +61,13 @@ LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 
 SESSION_THREAD_NAME = "nemo-gym-idegym-session"
-# Grace period for the private loop thread to unwind once the session shuts down.
-LOOP_JOIN_TIMEOUT_S = 10.0
+
+# The SDK waits max(60 s, 10%) past the wait it hands the orchestrator, so the readiness
+# budget is split to keep the SDK's own deadline inside it.
+START_DEADLINE_GRACE_MIN_S = 60.0
+START_DEADLINE_GRACE_FACTOR = 1.1
+
+_STOPPED_MESSAGE = "The IdeGYM session has been stopped and can no longer run operations"
 
 
 def resolve_client_name(connection: IdeGymConnectionConfig, attribution: IdeGymAttributionConfig) -> str:
@@ -62,8 +75,7 @@ def resolve_client_name(connection: IdeGymConnectionConfig, attribution: IdeGymA
 
     An explicit ``connection.client_name`` always wins, because IdeGYM matches
     resource-quota rules by regex against this name. Otherwise it is derived from job
-    attribution, which is the closest IdeGYM gets to the per-sandbox Kubernetes labels
-    other providers offer.
+    attribution, so quota rules and the orchestrator's client list group by job.
     """
     if connection.client_name:
         return clamp_client_name(connection.client_name)
@@ -102,6 +114,17 @@ class IdeGymBashResult:
     exit_code: int
 
 
+@dataclass(frozen=True)
+class IdeGymServerStatus:
+    """Whether one server accepts requests right now, from the orchestrator's status endpoint."""
+
+    usable: bool
+    availability: str
+    # None when the pod was not checked: the server is terminal or Kubernetes was unreachable.
+    pod_ready: bool | None
+    details: str | None
+
+
 def _resolve(
     future: "concurrent.futures.Future[Any]", exception: BaseException | None = None, result: Any = None
 ) -> None:
@@ -115,104 +138,21 @@ def _resolve(
         pass
 
 
-async def _settle(coro: Awaitable[T], future: "concurrent.futures.Future[T]") -> None:
-    """Run ``coro`` and report its outcome through ``future``.
+def _start_wait_timeout_s(timeout_s: float) -> int:
+    """The orchestrator's start wait for a start-server call budgeted at ``timeout_s``.
 
-    A cancelled caller cancels ``future`` but not this coroutine, so the orchestrator
-    call finishes and its result is dropped. That is deliberate: the sandbox-side work
-    has already started, and abandoning it mid-flight would leave the orchestrator's
-    view and ours disagreeing.
+    The SDK waits ``max(60 s, 10%)`` longer than the orchestrator does. From 120 s up,
+    the wait leaves room for that, so the SDK's client deadline stays within
+    ``timeout_s``. Below 120 s, fitting the grace would leave the orchestrator almost no
+    time and every start would fail. The orchestrator gets half the budget instead, and
+    the call can run up to 60 s past ``timeout_s``.
     """
-    try:
-        result = await coro
-    except BaseException as e:  # noqa: BLE001 - the future is the only channel back to the caller
-        _resolve(future, e)
-    else:
-        _resolve(future, result=result)
-
-
-class _SessionLoop:
-    """A private asyncio event loop running in a daemon thread."""
-
-    def __init__(self, name: str) -> None:
-        self._loop = asyncio.new_event_loop()
-        self._pending: set[concurrent.futures.Future[Any]] = set()
-        self._pending_lock = threading.Lock()
-        started = threading.Event()
-        self._thread = threading.Thread(target=self._run, args=(started,), name=name, daemon=True)
-        self._thread.start()
-        started.wait()
-
-    def _run(self, started: threading.Event) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._loop.call_soon(started.set)
-        self._loop.run_forever()
-
-    def call_soon(self, callback: Callable[[], None]) -> None:
-        self._loop.call_soon_threadsafe(callback)
-
-    def submit(self, factory: Callable[[], Awaitable[T]]) -> "concurrent.futures.Future[T]":
-        """Schedule ``factory()`` on the private loop and return its future.
-
-        The coroutine is created *on* the loop, so anything the factory allocates
-        (locks, tasks) is bound to the right loop.
-        """
-        if self._loop.is_closed():
-            # Reported as a session error rather than asyncio's bare "Event loop is
-            # closed", which says nothing about which session was stopped or why.
-            raise IdeGymError("The IdeGYM session has been stopped and can no longer run operations")
-        future: concurrent.futures.Future[T] = concurrent.futures.Future()
-        with self._pending_lock:
-            self._pending.add(future)
-
-        def forget(_: Any) -> None:
-            with self._pending_lock:
-                self._pending.discard(future)
-
-        future.add_done_callback(forget)
-
-        def start() -> None:
-            try:
-                coro = factory()
-            except BaseException as e:  # noqa: BLE001 - the future is the only channel back
-                # A factory can raise before it ever awaits (an unknown server id, say).
-                # Left to the loop's exception handler, that would never resolve the
-                # future and the caller would wait forever.
-                _resolve(future, e)
-                return
-            task = self._loop.create_task(_settle(coro, future))
-            # Hold a reference until the future completes so the task cannot be
-            # garbage-collected mid-flight.
-            future.add_done_callback(lambda _: task)
-
-        self._loop.call_soon_threadsafe(start)
-        return future
-
-    def stop(self) -> None:
-        """Stop the loop, join its thread, and fail anything still in flight.
-
-        Without the last part a caller awaiting an operation when the session is
-        released would wait forever: the loop stops before its task can resolve the
-        future, and nothing else ever will. Safe to call more than once.
-        """
-        if self._loop.is_closed():
-            return
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=LOOP_JOIN_TIMEOUT_S)
-        if self._thread.is_alive():  # pragma: no cover - only reachable with a wedged loop
-            LOGGER.warning(
-                f"IdeGYM session loop thread did not exit within {LOOP_JOIN_TIMEOUT_S:g}s; leaving it running"
-            )
-            return
-        self._loop.close()
-        with self._pending_lock:
-            abandoned, self._pending = self._pending, set()
-        for future in abandoned:
-            _resolve(future, IdeGymError("The IdeGYM session was stopped while this operation was in flight"))
+    fitted = min(timeout_s - START_DEADLINE_GRACE_MIN_S, timeout_s / START_DEADLINE_GRACE_FACTOR)
+    return max(1, math.floor(max(fitted, timeout_s / 2)))
 
 
 class IdeGymSession:
-    """A registered IdeGYM client plus the private loop it runs on.
+    """A registered IdeGYM client plus the SDK loop thread it runs on.
 
     Instances are created and released through :func:`acquire_session` and
     :func:`release_session` rather than directly: the registry is what makes them
@@ -222,12 +162,11 @@ class IdeGymSession:
     def __init__(self, connection: IdeGymConnectionConfig, client_name: str) -> None:
         self._connection = connection
         self._client_name = client_name
-        self._loop = _SessionLoop(SESSION_THREAD_NAME)
-        self._client: Any = None
-        self._shutdown: asyncio.Event | None = None
-        self._serving: concurrent.futures.Future[None] | None = None
-        # SDK server handles, keyed by server id. Only ever touched on the private
-        # loop, so the dict needs no lock of its own.
+        self._shared: Any = None
+        self._starter: threading.Thread | None = None
+        self._lifecycle_lock = threading.Lock()
+        # SDK server handles, keyed by server id. Only ever touched on the SDK loop, or
+        # after it has stopped, so the dict needs no lock of its own.
         self._servers: dict[int, Any] = {}
 
     @property
@@ -235,100 +174,119 @@ class IdeGymSession:
         """The IdeGYM client name this session registered under. Used in log lines."""
         return self._client_name
 
-    def _require_client(self) -> Any:
-        client = self._client
-        if client is None:
-            raise IdeGymError("The IdeGYM session is not running")
-        return client
-
     # --- lifecycle ---------------------------------------------------------
 
     def start(self) -> "concurrent.futures.Future[None]":
-        """Register the client on the private loop.
+        """Register the client on the SDK's loop thread.
 
-        The returned future resolves once the client is registered and
+        Registration blocks until the orchestrator answers, so it runs in a one-shot
+        thread. The returned future resolves once the client is registered and
         heartbeating; the session then keeps serving until :meth:`stop`.
         """
         ready: concurrent.futures.Future[None] = concurrent.futures.Future()
-        serving = self._loop.submit(lambda: self._serve(ready))
-        self._serving = serving
-        # An unexpected raise before `ready` is resolved would otherwise leave
-        # every acquirer waiting forever.
-        serving.add_done_callback(lambda finished: _propagate_failure(finished, ready))
+        starter = threading.Thread(target=self._enter, args=(ready,), name=SESSION_THREAD_NAME, daemon=True)
+        self._starter = starter
+        starter.start()
         return ready
 
-    async def _serve(self, ready: "concurrent.futures.Future[None]") -> None:
-        """Own the SDK client's context for the whole session lifetime."""
-        self._shutdown = asyncio.Event()
-        client = self._build_client()
-        # `async with` registers the client and starts its heartbeat; on exit it stops
-        # the client, which also terminates any server the process failed to close.
-        # Holding the context for the session's lifetime makes that a guarantee.
+    def _enter(self, ready: "concurrent.futures.Future[None]") -> None:
         try:
-            async with client:
-                self._client = client
-                _resolve(ready)
-                await self._shutdown.wait()
-        finally:
-            self._client = None
-            self._servers.clear()
+            from idegym.client import SharedIdeGYMClient
+
+            shared = SharedIdeGYMClient(**self._client_arguments())
+            # Registers the client and starts its heartbeat; the SDK closes its own loop
+            # when this raises, so a failed registration leaves nothing behind.
+            shared.__enter__()
+        except BaseException as e:  # noqa: BLE001 - the future is the only channel back to the acquirers
+            _resolve(ready, e)
+            return
+        self._shared = shared
+        _resolve(ready)
 
     async def stop(self) -> None:
-        """Unregister the client, then stop the private loop.
+        """Unregister the client, which also terminates any server still open, and stop its loop.
 
-        Stopping the loop joins its thread, so it runs in a worker thread rather than
-        blocking the caller's, and it happens even if unregistering failed — otherwise
-        the thread leaks for the life of the process.
+        The SDK drains in-flight work for several seconds and joins its thread, so this
+        runs in a worker thread rather than blocking the caller's loop. Safe to call
+        more than once, and before :meth:`start`.
         """
-        serving, self._serving = self._serving, None
-        try:
-            if serving is not None and self._shutdown is not None:
-                shutdown = self._shutdown
-                self._loop.call_soon(shutdown.set)
-                await asyncio.wrap_future(serving)
-        finally:
-            await asyncio.to_thread(self._loop.stop)
+        await asyncio.to_thread(self._exit)
+
+    def _exit(self) -> None:
+        with self._lifecycle_lock:
+            # A registration still in flight (its only acquirer was cancelled, say) has to
+            # finish before it can be undone; skipping it would leave a client heartbeating.
+            if self._starter is not None:
+                self._starter.join()
+            shared, self._shared = self._shared, None
+            if shared is None:
+                return
+            try:
+                shared.__exit__(None, None, None)
+            finally:
+                self._servers.clear()
 
     # --- SDK construction --------------------------------------------------
 
-    def _build_client(self) -> Any:
+    def _client_arguments(self) -> dict[str, Any]:
+        """Keyword arguments for ``IdeGYMClient``, which ``SharedIdeGYMClient`` builds on its loop."""
         from idegym.api.auth import BasicAuth
-        from idegym.api.config import OTELConfig, TracingConfig
-        from idegym.client import IdeGYMClient
 
         connection = self._connection
         auth = None
         if connection.username is not None or connection.password is not None:
             auth = BasicAuth(username=connection.username, password=connection.password)
-        # Always pass an explicit OTEL config: left to its own devices the SDK traces
-        # to its default off-box collector, and NeMo Gym does not ship telemetry to a
-        # third party unless it was configured to.
-        otel_config = OTELConfig(
-            service_name=f"nemo-gym-{self._client_name}",
-            tracing=TracingConfig(
-                endpoint=connection.tracing_endpoint,
-                timeout=connection.tracing_timeout_s,
-                auth=BasicAuth(username=connection.tracing_username, password=connection.tracing_password),
-            ),
-        )
-        client = IdeGYMClient(
-            orchestrator_url=connection.orchestrator_url,
-            name=self._client_name,
-            namespace=connection.namespace,
-            nodes_count=connection.nodes_count,
-            auth=auth,
-            heartbeat_interval_in_seconds=connection.heartbeat_interval_s,
-            request_timeout_in_seconds=connection.request_timeout_s,
-            otel_config=otel_config,
-        )
-        install_transport(client, connection)
-        return client
+        arguments: dict[str, Any] = {
+            "orchestrator_url": connection.orchestrator_url,
+            "name": self._client_name,
+            "namespace": connection.namespace,
+            "nodes_count": connection.nodes_count,
+            "auth": auth,
+            "heartbeat_interval_in_seconds": connection.heartbeat_interval_s,
+            "request_timeout_in_seconds": connection.request_timeout_s,
+            # Pool limits are set on the transport: the SDK rejects `limits` next to it.
+            "transport": build_transport(connection),
+        }
+        # Left out, the SDK keeps tracing off unless IDEGYM_OTEL_TRACING_ENDPOINT is set.
+        if connection.tracing_enabled:
+            from idegym.api.config import OTELConfig, TracingConfig
+
+            arguments["otel_config"] = OTELConfig(
+                service_name=f"nemo-gym-{self._client_name}",
+                tracing=TracingConfig(
+                    endpoint=connection.tracing_endpoint,
+                    timeout=connection.tracing_timeout_s,
+                    auth=BasicAuth(username=connection.tracing_username, password=connection.tracing_password),
+                ),
+            )
+        return arguments
 
     # --- request plumbing --------------------------------------------------
 
-    async def _call(self, factory: Callable[[], Awaitable[T]]) -> T:
-        """Run ``factory()`` on the session loop and await it on the caller's."""
-        return await asyncio.wrap_future(self._loop.submit(factory))
+    async def _call(self, call: Callable[[Any], Awaitable[T]]) -> T:
+        """Run ``call(client)`` on the SDK loop and await it on the caller's.
+
+        A cancelled caller does not cancel the SDK call: the sandbox-side work has
+        already started, and abandoning it mid-flight would leave the orchestrator's
+        view and ours disagreeing. The result is dropped instead.
+        """
+        shared = self._shared
+        if shared is None:
+            raise IdeGymError(_STOPPED_MESSAGE)
+        try:
+            future = shared.submit(call)
+        except RuntimeError as e:
+            # The SDK refuses work once it has started closing, with a message that
+            # says nothing about which session was stopped or why.
+            raise IdeGymError(_STOPPED_MESSAGE) from e
+        try:
+            return await asyncio.shield(asyncio.wrap_future(future))
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if future.cancelled() and (task is None or not task.cancelling()):
+                # The SDK cancelled it while draining at stop; the caller was not cancelled.
+                raise IdeGymError("The IdeGYM session was stopped while this operation was in flight") from None
+            raise
 
     def _polling_config(self, polling: IdeGymPollingConfig, wait_timeout_s: float) -> Any:
         from idegym.client.operations.utils import PollingConfig
@@ -345,7 +303,7 @@ class IdeGymSession:
 
     async def health(self) -> str:
         """Return the orchestrator's reported health status."""
-        response = await self._call(lambda: self._require_client().health_check())
+        response = await self._call(lambda client: client.health_check())
         return str(getattr(response, "status", "") or "")
 
     async def start_server(
@@ -362,15 +320,16 @@ class IdeGymSession:
         it needs are built here so nothing above this module imports them.
         """
         kwargs = self._build_start_kwargs(request, polling=polling, timeout_s=timeout_s)
-        server = await self._call(lambda: self._start_and_track(kwargs))
-        return IdeGymServerRef(
+        server = await self._call(lambda client: self._start_and_track(client, kwargs))
+        ref = IdeGymServerRef(
             server_id=int(server.server_id),
             server_name=str(kwargs["server_name"]),
             namespace=self._connection.namespace,
         )
+        return ref
 
-    async def _start_and_track(self, kwargs: dict[str, Any]) -> Any:
-        server = await self._require_client().start_server(**kwargs)
+    async def _start_and_track(self, client: Any, kwargs: dict[str, Any]) -> Any:
+        server = await client.start_server(**kwargs)
         self._servers[int(server.server_id)] = server
         return server
 
@@ -409,9 +368,9 @@ class IdeGymSession:
             if (value := kwargs.get(key)) is not None:
                 kwargs[key] = enum(value)
         kwargs["namespace"] = self._connection.namespace
-        # The SDK enforces the readiness budget itself, including its retries on
-        # the orchestrator's 429 back-pressure, so it gets the whole budget.
-        kwargs["server_start_wait_timeout_in_seconds"] = max(1, math.ceil(timeout_s))
+        # The SDK enforces the readiness budget itself, including its retries on the
+        # orchestrator's 429 back-pressure, but adds a grace period on top of the wait.
+        kwargs["server_start_wait_timeout_in_seconds"] = _start_wait_timeout_s(timeout_s)
         kwargs["polling_config"] = self._polling_config(polling, timeout_s)
         return kwargs
 
@@ -420,21 +379,46 @@ class IdeGymSession:
         server_id: int,
         script: str,
         *,
+        cwd: str | None,
+        env: Mapping[str, str] | None,
+        user: str | None,
+        max_output_bytes: int | None,
         command_timeout_s: float,
         graceful_termination_timeout_s: float,
         request_timeout_s: float,
         polling: IdeGymPollingConfig,
     ) -> IdeGymBashResult:
-        """Run ``script`` through the server's bash tool."""
+        """Run ``script`` through the server's bash tool, in ``cwd`` with ``env``, as ``user``.
+
+        ``max_output_bytes`` bounds each stream (head and tail around a truncation
+        marker); ``None`` returns them whole. Output is returned verbatim. A request the
+        SDK would refuse to build raises ``IdeGymInvalidRequestError`` before anything is
+        sent.
+        """
         request_timeout = max(1, math.ceil(request_timeout_s))
         polling_config = self._polling_config(polling, request_timeout_s)
+        bash_env = dict(env) if env is not None else None
+        self._validate_bash_request(
+            script=script,
+            cwd=cwd,
+            env=bash_env,
+            user=user,
+            max_output_bytes=max_output_bytes,
+            command_timeout_s=command_timeout_s,
+            graceful_termination_timeout_s=graceful_termination_timeout_s,
+        )
         response = await self._call(
-            lambda: self._server(server_id).execute_bash(
+            lambda _: self._server(server_id).execute_bash(
                 script=script,
                 command_timeout=command_timeout_s,
                 graceful_termination_timeout=graceful_termination_timeout_s,
                 request_timeout=request_timeout,
                 polling_config=polling_config,
+                max_output_bytes=max_output_bytes,
+                strip_output=False,
+                cwd=cwd,
+                env=bash_env,
+                user=user,
             )
         )
         return IdeGymBashResult(
@@ -443,39 +427,119 @@ class IdeGymSession:
             exit_code=int(response.exit_code),
         )
 
-    async def list_capabilities(self, server_id: int) -> list[str]:
-        """Return the plugins loaded in the running server container.
+    @staticmethod
+    def _validate_bash_request(
+        *,
+        script: str,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        user: str | None,
+        max_output_bytes: int | None,
+        command_timeout_s: float,
+        graceful_termination_timeout_s: float,
+    ) -> None:
+        """Build the SDK's bash request here, so only its validation reads as an invalid request.
 
-        This is the cheapest orchestrator call that touches both the server's
-        database record and the pod itself, which makes it the provider's liveness
-        probe.
+        The SDK builds the same model inside ``execute_bash``, where its ``ValidationError``
+        would be indistinguishable from one raised while parsing the response.
         """
-        response = await self._call(lambda: self._server(server_id).list_capabilities())
-        return [str(plugin) for plugin in (response.plugins or [])]
+        from idegym.api.tools.bash import BashCommandRequest
+        from pydantic import ValidationError
+
+        try:
+            BashCommandRequest(
+                command=script,
+                timeout=command_timeout_s,
+                graceful_termination_timeout=graceful_termination_timeout_s,
+                max_output_bytes=max_output_bytes,
+                strip_output=False,
+                cwd=cwd,
+                env=env or {},
+                user=user,
+            )
+        except ValidationError as e:
+            # Messages only: pydantic's own rendering repeats the input, env values included.
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in e.errors()
+            )
+            raise IdeGymInvalidRequestError(f"Invalid bash request: {problems}") from e
+
+    async def server_status(self, server_id: int) -> IdeGymServerStatus:
+        """Report whether the server is usable. Reading it does not count as activity."""
+        response = await self._call(lambda _: self._server(server_id).status())
+        return IdeGymServerStatus(
+            usable=bool(response.usable),
+            availability=str(response.availability),
+            pod_ready=response.pod_ready,
+            details=response.details,
+        )
+
+    async def keepalive(self, server_id: int, minutes: float) -> int:
+        """Hold the server against the inactivity reaper and return the hold's end, in epoch ms.
+
+        The orchestrator only ever extends a hold, so the returned end can be later than
+        ``minutes`` from now.
+        """
+        response = await self._call(lambda _: self._server(server_id).keepalive(minutes=minutes))
+        return int(response.keepalive_until)
+
+    async def upload_file(
+        self,
+        server_id: int,
+        local_path: Path,
+        remote_path: str,
+        *,
+        chunk_bytes: int,
+        request_timeout_s: float,
+        polling: IdeGymPollingConfig,
+    ) -> int:
+        """Upload ``local_path`` byte-for-byte and return the remote file's size."""
+        request_timeout = max(1, math.ceil(request_timeout_s))
+        polling_config = self._polling_config(polling, request_timeout_s)
+        return await self._call(
+            lambda _: self._server(server_id).upload_file(
+                local_path,
+                remote_path,
+                chunk_bytes=chunk_bytes,
+                request_timeout=request_timeout,
+                polling_config=polling_config,
+            )
+        )
+
+    async def download_file(
+        self,
+        server_id: int,
+        remote_path: str,
+        local_path: Path,
+        *,
+        chunk_bytes: int,
+        request_timeout_s: float,
+        polling: IdeGymPollingConfig,
+    ) -> int:
+        """Download ``remote_path`` into ``local_path`` and return the byte count."""
+        request_timeout = max(1, math.ceil(request_timeout_s))
+        polling_config = self._polling_config(polling, request_timeout_s)
+        return await self._call(
+            lambda _: self._server(server_id).download_file(
+                remote_path,
+                local_path,
+                chunk_bytes=chunk_bytes,
+                request_timeout=request_timeout,
+                polling_config=polling_config,
+            )
+        )
 
     async def stop_server(self, server_id: int, *, polling: IdeGymPollingConfig, timeout_s: float) -> None:
-        """Delete the server pod and its Kubernetes resources."""
+        """Delete the server pod and its Kubernetes resources. The SDK raises if that fails."""
         polling_config = self._polling_config(polling, timeout_s)
-        await self._call(lambda: self._stop_and_forget(server_id, polling_config))
+        await self._call(lambda client: self._stop_and_forget(client, server_id, polling_config))
 
-    async def _stop_and_forget(self, server_id: int, polling_config: Any) -> None:
+    async def _stop_and_forget(self, client: Any, server_id: int, polling_config: Any) -> None:
         server = self._server(server_id)
-        response = await self._require_client().stop_server(server, polling_config=polling_config)
-        # The SDK reports a failed delete operation by *returning* an ErrorResponse
-        # rather than raising, so an unchecked return records a live pod as stopped.
-        self._raise_for_error_response(response, f"Deleting IdeGYM server {server_id}")
+        await client.stop_server(server, polling_config=polling_config)
         # Forgotten only on success: a server dropped after a failed delete would make
         # the caller's next attempt look like "already stopped".
         self._servers.pop(server_id, None)
-
-    @staticmethod
-    def _raise_for_error_response(response: Any, action: str) -> None:
-        from idegym.api.orchestrator.servers import ErrorResponse
-
-        if isinstance(response, ErrorResponse):
-            # The dump carries `status_code`, which the error classifier reads to tell
-            # an already-gone server from a real failure.
-            raise IdeGymError(f"{action} failed: {response.model_dump()}")
 
     def _server(self, server_id: int) -> Any:
         server = self._servers.get(server_id)
@@ -485,63 +549,6 @@ class IdeGymSession:
                 f"belongs to another process"
             )
         return server
-
-
-def _propagate_failure(source: "concurrent.futures.Future[Any]", target: "concurrent.futures.Future[None]") -> None:
-    if target.done():
-        return
-    exception = None if source.cancelled() else source.exception()
-    _resolve(target, exception or IdeGymError("The IdeGYM session ended before it became ready"))
-
-
-_TRANSPORT_WARNED = False
-
-
-def install_transport(client: Any, connection: IdeGymConnectionConfig) -> None:
-    """Replace the SDK's HTTP transport with a pool-bounded one.
-
-    The IdeGYM client builds its own ``httpx.AsyncClient`` and exposes no transport
-    hook, so the pool limits and the aiohttp backend Gym expects can only be installed
-    by swapping it out afterwards. That reaches into a private attribute, so a shape
-    change in the SDK degrades to a warning rather than failing the run.
-    """
-    global _TRANSPORT_WARNED
-
-    http_client = getattr(client, "_http_client", None)
-    if http_client is None or not hasattr(http_client, "_transport"):
-        if not _TRANSPORT_WARNED:
-            _TRANSPORT_WARNED = True
-            LOGGER.warning(
-                "The installed idegym-client does not expose the httpx client this provider configures "
-                "connection pooling on; falling back to the SDK's own transport. Pool limits and "
-                "connection.transport_backend have no effect."
-            )
-        return
-    # The transport being replaced was built moments ago and has never issued a
-    # request, so its connection pool holds nothing that needs closing.
-    http_client._transport = build_transport(connection)
-
-
-def build_transport(connection: IdeGymConnectionConfig) -> Any:
-    """Build the httpx transport for the configured backend and pool limits."""
-    import httpx
-
-    limits = httpx.Limits(
-        max_connections=connection.max_connections,
-        max_keepalive_connections=connection.max_keepalive_connections,
-        keepalive_expiry=connection.keepalive_expiry_s,
-    )
-    if connection.transport_backend == TransportBackend.AIOHTTP:
-        try:
-            from httpx_aiohttp import AiohttpTransport
-        except ImportError:
-            LOGGER.warning(
-                "connection.transport_backend=aiohttp requested but httpx-aiohttp is not installed; "
-                "falling back to the httpx transport"
-            )
-        else:
-            return AiohttpTransport(limits=limits, retries=connection.connect_retries)
-    return httpx.AsyncHTTPTransport(limits=limits, retries=connection.connect_retries)
 
 
 @dataclass
@@ -575,15 +582,22 @@ def _observe(source: "concurrent.futures.Future[None]") -> "concurrent.futures.F
 
 
 def require_idegym_client() -> None:
-    """Fail with an actionable message when the IdeGYM SDK is not installed."""
+    """Fail with an actionable message when the IdeGYM SDK is missing or too old."""
+    install_hint = (
+        "Install it with `uv pip install 'nemo-gym[idegym]'` (or `pip install 'idegym-client>=0.13.1'`) in the "
+        "runtime environment before selecting the idegym sandbox provider."
+    )
     try:
-        import idegym.client  # noqa: F401
+        import idegym.client
     except ModuleNotFoundError as e:
         raise ModuleNotFoundError(
-            "The idegym-client SDK is required for the idegym sandbox provider. Install it with "
-            "`uv pip install 'nemo-gym[idegym]'` (or `pip install idegym-client`) in the runtime "
-            "environment before selecting the idegym sandbox provider."
+            f"The idegym-client SDK is required for the idegym sandbox provider. {install_hint}"
         ) from e
+    if not hasattr(idegym.client, "SharedIdeGYMClient"):
+        version = getattr(idegym.client, "__version__", "unknown")
+        raise ImportError(
+            f"The idegym sandbox provider requires idegym-client >= 0.13.1, found {version}. {install_hint}"
+        )
 
 
 async def acquire_session(connection: IdeGymConnectionConfig, attribution: IdeGymAttributionConfig) -> IdeGymSession:

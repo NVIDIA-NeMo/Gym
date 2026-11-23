@@ -17,18 +17,23 @@
 
 The provider is exercised against a fake :class:`IdeGymSession`, which is the
 provider's whole view of IdeGYM. Two things keep that fake honest: a signature
-test that binds the provider's session call shapes against the real class, and a
-``bash``-backed session that runs the generated scripts for real, so the parts
-most likely to be wrong -- the shell quoting, the ``cd``, the base64 chunking --
-are tested by executing them rather than by comparing strings.
+test that holds it to the real class's parameters, and a ``bash``-backed session
+that runs commands for real in the requested ``cwd`` with the requested ``env``, so
+what the provider sends is tested by executing it rather than by comparing strings.
+Failures are the SDK's own typed exceptions, which is what :mod:`.errors` classifies.
 """
 
 import asyncio
 import builtins
 import inspect
+import json
+import math
+import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +43,6 @@ from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecResult,
-    SandboxHandle,
     SandboxSpec,
     SandboxStatus,
 )
@@ -46,20 +50,27 @@ from nemo_gym.sandbox.providers.idegym import naming as idegym_naming
 from nemo_gym.sandbox.providers.idegym import provider as idegym_provider
 from nemo_gym.sandbox.providers.idegym import session as idegym_session
 from nemo_gym.sandbox.providers.idegym.config import (
-    MAX_COMMAND_BYTES,
-    MAX_UPLOAD_CHUNK_BYTES,
+    MAX_FILE_CHUNK_BYTES,
+    IdeGymAttributionConfig,
     IdeGymConnectionConfig,
+    IdeGymCreateConfig,
     IdeGymExecConfig,
     IdeGymFilesConfig,
+    IdeGymOperationsConfig,
+    IdeGymVerifyConfig,
 )
 from nemo_gym.sandbox.providers.idegym.errors import (
-    IdeGymCommandTooLongError,
+    IdeGymCreateVerificationError,
+    IdeGymError,
+    IdeGymInvalidRequestError,
     IdeGymOperationError,
+    IdeGymTransferError,
     IdeGymUnknownServerError,
     is_command_timeout,
+    is_deadline_exceeded,
+    is_invalid_request,
     is_retryable,
     is_sandbox_gone,
-    orchestrator_status,
 )
 from nemo_gym.sandbox.providers.idegym.naming import (
     MAX_CLIENT_NAME_LENGTH,
@@ -70,30 +81,52 @@ from nemo_gym.sandbox.providers.idegym.provider import (
     NO_TIMEOUT_COMMAND_SECONDS,
     SANDBOX_RUNTIME_RETURN_CODE,
     IdeGymProvider,
-    _IdeGymSandbox,
 )
-from nemo_gym.sandbox.providers.idegym.session import IdeGymBashResult, IdeGymServerRef
-from nemo_gym.sandbox.providers.idegym.shell import BashScriptBuilder
+from nemo_gym.sandbox.providers.idegym.session import IdeGymBashResult, IdeGymServerRef, IdeGymServerStatus
 from nemo_gym.sandbox.providers.idegym.spec import IdeGymProviderOptions, ServerRequestTranslator
-from nemo_gym.sandbox.providers.idegym.transfer import Base64BashFileTransfer
 from nemo_gym.sandbox.providers.registry import get_provider_class
 
 
 pytestmark = pytest.mark.sandbox
 
+pytest.importorskip("idegym.client", reason="idegym-client optional dependency is not installed")
+
+from idegym.client.exceptions import (  # noqa: E402 - after the importorskip guard
+    IdeGYMBusyError,
+    IdeGYMConnectionError,
+    IdeGYMSandboxError,
+    IdeGYMTimeoutError,
+    http_error,
+)
+
+
 MAX_SERVER_NAME_LENGTH = 63
+ROOT = Path(__file__).resolve().parents[3]
+SHIPPED_CONFIG = ROOT / "nemo_gym/sandbox/providers/idegym/configs/idegym.yaml"
 
 requires_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not available")
 
 
-def orchestrator_error(status: int, body: str = "boom") -> RuntimeError:
-    """An error shaped like the IdeGYM SDK's request failures."""
-    return RuntimeError(f"Request failed: url=/api/idegym-servers status={status} reason='x' data='{body}'")
+def orchestrator_error(status: int, body: str = "boom") -> Exception:
+    """The SDK's exception for a status the orchestrator itself returned."""
+    return http_error(f"Request failed: url=/api/idegym-servers status={status}", status_code=status, body=body)
 
 
-def forward_error(status: int, body: str) -> RuntimeError:
-    """An error shaped like the SDK's relayed orchestrator error responses."""
-    return RuntimeError(f"Failed to forward request POST /api/x: {{'status_code': {status}, 'body': '{body}'}}")
+def sandbox_error(status: int, message: str) -> IdeGYMSandboxError:
+    """The SDK's exception for a status the sandbox returned through a forward, worded as the SDK words it."""
+    body = json.dumps({"message": message, "status": status})
+    return IdeGYMSandboxError(
+        f"Failed to forward request POST /api/tools/x: {{'status_code': {status}, 'body': {body!r}}}",
+        status_code=status,
+        body=body,
+    )
+
+
+def bash_timeout(seconds: int = 3) -> IdeGYMSandboxError:
+    return sandbox_error(500, f"Command execution timed out after {seconds} seconds")
+
+
+ALIVE = IdeGymServerStatus(usable=True, availability="ALIVE", pod_ready=True, details=None)
 
 
 class FakeSession:
@@ -108,15 +141,22 @@ class FakeSession:
         self.client_name = "nemo-gym-test"
         self.start_calls: list[dict[str, Any]] = []
         self.bash_calls: list[dict[str, Any]] = []
-        self.capability_calls: list[int] = []
+        self.status_calls: list[int] = []
+        self.keepalive_calls: list[tuple[int, float]] = []
+        self.upload_calls: list[dict[str, Any]] = []
+        self.download_calls: list[dict[str, Any]] = []
         self.stop_calls: list[dict[str, Any]] = []
         self.health_calls = 0
         self.live_servers: set[int] = set()
         self.start_results: list[Any] = [
             IdeGymServerRef(server_id=7, server_name="nemo-gym-abcdef12", namespace="idegym")
         ]
-        self.bash_results: list[Any] = [IdeGymBashResult(stdout="idegym-sandbox-ready", stderr="", exit_code=0)]
-        self.capability_results: list[Any] = [["tools"]]
+        self.bash_results: list[Any] = [IdeGymBashResult(stdout="", stderr="", exit_code=0)]
+        self.status_results: list[Any] = [ALIVE]
+        # None answers with a hold of `minutes` from now, as the orchestrator does.
+        self.keepalive_results: list[Any] = [None]
+        self.upload_results: list[Any] = [0]
+        self.download_results: list[Any] = [0]
         self.stop_results: list[Any] = [None]
         self.health_results: list[Any] = ["healthy"]
 
@@ -142,6 +182,10 @@ class FakeSession:
         server_id: int,
         script: str,
         *,
+        cwd: Any,
+        env: Any,
+        user: Any,
+        max_output_bytes: Any,
         command_timeout_s: float,
         graceful_termination_timeout_s: float,
         request_timeout_s: float,
@@ -151,6 +195,10 @@ class FakeSession:
             {
                 "server_id": server_id,
                 "script": script,
+                "cwd": cwd,
+                "env": env,
+                "user": user,
+                "max_output_bytes": max_output_bytes,
                 "command_timeout_s": command_timeout_s,
                 "graceful_termination_timeout_s": graceful_termination_timeout_s,
                 "request_timeout_s": request_timeout_s,
@@ -158,9 +206,56 @@ class FakeSession:
         )
         return self._next(self.bash_results)
 
-    async def list_capabilities(self, server_id: int) -> Any:
-        self.capability_calls.append(server_id)
-        return self._next(self.capability_results)
+    async def server_status(self, server_id: int) -> Any:
+        self.status_calls.append(server_id)
+        return self._next(self.status_results)
+
+    async def keepalive(self, server_id: int, minutes: float) -> int:
+        self.keepalive_calls.append((server_id, minutes))
+        result = self._next(self.keepalive_results)
+        return int(time.time() * 1000 + minutes * 60_000) if result is None else result
+
+    async def upload_file(
+        self,
+        server_id: int,
+        local_path: Path,
+        remote_path: str,
+        *,
+        chunk_bytes: int,
+        request_timeout_s: float,
+        polling: Any,
+    ) -> int:
+        self.upload_calls.append(
+            {
+                "server_id": server_id,
+                "local_path": local_path,
+                "remote_path": remote_path,
+                "chunk_bytes": chunk_bytes,
+                "request_timeout_s": request_timeout_s,
+            }
+        )
+        return self._next(self.upload_results)
+
+    async def download_file(
+        self,
+        server_id: int,
+        remote_path: str,
+        local_path: Path,
+        *,
+        chunk_bytes: int,
+        request_timeout_s: float,
+        polling: Any,
+    ) -> int:
+        self.download_calls.append(
+            {
+                "server_id": server_id,
+                "remote_path": remote_path,
+                "local_path": local_path,
+                "chunk_bytes": chunk_bytes,
+                "request_timeout_s": request_timeout_s,
+            }
+        )
+        return self._next(self.download_results)
 
     async def stop_server(self, server_id: int, *, polling: Any, timeout_s: float) -> Any:
         self.stop_calls.append({"server_id": server_id, "timeout_s": timeout_s})
@@ -175,26 +270,55 @@ class FakeSession:
 
 
 class LocalBashSession(FakeSession):
-    """A fake session that actually runs the generated scripts with local ``bash``.
+    """A fake session that runs commands with local ``bash`` and moves files on local disk.
 
-    Mirrors the parts of IdeGYM's executor that the generated scripts depend on:
-    a fresh ``bash -c`` per call, and stdout/stderr stripped on the way back.
+    Mirrors what the IdeGYM 0.13.1 server does with a request: a fresh ``bash -c`` in
+    ``cwd`` with ``env`` on top of a minimal environment, output returned unstripped, a
+    missing ``cwd`` answered with a 400, and the file endpoints' 404 for a missing path
+    and 400 for a directory.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.scripts: list[str] = []
-
     async def execute_bash(self, server_id: int, script: str, **kwargs: Any) -> Any:
-        self.scripts.append(script)
+        await super().execute_bash(server_id, script, **kwargs)
+        cwd = kwargs["cwd"]
+        if cwd is not None and not Path(cwd).is_dir():
+            raise sandbox_error(400, f"Working directory {cwd} does not exist")
         completed = await asyncio.to_thread(
-            subprocess.run, ["bash", "-c", script], capture_output=True, text=True, check=False
+            subprocess.run,
+            ["bash", "-c", script],
+            cwd=cwd,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **(kwargs["env"] or {})},
+            capture_output=True,
+            check=False,
         )
         return IdeGymBashResult(
-            stdout=completed.stdout.strip(),
-            stderr=completed.stderr.strip(),
+            stdout=completed.stdout.decode(errors="replace"),
+            stderr=completed.stderr.decode(errors="replace"),
             exit_code=completed.returncode,
         )
+
+    @staticmethod
+    def _readable(remote_path: str) -> Path:
+        path = Path(remote_path)
+        if not path.exists():
+            raise sandbox_error(404, f"Path not found: {remote_path}")
+        if path.is_dir():
+            raise sandbox_error(400, f"Not a file: {remote_path}")
+        return path
+
+    async def upload_file(self, server_id: int, local_path: Path, remote_path: str, **kwargs: Any) -> int:
+        await super().upload_file(server_id, local_path, remote_path, **kwargs)
+        target = Path(remote_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(local_path, target)
+        return target.stat().st_size
+
+    async def download_file(self, server_id: int, remote_path: str, local_path: Path, **kwargs: Any) -> int:
+        await super().download_file(server_id, remote_path, local_path, **kwargs)
+        source = self._readable(remote_path)
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, local_path)
+        return Path(local_path).stat().st_size
 
 
 @pytest.fixture
@@ -234,35 +358,17 @@ def make_provider(monkeypatch: pytest.MonkeyPatch, fake_session: FakeSession):
     return factory
 
 
-def make_handle(
-    *,
-    server_id: int = 7,
-    workdir: str | None = None,
-    env: dict[str, str] | None = None,
-    stopped: bool = False,
-) -> SandboxHandle:
-    return SandboxHandle(
-        sandbox_id=str(server_id),
-        provider_name="idegym",
-        raw=_IdeGymSandbox(
-            server_id=server_id,
-            server_name="nemo-gym-abcdef12",
-            namespace="idegym",
-            image="registry.example.com/idegym/env:1",
-            workdir=workdir,
-            env=env or {},
-            stopped=stopped,
-        ),
-    )
-
-
 def spec(**overrides: Any) -> SandboxSpec:
     values: dict[str, Any] = {"image": "registry.example.com/idegym/env:1"}
     values.update(overrides)
     return SandboxSpec(**values)
 
 
-# --- registration and dependency ------------------------------------------
+def translator() -> ServerRequestTranslator:
+    return ServerRequestTranslator(IdeGymCreateConfig())
+
+
+# --- registration, dependency and package surface --------------------------
 
 
 def test_registry_resolves_idegym() -> None:
@@ -288,34 +394,31 @@ def test_missing_idegym_dependency_message(monkeypatch: pytest.MonkeyPatch) -> N
         idegym_session.require_idegym_client()
 
 
-def test_provider_binds_the_session_api_it_calls() -> None:
+SESSION_API = (
+    "health",
+    "start_server",
+    "execute_bash",
+    "server_status",
+    "keepalive",
+    "upload_file",
+    "download_file",
+    "stop_server",
+)
+
+
+@pytest.mark.parametrize("name", SESSION_API)
+def test_provider_binds_the_session_api_it_calls(name: str) -> None:
     """The fake session is only trustworthy if it matches the real one's shape.
 
-    Binding the provider's exact call shapes against ``IdeGymSession`` means a
-    signature change there fails these tests instead of passing against a fake
-    that has quietly drifted.
+    Names and kinds only: the fake annotates loosely on purpose, but a renamed,
+    reordered, added or removed parameter on ``IdeGymSession`` has to fail here
+    instead of passing against a fake that has quietly drifted.
     """
-    real = idegym_session.IdeGymSession
-    inspect.signature(real.start_server).bind(None, {}, polling=None, timeout_s=1.0)
-    inspect.signature(real.execute_bash).bind(
-        None,
-        1,
-        "true",
-        command_timeout_s=1.0,
-        graceful_termination_timeout_s=2.0,
-        request_timeout_s=3.0,
-        polling=None,
-    )
-    inspect.signature(real.list_capabilities).bind(None, 1)
-    inspect.signature(real.stop_server).bind(None, 1, polling=None, timeout_s=1.0)
-    inspect.signature(real.health).bind(None)
-    for name in ("start_server", "execute_bash", "list_capabilities", "stop_server", "health"):
-        # Names and kinds only: the fake annotates loosely on purpose, but a
-        # renamed, reordered, added or removed parameter has to fail here.
-        def parameters(owner: type) -> list[tuple[str, Any]]:
-            return [(p.name, p.kind) for p in inspect.signature(getattr(owner, name)).parameters.values()]
 
-        assert parameters(real) == parameters(FakeSession), name
+    def parameters(owner: type) -> list[tuple[str, Any]]:
+        return [(p.name, p.kind) for p in inspect.signature(getattr(owner, name)).parameters.values()]
+
+    assert parameters(idegym_session.IdeGymSession) == parameters(FakeSession)
 
 
 # --- config ----------------------------------------------------------------
@@ -335,6 +438,8 @@ def test_provider_binds_the_session_api_it_calls() -> None:
         ("connection", {"max_keepalive_connections": -1}),
         ("connection", {"keepalive_expiry_s": 0}),
         ("connection", {"connect_retries": -1}),
+        ("connection", {"poll_retries": -1}),
+        ("connection", {"retry_delay_s": -1}),
         ("connection", {"tracing_timeout_s": 0}),
         ("create", {"ready_timeout_s": 0}),
         ("create", {"retries": -1}),
@@ -345,6 +450,8 @@ def test_provider_binds_the_session_api_it_calls() -> None:
         ("create", {"service_port": 70000}),
         ("create", {"container_port": -1}),
         ("create", {"max_restarts": -1}),
+        ("create", {"keepalive_minutes": 0}),
+        ("create", {"keepalive_minutes": 24 * 60 + 1}),
         ("create", {"polling": {"initial_delay_s": 0}}),
         ("create", {"polling": {"interval_s": -1}}),
         ("create", {"polling": {"backoff_factor": 0.5}}),
@@ -352,19 +459,19 @@ def test_provider_binds_the_session_api_it_calls() -> None:
         ("exec", {"default_timeout_s": 0}),
         ("exec", {"graceful_termination_timeout_s": -1}),
         ("exec", {"request_overhead_s": -1}),
-        ("exec", {"user_mode": "sudo"}),
+        ("exec", {"max_output_bytes": 0}),
         ("verify", {"timeout_s": 0}),
-        ("files", {"upload_chunk_bytes": 0}),
-        ("files", {"upload_chunk_bytes": MAX_UPLOAD_CHUNK_BYTES + 1}),
-        ("files", {"download_chunk_bytes": 0}),
-        ("files", {"max_download_bytes": 0}),
+        ("files", {"chunk_bytes": 0}),
+        ("files", {"chunk_bytes": MAX_FILE_CHUNK_BYTES + 1}),
         ("files", {"timeout_s": 0}),
         ("operations", {"close_timeout_s": 0}),
         ("operations", {"status_timeout_s": 0}),
         ("operations", {"retries": -1}),
         ("operations", {"retry_delay_s": -1}),
         ("operations", {"retry_max_delay_s": -1}),
+        ("operations", {"keepalive_minutes_max": 0}),
         ("attribution", {"client_name_prefix": ""}),
+        ("attribution", {"key_prefix": "Not A Prefix"}),
     ],
 )
 def test_config_validation_rejects_bad_values(group: str, kwargs: dict[str, Any]) -> None:
@@ -372,16 +479,62 @@ def test_config_validation_rejects_bad_values(group: str, kwargs: dict[str, Any]
         IdeGymProvider(**{group: kwargs})
 
 
-def test_config_coercion_and_defaults() -> None:
-    provider = IdeGymProvider(connection={"orchestrator_url": "idegym.example", "namespace": "gym"})
+def test_an_unknown_config_key_fails_at_construction() -> None:
+    """A YAML still setting a pre-0.13 key, such as exec.user_mode, must not be silently half-applied."""
+    with pytest.raises(TypeError, match="user_mode"):
+        IdeGymProvider(exec={"user_mode": "sudo"})
+
+
+def test_config_sections_are_coerced_from_mappings() -> None:
+    provider = IdeGymProvider(
+        connection={"orchestrator_url": "idegym.example", "namespace": "gym"},
+        create={"server_name_metadata_keys": ["instance_id", "repo"], "polling": {"max_delay_s": 5.0}},
+    )
     assert provider._connection == IdeGymConnectionConfig(orchestrator_url="idegym.example", namespace="gym")
-    assert provider._connection.tracing_enabled is False
-    assert provider._files == IdeGymFilesConfig()
-
-
-def test_invalid_config_type_raises() -> None:
+    # Hydra hands over lists; the frozen config keeps a hashable tuple and a nested dataclass.
+    assert provider._create.server_name_metadata_keys == ("instance_id", "repo")
+    assert provider._create.polling.max_delay_s == 5.0
     with pytest.raises(TypeError, match="IdeGymConnectionConfig"):
         IdeGymProvider(connection=["not", "a", "mapping"])
+
+
+def test_the_shipped_config_block_constructs_the_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omegaconf import OmegaConf
+
+    for name in list(os.environ):
+        if name.startswith("IDEGYM_"):
+            monkeypatch.delenv(name)
+    shipped = OmegaConf.to_container(OmegaConf.load(SHIPPED_CONFIG), resolve=True)
+    provider = IdeGymProvider(**shipped["sandbox"]["idegym"])
+    assert provider._connection.orchestrator_url == "idegym.test"
+    assert provider._connection.username is None
+    assert provider._connection.tracing_endpoint is None
+    assert provider._create.keepalive_minutes is None
+    assert provider._exec.max_output_bytes == 1024 * 1024
+    assert provider._files.chunk_bytes == 1024 * 1024
+    assert provider._attribution.key_prefix == "nemo-gym.nvidia.com/"
+
+
+def test_the_shipped_config_only_overrides_the_code_defaults_on_purpose(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Building the provider in code must behave like the documented setup, save for the listed overrides."""
+    from omegaconf import OmegaConf
+
+    for name in list(os.environ):
+        if name.startswith("IDEGYM_"):
+            monkeypatch.delenv(name)
+    shipped = OmegaConf.to_container(OmegaConf.load(SHIPPED_CONFIG), resolve=True)["sandbox"]["idegym"]
+    provider = IdeGymProvider(**shipped)
+    # run_as_root is off in code, as in the SDK; the shipped config opts SWE-bench style images in.
+    assert provider._create == IdeGymCreateConfig(run_as_root=True)
+    assert provider._connection == IdeGymConnectionConfig()
+    assert provider._exec == IdeGymExecConfig()
+    assert provider._verify == IdeGymVerifyConfig()
+    assert provider._files == IdeGymFilesConfig()
+    assert provider._operations == IdeGymOperationsConfig()
+    assert provider._attribution == IdeGymAttributionConfig()
+    # Every key the code reads is in the shipped file, so each one has operator guidance there.
+    for section, config in (("connection", IdeGymConnectionConfig), ("operations", IdeGymOperationsConfig)):
+        assert set(shipped[section]) == set(config.__dataclass_fields__), section
 
 
 def test_provider_options_validation() -> None:
@@ -389,6 +542,8 @@ def test_provider_options_validation() -> None:
         IdeGymProviderOptions.from_mapping({"nope": 1})
     with pytest.raises(TypeError, match="node_selector"):
         IdeGymProviderOptions.from_mapping({"node_selector": ["a"]})
+    with pytest.raises(TypeError, match="labels"):
+        IdeGymProviderOptions.from_mapping({"labels": ["a"]})
     with pytest.raises(TypeError, match="pod_overrides"):
         IdeGymProviderOptions.from_mapping({"pod_overrides": []})
     with pytest.raises(TypeError, match="snapshot"):
@@ -403,40 +558,104 @@ def test_provider_options_validation() -> None:
 # --- error classification --------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("error", "status", "gone", "retryable"),
-    [
-        (orchestrator_error(404), 404, True, False),
-        (orchestrator_error(410), 410, True, False),
-        (orchestrator_error(429), 429, False, True),
-        (orchestrator_error(503), 503, False, True),
-        (orchestrator_error(400), 400, False, False),
-        (forward_error(410, "gone"), 410, True, False),
-        (RuntimeError("no status here"), None, False, False),
-        (ConnectionError("refused"), None, False, True),
-    ],
-)
-def test_error_classification(error: Exception, status: int | None, gone: bool, retryable: bool) -> None:
-    assert orchestrator_status(error) == status
-    assert is_sandbox_gone(error) is gone
-    assert is_retryable(error) is retryable
-
-
-def test_command_timeout_classification() -> None:
-    assert is_command_timeout(TimeoutError("client gave up")) is True
-    assert is_command_timeout(forward_error(500, "Command execution timed out after 5 seconds")) is True
-    assert is_command_timeout(orchestrator_error(500, "kaboom")) is False
-
-
-def test_transport_failures_are_retryable() -> None:
-    """The SDK lets httpx's exceptions through, and none of them are builtins."""
+def connect_timeout() -> IdeGYMTimeoutError:
     import httpx
 
-    for error in (httpx.ConnectError("refused"), httpx.ReadTimeout("slow"), httpx.PoolTimeout("full")):
-        assert is_retryable(error) is True, error
-    # A read timeout means we stopped waiting; failing to connect at all does not.
-    assert is_command_timeout(httpx.ReadTimeout("slow")) is True
-    assert is_command_timeout(httpx.ConnectTimeout("unreachable")) is False
+    try:
+        raise IdeGYMTimeoutError("Request timed out") from httpx.ConnectTimeout("unreachable")
+    except IdeGYMTimeoutError as e:
+        return e
+
+
+def malformed_json() -> json.JSONDecodeError:
+    """What the SDK re-raises when the orchestrator answers with a body that is not JSON."""
+    try:
+        json.loads("<html>bad gateway</html>")
+    except json.JSONDecodeError as e:
+        return e
+    raise AssertionError("unreachable")
+
+
+def malformed_bash_response() -> Exception:
+    """What the SDK raises when a bash response is missing fields."""
+    from idegym.api.tools.bash import BashCommandResponse
+    from pydantic import ValidationError
+
+    try:
+        BashCommandResponse.model_validate({"stdout": "x"})
+    except ValidationError as e:
+        return e
+    raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize(
+    ("error", "gone", "retryable", "timeout", "invalid"),
+    [
+        pytest.param(orchestrator_error(404), True, False, False, False, id="orchestrator-404"),
+        pytest.param(orchestrator_error(410), True, False, False, False, id="orchestrator-410"),
+        pytest.param(sandbox_error(404, "Path not found"), False, False, False, False, id="sandbox-404"),
+        pytest.param(orchestrator_error(429), False, True, False, False, id="busy-429"),
+        pytest.param(orchestrator_error(503), False, True, False, False, id="busy-503"),
+        pytest.param(orchestrator_error(502), False, True, False, False, id="bad-gateway"),
+        # A status means the orchestrator or a gateway gave up on one request, not that the command ran out.
+        pytest.param(orchestrator_error(504), False, True, False, False, id="gateway-timeout"),
+        pytest.param(orchestrator_error(408), False, True, False, False, id="request-timeout"),
+        pytest.param(orchestrator_error(500), False, False, False, False, id="orchestrator-500"),
+        pytest.param(orchestrator_error(400), False, False, False, False, id="orchestrator-400"),
+        pytest.param(IdeGYMConnectionError("reset"), False, True, False, False, id="connection"),
+        pytest.param(IdeGYMTimeoutError("Server start timed out"), False, True, True, False, id="sdk-deadline"),
+        pytest.param(connect_timeout(), False, True, False, False, id="connect-timeout"),
+        pytest.param(TimeoutError(), False, True, True, False, id="builtin-timeout"),
+        pytest.param(ConnectionError("refused"), False, True, False, False, id="builtin-connection"),
+        pytest.param(IdeGymUnknownServerError("not held"), True, False, False, False, id="unknown-server"),
+        pytest.param(sandbox_error(400, "Unknown user"), False, False, False, True, id="sandbox-400"),
+        pytest.param(IdeGymInvalidRequestError("bad env name"), False, False, False, True, id="request-validation"),
+        pytest.param(ValueError("not an identifier"), False, False, False, False, id="bare-value-error"),
+        pytest.param(malformed_json(), False, False, False, False, id="malformed-json"),
+        pytest.param(malformed_bash_response(), False, False, False, False, id="malformed-response"),
+        pytest.param(bash_timeout(), False, False, True, False, id="bash-timeout"),
+        pytest.param(sandbox_error(500, "kaboom"), False, False, False, False, id="sandbox-500"),
+        pytest.param(sandbox_error(503, "busy"), False, False, False, False, id="sandbox-503"),
+        pytest.param(RuntimeError("no status here"), False, False, False, False, id="unrelated"),
+    ],
+)
+def test_error_classification(error: Exception, gone: bool, retryable: bool, timeout: bool, invalid: bool) -> None:
+    assert is_sandbox_gone(error) is gone
+    assert is_retryable(error) is retryable
+    assert is_command_timeout(error) is timeout
+    assert is_invalid_request(error) is invalid
+
+
+@pytest.mark.parametrize(
+    ("error", "spent"),
+    [
+        pytest.param(IdeGYMTimeoutError("Server start timed out"), True, id="sdk-deadline"),
+        pytest.param(TimeoutError(), True, id="builtin"),
+        pytest.param(connect_timeout(), False, id="connect-timeout"),
+        pytest.param(orchestrator_error(504), False, id="gateway-timeout"),
+        pytest.param(orchestrator_error(408), False, id="request-timeout"),
+        pytest.param(IdeGYMConnectionError("reset"), False, id="connection"),
+    ],
+)
+def test_only_a_client_side_deadline_counts_as_exceeded(error: Exception, spent: bool) -> None:
+    assert is_deadline_exceeded(error) is spent
+
+
+@pytest.mark.parametrize(
+    ("body", "timeout"),
+    [
+        ("Command execution timed out after 5 seconds", True),
+        (json.dumps({"message": "pytest: test_foo timed out after 30 seconds"}), False),
+        # Tool output that mentions the marker is not the marker.
+        (json.dumps({"message": "error: Command execution timed out after 5 seconds"}), False),
+        (json.dumps({"message": 5}), False),
+        (json.dumps(["Command execution timed out after 5 seconds"]), False),
+        (None, False),
+    ],
+)
+def test_the_bash_timeout_is_read_only_from_the_start_of_the_sandbox_message(body: str | None, timeout: bool) -> None:
+    error = IdeGYMSandboxError("Sandbox returned 500", status_code=500, body=body)
+    assert is_command_timeout(error) is timeout
 
 
 # --- naming ----------------------------------------------------------------
@@ -449,18 +668,11 @@ def test_sanitize_and_clamp_names() -> None:
     assert len(long_name) == MAX_CLIENT_NAME_LENGTH
 
 
-def test_generated_server_names_leave_room_for_the_appended_server_id() -> None:
+def test_generated_server_names_leave_room_for_the_server_id_and_satisfy_rfc1035() -> None:
     name = generate_server_name("nemo-gym", ["django__django-11099"])
     assert name == "nemo-gym-django-django-11099"
-    # Room must be left for the `-<server_id>` suffix the orchestrator appends.
     assert len(name) + len("-9999999") <= MAX_SERVER_NAME_LENGTH
-    # A hint too long for that budget is truncated rather than overflowing it.
     assert len(generate_server_name("nemo-gym", ["x" * 200])) + len("-9999999") <= MAX_SERVER_NAME_LENGTH
-
-
-def test_generated_server_names_satisfy_rfc1035() -> None:
-    import re
-
     pattern = re.compile(r"^[a-z]([-a-z0-9]*[a-z0-9])?$")
     for prefix, hints in (
         ("nemo-gym", ["A_VERY::Odd/Instance ID"]),
@@ -472,11 +684,6 @@ def test_generated_server_names_satisfy_rfc1035() -> None:
 
 
 def test_server_id_reserve_must_leave_room_for_a_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Raising the reserve to the 63-character cap must fail loudly.
-
-    The budget is fixed by the length constants, so the alternative to raising is an
-    empty name that Kubernetes then rejects.
-    """
     monkeypatch.setattr(idegym_naming, "SERVER_ID_SUFFIX_RESERVE", MAX_SERVER_NAME_LENGTH)
     with pytest.raises(ValueError, match="leaves no room for a name"):
         generate_server_name("nemo-gym", [])
@@ -486,10 +693,10 @@ def test_server_id_reserve_must_leave_room_for_a_name(monkeypatch: pytest.Monkey
 
 
 def test_translate_maps_resources_to_limits_and_requests() -> None:
-    translator = ServerRequestTranslator(idegym_provider.IdeGymCreateConfig())
-    request = translator.translate(
+    request = translator().translate(
         spec(resources={"cpu": 2, "memory_mib": 8192, "disk_gib": 30}, metadata={"instance_id": "task-9"}),
         IdeGymProviderOptions.from_mapping({"resource_requests": {"cpu": 0.5, "memory_mib": 2048}}),
+        {},
     )
     assert request["resources"] == {
         "requests": {"cpu": "500m", "memory": "2048Mi"},
@@ -500,8 +707,7 @@ def test_translate_maps_resources_to_limits_and_requests() -> None:
 
 
 def test_translate_passes_pod_shape_options_through() -> None:
-    translator = ServerRequestTranslator(idegym_provider.IdeGymCreateConfig())
-    request = translator.translate(
+    request = translator().translate(
         spec(),
         IdeGymProviderOptions.from_mapping(
             {
@@ -522,6 +728,7 @@ def test_translate_passes_pod_shape_options_through() -> None:
                 "run_as_root": True,
             }
         ),
+        {},
     )
     assert request["server_name"] == "pinned-name"
     assert request["runtime_class_name"] == "gvisor"
@@ -533,28 +740,67 @@ def test_translate_passes_pod_shape_options_through() -> None:
     assert (request["max_restarts"], request["service_port"], request["container_port"]) == (3, 8080, 9000)
     assert request["run_as_root"] is True
     assert "resources" not in request
+    assert "annotations" not in request
+
+
+def test_translate_merges_attribution_metadata_and_option_labels() -> None:
+    """Later sources win: attribution, then spec.metadata, then provider_options.labels."""
+    request = translator().translate(
+        spec(metadata={"instance_id": "django__django-11099", "nemo-gym.nvidia.com/team": "from-spec", "x": "1"}),
+        IdeGymProviderOptions.from_mapping({"labels": {"x": "2"}, "annotations": {"owner": "me"}}),
+        {"nemo-gym.nvidia.com/team": "t", "nemo-gym.nvidia.com/run": "r"},
+    )
+    assert request["labels"] == {
+        "nemo-gym.nvidia.com/team": "from-spec",
+        "nemo-gym.nvidia.com/run": "r",
+        "instance_id": "django__django-11099",
+        "x": "2",
+    }
+    assert request["annotations"] == {"owner": "me"}
+
+
+def test_label_values_are_sanitized_rather_than_rejected() -> None:
+    request = translator().translate(spec(metadata={"long": "v" * 100, "colon": "a:b"}), IdeGymProviderOptions(), {})
+    assert len(request["labels"]["long"]) == 63
+    assert request["labels"]["colon"] == "a_b"
+
+
+@pytest.mark.parametrize(
+    ("metadata", "options"),
+    [
+        ({"app": "x"}, {}),
+        ({"app.kubernetes.io/name": "x"}, {}),
+        ({"idegym.jetbrains.com/server": "x"}, {}),
+        ({}, {"labels": {"idegym.jetbrains.com/x": "y"}}),
+        ({}, {"annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "true"}}),
+        ({}, {"annotations": {"prometheus.io/scrape": "true"}}),
+        ({}, {"annotations": {"podsnapshot.gke.io/policy": "x"}}),
+    ],
+)
+def test_keys_idegym_manages_are_rejected(metadata: dict[str, str], options: dict[str, Any]) -> None:
+    with pytest.raises(SandboxCreateError, match="managed by IdeGYM"):
+        translator().translate(spec(metadata=metadata), IdeGymProviderOptions.from_mapping(options), {})
 
 
 def test_translate_normalizes_and_validates_the_image() -> None:
-    translator = ServerRequestTranslator(idegym_provider.IdeGymCreateConfig())
-    request = translator.translate(spec(image="docker://reg.example/env:1"), IdeGymProviderOptions())
+    request = translator().translate(spec(image="docker://reg.example/env:1"), IdeGymProviderOptions(), {})
     assert request["image_tag"] == "reg.example/env:1"
-    with pytest.raises(SandboxCreateError, match="not a valid OCI image reference"):
-        translator.translate(spec(image="Reg.Example/Env:1"), IdeGymProviderOptions())
+    for image in ("Reg.Example/Env:1", "reg.example/env:1\n"):
+        with pytest.raises(SandboxCreateError, match="not a valid OCI image reference"):
+            translator().translate(spec(image=image), IdeGymProviderOptions(), {})
     with pytest.raises(SandboxCreateError, match="spec.image is required"):
-        translator.translate(spec(image=None), IdeGymProviderOptions())
+        translator().translate(spec(image=None), IdeGymProviderOptions(), {})
 
 
 def test_translate_rejects_entrypoint_and_warns_about_unsupported_fields(caplog: pytest.LogCaptureFixture) -> None:
-    translator = ServerRequestTranslator(idegym_provider.IdeGymCreateConfig())
+    translate = translator()
     with pytest.raises(SandboxCreateError, match="spec.entrypoint is not supported"):
-        translator.translate(spec(entrypoint=["/bin/sh"]), IdeGymProviderOptions())
+        translate.translate(spec(entrypoint=["/bin/sh"]), IdeGymProviderOptions(), {})
     unsupported = spec(ttl_s=60, ports=[8080], resources={"gpu": 1})
     with caplog.at_level("WARNING"):
-        translator.translate(unsupported, IdeGymProviderOptions())
-        translator.translate(unsupported, IdeGymProviderOptions())
-    # Once each, not once per sandbox: a benchmark translates one spec per task, and
-    # the agent config that ships with mini_swe_agent_2 sets ttl_s.
+        translate.translate(unsupported, IdeGymProviderOptions(), {})
+        translate.translate(unsupported, IdeGymProviderOptions(), {})
+    # Once each, not once per sandbox: a benchmark translates one spec per task.
     assert caplog.text.count("spec.ttl_s is not enforced") == 1
     assert caplog.text.count("sandbox.endpoint() is unavailable") == 1
     assert caplog.text.count("cannot map GPU resource requests") == 1
@@ -562,32 +808,53 @@ def test_translate_rejects_entrypoint_and_warns_about_unsupported_fields(caplog:
 
 @pytest.mark.parametrize("value", [0, -1])
 def test_translate_rejects_non_positive_resources(value: int) -> None:
-    translator = ServerRequestTranslator(idegym_provider.IdeGymCreateConfig())
     for key in ("cpu", "memory_mib", "disk_gib"):
         with pytest.raises(SandboxCreateError, match="greater than zero"):
-            translator.translate(spec(resources={key: value}), IdeGymProviderOptions())
+            translator().translate(spec(resources={key: value}), IdeGymProviderOptions(), {})
 
 
 # --- create ----------------------------------------------------------------
 
 
-async def test_create_verifies_the_workdir_and_returns_a_ready_handle(
-    make_provider, fake_session: FakeSession
-) -> None:
+async def test_create_checks_the_workdir_with_one_command(make_provider, fake_session: FakeSession) -> None:
     provider = make_provider()
     handle = await provider.create(
         spec(workdir="/testbed", env={"FOO": "bar"}, ready_timeout_s=99, metadata={"instance_id": "task-1"})
     )
     assert handle.provider_name == "idegym"
     assert handle.sandbox_id == "7"
-    assert handle.raw.workdir == "/testbed"
-    assert handle.raw.env == {"FOO": "bar"}
+    assert (handle.raw.workdir, handle.raw.env) == ("/testbed", {"FOO": "bar"})
     assert fake_session.start_calls[0]["timeout_s"] == pytest.approx(99, abs=1)
-    # IdeGYM already waited for pod readiness, so the workdir check is the only
-    # command create runs -- and it must not `cd` into the directory it is verifying.
-    assert len(fake_session.bash_calls) == 1
-    assert "[ -d /testbed ]" in fake_session.bash_calls[0]["script"]
-    assert "cd -- /testbed" not in fake_session.bash_calls[0]["script"]
+    # IdeGYM already waited for pod readiness, so one command in the workdir is all that is left to check.
+    assert [(call["script"], call["cwd"], call["env"]) for call in fake_session.bash_calls] == [
+        ("true", "/testbed", {})
+    ]
+    assert fake_session.status_calls == []
+    assert fake_session.keepalive_calls == []
+
+
+@pytest.mark.parametrize(
+    ("attribution", "expected"),
+    [
+        (
+            {"team": "t", "user": "u", "workload": "w", "run": "r"},
+            {
+                "nemo-gym.nvidia.com/team": "t",
+                "nemo-gym.nvidia.com/user": "u",
+                "nemo-gym.nvidia.com/workload": "w",
+                "nemo-gym.nvidia.com/run": "r",
+            },
+        ),
+        ({"enabled": False}, {}),
+    ],
+    ids=["attributed", "disabled"],
+)
+async def test_create_sends_labels_from_metadata_and_attribution(
+    make_provider, fake_session: FakeSession, attribution: dict[str, Any], expected: dict[str, str]
+) -> None:
+    provider = make_provider(attribution=attribution)
+    await provider.create(spec(metadata={"instance_id": "task-1"}))
+    assert fake_session.start_calls[0]["request"]["labels"] == {**expected, "instance_id": "task-1"}
 
 
 async def test_create_falls_back_to_configured_ready_timeout(make_provider, fake_session: FakeSession) -> None:
@@ -599,14 +866,42 @@ async def test_create_falls_back_to_configured_ready_timeout(make_provider, fake
 async def test_create_fails_when_the_workdir_is_unusable(
     make_provider, fake_session: FakeSession, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fake_session.bash_results = [IdeGymBashResult(stdout="", stderr="", exit_code=1)]
+    fake_session.bash_results = [sandbox_error(400, "Working directory /nope does not exist")]
     provider = make_provider()
     with caplog.at_level("WARNING"), pytest.raises(SandboxCreateVerificationError, match="is not usable"):
         await provider.create(spec(workdir="/nope"))
-    assert len(fake_session.bash_calls) == 1
     assert fake_session.stop_calls == [{"server_id": 7, "timeout_s": 5.0}]
     # Nothing else records that a pod was started and thrown away.
     assert "Tearing down the IdeGYM sandbox" in caplog.text
+
+
+@requires_bash
+async def test_create_against_a_local_server_checks_the_real_directory(make_provider, tmp_path: Path) -> None:
+    session = LocalBashSession()
+    provider = make_provider(session)
+    await provider.create(spec(workdir=str(tmp_path)))
+    with pytest.raises(SandboxCreateVerificationError, match="is not usable"):
+        await provider.create(spec(workdir=str(tmp_path / "missing")))
+
+
+async def test_create_fails_when_the_check_command_cannot_run(make_provider, fake_session: FakeSession) -> None:
+    fake_session.bash_results = [orchestrator_error(500, "kaboom")]
+    provider = make_provider()
+    with pytest.raises(IdeGymCreateVerificationError, match="could not run its verification command"):
+        await provider.create(spec(workdir="/testbed"))
+    assert fake_session.stop_calls
+
+
+@pytest.mark.parametrize(
+    ("verify", "workdir"), [({"check_workdir": False}, "/testbed"), ({}, None)], ids=["check-off", "no-workdir"]
+)
+async def test_create_runs_no_command_without_a_workdir_to_check(
+    make_provider, fake_session: FakeSession, verify: dict[str, Any], workdir: str | None
+) -> None:
+    provider = make_provider(verify=verify)
+    await provider.create(spec(workdir=workdir))
+    assert fake_session.bash_calls == []
+    assert fake_session.status_calls == []
 
 
 async def test_create_logs_the_teardown_when_it_is_cancelled(
@@ -622,22 +917,26 @@ async def test_create_logs_the_teardown_when_it_is_cancelled(
     assert fake_session.stop_calls
 
 
-async def test_create_runs_no_command_when_there_is_no_workdir_to_check(
-    make_provider, fake_session: FakeSession
-) -> None:
-    provider = make_provider(verify={"check_workdir": False})
-    await provider.create(spec(workdir="/testbed"))
-    assert fake_session.bash_calls == []
-    await provider.create(spec())
-    assert fake_session.bash_calls == []
-
-
+@pytest.mark.parametrize(
+    "transient",
+    [
+        IdeGYMBusyError("429", status_code=429),
+        IdeGYMConnectionError("reset"),
+        orchestrator_error(502),
+        # A 408 or 504 is one lost request, not the SDK's own deadline.
+        orchestrator_error(504),
+        orchestrator_error(408),
+        # The request never reached the orchestrator, so no budget was spent on it.
+        connect_timeout(),
+    ],
+    ids=["busy", "connection", "bad-gateway", "gateway-timeout", "request-timeout", "connect-timeout"],
+)
 async def test_create_retries_transient_failures_keeping_the_generated_name(
-    make_provider, fake_session: FakeSession
+    make_provider, fake_session: FakeSession, transient: Exception
 ) -> None:
-    """Renaming would defeat a RESTART/RESET reuse strategy, which matches on the name."""
+    """IdeGYM makes the pod name unique with its own server id, so a lost start that landed leaves an orphan."""
     fake_session.start_results = [
-        orchestrator_error(429),
+        transient,
         IdeGymServerRef(server_id=9, server_name="nemo-gym-second", namespace="idegym"),
     ]
     provider = make_provider()
@@ -645,6 +944,8 @@ async def test_create_retries_transient_failures_keeping_the_generated_name(
     assert handle.sandbox_id == "9"
     first, second = (call["request"]["server_name"] for call in fake_session.start_calls)
     assert first == second
+    # The second attempt gets what is left of the one budget, not a fresh one.
+    assert fake_session.start_calls[1]["timeout_s"] <= fake_session.start_calls[0]["timeout_s"]
 
 
 async def test_create_keeps_a_pinned_name_across_retries(make_provider, fake_session: FakeSession) -> None:
@@ -665,27 +966,28 @@ async def test_create_exhausted_retries_are_wrapped(make_provider, fake_session:
     assert len(fake_session.start_calls) == 2
 
 
-async def test_create_does_not_retry_an_exhausted_readiness_budget(make_provider, fake_session: FakeSession) -> None:
+@pytest.mark.parametrize(
+    "spent",
+    [IdeGYMTimeoutError("Server start timed out after 1200 seconds"), TimeoutError("deadline")],
+    ids=["sdk", "builtin"],
+)
+async def test_create_does_not_retry_an_exhausted_readiness_budget(
+    make_provider, fake_session: FakeSession, spent: Exception
+) -> None:
     """Retrying would silently multiply ready_timeout_s by the retry count."""
-    fake_session.start_results = [TimeoutError("Server start timed out after 1200 seconds")]
+    fake_session.start_results = [spent]
     provider = make_provider(create={"retries": 3})
     with pytest.raises(SandboxCreateError, match="could not start a server"):
         await provider.create(spec())
     assert len(fake_session.start_calls) == 1
 
 
-async def test_create_retries_a_transport_timeout(make_provider, fake_session: FakeSession) -> None:
-    """A transport timeout is one lost request, not the whole budget."""
-    import httpx
-
-    fake_session.start_results = [
-        httpx.ReadTimeout("orchestrator slow"),
-        IdeGymServerRef(server_id=9, server_name="nemo-gym-second", namespace="idegym"),
-    ]
-    provider = make_provider()
-    handle = await provider.create(spec())
-    assert handle.sandbox_id == "9"
-    assert len(fake_session.start_calls) == 2
+async def test_create_does_not_retry_past_the_deadline(make_provider, fake_session: FakeSession) -> None:
+    fake_session.start_results = [orchestrator_error(429)]
+    provider = make_provider(create={"retries": 3, "retry_delay_s": 60.0, "retry_max_delay_s": 60.0})
+    with pytest.raises(SandboxCreateError, match="could not start a server"):
+        await provider.create(spec())
+    assert len(fake_session.start_calls) == 1
 
 
 async def test_create_non_retryable_failure_is_not_retried(make_provider, fake_session: FakeSession) -> None:
@@ -699,7 +1001,7 @@ async def test_create_non_retryable_failure_is_not_retried(make_provider, fake_s
 async def test_create_teardown_failure_only_warns(
     make_provider, fake_session: FakeSession, caplog: pytest.LogCaptureFixture
 ) -> None:
-    fake_session.bash_results = [IdeGymBashResult(stdout="", stderr="broken", exit_code=1)]
+    fake_session.bash_results = [sandbox_error(400, "Working directory /nope does not exist")]
     fake_session.stop_results = [orchestrator_error(500)]
     provider = make_provider()
     with caplog.at_level("WARNING"), pytest.raises(SandboxCreateVerificationError):
@@ -707,54 +1009,188 @@ async def test_create_teardown_failure_only_warns(
     assert "may be left running on the cluster" in caplog.text
 
 
+# --- keepalive ---------------------------------------------------------------
+
+
+async def test_create_takes_the_configured_hold(make_provider, fake_session: FakeSession) -> None:
+    provider = make_provider(create={"keepalive_minutes": 5})
+    handle = await provider.create(spec())
+    assert fake_session.keepalive_calls == [(7, 5)]
+    assert handle.raw.held_until_ms == pytest.approx(time.time() * 1000 + 5 * 60_000, abs=5_000)
+
+
+async def test_provider_options_override_the_hold_per_sandbox(make_provider, fake_session: FakeSession) -> None:
+    provider = make_provider(create={"keepalive_minutes": 5})
+    await provider.create(spec(provider_options={"keepalive_minutes": 30}))
+    await provider.create(spec(provider_options={"keepalive_minutes": None}))
+    assert fake_session.keepalive_calls == [(7, 30.0)]
+    opted_in = make_provider()
+    await opted_in.create(spec(provider_options={"keepalive_minutes": 2}))
+    assert fake_session.keepalive_calls[-1] == (7, 2.0)
+
+
+@pytest.mark.parametrize("minutes", [0, -1, 24 * 60 + 1])
+async def test_an_invalid_per_sandbox_hold_fails_before_a_pod_is_started(
+    make_provider, fake_session: FakeSession, minutes: float
+) -> None:
+    provider = make_provider()
+    with pytest.raises(ValueError, match="provider_options.keepalive_minutes"):
+        await provider.create(spec(provider_options={"keepalive_minutes": minutes}))
+    assert fake_session.start_calls == []
+
+
+async def test_a_failed_hold_at_create_is_a_create_failure(make_provider, fake_session: FakeSession) -> None:
+    fake_session.keepalive_results = [orchestrator_error(500)]
+    provider = make_provider(create={"keepalive_minutes": 5})
+    with pytest.raises(SandboxCreateError, match="inactivity reaper"):
+        await provider.create(spec())
+    assert [call["server_id"] for call in fake_session.stop_calls] == [7]
+    assert fake_session.bash_calls == []
+
+
+async def test_a_long_exec_extends_the_hold_once(make_provider, fake_session: FakeSession) -> None:
+    provider = make_provider(create={"keepalive_minutes": 5})
+    handle = await provider.create(spec())
+    fake_session.keepalive_calls.clear()
+
+    await provider.exec(handle, "true", timeout_s=60)
+    assert fake_session.keepalive_calls == []
+
+    await provider.exec(handle, "make test", timeout_s=600)
+    # 600 s of command plus 60 s of request overhead, rounded up, plus a minute.
+    assert fake_session.keepalive_calls == [(7, math.ceil(660 / 60) + 1)]
+
+    await provider.exec(handle, "make test", timeout_s=600)
+    assert len(fake_session.keepalive_calls) == 1
+
+    # A sandbox that opted out of the hold never calls keepalive.
+    unheld = make_provider()
+    handle = await unheld.create(spec())
+    await unheld.exec(handle, "make test", timeout_s=600)
+    assert len(fake_session.keepalive_calls) == 1
+
+
+async def test_a_command_without_a_timeout_takes_the_longest_hold(make_provider, fake_session: FakeSession) -> None:
+    provider = make_provider(create={"keepalive_minutes": 5}, exec={"default_timeout_s": None})
+    handle = await provider.create(spec())
+    await provider.exec(handle, "sleep infinity")
+    assert fake_session.keepalive_calls[-1] == (7, 24 * 60.0)
+    assert fake_session.bash_calls[-1]["command_timeout_s"] == NO_TIMEOUT_COMMAND_SECONDS
+
+
+async def test_a_hold_that_finds_the_sandbox_gone_short_circuits_the_exec(
+    make_provider, fake_session: FakeSession
+) -> None:
+    provider = make_provider(create={"keepalive_minutes": 5})
+    handle = await provider.create(spec())
+    calls = len(fake_session.bash_calls)
+    fake_session.keepalive_results = [orchestrator_error(410, "gone")]
+    result = await provider.exec(handle, "make test", timeout_s=600)
+    assert (result.error_type, result.return_code) == ("sandbox", SANDBOX_RUNTIME_RETURN_CODE)
+    assert handle.raw.stopped is True
+    assert len(fake_session.bash_calls) == calls
+
+
+async def test_a_failed_hold_does_not_stop_the_command(
+    make_provider, fake_session: FakeSession, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = make_provider(create={"keepalive_minutes": 5})
+    handle = await provider.create(spec())
+    fake_session.keepalive_results = [orchestrator_error(500)]
+    with caplog.at_level("WARNING"):
+        result = await provider.exec(handle, "make test", timeout_s=600)
+    assert result.return_code == 0
+    assert "Could not extend the keepalive hold" in caplog.text
+
+
 # --- exec ------------------------------------------------------------------
 
 
-async def test_exec_shapes_the_script_and_the_timeouts(make_provider, fake_session: FakeSession) -> None:
-    provider = make_provider(verify={"check_workdir": False})
+async def test_exec_sends_the_command_context_as_request_fields(make_provider, fake_session: FakeSession) -> None:
+    provider = make_provider()
     handle = await provider.create(spec(workdir="/testbed", env={"CONDA_ENV": "testbed"}))
     fake_session.bash_results = [IdeGymBashResult(stdout="out", stderr="err", exit_code=3)]
-    # A value needing quoting proves the export is shell-safe; the call's env is
-    # merged on top of the sandbox's.
-    result = await provider.exec(handle, "pytest -q", env={"EXTRA": "a b'c"}, timeout_s=120)
+    result = await provider.exec(handle, "pytest -q", env={"EXTRA": "a b'c"}, timeout_s=120, user="tester")
     assert result == SandboxExecResult(stdout="out", stderr="err", return_code=3)
     call = fake_session.bash_calls[-1]
-    assert call["script"] == (
-        "{ :\ncd -- /testbed || exit 1\nexport CONDA_ENV=testbed\nexport EXTRA='a b'\"'\"'c'\npytest -q\n}"
+    # The command goes out untouched: no `cd`, `export`, brace group or user switch.
+    assert call["script"] == "pytest -q"
+    assert (call["cwd"], call["env"], call["user"]) == (
+        "/testbed",
+        {"CONDA_ENV": "testbed", "EXTRA": "a b'c"},
+        "tester",
     )
+    assert call["max_output_bytes"] == 1024 * 1024
     assert call["command_timeout_s"] == 120
     # The client waits longer than the sandbox, so the sandbox's own timeout wins
     # and the caller gets output instead of a transport error.
     assert call["request_timeout_s"] == 120 + 60
-
-
-async def test_exec_cwd_argument_overrides_the_sandbox_workdir(make_provider, fake_session: FakeSession) -> None:
-    provider = make_provider(verify={"check_workdir": False})
-    handle = await provider.create(spec(workdir="/testbed"))
     await provider.exec(handle, "true", cwd="/other")
-    assert "cd -- /other" in fake_session.bash_calls[-1]["script"]
+    assert fake_session.bash_calls[-1]["cwd"] == "/other"
 
 
-async def test_exec_without_timeout_uses_a_finite_ceiling(make_provider, fake_session: FakeSession) -> None:
-    provider = make_provider(exec={"default_timeout_s": None})
+async def test_exec_sends_a_large_script_unchanged(make_provider, fake_session: FakeSession) -> None:
+    """The pre-0.13 128 KiB argv cap is gone: the server reads the script from a file."""
+    provider = make_provider(exec={"max_output_bytes": None})
     handle = await provider.create(spec())
-    await provider.exec(handle, "true")
-    assert fake_session.bash_calls[-1]["command_timeout_s"] == NO_TIMEOUT_COMMAND_SECONDS
+    script = "echo " + "x" * (200 * 1024)
+    result = await provider.exec(handle, script)
+    assert result.error_type is None
+    assert fake_session.bash_calls[-1]["script"] == script
+    assert fake_session.bash_calls[-1]["max_output_bytes"] is None
 
 
-async def test_exec_reports_a_sandbox_side_timeout(make_provider, fake_session: FakeSession) -> None:
+@pytest.mark.parametrize("user", [0, 1000])
+async def test_exec_as_a_numeric_user_is_an_invalid_request(
+    make_provider, fake_session: FakeSession, user: int
+) -> None:
     provider = make_provider()
     handle = await provider.create(spec())
-    fake_session.bash_results = [forward_error(500, "Command execution timed out after 5 seconds")]
-    result = await provider.exec(handle, "sleep 100", timeout_s=5)
-    assert result.error_type == "timeout"
-    assert result.return_code == SANDBOX_RUNTIME_RETURN_CODE
+    calls = len(fake_session.bash_calls)
+    result = await provider.exec(handle, "true", user=user)
+    assert (result.error_type, result.return_code) == ("invalid_request", SANDBOX_RUNTIME_RETURN_CODE)
+    assert len(fake_session.bash_calls) == calls
 
 
-async def test_exec_on_a_deleted_sandbox_marks_it_stopped(make_provider, fake_session: FakeSession) -> None:
+@pytest.mark.parametrize(
+    "rejection",
+    [sandbox_error(400, "User nobody2 does not exist"), IdeGymInvalidRequestError("env name is not an identifier")],
+    ids=["sandbox-400", "validation"],
+)
+async def test_exec_reports_a_rejected_request_instead_of_raising(
+    make_provider, fake_session: FakeSession, rejection: Exception
+) -> None:
     provider = make_provider()
     handle = await provider.create(spec())
-    fake_session.bash_results = [orchestrator_error(410, "gone")]
+    fake_session.bash_results = [rejection]
+    result = await provider.exec(handle, "true", env={"NOT AN IDENT": "v"})
+    assert (result.error_type, result.return_code) == ("invalid_request", SANDBOX_RUNTIME_RETURN_CODE)
+    assert handle.raw.stopped is False
+
+
+@pytest.mark.parametrize(
+    "timeout", [bash_timeout(3), IdeGYMTimeoutError("Async operation 1 did not finish")], ids=["sandbox", "client"]
+)
+async def test_exec_reports_a_timeout(make_provider, fake_session: FakeSession, timeout: Exception) -> None:
+    provider = make_provider()
+    handle = await provider.create(spec())
+    fake_session.bash_results = [timeout]
+    result = await provider.exec(handle, "sleep 100", timeout_s=3)
+    assert (result.error_type, result.return_code) == ("timeout", SANDBOX_RUNTIME_RETURN_CODE)
+    assert handle.raw.stopped is False
+
+
+@pytest.mark.parametrize(
+    "gone",
+    [orchestrator_error(404), orchestrator_error(410), IdeGymUnknownServerError("not held")],
+    ids=["404", "410", "unknown"],
+)
+async def test_exec_on_a_deleted_sandbox_marks_it_stopped(
+    make_provider, fake_session: FakeSession, gone: Exception
+) -> None:
+    provider = make_provider()
+    handle = await provider.create(spec())
+    fake_session.bash_results = [gone]
     result = await provider.exec(handle, "true")
     assert result.error_type == "sandbox"
     assert handle.raw.stopped is True
@@ -765,127 +1201,65 @@ async def test_exec_on_a_deleted_sandbox_marks_it_stopped(make_provider, fake_se
     assert len(fake_session.bash_calls) == calls_before
 
 
+@pytest.mark.parametrize(
+    "garbled", [malformed_json(), malformed_bash_response()], ids=["malformed-json", "malformed-response"]
+)
+async def test_a_garbled_response_is_not_blamed_on_the_request(
+    make_provider, fake_session: FakeSession, garbled: Exception
+) -> None:
+    provider = make_provider()
+    handle = await provider.create(spec())
+    fake_session.bash_results = [garbled]
+    result = await provider.exec(handle, "true")
+    assert (result.error_type, result.return_code) == ("sandbox", SANDBOX_RUNTIME_RETURN_CODE)
+    assert "rejected the command request" not in result.stderr
+
+    with pytest.raises(IdeGymCreateVerificationError, match="could not run its verification command"):
+        await provider.create(spec(workdir="/testbed"))
+
+
+@pytest.mark.parametrize("status", [408, 504])
+async def test_an_orchestrator_timeout_status_is_not_a_command_timeout(
+    make_provider, fake_session: FakeSession, status: int
+) -> None:
+    """The gateway gave up on the request; the command may never have run."""
+    provider = make_provider()
+    handle = await provider.create(spec())
+    fake_session.bash_results = [orchestrator_error(status)]
+    result = await provider.exec(handle, "true", timeout_s=3)
+    assert result.error_type == "sandbox"
+    assert "timed out after" not in result.stderr
+
+
 async def test_exec_other_failures_are_reported_not_raised(
     make_provider, fake_session: FakeSession, caplog: pytest.LogCaptureFixture
 ) -> None:
     """An unclassified failure becomes a return value, so the log is the only traceback."""
     provider = make_provider()
     handle = await provider.create(spec())
-    fake_session.bash_results = [orchestrator_error(500, "kaboom")]
+    fake_session.bash_results = [sandbox_error(500, "kaboom")]
     with caplog.at_level("WARNING"):
         result = await provider.exec(handle, "true")
     assert (result.error_type, result.return_code) == ("sandbox", SANDBOX_RUNTIME_RETURN_CODE)
+    assert handle.raw.stopped is False
     assert "failed to run the command" in caplog.text
     assert "Traceback" in caplog.text
 
 
-async def test_exec_reports_an_undeliverable_command_instead_of_raising(make_provider) -> None:
-    provider = make_provider()
-    handle = await provider.create(spec())
-    too_long = await provider.exec(handle, "echo " + "x" * MAX_COMMAND_BYTES)
-    assert too_long.error_type == "command_too_long"
-    assert "byte limit" in (too_long.stderr or "")
-    bad_env = await provider.exec(handle, "true", env={"NOT AN IDENT": "v"})
-    assert bad_env.error_type == "invalid_request"
-
-
-async def test_exec_user_request_warns_once(
-    make_provider, fake_session: FakeSession, caplog: pytest.LogCaptureFixture
-) -> None:
-    provider = make_provider()
-    handle = await provider.create(spec())
-    with caplog.at_level("WARNING"):
-        await provider.exec(handle, "true", user="root")
-        await provider.exec(handle, "true", user="root")
-    assert caplog.text.count("cannot run commands as user") == 1
-    assert "runuser" not in fake_session.bash_calls[-1]["script"]
-
-
-@pytest.mark.parametrize(
-    ("mode", "expected"),
-    [("runuser", "exec runuser -u tester -- bash -c"), ("su", "exec su -s /bin/bash -c")],
-)
-def test_user_switch_modes_wrap_the_script(mode: str, expected: str) -> None:
-    """Both modes pin bash: a service account's login shell may be /sbin/nologin."""
-    builder = BashScriptBuilder(IdeGymExecConfig(user_mode=mode))
-    script = builder.build("true", cwd="/w", user="tester")
-    assert expected in script
-    assert "tester" in script
-    assert "cd -- /w" in script
-
-
 @requires_bash
-@pytest.mark.parametrize("mode", ["runuser", "su"])
-def test_a_user_switched_script_is_valid_bash(mode: str) -> None:
-    """The wrap nests two levels of quoting, which a substring assertion cannot check."""
-    script = BashScriptBuilder(IdeGymExecConfig(user_mode=mode)).build(
-        "echo hi && ls 'a b'", cwd="/testbed", env={"FOO": "a b"}, user="tester"
-    )
-    completed = subprocess.run(["bash", "-n", "-c", script], capture_output=True, text=True, check=False)
-    assert completed.returncode == 0, completed.stderr
-
-
-@pytest.mark.parametrize("mode", ["runuser", "su"])
-def test_user_switch_modes_reject_numeric_ids(mode: str) -> None:
-    builder = BashScriptBuilder(IdeGymExecConfig(user_mode=mode))
-    with pytest.raises(ValueError, match="needs a user name"):
-        builder.build("true", user=0)
-
-
-def test_script_size_limit_is_enforced() -> None:
-    builder = BashScriptBuilder(IdeGymExecConfig())
-    with pytest.raises(IdeGymCommandTooLongError, match="one argument"):
-        builder.build("x" * (MAX_COMMAND_BYTES + 1))
-
-
-@requires_bash
-@pytest.mark.parametrize("command", ["", "   ", "\n", "# just a comment"])
-def test_a_command_with_nothing_to_run_is_not_a_syntax_error(command: str) -> None:
-    """An empty brace group is a bash syntax error, not a no-op.
-
-    A model that emits a blank or comment-only action would otherwise be told its
-    command had a shell syntax error.
-    """
-    script = BashScriptBuilder(IdeGymExecConfig()).build(command)
-    completed = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
-    assert completed.returncode == 0, completed.stderr
-    assert "syntax error" not in completed.stderr
-
-
-@requires_bash
-def test_the_largest_permitted_upload_chunk_still_fits_in_one_command() -> None:
-    """The validator's ceiling has to leave room for the rest of the script."""
-    files = IdeGymFilesConfig(upload_chunk_bytes=MAX_UPLOAD_CHUNK_BYTES)
-    transfer = Base64BashFileTransfer(files, run=None)  # type: ignore[arg-type]
-    chunk_script = transfer._write_chunk_script(
-        "/testbed/nested/blob.bin", b"x" * files.upload_chunk_bytes, first=True
-    )
-    script = BashScriptBuilder(IdeGymExecConfig()).build(chunk_script, cwd="/testbed")
-    assert len(script.encode()) <= MAX_COMMAND_BYTES
-
-
-@pytest.mark.parametrize("name", ["FOO\n", "FO O", "1FOO", ""])
-def test_env_names_that_export_cannot_carry_are_rejected(name: str) -> None:
-    """A `$`-anchored check would accept a trailing newline and corrupt the script."""
-    builder = BashScriptBuilder(IdeGymExecConfig())
-    with pytest.raises(ValueError, match="not a valid shell identifier"):
-        builder.build("true", env={name: "v"})
-
-
-def test_an_image_with_a_trailing_newline_is_rejected() -> None:
-    translator = ServerRequestTranslator(idegym_provider.IdeGymCreateConfig())
-    with pytest.raises(SandboxCreateError, match="not a valid OCI image reference"):
-        translator.translate(spec(image="reg.example/env:1\n"), IdeGymProviderOptions())
-
-
-def test_a_relayed_sandbox_body_is_not_read_as_the_orchestrator_status() -> None:
-    """The body carries the sandbox's own output; scraping it would kill live sandboxes."""
-    relayed = forward_error(500, "curl failed: status=404 not found")
-    assert orchestrator_status(relayed) == 500
-    assert is_sandbox_gone(relayed) is False
-    # Likewise for the timeout marker: ordinary tool output must not read as a timeout.
-    assert is_command_timeout(forward_error(500, "pytest: test_foo timed out after 30 seconds")) is False
-    assert is_command_timeout(forward_error(500, "Command execution timed out after 5 seconds")) is True
+async def test_exec_runs_in_the_cwd_with_the_env(make_provider, tmp_path: Path) -> None:
+    other = tmp_path / "other dir"
+    other.mkdir()
+    provider = make_provider(LocalBashSession())
+    handle = await provider.create(spec(workdir=str(tmp_path), env={"FROM_SPEC": "1"}))
+    result = await provider.exec(handle, 'pwd; printf "%s|%s\\n" "$FROM_SPEC" "$EXTRA"', env={"EXTRA": "a b'c"})
+    assert result.stdout == f"{tmp_path}\n1|a b'c\n"
+    moved = await provider.exec(handle, "pwd", cwd=str(other))
+    assert moved.stdout == f"{other}\n"
+    missing = await provider.exec(handle, "pwd", cwd=str(tmp_path / "missing"))
+    assert missing.error_type == "invalid_request"
+    verbatim = await provider.exec(handle, "printf '  x  \\n'; printf ' e \\n' >&2")
+    assert (verbatim.stdout, verbatim.stderr, verbatim.return_code) == ("  x  \n", " e \n", 0)
 
 
 # --- files -----------------------------------------------------------------
@@ -894,154 +1268,110 @@ def test_a_relayed_sandbox_body_is_not_read_as_the_orchestrator_status() -> None
 @requires_bash
 async def test_file_transfer_round_trips_binary_content(make_provider, tmp_path: Path) -> None:
     session = LocalBashSession()
-    # Chunk sizes far below the defaults, so the chunk-boundary handling is what is
-    # under test rather than a single-chunk shortcut.
-    provider = make_provider(
-        session,
-        verify={"check_workdir": False},
-        files={"upload_chunk_bytes": 100, "download_chunk_bytes": 60},
-    )
+    provider = make_provider(session, files={"chunk_bytes": 4096, "timeout_s": 12})
     remote = tmp_path / "sandbox"
     remote.mkdir()
     handle = await provider.create(spec(workdir=str(remote)))
-    payload = bytes(range(256)) * 3
+    payload = bytes(range(256)) * 4096 + b"\xff"
     source = tmp_path / "blob.bin"
     source.write_bytes(payload)
 
     await provider.upload_file(handle, source, str(remote / "nested/dir/blob.bin"))
     assert (remote / "nested/dir/blob.bin").read_bytes() == payload
 
-    out = tmp_path / "back.bin"
+    out = tmp_path / "back" / "blob.bin"
     await provider.download_file(handle, str(remote / "nested/dir/blob.bin"), out)
     assert out.read_bytes() == payload
+    assert {call["chunk_bytes"] for call in session.upload_calls + session.download_calls} == {4096}
+    assert {call["request_timeout_s"] for call in session.upload_calls + session.download_calls} == {12}
+    # Nothing but the file itself is left next to it.
+    assert [path.name for path in out.parent.iterdir()] == ["blob.bin"]
 
 
 @requires_bash
-async def test_file_transfer_handles_empty_files_and_odd_names(make_provider, tmp_path: Path) -> None:
-    provider = make_provider(LocalBashSession(), verify={"check_workdir": False})
-    handle = await provider.create(spec())
-    empty = tmp_path / "empty"
-    empty.write_bytes(b"")
-    target = tmp_path / "-dash name'with quote.bin"
-    await provider.upload_file(handle, empty, str(target))
-    assert target.exists() and target.stat().st_size == 0
-    out = tmp_path / "empty-back"
-    await provider.download_file(handle, str(target), out)
-    assert out.read_bytes() == b""
-
-
-@requires_bash
-async def test_upload_resolves_relative_paths_against_the_workdir(make_provider, tmp_path: Path) -> None:
-    provider = make_provider(LocalBashSession(), verify={"check_workdir": False})
+async def test_relative_paths_resolve_against_the_workdir(make_provider, tmp_path: Path) -> None:
+    session = LocalBashSession()
+    provider = make_provider(session)
     handle = await provider.create(spec(workdir=str(tmp_path)))
     source = tmp_path / "src.txt"
     source.write_text("hello\n")
     await provider.upload_file(handle, source, "relative/target.txt")
     assert (tmp_path / "relative/target.txt").read_text() == "hello\n"
+    out = tmp_path / "out.txt"
+    await provider.download_file(handle, "relative/target.txt", out)
+    assert out.read_text() == "hello\n"
+    assert session.download_calls[-1]["remote_path"] == f"{tmp_path}/relative/target.txt"
+
+
+async def test_paths_are_passed_through_without_a_workdir(make_provider, fake_session: FakeSession) -> None:
+    provider = make_provider()
+    handle = await provider.create(spec())
+    await provider.upload_file(handle, Path("/local/a"), "relative/a")
+    await provider.upload_file(handle, Path("/local/a"), "/abs/a")
+    assert [call["remote_path"] for call in fake_session.upload_calls] == ["relative/a", "/abs/a"]
 
 
 @requires_bash
-async def test_download_of_a_missing_file_raises(make_provider, tmp_path: Path) -> None:
-    provider = make_provider(LocalBashSession(), verify={"check_workdir": False})
+async def test_a_missing_remote_file_fails_the_transfer_not_the_sandbox(make_provider, tmp_path: Path) -> None:
+    provider = make_provider(LocalBashSession())
     handle = await provider.create(spec())
-    with pytest.raises(idegym_provider.IdeGymOperationError, match="Cannot read"):
+    with pytest.raises(IdeGymTransferError, match="Path not found"):
         await provider.download_file(handle, str(tmp_path / "nope"), tmp_path / "out")
+    with pytest.raises(IdeGymTransferError, match="Not a file"):
+        await provider.download_file(handle, str(tmp_path), tmp_path / "out")
+    assert handle.raw.stopped is False
+    assert await provider.status(handle) is SandboxStatus.RUNNING
 
 
-@requires_bash
-async def test_download_refuses_files_over_the_configured_cap(make_provider, tmp_path: Path) -> None:
-    provider = make_provider(LocalBashSession(), verify={"check_workdir": False}, files={"max_download_bytes": 8})
-    handle = await provider.create(spec())
-    big = tmp_path / "big.bin"
-    big.write_bytes(b"x" * 64)
-    with pytest.raises(idegym_provider.IdeGymOperationError, match="max_download_bytes"):
-        await provider.download_file(handle, str(big), tmp_path / "out")
-
-
-async def test_upload_failure_reports_the_failing_chunk(
+async def test_a_failed_download_leaves_the_existing_target_untouched(
     make_provider, fake_session: FakeSession, tmp_path: Path
+) -> None:
+    """The SDK writes in place, so without a staging file a failure would truncate the target."""
+    target = tmp_path / "result.json"
+    target.write_text("previous")
+    provider = make_provider()
+    handle = await provider.create(spec())
+
+    async def half_written(server_id: int, remote_path: str, local_path: Path, **kwargs: Any) -> int:
+        Path(local_path).write_bytes(b"{")
+        raise IdeGYMConnectionError("reset mid-transfer")
+
+    fake_session.download_file = half_written  # type: ignore[method-assign]
+    with pytest.raises(IdeGymTransferError, match="reset mid-transfer"):
+        await provider.download_file(handle, "/tmp/result.json", target)
+    assert target.read_text() == "previous"
+    assert [path.name for path in tmp_path.iterdir()] == ["result.json"]
+
+
+@pytest.mark.parametrize("direction", ["upload", "download"])
+async def test_a_transfer_to_a_gone_sandbox_marks_it_stopped(
+    make_provider, fake_session: FakeSession, tmp_path: Path, direction: str
 ) -> None:
     provider = make_provider()
     handle = await provider.create(spec())
-    source = tmp_path / "src.bin"
-    source.write_bytes(b"abcdefghij")
-    fake_session.bash_results = [IdeGymBashResult(stdout="", stderr="disk full", exit_code=1)]
-    with pytest.raises(idegym_provider.IdeGymOperationError, match="failed on chunk 1/"):
-        await provider.upload_file(handle, source, "/tmp/x.bin")
+    fake_session.upload_results = [orchestrator_error(410)]
+    fake_session.download_results = [orchestrator_error(410)]
+    with pytest.raises(IdeGymTransferError, match="no longer available"):
+        if direction == "upload":
+            await provider.upload_file(handle, tmp_path / "x", "/tmp/x")
+        else:
+            await provider.download_file(handle, "/tmp/x", tmp_path / "x")
+    assert handle.raw.stopped is True
+    # Later transfers fail fast instead of making another round trip.
+    with pytest.raises(IdeGymTransferError, match="has been stopped"):
+        await provider.upload_file(handle, tmp_path / "x", "/tmp/x")
+    assert len(fake_session.upload_calls) == (1 if direction == "upload" else 0)
 
 
-async def test_upload_failure_names_a_later_chunk(make_provider, fake_session: FakeSession, tmp_path: Path) -> None:
-    """The reported index counts chunks, and a later chunk must still be attempted."""
-    provider = make_provider(files={"upload_chunk_bytes": 4})
-    handle = await provider.create(spec())
-    source = tmp_path / "src.bin"
-    source.write_bytes(b"abcdefghij")
-    fake_session.bash_results = [
-        IdeGymBashResult(stdout="", stderr="", exit_code=0),
-        IdeGymBashResult(stdout="", stderr="disk full", exit_code=1),
-    ]
-    with pytest.raises(idegym_provider.IdeGymOperationError, match="failed on chunk 2/3"):
-        await provider.upload_file(handle, source, "/tmp/x.bin")
-
-
-@requires_bash
-async def test_download_without_a_cap_is_uncapped(make_provider, tmp_path: Path) -> None:
-    """`max_download_bytes: null` disables the check rather than comparing against None."""
-    provider = make_provider(
-        LocalBashSession(),
-        verify={"check_workdir": False},
-        files={"max_download_bytes": None, "download_chunk_bytes": 16},
-    )
-    handle = await provider.create(spec())
-    payload = bytes(range(64))
-    source = tmp_path / "blob.bin"
-    source.write_bytes(payload)
-    out = tmp_path / "back.bin"
-    await provider.download_file(handle, str(source), out)
-    assert out.read_bytes() == payload
-
-
-async def test_download_rejects_unparsable_size_and_bad_base64(
-    make_provider, fake_session: FakeSession, tmp_path: Path
-) -> None:
+async def test_an_upload_failure_names_the_paths(make_provider, fake_session: FakeSession, tmp_path: Path) -> None:
     provider = make_provider()
     handle = await provider.create(spec())
-    fake_session.bash_results = [IdeGymBashResult(stdout="not-a-number", stderr="", exit_code=0)]
-    with pytest.raises(idegym_provider.IdeGymOperationError, match="unparsable size"):
-        await provider.download_file(handle, "/tmp/x", tmp_path / "out")
-
-    fake_session.bash_results = [
-        IdeGymBashResult(stdout="4", stderr="", exit_code=0),
-        IdeGymBashResult(stdout="!!!not base64!!!", stderr="", exit_code=0),
-    ]
-    with pytest.raises(idegym_provider.IdeGymOperationError, match="invalid base64"):
-        await provider.download_file(handle, "/tmp/x", tmp_path / "out")
-
-
-async def test_download_chunk_failure_names_the_offset(
-    make_provider, fake_session: FakeSession, tmp_path: Path
-) -> None:
-    provider = make_provider()
-    handle = await provider.create(spec())
-    fake_session.bash_results = [
-        IdeGymBashResult(stdout="16", stderr="", exit_code=0),
-        IdeGymBashResult(stdout="", stderr="I/O error", exit_code=1),
-    ]
-    with pytest.raises(idegym_provider.IdeGymOperationError, match="at offset 0"):
-        await provider.download_file(handle, "/tmp/x", tmp_path / "out")
-
-
-async def test_download_short_read_is_detected(make_provider, fake_session: FakeSession, tmp_path: Path) -> None:
-    import base64
-
-    provider = make_provider()
-    handle = await provider.create(spec())
-    fake_session.bash_results = [
-        IdeGymBashResult(stdout="8", stderr="", exit_code=0),
-        IdeGymBashResult(stdout=base64.b64encode(b"abc").decode(), stderr="", exit_code=0),
-    ]
-    with pytest.raises(idegym_provider.IdeGymOperationError, match="Expected 8 bytes"):
-        await provider.download_file(handle, "/tmp/x", tmp_path / "out")
+    fake_session.upload_results = [sandbox_error(507, "No space left on device")]
+    with pytest.raises(IdeGymTransferError, match=r"Uploading .*src\.bin to '/tmp/x\.bin'.*No space left") as raised:
+        await provider.upload_file(handle, tmp_path / "src.bin", "/tmp/x.bin")
+    assert isinstance(raised.value, IdeGymOperationError)
+    assert isinstance(raised.value.__cause__, IdeGYMSandboxError)
+    assert handle.raw.stopped is False
 
 
 # --- status ----------------------------------------------------------------
@@ -1052,11 +1382,21 @@ async def test_status_running_stopped_and_unknown(make_provider, fake_session: F
     handle = await provider.create(spec())
     assert await provider.status(handle) is SandboxStatus.RUNNING
 
-    fake_session.capability_results = [orchestrator_error(404)]
+    fake_session.status_results = [orchestrator_error(404)]
     assert await provider.status(handle) is SandboxStatus.STOPPED
 
-    fake_session.capability_results = [orchestrator_error(500)]
+    fake_session.status_results = [orchestrator_error(500)]
     assert await provider.status(handle) is SandboxStatus.UNKNOWN
+    assert handle.raw.stopped is False
+
+    fake_session.status_results = [
+        IdeGymServerStatus(usable=False, availability="CRASHED", pod_ready=None, details="OOMKilled")
+    ]
+    assert await provider.status(handle) is SandboxStatus.STOPPED
+    assert handle.raw.stopped is True
+    calls = len(fake_session.status_calls)
+    assert await provider.status(handle) is SandboxStatus.STOPPED
+    assert len(fake_session.status_calls) == calls
 
 
 async def test_status_of_a_closed_sandbox_is_stopped(make_provider, fake_session: FakeSession) -> None:
@@ -1064,7 +1404,7 @@ async def test_status_of_a_closed_sandbox_is_stopped(make_provider, fake_session
     handle = await provider.create(spec())
     await provider.close(handle)
     assert await provider.status(handle) is SandboxStatus.STOPPED
-    assert fake_session.capability_calls == []
+    assert fake_session.status_calls == []
 
 
 # --- teardown --------------------------------------------------------------
@@ -1078,19 +1418,19 @@ async def test_close_is_idempotent(make_provider, fake_session: FakeSession) -> 
     assert len(fake_session.stop_calls) == 1
 
 
-async def test_close_treats_an_already_gone_server_as_success(make_provider, fake_session: FakeSession) -> None:
+@pytest.mark.parametrize("gone", [404, 410, "forgotten"])
+async def test_close_treats_an_already_gone_server_as_success(
+    make_provider, fake_session: FakeSession, gone: int | str
+) -> None:
     provider = make_provider()
     handle = await provider.create(spec())
-    fake_session.stop_results = [orchestrator_error(404)]
-    await provider.close(handle)
-
-
-async def test_close_treats_a_server_the_session_forgot_as_success(make_provider, fake_session: FakeSession) -> None:
-    provider = make_provider()
-    handle = await provider.create(spec())
-    fake_session.live_servers.clear()
+    if gone == "forgotten":
+        fake_session.live_servers.clear()
+    else:
+        fake_session.stop_results = [orchestrator_error(gone)]
     await provider.close(handle)
     assert handle.raw.stopped is True
+    assert len(fake_session.stop_calls) == 1
 
 
 async def test_a_failed_stop_can_be_retried_against_the_same_server(make_provider, fake_session: FakeSession) -> None:
@@ -1112,24 +1452,61 @@ async def test_a_failed_stop_can_be_retried_against_the_same_server(make_provide
 
 
 async def test_close_retries_then_raises_and_keeps_the_sandbox_live(make_provider, fake_session: FakeSession) -> None:
-    provider = make_provider(operations={"retries": 2})
+    provider = make_provider()
     handle = await provider.create(spec())
-    fake_session.stop_results = [orchestrator_error(500)]
+    fake_session.stop_results = [orchestrator_error(502)]
     with pytest.raises(IdeGymOperationError, match="Failed to stop IdeGYM sandbox"):
         await provider.close(handle)
-    assert len(fake_session.stop_calls) == 3
+    # The default operations.retries is 1: one round on top of the first.
+    assert len(fake_session.stop_calls) == 2
     # A stop that failed for real must not leave the sandbox looking stopped: the
     # pod may well still be running, and status() has to keep saying so.
     assert handle.raw.stopped is False
     assert await provider.status(handle) is SandboxStatus.RUNNING
-
-
-async def test_close_succeeds_after_a_transient_failure(make_provider, fake_session: FakeSession) -> None:
-    provider = make_provider()
-    handle = await provider.create(spec())
+    # The next attempt reaches the same pod and succeeds after a transient failure.
+    fake_session.stop_calls.clear()
     fake_session.stop_results = [orchestrator_error(503), None]
     await provider.close(handle)
+    assert handle.raw.stopped is True
     assert len(fake_session.stop_calls) == 2
+
+
+@pytest.mark.parametrize(
+    "permanent",
+    [orchestrator_error(500), orchestrator_error(400), orchestrator_error(401), IdeGymError("session stopped")],
+    ids=["orchestrator-500", "bad-request", "unauthorized", "session-stopped"],
+)
+async def test_close_does_not_retry_a_failure_that_would_repeat(
+    make_provider, fake_session: FakeSession, permanent: Exception
+) -> None:
+    provider = make_provider(operations={"retries": 3})
+    handle = await provider.create(spec())
+    fake_session.stop_results = [permanent]
+    with pytest.raises(IdeGymOperationError, match="Failed to stop IdeGYM sandbox"):
+        await provider.close(handle)
+    assert len(fake_session.stop_calls) == 1
+    assert handle.raw.stopped is False
+
+
+async def test_close_retries_a_round_that_timed_out(
+    make_provider, fake_session: FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = make_provider(operations={"retries": 1, "close_timeout_s": 0.05})
+    handle = await provider.create(spec())
+    real_stop = fake_session.stop_server
+    calls = 0
+
+    async def slow_then_fast(server_id: int, *, polling: Any, timeout_s: float) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(1)
+        return await real_stop(server_id, polling=polling, timeout_s=timeout_s)
+
+    monkeypatch.setattr(fake_session, "stop_server", slow_then_fast)
+    await provider.close(handle)
+    assert calls == 2
+    assert handle.raw.stopped is True
 
 
 async def test_aclose_releases_the_session_once(make_provider, fake_session: FakeSession) -> None:
@@ -1154,12 +1531,6 @@ async def test_health_reports_the_orchestrator_status(make_provider, fake_sessio
     assert fake_session.health_calls == 1
 
 
-async def test_the_session_is_acquired_only_once(make_provider, fake_session: FakeSession) -> None:
-    provider = make_provider()
-    first, second = await asyncio.gather(provider.session(), provider.session())
-    assert first is second is fake_session
-
-
 async def test_a_racing_acquire_hands_back_its_surplus_reference(
     make_provider, fake_session: FakeSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1181,6 +1552,26 @@ async def test_a_racing_acquire_hands_back_its_surplus_reference(
     first, second = await asyncio.gather(provider.session(), provider.session())
     assert first is second is fake_session
     assert acquired == 2
+    assert provider.released == [fake_session]
+
+
+async def test_an_acquire_that_loses_to_aclose_is_handed_back(
+    make_provider, fake_session: FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = make_provider()
+    gate = asyncio.Event()
+
+    async def slow_acquire(connection: Any, attribution: Any) -> Any:
+        await gate.wait()
+        return fake_session
+
+    monkeypatch.setattr(idegym_provider, "acquire_session", slow_acquire)
+    pending = asyncio.ensure_future(provider.session())
+    await asyncio.sleep(0)
+    await provider.aclose()
+    gate.set()
+    with pytest.raises(IdeGymOperationError, match="has been closed"):
+        await pending
     assert provider.released == [fake_session]
 
 

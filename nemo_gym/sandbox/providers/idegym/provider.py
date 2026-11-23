@@ -17,8 +17,9 @@
 One sandbox is one IdeGYM *server*: a Kubernetes pod provisioned through the IdeGYM
 orchestrator, running the IdeGYM server image whose HTTP API the orchestrator forwards
 requests to. This module composes the layers around it — :mod:`.session` (the shared
-registered client), :mod:`.spec` (spec translation), :mod:`.shell` (command shaping),
-:mod:`.transfer` (files), :mod:`.errors` (failure classification).
+registered client), :mod:`.spec` (spec translation), :mod:`.errors` (failure
+classification). Command context (``cwd``, ``env``, ``user``) and file bytes travel as
+fields of IdeGYM's own requests, so nothing here builds shell text.
 
 Capabilities deliberately not claimed: ``endpoint()``, because the orchestrator
 forwards API requests rather than routing raw TCP; PTY sessions, because IdeGYM has no
@@ -28,11 +29,15 @@ through the registered client that owns it.
 
 import asyncio
 import logging
+import math
+import posixpath
 import threading
-from collections.abc import Mapping
+import time
+import uuid
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
@@ -41,6 +46,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.idegym.config import (
+    MAX_KEEPALIVE_MINUTES,
     IdeGymAttributionConfig,
     IdeGymConnectionConfig,
     IdeGymCreateConfig,
@@ -50,12 +56,13 @@ from nemo_gym.sandbox.providers.idegym.config import (
     IdeGymVerifyConfig,
 )
 from nemo_gym.sandbox.providers.idegym.errors import (
-    IdeGymCommandTooLongError,
     IdeGymCreateError,
     IdeGymCreateVerificationError,
     IdeGymOperationError,
-    IdeGymUnknownServerError,
+    IdeGymTransferError,
     is_command_timeout,
+    is_deadline_exceeded,
+    is_invalid_request,
     is_retryable,
     is_sandbox_gone,
 )
@@ -65,13 +72,13 @@ from nemo_gym.sandbox.providers.idegym.session import (
     acquire_session,
     release_session,
 )
-from nemo_gym.sandbox.providers.idegym.shell import BashScriptBuilder, directory_exists_script
 from nemo_gym.sandbox.providers.idegym.spec import IdeGymProviderOptions, ServerRequestTranslator
-from nemo_gym.sandbox.providers.idegym.transfer import Base64BashFileTransfer
 from nemo_gym.sandbox.providers.utils import coerce_config
 
 
 LOGGER = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # Returned by exec() when the sandbox runtime failed instead of the command. Same
 # sentinel the other Gym providers use, so callers can treat it uniformly.
@@ -82,6 +89,9 @@ SANDBOX_RUNTIME_RETURN_CODE = 125
 # it before the sandbox itself is torn down.
 NO_TIMEOUT_COMMAND_SECONDS = 24 * 60 * 60.0
 
+# Not a start-server field, so the provider takes it out of provider_options itself.
+KEEPALIVE_OPTION = "keepalive_minutes"
+
 
 @dataclass
 class _IdeGymSandbox:
@@ -89,11 +99,13 @@ class _IdeGymSandbox:
 
     server_id: int
     server_name: str
-    namespace: str
     image: str
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
-    metadata: dict[str, str] = field(default_factory=dict)
+    # None opts this sandbox out of keepalive holds.
+    keepalive_minutes: float | None = None
+    # Epoch ms the orchestrator holds the server against its inactivity reaper until.
+    held_until_ms: int = 0
     stopped: bool = False
 
     def __str__(self) -> str:
@@ -107,6 +119,22 @@ def _runtime_failure(message: str, *, error_type: str) -> SandboxExecResult:
         return_code=SANDBOX_RUNTIME_RETURN_CODE,
         error_type=error_type,
     )
+
+
+def _now_ms() -> float:
+    return time.time() * 1000
+
+
+def _keepalive_option(value: Any) -> float | None:
+    """Validate ``provider_options.keepalive_minutes`` the way ``create.keepalive_minutes`` is."""
+    if value is None:
+        return None
+    minutes = float(value)
+    if not 0 < minutes <= MAX_KEEPALIVE_MINUTES:
+        raise ValueError(
+            f"provider_options.{KEEPALIVE_OPTION} must be > 0 and <= {MAX_KEEPALIVE_MINUTES:g}, got {value!r}"
+        )
+    return minutes
 
 
 class IdeGymProvider:
@@ -134,7 +162,6 @@ class IdeGymProvider:
         self._attribution = coerce_config(attribution, IdeGymAttributionConfig)
 
         self._translator = ServerRequestTranslator(self._create)
-        self._script = BashScriptBuilder(self._exec)
         # The session registers a client with the orchestrator, which is async, so
         # it is acquired on first use rather than in this constructor.
         self._session: IdeGymSession | None = None
@@ -184,12 +211,14 @@ class IdeGymProvider:
         """Start an IdeGYM server for ``spec`` and return it ready to run commands.
 
         The orchestrator reports a server only once its pod passes the Kubernetes
-        readiness probe against the IdeGYM server's own health endpoint, so the one
-        thing left to check is ``spec.workdir``. A failure after provisioning tears
-        the server down.
+        readiness probe against the IdeGYM server's own health endpoint, so what is
+        left is the keepalive hold and ``spec.workdir``. A failure after provisioning
+        tears the server down.
         """
-        options = IdeGymProviderOptions.from_mapping(spec.provider_options)
-        request = self._translator.translate(spec, options)
+        provider_options = dict(spec.provider_options or {})
+        keepalive_minutes = _keepalive_option(provider_options.pop(KEEPALIVE_OPTION, self._create.keepalive_minutes))
+        options = IdeGymProviderOptions.from_mapping(provider_options)
+        request = self._translator.translate(spec, options, self._attribution.metadata())
         session = await self.session()
         ready_timeout_s = float(spec.ready_timeout_s or self._create.ready_timeout_s)
 
@@ -197,16 +226,16 @@ class IdeGymProvider:
         sandbox = _IdeGymSandbox(
             server_id=ref.server_id,
             server_name=ref.server_name,
-            namespace=ref.namespace,
             image=str(request["image_tag"]),
             workdir=spec.workdir,
             env={str(key): str(value) for key, value in spec.env.items()},
-            metadata={str(key): str(value) for key, value in spec.metadata.items()},
+            keepalive_minutes=keepalive_minutes,
         )
         handle = SandboxHandle(sandbox_id=str(ref.server_id), provider_name=self.name, raw=sandbox)
-        LOGGER.debug(f"Started IdeGYM sandbox {sandbox} from {sandbox.image!r} with metadata {sandbox.metadata}")
+        LOGGER.debug(f"Started IdeGYM sandbox {sandbox} from {sandbox.image!r} with labels {request['labels']}")
         try:
-            await self._verify_workdir(handle)
+            await self._hold_after_start(handle)
+            await self._verify_server(handle)
         except BaseException as e:
             LOGGER.warning(f"Tearing down the IdeGYM sandbox {sandbox}, which create could not finish: {e!r}")
             await self._discard(handle)
@@ -241,10 +270,9 @@ class IdeGymProvider:
                 return await session.start_server(request, polling=create.polling, timeout_s=remaining)
             except Exception as e:
                 backoff = min(delay, create.retry_max_delay_s)
-                # A bare TimeoutError means the SDK spent the budget it was given, so
-                # it is never worth another attempt even if the clock disagrees.
-                # Transport timeouts are a different exception type and stay retryable.
-                exhausted = type(e) is TimeoutError or deadline - loop.time() <= backoff
+                # A deadline the SDK ran out of was the whole remaining budget; retrying would
+                # multiply ready_timeout_s by the retry count.
+                exhausted = is_deadline_exceeded(e) or deadline - loop.time() <= backoff
                 if attempt >= create.retries or exhausted or not is_retryable(e):
                     raise IdeGymCreateError(
                         f"IdeGYM could not start a server for image {request['image_tag']!r}: {e}"
@@ -257,24 +285,41 @@ class IdeGymProvider:
                 await asyncio.sleep(backoff)
                 delay = min(delay * 2, create.retry_max_delay_s) if delay > 0 else create.retry_delay_s
 
-    async def _verify_workdir(self, handle: SandboxHandle) -> None:
-        """Fail create when ``spec.workdir`` does not exist in the image.
+    async def _hold_after_start(self, handle: SandboxHandle) -> None:
+        """Take the sandbox's keepalive hold; failing to is a create failure."""
+        sandbox: _IdeGymSandbox = handle.raw
+        if sandbox.keepalive_minutes is None:
+            return
+        try:
+            await self._keepalive(sandbox, sandbox.keepalive_minutes)
+        except Exception as e:
+            raise IdeGymCreateError(
+                f"IdeGYM could not hold the new sandbox {sandbox} for {sandbox.keepalive_minutes:g} min against "
+                f"its inactivity reaper: {e}"
+            ) from e
 
-        Without this check the mismatch shows up as every later command failing on
-        ``cd``, which reads like a broken agent rather than a mis-set workdir.
+    async def _verify_server(self, handle: SandboxHandle) -> None:
+        """Fail create on an unusable ``spec.workdir``.
+
+        A missing workdir would otherwise show up as every later command failing, which
+        reads like a broken agent.
         """
         sandbox: _IdeGymSandbox = handle.raw
-        if not self._verify.check_workdir or not sandbox.workdir:
+        cwd = sandbox.workdir if self._verify.check_workdir else None
+        if not cwd:
             return
-        # Deliberately no cwd: the point is to test the directory, not enter it.
-        script = self._script.build(directory_exists_script(sandbox.workdir))
-        result = await self._exec_script(handle, script, timeout_s=self._verify.timeout_s)
-        if result.return_code != 0:
+        result = await self._run(handle, "true", cwd=cwd, env={}, user=None, timeout_s=self._verify.timeout_s)
+        stderr = (result.stderr or "").strip()
+        if result.error_type == "invalid_request":
             raise IdeGymCreateVerificationError(
-                f"The working directory {sandbox.workdir!r} is not usable in the IdeGYM sandbox {sandbox} "
-                f"(image {sandbox.image!r}): return code {result.return_code}, "
-                f"stderr {(result.stderr or '').strip()!r}. Point sandbox_spec.workdir at the image's project "
+                f"The working directory {cwd!r} is not usable in the IdeGYM sandbox {sandbox} "
+                f"(image {sandbox.image!r}): {stderr}. Point sandbox_spec.workdir at the image's project "
                 f"directory, or leave it unset to use the IdeGYM server's own project directory."
+            )
+        if result.error_type is not None:
+            raise IdeGymCreateVerificationError(
+                f"The IdeGYM sandbox {sandbox} (image {sandbox.image!r}) could not run its verification "
+                f"command: {stderr}"
             )
 
     async def _discard(self, handle: SandboxHandle) -> None:
@@ -285,6 +330,38 @@ class IdeGymProvider:
             LOGGER.warning(
                 f"Failed to stop the half-created IdeGYM sandbox {handle.raw}; it may be left running on the "
                 f"cluster until the orchestrator reaps it: {e}"
+            )
+
+    # --- keepalive ---------------------------------------------------------
+
+    async def _keepalive(self, sandbox: _IdeGymSandbox, minutes: float) -> None:
+        session = await self.session()
+        async with asyncio.timeout(self._operations.status_timeout_s):
+            until_ms = await session.keepalive(sandbox.server_id, minutes)
+        sandbox.held_until_ms = max(sandbox.held_until_ms, until_ms)
+
+    async def _hold_for(self, handle: SandboxHandle, deadline_s: float) -> None:
+        """Extend the sandbox's keepalive hold to cover the next ``deadline_s`` seconds.
+
+        IdeGYM's watcher reaps on time since the last completed request, so a command
+        longer than the inactivity timeout would be killed mid-run. The hold only ever
+        grows, so racing callers cannot shorten it. A failure is not fatal: the command
+        may still finish inside the inactivity timeout.
+        """
+        sandbox: _IdeGymSandbox = handle.raw
+        if sandbox.keepalive_minutes is None or _now_ms() + deadline_s * 1000 <= sandbox.held_until_ms:
+            return
+        minutes = min(self._operations.keepalive_minutes_max, math.ceil(deadline_s / 60) + 1)
+        try:
+            await self._keepalive(sandbox, minutes)
+        except Exception as e:
+            if is_sandbox_gone(e):
+                sandbox.stopped = True
+                LOGGER.debug(f"IdeGYM sandbox {sandbox} is gone; further commands will short-circuit: {e}")
+                return
+            LOGGER.warning(
+                f"Could not extend the keepalive hold on IdeGYM sandbox {sandbox} to {minutes:g} min; the command "
+                f"runs without it and may be reaped as idle: {e}"
             )
 
     # --- exec --------------------------------------------------------------
@@ -301,30 +378,32 @@ class IdeGymProvider:
     ) -> SandboxExecResult:
         """Run ``command`` in the sandbox; never raises for a failing command.
 
-        A command that cannot be delivered at all (too long for the sandbox's
-        shell, or an environment name ``export`` cannot carry) is reported the same
-        way, so a bad model-generated command cannot end a rollout.
+        A request the sandbox cannot honour (a missing ``cwd``, an unknown ``user``, an
+        environment name that is not a shell identifier) is reported the same way, so a
+        bad model-generated command cannot end a rollout.
         """
+        if isinstance(user, int):
+            # The server switches users by name (runuser/sudo -u), and a uid has no name to give.
+            return _runtime_failure(
+                f"The idegym provider runs commands as a named user, not uid {user!r}", error_type="invalid_request"
+            )
         sandbox: _IdeGymSandbox = handle.raw
         merged_env = {**sandbox.env, **{str(key): str(value) for key, value in (env or {}).items()}}
         effective_cwd = cwd if cwd is not None else sandbox.workdir
-        try:
-            script = self._script.build(command, cwd=effective_cwd, env=merged_env, user=user)
-        except IdeGymCommandTooLongError as e:
-            return _runtime_failure(str(e), error_type="command_too_long")
-        except ValueError as e:
-            return _runtime_failure(str(e), error_type="invalid_request")
         timeout = timeout_s if timeout_s is not None else self._exec.default_timeout_s
-        return await self._exec_script(handle, script, timeout_s=timeout)
+        return await self._run(handle, command, cwd=effective_cwd, env=merged_env, user=user, timeout_s=timeout)
 
-    async def _exec_script(
+    async def _run(
         self,
         handle: SandboxHandle,
-        script: str,
+        command: str,
         *,
-        timeout_s: int | float | None,
+        cwd: str | None,
+        env: dict[str, str],
+        user: str | None,
+        timeout_s: float | None,
     ) -> SandboxExecResult:
-        """Send one prepared script to the sandbox and normalize the outcome."""
+        """Send one command to the sandbox and normalize the outcome."""
         sandbox: _IdeGymSandbox = handle.raw
         if sandbox.stopped:
             return _runtime_failure(f"IdeGYM sandbox {sandbox} has been stopped", error_type="sandbox")
@@ -334,10 +413,17 @@ class IdeGymProvider:
         # otherwise a timed-out command comes back as a transport error with none
         # of the output the caller needs.
         request_timeout = command_timeout + self._exec.request_overhead_s
+        await self._hold_for(handle, request_timeout)
+        if sandbox.stopped:
+            return _runtime_failure(f"IdeGYM sandbox {sandbox} is no longer available", error_type="sandbox")
         try:
             result = await session.execute_bash(
                 sandbox.server_id,
-                script,
+                command,
+                cwd=cwd,
+                env=env,
+                user=user,
+                max_output_bytes=self._exec.max_output_bytes,
                 command_timeout_s=command_timeout,
                 graceful_termination_timeout_s=self._exec.graceful_termination_timeout_s,
                 request_timeout_s=request_timeout,
@@ -349,10 +435,14 @@ class IdeGymProvider:
                     f"Command timed out after {command_timeout}s in IdeGYM sandbox {sandbox}: {e}",
                     error_type="timeout",
                 )
-            if is_sandbox_gone(e) or isinstance(e, IdeGymUnknownServerError):
+            if is_sandbox_gone(e):
                 sandbox.stopped = True
                 LOGGER.debug(f"IdeGYM sandbox {sandbox} is gone; further commands will short-circuit: {e}")
                 return _runtime_failure(f"IdeGYM sandbox {sandbox} is no longer available: {e}", error_type="sandbox")
+            if is_invalid_request(e):
+                return _runtime_failure(
+                    f"IdeGYM sandbox {sandbox} rejected the command request: {e}", error_type="invalid_request"
+                )
             # Unclassified: the return value keeps the rollout alive but throws the
             # traceback away, so this is the only place it can still be recovered.
             LOGGER.warning(f"IdeGYM sandbox {sandbox} failed to run the command", exc_info=True)
@@ -361,29 +451,84 @@ class IdeGymProvider:
 
     # --- files -------------------------------------------------------------
 
-    def _transfer(self, handle: SandboxHandle) -> Base64BashFileTransfer:
-        async def run(command: str, *, timeout_s: int | float | None = None) -> SandboxExecResult:
-            return await self.exec(handle, command, timeout_s=timeout_s)
+    @staticmethod
+    def _remote_path(sandbox: _IdeGymSandbox, path: str) -> str:
+        # The SDK resolves a relative path against the server's project directory, but
+        # the sandbox contract resolves it against spec.workdir.
+        if sandbox.workdir and not posixpath.isabs(path):
+            return posixpath.join(sandbox.workdir, path)
+        return path
 
-        return Base64BashFileTransfer(self._files, run)
+    async def _transfer(self, handle: SandboxHandle, what: str, call: Callable[[IdeGymSession], Awaitable[T]]) -> T:
+        sandbox: _IdeGymSandbox = handle.raw
+        if sandbox.stopped:
+            raise IdeGymTransferError(f"{what} failed: IdeGYM sandbox {sandbox} has been stopped")
+        session = await self.session()
+        try:
+            return await call(session)
+        except Exception as e:
+            if is_sandbox_gone(e):
+                sandbox.stopped = True
+                raise IdeGymTransferError(
+                    f"{what} failed: IdeGYM sandbox {sandbox} is no longer available: {e}"
+                ) from e
+            raise IdeGymTransferError(f"{what} failed: {e}") from e
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
-        """Upload one local file into the sandbox."""
-        await self._transfer(handle).upload(Path(source_path), target_path)
+        """Upload one local file into the sandbox, creating its parent directories."""
+        sandbox: _IdeGymSandbox = handle.raw
+        source = Path(source_path)
+        remote = self._remote_path(sandbox, target_path)
+        await self._transfer(
+            handle,
+            f"Uploading {source} to {remote!r} in IdeGYM sandbox {sandbox}",
+            lambda session: session.upload_file(
+                sandbox.server_id,
+                source,
+                remote,
+                chunk_bytes=self._files.chunk_bytes,
+                request_timeout_s=self._files.timeout_s,
+                polling=self._create.polling,
+            ),
+        )
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
-        """Download one sandbox file to the local filesystem."""
-        await self._transfer(handle).download(source_path, Path(target_path))
+        """Download one sandbox file to the local filesystem.
+
+        The bytes land in a temporary sibling first, so a failed download neither leaves
+        a truncated file behind nor clobbers one that was already there.
+        """
+        sandbox: _IdeGymSandbox = handle.raw
+        remote = self._remote_path(sandbox, source_path)
+        target = Path(target_path)
+        polling = self._create.polling
+        partial = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
+        try:
+            await self._transfer(
+                handle,
+                f"Downloading {remote!r} from IdeGYM sandbox {sandbox}",
+                lambda session: session.download_file(
+                    sandbox.server_id,
+                    remote,
+                    partial,
+                    chunk_bytes=self._files.chunk_bytes,
+                    request_timeout_s=self._files.timeout_s,
+                    polling=polling,
+                ),
+            )
+            await asyncio.to_thread(partial.replace, target)
+        except BaseException:
+            await asyncio.to_thread(partial.unlink, missing_ok=True)
+            raise
 
     # --- status and teardown ----------------------------------------------
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
-        """Report the sandbox's lifecycle status.
+        """Report the sandbox's lifecycle status from the orchestrator's status endpoint.
 
-        IdeGYM has no server-status endpoint, so the capabilities call stands in: it
-        validates the database record *and* reaches the pod, which is the liveness
-        question being asked. A "gone" answer means stopped; any other failure leaves
-        the status unknown rather than guessing.
+        Not-usable means terminal (crashed, killed, stopped): IdeGYM never brings such a
+        server back, so the sandbox is marked stopped. Any other failure leaves the
+        status unknown rather than guessing.
         """
         sandbox: _IdeGymSandbox = handle.raw
         if sandbox.stopped:
@@ -391,12 +536,19 @@ class IdeGymProvider:
         session = await self.session()
         try:
             async with asyncio.timeout(self._operations.status_timeout_s):
-                await session.list_capabilities(sandbox.server_id)
+                server_status = await session.server_status(sandbox.server_id)
         except Exception as e:
-            if is_sandbox_gone(e) or isinstance(e, IdeGymUnknownServerError):
+            if is_sandbox_gone(e):
                 return SandboxStatus.STOPPED
             LOGGER.debug(f"Could not determine the status of IdeGYM sandbox {sandbox}: {e}")
             return SandboxStatus.UNKNOWN
+        if not server_status.usable:
+            sandbox.stopped = True
+            LOGGER.debug(
+                f"IdeGYM sandbox {sandbox} is {server_status.availability}; further commands will short-circuit: "
+                f"{server_status.details}"
+            )
+            return SandboxStatus.STOPPED
         return SandboxStatus.RUNNING
 
     async def close(self, handle: SandboxHandle) -> None:
@@ -421,16 +573,12 @@ class IdeGymProvider:
                         polling=self._create.polling,
                         timeout_s=self._operations.close_timeout_s,
                     )
-            except IdeGymUnknownServerError:
-                # The session only forgets a server after stopping it, so this is a
-                # second teardown of the same sandbox.
-                sandbox.stopped = True
-                return
             except Exception as e:
                 if is_sandbox_gone(e):
                     sandbox.stopped = True
                     return
-                if attempt >= self._operations.retries:
+                # A rejected or unauthorized delete, or a stopped session, fails the same way again.
+                if attempt >= self._operations.retries or not is_retryable(e):
                     raise IdeGymOperationError(f"Failed to stop IdeGYM sandbox {sandbox}: {e}") from e
                 attempt += 1
                 backoff = min(delay, self._operations.retry_max_delay_s)

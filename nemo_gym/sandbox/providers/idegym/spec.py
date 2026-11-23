@@ -22,10 +22,11 @@
     *requests*. IdeGYM's quota accounting reads limits first.
 ``env``
     IdeGYM only imports pod environment from ConfigMaps and Secrets, so plain values
-    are exported per command by :mod:`~nemo_gym.sandbox.providers.idegym.shell`.
+    travel with each command, as the bash request's ``env`` field.
 ``metadata``
-    Cannot become Kubernetes labels — IdeGYM has no per-server label API — so
-    selected keys name the pod instead.
+    Becomes pod labels, merged over the job attribution and under
+    ``provider_options.labels``. Values are sanitized into valid label values; keys
+    that IdeGYM manages itself are rejected.
 ``ttl_s`` / ``ports`` / ``entrypoint``
     Unsupported: servers live until stopped, expose only their own service port, and
     own their container entrypoint.
@@ -37,6 +38,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from nemo_gym.sandbox.attribution import sanitize_label_value
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
 from nemo_gym.sandbox.providers.idegym.config import IdeGymCreateConfig
 from nemo_gym.sandbox.providers.idegym.errors import IdeGymCreateError
@@ -50,6 +52,12 @@ IMAGE_SCHEME_PREFIX = "docker://"
 # here so a bad image fails with an explanation rather than as a pydantic error deep
 # inside the SDK.
 _OCI_IMAGE = re.compile(r"[a-z0-9._/:@-]{1,383}")
+
+# Keys the orchestrator sets on the pod itself and rejects from a client request.
+_MANAGED_LABEL_KEYS = frozenset({"app"})
+_MANAGED_LABEL_PREFIXES = ("app.kubernetes.io/", "idegym.jetbrains.com/")
+_MANAGED_ANNOTATION_KEYS = frozenset({"cluster-autoscaler.kubernetes.io/safe-to-evict"})
+_MANAGED_ANNOTATION_PREFIXES = ("prometheus.io/", "podsnapshot.gke.io/")
 
 
 def normalize_image(image: str | None) -> str:
@@ -91,6 +99,29 @@ def format_gib(gib: int) -> str:
     return f"{int(gib)}Gi"
 
 
+def _reject_managed(kind: str, keys: Mapping[str, Any], exact: frozenset[str], prefixes: tuple[str, ...]) -> None:
+    for key in keys:
+        if key in exact or key.startswith(prefixes):
+            raise IdeGymCreateError(
+                f"Pod {kind} key {key!r} is managed by IdeGYM and cannot be set from spec.metadata or "
+                f"provider_options.{kind}s."
+            )
+
+
+def pod_labels(metadata: Mapping[str, str]) -> dict[str, str]:
+    """Return ``metadata`` as pod labels: values sanitized, IdeGYM-managed keys rejected."""
+    labels = {str(key): sanitize_label_value(value) for key, value in metadata.items()}
+    _reject_managed("label", labels, _MANAGED_LABEL_KEYS, _MANAGED_LABEL_PREFIXES)
+    return labels
+
+
+def pod_annotations(annotations: Mapping[str, str]) -> dict[str, str]:
+    """Return ``annotations`` as strings, rejecting IdeGYM-managed keys."""
+    rendered = {str(key): str(value) for key, value in annotations.items()}
+    _reject_managed("annotation", rendered, _MANAGED_ANNOTATION_KEYS, _MANAGED_ANNOTATION_PREFIXES)
+    return rendered
+
+
 def resource_quantities(resources: SandboxResources) -> dict[str, str]:
     """Render one neutral resource request as a Kubernetes quantity mapping."""
     quantities: dict[str, str] = {}
@@ -118,6 +149,8 @@ class IdeGymProviderOptions:
     runtime_class_name: str | None = None
     run_as_root: bool | None = None
     node_selector: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+    annotations: dict[str, str] = field(default_factory=dict)
     volumes: tuple[Mapping[str, Any], ...] = ()
     volume_mounts: tuple[Mapping[str, Any], ...] = ()
     env_from: tuple[Mapping[str, Any], ...] = ()
@@ -146,6 +179,8 @@ class IdeGymProviderOptions:
         scalars = dict(options)
         requests = scalars.pop("resource_requests", None)
         node_selector = _mapping(scalars.pop("node_selector", None), "node_selector") or {}
+        labels = _mapping(scalars.pop("labels", None), "labels") or {}
+        annotations = _mapping(scalars.pop("annotations", None), "annotations") or {}
         volumes = _mapping_tuple(scalars.pop("volumes", None), "volumes")
         volume_mounts = _mapping_tuple(scalars.pop("volume_mounts", None), "volume_mounts")
         env_from = _mapping_tuple(scalars.pop("env_from", None), "env_from")
@@ -154,6 +189,8 @@ class IdeGymProviderOptions:
         return cls(
             resource_requests=SandboxResources.from_mapping(requests) if requests is not None else None,
             node_selector={str(key): str(value) for key, value in node_selector.items()},
+            labels={str(key): str(value) for key, value in labels.items()},
+            annotations={str(key): str(value) for key, value in annotations.items()},
             volumes=volumes,
             volume_mounts=volume_mounts,
             env_from=env_from,
@@ -217,8 +254,13 @@ class ServerRequestTranslator:
         ]
         return generate_server_name(self._create.server_name_prefix, hints)
 
-    def translate(self, spec: SandboxSpec, options: IdeGymProviderOptions) -> dict[str, Any]:
+    def translate(
+        self, spec: SandboxSpec, options: IdeGymProviderOptions, attribution_metadata: Mapping[str, str]
+    ) -> dict[str, Any]:
         """Return the plain-dict start-server request for ``spec``.
+
+        Pod labels merge ``attribution_metadata``, then ``spec.metadata``, then
+        ``options.labels``; later sources win.
 
         Raises:
             IdeGymCreateError: If the spec asks for something IdeGYM cannot express.
@@ -235,7 +277,10 @@ class ServerRequestTranslator:
             "max_restarts": _or_default(options.max_restarts, create.max_restarts),
             # How long the SDK waits before retrying its own 429; it takes whole seconds.
             "retry_delay_in_seconds": max(1, round(create.busy_retry_delay_s)),
+            "labels": pod_labels({**attribution_metadata, **spec.metadata, **options.labels}),
         }
+        if annotations := pod_annotations(options.annotations):
+            request["annotations"] = annotations
         if resources := self._resources(spec, options):
             request["resources"] = resources
         for key, value in (
@@ -282,8 +327,9 @@ class ServerRequestTranslator:
         if spec.ttl_s is not None:
             self._warn_once(
                 "ttl_s",
-                "spec.ttl_s is not enforced by the idegym provider; servers live until close(). The IdeGYM "
-                "orchestrator's own watcher reaps servers whose client stops heartbeating.",
+                "spec.ttl_s is not enforced by the idegym provider: servers live until close(), and the IdeGYM "
+                "orchestrator's watcher reaps idle ones. Keepalive extends that idle window; it is not a "
+                "lifetime cap.",
             )
         if spec.ports:
             self._warn_once(
