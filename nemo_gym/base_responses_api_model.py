@@ -64,7 +64,8 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym import branch_replay
+from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -418,6 +419,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # chat_completions() signatures vary across servers: some take a leading `request`, some
         # only `body`. Dispatch on whichever this server declares so the shared dispatch works for
         # all of them.
+        # Branch replay: a rollout with a replay plan gets the source rollout's recorded answer for the turns
+        # before its branch turn. Served before parent resolution and admission, so the token capture never
+        # sees the call (see nemo_gym.branch_replay).
+        forced = branch_replay.forced_completion(current_rollout_id(), params)
+        if forced is not None:
+            return NeMoGymChatCompletion.model_validate(forced)
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
@@ -434,6 +441,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion,
             request_messages=request_messages,
         )
+        branch_replay.record_completion(current_rollout_id(), params, completion)
         return completion
 
     async def messages(self, request: Request, body: dict = Body()):

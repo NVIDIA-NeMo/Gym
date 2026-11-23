@@ -50,6 +50,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
+from nemo_gym.branch_replay import BRANCH_REPLAY_DIR_ENV, is_forced_response
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
@@ -180,6 +181,10 @@ def _set_reasoning(message_dict: dict[str, Any], reasoning: str, mode: Reasoning
 
 
 class VLLMModelConfig(BaseResponsesAPIModelConfig):
+    # Branch replay (nemo_gym/branch_replay.py): directory shared with the training controller. When set, every
+    # chat completion served under a rollout prefix is recorded there, and a rollout with a replay plan gets the
+    # recorded answers of its source rollout for the turns before its branch turn.
+    branch_replay_dir: Optional[str] = None
     base_url: Union[str, List[str]]
     api_key: str
     model: str
@@ -365,6 +370,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         return super().model_post_init(context)
 
     def _post_init(self) -> None:
+        if self.config.branch_replay_dir:
+            # nemo_gym.branch_replay reads the directory from the environment of this server process.
+            os.environ[BRANCH_REPLAY_DIR_ENV] = self.config.branch_replay_dir
+            LOG.info("`%s` records and replays chat completions under %s", self.config.name, self.config.branch_replay_dir)
         if self.config.sampling_overrides:
             LOG.info(
                 "`%s` pins sampling on every request to the engine: %s",
@@ -1131,6 +1140,9 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Publish lineage using the final Chat, Responses, or Messages representation."""
+        if is_forced_response(response):
+            # A branch-replay answer was never admitted to the capture: there is nothing to publish.
+            return
         if self._external_capture_handler is not None:
             await self._external_capture_handler.finalize_response(_jsonable(response))
 
