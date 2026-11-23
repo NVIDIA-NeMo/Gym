@@ -211,6 +211,21 @@ async def test_an_agent_session_returns_its_observations_on_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_verify_on_run_receives_no_observations() -> None:
+    # Their conversation holds every image; the verifier does not read them, so only the result carries them.
+    agent, _ = make_agent([response(output=[call()]), response("<answer>red</answer>")], observability_enabled=True)
+    result = await agent.run(request(), body())
+
+    [verify] = [
+        kwargs["json"]
+        for kwargs in (c.kwargs for c in agent.server_client.post.call_args_list)
+        if kwargs["url_path"] == "/verify"
+    ]
+    assert "ng_agent_observations" not in verify
+    assert result.model_dump()["ng_agent_observations"]["records"]
+
+
+@pytest.mark.asyncio
 async def test_collected_policy_turns_and_tool_attempts_are_observed(tmp_path: Path, monkeypatch) -> None:
     replies = [
         response(output=[call(call_id="crop-tool")]).model_copy(

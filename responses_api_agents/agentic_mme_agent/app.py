@@ -565,12 +565,12 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                 "responses_create_params": body.responses_create_params.model_dump(),
                 "response": result.model_dump(),
                 "verifier_metadata": body.verifier_metadata,
-                **observed,
             },
             cookies=request.cookies,
         )
         await raise_for_status(verification)
-        # Verify returns the tool trace and its counts.
+        # Verify returns the tool trace and its counts. It does not read the observations, whose conversation holds
+        # every image, so they join the result only here.
         verified = AgenticMMEVerifyResponse.model_validate(await get_response_json(verification))
         return verified.model_copy(
             update={
