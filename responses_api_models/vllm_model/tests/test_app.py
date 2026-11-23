@@ -5814,6 +5814,20 @@ _WINDOW_32768 = json.dumps(
         "(10 in the messages, 40000 in the completion). Please reduce the length of the messages or completion."
     }
 )
+# Refusals that state a prompt that alone fills the window: vLLM's, and NeMo RL's chat engine's behind a Dynamo
+# frontend, which refuses such a prompt before it applies the output cap.
+_PROMPT_OVER_WINDOW_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, you requested 72800 tokens "
+        "(32800 in the messages, 40000 in the completion). Please reduce the length of the messages or completion."
+    }
+)
+_DYNAMO_PROMPT_FILLS_WINDOW_8192 = json.dumps(
+    {
+        "message": "Prompt length (8200) fills or exceeds this model's maximum context length (8192). "
+        "No room for output tokens."
+    }
+)
 
 
 @mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
@@ -5849,6 +5863,8 @@ _WINDOW_32768 = json.dumps(
         ),
         ({"max_tokens": 32768}, _WINDOW_32768, ("invalid_output_token_parameter",) * 2),
         ({"max_tokens": 32767}, _WINDOW_32768, ("context_length_exceeded",) * 2),
+        ({"max_tokens": 8192}, _DYNAMO_PROMPT_FILLS_WINDOW_8192, ("context_length_exceeded",) * 2),
+        ({"max_tokens": 40000}, _PROMPT_OVER_WINDOW_32768, ("context_length_exceeded",) * 2),
         ({}, _WINDOW_32768, ("context_length_exceeded",) * 2),
         (
             {"max_tokens": 40000},
@@ -5864,6 +5880,8 @@ _WINDOW_32768 = json.dumps(
         "vllm-0.27-max-total-tokens",
         "budget-equal-to-window",
         "budget-below-window",
+        "dynamo-prompt-fills-window-budget-equal",
+        "prompt-over-window-budget-over",
         "no-budget",
         "no-window-named",
     ],
@@ -5877,7 +5895,9 @@ async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
     categories: tuple[str, str],
 ) -> None:
     """No prompt fits a budget as large as the whole window the engine names, so the budget is at fault. The budget
-    is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens."""
+    is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens. A
+    refusal that states a prompt that alone fills the window is an overflow whatever the budget, since no lower budget
+    would make that prompt fit."""
     monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
     monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
     model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
@@ -10040,20 +10060,26 @@ async def test_a_refit_counts_the_prompt_with_tokenize_when_the_refusal_does_not
     assert (execution["requested_max_tokens"], execution["applied_max_tokens"]) == (131072, _REFIT_APPLIED)
 
 
-async def test_a_refusal_through_dynamo_is_not_counted_with_tokenize(monkeypatch: MonkeyPatch) -> None:
+@mark.parametrize("budget", [131072, _REFIT_WINDOW], ids=["budget-over-window", "budget-equal-to-window"])
+async def test_a_refusal_through_dynamo_is_not_counted_with_tokenize(monkeypatch: MonkeyPatch, budget: int) -> None:
     monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
     monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
     model = TestApp()._setup_server(monkeypatch, dynamo_frontend=True)
     client = _refit_engine(_engine_bad_request_error(_REFIT_DYNAMO_PROMPT_FILLS_WINDOW))
     model._clients = [client]
+    request = _refit_request()
 
-    response = await model.chat_completions(_refit_request(), _refit_body({"max_tokens": 131072}))
+    response = await model.chat_completions(request, _refit_body({"max_tokens": budget}))
 
     assert response.choices[0].finish_reason == "length"
     # The frontend has no /tokenize, and the budget is NeMo RL's to lower: one call, no count, no resend.
     [call] = _generation_calls(client, False)
-    assert call["max_tokens"] == 131072
+    assert call["max_tokens"] == budget
     client.create_tokenize.assert_not_awaited()
+    # The prompt alone fills the window, so the conversation overflowed whatever the budget.
+    execution = request.state.nemo_gym_model_execution
+    assert execution["error_category"] == "context_length_exceeded"
+    assert "output_budget_refit" not in execution
 
 
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])

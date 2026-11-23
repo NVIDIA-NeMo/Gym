@@ -245,13 +245,14 @@ _CONTEXT_WINDOW_SIZE = re.compile(
     r"(?:maximum context length|maximum model length|max_model_len|max_total_tokens)\D{0,5}(\d+)"
 )
 # How an engine states the prompt's length in a length refusal: vLLM's "(N in the messages, M in the completion)",
-# vLLM 0.29's "your prompt contains N input tokens", "your request has N input tokens", and the prompt-only checks'
-# "Input length (N)" and "decoder prompt (length N)".
+# vLLM 0.29's "your prompt contains N input tokens", "your request has N input tokens", the prompt-only checks'
+# "Input length (N)" and "decoder prompt (length N)", and NeMo RL's chat engine's "Prompt length (N) fills or exceeds".
 _PROMPT_TOKEN_COUNT = re.compile(
     r"(\d+) (?:tokens )?in the messages"
     r"|(?:prompt contains|request has) (\d+) input tokens"
     r"|Input length \((\d+)\)"
     r"|decoder prompt \(length (\d+)\)"
+    r"|Prompt length \((\d+)\)"
 )
 # Tokens a refitted request leaves unused in the window, against small differences between the prompt count the
 # server obtains and the one the engine checks.
@@ -374,14 +375,22 @@ def _length_refusal_category(
     fills all of it, so that no prompt fits; otherwise ``context_length_exceeded``.
 
     The budget is the one the engine received: on chat, ``max_completion_tokens`` before ``max_tokens``. A message that
-    names no window does not prove the budget wrong, so that refusal stays an overflow.
+    names no window does not prove the budget wrong, so that refusal stays an overflow. Neither does one that states a
+    prompt that alone fills the window: no budget would make that prompt fit, and NeMo RL's chat engine behind a Dynamo
+    frontend refuses such a prompt before it applies the output cap.
     """
     key = _effective_budget_key(outbound, _COMPLETIONS_BUDGET_KEYS if completions_api else _CHAT_BUDGET_KEYS)
     budget = None if key is None else outbound[key]
     message, _, _ = context_overflow_error_fields(error)
     window = _CONTEXT_WINDOW_SIZE.search(message)
+    if window is None:
+        return "context_length_exceeded"
+    window_tokens = int(window.group(1))
+    prompt_tokens = _stated_prompt_tokens(message)
+    if prompt_tokens is not None and prompt_tokens >= window_tokens:
+        return "context_length_exceeded"
     # A budget equal to the window is at fault too: it leaves no token for a prompt, however short.
-    if type(budget) is int and window is not None and budget >= int(window.group(1)):
+    if type(budget) is int and budget >= window_tokens:
         return "invalid_output_token_parameter"
     return "context_length_exceeded"
 
