@@ -1163,6 +1163,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             f"{state.runtime}/node/bin/node",
             f"{state.runtime}/codex/node_modules/@openai/codex/bin/codex.js",
         ]
+        access = state.request.sandbox_access
         payload = {
             "directory": state.session.session_dir,
             "command": command,
@@ -1172,6 +1173,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "prompt": prompt,
             "cwd": state.session.workdir,
             "env": {
+                # SandboxAccess.env, except CODEX_* and OPENAI_* variables, which could redirect Codex's
+                # configuration or model calls, and NEMO_GYM_* variables, which Gym sets for the harness itself.
+                **{
+                    key: value
+                    for key, value in (access.env if access else {}).items()
+                    if not key.startswith(("CODEX_", "OPENAI_", "NEMO_GYM_"))
+                },
                 "CODEX_HOME": f"{state.session.session_dir}/home/.codex",
                 # Gym receives the calls; never copy the direct OpenAI credential into this path.
                 "OPENAI_API_KEY": "gym",  # pragma: allowlist secret

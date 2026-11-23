@@ -3481,6 +3481,32 @@ def test_sandbox_environment_inheritance_is_opt_in(setup, inherit) -> None:
     }
 
 
+def test_sandbox_access_env_reaches_codex_except_codex_openai_and_nemo_gym_variables(setup) -> None:
+    agent, sandbox = setup
+    request = seed()
+    request.sandbox_access.env = {
+        "TASK_API_TOKEN": "task-value",
+        "HOME": "/task-home",
+        "CODEX_HOME": "must-not-apply",
+        "CODEX_OTHER": "must-not-apply",
+        "OPENAI_API_KEY": "must-not-apply",  # pragma: allowlist secret
+        "OPENAI_BASE_URL": "http://must-not-apply",
+        "NEMO_GYM_SUPERVISOR": "must-not-apply",
+    }
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=request.model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert payload["env"] == {
+        "TASK_API_TOKEN": "task-value",
+        "HOME": "/task-home",
+        "CODEX_HOME": f"{sandbox.directory}/home/.codex",
+        "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+    }
+
+
 @pytest.mark.parametrize("status", [400, 401, 429, 503])
 async def test_native_model_error_is_reported_with_classification(setup, status):
     agent, sandbox = setup

@@ -110,6 +110,8 @@ sandbox. `inherit_sandbox_environment: true` instead passes the sandbox's whole 
 as a harness started in the task container sees it (task variables such as `VIRTUAL_ENV` or
 `OMP_NUM_THREADS`), keeping only `CODEX_HOME` private. Use it only with remote providers,
 where that environment is the task's own.
+In both cases `SandboxAccess.env` is forwarded over the sandbox's values, except `CODEX_*`,
+`OPENAI_*` and `NEMO_GYM_*` variables.
 Installation errors retain the command, exit status, stdout, and stderr. Runtime compatibility
 must still be checked on actual task images; a mocked installer test is not image validation.
 
