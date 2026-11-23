@@ -52,11 +52,7 @@ default provider and fail to schedule. `--exclude-tasks` and `--only-tasks` sele
 Settings live in four places (see `fern/versions/latest/pages/agent-interactions/harbor.mdx`, "Configure the server"). `dataset.toml` sets
 `CIRCLE_NODE_TOTAL=3` for `nextjs-performance`, as the legacy benchmark's server does, so its test sharding matches
 the task's two-CPU allocation. It sets it for the agent's sandbox and for the separate verifier's, which gets only its
-own `[verifier.environment].env`; the loader applies both. `lake-temp-glm` and `batched-eval-parity` deny their
-separate verifier all egress on `[verifier.environment]` (`allow_internet = false`), where the loader refuses a network
-restriction; `dataset.toml` sets `network_mode = "no-network"` on their `[verifier]` instead, which the loader applies
-as an egress policy on the separate verifier's sandbox (OpenSandbox only), and leaves their verifier environment
-public. Their verifier still has no egress, and nothing else changes.
+own `[verifier.environment].env`; the loader applies both and nothing else changes.
 
 Deployment settings go in the `sandbox` and `sandbox_gpu` provider blocks of the merged configuration (`env.yaml` or a `--config` overlay): Compose networking and
 the shared-memory label as documented in `fern/versions/latest/pages/data/task-folders/compose-tasks.mdx`, and, for `gym dataset validate` on the three images

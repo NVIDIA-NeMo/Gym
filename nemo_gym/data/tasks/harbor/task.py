@@ -395,6 +395,29 @@ def read_instruction(path: Path) -> str:
     return "\n".join(lines)
 
 
+def _verifier_network_from_its_environment(config: HarborTaskConfig) -> HarborTaskConfig:
+    """``config`` with a restriction on ``[verifier.environment]`` resolved into ``[verifier]``, as Harbor resolves it.
+
+    A ``[verifier.environment]`` makes verification separate, and Harbor runs a separate verifier under its explicit
+    ``[verifier]`` policy, else under the baseline of the environment it runs in, ``[verifier.environment]``
+    (``resolve_trial_network_plan``); so ``allow_internet = false`` there alone leaves the verifier without network.
+    The server applies a verifier restriction from ``[verifier]``, as the separate verifier sandbox's egress policy at
+    its creation (refused at seed on a provider that cannot enforce one) and as ``verifier_network``. So the
+    environment's restriction becomes the ``[verifier]`` policy unless ``[verifier]`` names its own, which wins as in
+    Harbor, and the environment is left public. A multi-step task's steps resolve their own verifier environments, so
+    its ``[verifier.environment]`` is kept as written and a restriction there is refused below.
+    """
+    verifier = config.verifier
+    environment = verifier.environment
+    if config.steps or environment is None or environment.network_mode == "public":
+        return config
+    phase: dict[str, Any] = {}
+    if verifier.network_mode is None:
+        phase = {"network_mode": environment.network_mode, "allowed_hosts": environment.allowed_hosts}
+    public = environment.model_copy(update={"network_mode": "public", "allowed_hosts": None})
+    return config.model_copy(update={"verifier": verifier.model_copy(update={**phase, "environment": public})})
+
+
 def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[str, Any] | None = None) -> HarborTask:
     """Read ``path`` as one task. Raises :class:`HarborTaskError` when it is not one.
 
@@ -433,6 +456,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         config = apply_dataset_config(config, path.name, dataset)
     except ValueError as exc:
         raise HarborTaskError(str(exc)) from exc
+    config = _verifier_network_from_its_environment(config)
 
     phases = {"environment": config.environment, "agent": config.agent, "verifier": config.verifier}
     if config.verifier.environment is not None:

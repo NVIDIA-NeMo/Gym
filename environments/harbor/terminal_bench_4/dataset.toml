@@ -13,20 +13,3 @@ env = { CIRCLE_NODE_TOTAL = "3" }
 
 [gym.tasks."nextjs-performance".verifier.environment]
 env = { CIRCLE_NODE_TOTAL = "3" }
-
-# Verifier network. lake-temp-glm and batched-eval-parity deny their separate verifier all egress with
-# [verifier.environment] allow_internet = false. Gym's loader applies a verifier restriction from
-# [verifier].network_mode, as an egress policy on the separate verifier's sandbox, and refuses one on
-# [verifier.environment]; so, as in environments/harbor/terminal_bench_science/dataset.toml, the restriction is set on
-# [verifier] and the verifier environment is public. The verifier sandbox still has no egress (OpenSandbox only).
-[gym.tasks."batched-eval-parity".verifier]
-network_mode = "no-network"
-
-[gym.tasks."batched-eval-parity".verifier.environment]
-network_mode = "public"
-
-[gym.tasks."lake-temp-glm".verifier]
-network_mode = "no-network"
-
-[gym.tasks."lake-temp-glm".verifier.environment]
-network_mode = "public"

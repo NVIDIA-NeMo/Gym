@@ -5452,6 +5452,10 @@ class TestVerifierNetwork:
         "[verifier]\n",
         '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["PyPI.org", "*.nvidia.com", "pypi.org", "10.0.0.7"]\n',
     )
+    # Upstream's spelling: the restriction on `[verifier.environment]` only, no `[verifier]` policy, no dataset override.
+    ENVIRONMENT_NO_NETWORK_TOML = SEPARATE_TOML.replace(
+        'docker_image = "org/verifier:1"\n', 'docker_image = "org/verifier:1"\nallow_internet = false\n'
+    )
 
     def prepared(self, tmp_path, monkeypatch, *, toml, provider="opensandbox", **config):
         agent = AgentSandbox()
@@ -5489,6 +5493,25 @@ class TestVerifierNetwork:
         assert spec.image == "org/verifier:1"
         assert spec.provider_options == {"network_policy": {"defaultAction": "deny", "egress": []}}
         # The agent's own sandbox is created as before: public, with the deployment's options only.
+        assert "network_policy" not in server._sandbox_spec(task, "/app").provider_options
+        assert verifier.stopped and agent.stopped
+
+    async def test_a_verifier_environment_without_internet_gives_only_the_verifier_a_deny_all_policy(
+        self, tmp_path, monkeypatch
+    ):
+        """`[verifier.environment] allow_internet = false` with no `[verifier]` policy is the separate verifier's
+        network, as Harbor resolves it: its sandbox alone is created under the deny-all policy, the agent's stays
+        public, and the result reports `no-network`."""
+        toml = self.ENVIRONMENT_NO_NETWORK_TOML
+        assert "allow_internet = false" in toml and "network_mode" not in toml
+        server, task, agent, verifier, specs, _ = self.prepared(tmp_path, monkeypatch, toml=toml)
+        response = await run_episode(server, task)
+        result = response.result
+        assert result is not None, response.failure
+        assert (result.reward, result.verifier_mode, result.verifier_network) == (1.0, "separate", "no-network")
+        (spec,) = specs
+        assert spec.image == "org/verifier:1"
+        assert spec.provider_options == {"network_policy": {"defaultAction": "deny", "egress": []}}
         assert "network_policy" not in server._sandbox_spec(task, "/app").provider_options
         assert verifier.stopped and agent.stopped
 
@@ -5614,10 +5637,11 @@ class TestVerifierNetwork:
         # The deployment's options are not mutated.
         assert server.config.sandbox_provider_options["network_policy"] == baseline
 
+    @pytest.mark.parametrize("toml", ["NO_NETWORK_TOML", "ENVIRONMENT_NO_NETWORK_TOML"])
     @pytest.mark.parametrize("provider", ["docker", "daytona"])
-    async def test_providers_without_an_egress_policy_are_refused_at_seed(self, tmp_path, monkeypatch, provider):
+    async def test_providers_without_an_egress_policy_are_refused_at_seed(self, tmp_path, monkeypatch, provider, toml):
         server, task, _, _, specs, created = self.prepared(
-            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, provider=provider
+            tmp_path, monkeypatch, toml=getattr(self, toml), provider=provider
         )
         response = await run_episode(server, task)
         failure = response.failure

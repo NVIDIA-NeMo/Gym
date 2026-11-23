@@ -184,10 +184,12 @@ A separate-mode task with none of these is refused. When Gym has the verifier im
 prebuilt verifier image, only a `pull_policy` other than `build`.
 
 `[verifier].network_mode` (`no-network`, or `allowlist` with `allowed_hosts`) restricts the separate verifier's
-sandbox; a restriction on any other table is refused at load. The episode fails at seed without OpenSandbox, or
-for an allowlist under a deny-by-default `sandbox_provider_options.network_policy`. Under shared verification the
-task is refused at load. The server option `separate_verifier_for_artifacts: true` verifies every task that
-declares `artifacts` separately; see [Configure the server](/main/agent-interactions/harbor#configure-the-server).
+sandbox. Without one, a restriction on a single-step task's `[verifier.environment]` (such as `allow_internet = false`)
+is the verifier's, as in Harbor; a restriction on any other table is refused at load. The episode fails at seed
+without OpenSandbox, or for an allowlist under a deny-by-default `sandbox_provider_options.network_policy`. Under
+shared verification the task is refused at load. The server option `separate_verifier_for_artifacts: true` verifies
+every task that declares `artifacts` separately; see
+[Configure the server](/main/agent-interactions/harbor#configure-the-server).
 
 ## Environment variables and secrets
 
