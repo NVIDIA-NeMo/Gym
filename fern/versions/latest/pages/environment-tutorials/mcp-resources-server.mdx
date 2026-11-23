@@ -388,7 +388,7 @@ seed = AgentSeedSessionRequest(
 )
 ```
 
-Each grant carries the episode's token in the `X-NeMo-Gym-Episode-Token` header. `/mcp` lists only that episode's tools, and the grant ends when the episode's cleanup runs. A tool that returns `ToolResult(is_error=True)` gives an MCP result with `isError: true`. Over direct HTTP, the reply carries `X-NeMo-Gym-Tool-Error: true` instead.
+Each grant carries the episode's token in the `X-NeMo-Gym-Episode-Token` header. `/mcp` lists only that episode's tools, and the grant ends when the episode's cleanup runs. A tool that returns `ToolResult(is_error=True)` gives an MCP result with `isError: true`. Over direct HTTP, the reply carries `X-NeMo-Gym-Tool-Error: true` instead. A tool that returns `ToolResult(ends_activation=True)` asks the agent to end its activation, as a submission that ends a turn does. Over direct HTTP the reply carries `X-NeMo-Gym-End-Activation: true`: `simple_agent` runs the rest of the model response's tool calls and returns without calling the model again. Other agents ignore the header and call the model again. MCP has no field for it, so an MCP agent calls the model again.
 
 ---
 

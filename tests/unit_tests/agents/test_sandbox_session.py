@@ -32,6 +32,8 @@ from nemo_gym.sandbox.providers.registry import get_provider_class
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
 OK = SandboxExecResult(stdout="", stderr="", return_code=0)
+# The answer to the check a session runs after its launch command raised: the launch's supervisor never started.
+NOT_STARTED = SandboxExecResult(stdout="", stderr="", return_code=1)
 EXPIRE_MARKER = "/session/expire.request"
 
 
@@ -343,7 +345,7 @@ async def test_close_during_input_preparation_prevents_launch(session, receipt_r
 @pytest.mark.parametrize("failure", [OSError("transport failed"), "timeout", "unavailable"])
 async def test_transport_failure_preserves_partial_output_and_original_error(session, failure):
     if isinstance(failure, Exception):
-        session.sandbox.exec.side_effect = [failure, OK]
+        session.sandbox.exec.side_effect = [failure, NOT_STARTED, OK]
     else:
         session.sandbox.exec.side_effect = [SandboxExecResult("", "transport", 1, failure), OK]
     expected = OSError if isinstance(failure, Exception) else TimeoutError if failure == "timeout" else RuntimeError
@@ -402,7 +404,7 @@ async def test_oom_outside_supervised_execution_is_not_classified_as_agent_oom(s
 
 
 async def test_capture_failure_does_not_hide_execution_failure(session):
-    session.sandbox.exec.side_effect = [OSError("transport failed"), OK]
+    session.sandbox.exec.side_effect = [OSError("transport failed"), NOT_STARTED, OK]
     collector = AsyncMock(side_effect=ValueError("malformed snapshot"))
     with pytest.raises(OSError, match="transport failed"):
         await execute(session, collect=collector)
@@ -448,7 +450,7 @@ async def test_missing_borrowed_receipt_retains_state_and_retries_capture(sessio
 
 async def test_transport_error_survives_failed_cleanup_until_receipt_arrives(session, receipt_reader):
     failure = OSError("transport failed")
-    session.sandbox.exec.side_effect = [failure, OK, OK, OK]
+    session.sandbox.exec.side_effect = [failure, NOT_STARTED, OK, OK, OK]
     receipt_reader.side_effect = FileNotFoundError("no receipt yet")
     collector = AsyncMock(return_value="recovered transcript")
 
@@ -714,6 +716,44 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.closed
 
 
+@pytest.mark.parametrize("provider_proves", [True, False])
+async def test_supervisor_without_receipt_after_normal_exit(session, receipt_reader, provider_proves):
+    # Seen in a real run: the launch exec returned, but cleanup.json never appeared.
+    receipt_reader.side_effect = FileNotFoundError("cleanup.json")
+    killed = SandboxExecResult(stdout="", stderr="", return_code=137)
+    claimed = SandboxExecResult(stdout="launch\n", stderr="", return_code=0)
+
+    def exec_(command, **kwargs):
+        if "--receipt" in command:
+            return killed
+        return claimed if command.startswith("readlink ") else OK
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.exec_processes_terminated = AsyncMock(return_value=provider_proves)
+    if provider_proves:
+        assert await execute(session) == "transcript"
+        # The receipt itself says the supervisor's own one is missing, so no consumer reads it as a clean stop.
+        assert session.cleanup == {
+            "cleanup_confirmed": True,
+            "return_code": None,
+            "error": None,
+            "timed_out": False,
+            "receipt_missing": True,
+        }
+        assert session.cleanup_receipt_missing and session.launch_return_code == 137
+        # Nothing left to stop: only the launch and the claim check ran.
+        assert session.sandbox.exec.await_count == 2
+        await session.close(timeout=1)
+        assert session.closed
+    else:
+        with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+            await execute(session)
+        assert session.cleanup is None and not session.cleanup_receipt_missing
+        with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+            await session.close(timeout=1)
+        assert not session.closed
+
+
 async def test_expire_while_running_requests_the_timeout_path_once(session, receipt_reader):
     launched = asyncio.Event()
     finish = asyncio.Event()
@@ -877,11 +917,22 @@ async def test_failed_expire_write_keeps_the_stop_only_if_the_marker_landed(sess
     await session.close(timeout=1)
 
 
-async def test_expire_write_failing_during_finalization_still_keeps_a_landed_stop(session, receipt_reader):
+async def test_expire_write_failing_during_finalization_still_keeps_a_landed_stop(
+    session, receipt_reader, monkeypatch
+):
     # The marker lands, the harness ends at the stop, and the write fails only once finalization has begun.
-    launched, landed, fail_write = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    launched, landed, finalizing = asyncio.Event(), asyncio.Event(), asyncio.Event()
     finish = asyncio.Event()
     written = set()
+    confirm_expiry = session._confirm_unacknowledged_expiry
+
+    async def confirm_during_write(*, timeout):
+        assert not activation.done()
+        assert session._expire_write is not None and not session._expire_write.done()
+        finalizing.set()
+        await confirm_expiry(timeout=timeout)
+
+    monkeypatch.setattr(session, "_confirm_unacknowledged_expiry", confirm_during_write)
 
     async def exec_(command, **_):
         if "--expire-file" in command:
@@ -896,7 +947,7 @@ async def test_expire_write_failing_during_finalization_still_keeps_a_landed_sto
         if target == EXPIRE_MARKER:
             written.add(target)
             landed.set()
-            await fail_write.wait()
+            await finalizing.wait()
             raise ConnectionError("acknowledgment lost")
 
     session.sandbox.exec.side_effect = exec_
@@ -906,10 +957,7 @@ async def test_expire_write_failing_during_finalization_still_keeps_a_landed_sto
         await asyncio.wait_for(landed.wait(), 2)
         receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
         finish.set()
-        # Finalization waits for the write still in flight instead of reconciling past it.
-        await asyncio.sleep(0.1)
-        assert not activation.done()
-        fail_write.set()
+        # Fail the write only when finalization reaches expiry confirmation, without racing a timer.
         with pytest.raises(RuntimeError, match="Could not request test expiry"):
             await asyncio.wait_for(stop, 2)
         assert await asyncio.wait_for(activation, 5) == "transcript"
@@ -1028,6 +1076,8 @@ async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, 
     "name,options,independent",
     [
         ("local", {}, True),
+        # Uploads are host-side copies in a worker thread; only commands take the exec semaphore.
+        ("bwrap", {"bwrap_path": "/bin/sh", "ro_binds": ["/usr"]}, True),
         ("opensandbox", {"operations": {"background_exec": True}}, True),
         # A running foreground command holds one of the shared HTTP pool's connections.
         ("opensandbox", {"operations": {"background_exec": False}}, False),

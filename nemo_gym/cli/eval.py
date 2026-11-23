@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -87,7 +88,6 @@ from nemo_gym.data.tasks.harbor.materialize import (
     write_rows,
 )
 from nemo_gym.data.tasks.harbor.prepare import (
-    DEFAULT_OUTPUT_ROOT,
     HARBOR_TARGET_KEY,
     ORACLE_AGENT,
     AgentSelection,
@@ -97,6 +97,7 @@ from nemo_gym.data.tasks.harbor.prepare import (
     _listed,
     build_run,
     harbor_benchmark,
+    output_root_from_overrides,
     prepare_target,
     resolve_agent,
     resolve_sandbox_config,
@@ -960,7 +961,8 @@ def _rejudge_saved_judge_failures(
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
     ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
     incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
-    (always False without ``complete_only``).
+    (always False without ``complete_only``). Recomputed metrics also refresh the per-agent completion files written
+    during collection; when they cannot be refreshed, the files are removed rather than left with the old scores.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
@@ -992,8 +994,10 @@ def _rejudge_saved_judge_failures(
         return complete
     if complete_only and not complete:
         # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
-        # pass settled: the aggregation that rewrites it is skipped with the metrics.
+        # pass settled: the aggregation that rewrites it is skipped with the metrics. No completion file can follow
+        # it either, so they are removed.
         if scored or raised or changed:
+            _remove_completion_files(output)
             _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
         return complete
     try:
@@ -1007,7 +1011,33 @@ def _rejudge_saved_judge_failures(
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+        _remove_completion_files(output)
+        return complete
+    _refresh_completion_files(output, run_config)
     return complete
+
+
+def _refresh_completion_files(output: Path, run_config: Mapping[str, Any]) -> None:
+    """Bring the per-agent completion files in line with the run-wide metrics just recomputed in place, or remove them
+    when they cannot be refreshed, rather than leave them with the scores from before the re-judgment."""
+    from nemo_gym.rollouts.rollout_collection import refresh_agent_complete_files
+
+    try:
+        refresh_agent_complete_files(output, OmegaConf.create(run_config))
+    except Exception as error:  # the recomputed run-wide metrics stand; only the per-agent copies are behind them
+        print(
+            f"Per-agent completion files were not refreshed after the re-judgment ({type(error).__name__}: {error}); "
+            f"they are removed, and {output.stem}_aggregate_metrics.json holds every agent's metrics.",
+            flush=True,
+        )
+        _remove_completion_files(output)
+
+
+def _remove_completion_files(output: Path) -> None:
+    """Remove the per-agent completion files of a run whose grades changed after they were written."""
+    from nemo_gym.utils.path_utils import agent_complete_dir_for
+
+    shutil.rmtree(agent_complete_dir_for(output), ignore_errors=True)
 
 
 class _SettledHealthSettings(RunHealthConfig):
@@ -1047,6 +1077,8 @@ def _refresh_settled_source(
     as the run's own completion does after its saved-answer pass. ``metrics=False`` rewrites only the quality summary,
     for a strict run that stays incomplete and publishes no score.
 
+    The per-agent completion files follow the recomputed metrics, or are removed when they cannot.
+
     A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it). A health
     check that selects the Store's attempts itself reads it as it is; an earlier one reads it only through a
     selected-result projection: the Store's selected rows are written under ``workdir`` for the check, which is bound
@@ -1071,12 +1103,14 @@ def _refresh_settled_source(
             )
             asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
             refreshed["metrics_recomputed"] = True
+            _refresh_completion_files(output, run_config)
     except Exception as error:
         print(
             f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+        _remove_completion_files(output)
     projection = None
     try:
         settings = _SettledHealthSettings.model_validate(run_config)
@@ -1788,6 +1822,7 @@ def _prepare_for_agent(
             shared_storage=shared_storage_from_overrides(overrides, sandbox),
             gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
             compose_overlay=compose_overlay_from_overrides(overrides),
+            output_root=output_root_from_overrides(overrides),
             rows_name=_rows_name(agent),
             registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
             agent=agent.impl_name,
@@ -2047,12 +2082,14 @@ def validate_target(
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
         preparation = preparation_overrides if preparation_overrides is not None else overrides
+        # `+harbor_output_root` (a submitted run's job directory) moves both, as it does for a model's run.
+        output_root = output_root_from_overrides(preparation)
         prepared = prepare_target(
             args.target,
-            output_root=DEFAULT_OUTPUT_ROOT / "validation",
+            output_root=output_root / "validation",
             # A template renders where `gym eval run` renders it: one rendered dataset, one set of records (an image
             # built for it once), while the oracle's rows and results stay under validation/.
-            render_root=DEFAULT_OUTPUT_ROOT,
+            render_root=output_root,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build_options_from_overrides(preparation),

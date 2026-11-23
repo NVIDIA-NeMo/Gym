@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: aga_visual_tasks
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: Code-assisted VQA and Agent-X training under OpenCode, Pi, Codex, Claude Code and OpenClaw, graded by the
+  original math, multiple-choice and string answer graders.
+modality: multimodal
+licensing: internal
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: stochastic
+dataset_owner: aga_opencode_agent
+resources_server: aga_visual_tasks
+agent_server: opencode_agent
+model_server: aga_policy_model
+datasets:
+- name: aga_visual_tasks
+  type: train
+  jsonl_fpath: environments/aga_visual_tasks/data/aga_visual_tasks_train.jsonl
+  prepare_script: environments/aga_visual_tasks/prepare.py
+  num_repeats: 1
+prompt_source: prepared
+session_model: episode
+state: per_session
+lifecycle: active

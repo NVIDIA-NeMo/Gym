@@ -6,7 +6,6 @@
 import argparse
 import asyncio
 import importlib
-import importlib.util
 import json
 import os
 import shutil
@@ -45,21 +44,18 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
             raise RuntimeError(f"{harness} conformance requires {command} on PATH")
     if definition.builtin:
         return {"installation": "builtin"}
-    if use_agent_sessions and not definition.runtime_modules:
+    if definition.runtime_info:
+        return {
+            "installation": "agent_session" if use_agent_sessions else "host_worker",
+            **definition.runtime_info(),
+        }
+    if use_agent_sessions:
         root = Path(__file__).resolve().parents[2]
         return {
             "installation": "agent_session",
             **definition.runtime_metadata,
             **{key: digest_file(root / path) for key, path in definition.runtime_files.items()},
         }
-    if definition.runtime_modules:
-        modules = [importlib.util.find_spec(name) for name in definition.runtime_modules]
-        if any(module is None for module in modules):
-            raise RuntimeError(
-                f"sync responses_api_agents/{harness}_agent with uv sync --locked in this isolated Python environment"
-            )
-        source = Path(modules[0].origin)
-        return {"source": str(source), "sha256": digest_file(source)}
     if not shutil.which(harness):
         raise RuntimeError(f"install the {harness} runtime and put it on PATH before running probes")
     version = subprocess.run(
