@@ -50,6 +50,8 @@ vision2code_simple_agent:
       entrypoint: app.py
       # Return the last attempt; final_judge_score stops at the rounded judge rating of 5.
       num_passes: 1
+      # Per policy call, reasoning included; null leaves the task's or the run's cap.
+      max_output_tokens: null
       result_selection: last
       stop_on: reward
       minimum_scores: {}

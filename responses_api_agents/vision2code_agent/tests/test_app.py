@@ -67,10 +67,20 @@ def http_response(payload):
 
 @pytest.fixture
 def harness():
-    def make(*, num_passes=1, results=None, observability=True, agent_type=Vision2CodeAgent):
+    def make(
+        *,
+        num_passes=1,
+        results=None,
+        observability=True,
+        agent_type=Vision2CodeAgent,
+        max_output_tokens=None,
+        task_max_output_tokens=2048,
+    ):
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = {"observability_enabled": observability}
-        agent = agent_type(config=config(num_passes=num_passes), server_client=client)
+        agent = agent_type(
+            config=config(num_passes=num_passes, max_output_tokens=max_output_tokens), server_client=client
+        )
         request = Request({"type": "http", "headers": [], "path": "/run"})
         body = SimpleAgentRunRequest.model_validate(
             {
@@ -80,7 +90,7 @@ def harness():
                 "verifier_metadata": {"rubric": "generic"},
                 "responses_create_params": {
                     "temperature": 0.7,
-                    "max_output_tokens": 2048,
+                    "max_output_tokens": task_max_output_tokens,
                     "input": [
                         {"role": "system", "content": "Return Python."},
                         {
@@ -201,6 +211,31 @@ async def test_single_pass_matches_simple_agent(harness):
         assert calls[0] == body.responses_create_params
     assert outputs[0] == outputs[1]
     assert "attempts" not in outputs[1]
+
+
+@pytest.mark.parametrize("max_output_tokens", [0, -1, 1.5, True])
+def test_invalid_output_cap(max_output_tokens):
+    with pytest.raises(ValidationError):
+        config(max_output_tokens=max_output_tokens)
+
+
+@pytest.mark.parametrize(
+    "cap,task_cap,expected",
+    [(None, None, None), (8192, None, 8192), (8192, 131072, 8192), (8192, 2048, 2048), (8192, 8192, 8192)],
+)
+@pytest.mark.parametrize("num_passes", [1, 2])
+async def test_output_cap_applies_to_every_policy_call(harness, cap, task_cap, expected, num_passes):
+    agent, request, body, calls, verified = harness(
+        num_passes=num_passes,
+        max_output_tokens=cap,
+        task_max_output_tokens=task_cap,
+        results=[{"reward": 0.5}, {"reward": 0.6}],
+    )
+    original = body.model_dump()
+    await agent.run(request, body)
+    assert len(calls) == num_passes
+    assert [call.max_output_tokens for call in calls] == [expected] * num_passes
+    assert body.model_dump() == original
 
 
 @pytest.mark.parametrize("rewards,expected", [([1.0], 1), ([0.5, 1.0], 2), ([0.9, 0.4, 0.999999], 3)])

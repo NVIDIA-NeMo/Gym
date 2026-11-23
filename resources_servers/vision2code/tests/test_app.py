@@ -295,6 +295,30 @@ async def test_policy_failure_is_unmasked_zero(setup, status, name, blend):
 
 
 @pytest.mark.asyncio
+async def test_response_cut_by_output_cap_before_answering_is_unmasked_zero(setup):
+    server, body, renderer, judge = setup
+    body.response = NeMoGymResponse(
+        id="resp",
+        created_at=0,
+        model="test",
+        object="response",
+        output=[{"id": "rs", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Plan the chart"}]}],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+        status="incomplete",
+        incomplete_details={"reason": "max_output_tokens"},
+    )
+    renderer.side_effect = None
+    renderer.return_value = RenderResult(status="missing_output")
+    result = await server.verify(body)
+    assert renderer.call_args.kwargs["code"] == ""
+    assert result.reward == 0 and not result.mask_sample
+    assert result.failure_kind is None
+    judge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_infrastructure_is_masked(setup):
     server, body, renderer, judge = setup
     renderer.side_effect = None

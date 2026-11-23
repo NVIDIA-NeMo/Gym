@@ -163,6 +163,11 @@ Start with `--limit 1` to inspect a rollout. For reasoning endpoints, set the mo
 `uses_reasoning_parser` and `uses_interleaved_reasoning` to match its response format.
 Configure these on the policy and judge adapters independently.
 
+Where no run-level `--max-output-tokens` applies, as in training, set the agent's `max_output_tokens`
+to cap each policy call, reasoning included; a task's smaller `responses_create_params.max_output_tokens`
+is kept. A response cut by the cap is scored as written: a program cut off before it is complete, or
+no answer at all, fails to render and receives an unmasked zero.
+
 ## Multi-pass revisions
 
 Use the [feedback preset](configs/vision2code_feedback.yaml) for up to three passes.

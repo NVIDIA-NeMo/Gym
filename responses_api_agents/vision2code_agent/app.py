@@ -25,6 +25,12 @@ class Vision2CodeAgentConfig(SimpleAgentConfig):
 
     max_steps: int = Field(default=1, ge=1, le=1, strict=True, description="One policy response per revision pass.")
     num_passes: int = Field(default=1, ge=1, strict=True, description="Maximum generate-and-verify passes.")
+    max_output_tokens: int | None = Field(
+        default=None,
+        gt=0,
+        strict=True,
+        description="Cap on each policy call's output tokens, reasoning included. A task's smaller cap is kept.",
+    )
 
     include_rendered_image: bool = True
     include_judge_scores: bool = False
@@ -107,8 +113,19 @@ class Vision2CodeAgent(SimpleAgent):
 
     config: Vision2CodeAgentConfig
 
+    def _capped(self, body: SimpleAgentRunRequest) -> SimpleAgentRunRequest:
+        """Return the request with the configured output cap, unless the task's own cap is smaller."""
+        cap = self.config.max_output_tokens
+        params = body.responses_create_params
+        if cap is None or (params.max_output_tokens is not None and params.max_output_tokens <= cap):
+            return body
+        return body.model_copy(
+            update={"responses_create_params": params.model_copy(update={"max_output_tokens": cap})}
+        )
+
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         """Revise until the configured success criterion or pass budget is reached."""
+        body = self._capped(body)
         if self.config.num_passes == 1:
             return await super().run(request, body)
 
