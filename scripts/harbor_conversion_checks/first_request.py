@@ -9,8 +9,9 @@ title call offers none). Tasks are paired by the first user message, exactly, or
 and CRLF or CR read as LF (Gym reads instruction.md in text mode, so a native CRLF prompt arrives with LF); either is
 a note, not a failure. Every capture is compared: repeats of a prompt (and distinct tasks that share one) pair in
 file-name order, and a capture left over on one side is unpaired.
-Each pair compares the model, the tool names, every other top-level request key but `messages`, `stream` and
-`stream_options` (the sampling settings, `tool_choice` among them) and the message roles. A contamination flag
+Each pair compares the model, the tools (their names, then each definition whole, in any order of tools and of object
+keys), every other top-level request key but `messages`, `stream` and `stream_options` (the sampling settings,
+`tool_choice` among them) and the message roles. A contamination flag
 (`AGENTS.md`, `CLAUDE.md`, `Instructions from`, `<available_skills>`), counted over every message but the assistant's,
 fails a pair when its count differs between the sides or it sits on a system-prompt line that differs; OpenCode's
 built-in prompt carries some of them identically on both paths. Zero pairs fails.
@@ -71,9 +72,16 @@ def describe(request: dict) -> dict:
     system = "\n".join(message_text(m.get("content")) for m in messages if m.get("role") in ("system", "developer"))
     seen = "\n".join(message_text(m.get("content")) for m in messages if m.get("role") != "assistant")
     tools = request.get("tools") if isinstance(request.get("tools"), list) else []
+    # Each tool's whole definition (description, parameter schema, strictness), keyed by name, with its keys sorted.
+    definitions: dict[str, list[str]] = {}
+    for tool in tools:
+        if isinstance(tool, dict):
+            name = str((tool.get("function") or tool).get("name"))
+            definitions.setdefault(name, []).append(json.dumps(tool, sort_keys=True))
     return {
         "model": request.get("model"),
-        "tools": sorted(str((t.get("function") or t).get("name")) for t in tools if isinstance(t, dict)),
+        "tools": sorted(name for name, texts in definitions.items() for _ in texts),
+        "tool_definitions": {name: sorted(texts) for name, texts in definitions.items()},
         "sampling": {key: value for key, value in request.items() if key not in NOT_SAMPLING},
         "roles": [m.get("role") for m in messages],
         "flags": {flag: seen.count(flag) for flag in FLAGS if flag in seen},
@@ -103,6 +111,11 @@ def _flag_problems(a: dict, b: dict, diff: list[str]) -> tuple[list[str], list[s
 def compare(native_key: str, harbor_key: str, native: dict, harbor: dict) -> dict:
     a, b = describe(native["request"]), describe(harbor["request"])
     problems = [f"{name} differs" for name in ("model", "tools", "sampling") if a[name] != b[name]]
+    if a["tools"] == b["tools"]:
+        changed = sorted(
+            name for name in a["tool_definitions"] if a["tool_definitions"][name] != b["tool_definitions"][name]
+        )
+        problems += [f"tools differs: the definition of {', '.join(changed)}"] if changed else []
     problems += ["roles differ"] if a["roles"] != b["roles"] else []
     diff = list(
         difflib.unified_diff(a["system"].splitlines(), b["system"].splitlines(), "native", "harbor", n=0, lineterm="")
@@ -117,8 +130,8 @@ def compare(native_key: str, harbor_key: str, native: dict, harbor: dict) -> dic
     return {
         "key": hashlib.sha256(harbor_key.encode()).hexdigest()[:12],
         "files": {"native": native["file"], "harbor": harbor["file"]},
-        "native": {k: v for k, v in a.items() if k != "system"},
-        "harbor": {k: v for k, v in b.items() if k != "system"},
+        "native": {k: v for k, v in a.items() if k not in ("system", "tool_definitions")},
+        "harbor": {k: v for k, v in b.items() if k not in ("system", "tool_definitions")},
         "problems": problems,
         "notes": notes,
         "system_diff": diff[:DIFF_LINES],

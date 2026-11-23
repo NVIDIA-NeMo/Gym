@@ -61,9 +61,10 @@ runs after G2. The checks:
   you pass `--normalize-newlines`, which counts those tasks in the detail line. Record it as a difference.
 - `hidden-values` (needs `--hidden FIELD` or `--hidden-from task_data.py`): fails when a hidden native value is in
   `instruction.md`, a `steps/<name>/instruction.md`, the `[environment].env` variables of `task.toml` or a file under
-  `environment/`. A `.gz` or `.tar` file and base64 runs of 1024+ characters (one line, or wrapped as `base64` wraps)
-  are decoded, gunzipped and untarred, and so are the members of a tar and the base64 runs in a gunzipped file or a
-  tar member; a zip, xz or bz2 file, base64 payload or tar member is reported as not scanned. JSON-escaped copies
+  `environment/`. Every file goes through one traversal: each base64 run of 1024+ characters (one line, or wrapped
+  as `base64` wraps) is decoded, a gzip is gunzipped (every member of the stream) and a tar is untarred, and each of
+  those layers is traversed the same way, so a base64 bundle and the same file on disk are scanned alike. A zip, xz
+  or bz2 file, base64 payload or tar member is reported as not scanned. JSON-escaped copies
   of a value are found, but case-changed copies and other encodings are not scanned and must be read by hand
   (`first-request` is the stronger evidence).
 - `hidden-template` (needs `--template`, `--template-hidden NAME`): fails when a template file Gym renders
@@ -78,8 +79,9 @@ runs after G2. The checks:
   yours: read the prompt and the shipped files for such paths by eye.
 
 A check whose inputs are absent prints `SKIP`. What a check cannot scan in full fails it, naming the file: a zip, xz
-or bz2 file, base64 payload or tar member, a gzip inside a gzip, a tar member nested more than 8 archives deep, a
-run laid out as base64 that does not decode, or a gzip or tar member over 256 MiB.
+or bz2 file, base64 payload or tar member, a gzip that does not gunzip, ends early or has other bytes after it, a run
+laid out as base64 that does not decode, a layer nested more than 8 deep (each base64 run, gunzip and tar member is
+one layer), or anything past 256 MiB of decoded bytes per file (all layers together).
 
 `secrets` and `local-paths` scan every file under DATASET, so on a folder that was already validated they also scan
 the records validation wrote there (`compose-images.json`, `compose-images.json.lock`, `manifest.toml`).
@@ -224,9 +226,11 @@ Each folder holds the `*.capture.jsonl` files a run writes with `++observability
 ++model_call_capture_dir=DIR`, one per rollout. A file's first agent request is its earliest request that offers
 tools, which skips OpenCode's title call. Tasks are paired by the first user message: exactly, or with OpenCode's argv
 quoting undone (noted as `argv_prompt_quoting`) and CRLF or CR read as LF (noted as `newlines`: Gym reads
-`instruction.md` in text mode); notes are not failures. For each pair it compares the model, the sorted tool names,
-every other top-level request key except `messages`, `tools`, `stream` and `stream_options` (the sampling settings:
-`temperature`, `max_tokens`, `tool_choice`, `top_k`, `seed`, `chat_template_kwargs` and so on) and the message roles,
+`instruction.md` in text mode); notes are not failures. For each pair it compares the model, the tools (their
+names, then each tool's whole definition, such as its description, parameter schema and `strict`, in any order of
+tools and of JSON keys; a changed definition reports `tools differs: the definition of NAME`), every other top-level
+request key except `messages`, `tools`, `stream` and `stream_options` (the sampling settings: `temperature`,
+`max_tokens`, `tool_choice`, `top_k`, `seed`, `chat_template_kwargs` and so on) and the message roles,
 prints a unified diff of the system prompts, and counts `AGENTS.md`, `CLAUDE.md`, `Instructions from` and
 `<available_skills>` in every message but the assistant's. `--out` writes each pair's system prompt and user message
 to `DIR/<sha256 of the user message, 12 hex>/{native,harbor}.{system,user}.txt`. A capture file with no request that

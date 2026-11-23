@@ -449,6 +449,41 @@ def test_first_request_differences_fail(tmp_path, capsys, harbor_kwargs, problem
     assert problem in out and out.splitlines()[-1] == "first-request: 1 paired, 0 unpaired, 1 differing"
 
 
+def _weather(argument="location", *, description="Get the weather", strict=None, key_order=False):
+    parameters = {"type": "object", "properties": {argument: {"type": "string"}}, "required": [argument]}
+    function = {"name": "weather", "description": description, "parameters": parameters}
+    if strict is not None:
+        function["strict"] = strict
+    if key_order:
+        function = dict(reversed(function.items()))
+    return {"type": "function", "function": function}
+
+
+BASH = {"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}
+
+
+@pytest.mark.parametrize(
+    "harbor_tools, problem",
+    [
+        ([BASH, _weather()], None),
+        ([_weather(key_order=True), BASH], None),
+        ([BASH, _weather("query")], "tools differs: the definition of weather"),
+        ([BASH, _weather(description="Look up the weather")], "tools differs: the definition of weather"),
+        ([BASH, _weather(strict=True)], "tools differs: the definition of weather"),
+    ],
+)
+def test_first_request_compares_tool_definitions_not_only_names(tmp_path, capsys, harbor_tools, problem):
+    # The native prompt is argv-quoted, so the pair still needs the quoting normalisation.
+    _capture(tmp_path / "native", "0-0", '"Say \\"hi\\""', extra={"tools": [BASH, _weather()]})
+    _capture(tmp_path / "harbor", "0-0", 'Say "hi"', extra={"tools": harbor_tools})
+    assert _first_request(tmp_path) == (1 if problem else 0)
+    out = capsys.readouterr().out
+    assert "argv_prompt_quoting" in out
+    assert out.splitlines()[-1] == f"first-request: 1 paired, 0 unpaired, {1 if problem else 0} differing"
+    if problem:
+        assert problem in out
+
+
 # OpenCode's built-in system prompt, as captured on both paths of the scale_swe pilot.
 OPENCODE_BUILTIN = (
     "If you are unable to find the correct command, ask the user for the command to run and if they supply it, "
@@ -1073,13 +1108,101 @@ def test_what_cannot_be_scanned_in_full_fails(tmp_path, capsys, monkeypatch):
     capsys.readouterr()
     monkeypatch.setattr(scan, "MAX_DECODED", 256)
     assert _check(dataset, rows, "--hidden", "patch") == 1
-    assert "gunzips to more than 256 bytes: only the start is scanned" in capsys.readouterr().out
+    assert "t1/environment/bundle.b64[base64 at 0]: over 256 decoded bytes in all: not scanned" in (
+        capsys.readouterr().out
+    )
     monkeypatch.undo()
     (dataset / "t2" / "environment" / "bundle.b64").write_text("Q" * 1025 + "\n")
     assert _check(dataset, rows, "--hidden", "patch") == 1
     assert "t2/environment/bundle.b64[base64 at 0]: a 1025-character base64 run does not decode" in (
         capsys.readouterr().out
     )
+
+
+def _hex_lines(count):
+    """Text (no NUL byte, so the secret and path checks read it) that compresses little."""
+    return "".join(f"# {hashlib.sha256(str(i).encode()).hexdigest()}\n" for i in range(count)).encode()
+
+
+def test_decoded_bytes_share_one_bound_across_layers(tmp_path, capsys, monkeypatch):
+    dataset, rows = _dataset(tmp_path)
+    text = _hex_lines(45)  # 3015 bytes
+    (dataset / "t1" / "environment" / "bundle.tar").write_bytes(_tar({"a.txt": text, "b.txt": text}))
+    (dataset / "t2" / "environment" / "data.gz").write_bytes(gzip.compress(text * 2))
+    assert _check(dataset, rows, "--hidden", "expected") == 0
+    capsys.readouterr()
+    # Each member fits the bound alone; together they pass it.
+    monkeypatch.setattr(scan, "MAX_DECODED", 4096)
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    out = capsys.readouterr().out
+    assert "t1/environment/bundle.tar:b.txt: over 4096 decoded bytes in all: only the start is scanned" in out
+    assert "bundle.tar:a.txt: over" not in out
+    assert "t2/environment/data.gz: over 4096 decoded bytes in all: only the start is scanned" in out
+
+
+def _place(dataset, encoding, data):
+    """`data` as t1's environment/data.gz, or base64 in its Dockerfile."""
+    if encoding == "raw":
+        (dataset / "t1" / "environment" / "data.gz").write_bytes(data)
+        return "t1/environment/data.gz"
+    blob = base64.b64encode(data).decode()
+    assert len(blob) >= 1024
+    (dataset / "t1" / "environment" / "Dockerfile").write_text(f"FROM python:3.12\nRUN echo '{blob}' | base64 -d\n")
+    return "t1/environment/Dockerfile[base64 at 27]"
+
+
+@pytest.mark.parametrize("encoding", ["raw", "base64"])
+def test_every_member_of_a_gzip_stream_is_scanned(tmp_path, capsys, encoding):
+    dataset, rows = _dataset(tmp_path)
+    first = gzip.compress(_hex_lines(40), mtime=0)
+    label = _place(dataset, encoding, first)
+    assert _check(dataset, rows, "--hidden", "expected") == 0
+    capsys.readouterr()
+    _place(dataset, encoding, first + gzip.compress(b"more harmless text\n", mtime=0))
+    assert _check(dataset, rows, "--hidden", "expected") == 0
+    capsys.readouterr()
+    root = "/" + "scr" + "atch" + "/"
+    hidden = f"{ANSWER}\nKEY={SECRET_SAMPLES['aws']}\ncp {root}project/data .\n".encode()
+    _place(dataset, encoding, first + gzip.compress(hidden, mtime=0))
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    out = capsys.readouterr().out
+    assert f"{label} contains expected value" in out
+    assert f"{label}: AKIA" in out
+    assert f"{label}: {root}" in out
+
+
+@pytest.mark.parametrize("encoding", ["raw", "base64"])
+@pytest.mark.parametrize(
+    "wrap", [lambda data: gzip.compress(data, mtime=0), lambda data: _tar({"x.txt": data})], ids=["gzip", "tar"]
+)
+def test_a_later_gzip_member_is_unpacked_on_its_own(tmp_path, capsys, encoding, wrap):
+    # Joined, the members start with member 1's text, so member 2's own gzip or tar is only seen in member 2 alone.
+    dataset, rows = _dataset(tmp_path)
+    first = gzip.compress(_hex_lines(40), mtime=0)
+    _place(dataset, encoding, first + gzip.compress(wrap(b"nothing hidden here\n"), mtime=0))
+    assert _check(dataset, rows, "--hidden", "expected") == 0
+    capsys.readouterr()
+    root = "/" + "scr" + "atch" + "/"
+    hidden = f"{ANSWER}\nKEY={SECRET_SAMPLES['aws']}\ncp {root}project/data .\n".encode()
+    label = _place(dataset, encoding, first + gzip.compress(wrap(hidden), mtime=0))
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    out = capsys.readouterr().out
+    assert "FAIL hidden-values" in out and f"{label}[gzip member 2]" in out
+    assert "FAIL secrets" in out and ": AKIA" in out
+    assert "FAIL local-paths" in out and f": {root}" in out
+
+
+@pytest.mark.parametrize("encoding", ["raw", "base64"])
+@pytest.mark.parametrize(
+    "tail, problem",
+    [(b"trailing bytes", "14 bytes after the gzip stream: not scanned"), (None, "a gzip stream that ends early")],
+)
+def test_what_follows_or_cuts_a_gzip_stream_fails_as_not_scanned(tmp_path, capsys, encoding, tail, problem):
+    dataset, rows = _dataset(tmp_path)
+    data = gzip.compress(_hex_lines(40), mtime=0)
+    label = _place(dataset, encoding, data + tail if tail else data[:-100])
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert f"{label}: {problem}" in capsys.readouterr().out
 
 
 def _incompressible(size):
@@ -1144,7 +1267,7 @@ def test_a_tar_gz_inside_a_tar_is_unpacked(tmp_path, capsys, monkeypatch):
     dataset, rows = _dataset(tmp_path)
     inner = _tar({"answer.txt": b"nothing hidden here"}, mode="w:gz")
     (dataset / "t1" / "environment" / "bundle.tar").write_bytes(_tar({"inner.tar.gz": inner}))
-    blob = base64.b64encode(_tar({"inner.tar.gz": inner + _incompressible(1024)})).decode()
+    blob = base64.b64encode(_tar({"inner.tar.gz": inner, "noise.bin": _incompressible(1024)})).decode()
     (dataset / "t2" / "environment" / "Dockerfile").write_text(f"FROM python:3.12\nRUN echo '{blob}' | base64 -d\n")
     assert _check(dataset, rows, "--hidden", "expected") == 0
     capsys.readouterr()
@@ -1153,9 +1276,10 @@ def test_a_tar_gz_inside_a_tar_is_unpacked(tmp_path, capsys, monkeypatch):
     (dataset / "t1" / "environment" / "bundle.tar").write_bytes(_tar({"inner.tar.gz": inner}))
     assert _check(dataset, rows, "--hidden", "expected") == 1
     assert "t1/environment/bundle.tar:inner.tar.gz:answer.txt contains expected value" in capsys.readouterr().out
+    # bundle.tar holds the member inner.tar.gz (one layer), which gunzips (two layers).
     monkeypatch.setattr(scan, "MAX_NESTING", 1)
     assert _check(dataset, rows, "--hidden", "expected") == 1
-    assert "bundle.tar:inner.tar.gz:answer.txt: archives nested over 1 deep: not scanned" in capsys.readouterr().out
+    assert "t1/environment/bundle.tar:inner.tar.gz: nested over 1 layers deep: not scanned" in capsys.readouterr().out
 
 
 def test_base64_runs_in_a_tar_gz_member_are_decoded(tmp_path, capsys):
@@ -1167,17 +1291,52 @@ def test_base64_runs_in_a_tar_gz_member_are_decoded(tmp_path, capsys):
     assert "t1/environment/ctx.tar.gz:Dockerfile[base64 at 27]: a zip archive: not scanned" in capsys.readouterr().out
 
 
-def test_a_gzip_inside_a_gzip_fails_as_not_scanned_raw_or_in_base64(tmp_path, capsys):
-    data = gzip.compress(gzip.compress(_payload(ANSWER)))
+@pytest.mark.parametrize("encoding", ["raw", "base64"])
+def test_a_gzip_inside_a_gzip_is_unpacked(tmp_path, capsys, encoding):
     dataset, rows = _dataset(tmp_path)
-    (dataset / "t1" / "environment" / "answer.gz").write_bytes(data)
-    blob = base64.b64encode(data).decode()
-    assert len(blob) >= 1024
-    (dataset / "t2" / "environment" / "Dockerfile").write_text(f"FROM python:3.12\nRUN echo '{blob}' | base64 -d\n")
+    _place(dataset, encoding, gzip.compress(gzip.compress(_payload("nothing hidden here"))))
+    assert _check(dataset, rows, "--hidden", "expected") == 0
+    capsys.readouterr()
+    label = _place(dataset, encoding, gzip.compress(gzip.compress(_payload(ANSWER))))
     assert _check(dataset, rows, "--hidden", "expected") == 1
-    out = capsys.readouterr().out
-    assert "t1/environment/answer.gz: a gzip archive: not scanned" in out
-    assert "t2/environment/Dockerfile[base64 at 27]: a gzip archive: not scanned" in out
+    assert f"{label} contains expected value" in capsys.readouterr().out
+
+
+def _setup_bundle(text):
+    """A .tar.gz whose setup.sh unpacks a base64 gzip of `text`."""
+    inner = base64.b64encode(gzip.compress(text.encode() * 3 + _hex_lines(40), mtime=0)).decode()
+    assert len(inner) >= 1024
+    setup = f"#!/bin/sh\necho '{inner}' | base64 -d | gunzip > /answer\n".encode()
+    return _tar({"setup.sh": setup}, mode="w:gz")
+
+
+def test_a_bundle_finds_the_same_values_raw_or_in_base64(tmp_path, capsys):
+    dataset, rows = _dataset(tmp_path)
+    for bundle, status in ((_setup_bundle("nothing hidden here"), 0), (_setup_bundle(ANSWER), 1)):
+        (dataset / "t1" / "environment" / "bundle.tar.gz").write_bytes(bundle)
+        blob = base64.b64encode(bundle).decode()
+        (dataset / "t2" / "environment" / "Dockerfile").write_text(
+            f"FROM python:3.12\nRUN echo '{blob}' | base64 -d\n"
+        )
+        assert _check(dataset, rows, "--hidden", "expected") == status
+        out = capsys.readouterr().out
+        for label in ("t1/environment/bundle.tar.gz", "t2/environment/Dockerfile[base64 at 27]"):
+            assert (f"{label}:setup.sh[base64 at 16] contains expected value" in out) == bool(status)
+
+
+def test_layers_count_toward_one_depth_bound(tmp_path, capsys):
+    """A value base64-encoded 8 times is found; 9 times, its innermost layer is past `MAX_NESTING` (8)."""
+    dataset, rows = _dataset(tmp_path)
+    for times, status in ((8, 1), (9, 1)):
+        blob = ANSWER.encode() + b" " + _hex_lines(12)
+        for _ in range(times):
+            blob = base64.b64encode(blob)
+        (dataset / "t1" / "environment" / "deep.b64").write_bytes(blob + b"\n")
+        assert _check(dataset, rows, "--hidden", "expected") == status
+        out = capsys.readouterr().out
+        label = "t1/environment/deep.b64" + "[base64 at 0]" * times
+        assert (f"{label} contains expected value" in out) == (times == 8)
+        assert (f"{label}: nested over 8 layers deep: not scanned" in out) == (times == 9)
 
 
 def test_grouped_task_folders_are_found_as_gym_finds_them(tmp_path, capsys):
