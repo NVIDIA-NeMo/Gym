@@ -1,0 +1,58 @@
+# Prefix pass@K on DeepSWE for POST-TRAINED (chat) checkpoints (function calling wire).
+#
+# The rows, the replay settings and the grading are those of deepswe.yaml; only
+# how the candidate is called and where it takes over differ:
+#   * relay: the harness's own request goes to the model unchanged, through its
+#     chat template -- no steer, primer, prefill or stop list (see
+#     post_trained_model.yaml);
+#   * handover: midpoint, handover_fraction 0.8: the candidate takes over 80% of
+#     the way from the first turn to the decisive turn T, after replaying turns
+#     1..floor(0.8 * (T-1)), and must find the decisive edit itself. At halfway
+#     (a post-trained checkpoint) every rollout spent its 15 turns before submitting: the
+#     patches came close (up to 86/88 fail-to-pass) but none passed in full;
+#   * forward_budget: 15 turns after the handover for every row, kept from the
+#     halfway arm (its 90th percentile of the skipped turns plus max_forwards,
+#     3). The 90th percentile at 0.8 would be 8.
+#
+# The model server must parse tool calls (vLLM: --enable-auto-tool-choice and a
+# --tool-call-parser).
+#
+#   gym env start \
+#       --config benchmarks/prefix_pass_k/deepswe_post_trained.yaml \
+#       --config responses_api_models/base_model/configs/base_model.yaml \
+#       --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+#       ++policy_base_url=<endpoint>/v1 ++policy_model_name=<served id> ++policy_api_key=<key>
+#   gym eval run --no-serve --agent prefix_pass_k_agent_deepswe_post_trained \
+#       --input benchmarks/prefix_pass_k/data/prefix_pass_k_deepswe_benchmark.jsonl ...
+config_paths:
+- benchmarks/prefix_pass_k/deepswe.yaml
+- benchmarks/prefix_pass_k/post_trained_model.yaml
+
+prefix_pass_k_agent_deepswe_post_trained:
+  _inherit_from: prefix_pass_k_agent
+  responses_api_agents:
+    prefix_pass_k_agent:
+      wire: function_calling
+      resources_server:
+        type: resources_servers
+        name: prefix_pass_k_deepswe_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model_post_trained
+      relay: true
+      handover: midpoint
+      handover_fraction: 0.8
+      forward_budget: 15
+      # mini's live `bash` schema, as policy_model_deepswe renders it for base checkpoints.
+      tool_definitions_json: '[{"type": "function", "function": {"name": "bash", "description": "Execute a bash command", "parameters": {"type": "object", "properties": {"command": {"type": "string", "description": "The bash command to execute"}}, "required": ["command"]}}}]'
+      step_timeout: 30
+      interpreter: [bash, -c]
+      exec_env:
+        PAGER: cat
+        MANPAGER: cat
+        LESS: -R
+        PIP_PROGRESS_BAR: "off"
+        TQDM_DISABLE: "1"
+        BASH_ENV: /root/.bashrc
+      commit_worktree: true
+      datasets: []
