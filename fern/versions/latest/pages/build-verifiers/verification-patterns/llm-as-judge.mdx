@@ -377,7 +377,7 @@ Wrap the **call**, not the scoring around it: `reraise_judge_errors` relabels ev
 |---|---|
 | Call failed (transport, timeout, HTTP error) | `call_judge` raises a resources-server `judge_failed` event for you |
 | Call `call_judge` can't express (external SDK, own timeout) | wrap it in `reraise_judge_errors` |
-| Judge answered, verdict unparseable | a real score — map it to `reward_if_unclear` |
+| Judge answered, verdict unparseable | `raise JudgeError(..., failure_kind="judge_unparseable")` to mask the row and judge it again from the saved answer. If an unclear reply is a real score for this verifier, map it to `reward_if_unclear`. |
 | Judge answered with nothing | your call; `raise JudgeError(...)` if an empty verdict is meaningless |
 | Bug in your own scoring code | let it raise |
 
