@@ -27,6 +27,8 @@ multi-worker entrypoint with no module-level `app`. Both looked fine locally and
 failed once real traffic hit them, so the same tests are written here from the start.
 """
 
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -222,22 +224,19 @@ class TestSeedSessionMavenSettings:
     async def test_seed_sandbox_follows_config(self, overwrite: bool) -> None:
         from unittest.mock import AsyncMock
 
-        from nemo_gym.server_utils import SESSION_ID_KEY
         from resources_servers.swemer_v1.app import SwemerV1ResourcesServer
 
         create_sandbox = AsyncMock(side_effect=self._Stop)
         server = SimpleNamespace(
             config=SimpleNamespace(overwrite_maven_settings=overwrite),
-            _stop_sandbox=AsyncMock(),
+            _forget_task_sandbox_state=lambda session_id: None,
             _create_sandbox=create_sandbox,
             _session_id_to_sandbox={},
             _session_id_to_pristine_untracked={},
             _session_id_to_base_commit={},
         )
         with pytest.raises(self._Stop):
-            await SwemerV1ResourcesServer.seed_session(
-                server, SimpleNamespace(session={SESSION_ID_KEY: "s"}), SimpleNamespace()
-            )
+            await SwemerV1ResourcesServer._start_task_sandbox(server, "s", SimpleNamespace())
 
         files = create_sandbox.await_args.kwargs["files"]
         assert (MAVEN_SETTINGS_PATH in files) is overwrite
@@ -342,7 +341,7 @@ class TestDropTestPatchFiles:
 
 class _FakeSandbox:
     def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=return_code)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -549,7 +548,9 @@ class TestAntiCheating:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v1.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v1_legacy_agent.yaml").read_text()
+        )
         assert config["swemer_v1_resources_server"]["resources_servers"]["swemer_v1"]["apply_anti_cheating"] is True
 
 
@@ -576,10 +577,30 @@ class TestMultiWorkerEntrypoint:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v1.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v1_legacy_agent.yaml").read_text()
+        )
         for name, block in config.items():
             workers = block["resources_servers"]["swemer_v1"].get("num_workers")
             if workers and workers > 1:
                 assert "is_nemo_gym_fastapi_entrypoint(__file__)" in self._source(), (
                     f"{name} sets num_workers={workers} but the entrypoint has no module-level app"
                 )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order(tmp_path) -> None:
+    """Providers return a command's stdout and stderr apart: the script's redirect puts both on stdout, in order."""
+    header, found, _ = build_eval_script(_inputs()).partition("\ncd ")
+    assert found, "the eval script no longer begins its work with a cd line; update this split"
+    # Only the redirect may run here: never the real script, which resets a checkout.
+    assert [line for line in header.splitlines() if line and not line.startswith("#")] == ["exec 2>&1"]
+    result = subprocess.run(
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=30,
+    )
+    assert result.stdout.splitlines() == ["first", "second", "third"]
+    assert result.stderr == ""

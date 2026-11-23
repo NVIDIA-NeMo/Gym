@@ -6,7 +6,7 @@
 """Unit tests for the asr_with_pc resources server.
 
 Each test fixes the model output and the reference transcript and asserts the
-WER values against numeric expectations computed offline (jiwer 3.x).
+WER values against numeric expectations computed offline (unchanged between jiwer 3.x and 4.0).
 """
 
 import base64
@@ -15,9 +15,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.asr_with_pc.app import (
     ASRWithPCConfig,
     ASRWithPCResourcesServer,
@@ -42,8 +44,8 @@ MINIMAL_RESPONSES_CREATE_PARAMS = {
 EXAMPLE_DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
 
 
-def _make_server(task_type: str = "ASR-PC") -> ASRWithPCResourcesServer:
-    config = ASRWithPCConfig(host="0.0.0.0", port=8080, entrypoint="", name="", task_type=task_type)
+def _make_server(task_type: str = "ASR-PC", **config_fields) -> ASRWithPCResourcesServer:
+    config = ASRWithPCConfig(host="0.0.0.0", port=8080, entrypoint="", name="", task_type=task_type, **config_fields)
     return ASRWithPCResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -319,6 +321,9 @@ class TestASRWithPCServer:
 
 
 class TestAggregateMetrics:
+    def test_reverify_mode_is_stateless(self) -> None:
+        assert _make_server().config.REVERIFY_MODE == ReverifyMode.STATELESS
+
     def test_compute_metrics_perfect(self) -> None:
         """All rollouts perfect → corpus_wer == 0, pass@1 accuracy == 100."""
         server = _make_server()
@@ -351,6 +356,39 @@ class TestAggregateMetrics:
         server = _make_server()
         assert server.compute_metrics([]) == {}
 
+    def test_multilingual_headline_macros_dataset_then_language(self) -> None:
+        server = _make_server(multilingual_macro_profiles=["asr-leaderboard-multilingual"])
+
+        def row(language: str, subset: str, errors: int, references: int) -> dict:
+            return {
+                "benchmark_profile": "asr-leaderboard-multilingual",
+                "subset_for_metrics": subset,
+                "language": language,
+                "is_correct": errors == 0,
+                "pred_text": "hypothesis",
+                "wer": errors / references,
+                "wer_errors": errors,
+                "wer_ref_words": references,
+            }
+
+        tasks = [
+            [row("de", "mcv_de", 0, 1)],
+            [row("de", "fleurs_de", 100, 100)],
+            [row("fr", "mcv_fr", 0, 10)],
+            [row("fr", "fleurs_fr", 5, 10)],
+            [row("fr", "mls_fr", 10, 10)],
+        ]
+        metrics = server.compute_metrics(tasks)
+
+        assert metrics["wer::subset::mcv_de@k=1"] == pytest.approx(0.0)
+        assert metrics["wer::subset::fleurs_de@k=1"] == pytest.approx(100.0)
+        # The dataset macro has its own key; the pooled language rate keeps its own.
+        assert metrics["macro_wer::language::de@k=1"] == pytest.approx(50.0)
+        assert metrics["macro_wer::language::fr@k=1"] == pytest.approx(50.0)
+        assert metrics["wer::language::de@k=1"] == pytest.approx(100.0 * 100 / 101)
+        assert metrics["multilingual_macro_wer@k=1"] == pytest.approx(50.0)
+        assert metrics["corpus_wer@k=1"] == pytest.approx(50.0)
+
     def test_get_key_metrics_picks_highest_k(self) -> None:
         server = _make_server()
         agent_metrics = {
@@ -363,6 +401,8 @@ class TestAggregateMetrics:
             "wer_c@k=4": 9.0,
             "wer_pc@k=4": 14.0,
             "per@k=4": 22.0,
+            "mean_utterance_wer@k=4": 13.5,
+            "mean_utterance_cer@k=4": 4.2,
             "mean/output_tokens": 42,
         }
         key = server.get_key_metrics(agent_metrics)
@@ -375,6 +415,9 @@ class TestAggregateMetrics:
         assert key["wer_c"] == 9.0
         assert key["wer_pc"] == 14.0
         assert key["per"] == 22.0
+        assert key["mean_utterance_wer"] == pytest.approx(13.5)
+        assert key["mean_utterance_cer"] == pytest.approx(4.2)
+        assert "wer_macro" not in key
         assert key["mean/output_tokens"] == 42
 
     def test_score_fn_no_answer_flag(self) -> None:
@@ -529,8 +572,8 @@ class TestAsrLeaderboardDispatch:
         assert "wer_alternate" in dump
         assert dump["is_correct_alternate"] is True
 
-    async def test_missing_reference_field_raises(self) -> None:
-        """A reference_fields entry that isn't on the request must raise."""
+    async def test_missing_reference_field_is_rejected_with_422(self) -> None:
+        """A reference_fields entry that isn't on the request is a deterministic input error."""
         server = _make_server(task_type="ASR_LEADERBOARD")
         body = ASRWithPCVerifyRequest(
             responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
@@ -538,8 +581,9 @@ class TestAsrLeaderboardDispatch:
             expected_answer="hi",
             reference_fields=["text_missing"],
         )
-        with pytest.raises(ValueError, match="reference_fields entry 'text_missing'"):
+        with pytest.raises(HTTPException, match="reference_fields entry 'text_missing'") as error:
             await server.verify(body)
+        assert error.value.status_code == 422
 
     async def test_no_reference_fields_runs_primary_only(self) -> None:
         """ASR_LEADERBOARD without reference_fields should still produce primary WER."""
@@ -618,6 +662,7 @@ class TestMixedTaskTypeAggregation:
                     "wer_pc": None,
                     "text": "hello world",
                     "pred_text": "hello world",
+                    "reference_fields": ["text_tn"],
                     "text_tn": "hello world",
                     "wer_tn": 0.0,
                     "is_correct_tn": True,
@@ -631,6 +676,7 @@ class TestMixedTaskTypeAggregation:
                     "wer_pc": None,
                     "text": "hello world",
                     "pred_text": "hello world",
+                    "reference_fields": ["text_tn"],
                     "text_tn": "totally different words",
                     "wer_tn": 1.0,
                     "is_correct_tn": False,
@@ -664,3 +710,20 @@ class TestMixedTaskTypeAggregation:
         # Reserved suffixes (c, pc) stay under their canonical headline names.
         assert key["wer_c"] == 9.0
         assert key["wer_pc"] == 14.0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_generation_loops_collapses_runaway_repetition_only_when_enabled() -> None:
+    looped = "hello world. " + "ab" * 40
+    request = _make_verify_request(looped, "hello world ab")
+
+    plain = await _make_server("ASR").verify(request)
+    config = ASRWithPCConfig(
+        host="0.0.0.0", port=8080, entrypoint="", name="", task_type="ASR", cleanup_generation_loops=True
+    )
+    guarded = await ASRWithPCResourcesServer(config=config, server_client=MagicMock(spec=ServerClient)).verify(request)
+
+    # raw_pred_text is the extracted model output; the guardrail only changes what is scored.
+    assert plain.raw_pred_text == looped
+    assert guarded.raw_pred_text == looped
+    assert guarded.wer < plain.wer

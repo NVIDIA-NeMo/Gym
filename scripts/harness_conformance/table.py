@@ -26,8 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import nemo_gym
-from nemo_gym.harness_capabilities import checker
-from nemo_gym.harness_capabilities.cli import digest_file
+from nemo_gym.rollouts.harness_capabilities import checker, digest_file
 
 from . import episode, runner
 from .documentation import BEGIN, END, PAGE, atomic_write, replace_block
@@ -105,7 +104,7 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
     output.mkdir(parents=True, exist_ok=False)
     test_paths = {"runner": "scripts/harness_conformance/tests"}
     test_paths.update({harness: f"responses_api_agents/{harness}_agent/tests" for harness in harnesses})
-    test_paths["checker"] = "tests/unit_tests/harness_capabilities"
+    test_paths["checker"] = "tests/unit_tests/rollouts/harness_capabilities"
     tests = {name: run_tests(root, output, name=name, path=path) for name, path in test_paths.items()}
     verify_revision(root, commit)
     probes = output / "probes"
@@ -115,11 +114,13 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
     runtimes = {}
     for harness in harnesses:
         identities = []
-        for scenario in SCENARIOS:
-            runtime = json.loads((probes / harness / scenario.name / "runtime.json").read_text())
+        for scenario in summary["harnesses"][harness]["scenarios"]:
+            if scenario.get("unsupported_reason"):
+                continue  # A declared failure did not start a runtime.
+            runtime = json.loads((probes / harness / scenario["scenario"] / "runtime.json").read_text())
             # Runtime locations are machine-local; versions and source hashes are portable.
             identities.append({key: value for key, value in runtime.items() if key not in ("source", "executable")})
-        if not identities[0] or any(identity != identities[0] for identity in identities):
+        if not identities or not identities[0] or any(identity != identities[0] for identity in identities):
             raise ValueError(f"{harness} runtime changed during probing")
         runtimes[harness] = identities[0]
     report = {

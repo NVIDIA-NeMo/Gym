@@ -11,11 +11,12 @@ from aiohttp import ClientOSError, ServerDisconnectedError
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-import nemo_gym.server_utils as server_utils
+import nemo_gym.client.http_client
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
@@ -124,7 +125,7 @@ def test_resources_session_http_lifecycle_keeps_task_until_close(setup, reward: 
         assert client.post("/close_session", json=close_body(seed).model_dump(mode="json")).json() == closed.json()
         assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
         assert client.post("/verify", json=verify_body(seed).model_dump(mode="json")).status_code == 409
-    sandbox.stop.assert_awaited_once()
+    sandbox.stop.assert_awaited_once_with(timeout_s=server.config.session_close_timeout_seconds)
     assert not server._session_id_to_sandbox
     assert not server._session_id_to_state
 
@@ -174,7 +175,7 @@ async def test_failed_close_retains_owner_for_retry(setup) -> None:
     with pytest.raises(RuntimeError, match="provider unavailable"):
         await server.close_resources_session(close_body(seed))
     assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-    assert seed.resources_session_id not in server._closed_session_records
+    assert seed.resources_session_id not in server._fenced_session_records
     await server.close_resources_session(close_body(seed))
     await server.close_resources_session(close_body(seed))
     assert sandbox.stop.await_count == 2
@@ -229,7 +230,7 @@ async def test_initial_setup_failure_retains_sandbox_for_cleanup_retry(
         provider.close.assert_awaited_once()
         provider.aclose.assert_not_awaited()
         assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-        assert seed.resources_session_id not in server._closed_session_records
+        assert seed.resources_session_id not in server._fenced_session_records
         if recovery == "close":
             await server.close_resources_session(close_body(seed))
             await server.close_resources_session(close_body(seed))
@@ -255,8 +256,10 @@ async def test_lost_verdict_response_replays_through_shared_http_retry(
                 raise disconnect("lost completed verdict")
             return response
 
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: SimpleNamespace(request=send))
-        response = await server_utils._request_with_retries(
+        monkeypatch.setattr(
+            "nemo_gym.client.http_client.get_global_aiohttp_client", lambda: SimpleNamespace(request=send)
+        )
+        response = await nemo_gym.client.http_client._request_with_retries(
             "POST",
             "http://testserver/verify",
             _internal=True,
@@ -404,12 +407,14 @@ def test_shutdown_cleans_seeded_sandbox_and_legacy_seed_shape_stays_unchanged(se
     sandbox.stop.assert_awaited_once()
 
 
-def test_process_local_sessions_reject_multiple_workers(setup) -> None:
+def test_several_workers_are_allowed(setup) -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the sandbox."""
     server, _, _, _ = setup
-    with pytest.raises(ValueError, match="num_workers=1"):
+    refuse_unsupported_num_workers(
         TerminalBench21ResourcesServer(
             config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
         )
+    )
 
 
 @pytest.mark.parametrize("invalid_image", [None, 42])
@@ -503,7 +508,7 @@ async def test_completed_close_records_expire_without_retry_renewal(setup, monke
     other = close_body(seed).model_copy(update={"resources_session_id": "other"})
     await server.close_resources_session(other)
     assert seed.resources_session_id not in server._session_id_to_state
-    assert seed.resources_session_id not in server._closed_session_records
+    assert seed.resources_session_id not in server._fenced_session_records
     with pytest.raises(HTTPException, match="unknown or closed"):
         await server.verify(request, verify_body(seed))
     sandbox.stop.assert_awaited_once()
@@ -588,7 +593,7 @@ async def test_cancelled_close_fences_slow_seed_until_its_cleanup(
     closing.cancel()
     with pytest.raises(asyncio.CancelledError):
         await closing
-    now = 1000  # A pending allocation cannot lose its fence after the normal retry window.
+    now = 1000  # A pending allocation cannot lose its fence after the close retry window.
     await server.close_resources_session(close_body(seed).model_copy(update={"resources_session_id": "other"}))
     record = server._session_id_to_state[seed.resources_session_id]
     assert record.closing and record.expires_at == float("inf")
@@ -609,11 +614,11 @@ async def test_shutdown_stops_sessions_concurrently_under_their_locks(setup) -> 
     await server.seed_session(request, seed)
     entered, release, other_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    async def stop():
+    async def stop(**_: object):
         entered.set()
         await release.wait()
 
-    async def stop_other():
+    async def stop_other(**_: object):
         other_entered.set()
 
     sandbox.stop.side_effect = stop
@@ -634,7 +639,7 @@ async def test_shutdown_stops_sessions_concurrently_under_their_locks(setup) -> 
     other.stop.assert_awaited_once()
     assert not server._session_id_to_sandbox
     assert not server._session_id_to_state
-    assert not server._closed_session_records
+    assert not server._fenced_session_records
 
 
 @pytest.mark.parametrize("seeded", [False, True])
@@ -674,10 +679,11 @@ async def test_golden_cleanup_is_bounded_and_preserves_primary_result(
     if original is not None:
         server._upload_folder.side_effect = original
 
-    async def stop():
+    async def stop(*, timeout_s: float | None = None):
+        # The sandbox's stop is bounded by the configured timeout and raises TimeoutError when it runs out.
         if stop_failure == "error":
             raise RuntimeError("provider unavailable")
-        await asyncio.Event().wait()
+        raise TimeoutError
 
     sandbox.stop.side_effect = stop
     if original is None:
@@ -687,7 +693,7 @@ async def test_golden_cleanup_is_bounded_and_preserves_primary_result(
         with pytest.raises(failure) as error:
             await asyncio.wait_for(server.verify(request, verify_body(seed)), timeout=1)
         assert error.value is original
-    sandbox.stop.assert_awaited_once()
+    sandbox.stop.assert_awaited_once_with(timeout_s=server.config.session_close_timeout_seconds)
 
 
 @pytest.mark.parametrize(
@@ -727,7 +733,7 @@ async def test_cancelled_close_is_honored_when_verification_unwinds(setup, outco
     assert record.closing
     if stop_fails:
         assert server._session_id_to_sandbox[seed.resources_session_id] is sandbox
-        assert seed.resources_session_id not in server._closed_session_records
+        assert seed.resources_session_id not in server._fenced_session_records
         await server.close_resources_session(close_body(seed))
         assert sandbox.stop.await_count == 2
     assert record.request is None and record.verification_response is None

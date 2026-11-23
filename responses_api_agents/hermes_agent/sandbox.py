@@ -3,48 +3,111 @@
 """Agent-server side of Hermes execution in borrowed or owned task sandboxes."""
 
 import asyncio
-import importlib.metadata
 import json
 import logging
+import os
+import subprocess
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.agent_utils.uv_bootstrap import DEFAULT_UV_CACHE_DIR, uv_for_sandbox
-from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPlatform, SandboxPythonRuntime, SandboxSession
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentObservationBundle
+from responses_api_agents.hermes_agent.runtime import (
+    HERMES_MIN_GLIBC_MINOR,
+    HERMES_PYTHON_VERSION,
+    HERMES_SOURCE,
+    source_checkout,
+    stage_source,
+)
 
 
 LOG = logging.getLogger(__name__)
 
 
-def _sandbox_hermes_install() -> tuple[str, str]:
-    """Return the requirement the sandbox installs and the key that names its runtime directory.
-
-    Both come from the Hermes installed with this server, so ``requirements.txt`` is the only version pin and
-    the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so the sandbox
-    does not need git. The ``mcp`` extra carries Hermes' MCP client, which episode tool grants use.
-    """
-    distribution = importlib.metadata.distribution("hermes-agent")
-    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
-    commit = (direct_url.get("vcs_info") or {}).get("commit_id")
-    if commit is None:
-        return f"hermes-agent[mcp]=={distribution.version}", distribution.version
-    url = str(direct_url.get("url") or "").removesuffix(".git")
-    if not url.startswith("https://github.com/"):
-        raise RuntimeError(f"Cannot build a sandbox install URL for hermes-agent installed from {url!r}")
-    return f"hermes-agent[mcp] @ {url}/archive/{commit}.tar.gz", commit[:12]
+class HermesPlatformUnsupportedError(RuntimeError):
+    """The task sandbox's platform cannot run the locked Hermes wheels, so every attempt on its image fails."""
 
 
-_HERMES_REQUIREMENT, _HERMES_RUNTIME_KEY = _sandbox_hermes_install()
-_SANDBOX_RUNTIME_DIR = f"/tmp/nemo-gym-hermes-runtime-{_HERMES_RUNTIME_KEY}"
-_SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
-_SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
+class HermesPythonRuntime(SandboxPythonRuntime):
+    """Bundle the exact upstream lock and source tree for an offline task sandbox."""
+
+    async def _build_site_packages(self, platform: SandboxPlatform, destination: Path) -> None:
+        if platform.libc == "gnu" and (platform.glibc_minor or 0) < HERMES_MIN_GLIBC_MINOR:
+            version = f"2.{platform.glibc_minor}" if platform.glibc_minor is not None else "unknown"
+            raise HermesPlatformUnsupportedError(
+                f"Hermes requires glibc 2.{HERMES_MIN_GLIBC_MINOR} or newer for its locked wheels. "
+                f"The sandbox reported glibc {version} on {platform.arch}."
+            )
+        await asyncio.to_thread(self.build_packages, platform.wheel_platform, destination)
+
+    def build_packages(self, wheel_platform: str, destination: Path) -> None:
+        """Create the relocatable package archive for one Python 3.14 platform."""
+        source = source_checkout(self.requirements[0])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+            scratch = Path(temporary)
+            requirements = scratch / "requirements.txt"
+            with requirements.open("w") as output:
+                subprocess.run(
+                    ["uv", "export", "--frozen", "--no-dev", "--extra", "mcp", "--no-emit-project"],
+                    cwd=source,
+                    stdout=output,
+                    check=True,
+                )
+            minor = ".".join(self.python_version.split(".")[:2])
+            site = scratch / f"python/lib/python{minor}/site-packages"
+            # Export already applied the upstream overrides. Install exactly those hashes.
+            subprocess.run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--no-config",
+                    "--no-deps",
+                    "--require-hashes",
+                    "--only-binary",
+                    ":all:",
+                    "--python-platform",
+                    wheel_platform,
+                    "--python-version",
+                    self.python_version,
+                    "--target",
+                    str(site),
+                    "--link-mode",
+                    "copy",
+                    "-r",
+                    str(requirements),
+                ],
+                cwd=scratch,
+                check=True,
+            )
+            stage_source(source, site)
+            archive = scratch / "packages.tar.gz"
+            with tarfile.open(archive, "w:gz", compresslevel=1) as bundle:
+                bundle.add(scratch / "python", arcname="python")
+            os.replace(archive, destination)
+
+
+_HERMES_RUNTIME = HermesPythonRuntime(
+    harness="hermes",
+    python_version=HERMES_PYTHON_VERSION,
+    requirements=(HERMES_SOURCE,),
+    constraints=(),
+    import_check=(
+        "import os; os.environ['HERMES_HOME'] = os.path.join(os.environ['HOME'], '.hermes'); "
+        "from run_agent import AIAgent; from tools.mcp_tool_discovery import discover_mcp_tools; import mcp"
+    ),
+)
+# These paths are inside the task sandbox. The runner uses the absolute interpreter path regardless of the task's PATH.
+_SANDBOX_RUNTIME_DIR = _HERMES_RUNTIME.directory
+_SANDBOX_PYTHON = _HERMES_RUNTIME.python
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
 _SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
@@ -78,48 +141,22 @@ class HermesSandboxSession(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
 
-    async def install_runtime(self, *, install_timeout: float, uv_cache_dir: str = DEFAULT_UV_CACHE_DIR) -> None:
-        """Reuse or install the pinned runtime and stage the Hermes harness files."""
+    async def install_runtime(self, *, install_timeout: float) -> None:
+        """Reuse or install the pinned runtime and stage the Hermes harness files.
+
+        The runtime directory is keyed by its inputs, so a runtime an earlier session left in this sandbox is
+        reused when it passes the import check.
+        """
         prepared = await self.session.sandbox.exec(
-            f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.session_dir)}",
-            cwd=self.session.workdir,
-            timeout_s=30,
+            f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.session_dir)}", cwd="/", timeout_s=30
         )
         if prepared.return_code != 0:
             raise RuntimeError(prepared.stderr or prepared.stdout or "Failed to prepare Hermes sandbox paths")
-        if not await self._runtime_installed():
-            await self._install_runtime(install_timeout, uv_cache_dir)
+        if not await _HERMES_RUNTIME.is_installed(self.session.sandbox):
+            await _HERMES_RUNTIME.install(self.session.sandbox, timeout_s=install_timeout)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         await self.session.sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
-
-    async def _runtime_installed(self) -> bool:
-        """Whether the pinned Hermes and its MCP client import from its runtime path.
-
-        The path is keyed by the pinned commit, so a runtime baked into the image or left by an earlier
-        session in this sandbox is reused.
-        """
-        check = await self.session.sandbox.exec(
-            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent; from mcp.client.streamable_http import streamablehttp_client'",
-            cwd=self.session.workdir,
-            timeout_s=120,
-        )
-        return check.return_code == 0
-
-    async def _install_runtime(self, timeout: float, uv_cache_dir: str) -> None:
-        uv_path = await uv_for_sandbox(self.session.sandbox, self.session.workdir, uv_cache_dir)
-        await self.session.sandbox.upload(uv_path, _SANDBOX_UV)
-        venv = quote(_SANDBOX_RUNTIME_DIR + "/venv")
-        # A runtime that failed the import check is incomplete, so rebuild it rather than reuse it.
-        install = await self.session.sandbox.exec(
-            f"chmod 755 {quote(_SANDBOX_UV)} && rm -rf {venv} && "
-            f"{quote(_SANDBOX_UV)} venv {venv} --python 3.13 && "
-            f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} {quote(_HERMES_REQUIREMENT)} 'mcp>=1.28.1,<2'",
-            cwd=self.session.workdir,
-            timeout_s=timeout,
-        )
-        if install.return_code != 0 or not await self._runtime_installed():
-            raise RuntimeError(install.stderr or install.stdout or "Hermes sandbox installation failed")
 
     async def upload_json(self, name: str, payload: dict[str, JsonValue]) -> None:
         """Write a Hermes input under the session directory using file transfer."""
@@ -169,6 +206,9 @@ class HermesSandboxSession(AgentSessionState):
         return SandboxCommand(
             argv=[
                 _SANDBOX_PYTHON,
+                # Ignore task Python settings without changing the environment inherited by tool subprocesses.
+                "-E",
+                "-s",
                 _SANDBOX_RUNNER,
                 f"{self.session.session_dir}/input.json",
                 f"{self.session.session_dir}/output.json",

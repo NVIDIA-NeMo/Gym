@@ -21,11 +21,11 @@ Detailed patterns, schemas, and code examples for adding benchmarks to NeMo-Gym.
 ### Minimal verify-only server (e.g. `example_single_tool_call`)
 
 ```python
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     SimpleResourcesServer, BaseResourcesServerConfig,
     BaseVerifyRequest, BaseVerifyResponse,
 )
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 class MyConfig(BaseResourcesServerConfig):
     pass
@@ -46,14 +46,14 @@ elif is_nemo_gym_fastapi_entrypoint(__file__):
     app = MyServer.run_webserver()  # noqa: F401
 ```
 
-### Subprocess execution server (e.g. `code_gen`)
+### Subprocess execution server with Ray (e.g. `evalplus`)
 
 ```python
 from asyncio import Semaphore, get_running_loop
 from time import time
 from typing import Any, Dict, List, Optional
 import ray
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     SimpleResourcesServer, BaseResourcesServerConfig,
     BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse,
 )
@@ -71,6 +71,8 @@ class MyVerifyResponse(BaseVerifyResponse):
     # ... benchmark-specific result fields
 
 class MyServer(SimpleResourcesServer):
+    # Required for any server that uses Ray: Gym starts Ray only for servers that declare it.
+    ray_enabled = True
     config: MyConfig
 
     def model_post_init(self, context):
@@ -105,6 +107,7 @@ class MyServer(SimpleResourcesServer):
 - Guard optional nested fields: `(body.verifier_metadata or {}).get("key", default)`
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` in async context.
+- A server that uses Ray must declare `ray_enabled = True` on the class its entrypoint runs and request `nemo-gym[ray]` in its own `pyproject.toml`; otherwise Gym doesn't start Ray for it and Ray calls fail with "Ray has not been started yet". For isolated code execution, use the Sandbox API instead of Ray.
 
 ---
 
@@ -308,12 +311,12 @@ For single-turn benchmarks (model generates once, verify). Just reference `simpl
 For benchmarks where the model gets error feedback and retries:
 
 ```python
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.client import raise_for_status
 
 class MyAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
@@ -407,7 +410,7 @@ Handle these edge cases:
 
 ## Subprocess Execution with Ray
 
-For benchmarks that compile/run code:
+For benchmarks that compile/run code. Ray is optional: declare `ray_enabled = True` on the server class and add `nemo-gym[ray]` to the server's `pyproject.toml` dependencies, as in the subprocess execution server above. Without the declaration, Ray calls fail with "Ray has not been started yet". For isolated execution, prefer the Sandbox API (`nemo_gym.sandbox`).
 
 ```python
 import ray
@@ -454,7 +457,7 @@ def run_tests_remote(code, test_cases, timeout=30):
 import shutil
 import pytest
 from unittest.mock import MagicMock
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.my_benchmark.app import MyServer, MyConfig
 
 SKIP_REASON = "tool-name not installed"
@@ -641,18 +644,18 @@ class ExternalBenchmarkAgent(SimpleResponsesAPIAgent):
         )
 ```
 
-Add the dependency in `requirements.txt`. If needs are more complex than pip packages, use `setup.py` or `pyproject.toml`.
+Add the dependency in `pyproject.toml`, then run `uv lock` and commit `uv.lock`.
 
 Reproduction requirement: run the original repo first, reproduce published numbers, then integrate into Gym and reproduce again. This decouples Gym integration bugs from benchmark bugs.
 
 ### Replacing httpx with aiohttp in external libraries
 
-Many external libraries use `httpx.AsyncClient` internally. NeMo Gym requires all async HTTP to go through its global aiohttp client (`nemo_gym.server_utils.request()`) because httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency. See `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx`.
+Many external libraries use `httpx.AsyncClient` internally. NeMo Gym requires all async HTTP to go through its global aiohttp client (`nemo_gym.client.http_client.request()`) because httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency. See `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx`.
 
 When wrapping such a library, create an adapter class that mimics the library's expected HTTP interface but routes calls through aiohttp. The `tavily_search` resources server demonstrates this pattern:
 
 ```python
-from nemo_gym.server_utils import request
+from nemo_gym.client import request
 
 class AIOHTTPAdapter(BaseModel):
     headers: Dict[str, str]

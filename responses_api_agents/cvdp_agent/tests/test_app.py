@@ -12,8 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+import multiprocessing
+import os
 import tarfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -22,19 +26,25 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from responses_api_agents.cvdp_agent import app as cvdp_app
 from responses_api_agents.cvdp_agent.app import (
     CVDPAgent,
     CVDPAgentConfig,
     CVDPAgentRunRequest,
+    agent_key,
     deps_build_env,
+    harvest,
 )
 
 
@@ -50,6 +60,31 @@ def _drop_nulls(value):
     if isinstance(value, list):
         return [_drop_nulls(v) for v in value]
     return value
+
+
+class TestHarvest:
+    def test_collects_project_text_changes_without_restricting_extensions(self, tmp_path) -> None:
+        files = {
+            "docs/spec.md": "updated specification",
+            "rtl/coefficients.mem": "00\n01\n",
+            "verif/check.py": "assert True\n",
+            "rtl/unchanged.sv": "module old; endmodule",
+            "rtl/.cache/generated.txt": "cache",
+            "rtl/__pycache__/generated.pyc": "cache",
+        }
+        for rel, content in files.items():
+            path = tmp_path / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        assert harvest(
+            tmp_path,
+            ["docs/**/*", "rtl/**/*", "verif/**/*"],
+            seeded={"rtl/unchanged.sv": files["rtl/unchanged.sv"]},
+        ) == {key: files[key] for key in ["docs/spec.md", "rtl/coefficients.mem", "verif/check.py"]}
+
+    def test_does_not_collect_root_level_rtl_outside_project_roots(self, tmp_path) -> None:
+        (tmp_path / "top.sv").write_text("module top; endmodule")
+        assert harvest(tmp_path, CVDPAgentConfig.model_fields["harvest_globs"].default) == {}
 
 
 class TestApp:
@@ -236,20 +271,16 @@ class TestAgenticSandboxSpec:
         assert spec.env["NV_AGENT_HOME"] == "/code/.home"
 
     def test_sandbox_model_url_carries_the_current_span(self, monkeypatch) -> None:
-        from nemo_gym import server_utils
-
         segment = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
-        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: segment)
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: segment)
         agent = self._agent(deps_provision="archive")
         agent._model_url = MagicMock(return_value="http://model.example")
         spec = agent._build_spec(self._run_request(), "build rtl", {}, agent._resolve_image())
         assert spec.env["NV_MODEL_URL"] == f"http://model.example{segment}"
 
     def test_sandbox_model_url_carries_the_rollout_prefix_when_capture_is_on(self, monkeypatch) -> None:
-        from nemo_gym import server_utils
-
         segment = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
-        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: segment)
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: segment)
         agent = self._agent(deps_provision="archive")
         agent.server_client.global_config_dict = {"observability_enabled": True}
         agent._model_url = MagicMock(return_value="http://model.example")
@@ -263,6 +294,16 @@ class TestAgenticSandboxSpec:
         spec = agent._build_spec(body, "build rtl", {}, agent._resolve_image())
         assert spec.env["NV_MODEL_URL"] == f"http://model.example/ng-rollout/3-0{segment}"
 
+    def test_sandbox_untrained_model_url_keeps_the_model_servers_sampling(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "nemo_gym.agents.base_responses_api_agent.current_model_sampling_segment", lambda: "temperature-1"
+        )
+        agent = self._agent(deps_provision="archive")
+        agent._model_url = MagicMock(return_value="http://model.example")
+        spec = agent._build_spec(self._run_request(), "build rtl", {}, agent._resolve_image())
+        assert spec.env["NV_MODEL_URL"].endswith("/ng-sampling/temperature-1")
+        assert spec.env["NV_UNTRAINED_MODEL_URL"].endswith("/ng-sampling/null")
+
     def test_local_sif_rejected_for_open_sandbox(self) -> None:
         agent = self._agent(image="/tmp/cvdp.sif")
         with pytest.raises(ValueError, match="Apptainer"):
@@ -275,8 +316,8 @@ class TestAgenticSandboxSpec:
         box.start = AsyncMock()
         box.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=7, stdout="", stderr="harness failed"),
+                SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+                SimpleNamespace(return_code=7, stdout="", stderr="harness failed", error_type=None),
             ]
         )
 
@@ -292,15 +333,15 @@ class TestAgenticSandboxSpec:
         assert "harness failed" in result.container_stderr
         agent.server_client.post.assert_not_called()
 
-    async def test_missing_harness_response_returns_zero_reward(self) -> None:
+    async def test_missing_harness_response_is_an_agent_route_failure(self) -> None:
         agent = self._agent(deps_provision="baked")
         agent._image = "ghcr.io/hdl/sim/osvb"
         box = MagicMock()
         box.start = AsyncMock()
         box.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
-                SimpleNamespace(return_code=0, stdout="", stderr=""),
+                SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+                SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
             ]
         )
         box.download = AsyncMock(side_effect=FileNotFoundError("response.json"))
@@ -309,12 +350,297 @@ class TestAgenticSandboxSpec:
             "responses_api_agents.cvdp_agent.app.AsyncSandbox",
             return_value=self._sandbox_context(box),
         ):
-            result = await agent.run(MagicMock(cookies={}), self._run_request())
+            with pytest.raises(NgFailureEvent, match="response.json") as caught:
+                await agent.run(MagicMock(cookies={}), self._run_request())
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        agent.server_client.post.assert_not_called()
 
-        assert result.reward == 0.0
-        assert result.task_id == "task-1"
-        assert result.container_exit_code is None
-        assert "response.json" in result.container_stderr
+    @pytest.mark.parametrize(
+        "result",
+        [
+            SimpleNamespace(return_code=None, stdout="", stderr="vanished", error_type="provider_error"),
+            SimpleNamespace(return_code=-9, stdout="", stderr="", error_type=None),
+        ],
+        ids=["provider_error", "signal"],
+    )
+    async def test_sandbox_level_harness_exit_is_an_agent_route_failure(self, result) -> None:
+        agent = self._agent(deps_provision="baked")
+        agent._image = "ghcr.io/hdl/sim/osvb"
+        box = MagicMock()
+        box.start = AsyncMock()
+        box.exec = AsyncMock(
+            side_effect=[SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None), result]
+        )
+        with patch(
+            "responses_api_agents.cvdp_agent.app.AsyncSandbox",
+            return_value=self._sandbox_context(box),
+        ):
+            with pytest.raises(NgFailureEvent) as caught:
+                await agent.run(MagicMock(cookies={}), self._run_request())
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        agent.server_client.post.assert_not_called()
+
+    async def test_harvest_download_error_is_an_agent_route_failure(self, tmp_path) -> None:
+        agent = self._agent()
+        box = MagicMock()
+        box.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="rtl/a.sv\n", stderr="", return_code=0, error_type=None)
+        )
+        box.download = AsyncMock(side_effect=OSError("transfer broke"))
+        with pytest.raises(NgFailureEvent, match="transfer broke") as caught:
+            await agent._remote_harvest(box, "/code", ["rtl/*.sv"], {}, tmp_path)
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+
+    @pytest.mark.parametrize(
+        "listing",
+        [
+            SimpleNamespace(stdout="", stderr="vanished", return_code=None, error_type="provider_error"),
+            SimpleNamespace(stdout="", stderr="", return_code=0, error_type="timeout"),
+            SimpleNamespace(stdout="", stderr="sh: 1: cd: can't cd", return_code=2, error_type=None),
+            SimpleNamespace(stdout="", stderr="", return_code=-9, error_type=None),
+        ],
+        ids=["provider_error", "timeout", "shell_error", "signal"],
+    )
+    async def test_harvest_listing_failure_is_an_agent_route_failure(self, tmp_path, listing) -> None:
+        agent = self._agent()
+        box = MagicMock()
+        box.exec = AsyncMock(return_value=listing)
+        box.download = AsyncMock()
+        with pytest.raises(NgFailureEvent, match="harvest listing failed") as caught:
+            await agent._remote_harvest(box, "/code", ["rtl/*.sv"], {}, tmp_path)
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        box.download.assert_not_called()
+
+    async def test_absent_harvest_directory_is_a_genuine_miss(self, tmp_path) -> None:
+        # find exits 1 with no output when the optional directory does not exist.
+        agent = self._agent()
+        box = MagicMock()
+        box.exec = AsyncMock(return_value=SimpleNamespace(stdout="", stderr="", return_code=1, error_type=None))
+        box.download = AsyncMock()
+        assert await agent._remote_harvest(box, "/code", ["rtl/*.sv"], {}, tmp_path) == {}
+        box.download.assert_not_called()
+
+    @staticmethod
+    def _target_run_request() -> CVDPAgentRunRequest:
+        return CVDPAgentRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [{"role": "user", "content": "build rtl"}], "model": "m"},
+                "verifier_metadata": {"task_id": "task-1", "target_files": ["rtl/top.sv"]},
+            }
+        )
+
+    @staticmethod
+    def _target_box(probe, download_target=None):
+        """A sandbox whose harness ran cleanly; probe is the result of the target file existence check."""
+        response_json = NeMoGymResponse(
+            id="r",
+            created_at=0.0,
+            model="m",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        ).model_dump_json()
+
+        async def download(src, dest):
+            if str(src).endswith("response.json"):
+                dest.write_text(response_json)
+            elif download_target is not None:
+                download_target(dest)
+
+        ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+        box = MagicMock()
+        box.start = AsyncMock()
+        # runtime check, harness run, harvest listing (nothing found), then the target file probe
+        box.exec = AsyncMock(side_effect=[ok, ok, ok, probe])
+        box.download = AsyncMock(side_effect=download)
+        return box
+
+    def _target_agent(self) -> CVDPAgent:
+        agent = self._agent(deps_provision="baked")
+        agent._image = "ghcr.io/hdl/sim/osvb"
+        agent.server_client.post = AsyncMock()
+        return agent
+
+    async def _run_to_verification(self, agent, box, body=None):
+        with (
+            patch("responses_api_agents.cvdp_agent.app.AsyncSandbox", return_value=self._sandbox_context(box)),
+            patch("responses_api_agents.cvdp_agent.app.raise_for_status", AsyncMock()),
+            patch("responses_api_agents.cvdp_agent.app.get_response_json", AsyncMock(return_value={"reward": 0.0})),
+        ):
+            return await agent.run(MagicMock(cookies={}), body if body is not None else self._target_run_request())
+
+    async def test_absent_target_file_reaches_verification_without_it(self) -> None:
+        box = self._target_box(SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None))
+        agent = self._target_agent()
+        assert await self._run_to_verification(agent, box) == {"reward": 0.0}
+        sent = agent.server_client.post.call_args.kwargs["json"]
+        assert "rtl_files" not in sent  # the model wrote nothing: scored as a miss, not masked
+
+    async def test_heavy_agent_sends_replayable_project_changes(self, tmp_path) -> None:
+        import base64
+        import hashlib
+
+        from resources_servers.cvdp.repository_workspace import apply_changes, collect_changes, snapshot
+
+        project = tmp_path / "project"
+        (project / "src").mkdir(parents=True)
+        (project / "src/core.v").write_text("starting RTL")
+        (project / "deleted.v").write_text("old RTL")
+        archive = tmp_path / "baseline.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            stream.add(project / "src", arcname="src")
+            stream.add(project / "deleted.v", arcname="deleted.v")
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        archive = archive.rename(tmp_path / f"{digest}.tar.gz")
+        before = snapshot(project)
+        (project / "src/core.v").write_text("fixed RTL")
+        (project / "deleted.v").unlink()
+        delta = tmp_path / "delta.tar.gz"
+        changes = collect_changes(project, before, delta)
+        box = self._target_box(None)
+        original_download = box.download.side_effect
+
+        async def download(source, destination):
+            if source.endswith("changes.tar.gz"):
+                destination.write_bytes(delta.read_bytes())
+            elif source.endswith("changes.tar.json"):
+                destination.write_text(json.dumps(changes))
+            else:
+                await original_download(source, destination)
+
+        async def start_with_setup(spec, setup):
+            await setup(box)
+
+        box.start_with_setup = AsyncMock(side_effect=start_with_setup)
+        box.upload = AsyncMock()
+        box.download.side_effect = download
+        box.exec.side_effect = None
+        box.exec.return_value = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+        agent = self._target_agent()
+        agent.config.prepared_repository_dir = str(tmp_path)
+        body = self._target_run_request()
+        body.verifier_metadata["repository_workspace_sha256"] = digest
+        await self._run_to_verification(agent, box, body)
+        sent = agent.server_client.post.call_args.kwargs["json"]
+        assert sent["verifier_metadata"]["repository_workspace_sha256"] == digest
+        assert sent["repository_changes"]["deleted"] == ["deleted.v"]
+        assert base64.b64decode(sent["repository_changes"]["archive"]) == delta.read_bytes()
+        replay = tmp_path / "replay"
+        with tarfile.open(archive) as stream:
+            stream.extractall(replay, filter="data")
+        apply_changes(replay, sent["repository_changes"])
+        assert snapshot(replay) == snapshot(project)
+        box.start_with_setup.assert_awaited_once()
+        box.upload.assert_awaited_once_with(archive, "/code/.nv/repository.tar.gz")
+
+    async def test_present_target_file_is_sent_to_verification(self) -> None:
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+            download_target=lambda dest: dest.write_text("module top; endmodule"),
+        )
+        agent = self._target_agent()
+        await self._run_to_verification(agent, box)
+        sent = agent.server_client.post.call_args.kwargs["json"]
+        assert sent["rtl_files"] == {"rtl/top.sv": "module top; endmodule"}
+
+    async def test_project_roots_and_deleted_context_reach_verifier(self) -> None:
+        body = self._target_run_request()
+        body.verifier_metadata["context_files"] = {
+            "docs/spec.md": "original spec",
+            "hardware/old.sv": "module old; endmodule",
+            "README.md": "project readme",
+            "rtl/deleted.sv": "module deleted; endmodule",
+        }
+        final_files = {
+            "docs/spec.md": "updated spec",
+            "hardware/old.sv": "module old; endmodule",
+            "hardware/new.mem": "abcd",
+            "README.md": "project readme",
+        }
+        box = self._target_box(SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None))
+        original_download = box.download.side_effect
+
+        async def download(src, dest):
+            rel = str(src).removeprefix("/code/")
+            if rel in final_files:
+                dest.write_text(final_files[rel])
+            else:
+                await original_download(src, dest)
+
+        box.download.side_effect = download
+        ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+        box.exec.side_effect = [
+            ok,
+            ok,
+            SimpleNamespace(return_code=0, stdout="\n".join(final_files), stderr="", error_type=None),
+            SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None),
+        ]
+        agent = self._target_agent()
+        await self._run_to_verification(agent, box, body)
+        sent = agent.server_client.post.call_args.kwargs["json"]
+        assert sent["rtl_files"] == {"docs/spec.md": "updated spec", "hardware/new.mem": "abcd"}
+        assert sent["verifier_metadata"]["context_files"] == {
+            key: value for key, value in body.verifier_metadata["context_files"].items() if key != "rtl/deleted.sv"
+        }
+
+    async def test_unchanged_seeded_target_is_still_verified(self) -> None:
+        starting = "module top; // starting RTL left unchanged\nendmodule"
+        body = self._target_run_request()
+        body.verifier_metadata["context_files"] = {"rtl/top.sv": starting}
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+            download_target=lambda dest: dest.write_text(starting),
+        )
+        agent = self._target_agent()
+        with patch.object(agent, "_build_spec", wraps=agent._build_spec) as build_spec:
+            await self._run_to_verification(agent, box, body)
+        assert build_spec.call_args.args[2]["/code/rtl/top.sv"] == starting
+        assert agent.server_client.post.call_args.kwargs["json"]["rtl_files"] == {"rtl/top.sv": starting}
+
+    @pytest.mark.parametrize(
+        "probe",
+        [
+            SimpleNamespace(return_code=None, stdout="", stderr="vanished", error_type="provider_error"),
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type="timeout"),
+            SimpleNamespace(return_code=126, stdout="", stderr="cannot execute", error_type=None),
+        ],
+        ids=["provider_error", "timeout", "unexpected_exit"],
+    )
+    async def test_target_probe_fault_is_an_agent_route_failure(self, probe) -> None:
+        agent = self._target_agent()
+        with pytest.raises(NgFailureEvent, match="could not check target file") as caught:
+            await self._run_to_verification(agent, self._target_box(probe))
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        agent.server_client.post.assert_not_called()
+
+    async def test_target_download_fault_is_an_agent_route_failure(self) -> None:
+        def broken(_dest):
+            raise OSError("transfer broke")
+
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None), download_target=broken
+        )
+        agent = self._target_agent()
+        with pytest.raises(NgFailureEvent, match="target file download of rtl/top.sv failed") as caught:
+            await self._run_to_verification(agent, box)
+        assert caught.value.failure_kind == AGENT_ROUTE_FAILED
+        agent.server_client.post.assert_not_called()
+
+    async def test_invalid_utf8_target_is_a_scored_failure_with_original_response(self) -> None:
+        box = self._target_box(
+            SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None),
+            download_target=lambda dest: dest.write_bytes(bytes([255])),
+        )
+        agent = self._target_agent()
+
+        result = await self._run_to_verification(agent, box)
+
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert result.response.id == "r" and result.response.model == "m"
+        assert result.response.output == []
+        assert "rtl/top.sv is not UTF-8" in result.container_stderr
         agent.server_client.post.assert_not_called()
 
     def test_deps_archive_contains_runtime_root(self, tmp_path) -> None:
@@ -326,6 +652,82 @@ class TestAgenticSandboxSpec:
         archive = agent._archive_deps(deps)
         with tarfile.open(archive, "r:gz") as tar:
             assert "bin/python" in tar.getnames()
+
+    def _fake_build(self, tmp_path: Path):
+        """A setup script stand-in that records each run and fills the deps prefix."""
+
+        def run(command, env, check):
+            with (tmp_path / "builds").open("a") as log:
+                log.write(f"{os.getpid()}\n")
+            # Long enough for the other worker to reach the build while this one is still in it.
+            time.sleep(0.5)
+            (Path(env["DEPS_DIR"]) / "bin").mkdir(parents=True, exist_ok=True)
+            (Path(env["DEPS_DIR"]) / "bin" / "python3").write_text("runtime")
+
+        return run
+
+    def _first_rollout_setup(self, agent: CVDPAgent, results) -> None:
+        try:
+            deps_dir = agent._provision_deps()
+            results.put(str(agent._archive_deps(deps_dir)))
+        except Exception as error:
+            results.put(repr(error))
+
+    def test_concurrent_first_rollouts_in_two_workers_build_the_runtime_once(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cvdp_app, "DEPS_ROOT", tmp_path / "deps", raising=False)
+        monkeypatch.setattr(cvdp_app.subprocess, "run", self._fake_build(tmp_path))
+        agent = self._agent()
+        context = multiprocessing.get_context("fork")
+        results = context.Queue()
+        workers = [context.Process(target=self._first_rollout_setup, args=(agent, results)) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        archives = [results.get(timeout=60) for _ in workers]
+        for worker in workers:
+            worker.join(timeout=60)
+
+        assert archives[0] == archives[1] and Path(archives[0]).is_file()
+        assert len((tmp_path / "builds").read_text().splitlines()) == 1
+
+    async def test_concurrent_sandbox_builds_build_the_archive_once(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        # Each call opens its own lock file handle, as two workers do, so the second waits for the first's build.
+        monkeypatch.setattr(cvdp_app, "DEPS_ROOT", tmp_path / "deps", raising=False)
+        builds = []
+
+        async def build(self, image, script, recipe, archive: Path) -> None:
+            builds.append(archive)
+            await asyncio.sleep(0.3)
+            archive.write_text("runtime")
+
+        monkeypatch.setattr(CVDPAgent, "_build_deps_archive_in_sandbox", build)
+        first, second = self._agent(), self._agent()
+
+        archives = await asyncio.gather(
+            first._provision_deps_in_sandbox("image"), second._provision_deps_in_sandbox("image")
+        )
+
+        assert archives[0] == archives[1] and archives[0].read_text() == "runtime"
+        assert builds == [archives[0]]
+
+    def test_an_interrupted_runtime_build_starts_from_an_empty_prefix(
+        self, tmp_path, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(cvdp_app, "DEPS_ROOT", tmp_path / "deps", raising=False)
+        monkeypatch.setattr(cvdp_app.subprocess, "run", self._fake_build(tmp_path))
+        agent = self._agent()
+        target = agent._deps_target_arch()[0]
+        # A build that stopped before it wrote its sentinel left a partial file behind.
+        partial = tmp_path / "deps" / f"{agent_key(agent.config.agent_server_module)}-{target}" / "partial"
+        partial.parent.mkdir(parents=True)
+        partial.write_text("half written")
+
+        deps_dir = agent._provision_deps()
+
+        assert not partial.exists()
+        assert (deps_dir / "bin" / "python3").is_file()
+        assert (deps_dir / ".installed").is_file()
 
     def test_deps_build_uses_private_host_state(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setenv("HOME", "/full-home")
@@ -341,6 +743,35 @@ class TestAgenticSandboxSpec:
         assert env["ARCH"] == "x86_64-unknown-linux-gnu"
         assert env["NODE_ARCH"] == "linux-x64"
         assert Path(env["TMPDIR"]).is_dir()
+
+    def test_deps_recipe_follows_the_agent_pin(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        """Hermes reads its source pin from its pyproject.toml, so a pin bump must rebuild the cached prefix."""
+        hermes_dir = Path(cvdp_app.__file__).resolve().parents[1] / "hermes_agent"
+        assert hermes_dir / "pyproject.toml" in cvdp_app.agent_pin_files("hermes_agent")
+        pin = tmp_path / "pyproject.toml"
+        pin.write_text("source = 'a'")
+        monkeypatch.setattr(cvdp_app, "agent_pin_files", lambda key: (pin,))
+        agent = self._agent()
+        before = agent._deps_recipe("hermes_agent")[1]
+
+        pin.write_text("source = 'b'")
+        bumped = agent._deps_recipe("hermes_agent")[1]
+        assert bumped != before
+
+        # The deps script also builds from HERMES_SPEC when it is set.
+        monkeypatch.setenv("HERMES_SPEC", "git+https://example.invalid/hermes@experiment")
+        assert agent._deps_recipe("hermes_agent")[1] != bumped
+
+    async def test_hermes_deps_refuse_a_cross_architecture_sandbox_build(self, monkeypatch: MonkeyPatch) -> None:
+        """Hermes builds its runtime on the host with uv and the Gym checkout, which a task sandbox lacks."""
+        monkeypatch.setattr("responses_api_agents.cvdp_agent.app.os.uname", lambda: SimpleNamespace(machine="aarch64"))
+        agent = self._agent(
+            sandbox_provider={"opensandbox": {}}, agent_server_module="responses_api_agents.hermes_agent.app"
+        )
+        assert agent._deps_needs_sandbox_build() is True
+
+        with pytest.raises(RuntimeError, match=r"run CVDP on a host of the sandbox's architecture \(amd64\)"):
+            await agent._provision_deps_in_sandbox("image")
 
     def test_opensandbox_deps_default_to_amd64_even_on_arm_host(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("responses_api_agents.cvdp_agent.app.os.uname", lambda: SimpleNamespace(machine="aarch64"))
@@ -555,3 +986,318 @@ class TestAgenticSandboxSpec:
             "safety_identifier": None,
         }
         assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
+
+
+class TestSimpleRunAttemptEvidence:
+    """/run owns the model calls of every attempt and accounts their usage, without changing what it dispatches."""
+
+    @staticmethod
+    def _reply(response_id: str, text: str | None, usage: tuple[int, int] | None) -> dict:
+        output = []
+        if text is not None:
+            output.append(
+                {
+                    "id": f"msg_{response_id}",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                }
+            )
+        body = {
+            "id": response_id,
+            "created_at": 1.0,
+            "model": "synthetic-model",
+            "object": "response",
+            "output": output,
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        if usage is not None:
+            body["usage"] = {
+                "input_tokens": usage[0],
+                "output_tokens": usage[1],
+                "total_tokens": sum(usage),
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            }
+        return body
+
+    def _run(
+        self, model_replies: list, parse_failed: list[bool], *, capture: bool = True, max_steps: int | None = None
+    ):
+        """Run /run in process: model and resources servers are scripted, the self-call reaches this agent's app."""
+        config = CVDPAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="cvdp_agent",
+            simple_agent=True,
+            max_steps=max_steps,
+            resources_server=ResourcesServerRef(type="resources_servers", name="cvdp"),
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": capture}
+        agent = CVDPAgent(config=config, server_client=server_client)
+        client = TestClient(agent.setup_webserver())
+        model_requests, verify_payloads, self_replies = [], [], []
+        model_replies, parse_failed = list(model_replies), list(parse_failed)
+
+        def reply(status: int, payload: dict) -> MagicMock:
+            response = MagicMock()
+            response.ok = status < 400
+            response.status = status
+            response.cookies = {}
+            response.read = AsyncMock(return_value=json.dumps(payload).encode())
+            response.raise_for_status.side_effect = None if status < 400 else RuntimeError(f"HTTP {status}")
+            return response
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            payload = json.model_dump(mode="json", exclude_unset=True) if hasattr(json, "model_dump") else json
+            if server_name == "cvdp_agent":
+                result = client.post(url_path, json=payload)
+                self_replies.append(result.json())
+                return reply(result.status_code, result.json())
+            if server_name == "policy_model":
+                model_requests.append(payload)
+                body = model_replies.pop(0)
+                return reply(500, {"error": "synthetic"}) if body is None else reply(200, body)
+            if url_path == "/seed_session":
+                return reply(200, {})
+            verify_payloads.append(payload)
+            return reply(200, payload | {"reward": 0.0, "parse_failed": parse_failed.pop(0)})
+
+        server_client.post.side_effect = post
+        row = {
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 1,
+            "responses_create_params": {"input": [{"role": "user", "content": "write module a"}], "temperature": 0.6},
+            "verifier_metadata": {"task_id": "synthetic_0001"},
+        }
+        result = client.post("/run", json=row)
+        assert result.status_code == 200, result.text
+        return result.json(), model_requests, verify_payloads, self_replies
+
+    def test_parse_retry_owns_both_calls_and_reports_the_episode_usage(self) -> None:
+        first, last = self._reply("resp_a", "no code", (10, 7)), self._reply("resp_b", "module a; endmodule", (10, 9))
+        result, model_requests, verify_payloads, self_replies = self._run([first, last], [True, False])
+
+        assert len(model_requests) == 2 and model_requests[0] == model_requests[1]
+        assert [p["response"]["id"] for p in verify_payloads] == ["resp_a", "resp_b"]
+        assert all("_ng_trajectory" not in p["response"] for p in verify_payloads)
+        assert [p["response"]["usage"]["output_tokens"] for p in verify_payloads] == [7, 9]
+        assert all("_ng_trajectory" in r for r in self_replies)
+        assert result["response"]["id"] == "resp_b"
+        assert result["response"]["output"][0]["content"][0]["text"] == "module a; endmodule"
+        assert (result["response"]["usage"]["input_tokens"], result["response"]["usage"]["output_tokens"]) == (20, 16)
+        trajectory = result["ng_trajectory"]
+        assert (trajectory["task_id"], trajectory["rollout_id"]) == ("3", "3-1")
+        assert [ref["response_id"] for ref in trajectory["invocations"][0]["model_calls"]] == ["resp_a", "resp_b"]
+        assert [(t["turn_no"], [r["response_id"] for r in t["model_calls"]]) for t in trajectory["turns"]] == [
+            (1, ["resp_a"]),
+            (2, ["resp_b"]),
+        ]
+        assert trajectory["gaps"] == []
+
+    def test_single_call_keeps_its_usage_and_owns_its_call(self) -> None:
+        result, model_requests, verify_payloads, _ = self._run(
+            [self._reply("resp_a", "module a; endmodule", (10, 5))], [False]
+        )
+
+        assert len(model_requests) == 1 and len(verify_payloads) == 1
+        assert result["response"]["usage"] == verify_payloads[0]["response"]["usage"]
+        assert [ref["response_id"] for ref in result["ng_trajectory"]["invocations"][0]["model_calls"]] == ["resp_a"]
+
+    def test_attempt_without_a_reply_is_a_missing_reference_not_an_invented_one(self) -> None:
+        result, model_requests, verify_payloads, _ = self._run(
+            [None, self._reply("resp_b", "module a; endmodule", (10, 6))], [False]
+        )
+
+        assert len(model_requests) == 2 and len(verify_payloads) == 1
+        assert (result["response"]["usage"]["input_tokens"], result["response"]["usage"]["output_tokens"]) == (10, 6)
+        trajectory = result["ng_trajectory"]
+        assert [ref["response_id"] for ref in trajectory["invocations"][0]["model_calls"]] == ["resp_b"]
+        assert [(g["code"], g["detail"]) for g in trajectory["gaps"]] == [
+            ("model_call_reference_unavailable", "attempt:1")
+        ]
+
+    def test_missing_attempt_usage_makes_the_episode_usage_unknown(self) -> None:
+        result, *_ = self._run(
+            [self._reply("resp_a", "no code", None), self._reply("resp_b", "module a; endmodule", (10, 9))],
+            [True, False],
+        )
+
+        assert result["response"]["usage"] is None
+
+    def test_without_capture_the_reply_and_result_carry_no_trajectory(self) -> None:
+        result, _, verify_payloads, self_replies = self._run(
+            [self._reply("resp_a", "no code", (10, 7)), self._reply("resp_b", "module a; endmodule", (10, 9))],
+            [True, False],
+            capture=False,
+        )
+
+        assert "ng_trajectory" not in result
+        assert all("_ng_trajectory" not in r for r in self_replies)
+        assert all("_ng_trajectory" not in p["response"] for p in verify_payloads)
+        assert (result["response"]["usage"]["input_tokens"], result["response"]["usage"]["output_tokens"]) == (20, 16)
+
+    def test_multi_step_call_without_usage_keeps_the_verify_payload_and_reports_unknown_usage(self) -> None:
+        # One attempt, two model calls: the first returns no message and no usage, so the loop continues.
+        result, model_requests, verify_payloads, _ = self._run(
+            [self._reply("resp_a", None, None), self._reply("resp_b", "module a; endmodule", (10, 9))], [False]
+        )
+
+        assert len(model_requests) == 2 and len(verify_payloads) == 1
+        # /verify receives the same partial sum it received before this agent reported evidence.
+        assert (
+            verify_payloads[0]["response"]["usage"]["input_tokens"],
+            verify_payloads[0]["response"]["usage"]["output_tokens"],
+        ) == (10, 9)
+        assert set(verify_payloads[0]["response"]) & {"_ng_trajectory", "_ng_usage_complete"} == set()
+        # After verification the episode usage is unknown, not the partial sum.
+        assert result["response"]["usage"] is None
+        assert [ref["response_id"] for ref in result["ng_trajectory"]["invocations"][0]["model_calls"]] == [
+            "resp_a",
+            "resp_b",
+        ]
+
+    def test_an_evidence_error_is_a_gap_and_never_another_attempt(self, monkeypatch: MonkeyPatch) -> None:
+        import responses_api_agents.cvdp_agent.app as cvdp_app
+
+        def refuse(*args, **kwargs):
+            raise ValueError("synthetic evidence failure")
+
+        monkeypatch.setattr(cvdp_app.TrajectoryRecord, "model_validate", refuse)
+        result, model_requests, verify_payloads, _ = self._run(
+            [self._reply("resp_a", "module a; endmodule", (10, 5))], [False]
+        )
+
+        assert len(model_requests) == 1 and len(verify_payloads) == 1
+        assert result["reward"] == 0.0 and result["response"]["id"] == "resp_a"
+        assert [(g["code"], g["detail"]) for g in result["ng_trajectory"]["gaps"]] == [
+            ("agent_observations_invalid", "attempt:1:ValueError")
+        ]
+        assert result["ng_trajectory"]["invocations"][0]["model_calls"] == []
+        assert result["ng_trajectory"]["invocations"][0]["status"] == "unknown"
+
+    @pytest.mark.parametrize("usage", [(10, 5), None], ids=["usage", "missing_usage"])
+    @pytest.mark.parametrize(
+        ("outcome", "expected_status", "expected_stop_reason"),
+        [
+            ("iteration_limit", "incomplete", "max_iterations"),
+            ("failed", "failed", None),
+            ("incomplete", "incomplete", "max_output_tokens"),
+            ("completed", "completed", None),
+            ("legacy", "completed", None),
+        ],
+    )
+    def test_invocation_outcome_preserves_requests_verification_and_results(
+        self, outcome: str, expected_status: str, expected_stop_reason: str | None, usage: tuple[int, int] | None
+    ) -> None:
+        reply = self._reply("resp_a", "module a; endmodule", usage)
+        if outcome == "iteration_limit":
+            reply["status"] = "completed"
+            reply["output"] = [{"id": "reason_a", "type": "reasoning", "summary": []}]
+        elif outcome == "failed":
+            reply["status"] = "failed"
+            reply["error"] = {"code": "server_error", "message": "synthetic failure with partial output"}
+        elif outcome == "incomplete":
+            reply["status"] = "incomplete"
+            reply["incomplete_details"] = {"reason": "max_output_tokens"}
+        elif outcome == "completed":
+            reply["status"] = "completed"
+
+        result, requests, verified, _ = self._run([reply], [False], max_steps=1)
+        without_capture, plain_requests, plain_verified, _ = self._run([reply], [False], capture=False, max_steps=1)
+
+        invocation = result["ng_trajectory"]["invocations"][0]
+        assert (invocation["status"], invocation["stop_reason"]) == (expected_status, expected_stop_reason)
+        assert [ref["response_id"] for ref in invocation["model_calls"]] == ["resp_a"]
+        assert len(requests) == len(verified) == 1
+        assert requests == plain_requests
+        assert verified == plain_verified
+        assert {key: value for key, value in result.items() if key != "ng_trajectory"} == without_capture
+        assert result["response"] == verified[0]["response"]
+        assert result["reward"] == 0.0
+
+    def test_recovered_iteration_limit_uses_final_attempt_outcome_and_keeps_both_calls(self) -> None:
+        first = self._reply("resp_a", None, None)
+        first["output"] = [{"id": "reason_a", "type": "reasoning", "summary": []}]
+        last = self._reply("resp_b", "module a; endmodule", (10, 5))
+        result, requests, verified, _ = self._run([first, last], [True, False], max_steps=1)
+        invocation = result["ng_trajectory"]["invocations"][0]
+        assert (invocation["status"], invocation["stop_reason"]) == ("completed", None)
+        assert [ref["response_id"] for ref in invocation["model_calls"]] == ["resp_a", "resp_b"]
+        assert len(requests) == len(verified) == 2
+        assert requests[0] == requests[1]
+        assert result["response"]["usage"] is None
+        assert result["response"]["output"] == verified[-1]["response"]["output"]
+        assert result["reward"] == 0.0
+
+
+_RESOLVER_PROBE_AGENT = """
+import json
+from types import SimpleNamespace
+
+
+class ProbeConfig:
+    model_fields = {}
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class ProbeAgent:
+    def __init__(self, config, server_client):
+        self.config = config
+
+    def resolve_model_base_url(self, model_server_name, rollout_id=None, *, trace_context=True, trained=True):
+        raise AssertionError("the entrypoint must replace the resolver")
+
+    async def responses(self, request, body):
+        urls = [
+            self.resolve_model_base_url("policy", "rollout-1"),
+            self.resolve_model_base_url("policy", "rollout-1", trained=False),
+        ]
+        return SimpleNamespace(output=[], model_dump_json=lambda: json.dumps(urls))
+"""
+
+
+@pytest.mark.parametrize("untrained_url", ["http://model/ng-rollout/rollout-1/ng-sampling/null", None])
+def test_sandbox_entrypoint_resolver_routes_the_untrained_role(tmp_path: Path, untrained_url: str | None) -> None:
+    """Hermes resolves its compression URL with ``trained=False``; an older parent sends only the run URL."""
+    import subprocess
+    import sys
+
+    (tmp_path / "resolver_probe_agent.py").write_text(_RESOLVER_PROBE_AGENT)
+    traj_dir = tmp_path / "traj"
+    traj_dir.mkdir()
+    (traj_dir / "instruction.txt").write_text("solve")
+    entrypoint = Path(__file__).resolve().parents[1] / "sandbox_entrypoint.py"
+    repo_root = Path(__file__).resolve().parents[3]
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(tmp_path), str(repo_root), os.environ.get("PYTHONPATH", "")]),
+        "NV_AGENT_HOME": str(tmp_path / "home"),
+        "NV_MODEL_URL": "http://model/ng-rollout/rollout-1",
+        "NV_MODEL_NAME": "policy",
+        "NV_TRAJ_DIR": str(traj_dir),
+        "NV_AGENT_MODULE": "resolver_probe_agent",
+        "NV_AGENT_CLASS": "ProbeAgent",
+        "NV_AGENT_CFG_CLASS": "ProbeConfig",
+    }
+    if untrained_url:
+        env["NV_UNTRAINED_MODEL_URL"] = untrained_url
+
+    # The entrypoint creates the CVDP task directories in its working directory.
+    completed = subprocess.run(
+        [sys.executable, str(entrypoint)], env=env, capture_output=True, text=True, timeout=120, cwd=tmp_path
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((traj_dir / "response.json").read_text()) == [
+        "http://model/ng-rollout/rollout-1/v1",
+        f"{untrained_url or 'http://model/ng-rollout/rollout-1'}/v1",
+    ]

@@ -12,12 +12,14 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxEndpoint
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.enterpriseops_gym import app as app_module
 from resources_servers.enterpriseops_gym.app import (
     EnterpriseOpsGymResourcesServer,
@@ -112,7 +114,7 @@ def sandboxes(monkeypatch) -> dict[str, list]:
         assert port in self._spec.ports
         return SandboxEndpoint(endpoint=f"http://{self._spec.metadata['gym_server']}.test", headers={"auth": "proxy"})
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, *, timeout_s: float | None = None) -> None:
         if self._spec is not None:
             if self._spec.metadata["gym_server"] in record["failing_stops"]:
                 raise RuntimeError("delete timed out")

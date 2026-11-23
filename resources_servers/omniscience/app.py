@@ -26,7 +26,7 @@ Computes:
 - is_hallucination: 1.0 when INCORRECT (confident wrong answer)
 
 Based on the AA-Omniscience benchmark:
-https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
+https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public-v1.1
 """
 
 from __future__ import annotations
@@ -39,23 +39,25 @@ import yaml
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+    observe_llm_judge_grading,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 
 
 # ---------------------------------------------------------------------------
@@ -109,26 +111,97 @@ def extract_text_from_response(response: NeMoGymResponse, strip_thinking: bool =
     return ""
 
 
-def parse_judge_grade(judge_text: str) -> str:
-    """Parse the single-letter grade (A/B/C/D) from the judge's response.
+# Grade names from the judge prompt, matched case-sensitively at explicit verdict positions.
+_GRADE_KEYWORDS = {
+    "CORRECT": "A",
+    "INCORRECT": "B",
+    "PARTIAL_ANSWER": "C",
+    "PARTIAL": "C",
+    "NOT_ATTEMPTED": "D",
+}
+_GRADE_KEYWORD_PATTERN = "|".join(_GRADE_KEYWORDS)
+_GRADE_TOKEN_PATTERN = rf"(?:{_GRADE_KEYWORD_PATTERN}|[ABCD])(?![\w+-])"
+_GRADE_TOKEN_RE = re.compile(_GRADE_TOKEN_PATTERN)
+_GRADE_CONNECTOR_PATTERN = r"(?:[:/,&|]|\b(?i:or|and)\b)"
+_UNPARSED_ALTERNATIVE_RE = re.compile(rf"^[\"'*)\]`]*[^\S\n]*{_GRADE_CONNECTOR_PATTERN}")
+_EXPLICIT_GRADE_RE = re.compile(
+    r"^[^\S\n]*(?:"
+    # Closed lead-ins prevent gold answers, negations and other prose from becoming grades.
+    r"(?i:(?:(?:the|final)[^\S\n]+)?"
+    r"(?:(?:grade|verdict|answer)\b[^\S\n]*(?:is\b|:|=)))[^\S\n]*"
+    r"|(?P<letter>[ABCD])[^\S\n]*:[^\S\n]*"
+    rf"|(?=[\"'*(\[`]*(?:{_GRADE_KEYWORD_PATTERN})(?![\w+-]))"
+    r")[\"'*(\[`]*(?P<grades>"
+    rf"{_GRADE_TOKEN_PATTERN}(?:[\"'*)\]`]*[^\S\n]*{_GRADE_CONNECTOR_PATTERN}"
+    rf"[^\S\n]*[\"'*(\[`]*{_GRADE_TOKEN_PATTERN})*)"
+)
+# What may follow an explicit verdict on its line: closing wrappers or punctuation, then nothing or a short reason.
+_VERDICT_TAIL_RE = re.compile(r"[\"'*)\]`.!]*[^\S\n]*(?:$|(?i:because|since|based[^\S\n]+on)\b|-|\()")
+_UNSTRIPPED_THINK_RE = re.compile(r"</?think(?:ing)?\b", re.IGNORECASE)
+_LETTER_WRAPPER_CHARS = " \t*_`\"'()[]."
 
-    Returns "A", "B", "C", or "D". Falls back to "B" (INCORRECT) when the
-    output cannot be reliably parsed.
+
+def parse_judge_grade(judge_text: str) -> str | None:
+    """Parse the grade letter (A/B/C/D) from the judge's response.
+
+    A grade is accepted only when it is unambiguous: the bare letter, the last
+    line (ignoring markdown or punctuation wrappers), or explicit verdicts at
+    the start of a line ("Grade: A", "NOT_ATTEMPTED", "C: PARTIAL_ANSWER").
+    An explicit verdict counts only when the rest of its line is empty, closing
+    punctuation or a short reason ("because", "since", "based on", "-", "(").
+    Connected alternatives and conflicting semicolon-separated verdicts remain
+    ambiguous. Residual thinking tags make the whole reply ambiguous.
+    ``record_parsed_judge_verdict`` is called only for an unambiguous grade;
+    otherwise the result is None and the caller treats the reply as a judge failure.
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C", "D"):
+        record_parsed_judge_verdict()
         return cleaned
 
-    last_line = cleaned.rsplit("\n", 1)[-1].strip()
-    for letter in ("A", "B", "C", "D"):
-        if last_line == letter:
-            return letter
+    if _UNSTRIPPED_THINK_RE.search(cleaned):
+        return None
 
-    for letter in ("A", "B", "C", "D"):
-        if letter in cleaned:
-            return letter
+    last_line = cleaned.rsplit("\n", 1)[-1].strip().strip(_LETTER_WRAPPER_CHARS)
+    if last_line in ("A", "B", "C", "D"):
+        record_parsed_judge_verdict()
+        return last_line
 
-    return "B"
+    candidates: set[str] = set()
+    suspects: set[str] = set()
+    for line in cleaned.splitlines():
+        clauses = line.split(";")
+        first = _EXPLICIT_GRADE_RE.match(clauses[0])
+        if first is None:
+            continue
+        matches = [first]
+        for clause in clauses[1:]:
+            match = _EXPLICIT_GRADE_RE.match(clause)
+            if match is None:
+                return None
+            matches.append(match)
+        rests = [match.string[match.end() :] for match in matches]
+        # A malformed alternative must not turn a matching prefix into a completed grade.
+        if any(_UNPARSED_ALTERNATIVE_RE.match(rest) for rest in rests):
+            return None
+        letters: set[str] = set()
+        for match in matches:
+            if letter := match.group("letter"):
+                letters.add(letter)
+            letters.update(
+                _GRADE_KEYWORDS.get(token, token) for token in _GRADE_TOKEN_RE.findall(match.group("grades"))
+            )
+        if not _VERDICT_TAIL_RE.match(rests[0]):
+            suspects |= letters
+            continue
+        if not all(_VERDICT_TAIL_RE.match(rest) for rest in rests[1:]):
+            return None
+        candidates |= letters
+    if len(candidates) == 1 and suspects <= candidates:
+        record_parsed_judge_verdict()
+        return candidates.pop()
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +230,7 @@ class OmniscienceRunRequest(BaseRunRequest):
 
     id: Optional[Union[int, str]] = None
     domain: Optional[str] = None
+    subtopic: Optional[str] = None
     topic: Optional[str] = None
     question: Optional[str] = None
     expected_answer: Optional[str] = None
@@ -262,7 +336,7 @@ class OmniscienceServer(SimpleResourcesServer):
                 response_model=NeMoGymChatCompletion,
             )
             content = chat_response.choices[0].message.content if chat_response.choices else None
-            return content.strip() if content else ""
+            return _strip_thinking_traces(content) if content else ""
 
         msgs: List[NeMoGymEasyInputMessage] = [
             NeMoGymEasyInputMessage(role="user", content=judge_prompt),
@@ -300,47 +374,56 @@ class OmniscienceServer(SimpleResourcesServer):
             generation=generation,
         )
 
-        judge_text = await self._call_judge(judge_prompt)
-        if not judge_text:
-            raise JudgeError("empty judge response")
+        async def grade() -> OmniscienceVerifyResponse:
+            judge_text = await self._call_judge(judge_prompt)
+            if not judge_text:
+                raise JudgeError("empty judge response")
 
-        grade = parse_judge_grade(judge_text)
+            grade = parse_judge_grade(judge_text)
+            if grade is None:
+                # Masked and graded again from the saved answer, rather than counted as incorrect.
+                raise JudgeError(f"no unambiguous grade in the judge response: {judge_text[:200]!r}")
 
-        if grade == "A":
-            verdict = "correct"
-            reward = 1.0
-        elif grade == "C":
-            verdict = "partial"
-            reward = 0.0
-        elif grade == "D":
-            verdict = "not_attempted"
-            reward = 0.0
-        else:
-            verdict = "incorrect"
-            reward = 0.0
+            if grade == "A":
+                verdict = "correct"
+                reward = 1.0
+            elif grade == "C":
+                verdict = "partial"
+                reward = 0.0
+            elif grade == "D":
+                verdict = "not_attempted"
+                reward = 0.0
+            else:
+                verdict = "incorrect"
+                reward = 0.0
 
-        is_correct = 1.0 if verdict == "correct" else 0.0
-        is_incorrect = 1.0 if verdict == "incorrect" else 0.0
-        is_partial = 1.0 if verdict == "partial" else 0.0
-        is_not_attempted = 1.0 if verdict == "not_attempted" else 0.0
-        omniscience_index = is_correct - is_incorrect
-        is_hallucination = is_incorrect
+            is_correct = 1.0 if verdict == "correct" else 0.0
+            is_incorrect = 1.0 if verdict == "incorrect" else 0.0
+            is_partial = 1.0 if verdict == "partial" else 0.0
+            is_not_attempted = 1.0 if verdict == "not_attempted" else 0.0
+            omniscience_index = is_correct - is_incorrect
+            is_hallucination = is_incorrect
 
-        return OmniscienceVerifyResponse(
-            **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
-            reward=reward,
-            extracted_answer=generation,
-            expected_answer=expected_answer,
-            verdict=verdict,
-            judge_output=judge_text,
-            is_correct=is_correct,
-            is_incorrect=is_incorrect,
-            is_partial=is_partial,
-            is_not_attempted=is_not_attempted,
-            omniscience_index=omniscience_index,
-            is_hallucination=is_hallucination,
-        )
+            return OmniscienceVerifyResponse(
+                **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
+                reward=reward,
+                extracted_answer=generation,
+                expected_answer=expected_answer,
+                verdict=verdict,
+                judge_output=judge_text,
+                is_correct=is_correct,
+                is_incorrect=is_incorrect,
+                is_partial=is_partial,
+                is_not_attempted=is_not_attempted,
+                omniscience_index=omniscience_index,
+                is_hallucination=is_hallucination,
+            )
+
+        return await observe_llm_judge_grading(grade)
 
 
 if __name__ == "__main__":
     OmniscienceServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OmniscienceServer.run_webserver()  # noqa: F401

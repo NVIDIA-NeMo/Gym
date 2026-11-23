@@ -27,7 +27,7 @@ must be staged manually at the path the resources server is configured to read.
 
 from pathlib import Path
 
-from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
 
 
 BENCHMARK_DIR = Path(__file__).parent

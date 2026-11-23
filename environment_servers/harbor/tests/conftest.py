@@ -34,14 +34,19 @@ from environment_servers.harbor.app import (
     HarborEpisodeResponse,
 )
 from environment_servers.harbor.verifier import EXIT_RECORD_NAME
-from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentSeedSessionRequest
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
-from nemo_gym.server_utils import BaseServerConfig, ServerClient
-from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
+from nemo_gym.agents import AGENT_ACTIVATION_HEADER, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.data.tasks.harbor import (
+    BUILT_IMAGES_FILE,
+    DIGEST_KEY,
+    IMAGE_CONFIGS_FILE,
+    RECORD_VERSION,
+    context_digest,
+    load_task,
+)
+from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 
 
 TASK_TOML = """
@@ -65,6 +70,7 @@ IMAGE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 
 SOLVE_SH = "#!/bin/bash\necho hi > hello.txt\n"
+SKILL_MD = "---\nname: pdf\ndescription: Read PDF files.\n---\nRun scripts/extract.py.\n"
 
 
 def write_image_config(parent: Path, image: str, **config) -> None:
@@ -88,6 +94,7 @@ def write_task(
     dockerfile: str = "FROM ubuntu:24.04\nWORKDIR /app",
     image_config: dict | None = None,
     solution: bool = False,
+    skills: bool = False,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "task.toml").write_text(toml)
@@ -106,6 +113,14 @@ def write_task(
         (root / "solution" / "data" / "answer.txt").write_text("42\n")
         (root / "solution" / "__pycache__").mkdir(exist_ok=True)
         (root / "solution" / "__pycache__" / "x.pyc").write_bytes(b"\x00")
+    if skills:
+        # One skill in the build context, with a helper script and an editor leftover the task digest skips.
+        skill = root / "environment" / "skills" / "pdf"
+        (skill / "scripts").mkdir(parents=True, exist_ok=True)
+        (skill / "SKILL.md").write_text(SKILL_MD)
+        (skill / "scripts" / "extract.py").write_text("print('text')\n")
+        (skill / "__pycache__").mkdir(exist_ok=True)
+        (skill / "__pycache__" / "x.pyc").write_bytes(b"\x00")
     # The loader resolves the Dockerfile against its base image's configuration, recorded at prepare.
     write_image_config(root.parent, dockerfile.split()[1], **(image_config or {"Env": [f"PATH={IMAGE_PATH}"]}))
     return root
@@ -447,11 +462,19 @@ def make_server(
     image_config: dict | None = None,
     agent_implementation: str = "test",
     solution: bool = False,
+    skills: bool = False,
     **config_overrides,
 ):
     folder = tmp_path / "datasets" / "ds"
     task = load_task(
-        write_task(folder / "hello", toml=toml, dockerfile=dockerfile, image_config=image_config, solution=solution)
+        write_task(
+            folder / "hello",
+            toml=toml,
+            dockerfile=dockerfile,
+            image_config=image_config,
+            solution=solution,
+            skills=skills,
+        )
     )
     config = HarborEnvironmentServerConfig(
         host="0.0.0.0",
@@ -651,6 +674,7 @@ IMAGE_CONFIGS = {
 class FakeCompose:
     def __init__(self, services):
         self.services = services
+        self.document = {"services": {"main": {}}}
         self.stopped = False
 
     async def stop(self):

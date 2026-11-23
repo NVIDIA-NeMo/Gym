@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,17 +23,19 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from nemo_gym.agent_utils import uv_bootstrap
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    _AgentSessionRecord,
+    SandboxPythonRuntime,
+    SandboxSession,
+    check_agent_seed_rejected,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import (
+from nemo_gym.agents.base_responses_api_agent import _AgentSessionRecord
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
+    EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -40,13 +43,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseReasoningItem,
+    TaskId,
 )
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
@@ -57,8 +58,10 @@ from responses_api_agents.hermes_agent.app import (
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
 )
-from responses_api_agents.hermes_agent.observability import HermesAgentObserver
-from responses_api_agents.hermes_agent.sandbox import HermesSandboxSession, _sandbox_hermes_install
+from responses_api_agents.hermes_agent.sandbox import (
+    _HERMES_RUNTIME,
+    HermesSandboxSession,
+)
 
 
 class _FakeResponse:
@@ -95,15 +98,15 @@ def _mcp_access(name: str, *, required: bool = True) -> MCPToolAccess:
 
 
 def test_gym_mcp_tool_name_maps_hermes_names_of_granted_servers() -> None:
-    assert _gym_mcp_tool_name("mcp_weather_get_weather", ["weather"]) == "mcp__weather__get_weather"
+    assert _gym_mcp_tool_name("mcp__weather__get_weather", ["weather"]) == "mcp__weather__get_weather"
     # Hermes replaced "-" and "." in the server name; the granted name is restored.
-    assert _gym_mcp_tool_name("mcp_my_store_v1_append", ["my-store.v1"]) == "mcp__my-store.v1__append"
+    assert _gym_mcp_tool_name("mcp__my_store_v1__append", ["my-store.v1"]) == "mcp__my-store.v1__append"
     # A granted name that extends another does not lose its tools to the shorter one.
-    assert _gym_mcp_tool_name("mcp_store_b_append", ["store", "store_b"]) == "mcp__store_b__append"
-    assert _gym_mcp_tool_name("mcp_store_append", ["store", "store_b"]) == "mcp__store__append"
+    assert _gym_mcp_tool_name("mcp__store_b__append", ["store", "store_b"]) == "mcp__store_b__append"
+    assert _gym_mcp_tool_name("mcp__store__append", ["store", "store_b"]) == "mcp__store__append"
     # Built-in tools and servers that were not granted are left alone.
     assert _gym_mcp_tool_name("terminal", ["weather"]) == "terminal"
-    assert _gym_mcp_tool_name("mcp_other_get", ["weather"]) == "mcp_other_get"
+    assert _gym_mcp_tool_name("mcp__other__get", ["weather"]) == "mcp__other__get"
 
 
 class TestSanity:
@@ -122,6 +125,28 @@ class TestSanity:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
         assert agent._model_name() == "Qwen3.6-35B-A3B"
 
+    def test_context_length_is_written_as_the_model_context_length(self) -> None:
+        agent = HermesAgent(
+            config=_config(model="policy", context_length=262144), server_client=MagicMock(spec=ServerClient)
+        )
+        assert yaml.safe_load(agent._build_config())["model"] == {"default": "policy", "context_length": 262144}
+
+    @pytest.mark.parametrize("threshold_tokens", [None, 20000])
+    def test_compression_token_threshold_is_written_to_the_compression_config(self, threshold_tokens) -> None:
+        agent = HermesAgent(
+            config=_config(compression_threshold=0.5, compression_threshold_tokens=threshold_tokens),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        assert yaml.safe_load(agent._build_config())["compression"] == {
+            "enabled": True,
+            "threshold": 0.5,
+            "threshold_tokens": threshold_tokens,
+        }
+
+    def test_model_stays_a_name_without_context_length(self) -> None:
+        agent = HermesAgent(config=_config(model="policy"), server_client=MagicMock(spec=ServerClient))
+        assert yaml.safe_load(agent._build_config())["model"] == "policy"
+
     @pytest.mark.parametrize("with_mcp", [False, True])
     async def test_sandbox_access_selects_runtime_provider(self, monkeypatch, with_mcp) -> None:
         hermes = HermesAgent(
@@ -135,10 +160,9 @@ class TestSanity:
         resolve = MagicMock(return_value=provider_config)
         provider = AsyncMock()
         sandbox = AsyncMock()
-        sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
+        sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
         connect = AsyncMock(return_value=sandbox)
-        monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
             lambda: {"runtime": {}},
@@ -185,17 +209,16 @@ class TestSanity:
         }
 
     async def test_seed_installs_hermes_when_it_does_not_import(self, monkeypatch) -> None:
-        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        hermes = HermesAgent(
+            config=_config(sandbox_install_timeout_seconds=123), server_client=MagicMock(spec=ServerClient)
+        )
         sandbox = AsyncMock()
-        import_results = iter([1, 0])
-
-        async def exec_(command, **_kwargs):
-            if "import run_agent" in command:
-                return MagicMock(return_code=next(import_results), stdout="", stderr="")
-            return MagicMock(return_code=0, stdout="", stderr="")
-
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
-        sandbox.exec.side_effect = exec_
+        sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+        is_installed = AsyncMock(return_value=False)
+        install = AsyncMock()
+        monkeypatch.setattr(SandboxPythonRuntime, "is_installed", is_installed)
+        monkeypatch.setattr(SandboxPythonRuntime, "install", install)
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
             lambda: {"runtime": {}},
@@ -205,7 +228,6 @@ class TestSanity:
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
         )
-        monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda _name: "/usr/bin/uv")
 
         hermes._session_records["session"] = _AgentSessionRecord()
         await hermes._initialize_agent_session_state(
@@ -221,13 +243,17 @@ class TestSanity:
             ),
         )
 
-        commands = [call.args[0] for call in sandbox.exec.await_args_list]
-        install = [command for command in commands if "pip install" in command]
-        assert len(install) == 1 and "rm -rf" in install[0]
-        assert "mcp>=1.28.1,<2" in install[0]
-        # The import is checked before installing and again after.
-        assert sum("import run_agent" in command for command in commands) == 2
-        assert sandbox.upload.await_args_list[0].args[0] == Path("/usr/bin/uv")
+        is_installed.assert_awaited_once_with(sandbox)
+        install.assert_awaited_once_with(sandbox, timeout_s=123)
+        assert _HERMES_RUNTIME.python_version.startswith("3.14.")
+        assert "mcp_tool_discovery" in _HERMES_RUNTIME.import_check
+        # Seeding prepares paths from the root; it never runs in, or writes to, the task's working directory.
+        assert [call.kwargs["cwd"] for call in sandbox.exec.await_args_list] == ["/"]
+        assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
+            "sandbox_runner.py",
+            "sandbox_observer.py",
+            "model_kwargs.py",
+        }
 
     @pytest.mark.parametrize(
         "sandbox_config, install_timeout, runner_timeout, expected_ttl",
@@ -258,8 +284,8 @@ class TestSanity:
         )
         provider = AsyncMock()
         sandbox = AsyncMock()
-        sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
+        sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
         sandbox_factory = MagicMock(return_value=sandbox)
         original_config = hermes.config.sandbox_config.copy()
         monkeypatch.setattr(
@@ -408,7 +434,7 @@ class TestSanity:
             ({}, "Hermes requires sandbox_access or a configured sandbox_provider for an episode session"),
         ],
     )
-    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+    def test_unsupported_seed_is_refused_with_a_terminal_422(self, unsupported: dict, reason: str) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         seed = AgentSeedSessionRequest(
             agent_session_id="session",
@@ -424,7 +450,7 @@ class TestSanity:
     def _sandbox_session(
         monkeypatch, sandbox, *, config=None, tool_accesses=()
     ) -> tuple[HermesAgent, SimpleNamespace, AgentSeedSessionRequest]:
-        import nemo_gym.base_responses_api_agent as base_agent
+        import nemo_gym.agents.base_responses_api_agent as base_agent
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -516,7 +542,7 @@ class TestSanity:
                 tool_call = {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "mcp_weather_get_weather", "arguments": '{"city": "Paris"}'},
+                    "function": {"name": "mcp__weather_v1_0__get_weather", "arguments": '{"city": "Paris"}'},
                 }
                 messages = [
                     {"role": "user", "content": "what is the weather"},
@@ -533,7 +559,7 @@ class TestSanity:
             monkeypatch,
             sandbox,
             config=_config(enabled_toolsets=["terminal"]),
-            tool_accesses=[_mcp_access("weather"), _mcp_access("search", required=False)],
+            tool_accesses=[_mcp_access("weather-v1.0"), _mcp_access("search", required=False)],
         )
 
         response = await hermes.responses(
@@ -541,17 +567,19 @@ class TestSanity:
         )
 
         runner_input = json.loads(sandbox.uploaded["/session/input.json"])
-        assert runner_input["mcp_servers"] == ["weather", "search"]
-        assert runner_input["required_mcp_servers"] == ["weather"]
-        assert runner_input["enabled_toolsets"] == ["terminal", "weather", "search"]
+        assert runner_input["mcp_servers"] == ["weather-v1.0", "search"]
+        assert runner_input["required_mcp_servers"] == ["weather-v1.0"]
+        assert runner_input["enabled_toolsets"] == ["terminal", "weather-v1.0", "search"]
         mcp_servers = yaml.safe_load(runner_input["config_yaml"])["mcp_servers"]
-        assert mcp_servers["weather"] == {
+        assert mcp_servers["weather-v1.0"] == {
             "url": "http://resources:8000/mcp",
-            "headers": {"X-NeMo-Gym-Session-Token": "token-weather"},
+            "headers": {"X-NeMo-Gym-Session-Token": "token-weather-v1.0"},
             "tools": {"resources": False, "prompts": False},
         }
         # Verifiers see Gym's MCP naming, not Hermes'.
-        assert [item.name for item in response.output if item.type == "function_call"] == ["mcp__weather__get_weather"]
+        assert [item.name for item in response.output if item.type == "function_call"] == [
+            "mcp__weather-v1.0__get_weather"
+        ]
 
     async def test_provider_timeout_without_output_confirms_cleanup_and_fails(self, monkeypatch) -> None:
         class _Sandbox:
@@ -694,7 +722,7 @@ class TestSanity:
             async def upload(self, *_args) -> None:
                 pass
 
-            async def disconnect(self) -> None:
+            async def disconnect(self, **_) -> None:
                 pass
 
             async def download(self, remote_path, local_path) -> None:
@@ -757,8 +785,10 @@ class _FakeAgent:
     def __init__(self) -> None:
         self.interrupt_reason = None
 
-    def interrupt(self, reason: str) -> None:
-        self.interrupt_reason = reason
+    returncode = None
+
+    def terminate(self) -> None:
+        self.interrupt_reason = "timeout"
 
 
 class TestSigtermHandler:
@@ -831,8 +861,8 @@ class TestSigtermHandler:
             loop.close()
 
     def test_interrupted_agent_id_cleared_when_run_conversation_raises(self, monkeypatch) -> None:
-        import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        import nemo_gym.agents.base_responses_api_agent as base_agent
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -841,15 +871,15 @@ class TestSigtermHandler:
         hermes = HermesAgent(config=_config(), server_client=server_client)
         monkeypatch.setattr(hermes, "_ensure_sigterm_handler", lambda: None)
 
-        class _FailingInterruptedAIAgent:
-            def __init__(self, **kwargs) -> None:
-                self._build_api_kwargs = lambda _messages: {}
+        process = MagicMock(returncode=1)
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                hermes.interrupted_agents.add(id(self))
-                raise RuntimeError("agent failed")
+        async def communicate(_):
+            hermes.interrupted_agents.add(id(process))
+            raise RuntimeError("agent failed")
 
-        monkeypatch.setattr("run_agent.AIAgent", _FailingInterruptedAIAgent)
+        process.communicate = communicate
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.host_python", lambda: "python")
 
         with pytest.raises(RuntimeError, match="agent failed"):
             asyncio.run(hermes.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
@@ -959,6 +989,17 @@ class TestResultClassification:
             {"failed": True, "error": "First response truncated due to output length limit"},
             {"partial": True, "error": "Response truncated due to output length limit"},
             {"partial": True, "error": "Context length exceeded (100 tokens). Cannot compress further."},
+            {
+                "failed": True,
+                "failure_reason": "context_overflow",
+                "compression_exhausted": True,
+                "error": "This conversation has grown too long for model to read, and Hermes couldn't shrink it",
+            },
+            {
+                "failed": True,
+                "failure_reason": "truncated",
+                "error": "The model's reply was cut off before it finished (it hit its output length limit)",
+            },
             {"partial": True, "error": "Model generated invalid tool call: invalid"},
             {"completed": True},
             {"completed": False, "stop_reason": "max_iterations"},
@@ -981,15 +1022,12 @@ class TestResultClassification:
     @pytest.mark.parametrize("totals", [None, (0, 0), (20, 10)])
     async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch, totals) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
         monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
-        runner = MagicMock()
-        runner.run_conversation.return_value = {"failed": True, "error": "HTTP 500", "messages": []}
+        result = {"failed": True, "error": "HTTP 500", "messages": []}
         if totals is not None:
-            runner.session_prompt_tokens, runner.session_completion_tokens = totals
-            runner.session_cache_read_tokens = 0
-            runner.session_reasoning_tokens = 0
-        monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
+            result.update(prompt_tokens=totals[0], completion_tokens=totals[1])
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(return_value=({"result": result}, False)))
         response = await hermes._create_response(NeMoGymResponseCreateParamsNonStreaming(input="hi"))
         assert response.status == "failed"
         assert response.error.message == "HTTP 500"
@@ -1002,44 +1040,13 @@ class TestResultClassification:
             assert response.usage.total_tokens == sum(totals)
 
 
-class TestSandboxHermesInstall:
-    """The sandbox installs whatever Hermes this server has installed, so requirements.txt is the only pin."""
+def test_host_and_sandbox_share_an_immutable_runtime_source():
+    from responses_api_agents.hermes_agent.runtime import HERMES_COMMIT, HERMES_PYTHON_VERSION, HERMES_SOURCE
 
-    @staticmethod
-    def _installed(monkeypatch, *, version: str, direct_url: dict | None) -> None:
-        distribution = SimpleNamespace(
-            version=version,
-            read_text=lambda name: json.dumps(direct_url) if direct_url is not None else None,
-        )
-        monkeypatch.setattr("importlib.metadata.distribution", lambda name: distribution)
-
-    def test_git_install_becomes_a_github_archive_keyed_by_commit(self, monkeypatch) -> None:
-        commit = "a" * 40
-        self._installed(
-            monkeypatch,
-            version="0.6.0",
-            direct_url={"url": "https://github.com/cmunley1/hermes-agent.git", "vcs_info": {"commit_id": commit}},
-        )
-
-        requirement, key = _sandbox_hermes_install()
-
-        assert requirement == f"hermes-agent[mcp] @ https://github.com/cmunley1/hermes-agent/archive/{commit}.tar.gz"
-        assert key == commit[:12]
-
-    def test_release_install_pins_the_version(self, monkeypatch) -> None:
-        self._installed(monkeypatch, version="0.7.1", direct_url=None)
-
-        assert _sandbox_hermes_install() == ("hermes-agent[mcp]==0.7.1", "0.7.1")
-
-    def test_git_install_outside_github_is_rejected(self, monkeypatch) -> None:
-        self._installed(
-            monkeypatch,
-            version="0.6.0",
-            direct_url={"url": "https://gitlab.example.com/hermes-agent", "vcs_info": {"commit_id": "abc"}},
-        )
-
-        with pytest.raises(RuntimeError, match="gitlab.example.com"):
-            _sandbox_hermes_install()
+    assert _HERMES_RUNTIME.python_version == HERMES_PYTHON_VERSION
+    assert re.fullmatch("[0-9a-f]{40}", HERMES_COMMIT)
+    assert _HERMES_RUNTIME.requirements == (HERMES_SOURCE,)
+    assert HERMES_SOURCE.endswith("@" + HERMES_COMMIT)
 
 
 class TestSplitInputToUserAndHistory:
@@ -1178,8 +1185,8 @@ class TestRolloutCorrelation:
     def test_responses_applies_rollout_prefix(self, monkeypatch) -> None:
         from fastapi.testclient import TestClient
 
-        import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        import nemo_gym.agents.base_responses_api_agent as base_agent
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1190,16 +1197,11 @@ class TestRolloutCorrelation:
 
         seen: dict = {}
 
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                seen["base_url"] = kwargs.get("base_url")
-                self._build_api_kwargs = lambda _messages: {}
-                self.compression_enabled = True
+        async def worker(_, payload):
+            seen["base_url"] = payload["model_base_url"]
+            return ({"result": {"messages": [{"role": "assistant", "content": "ok"}]}}, False)
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {"messages": [{"role": "assistant", "content": "ok"}]}
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", worker)
         client = TestClient(agent.setup_webserver())
 
         assert client.post("/ng-rollout/rid/v1/responses", json={"input": "hi"}).status_code == 200
@@ -1222,7 +1224,7 @@ class TestRolloutCorrelation:
 
 class TestMaxTokens:
     def _agent_and_seen(self, monkeypatch, **config_kwargs) -> tuple[HermesAgent, dict]:
-        import nemo_gym.base_responses_api_agent as base_agent
+        import nemo_gym.agents.base_responses_api_agent as base_agent
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1233,27 +1235,22 @@ class TestMaxTokens:
 
         seen: dict = {}
 
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                seen["max_tokens"] = kwargs.get("max_tokens")
-                self._build_api_kwargs = lambda _messages: {}
-                self.compression_enabled = True
+        async def worker(_, payload):
+            seen["max_tokens"] = payload["max_tokens"]
+            return ({"result": {"messages": [{"role": "assistant", "content": "ok"}]}}, False)
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {"messages": [{"role": "assistant", "content": "ok"}]}
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", worker)
         return agent, seen
 
     def test_max_tokens_passed_to_ai_agent(self, monkeypatch) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         agent, seen = self._agent_and_seen(monkeypatch, max_tokens=4096)
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["max_tokens"] == 4096
 
     def test_max_tokens_defaults_to_none(self, monkeypatch) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         agent, seen = self._agent_and_seen(monkeypatch)
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
@@ -1266,8 +1263,8 @@ class TestObservability:
         [("local", "no_sandbox_runtime"), ("docker", "sandbox_observation_unavailable")],
     )
     def test_observation_failure_does_not_change_response(self, monkeypatch, terminal_backend, runtime_gap) -> None:
-        import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        import nemo_gym.agents.base_responses_api_agent as base_agent
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1276,27 +1273,21 @@ class TestObservability:
         agent = HermesAgent(config=_config(terminal_backend=terminal_backend), server_client=server_client)
         monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
 
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                self._build_api_kwargs = lambda _messages: {}
-
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {
-                    "completed": True,
-                    "messages": [
-                        {"role": "user", "content": "hi"},
-                        {"role": "assistant", "content": "ok"},
-                    ],
-                }
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        result = {
+            "completed": True,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ok"},
+            ],
+        }
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(return_value=({"result": result}, False)))
         body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
         baseline = asyncio.run(agent.responses(request=None, body=body))
 
         def fail_finish(*args, **kwargs):
             raise RuntimeError("observer failed")
 
-        monkeypatch.setattr(HermesAgentObserver, "finish", fail_finish)
+        monkeypatch.setattr(HermesAgent, "_sandbox_observations", fail_finish)
         episode = asyncio.run(agent._create_episode(body=body, rollout_id="rid"))
 
         assert episode.response.output == baseline.output
@@ -1376,8 +1367,8 @@ class TestObservability:
         assert "rollout_id" not in verify_json
 
     def test_observer_failure_does_not_mask_agent_exception(self, monkeypatch) -> None:
-        import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        import nemo_gym.agents.base_responses_api_agent as base_agent
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1386,18 +1377,9 @@ class TestObservability:
         agent = HermesAgent(config=_config(), server_client=server_client)
         monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
 
-        class _FailingAIAgent:
-            def __init__(self, **kwargs) -> None:
-                self._build_api_kwargs = lambda _messages: {}
-
-            def run_conversation(self, *args, **kwargs) -> dict:
-                raise ValueError("agent failed")
-
-        monkeypatch.setattr("run_agent.AIAgent", _FailingAIAgent)
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(side_effect=ValueError("agent failed")))
         monkeypatch.setattr(
-            HermesAgentObserver,
-            "finish",
-            MagicMock(side_effect=RuntimeError("observer failed")),
+            HermesAgent, "_sandbox_observations", MagicMock(side_effect=RuntimeError("observer failed"))
         )
 
         with pytest.raises(ValueError, match="agent failed"):
@@ -1407,56 +1389,6 @@ class TestObservability:
                     rollout_id="rid",
                 )
             )
-
-
-class TestSandboxUv:
-    """Seed uploads the uv build chosen for the sandbox's platform (see tests/unit_tests/test_uv_bootstrap.py)."""
-
-    async def test_seed_passes_the_configured_uv_cache_dir(self, monkeypatch, tmp_path) -> None:
-        hermes = HermesAgent(config=_config(uv_cache_dir=str(tmp_path)), server_client=MagicMock(spec=ServerClient))
-        sandbox = AsyncMock()
-        import_results = iter([1, 0])
-
-        async def exec_(command, **_kwargs):
-            if "import run_agent" in command:
-                return MagicMock(return_code=next(import_results), stdout="", stderr="")
-            if command == uv_bootstrap._PLATFORM_PROBE:
-                return MagicMock(return_code=0, stdout="Linux\nx86_64\ngnu\n", stderr="")
-            return MagicMock(return_code=0, stdout="", stderr="")
-
-        sandbox.exec.side_effect = exec_
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
-        monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: "/usr/bin/uv")
-        monkeypatch.setattr(uv_bootstrap.platform, "machine", lambda: "aarch64")
-        monkeypatch.setattr(uv_bootstrap.platform, "system", lambda: "Linux")
-        monkeypatch.setattr(uv_bootstrap, "_host_uv_version", lambda uv: "0.12.3")
-        monkeypatch.setattr(
-            uv_bootstrap, "_download_uv", lambda v, t, d: (d.parent.mkdir(parents=True), d.write_bytes(b"uv"))
-        )
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: AsyncMock())
-        monkeypatch.setattr(
-            "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
-        )
-
-        hermes._session_records["session"] = _AgentSessionRecord()
-        await hermes._initialize_agent_session_state(
-            "session",
-            AgentSeedSessionRequest(
-                agent_session_id="session",
-                episode_id=EpisodeId(rollout_id="rollout"),
-                task_id=TaskId(taskset="test", task_id="task"),
-                sandbox_access=SandboxAccess(
-                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
-                    workdir="/app",
-                ),
-            ),
-        )
-
-        uploaded = sandbox.upload.await_args_list[0].args[0]
-        # An aarch64 host driving an x86_64 glibc pod uploads the static musl build for x86_64.
-        assert uploaded == tmp_path / "0.12.3" / "x86_64-unknown-linux-musl" / "uv"
 
 
 @pytest.mark.parametrize("status", [400, 401, 429, 503])
@@ -1477,3 +1409,64 @@ def test_native_model_error_is_reported_with_classification(status):
         "failure_kind": "model_request_error",
         "status_code": status,
     }
+
+
+def _host_worker_agent(monkeypatch, tmp_path, script: str) -> HermesAgent:
+    """A Hermes agent whose host worker interpreter is the given shell script."""
+    worker = tmp_path / "worker"
+    worker.write_text("#!/bin/sh\n" + script)
+    worker.chmod(0o755)
+    monkeypatch.setattr("responses_api_agents.hermes_agent.app.host_python", lambda: worker)
+    hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(hermes, "_ensure_sigterm_handler", lambda: None)
+    return hermes
+
+
+@pytest.mark.parametrize(
+    ("script", "message"),
+    [
+        ("cat >/dev/null\nexit 3\n", "exited with status 3 without a response"),
+        (
+            'cat >/dev/null\necho \'{"error_type": "ImportError", "error": "no module"}\'\nexit 1\n',
+            r"Hermes worker failed \(ImportError\): no module",
+        ),
+    ],
+)
+def test_host_worker_failure_raises_with_its_reason(monkeypatch, tmp_path, script, message) -> None:
+    hermes = _host_worker_agent(monkeypatch, tmp_path, script)
+
+    with pytest.raises(RuntimeError, match=message):
+        asyncio.run(hermes._run_host_worker({"history": []}))
+    assert hermes.active_agents == set()
+
+
+def test_host_worker_cancel_kills_its_process_group(monkeypatch, tmp_path) -> None:
+    import os
+    import signal
+
+    child_pid = tmp_path / "child.pid"
+    # The worker starts a tool-like grandchild in its own process group, then waits.
+    hermes = _host_worker_agent(monkeypatch, tmp_path, f"sleep 300 &\necho $! > {child_pid}\nwait\n")
+
+    async def cancel_running_worker() -> None:
+        task = asyncio.create_task(hermes._run_host_worker({"history": []}))
+        for _ in range(500):
+            if child_pid.exists() and child_pid.read_text().strip():
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        # A surviving grandchild keeps the worker's stdout open, so cleanup would wait for it.
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=10)
+
+    try:
+        asyncio.run(cancel_running_worker())
+    finally:
+        pid = int(child_pid.read_text())
+        try:
+            os.kill(pid, signal.SIGKILL)
+            survived = True
+        except ProcessLookupError:
+            survived = False
+    assert not survived, "the worker's process group outlived the cancelled activation"
+    assert hermes.active_agents == set()

@@ -18,54 +18,82 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from time import time
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
 )
+from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxSpec,
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils.install_lock import async_install_lock, install_lock
+from resources_servers.cvdp.repository_workspace import resolve_archive
 
 
-_DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
+_DEFAULT_HARVEST_GLOBS = ["docs/**/*", "rtl/**/*", "verif/**/*"]
+_GENERATED_WORKSPACE_DIRS = {"rundir", "__pycache__", ".cache", ".pytest_cache"}
 
 _RUNNER_SOURCE_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
+# Carries the model-call evidence of one /v1/responses self-call back to /run, which removes it before /verify.
+_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+# False on a /v1/responses reply whose usage is a partial sum over its calls; /run removes it before /verify.
+_INTERNAL_USAGE_COMPLETE_KEY = "_ng_usage_complete"
+
+DEPS_ROOT = Path(__file__).parent / "deps"
+# With num_workers > 1, every worker builds the runtime on its first rollout, into the same paths under DEPS_ROOT.
+# The build steps take this lock file in the directory they write to,
+# so one worker builds while the others wait and then reuse its result.
+DEPS_LOCK_NAME = ".setup.lock"
 
 _ARCHES = {
     "amd64": ("amd64", "x86_64-unknown-linux-gnu", "linux-x64"),
@@ -81,6 +109,16 @@ def agent_key(agent_server_module: str) -> str:
     """responses_api_agents.hermes_agent.app maps to hermes_agent, the deps-script key."""
     parts = agent_server_module.split(".")
     return parts[-2] if len(parts) >= 2 else agent_server_module
+
+
+def _agent_route_failed(reason: str, operation: str) -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="agent",
+        failure_kind=AGENT_ROUTE_FAILED,
+        failure_reason=reason,
+        operation=operation,
+        stage="agent",
+    )
 
 
 def load_runner_source() -> str:
@@ -108,6 +146,15 @@ def deps_recipe_key(*paths: Path, values: tuple[str, ...] = ()) -> str:
     if values:
         blob += b"\0" + b"\0".join(value.encode("utf-8") for value in values)
     return hashlib.sha256(blob).hexdigest()
+
+
+def agent_pin_files(key: str) -> tuple[Path, ...]:
+    """The agent's own pins and build scripts that its deps script reads, e.g. Hermes' source pin in pyproject.toml.
+
+    A pin bump must rebuild the prefix: Hermes refuses a prefix built from another source.
+    """
+    agent_dir = Path(__file__).resolve().parents[1] / key
+    return (agent_dir / "pyproject.toml", *sorted((agent_dir / "scripts").glob("*.py")))
 
 
 def deps_build_env(deps_dir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -148,6 +195,12 @@ def harvest(workdir: Path, globs: list[str], *, seeded: dict[str, str] | None = 
             if not fpath.is_file():
                 continue
             rel = fpath.relative_to(workdir).as_posix()
+            if _is_harness_path(rel) or any(
+                part in _GENERATED_WORKSPACE_DIRS for part in fpath.relative_to(workdir).parts
+            ):
+                continue
+            if fpath.is_symlink() or not fpath.resolve().is_relative_to(workdir.resolve()):
+                continue
             if rel in produced:
                 continue
             try:
@@ -213,6 +266,7 @@ class CVDPAgentConfig(BaseResponsesAPIAgentConfig):
     container_workdir: str = "/code"
     harvest_globs: list[str] = _DEFAULT_HARVEST_GLOBS
     deps_provision: Literal["archive", "baked"] = "archive"
+    prepared_repository_dir: str = ""
 
 
 class CVDPAgentRunRequest(BaseRunRequest):
@@ -283,9 +337,17 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
+        turns: list[TrajectoryTurn] = []
+        gaps: list[ObservationGap] = []
+
         new_outputs = []
         usage = None
+        usage_complete = True
         step = 0
+        stop_reason = None
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
@@ -293,6 +355,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
 
+            turn_timestamp = time()
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
                 url_path=self.url_path_for_request("/v1/responses", request),
@@ -312,10 +375,52 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+            if collect_trajectory:
+                try:
+                    # The id the model server returned is the call this agent made; a call without one stays unowned.
+                    refs = (
+                        [ModelCallRef(model_ref=self.config.model_server, response_id=model_response.id)]
+                        if model_response.id
+                        else []
+                    )
+                    if not refs:
+                        gaps.append(
+                            ObservationGap(
+                                code="model_call_reference_unavailable", invocation_id="root", detail=f"turn:{step}"
+                            )
+                        )
+                    turns.append(
+                        TrajectoryTurn(
+                            invocation_id="root",
+                            task_id="unscoped",
+                            rollout_id=rollout_id,
+                            turn_no=step,
+                            timestamp=turn_timestamp,
+                            question=new_body.input,
+                            answer=[item for item in output if item.type != "reasoning"],
+                            reasoning_content=[
+                                item.model_dump(mode="json") for item in output if item.type == "reasoning"
+                            ]
+                            or None,
+                            step_count=step,
+                            model_calls=refs,
+                        )
+                    )
+                except Exception as error:
+                    # Evidence never changes the episode: an unrecordable turn is a gap, not a failed call.
+                    gaps.append(
+                        ObservationGap(
+                            code="agent_observations_invalid",
+                            invocation_id="root",
+                            detail=f"turn:{step}:{type(error).__name__}",
+                        )
+                    )
 
+            usage_complete = usage_complete and model_response.usage is not None
             usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                stop_reason = "max_output_tokens"
                 break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
@@ -325,6 +430,10 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             if not all_fn_calls and all_output_messages:
                 break
 
+            if collect_trajectory and all_fn_calls:
+                gaps.append(
+                    ObservationGap(code="tool_timing_unavailable", invocation_id="root", detail=f"turn:{step}")
+                )
             for output_function_call in all_fn_calls:
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -344,6 +453,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
+                stop_reason = "max_iterations"
                 break
 
         # Propogate any extra cookies necessary for downstream verification
@@ -352,7 +462,28 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
         model_response.output = new_outputs
         model_response.usage = usage
-        return model_response
+        evidence = {}
+        if usage is not None and not usage_complete:
+            # Only a partial sum needs the flag; a reply without usage already reports it as unknown.
+            evidence[_INTERNAL_USAGE_COMPLETE_KEY] = False
+        if collect_trajectory:
+            # Record why this invocation ended without changing the model response sent to verification.
+            if model_response.status == "failed" or model_response.error:
+                status = "failed"
+            elif stop_reason or model_response.incomplete_details or model_response.status == "incomplete":
+                status = "incomplete"
+            else:
+                status = "completed" if model_response.status in (None, "completed") else "unknown"
+            if stop_reason is None and model_response.incomplete_details:
+                stop_reason = model_response.incomplete_details.reason
+            evidence[_INTERNAL_TRAJECTORY_KEY] = TrajectoryRecord(
+                task_id="unscoped",
+                rollout_id=rollout_id,
+                invocations=[AgentInvocation(invocation_id="root", status=status, stop_reason=stop_reason)],
+                turns=turns,
+                gaps=gaps,
+            ).model_dump(mode="json")
+        return model_response.model_copy(update=evidence) if evidence else model_response
 
     async def _run_simple(self, request: Request, body: CVDPAgentRunRequest) -> CVDPAgentVerifyResponse:
         cookies = request.cookies
@@ -376,7 +507,17 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             else getattr(body.verifier_metadata, "task_id", None)
         )
         retries_left = self.config.llm_parse_retries
+        # Evidence of every attempt, so the record owns the calls of retried attempts as well as the last one.
+        rollout_id = self.rollout_id_from_run(body)
+        collect_trajectory = self._model_call_capture_enabled() and rollout_id is not None
+        turns: list[TrajectoryTurn] = []
+        gaps: list[ObservationGap] = []
+        attempt_usages: list[Optional[NeMoGymResponseUsage]] = []
+        invocation: Optional[AgentInvocation] = None
+        attempt = 0
         while True:
+            attempt += 1
+            replied = False
             try:
                 response = await self.server_client.post(
                     server_name=self.config.name,
@@ -387,9 +528,22 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(response)
                 cookies = response.cookies
 
-                verify_request = CVDPAgentVerifyRequest.model_validate(
-                    body.model_dump() | {"response": await get_response_json(response)}
+                response_json = await get_response_json(response)
+                # Removed before /verify, so the verifier receives the bytes it received without evidence.
+                raw_trajectory = response_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
+                usage_complete = response_json.pop(_INTERNAL_USAGE_COMPLETE_KEY, True) is not False
+                replied = True
+                invocation = self._record_attempt(
+                    attempt,
+                    response_json.get("usage") if usage_complete else None,
+                    raw_trajectory if collect_trajectory else None,
+                    turns=turns,
+                    gaps=gaps,
+                    attempt_usages=attempt_usages,
+                    collect_trajectory=collect_trajectory,
                 )
+
+                verify_request = CVDPAgentVerifyRequest.model_validate(body.model_dump() | {"response": response_json})
 
                 verify_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -407,21 +561,132 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     print(f"[RETRY] parse_failed for task_id={task_id}, retries_left={retries_left}")
                     continue
 
-                return result
+                # Accounted outside the retry handler, so recording evidence can never start another attempt.
+                break
 
             except Exception as e:
+                if collect_trajectory and not replied:
+                    gaps.append(
+                        ObservationGap(
+                            code="model_call_reference_unavailable", invocation_id="root", detail=f"attempt:{attempt}"
+                        )
+                    )
                 if retries_left > 0:
                     retries_left -= 1
                     print(f"[RETRY] exception for task_id={task_id}, retries_left={retries_left}, error={e}")
                     continue
                 raise
+        return self._with_attempt_evidence(result, body, rollout_id, turns, gaps, attempt_usages, invocation)
+
+    @staticmethod
+    def _record_attempt(
+        attempt: int,
+        usage_json: Any,
+        raw_trajectory: Any,
+        *,
+        turns: list[TrajectoryTurn],
+        gaps: list[ObservationGap],
+        attempt_usages: list[Optional[NeMoGymResponseUsage]],
+        collect_trajectory: bool,
+    ) -> Optional[AgentInvocation]:
+        """Keep one replied attempt's usage and turns, and return its observed invocation outcome."""
+        try:
+            attempt_usages.append(NeMoGymResponseUsage.model_validate(usage_json) if usage_json is not None else None)
+        except Exception:
+            attempt_usages.append(None)
+        if not collect_trajectory:
+            return
+        if not isinstance(raw_trajectory, dict):
+            gaps.append(
+                ObservationGap(
+                    code="model_call_reference_unavailable", invocation_id="root", detail=f"attempt:{attempt}"
+                )
+            )
+            return
+        try:
+            attempt_trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+        except Exception as error:
+            gaps.append(
+                ObservationGap(
+                    code="agent_observations_invalid",
+                    invocation_id="root",
+                    detail=f"attempt:{attempt}:{type(error).__name__}",
+                )
+            )
+            return
+        offset = len(turns)
+        turns.extend(
+            turn.model_copy(update={"turn_no": offset + n, "step_count": offset + n})
+            for n, turn in enumerate(attempt_trajectory.turns, start=1)
+        )
+        gaps.extend(attempt_trajectory.gaps)
+        return next((item for item in attempt_trajectory.invocations if item.invocation_id == "root"), None)
+
+    def _with_attempt_evidence(
+        self,
+        result: CVDPAgentVerifyResponse,
+        body: CVDPAgentRunRequest,
+        rollout_id: Optional[str],
+        turns: list[TrajectoryTurn],
+        gaps: list[ObservationGap],
+        attempt_usages: list[Optional[NeMoGymResponseUsage]],
+        invocation: Optional[AgentInvocation],
+    ) -> CVDPAgentVerifyResponse:
+        """Account the verified result for every attempt that reached a reply, after verification ran.
+
+        The response stays the last attempt's. With retries, its usage becomes the episode total that rollout health
+        compares against the owned calls; it is unknown when any finished call's usage is missing.
+        """
+        if len(attempt_usages) > 1 or None in attempt_usages:
+            total: Optional[NeMoGymResponseUsage] = None
+            if None not in attempt_usages:
+                for usage in attempt_usages:
+                    total = accumulate_response_usage(total, usage)
+            result.response.usage = total
+        if rollout_id is None or not self._model_call_capture_enabled():
+            return result
+        try:
+            return result.model_copy(
+                update={
+                    "ng_trajectory": self._trajectory(body, rollout_id, invocation, turns, gaps).model_dump(
+                        mode="json"
+                    )
+                }
+            )
+        except Exception:
+            # Without a valid trajectory the record keeps no ownership evidence, as before this agent reported any.
+            return result
+
+    @staticmethod
+    def _trajectory(
+        body: CVDPAgentRunRequest,
+        rollout_id: str,
+        invocation: Optional[AgentInvocation],
+        turns: list[TrajectoryTurn],
+        gaps: list[ObservationGap],
+    ) -> TrajectoryRecord:
+        fields = body.model_dump()
+        task_id = next(
+            (str(fields[key]) for key in TASK_ID_FIELDS if fields.get(key) is not None),
+            str(fields.get(TASK_INDEX_KEY_NAME, "unknown")),
+        )
+        invocation = (invocation or AgentInvocation(invocation_id="root")).model_copy(
+            update={"model_calls": [ref for turn in turns for ref in turn.model_calls]}
+        )
+        return TrajectoryRecord(
+            task_id=task_id,
+            rollout_id=rollout_id,
+            invocations=[invocation],
+            turns=[turn.model_copy(update={"task_id": task_id, "rollout_id": rollout_id}) for turn in turns],
+            gaps=gaps,
+        )
 
     def _provision_deps(self) -> Path:
         """Install the configured agent's portable dependency prefix once."""
         key = agent_key(self.config.agent_server_module)
         scripts_dir = Path(__file__).parent / "setup_scripts"
         target, python_arch, node_arch = self._deps_target_arch()
-        deps_dir = Path(__file__).parent / "deps" / f"{key}-{target}"
+        deps_dir = DEPS_ROOT / f"{key}-{target}"
         script = scripts_dir / f"{key}_deps.sh"
         sentinel = deps_dir / ".installed"
         # fingerprint the per-harness script AND the shared helper it sources, so editing
@@ -430,15 +695,27 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         recipe = deps_recipe_key(
             script,
             scripts_dir / "_portable_python.sh",
-            values=tuple(f"{name}={value}" for name, value in sorted(arch_env.items())),
+            *agent_pin_files(key),
+            values=(
+                *(f"{name}={value}" for name, value in sorted(arch_env.items())),
+                f"HERMES_SPEC={os.environ.get('HERMES_SPEC', '')}",
+            ),
         )
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             return deps_dir
         if not script.exists():
             raise RuntimeError(f"no setup script for {key!r} at {script}")
-        deps_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["bash", str(script)], env=deps_build_env(deps_dir, arch_env), check=True)
-        sentinel.write_text(recipe)
+        with install_lock(DEPS_ROOT / DEPS_LOCK_NAME):
+            # Another worker may have finished the install while this one waited.
+            if sentinel.exists() and sentinel.read_text().strip() == recipe:
+                return deps_dir
+            # The sentinel is written last,
+            # so a prefix without a matching one is left from an interrupted or outdated install.
+            # The setup scripts skip steps whose output already exists, so start again from an empty prefix.
+            shutil.rmtree(deps_dir, ignore_errors=True)
+            deps_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["bash", str(script)], env=deps_build_env(deps_dir, arch_env), check=True)
+            sentinel.write_text(recipe)
         return deps_dir
 
     def _deps_target_arch(self) -> tuple[str, str, str]:
@@ -471,12 +748,18 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         recipe = deps_recipe_key(
             script,
             scripts_dir / "_portable_python.sh",
-            values=(f"target={target}", f"ARCH={python_arch}", f"NODE_ARCH={node_arch}"),
+            *agent_pin_files(key),
+            values=(
+                f"target={target}",
+                f"ARCH={python_arch}",
+                f"NODE_ARCH={node_arch}",
+                f"HERMES_SPEC={os.environ.get('HERMES_SPEC', '')}",
+            ),
         )
         return script, recipe
 
     def _build_nemo_gym_wheel(self, recipe: str) -> Path:
-        wheel_dir = Path(__file__).parent / "deps" / f".nemo-gym-wheel-{recipe[:16]}"
+        wheel_dir = DEPS_ROOT / f".nemo-gym-wheel-{recipe[:16]}"
         wheel_dir.mkdir(parents=True, exist_ok=True)
         wheels = sorted(wheel_dir.glob("nemo_gym-*.whl"))
         if wheels:
@@ -506,14 +789,26 @@ class CVDPAgent(SimpleResponsesAPIAgent):
     async def _provision_deps_in_sandbox(self, image: str) -> Path:
         """Build the portable runtime inside OpenSandbox when host and sandbox arch differ."""
         key = agent_key(self.config.agent_server_module)
+        if key == "hermes_agent":
+            # Its deps script builds the Hermes runtime with uv from the Gym checkout, which a task sandbox lacks.
+            raise RuntimeError(
+                "Hermes deps cannot be built inside a sandbox of another architecture; run CVDP on a host of the "
+                f"sandbox's architecture ({self._deps_target_arch()[0]})"
+            )
         script, recipe = self._deps_recipe(key)
         target, _python_arch, _node_arch = self._deps_target_arch()
-        deps_root = Path(__file__).parent / "deps"
-        deps_root.mkdir(parents=True, exist_ok=True)
-        archive = deps_root / f".{key}-{target}-{recipe[:16]}.tar.gz"
+        DEPS_ROOT.mkdir(parents=True, exist_ok=True)
+        archive = DEPS_ROOT / f".{key}-{target}-{recipe[:16]}.tar.gz"
         if archive.exists():
             return archive
+        async with async_install_lock(DEPS_ROOT / DEPS_LOCK_NAME):
+            # Another worker may have built the archive while this one waited.
+            if archive.exists():
+                return archive
+            await self._build_deps_archive_in_sandbox(image, script, recipe, archive)
+        return archive
 
+    async def _build_deps_archive_in_sandbox(self, image: str, script: Path, recipe: str, archive: Path) -> None:
         wheel = await asyncio.to_thread(self._build_nemo_gym_wheel, recipe)
         scripts_dir = script.parent
         remote_root = "/tmp/nemo-gym-agent-deps-build"
@@ -557,7 +852,6 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(f"sandbox agent deps archive failed with code {pack.return_code}: {details}")
             await box.download(remote_archive, temporary)
         temporary.replace(archive)
-        return archive
 
     def _resolve_image(self) -> str:
         """Validate and normalize the configured image reference."""
@@ -580,11 +874,15 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         archive = deps_dir.parent / f".{deps_dir.name}-{recipe[:16]}.tar.gz"
         if archive.exists() and archive.stat().st_mtime >= sentinel.stat().st_mtime:
             return archive
-        temporary = archive.with_suffix(".tmp")
-        with tarfile.open(temporary, "w:gz", compresslevel=1) as tar:
-            for child in sorted(deps_dir.iterdir()):
-                tar.add(child, arcname=child.name)
-        temporary.replace(archive)
+        with install_lock(deps_dir.parent / DEPS_LOCK_NAME):
+            # Another worker may have packed the archive while this one waited.
+            if archive.exists() and archive.stat().st_mtime >= sentinel.stat().st_mtime:
+                return archive
+            temporary = archive.with_suffix(".tmp")
+            with tarfile.open(temporary, "w:gz", compresslevel=1) as tar:
+                for child in sorted(deps_dir.iterdir()):
+                    tar.add(child, arcname=child.name)
+            temporary.replace(archive)
         return archive
 
     def _model_url(self) -> str:
@@ -618,6 +916,10 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             env={
                 # The harness in the sandbox sends no traceparent: the URL carries the rollout prefix and this run's span.
                 "NV_MODEL_URL": self.base_url_for_run(self._model_url(), body) if self._model_url() else "",
+                # Hermes sends compression calls here, without this run's sampling values.
+                "NV_UNTRAINED_MODEL_URL": (
+                    self.base_url_for_run(self._model_url(), body, trained=False) if self._model_url() else ""
+                ),
                 "NV_MODEL_NAME": body.responses_create_params.model or "model",
                 "NV_AGENT_KWARGS": json.dumps(self.config.agent_kwargs),
                 "NV_AGENT_HOME": f"{wd.rstrip('/')}/.home",
@@ -688,20 +990,35 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         mirror: Path,
     ) -> dict:
         """Download files matching the harvest globs."""
-        dirs = sorted({g.split("/")[0] for g in globs if "/" in g}) or ["."]
+        if not globs:
+            return {}
+        roots = {g.split("/")[0] for g in globs}
+        dirs = sorted({"." if any(char in root for char in "*?[") else root for root in roots})
         listing = await box.exec(
             f"cd {shlex.quote(workdir)} && find {' '.join(shlex.quote(d) for d in dirs)} -type f 2>/dev/null"
         )
-        rels = [line.strip().lstrip("./") for line in (listing.stdout or "").splitlines() if line.strip()]
+        # find exits 1 when an optional harvest directory is absent (a genuine miss); anything else is a sandbox fault.
+        if listing.error_type or listing.return_code not in (0, 1):
+            raise _agent_route_failed(
+                f"harvest listing failed: error_type={listing.error_type} return_code={listing.return_code}: "
+                f"{(listing.stderr or '')[-500:]}",
+                "agent.harvest",
+            )
+        rels = [line.strip().removeprefix("./") for line in (listing.stdout or "").splitlines() if line.strip()]
         for rel in rels:
-            if not _safe_rel(rel):
+            if (
+                not _safe_rel(rel)
+                or _is_harness_path(rel)
+                or any(part in _GENERATED_WORKSPACE_DIRS for part in Path(rel).parts)
+            ):
                 continue
             dest = mirror / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 await box.download(f"{workdir.rstrip('/')}/{rel}", dest)
-            except Exception:
-                pass
+            except Exception as error:
+                # The file was just listed, so a failed download is a transport fault, not an absent file.
+                raise _agent_route_failed(f"harvest download of {rel} failed: {error}", "agent.harvest") from error
         return harvest(mirror, globs, seeded=seeded)
 
     async def _run_agentic(self, request: Request, body: CVDPAgentRunRequest) -> CVDPAgentVerifyResponse:
@@ -709,6 +1026,23 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         context_files = meta.get("context_files") or {}
         target_files = meta.get("target_files") or []
         wd = self.config.container_workdir
+        repository_digest = meta.get("repository_workspace_sha256")
+        repository_archive = None
+        if repository_digest:
+            try:
+                repository_archive = await asyncio.to_thread(
+                    resolve_archive, self.config.prepared_repository_dir, repository_digest
+                )
+            except (OSError, ValueError) as error:
+                raise _agent_route_failed(f"Heavy repository preparation failed: {error}", "agent.setup") from error
+        # Track the visible project roots, as CVDP's agentic runner does. New roots
+        # absent from the initial workspace are not inferred from reference targets.
+        harvest_globs = list(self.config.harvest_globs)
+        for rel in context_files:
+            if _safe_rel(rel) and not _is_harness_path(rel) and not rel.startswith("."):
+                pattern = rel.split("/", 1)[0] + "/**/*" if "/" in rel else rel
+                if pattern not in harvest_globs:
+                    harvest_globs.append(pattern)
 
         inp = body.responses_create_params.input
         instruction = (
@@ -733,9 +1067,31 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             image = self._image
             seeded = self._seed_files(wd, context_files, meta.get("harness_files"))
             spec = self._build_spec(body, instruction, seeded, image)
+            if repository_archive:
+                spec.files[f"{self._traj_dir()}/repository_workspace.py"] = (
+                    Path(__file__).resolve().parents[2] / "resources_servers/cvdp/repository_workspace.py"
+                ).read_text()
 
             async with AsyncSandbox(self._sandbox_provider, spec) as box:
-                await box.start()
+                if repository_archive:
+
+                    async def setup_repository(sandbox: AsyncSandbox) -> None:
+                        traj = self._traj_dir()
+                        await sandbox.upload(repository_archive, f"{traj}/repository.tar.gz")
+                        command = (
+                            f"python {shlex.quote(traj + '/repository_workspace.py')} restore "
+                            f"{shlex.quote(wd)} {shlex.quote(traj + '/before.json')} "
+                            f"--archive {shlex.quote(traj + '/repository.tar.gz')}"
+                        )
+                        result = await sandbox.exec(command, timeout_s=600)
+                        if result.error_type or result.return_code != 0:
+                            raise _agent_route_failed(
+                                f"Heavy repository setup failed: {result.stderr or result.stdout}", "agent.setup"
+                            )
+
+                    await box.start_with_setup(None, setup_repository)
+                else:
+                    await box.start()
                 traj = self._traj_dir()
                 agent_deps_dir = self._agent_deps_dir()
                 if self.config.deps_provision == "archive":
@@ -757,6 +1113,18 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     cwd=wd,
                     timeout_s=self.config.timeout,
                 )
+                if (
+                    agent_result.error_type not in (None, "timeout")
+                    or agent_result.return_code is None
+                    or agent_result.return_code < 0
+                ):
+                    # No exit status, a provider error or a signal kill (OOM) says nothing about the model's run.
+                    raise _agent_route_failed(
+                        f"sandbox harness could not be run to completion: error_type={agent_result.error_type} "
+                        f"return_code={agent_result.return_code}: "
+                        f"{(agent_result.stderr or agent_result.stdout or '')[-500:]}",
+                        "agent.sandbox_exec",
+                    )
                 if agent_result.return_code != 0:
                     details = (agent_result.stderr or agent_result.stdout or "")[-2000:]
                     return self._failed_agentic_response(
@@ -772,28 +1140,82 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                         await box.download(f"{traj}/response.json", resp_local)
                         response = NeMoGymResponse.model_validate_json(resp_local.read_text())
                     except Exception as e:
-                        return self._failed_agentic_response(body, f"could not load harness response.json: {e}")
+                        # The harness exited 0 but its output is missing or unreadable: a sandbox or harness fault.
+                        raise _agent_route_failed(
+                            f"could not load harness response.json: {e}", "agent.download"
+                        ) from e
 
-                    rtl_files = await self._remote_harvest(
-                        box,
-                        wd,
-                        self.config.harvest_globs,
-                        context_files,
-                        scratch_path / "harvest",
-                    )
-                    # always include declared targets that exist, even outside the harvested dirs
-                    for tf in target_files:
-                        if tf in rtl_files or not _safe_rel(tf):
-                            continue
-                        dest = scratch_path / "targets" / tf
-                        dest.parent.mkdir(parents=True, exist_ok=True)
-                        try:
-                            await box.download(f"{wd.rstrip('/')}/{tf}", dest)
-                            rtl_files[tf] = dest.read_text(encoding="utf-8")
-                        except Exception:
-                            pass
+                    repository_changes = None
+                    if repository_archive:
+                        collect = await box.exec(
+                            f"python {shlex.quote(traj + '/repository_workspace.py')} collect "
+                            f"{shlex.quote(wd)} {shlex.quote(traj + '/before.json')} "
+                            f"--archive {shlex.quote(traj + '/changes.tar.gz')}",
+                            timeout_s=600,
+                        )
+                        if collect.error_type or collect.return_code != 0:
+                            raise _agent_route_failed(
+                                f"Heavy collection failed: {collect.stderr or collect.stdout}", "agent.harvest"
+                            )
+                        await box.download(f"{traj}/changes.tar.gz", scratch_path / "changes.tar.gz")
+                        await box.download(f"{traj}/changes.tar.json", scratch_path / "changes.json")
+                        repository_changes = json.loads((scratch_path / "changes.json").read_text())
+                        repository_changes["archive"] = base64.b64encode(
+                            (scratch_path / "changes.tar.gz").read_bytes()
+                        ).decode("ascii")
+                        rtl_files = {}
+                        remaining_context = {}
+                    else:
+                        rtl_files = await self._remote_harvest(
+                            box,
+                            wd,
+                            harvest_globs,
+                            context_files,
+                            scratch_path / "harvest",
+                        )
+                        # A deleted starting file must not be silently restored by the
+                        # verifier when it reconstructs the final project workspace.
+                        remaining_context = {
+                            rel: content
+                            for rel, content in context_files.items()
+                            if not _safe_rel(rel)
+                            or _is_harness_path(rel)
+                            or rel.startswith(".")
+                            or any(part in _GENERATED_WORKSPACE_DIRS for part in Path(rel).parts)
+                            or (scratch_path / "harvest" / rel).is_file()
+                        }
+                        # always include declared targets that exist, even outside the harvested dirs
+                        for tf in target_files:
+                            if tf in rtl_files or not _safe_rel(tf):
+                                continue
+                            dest = scratch_path / "targets" / tf
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            target = f"{wd.rstrip('/')}/{tf}"
+                            present = await box.exec(f"test -f {shlex.quote(target)}", timeout_s=30)
+                            if present.error_type or present.return_code not in (0, 1):
+                                raise _agent_route_failed(
+                                    f"could not check target file {tf}: {present.error_type} {present.return_code}",
+                                    "agent.download",
+                                )
+                            if present.return_code != 0:
+                                continue  # the agent did not write this target: a genuine miss
+                            try:
+                                await box.download(target, dest)
+                            except Exception as error:
+                                raise _agent_route_failed(
+                                    f"target file download of {tf} failed: {error}", "agent.download"
+                                ) from error
+                            try:
+                                rtl_files[tf] = dest.read_text(encoding="utf-8")
+                            except UnicodeDecodeError:
+                                return self._failed_agentic_response(
+                                    body, f"target file {tf} is not UTF-8"
+                                ).model_copy(update={"response": response})
 
             payload = body.model_dump() | {"response": response.model_dump()}
+            payload["verifier_metadata"] = meta | {"context_files": remaining_context}
+            if repository_changes is not None:
+                payload["repository_changes"] = repository_changes
             if rtl_files:
                 payload["rtl_files"] = rtl_files
             verify_resp = await self.server_client.post(
@@ -808,3 +1230,6 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     CVDPAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CVDPAgent.run_webserver()  # noqa: F401

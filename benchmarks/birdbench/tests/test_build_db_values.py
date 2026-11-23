@@ -19,7 +19,7 @@ _BM25S_INSTALLED = importlib.util.find_spec("bm25s") is not None
 _NLTK_INSTALLED = importlib.util.find_spec("nltk") is not None
 requires_birdbench_extra = pytest.mark.skipif(
     not (_BM25S_INSTALLED and _NLTK_INSTALLED),
-    reason="requires `bm25s` and `nltk` (`uv pip install bm25s nltk`, see benchmarks/birdbench/README.md)",
+    reason="requires `bm25s` and `nltk` (`uv sync --locked --project benchmarks/birdbench`, see benchmarks/birdbench/README.md)",
 )
 
 
@@ -364,3 +364,136 @@ class TestDbHandle:
         handle = build_db_values.DbHandle(cur, description_dir=tmp_path)
         assert handle.relevant_hits_for_question("anything") == []
         conn.close()
+
+
+class TestBuildSqlContextLabels:
+    def test_custom_labels_render_names_and_default_is_unchanged(self):
+        kwargs = dict(
+            table_names=["students"],
+            column_types_by_table={"students": {"Free Meal (K-12)": "BIGINT"}},
+            primary_keys_by_table={},
+            descriptions_by_table={},
+            values_by_column={},
+            foreign_keys=[],
+        )
+        plain = build_db_values.build_sql_context(**kwargs)
+        labelled = build_db_values.build_sql_context(
+            **kwargs, table_label=lambda t: f"`db`.`{t}`", column_label=lambda c: f"`{c}`"
+        )
+        assert "- students:\n  - Free Meal (K-12):" in plain
+        assert "- `db`.`students`:\n  - `Free Meal (K-12)`:" in labelled
+
+
+class TestAllForeignKeysColumnRef:
+    def test_default_and_custom_column_ref(self, cur):
+        assert build_db_values._all_foreign_keys(cur, ["students", "enrollments"]) == [
+            "enrollments.student_id = students.student_id"
+        ]
+        quoted = build_db_values._all_foreign_keys(cur, ["students", "enrollments"], lambda t, c: f"`db`.`{t}`.`{c}`")
+        assert quoted == ["`db`.`enrollments`.`student_id` = `db`.`students`.`student_id`"]
+
+
+class TestDbHandleDialect:
+    def test_unsupported_dialect_raises(self, cur, tmp_path):
+        with pytest.raises(ValueError, match="Unsupported dialect"):
+            build_db_values.DbHandle(cur, description_dir=tmp_path, dialect="mysql")
+
+    def test_spark_requires_db_id(self, cur, tmp_path):
+        with pytest.raises(ValueError, match="requires db_id"):
+            build_db_values.DbHandle(cur, description_dir=tmp_path, dialect="spark")
+
+
+@pytest.mark.skipif(
+    not all(importlib.util.find_spec(m) for m in ("bm25s", "nltk", "pandas", "pyarrow")),
+    reason="requires bm25s, nltk, pandas and pyarrow",
+)
+class TestDbHandleSpark:
+    def test_sql_context_is_qualified_quoted_and_uses_loaded_spark_types(self, tmp_path):
+        db_path = tmp_path / "school" / "school.sqlite"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE students (student_id INTEGER PRIMARY KEY, name TEXT, `Free Meal (K-12)` REAL)")
+        conn.execute(
+            "CREATE TABLE notes (student_id INTEGER, dirty INTEGER, FOREIGN KEY (student_id) REFERENCES students(student_id))"
+        )
+        conn.execute("INSERT INTO students VALUES (1, 'Alice', 1.5)")
+        conn.execute("INSERT INTO notes VALUES (1, 'oops')")  # non-numeric data in an INTEGER column
+        conn.commit()
+
+        handle = build_db_values.DbHandle(conn.cursor(), tmp_path, dialect="spark", db_id="school")
+        context = handle.sql_context_for_question("What is Alice's meal count?")
+        conn.close()
+
+        assert "- `school`.`students`:" in context and "- `school`.`notes`:" in context
+        assert "  - `Free Meal (K-12)`:\n      data_type: DOUBLE" in context
+        assert "  - `student_id`:\n      data_type: BIGINT (primary key)" in context
+        assert "  - `name`:\n      data_type: STRING" in context
+        assert "  - `dirty`:\n      data_type: STRING" in context  # fell back to string when loaded
+        assert "- `school`.`notes`.`student_id` = `school`.`students`.`student_id`" in context
+
+    def test_table_names_spark_cannot_hold_are_rendered_as_loaded(self, tmp_path):
+        db_path = tmp_path / "shop" / "shop.sqlite"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE `Sales Team` (team_id INTEGER PRIMARY KEY, name TEXT)")
+        conn.execute(
+            "CREATE TABLE `voice-actors` (team_id INTEGER, FOREIGN KEY (team_id) REFERENCES `Sales Team`(team_id))"
+        )
+        conn.execute("INSERT INTO `Sales Team` VALUES (1, 'Alice')")
+        conn.commit()
+
+        handle = build_db_values.DbHandle(conn.cursor(), tmp_path, dialect="spark", db_id="shop")
+        context = handle.sql_context_for_question("Which team?")
+        conn.close()
+
+        assert "- `shop`.`Sales_Team`:" in context and "- `shop`.`voice_actors`:" in context
+        assert "- `shop`.`voice_actors`.`team_id` = `shop`.`Sales_Team`.`team_id`" in context
+        assert "Sales Team" not in context and "voice-actors" not in context
+
+
+@pytest.mark.skipif(
+    not all(importlib.util.find_spec(m) for m in ("bm25s", "nltk", "pandas", "psycopg")),
+    reason="requires bm25s, nltk, pandas and psycopg",
+)
+class TestDbHandlePostgres:
+    def test_sql_context_is_qualified_double_quoted_and_uses_loaded_postgres_names_and_types(self, tmp_path):
+        db_path = tmp_path / "school" / "school.sqlite"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE Students (StudentID INTEGER PRIMARY KEY, Name TEXT, `Free Meal (K-12)` REAL)")
+        conn.execute(
+            "CREATE TABLE notes (StudentID INTEGER, dirty INTEGER, FOREIGN KEY (StudentID) REFERENCES Students(StudentID))"
+        )
+        # No referenced column: SQLite's foreign_key_list reports None for a key on the parent's primary key.
+        conn.execute("CREATE TABLE grades (StudentID INTEGER REFERENCES Students)")
+        conn.execute("INSERT INTO Students VALUES (1, 'Alice', 1.5)")
+        conn.execute("INSERT INTO notes VALUES (1, 'oops')")  # non-numeric data in an INTEGER column
+        conn.commit()
+        (tmp_path / "Students.csv").write_text(
+            "original_column_name,column_name,column_description,value_description\nName,,the student's name,\n"
+        )
+
+        handle = build_db_values.DbHandle(conn.cursor(), tmp_path, dialect="postgres", db_id="school")
+        context = handle.sql_context_for_question("What is Alice's meal count?")
+        conn.close()
+
+        assert '- "school"."Students":' in context and '- "school"."notes":' in context  # table names keep their case
+        # Column names are lower-cased, as loaded; the primary key, description and values still line up with them.
+        assert '  - "studentid":\n      data_type: BIGINT (primary key)' in context
+        assert (
+            '  - "name":\n      data_type: TEXT\n      description: the student\'s name.\n      values:\n      - Alice'
+            in context
+        )
+        assert '  - "free meal (k-12)":\n      data_type: DOUBLE PRECISION' in context
+        assert '  - "dirty":\n      data_type: TEXT' in context  # fell back to text when loaded
+        assert '- "school"."notes"."studentid" = "school"."Students"."studentid"' in context
+        assert '- "school"."grades"."studentid" = "school"."Students".' in context
+
+
+def test_collect_column_values_limit_per_column_caps_the_scan(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "t.sqlite"))
+    conn.execute("CREATE TABLE t (name TEXT)")
+    conn.executemany("INSERT INTO t VALUES (?)", [(f"value{i}",) for i in range(10)])
+    cur = conn.cursor()
+    assert len(build_db_values._collect_column_values(cur, ["t"])) == 10
+    assert len(build_db_values._collect_column_values(cur, ["t"], limit_per_column=3)) == 3

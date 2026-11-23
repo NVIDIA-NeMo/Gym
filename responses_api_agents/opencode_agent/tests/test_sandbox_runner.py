@@ -15,8 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
-from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.snapshot import snapshot
 
@@ -33,7 +32,7 @@ class LocalSandbox:
         shutil.copyfile(source, destination)
 
 
-async def stage(tmp_path: Path, command: list[str], *, env: dict[str, str] | None = None) -> list[str]:
+async def stage(tmp_path: Path, command: list[str], *, env: dict[str, str] | None = None, **options) -> list[str]:
     """Stage an activation with the adapter, then return its argv with the runner it uploaded at seed time."""
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, tmp_path / HARNESS_RUNNER_FILE)
     state = SimpleNamespace(
@@ -47,14 +46,29 @@ async def stage(tmp_path: Path, command: list[str], *, env: dict[str, str] | Non
         "command": command,
         "prompt": "task input",
         "env": {key: str(tmp_path / "private" / key) for key in PRIVATE_KEYS} | (env or {}),
-    }
+    } | options
     return (await OpenCodeSandboxSession.stage_activation(state, payload)).argv
 
 
-def supervise(tmp_path: Path, argv: list[str], *, timeout: float = 3) -> subprocess.Popen:
+# Generous enough for a loaded runner to start the harness chain; a test that needs the deadline fires it on
+# purpose through the expire file after the harness is ready, rather than racing the harness start.
+SUPERVISOR_TIMEOUT_SECONDS = 60
+CLEANUP_TIMEOUT_SECONDS = 5
+
+
+def wait_for(path):
+    deadline = time.monotonic() + 30
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"{path} never appeared")
+        time.sleep(0.01)
+
+
+def supervise(tmp_path: Path, argv: list[str], *, timeout: float = SUPERVISOR_TIMEOUT_SECONDS) -> subprocess.Popen:
     return subprocess.Popen(
-        ["bash", str(SUPERVISOR_SCRIPT), "--timeout", str(timeout), "--cleanup-timeout", "0.5"]
-        + ["--receipt", str(tmp_path / "cleanup.json"), "--stop-file", str(tmp_path / "stop.request"), "--", *argv],
+        ["bash", str(SUPERVISOR_SCRIPT), "--timeout", str(timeout), "--cleanup-timeout", str(CLEANUP_TIMEOUT_SECONDS)]
+        + ["--receipt", str(tmp_path / "cleanup.json"), "--stop-file", str(tmp_path / "stop.request")]
+        + ["--expire-file", str(tmp_path / "expire.request"), "--", *argv],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -62,13 +76,25 @@ def supervise(tmp_path: Path, argv: list[str], *, timeout: float = 3) -> subproc
 
 def result(tmp_path, process):
     try:
-        stdout, stderr = process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=SUPERVISOR_TIMEOUT_SECONDS)
         assert process.returncode == 0, (stdout, stderr)
         return json.loads((tmp_path / "cleanup.json").read_text())
     finally:
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def stop(tmp_path, process):
+    """Stop a supervisor whose test failed before reading its result, so it cannot outlive the test."""
+    if process is None or process.poll() is not None:
+        return
+    (tmp_path / "stop.request").touch()
+    try:
+        process.wait(timeout=CLEANUP_TIMEOUT_SECONDS + 10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 async def test_runner_records_task_directories_before_private_overrides(tmp_path):
@@ -116,6 +142,7 @@ async def test_unset_home_falls_back_to_the_account_home(tmp_path):
 @linux_only
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
 async def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
+    process = None
     try:
         # A completed tool leaves its detached service adopted before close.
         tool = (
@@ -130,19 +157,18 @@ async def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
             "pathlib.Path('ready').touch(); " + ("time.sleep(60)" if ending != "natural" else "pass")
         )
         process = supervise(tmp_path, await stage(tmp_path, [sys.executable, "-c", code]))
-        if ending == "cancel":
-            for _ in range(200):
-                if (tmp_path / "ready").exists():
-                    break
-                time.sleep(0.01)
-            (tmp_path / "stop.request").touch()
+        if ending != "natural":
+            wait_for(tmp_path / "ready")
+            (tmp_path / ("stop.request" if ending == "cancel" else "expire.request")).touch()
         summary = result(tmp_path, process)
         assert summary["cleanup_confirmed"] is True
         assert summary["timed_out"] is (ending == "timeout")
-        assert set(summary) == {"return_code", "timed_out", "cleanup_confirmed", "error"}
+        assert set(summary) == {"return_code", "timed_out", "cleanup_confirmed", "error", "stopped"}
+        assert summary["stopped"] is (ending == "cancel")
         pid = int((tmp_path / "child.pid").read_text())
         assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
+        stop(tmp_path, process)
         if (tmp_path / "child.pid").exists():
             try:
                 os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)

@@ -42,14 +42,15 @@ from typing import Any, Literal, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 ANSWER_PATTERN = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
@@ -614,6 +615,10 @@ def _score_tracks(
 
 
 class SavTracksResourcesServer(SimpleResourcesServer):
+    # Each verification scores tracks against the request's targets: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: SavTracksResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -679,3 +684,6 @@ class SavTracksResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SavTracksResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SavTracksResourcesServer.run_webserver()  # noqa: F401

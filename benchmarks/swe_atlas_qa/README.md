@@ -30,13 +30,21 @@ Also configure the OpenSandbox provider's connection settings.
   port to it and set `++swe_atlas_qa_resources_server.resources_servers.swe_atlas_qa.sandbox_model_base_url=<relay URL>`.
 - Raise `swe_atlas_qa_agent.responses_api_agents.harness_agent.concurrency` (default 1) for a full run.
   `route_failures_to_sidecar` keeps one failed rollout from ending the run. Count rows in `rollouts_failures.jsonl` as zero.
+- Use a judge route without a content filter. On NVIDIA's inference API, `azure/anthropic/claude-opus-4-*` answers
+  some rubric calls on the security-tool tasks (trufflehog, scapy, SFTPGo, SimpleLogin, ...) with
+  `finish_reason: content_filter` and no content. The evaluator leaves those rubrics unscored, and a rollout with none
+  scored is masked. In one 124 x 3 run judged by `azure/anthropic/claude-opus-4-6`, 17% of rubric calls came back
+  filtered and 58 of 366 rollouts, from 23 tasks, had no rubric scored; `aws/anthropic/bedrock-claude-opus-4-6` scored
+  the same calls normally. Watch `num_unscored` and `all_rubrics_scored` in the rollouts.
 
 ## Harness bundle
 
 `harness_bundle` is a tarball with `nemo_gym/`, the harness's `responses_api_agents/<agent>/` package, and a Linux
 x86_64 runtime for the harness. Each task sandbox unpacks it to `/work/gym_mount` and starts it with `harness_python`.
 The runtime must also run on the three Alpine images (k6, MinIO, and SFTPGo). A URL must be on the model host, the only
-host task sandboxes can reach.
+host task sandboxes can reach. A `hermes` bundle also needs the Hermes worker under its interpreter's prefix (see
+"Presets that run this agent's host path" in `responses_api_agents/hermes_agent/README.md`); that worker needs glibc
+2.28 or newer, so the three Alpine tasks cannot run Hermes.
 
 ## Harnesses
 

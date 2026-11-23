@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxExecResult, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult, SandboxResources, SandboxSpec
 from resources_servers.critpt_custom_grader import sandbox_domain as sd
 from resources_servers.critpt_custom_grader.runner import EXIT_COMPLETED, EXIT_WORKER_ABORTED, RESULT_BYTES_LIMIT
 from resources_servers.critpt_custom_grader.tests.support import (
@@ -185,7 +185,8 @@ async def test_close_statuses():
     provider = ScriptedProvider({("stop", "candidate"): hang})
     dom = domain(provider, cleanup_timeout_s=0.05)
     await dom.create()
-    assert await dom.close() == "delete_failed"
+    # The configured limit reaches the sandbox's own stop; without it the stop would wait out its 120 s default.
+    assert await asyncio.wait_for(dom.close(), timeout=2) == "delete_failed"
 
 
 @pytest.mark.asyncio

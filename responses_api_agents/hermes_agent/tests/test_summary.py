@@ -1,206 +1,161 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+import json
+import os
+import subprocess
+from pathlib import Path
 
 import pytest
+
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
+from responses_api_agents.hermes_agent.runtime import host_python
+from responses_api_agents.hermes_agent.tests.test_sandbox_runner import _completion, _ModelServer
+
+
+@pytest.mark.parametrize("delegated", [True, False])
+@pytest.mark.parametrize("retry", [True, False])
+def test_iteration_summary_retains_invocation_on_all_attempts(tmp_path, delegated, retry):
+    """Exercise the pinned root/child summary API and validate its wire traffic with Gym."""
+    responses = [_completion({"content": ""})] if retry else []
+    responses.append(_completion({"content": "Partial findings."}))
+    for i, response in enumerate(responses):
+        response["id"] = f"summary-{i}"
+    probe = """
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
 from run_agent import AIAgent
 from tools.delegate_tool import _build_child_agent
-
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
-from responses_api_agents.hermes_agent.model_kwargs import install_summary_compat
-from responses_api_agents.hermes_agent.observability import HermesAgentObserver
-from responses_api_agents.hermes_agent.sandbox_observer import SandboxHermesObserver
-
-
-@pytest.mark.parametrize("sandbox", [False, True])
-@pytest.mark.parametrize("retry", [False, True])
-def test_pinned_hermes_summary_passes_gym_schema_and_retains_call_ownership(
-    sandbox, retry, monkeypatch, tmp_path
-) -> None:
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("run_agent.get_tool_definitions", return_value=[]), patch("run_agent.OpenAI"):
-        agent = AIAgent(
-            base_url="http://gym:8000/v1",
-            api_key="test-key",  # pragma: allowlist secret
-            model="test-model",
-            quiet_mode=True,
-            skip_context_files=True,
-            skip_memory=True,
-        )
-    agent._cached_system_prompt = "Summarize the work."
-    messages = [
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "call_id": "call_1",
-                    "response_item_id": "fc_1",
-                    "type": "function",
-                    "function": {"name": "terminal", "arguments": "{}"},
-                }
+from model_kwargs import configure_model_calls
+from sandbox_observer import SandboxHermesObserver
+parent = AIAgent(base_url=sys.argv[2], api_key='gym', model='policy_model', provider='custom',
+    api_mode='chat_completions', quiet_mode=True, enabled_toolsets=[], skip_memory=True,
+    skip_context_files=True, skip_background_review=True, max_iterations=1)
+configure_model_calls(parent, preserve_reasoning_history=False)
+observer = SandboxHermesObserver().instrument(parent)
+agent = parent
+if sys.argv[3] == 'True':
+    agent = _build_child_agent(task_index=0, task_count=1, goal='Inspect the work', context=None,
+        toolsets=[], model=None, max_iterations=1, parent_agent=parent)
+messages = [
+    {'role':'assistant', 'content':None, 'tool_calls':[{'type':'function','id':'t','call_id':'t',
+     'response_item_id':'fc_1','function':{'name':'terminal','arguments':'{}'}}]},
+    {'role':'tool','tool_call_id':'t','content':'partial work'},
+]
+agent._cached_system_prompt = 'Inspect the work.'
+summary = agent._handle_max_iterations(messages, 1)
+rows = observer.finish({'messages': [], 'completed': True}, None)['invocations']
+pathlib.Path(sys.argv[4]).write_text(json.dumps([summary, rows, messages[0]]))
+"""
+    output = tmp_path / "result.json"
+    with _ModelServer(responses) as model:
+        completed = subprocess.run(
+            [
+                str(host_python()),
+                "-I",
+                "-c",
+                probe,
+                str(Path(__file__).parents[1]),
+                model.base_url,
+                str(delegated),
+                str(output),
             ],
-        },
-        {"role": "tool", "tool_call_id": "call_1", "content": "patch applied"},
-    ]
-    requests = []
-
-    def complete(**kwargs):
-        # OpenAI consumes client options before validating the model request body.
-        assert kwargs.pop("extra_headers", {}) == ({"x-session-id": "root"} if sandbox else {})
-        requests.append(NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(kwargs))
-        content = "" if retry and len(requests) == 1 else "Applied a partial patch."
-        return SimpleNamespace(
-            id=f"summary-{len(requests)}", choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            env={**os.environ, "HERMES_HOME": str(tmp_path / "home")},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60,
         )
-
-    client = MagicMock()
-    client.chat.completions.create.side_effect = complete
-    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **kwargs: client)
-    monkeypatch.setattr(agent, "_close_request_openai_client", lambda *args, **kwargs: None)
-    install_summary_compat(agent, preserve_reasoning_history=False)
-    observer = (
-        SandboxHermesObserver()
-        if sandbox
-        else HermesAgentObserver(model_ref=ModelServerRef(type="responses_api_models", name="policy_model"))
-    ).instrument(agent)
-
-    summary = agent._handle_max_iterations(messages, 1)
-
-    assert summary == "Applied a partial patch."
-    assert agent._gym_iteration_limit_reached is True
-    assert len(requests) == 1 + retry
-    assert messages[0]["tool_calls"][0]["response_item_id"] == "fc_1"
-    result = {"messages": messages, "completed": False}
-    if sandbox:
-        observations = observer.finish(result, None)
-        ids = observations["invocations"][0]["model_response_ids"]
-        assert observations["invocations"][0]["stop_reason"] == "max_iterations"
-        assert observations["invocations"][0]["status"] == "incomplete"
-    else:
-        observations = observer.finish(result)
-        ids = [call.response_id for call in observations.records[0].model_calls]
-        assert observations.records[0].stop_reason == "max_iterations"
-        assert observations.records[0].status == "incomplete"
-    assert ids == [f"summary-{i + 1}" for i in range(len(requests))]
+    assert completed.returncode == 0, completed.stderr
+    summary, rows, original = json.loads(output.read_text())
+    assert summary == "Partial findings."
+    assert original["tool_calls"][0]["response_item_id"] == "fc_1"
+    assert len(model.requests) == len(responses)
+    for body in model.requests:
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+        assert not body.get("stream")
+    owner = "root.child-1" if delegated else "root"
+    assert [h.get("x-session-id") for h in model.request_headers] == [owner] * len(responses)
+    by_id = {row["invocation_id"]: row for row in rows}
+    assert by_id[owner]["model_response_ids"] == [response["id"] for response in responses]
+    assert by_id[owner]["stop_reason"] == "max_iterations"
+    assert by_id[owner]["status"] == "incomplete"
+    if delegated:
+        assert by_id["root"]["status"] == "completed"
+        assert by_id["root"]["model_response_ids"] == []
 
 
-@pytest.mark.parametrize("observer_kind", ["host", "sandbox", "none"])
-@pytest.mark.parametrize("install_before_observer", [False, True])
-def test_delegated_child_limit_summary_uses_gym_and_belongs_to_child(
-    observer_kind, install_before_observer, monkeypatch, tmp_path
-) -> None:
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("run_agent.get_tool_definitions", return_value=[]), patch("run_agent.OpenAI"):
-        parent = AIAgent(
-            base_url="http://gym:8000/v1",
-            api_key="test-key",  # pragma: allowlist secret
-            model="test-model",
-            quiet_mode=True,
-            skip_context_files=True,
-            skip_memory=True,
-        )
-        if install_before_observer:
-            install_summary_compat(parent, preserve_reasoning_history=False)
-        observer = None
-        if observer_kind == "host":
-            observer = HermesAgentObserver(
-                model_ref=ModelServerRef(type="responses_api_models", name="policy_model")
-            ).instrument(parent)
-        elif observer_kind == "sandbox":
-            observer = SandboxHermesObserver().instrument(parent)
-        if not install_before_observer:
-            install_summary_compat(parent, preserve_reasoning_history=False)
-        child = _build_child_agent(
-            task_index=0,
-            goal="Inspect a file",
-            context=None,
-            toolsets=None,
-            model=None,
-            max_iterations=1,
-            parent_agent=parent,
-        )
-
-    child._cached_system_prompt = "Inspect the file."
-    requests = []
-
-    def complete(**kwargs):
-        assert kwargs.pop("extra_headers", {}) == (
-            {"x-session-id": "root.child-1"} if observer_kind == "sandbox" else {}
-        )
-        requests.append(NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(kwargs))
-        return SimpleNamespace(
-            id="child-summary", choices=[SimpleNamespace(message=SimpleNamespace(content="Partial findings."))]
-        )
-
-    client = MagicMock()
-    client.chat.completions.create.side_effect = complete
-    monkeypatch.setattr(child, "_create_request_openai_client", lambda **kwargs: client)
-    monkeypatch.setattr(child, "_close_request_openai_client", lambda *args, **kwargs: None)
-    messages = [
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call_1",
-                    "call_id": "call_1",
-                    "response_item_id": "fc_1",
-                    "type": "function",
-                    "function": {"name": "terminal", "arguments": "{}"},
-                }
-            ],
-        },
-        {"role": "tool", "tool_call_id": "call_1", "content": "file inspected"},
-    ]
-
-    assert child._handle_max_iterations(messages, 1) == "Partial findings."
-    assert child._gym_iteration_limit_reached is True
-    assert not getattr(parent, "_gym_iteration_limit_reached", False)
-    assert len(requests) == 1
-    assert messages[0]["tool_calls"][0]["response_item_id"] == "fc_1"
-
-    if observer_kind == "sandbox":
-        invocations = observer.finish({"messages": [], "completed": True}, None)["invocations"]
-        assert invocations[0]["model_response_ids"] == []
-        assert invocations[1]["model_response_ids"] == ["child-summary"]
-        assert invocations[0].get("stop_reason") is None
-        assert invocations[0]["status"] == "completed"
-        assert invocations[1]["stop_reason"] == "max_iterations"
-        assert invocations[1]["status"] == "incomplete"
-    elif observer_kind == "host":
-        invocations = [
-            r for r in observer.finish({"messages": [], "completed": True}).records if hasattr(r, "model_calls")
-        ]
-        assert invocations[0].model_calls == []
-        assert [call.response_id for call in invocations[1].model_calls] == ["child-summary"]
-        assert invocations[0].stop_reason is None
-        assert invocations[0].status == "completed"
-        assert invocations[1].stop_reason == "max_iterations"
-        assert invocations[1].status == "incomplete"
-
-
-def test_iteration_limit_hook_fires_once_before_summary_even_when_summary_fails() -> None:
-    events = []
-
-    def fail_summary(_messages, _api_call_count):
-        events.append("summary")
-        raise RuntimeError("summary unavailable")
-
-    agent = SimpleNamespace(
-        _ensure_primary_openai_client=lambda *, reason: None,
-        _handle_max_iterations=fail_summary,
-        _gym_invocation_id="root.child-1",
-        _gym_on_iteration_limit_reached=lambda *, invocation_id: events.append(invocation_id),
+def test_token_capture_survives_transport_rebuild(tmp_path):
+    """Hermes clears its transport cache when it rebuilds the client after transient errors; capture must persist."""
+    probe = """
+import json, pathlib, sys
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+from openai.types.chat import ChatCompletion
+from run_agent import AIAgent
+from model_kwargs import configure_model_calls
+agent = AIAgent(base_url='http://127.0.0.1:9/v1', api_key='gym', model='policy_model', provider='custom',
+    api_mode='chat_completions', quiet_mode=True, enabled_toolsets=[], skip_memory=True,
+    skip_context_files=True, skip_background_review=True, max_iterations=1)
+configure_model_calls(agent, preserve_reasoning_history=False)
+agent._transport_cache.clear()
+response = ChatCompletion.model_validate(json.loads(sys.argv[2]))
+normalized = agent._get_transport().normalize_response(response)
+pathlib.Path(sys.argv[3]).write_text(json.dumps(agent._build_assistant_message(normalized, 'stop')))
+"""
+    completion = _completion(
+        {"content": "done", "prompt_token_ids": [3, 4], "generation_token_ids": [5], "generation_log_probs": [-0.1]}
     )
-    install_summary_compat(agent, preserve_reasoning_history=False)
+    output = tmp_path / "message.json"
+    completed = subprocess.run(
+        [str(host_python()), "-I", "-c", probe, str(Path(__file__).parents[1]), json.dumps(completion), str(output)],
+        env={**os.environ, "HERMES_HOME": str(tmp_path / "home")},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    message = json.loads(output.read_text())
+    assert message["prompt_token_ids"] == [3, 4]
+    assert message["generation_token_ids"] == [5]
+    assert message["generation_log_probs"] == [-0.1]
 
-    for _ in range(2):
-        with pytest.raises(RuntimeError, match="summary unavailable"):
-            agent._handle_max_iterations([], 1)
 
-    assert events == ["root.child-1", "summary", "summary"]
+def test_summary_retry_attaches_only_the_final_attempt_tokens(tmp_path):
+    """An empty first summary attempt is retried; the appended summary turn owns only the retry's token IDs."""
+    responses = [
+        _completion({"content": "", "prompt_token_ids": [1], "generation_token_ids": [2]}),
+        _completion({"content": "Partial findings.", "prompt_token_ids": [7, 8], "generation_token_ids": [9]}),
+    ]
+    probe = """
+import json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from run_agent import AIAgent
+from model_kwargs import configure_model_calls
+agent = AIAgent(base_url=sys.argv[2], api_key='gym', model='policy_model', provider='custom',
+    api_mode='chat_completions', quiet_mode=True, enabled_toolsets=[], skip_memory=True,
+    skip_context_files=True, skip_background_review=True, max_iterations=1)
+configure_model_calls(agent, preserve_reasoning_history=False)
+agent._cached_system_prompt = 'Inspect the work.'
+messages = [{'role': 'user', 'content': 'Inspect the work.'}]
+summary = agent._handle_max_iterations(messages, 1)
+pathlib.Path(sys.argv[3]).write_text(json.dumps([summary, messages[-1]]))
+"""
+    output = tmp_path / "result.json"
+    with _ModelServer(responses) as model:
+        completed = subprocess.run(
+            [str(host_python()), "-I", "-c", probe, str(Path(__file__).parents[1]), model.base_url, str(output)],
+            env={**os.environ, "HERMES_HOME": str(tmp_path / "home")},
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60,
+        )
+    assert completed.returncode == 0, completed.stderr
+    summary, last = json.loads(output.read_text())
+    assert summary == "Partial findings."
+    assert len(model.requests) == 2
+    assert last["role"] == "assistant"
+    assert last["prompt_token_ids"] == [7, 8]
+    assert last["generation_token_ids"] == [9]

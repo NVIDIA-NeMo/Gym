@@ -24,8 +24,11 @@ import json
 from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import APIStatusError
 from pydantic import BaseModel
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, Tool, ToolCall, ToolMessage, UserMessage
 
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
@@ -54,6 +57,90 @@ def _make_response(content: str = "ok"):
     response.usage.completion_tokens = 5
     response.usage.completion_tokens_details = None
     return response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 413])
+async def test_explicit_context_rejection_reaches_stirrup_recovery(status, caplog) -> None:
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
+    error = APIStatusError(
+        "DO_NOT_LOG_ERROR_BODY",
+        response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
+        body={"code": "context_length_exceeded", "message": "DO_NOT_LOG_ERROR_BODY"},
+    )
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+    history = [UserMessage(content="original task")]
+    before = list(history)
+
+    with pytest.raises(ContextOverflowError) as caught:
+        await client.generate(history, tools={})
+
+    assert caught.value.__cause__ is error
+    assert "DO_NOT_LOG_ERROR_BODY" not in str(caught.value)
+    assert "DO_NOT_LOG_ERROR_BODY" not in caplog.text
+    assert history == before
+    assert client._truncation_overruns == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 413])
+async def test_a_context_rejection_is_raised_unchanged_when_recovery_is_off(status) -> None:
+    client = _make_client(truncation_recovery=False)
+    error = APIStatusError(
+        "prompt too long",
+        response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
+        body={"code": "context_length_exceeded", "message": "prompt too long"},
+    )
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+
+    with pytest.raises(APIStatusError) as caught:
+        await client.generate([UserMessage(content="original task")], tools={})
+
+    assert caught.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, {"code": "invalid_output_token_parameter", "message": "context length exceeded"}),
+        (400, {"message": "context_length_exceeded"}),
+        (400, {"code": None}),
+        (400, None),
+        (400, "context_length_exceeded"),
+        (413, {"code": "request_too_large"}),
+        (422, {"code": "context_length_exceeded"}),
+        (500, {"code": "context_length_exceeded"}),
+    ],
+)
+async def test_other_http_failures_are_not_treated_as_context_overflow(status, body) -> None:
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
+    error = APIStatusError(
+        "request refused",
+        response=httpx.Response(status, request=httpx.Request("POST", "http://test/chat/completions")),
+        body=body,
+    )
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+
+    with pytest.raises(APIStatusError) as caught:
+        await client.generate([UserMessage(content="original task")], tools={})
+
+    assert caught.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+async def test_successful_length_response_retains_partial_content(finish_reason) -> None:
+    client = _make_client(truncation_recovery=False, context_overflow_recovery=True)
+    response = _make_response(content="partial work")
+    response.choices[0].finish_reason = finish_reason
+    client._client.chat.completions.create = AsyncMock(return_value=response)
+
+    result = await client.generate([UserMessage(content="original task")], tools={})
+
+    assert result.content == "partial work"
+    assert result.token_usage.input == 10
+    assert result.token_usage.output == 5
 
 
 @pytest.mark.asyncio
@@ -368,6 +455,68 @@ def test_character_fallback_counts_complete_serialized_messages() -> None:
     assert client._count_input_tokens(long_arguments, tools={}) >= count + 990
 
 
+def test_an_image_counts_a_fixed_token_estimate_not_its_base64_length() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+    )
+    text = {"role": "user", "content": [{"type": "text", "text": "frame"}]}
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 900_000}}
+
+    count = client._count_input_tokens([{**text, "content": [*text["content"], image]}], tools={})
+
+    # 900 KB of base64 would otherwise count as 300K tokens and pin every call to the completion floor.
+    assert count == client._count_input_tokens([text], tools={}) + 1536
+
+
+def _noisy_png(seed: int) -> bytes:
+    import io
+    import random
+
+    from PIL import Image
+
+    rng = random.Random(seed)
+    image = Image.new("RGB", (400, 400))
+    image.putdata([(rng.randrange(256), rng.randrange(256), rng.randrange(256)) for _ in range(400 * 400)])
+    out = io.BytesIO()
+    image.save(out, format="PNG")
+    return out.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_two_images_budget_two_fixed_estimates_and_still_reach_the_request() -> None:
+    from stirrup.core.models import ImageContentBlock
+
+    client, fake_create = _client_with_fake_create(max_tokens=20_000, completion_token_buffer=1000)
+    images = [ImageContentBlock(data=_noisy_png(seed)) for seed in (1, 2)]
+
+    await client.generate([UserMessage(content=["frame", *images])], tools={})
+
+    sent = fake_create.await_args.kwargs
+    parts = sent["messages"][0]["content"]
+    urls = [part["image_url"]["url"] for part in parts if part["type"] == "image_url"]
+    # The request keeps both complete images, each far larger than the context window if counted per character.
+    assert [url.startswith("data:image/png;base64,") for url in urls] == [True, True]
+    assert all(len(url) > 100_000 for url in urls)
+    # The text part serializes to 66 characters (22 tokens); each image adds a fixed 1536 tokens.
+    assert sent["max_completion_tokens"] == 20_000 - (22 + 2 * 1536) - 1000
+
+
+@pytest.mark.asyncio
+async def test_image_token_estimate_is_configurable() -> None:
+    from stirrup.core.models import ImageContentBlock
+
+    client, fake_create = _client_with_fake_create(
+        max_tokens=20_000, completion_token_buffer=1000, image_token_estimate=4000
+    )
+
+    await client.generate([UserMessage(content=["frame", ImageContentBlock(data=_noisy_png(1))])], tools={})
+
+    assert fake_create.await_args.kwargs["max_completion_tokens"] == 20_000 - (22 + 4000) - 1000
+
+
 @pytest.mark.asyncio
 async def test_output_cap_smaller_than_prompt_does_not_shrink_context_window() -> None:
     client, fake_create = _client_with_fake_create(
@@ -637,7 +786,7 @@ class TestProviderHistoryMatchesStrictIngress:
         assert set(final) == {"role", "content"}
 
     def test_validates_against_strict_chat_schema_and_round_trips(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 
         serialized = to_provider_openai_messages(self._history())
         validated = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": serialized})
@@ -684,7 +833,7 @@ class TestProviderHistoryMatchesStrictIngress:
         canonical output would 422 and this fails first."""
         from typing import get_type_hints
 
-        from nemo_gym.openai_utils import (
+        from nemo_gym.core import (
             NeMoGymChatCompletionAssistantMessageParam,
             NeMoGymChatCompletionMessageToolCallParam,
             NeMoGymChatCompletionToolMessageParam,

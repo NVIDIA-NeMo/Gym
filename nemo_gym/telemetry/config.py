@@ -87,6 +87,13 @@ class TelemetryConfig(BaseModel, extra="allow"):
     memory_profiling: MemoryProfilingConfig = Field(default_factory=MemoryProfilingConfig)
     """Sample each Gym-managed server process tree and emit memory metrics."""
 
+    sandbox_resource_sample_interval_seconds: float = Field(default=10.0, ge=0)
+    """Seconds between existing provider resource snapshots; zero disables sampling.
+
+    Requires sandbox spans and an active trace exporter. Records are correlated with the
+    creating rollout, including when cleanup runs outside its request context.
+    """
+
     event_loop_sample_interval_seconds: float = Field(default=1.0, gt=0)
     """Seconds between samples of each process's event-loop lag, when metrics are on."""
 

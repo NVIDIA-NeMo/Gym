@@ -18,6 +18,11 @@ These cover the parts that decide whether a task counts as resolved. The sandbox
 itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import re
+import shutil
+import signal
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -209,7 +214,7 @@ class TestDropTestPatchFiles:
 
 class _FakeSandbox:
     def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=return_code)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -229,6 +234,158 @@ class TestRunVerification:
         )
         assert result.completed and result.resolved
         assert sandbox.commands == ["bash /tmp/nemo_gym_eval.sh"]
+
+    @pytest.mark.asyncio
+    async def test_signal_interruption_does_not_grade_partial_passing_output(self) -> None:
+        process = subprocess.run(
+            ["bash", "-c", 'printf "%s\\n" "$1" "a PASSED"; kill -KILL $$', "bash", TEST_OUTPUT_BEGIN],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert process.returncode == -signal.SIGKILL
+        assert "a PASSED" in process.stdout and TEST_OUTPUT_END not in process.stdout
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return {"a": "PASSED"} if "a PASSED" in log.splitlines() else {}
+
+        result = await run_verification(
+            sandbox=_FakeSandbox(process.stdout, return_code=process.returncode),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["tests_observed"] == 1
+        assert result.test_results["resolved"] is False
+        assert parsed == ["\na PASSED\n"]
+        assert result.test_output == process.stdout
+        assert "return code -9" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "return_code,end_marker,error_type,completed,resolved",
+        [
+            (-1, False, None, False, False),  # OpenSandbox signal death without a known cause.
+            (-1, True, None, True, True),  # The complete test section remains gradeable.
+            (-9, True, None, True, True),
+            (124, False, None, True, True),  # Preserve the non-signal exit-code policy.
+            (128, False, None, True, True),
+            (129, False, None, False, False),  # Shells encode signal exits as 128 + signal.
+            (137, False, None, False, False),  # Docker reports SIGKILL as 137.
+            (143, False, None, False, False),
+            (137, True, None, True, True),
+            (-1, False, "timeout", True, False),  # Preserve the explicit timeout policy.
+            (137, False, "timeout", True, False),
+            (-1, False, "sandbox", False, False),
+        ],
+    )
+    async def test_interruption_guard_preserves_known_outcomes(
+        self, return_code: int, end_marker: bool, error_type: str | None, completed: bool, resolved: bool
+    ) -> None:
+        output = f"{TEST_OUTPUT_BEGIN}\na PASSED\n" + (TEST_OUTPUT_END if end_marker else "")
+        sandbox = _FakeSandbox(output, return_code=return_code)
+        sandbox._result.error_type = error_type
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return {"a": "PASSED"} if "a PASSED" in log.splitlines() else {}
+
+        result = await run_verification(
+            sandbox=sandbox, inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]), parser=parse
+        )
+        assert result.completed is completed and result.resolved is resolved
+        assert bool(parsed) is (error_type is None)
+        assert result.test_output == output
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "statuses,completed",
+        [
+            ({"a [123 ms]": "FAILED"}, True),  # A normalized FAIL_TO_PASS name explicitly failed.
+            ({"b in 1 sec": "FAILED"}, True),  # PASS_TO_PASS failures also establish a zero.
+            ({"unrelated": "FAILED"}, False),
+            ({"a": "PASSED", "b": "PASSED"}, False),
+            ({}, False),  # Malformed/truncated log with no recognized tests.
+            ({"a": "ERROR"}, False),  # Do not infer an explicit FAILED status from another parser label.
+        ],
+    )
+    @pytest.mark.parametrize("return_code", [-1, 137])
+    async def test_interrupted_output_retains_only_conclusive_required_failures(
+        self, statuses: dict[str, str], completed: bool, return_code: int
+    ) -> None:
+        output = f"{TEST_OUTPUT_BEGIN}\n" + "\n".join(f"{name}: {status}" for name, status in statuses.items())
+        result = await run_verification(
+            sandbox=_FakeSandbox(output, return_code=return_code),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=["b"]),
+            parser=lambda log: dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line),
+        )
+        assert result.completed is completed and result.resolved is False
+        assert (result.error is None) is completed
+        assert result.test_output == output
+
+    @pytest.mark.asyncio
+    async def test_interrupted_install_failure_is_not_a_test_verdict(self) -> None:
+        def parse(log: str) -> dict[str, str]:
+            pytest.fail("The interrupted install output must not reach the test parser")
+
+        result = await run_verification(
+            sandbox=_FakeSandbox("a: FAILED\n", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["tests_observed"] == 0
+        assert result.patch_applied is False
+
+    @pytest.mark.asyncio
+    async def test_interrupted_log_parser_failure_is_incomplete(self) -> None:
+        def parse(log: str) -> dict[str, str]:
+            raise ValueError("truncated test result")
+
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_OUTPUT_BEGIN}\na: FAILED", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results is None
+        assert "truncated test result" in result.error
+
+    @pytest.mark.asyncio
+    async def test_interrupted_failure_after_a_failed_test_patch_is_incomplete(self) -> None:
+        """A required FAILED is not a verdict when the held-out tests never applied."""
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_PATCH_FAILED}\n{TEST_OUTPUT_BEGIN}\na: FAILED", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=lambda log: dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line),
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_patch_failed is True and result.patch_applied is True
+        assert result.error.startswith("held-out test patch did not apply")
+        assert "return code -1" in result.error
+
+    @pytest.mark.asyncio
+    async def test_interrupted_output_ignores_appended_stderr(self) -> None:
+        """Without the end marker, stderr (install output included) must not supply the verdict."""
+        sandbox = _FakeSandbox(f"{TEST_OUTPUT_BEGIN}\na: PASSED", return_code=-1)
+        sandbox._result.stderr = "a: FAILED"
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line)
+
+        result = await run_verification(
+            sandbox=sandbox, inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]), parser=parse
+        )
+        assert parsed == ["\na: PASSED"]
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["resolved"] is False
+        assert result.test_output.endswith("\na: FAILED")
 
     @pytest.mark.asyncio
     async def test_a_test_patch_that_does_not_apply_is_incomplete(self) -> None:
@@ -356,7 +513,7 @@ class TestSandboxCpuCap:
     This set is the compile-heaviest in the repo, so it is the one that most needs them."""
 
     def test_cpu_cap_env_is_derived_from_the_cpu_limit(self) -> None:
-        from nemo_gym.sandbox.utils import cpu_cap_env
+        from nemo_gym.sandbox import cpu_cap_env
 
         env = cpu_cap_env(4)
         assert env["OMP_NUM_THREADS"] == "4"
@@ -364,7 +521,7 @@ class TestSandboxCpuCap:
         assert env["CARGO_BUILD_JOBS"] == "4"
 
     def test_the_server_applies_them_and_explicit_env_still_wins(self) -> None:
-        from nemo_gym.sandbox.utils import cpu_cap_env
+        from nemo_gym.sandbox import cpu_cap_env
 
         # Mirrors the precedence in _create_sandbox: derived caps first, explicit env over them.
         derived = cpu_cap_env(4)
@@ -448,7 +605,9 @@ class TestAntiCheating:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swe_rebench.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swe_rebench_legacy_agent.yaml").read_text()
+        )
         assert (
             config["swe_rebench_resources_server"]["resources_servers"]["swe_rebench"]["apply_anti_cheating"] is True
         )
@@ -479,7 +638,9 @@ class TestMultiWorkerEntrypoint:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swe_rebench.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swe_rebench_legacy_agent.yaml").read_text()
+        )
         for name, block in config.items():
             workers = block["resources_servers"]["swe_rebench"].get("num_workers")
             if workers and workers > 1:
@@ -579,3 +740,237 @@ class TestMavenMirror:
 
         merged = JVM_MIRROR_ENV | {"GRADLE_USER_HOME": "/custom"}
         assert merged["GRADLE_USER_HOME"] == "/custom"
+
+
+class _RecordingAsyncSandbox:
+    def __init__(self, provider_config) -> None:
+        self.spec = None
+        self.setup = None
+
+    async def start(self, spec) -> None:
+        self.spec = spec
+
+    async def start_with_setup(self, spec, setup) -> None:
+        self.spec = spec
+        self.setup = setup
+
+
+class TestSweAgentsContainerSetup:
+    """sandbox_config.legacy_container_setup gives the agent's and the evaluator's sandbox the
+    toolchain setup the Apptainer swe_agents harness applied to both of its containers."""
+
+    @staticmethod
+    async def _create(
+        monkeypatch,
+        sandbox_config: dict,
+        files: dict[str, str] | None = None,
+        *,
+        overwrite_maven_settings: bool = True,
+    ):
+        import resources_servers.swe_rebench.app as app
+
+        monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
+        monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
+        server = SimpleNamespace(
+            config=app.SWERebenchResourcesServerConfig(
+                host="127.0.0.1",
+                port=8000,
+                entrypoint="resources_servers/swe_rebench",
+                sandbox_config=sandbox_config,
+                sandbox_provider="sandbox",
+                name="swe_rebench",
+                overwrite_maven_settings=overwrite_maven_settings,
+            )
+        )
+        body = app.SWERebenchInstanceRequest(instance_id="o__r-1", repo="o/r", base_commit="abc", image_name="img")
+        return await app.SWERebenchResourcesServer._create_sandbox(server, body, files=files)
+
+    async def test_off_by_default(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import CHROME_WRAPPER_PATH
+
+        sandbox = await self._create(monkeypatch, {})
+        assert "CHROME_BIN" not in sandbox.spec.env and "_JAVA_OPTIONS" not in sandbox.spec.env
+        assert CHROME_WRAPPER_PATH not in sandbox.spec.files
+        assert sandbox.setup is None
+
+    async def test_agent_sandbox_gets_the_env_files_and_setup(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import (
+            SWE_AGENTS_CONTAINER_ENV,
+            apply_swe_agents_container_setup,
+            swe_agents_container_files,
+        )
+
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True})
+        assert SWE_AGENTS_CONTAINER_ENV.items() <= sandbox.spec.env.items()
+        assert sandbox.spec.files == swe_agents_container_files()
+        assert sandbox.setup is apply_swe_agents_container_setup
+
+    async def test_eval_sandbox_keeps_its_verification_files(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import CHROME_WRAPPER_PATH
+
+        files = verification_files(_inputs())
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, files=files)
+        assert files.items() <= sandbox.spec.files.items()
+        assert CHROME_WRAPPER_PATH in sandbox.spec.files
+
+    async def test_explicit_config_env_still_wins(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True, "env": {"CHROME_BIN": "/custom"}})
+        assert sandbox.spec.env["CHROME_BIN"] == "/custom"
+
+    async def test_maven_settings_stay_with_the_provider_when_not_overwritten(self, monkeypatch) -> None:
+        """overwrite_maven_settings: false must hold for the agent sandbox too, or the swe_agents files
+        would write the settings.xml the provider mounts read-only."""
+        from resources_servers.swebench.swe_agents_container_setup import GRADLE_INIT_PATH, MAVEN_SETTINGS_PATH
+
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, overwrite_maven_settings=False)
+        assert MAVEN_SETTINGS_PATH not in sandbox.spec.files
+        assert GRADLE_INIT_PATH in sandbox.spec.files
+
+    def test_one_mirror_copy_per_eval_sandbox(self) -> None:
+        """Both ship the same files to the same paths; a second Gradle init script under another
+        name would add the mirror repository twice."""
+        from resources_servers.swe_rebench.verification import _mirror_files
+        from resources_servers.swebench.swe_agents_container_setup import swe_agents_container_files
+
+        assert _mirror_files().items() <= swe_agents_container_files().items()
+
+
+class TestLogParserPin:
+    """Graded results must not move when SWE-rebench-V2 changes upstream.
+
+    A parser cache filled from another commit must not stand in for the pinned one.
+    """
+
+    @staticmethod
+    def _fake_git(calls: list, fail_on: str | None = None):
+        def run(args, cwd=None, check=False, capture_output=False):
+            command = args[1]
+            calls.append(args)
+            if command == fail_on:
+                raise subprocess.CalledProcessError(128, args, stderr=b"fatal: remote error: not our ref")
+            if command == "init":
+                Path(args[-1]).mkdir(parents=True)
+            elif command in ("clone", "checkout"):
+                # Nothing in log_parsers calls `git clone`.
+                # A clone here puts main's parsers in the destination before the pin is fetched.
+                # The visibility test relies on this to fail for code that clones into place.
+                root = Path(args[-1]) if command == "clone" else Path(cwd)
+                parser = root / "lib" / "agent" / "log_parsers.py"
+                parser.parent.mkdir(parents=True, exist_ok=True)
+                parser.write_text(f"NAME_TO_PARSER = {{{command!r}: lambda log: {{}}}}\n")
+
+        return run
+
+    def test_pinned_to_a_full_commit(self) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        assert re.fullmatch(r"[0-9a-f]{40}", log_parsers.UPSTREAM_COMMIT)
+        assert log_parsers._repo_dir_name() == f"SWE-rebench-V2-{log_parsers.UPSTREAM_COMMIT[:12]}"
+
+    def test_a_cached_clone_of_main_is_not_reused(self, monkeypatch, tmp_path) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        stale = tmp_path / "SWE-rebench-V2" / "lib" / "agent" / "log_parsers.py"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("NAME_TO_PARSER = {'stale': lambda log: {}}\n")
+        calls: list = []
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git(calls))
+        monkeypatch.setattr(log_parsers, "_MODULE", None)
+        module = log_parsers.load_parsers(tmp_path)
+        assert [args[1] for args in calls] == ["init", "fetch", "checkout"]
+        assert calls[1][-1] == log_parsers.UPSTREAM_COMMIT
+        assert set(module.NAME_TO_PARSER) == {"checkout"}
+
+    def test_the_tree_is_visible_only_once_the_pin_is_checked_out(self, monkeypatch, tmp_path) -> None:
+        """A worker waiting on the clone lock returns as soon as a parser file exists.
+
+        No parser file may appear under the destination before the pinned checkout is complete.
+        """
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        seen: list = []
+        fake = self._fake_git([])
+
+        def run(args, **kwargs):
+            fake(args, **kwargs)
+            seen.append((args[1], log_parsers._parser_path(destination)))
+
+        monkeypatch.setattr(log_parsers.subprocess, "run", run)
+        log_parsers._clone_locked(destination)
+        assert [command for command, _ in seen] == ["init", "fetch", "checkout"]
+        assert all(path is None for _, path in seen), seen
+        assert log_parsers._parser_path(destination) is not None
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    def test_a_killed_workers_lock_is_named_and_its_staging_tree_removed_once_cleared(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A worker killed mid-fetch skips its cleanup, so it leaves both its staging tree and the lock."""
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        lock_path = tmp_path / f".{destination.name}.clone.lockdir"
+        lock_path.mkdir()
+        orphan = tmp_path / f".{destination.name}.tmp-999999"
+        orphan.mkdir()
+        (orphan / "partial").write_text("left by a worker killed mid-fetch")
+        calls: list = []
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git(calls))
+        monkeypatch.setattr(log_parsers.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(TimeoutError, match=re.escape(str(lock_path))):
+            log_parsers._clone_locked(destination, timeout_s=0)
+        assert calls == []
+
+        lock_path.rmdir()
+        log_parsers._clone_locked(destination)
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    @pytest.mark.parametrize("step", ["fetch", "checkout"])
+    def test_a_failed_git_step_leaves_no_tree_behind(self, monkeypatch, tmp_path, step: str) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], fail_on=step))
+        with pytest.raises(RuntimeError, match=f"git {step} .* failed: fatal: remote error: not our ref"):
+            log_parsers._clone_locked(destination)
+        assert list(tmp_path.iterdir()) == [], f"no clone, staging tree, or lock may survive a failed {step}"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order(tmp_path) -> None:
+    """Providers return a command's stdout and stderr apart: the script's redirect puts both on stdout, in order."""
+    header, found, _ = build_eval_script(_inputs()).partition("\ncd ")
+    assert found, "the eval script no longer begins its work with a cd line; update this split"
+    # Only the redirect may run here: never the real script, which resets a checkout.
+    assert [line for line in header.splitlines() if line and not line.startswith("#")] == ["exec 2>&1"]
+    result = subprocess.run(
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=30,
+    )
+    assert result.stdout.splitlines() == ["first", "second", "third"]
+    assert result.stderr == ""
+
+
+def test_the_shipped_configs_require_the_anti_cheat_scrub() -> None:
+    """The only configs that turn it on: without the line, swe_rebench would hand out unscrubbed histories again."""
+    from pathlib import Path
+
+    import yaml
+
+    from resources_servers.swe_rebench.app import SWERebenchResourcesServerConfig
+
+    configs = Path(__file__).resolve().parent.parent / "configs"
+    resources = yaml.safe_load((configs / "swe_rebench_legacy_agent.yaml").read_text())
+    assert resources["swe_rebench_resources_server"]["resources_servers"]["swe_rebench"]["anti_cheat_required"] is True
+    # The episode default takes the resources server's settings from that file.
+    episode = yaml.safe_load((configs / "swe_rebench.yaml").read_text())
+    assert "resources_servers/swe_rebench/configs/swe_rebench_legacy_agent.yaml" in episode["config_paths"]
+    # Off unless a config asks for it: the other servers keep the scrub best effort.
+    assert SWERebenchResourcesServerConfig.model_fields["anti_cheat_required"].default is False

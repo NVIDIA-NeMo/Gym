@@ -15,15 +15,22 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
+from omegaconf import OmegaConf
+from pydantic import ValidationError
+from stirrup.core.models import AssistantMessage, Reasoning, TokenUsage, ToolCall, ToolMessage, UserMessage
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAction, agent_outcome_policy
+from nemo_gym.cli.env import validate_server_configs
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    MODEL_REQUEST_ERROR,
+    EpisodeId,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
@@ -62,6 +69,33 @@ def test_removed_options_are_rejected(option):
         _make_config(**{option: "x"})
 
 
+def test_removed_options_are_each_located_at_their_own_key():
+    with pytest.raises(ValidationError) as error:
+        _make_config(judge_only=False, task="t")
+    assert [(detail["loc"], detail["type"]) for detail in error.value.errors()] == [
+        (("judge_only",), "removed_option"),
+        (("task",), "removed_option"),
+    ]
+
+
+def test_validate_server_configs_reports_a_removed_option_at_its_full_path():
+    block = {
+        "entrypoint": "app.py",
+        "host": "0.0.0.0",
+        "port": 8080,
+        "model_server": {"type": "responses_api_models", "name": "policy_model"},
+        "judge_only": False,
+    }
+    config = OmegaConf.create({"gdpval_agent": {"responses_api_agents": {"stirrup_agent": block}}})
+    [problem] = validate_server_configs(config, ["responses_api_agents"])
+    assert (problem.path, problem.config_class, problem.value) == (
+        "gdpval_agent.responses_api_agents.stirrup_agent.judge_only",
+        "StirrupAgentWrapperConfig",
+        False,
+    )
+    assert "removed options that are no longer supported: `judge_only`" in problem.message
+
+
 def _report(**fields) -> dict:
     return {
         "input_items": [],
@@ -79,8 +113,9 @@ async def _run_episode(config, body, report=None, *, execute_error=None, artifac
     """Run one episode against a state whose sandbox runner returns ``report`` (or raises); return response, payload, state."""
     sent = []
 
-    async def execute(payload, **_):
+    async def execute(payload, **kwargs):
         sent.append(payload)
+        state.execute_kwargs = kwargs
         if execute_error:
             raise execute_error
         return report or _report()
@@ -138,6 +173,17 @@ class TestApp:
 
         # Unset means off: only configs that opt in (GDPVal's benchmark config) get recovery nudges.
         assert payload["client"]["truncation_recovery"] is bool(truncation_recovery)
+
+    @pytest.mark.parametrize("recovery", [None, False, True])
+    @pytest.mark.asyncio
+    async def test_context_overflow_recovery_is_forwarded_to_the_rollout(self, recovery) -> None:
+        fields = {} if recovery is None else {"context_overflow_recovery": recovery}
+        body = NeMoGymResponseCreateParamsNonStreaming(input="ignored", model="policy")
+
+        payload = await _runner_payload(_make_config(**fields), body)
+
+        # Unset means off: a rejected request ends the episode unless the benchmark's config opts in.
+        assert payload["client"]["context_overflow_recovery"] is bool(recovery)
 
     @pytest.mark.parametrize("code_exec", [None, False, True])
     @pytest.mark.asyncio
@@ -224,11 +270,36 @@ class TestApp:
         )
 
         assert response.status == "incomplete"
-        assert response.metadata == {"elapsed_seconds": "1.5", "stop_reason": "cancelled"}
+        assert response.metadata == {
+            "elapsed_seconds": "1.5",
+            "agent_timeout_sec": "12600.0",
+            "stop_reason": "cancelled",
+        }
         assert [item.type for item in response.output] == ["message", "message"]
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (20, 10, 30)
         assert response.usage.input_tokens_details.cached_tokens == 8
         assert response.usage.output_tokens_details.reasoning_tokens == 4
+
+    @pytest.mark.parametrize(
+        "metadata,budget",
+        [
+            (None, 900.0),
+            ({"agent_timeout_sec": "600"}, 600.0),
+            ({"agent_timeout_sec": "5000"}, 900.0),
+            ({"agent_timeout_sec": "not-a-number"}, 900.0),
+        ],
+    )
+    async def test_task_timeout_shortens_but_never_extends_the_configured_budget(
+        self, metadata: dict | None, budget: float
+    ) -> None:
+        """A Harbor task row carries `metadata.agent_timeout_sec`; the runner gets min(config, task) seconds."""
+        response, _, state = await _run_episode(
+            _make_config(sandbox_runner_timeout_seconds=900),
+            NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy", metadata=metadata),
+        )
+
+        assert state.execute_kwargs["timeout"] == budget
+        assert response.metadata["agent_timeout_sec"] == str(budget)
 
     @pytest.mark.asyncio
     async def test_a_run_whose_model_calls_reported_no_usage_has_none(self) -> None:
@@ -263,6 +334,26 @@ class TestApp:
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_a_run_ended_by_unusable_compaction_summaries_is_the_models_invalid_output(self) -> None:
+        report = _report(
+            stop_reason="compaction_failed",
+            invalid_output="Compaction summarizer produced no usable text after 3 attempts",
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert response.error is None
+        assert response.metadata["stop_reason"] == "compaction_failed"
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=AGENT_INVALID_OUTPUT
+        )
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
     @pytest.mark.asyncio
     async def test_a_run_killed_before_any_model_response_has_unknown_usage_and_no_error(self) -> None:
@@ -376,6 +467,50 @@ class TestApp:
         assert output_items[1]["type"] == "function_call_output"
         assert output_items[1]["call_id"] == "call_1"
         assert output_items[1]["output"] == "ok"
+
+    def test_output_history_keeps_reasoning_returned_in_its_own_field(self) -> None:
+        call = ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"ls"}')
+        history = [
+            [
+                AssistantMessage(
+                    content="Listing the inputs.", tool_calls=[call], reasoning=Reasoning(content="Look first.")
+                ),
+                ToolMessage(content="a.xlsx", name="code_exec", tool_call_id="call_1"),
+                AssistantMessage(content="Done.", reasoning=Reasoning(content="")),
+            ]
+        ]
+
+        _, output_items = convert_stirrup_history_to_output_items(history)
+
+        assert [item["type"] for item in output_items] == [
+            "reasoning",
+            "message",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert output_items[0]["summary"] == [{"type": "summary_text", "text": "Look first."}]
+        response = NeMoGymResponse(
+            id="r",
+            created_at=0,
+            model="m",
+            object="response",
+            output=output_items,
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        assert response.output[0].type == "reasoning"
+
+    def test_output_history_without_reasoning_is_unchanged(self) -> None:
+        call = ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"ls"}')
+        inline = AssistantMessage(content="<think>Look first.</think>Listing.", tool_calls=[call])
+        history = [[inline, ToolMessage(content="a.xlsx", name="code_exec", tool_call_id="call_1")]]
+
+        _, output_items = convert_stirrup_history_to_output_items(history)
+
+        assert [item["type"] for item in output_items] == ["message", "function_call", "function_call_output"]
+        assert output_items[0]["content"][0]["text"] == "<think>Look first.</think>Listing."
 
 
 class TestObservations:

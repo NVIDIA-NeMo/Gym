@@ -40,3 +40,7 @@ kilocode_agent:
           bash: allow
           edit: allow
           webfetch: allow
+        # Per-call MCP tool timeout in milliseconds. Unset, Kilo uses the MCP SDK's 60 s default and
+        # cancels slower Resources tools. Keep it within `timeout`.
+        experimental:
+          mcp_timeout: 300000

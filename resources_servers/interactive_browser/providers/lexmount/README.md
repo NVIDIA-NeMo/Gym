@@ -5,18 +5,19 @@ the browser runs off the training node, and this environment reaches it over
 CDP. Useful as a worked example of a metered, session-based provider — creation
 is slow and fallible, sessions cost quota, and teardown must not be silent.
 
-The SDK is **not** a dependency of this environment. Nothing here is imported
-unless the config selects `session_provider: {lexmount: ...}`.
+The SDK is a locked, optional `lexmount` extra, not a default dependency.
+Nothing here is imported unless the config selects `session_provider: {lexmount: ...}`.
+The example config selects that extra so startup keeps it installed.
 
 ## Use it
 
 1. Register at <https://browser.lexmount.com>, create a project, copy the **API
    key** and **project ID**.
-2. Install the SDK into the resources server's own venv (created the first time
-   `gym env start` serves this environment) and export credentials — never
+2. Optionally prefetch the locked SDK into the resources server's own venv
+   (startup also syncs the selected extra), and export credentials — never
    commit them:
    ```bash
-   uv pip install --python resources_servers/interactive_browser/.venv/bin/python "lexmount>=0.5.13"
+   uv sync --locked --project resources_servers/interactive_browser --extra lexmount
    export LEXMOUNT_API_KEY=<your-api-key>
    export LEXMOUNT_PROJECT_ID=<your-project-id>
    export LEXMOUNT_BASE_URL=https://api.lexmount.com   # API base shown in your dashboard

@@ -17,13 +17,16 @@ iheval_benchmark_simple_agent:
         # Rows already carry a fully-built responses_create_params.input, so no
         # prompt template is applied. The key is required by BenchmarkDatasetConfig
         # (Optional[Path] = value may be null, but the key must be present); null
-        # keeps the pre-built input untouched (see train_data_utils collate path).
+        # keeps the pre-built input untouched (see the collate path in nemo_gym/data/dataset_preparation.py).
         prompt_config: null
         license: Apache 2.0
 
 iheval_benchmark_environment_server:
   _inherit_from: iheval_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: iheval
       agent_server:
         name: iheval_benchmark_simple_agent

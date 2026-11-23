@@ -30,8 +30,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
+import anyio
 import yaml
 
+from nemo_gym.data.tasks.harbor.digest import is_ignored
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.compose_fields import (
     ComposeFieldError,
@@ -40,6 +42,7 @@ from nemo_gym.sandbox.compose_fields import (
     service_resources,
 )
 from nemo_gym.sandbox.compose_volumes import LOGS_TREE, first_link, lexical_target
+from nemo_gym.sandbox.observability import span_attributes
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
     COMPOSE_SERVICE_OPTION_FIELDS,
@@ -51,7 +54,9 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxServiceOptions,
     SupportsSandboxSharedStorage,
 )
-from nemo_gym.tasks.harbor.digest import is_ignored
+from nemo_gym.sandbox.resource_telemetry import record_request
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 LOGGER = logging.getLogger(__name__)
@@ -77,6 +82,12 @@ def _merge_provider_options(*layers: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 merged[key] = list(value) if isinstance(value, tuple) else value
     return merged
+
+
+# Every sandbox of one Compose project carries this label with a shared placement group. Members
+# reach each other by pod IP and share storage, so a multi-cell front end (cell-router)
+# must place them together; it routes every create with the same value to one cell.
+PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
 
 
 def _seconds(value: str | int | float) -> float:
@@ -114,9 +125,13 @@ class AsyncSandboxCompose:
     its shared storage; ``service_volume_sources`` gives a service on its own provider that provider's
     mapping, which its volumes resolve through instead. ``service_setup`` names, per service, a coroutine
     function the group awaits with that service's sandbox once it is created and its runtime is configured,
-    before its uploads, its command, its hooks and its healthcheck: the caller's own image setup (the Harbor
-    server runs an overlay Dockerfile's ``RUN`` lines there, so they precede the mounts and the command, as
-    a build precedes ``compose up``). An exception from it fails the start and stops the group.
+    before its log links, uploads, command, hooks and healthcheck. Named/external volumes are already mounted
+    when the sandbox is created, so setup (including Harbor's overlay Dockerfile ``RUN`` lines) can write to
+    shared storage. For a service with setup, its working directory is applied afterwards:
+    setup may create that directory under a different user. An exception fails the start and stops the group.
+
+    ``placement_group`` keeps related collections and external helpers on the same router cell. It defaults
+    to this collection's unique project; sharing placement does not share managed volumes or cleanup ownership.
     """
 
     def __init__(
@@ -134,6 +149,7 @@ class AsyncSandboxCompose:
         upload_root: str | Path | None = None,
         service_volume_sources: Mapping[str, Mapping[str, str]] | None = None,
         service_setup: Mapping[str, Callable[[AsyncSandbox], Awaitable[None]]] | None = None,
+        placement_group: str | None = None,
     ):
         self.provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self.service_providers = {
@@ -157,6 +173,10 @@ class AsyncSandboxCompose:
         self.service_setup = dict(service_setup or {})
         self.upload_root = Path(upload_root).resolve() if upload_root is not None else None
         self.project = "compose-" + uuid.uuid4().hex
+        # Placement can span collections, while storage and cleanup stay project-owned.
+        self.placement_group = self.project if placement_group is None else placement_group
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?", self.placement_group):
+            raise ValueError("placement_group must be a valid Kubernetes label value of 1-63 characters")
         self.services: dict[str, AsyncSandbox] = {}
         self._plans: dict[str, dict[str, Any]] = {}
         self._runtime_metadata: dict[str, dict[str, str]] = {}
@@ -201,7 +221,7 @@ class AsyncSandboxCompose:
             if not isinstance(service, Mapping):
                 raise ValueError(f"Service {name!r} requires a mapping")
         try:
-            # The one field check, shared with prepare (``nemo_gym.tasks.harbor.image_configs``), which reports a
+            # The one field check, shared with prepare (``nemo_gym.data.tasks.harbor.image_configs``), which reports a
             # refused field per task before any sandbox exists; here it is the last line before provisioning. A key
             # the group does not start is refused first, then every M28 field takes its normalized shape, so the
             # checks below read one form each.
@@ -519,6 +539,7 @@ class AsyncSandboxCompose:
                         **spec.metadata,
                         **(service.get("labels") or {}),
                         **self._runtime_metadata.get(name, {}),
+                        PLACEMENT_GROUP_KEY: self.placement_group,
                     },
                     provider_options=_merge_provider_options(
                         spec.provider_options, self._service_options.get(name, {})
@@ -557,7 +578,7 @@ class AsyncSandboxCompose:
                     image=self.volume_init_image,
                     ttl_s=self.timeout_s + 3600,
                     entrypoint=["sh", "-c", "while :; do sleep 3600; done"],
-                    metadata=provider.shared_volume_metadata(),
+                    metadata={**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.placement_group},
                     provider_options=provider.shared_volume_options(None, root),
                 ),
                 owns_provider=False,
@@ -575,7 +596,7 @@ class AsyncSandboxCompose:
             # shared storage, the copy-up seed (a sandbox of the service's own spec) and the mount options.
             provider = self._provider_for(name)
             volume_sources = self._volume_sources_for(name)
-            metadata = provider.shared_volume_metadata()
+            metadata = {**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.placement_group}
             helper = await self._volume_helper_for(provider, root)
             mounts = []
             for volume in service["volumes"]:
@@ -595,6 +616,8 @@ class AsyncSandboxCompose:
                         service_options = self._plans[name]["spec"].provider_options
                         seed_spec = replace(
                             self._plans[name]["spec"],
+                            # Copy-up reads the base image before setup creates the service's final WORKDIR.
+                            workdir=None if name in self.service_setup else self._plans[name]["spec"].workdir,
                             metadata=metadata,
                             provider_options=_merge_provider_options(
                                 {key: value for key, value in service_options.items() if key != "volumes"},
@@ -611,6 +634,7 @@ class AsyncSandboxCompose:
                                 f"elif test -d {target}; then cp -a {target}/. {root}/; "
                                 f"elif test -e {target}; then exit 1; fi",
                                 user="root",
+                                cwd="/",  # The service's working directory may not exist in the seed image.
                                 timeout_s=300,
                             )
                             if result.return_code:
@@ -716,7 +740,7 @@ class AsyncSandboxCompose:
         included (a program that expects the output or cache folder the task supplies finds it, as under
         a bind mount), over whatever the image already has there (a merge, where a bind mount would hide
         the image's folder). The names the task digest skips (``__pycache__``, ``*.pyc``, editor leftovers:
-        :func:`nemo_gym.tasks.harbor.digest.is_ignored`) are left out, so what reaches the service is what
+        :func:`nemo_gym.data.tasks.harbor.digest.is_ignored`) are left out, so what reaches the service is what
         the digest covers, and a link inside the folder is refused, naming it, rather than read through.
         """
         sandbox = self.services[name]
@@ -934,13 +958,30 @@ class AsyncSandboxCompose:
                 self.document = self._load()
                 order = self._validate()
                 await self._prepare()
+                resource_requests = {}
+                if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                    for name in order:
+                        resource_requests[name] = record_request(
+                            self._plans[name]["spec"],
+                            {
+                                **span_attributes(),
+                                "nemo.gym.sandbox.provider": self._provider_for(name).name,
+                                "nemo.gym.sandbox.service": name,
+                                "nemo.gym.sandbox.collection": self.project,
+                            },
+                        )
                 if any(service.get("volumes") for service in self.document["services"].values()):
                     await self._prepare_volumes()
                 for name in order:
                     provider = self._provider_for(name)
-                    self.services[name] = AsyncSandbox(provider, self._plans[name]["spec"], owns_provider=False)
-                    await self.services[name].start()
-                    await self._create_workdir(name)
+                    spec = self._plans[name]["spec"]
+                    # Image setup owns directory creation, including its permissions. Do not let the provider
+                    # or our bootstrap create the final WORKDIR as root before a Dockerfile's RUN lines.
+                    creation_spec = replace(spec, workdir=None) if name in self.service_setup else spec
+                    self.services[name] = AsyncSandbox(provider, creation_spec, owns_provider=False)
+                    await self.services[name].start(span_attributes=resource_requests.get(name))
+                    if name not in self.service_setup:
+                        await self._create_workdir(name)
                     service = self.document["services"][name]
                     if service.get("cap_add") or service.get("shm_size") is not None:
                         await provider.configure_runtime(
@@ -953,6 +994,8 @@ class AsyncSandboxCompose:
                     # into the mounted container), then, below, the command, hooks and healthcheck.
                     if name in self.service_setup:
                         await self.service_setup[name](self.services[name])
+                        await self._create_workdir(name)
+                        self.services[name].set_default_workdir(spec.workdir)
                     if (service.get("x-sandbox") or {}).get("logs"):
                         await self._prepare_logs(name)
                     if (service.get("x-sandbox") or {}).get("uploads"):
@@ -1097,16 +1140,24 @@ class AsyncSandboxCompose:
         collection._started = collection._ready = True
         return collection
 
-    async def stop(self):
+    async def stop(self, *, timeout_s: float | None = None) -> None:
+        """Stop every sandbox of the group, shielded like :meth:`AsyncSandbox.stop`.
+
+        Each member's stop is bounded by its own ``STOP_TIMEOUT_S``, and members stop one after another, so the
+        group has no limit of its own unless ``timeout_s`` sets one. The stop runs as its own task, so neither a
+        cancelled caller nor ``timeout_s`` cuts it short: a caller that gives up leaves it running, and the next
+        ``stop`` waits for that same task instead of starting another. A stop that failed is started again.
+
+        Raises:
+            TimeoutError: The stop did not finish within ``timeout_s``.
+        """
         if self._closed:
             return
         if self._stop_task is None or self._stop_task.done():
             self._stop_task = asyncio.create_task(self._stop())
-        try:
+            self._stop_task.add_done_callback(_log_unawaited_stop_failure)
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
             await asyncio.shield(self._stop_task)
-        except asyncio.CancelledError:
-            await self._stop_task
-            raise
 
     async def _stop(self):
         for process in self._processes.values():
@@ -1146,3 +1197,9 @@ class AsyncSandboxCompose:
 
     async def __aexit__(self, *exc):
         await self.stop()
+
+
+def _log_unawaited_stop_failure(task: asyncio.Task) -> None:
+    """Retrieve a group stop's failure, which a caller that gave up on the stop never awaits; the next stop retries."""
+    if not task.cancelled() and (error := task.exception()) is not None:
+        LOGGER.warning("Compose group stop failed; the next stop retries it: %r", error)

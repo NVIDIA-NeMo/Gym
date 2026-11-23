@@ -9,7 +9,7 @@ import pytest
 from benchmarks.gdpval import prepare as prepare_module
 from benchmarks.gdpval import prepare_harness_neutral
 from benchmarks.gdpval.prepare import reference_files_str
-from nemo_gym.prompt import fill_prompt, load_prompt_config
+from nemo_gym.data import fill_prompt, load_prompt_config
 
 
 _BENCHMARK = Path(__file__).resolve().parents[3] / "benchmarks" / "gdpval"
@@ -105,7 +105,7 @@ def test_prepare_defaults_the_fields_a_task_lacks(prepared):
     }
 
 
-@pytest.mark.parametrize("prompt_file", ["default-stirrup.yaml", "harness-neutral.yaml"])
+@pytest.mark.parametrize("prompt_file", ["default-stirrup.yaml", "harness-neutral.yaml", "nooa.yaml"])
 def test_every_benchmark_prompt_renders_a_prepared_record(prepared, prompt_file):
     config = load_prompt_config(str(_BENCHMARK / "prompts" / prompt_file))
 

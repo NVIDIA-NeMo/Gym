@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import shlex
 import shutil
 import sys
@@ -10,12 +11,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
 
-from nemo_gym.agent_utils.supervisor_client import DEFAULT_CLEANUP_TIMEOUT
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import DEFAULT_CLEANUP_TIMEOUT
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from responses_api_agents.hermes_sandboxed_agent import app
 from responses_api_agents.hermes_sandboxed_agent.app import (
     MAX_OUTPUT_BYTES,
     HermesSandboxedAgent,
@@ -42,6 +46,21 @@ def agent(tmp_path):
         ),
         server_client=MagicMock(spec=ServerClient),
     )
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_only_the_main_process_logs_the_deprecation_once(agent, caplog, monkeypatch, worker):
+    """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+    app._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            HermesSandboxedAgent(config=agent.config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == app.__name__]
+    assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
+    for phrase in ("hermes_sandboxed_agent", "legacy /run", "Use hermes_agent", "hermes_agent/README.md"):
+        assert phrase in app.DEPRECATION_WARNING
 
 
 def test_input_preserves_system_and_history():
@@ -130,6 +149,9 @@ def test_trajectory_contains_actual_reasoning_tools_and_usage():
     assert response.usage.total_tokens == 120
     assert response.usage.input_tokens_details.cached_tokens == 10
     assert response.status == "completed"
+    del result["usage"]["cached_tokens"]
+    unknown = trajectory_response(result, NeMoGymResponseCreateParamsNonStreaming(input="problem"), "real-model")
+    assert unknown.usage.input_tokens_details.cached_tokens is None
 
 
 @pytest.mark.parametrize(
@@ -347,8 +369,11 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
     if failed_endpoint == "/cleanup_timeout":
         agent.config.cleanup_timeout = 0.01
 
-        async def hung_stop():
-            await asyncio.Event().wait()
+        async def hung_stop(*, timeout_s: float | None = None):
+            # A hung provider: the sandbox's own stop gives up after timeout_s. Without a limit the hang still ends,
+            # so a caller that passes none fails this test instead of hanging it.
+            with anyio.fail_after(timeout_s if timeout_s is not None else 1):
+                await asyncio.Event().wait()
 
         sandbox.stop.side_effect = hung_stop
     connected = AsyncMock(return_value=sandbox)
@@ -375,14 +400,14 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
         ),
     )
     if failed_endpoint == "/verify":
-        result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
+        result = await asyncio.wait_for(agent.run(SimpleNamespace(cookies={"original": "cookie"}), body), timeout=5)
         wire = result.model_dump(mode="json")
         assert wire["_ng_failure_class"] == "agent_run_error"
         assert "verify unavailable" in wire["_ng_failure_message"]
         assert "reward" not in wire and "response" not in wire
         assert result.hermes_result_path == "artifact"
     else:
-        result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
+        result = await asyncio.wait_for(agent.run(SimpleNamespace(cookies={"original": "cookie"}), body), timeout=5)
         assert result.verifier_reward == verifier_reward
         wire = result.model_dump(mode="json")
         if failure:
@@ -399,6 +424,9 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
     connected.assert_awaited_once_with({"sandbox_id": "box"}, provider=provider)
     provider.aclose.assert_awaited_once()
     assert sandbox.stop.await_count == (1 if failed_endpoint in ("/close_session", "/cleanup_timeout") else 0)
+    if sandbox.stop.await_count:
+        # The fallback stop is bounded by the cleanup limit, not only by the sandbox's own default.
+        sandbox.stop.assert_awaited_once_with(timeout_s=agent.config.cleanup_timeout)
 
 
 @pytest.mark.asyncio

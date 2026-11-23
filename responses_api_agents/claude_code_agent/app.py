@@ -27,27 +27,34 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, field_validator
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
+    restrict_sandbox_network,
+    stage_skills,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
+from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -57,27 +64,56 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import (
+    await_model_call_capture_quiescence,
+    model_call_capture_dirs_from_config,
+    read_available_model_call_records,
+)
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
-from nemo_gym.skills import stage_skills
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.claude_code_agent.observability import (
+    ClaudeCodeTranscripts,
+    associate_claude_code_compaction_calls,
+    captured_claude_code_usage,
+    extract_claude_code_observations,
+    read_transcripts,
+)
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
 from responses_api_agents.claude_code_agent.sandbox import (
     ClaudeCodeSandboxSession,
     parse_artifact_observations,
+    read_artifact_transcripts,
 )
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
+from responses_api_agents.claude_code_agent.system_dependencies import system_dependencies_command
 
 
 LOG = logging.getLogger(__name__)
+# Environment the agent sets itself; extra_env may not replace it.
+_MANAGED_ENV = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        "CLAUDE_CONFIG_DIR",
+    }
+)
 # Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash.
 _BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
     [ "$(id -u)" = 0 ] || { echo "Claude Code sandbox sessions require bash: preinstall it or use a root image." >&2; exit 1; }
@@ -91,6 +127,12 @@ _BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
     fi
 fi
 """
+
+
+# A headless run ends when the CLI exits, and the CLI first waits for every background task. A Bash command the model
+# moves to the background (`run_in_background`) can therefore hold the run open long after the final answer, up to
+# the agent timeout. Keep commands in the foreground, where the Bash tool's own timeout bounds them.
+_HEADLESS_RUN_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -108,24 +150,76 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     allowed_tools: Optional[str] = None
     disallowed_tools: Optional[str] = None
+    tools: Optional[str] = None
+    session_name: Optional[str] = None
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
+    # Whether assistant thinking is folded into message text as ``<think>...</think>``. None keeps the default:
+    # folded unless training-token capture is enabled. False emits thinking as separate ``reasoning`` items, so
+    # the final message holds only the answer (e.g. for answer-only grading). Capture requires unfolded output.
+    fold_thinking: Optional[bool] = None
     # Runtime capability knobs. The default (bare=True, no mcp_config/settings) reproduces the original
     # isolated behavior: Claude Code skips hooks, LSP, plugin sync, attribution, auto-memory, background
     # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
     bare: bool = True
     mcp_config: Optional[str] = None
-    settings: Optional[str] = None
+    settings: str | dict[str, Any] | None = None
 
     # Used only when an episode does not supply a borrowed SandboxAccess.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Claude creates: `model_only` allows only the model endpoint's host. Claude uses no "
+            "tool grants, so `model_and_tools` is rejected. A borrowed task sandbox keeps its owner's network, so a "
+            "session that borrows one rejects any other value than `inherit`."
+        ),
+    )
     sandbox_executable_path: str | None = None
     sandbox_local_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Sandbox sessions: pass the instruction on the CLI's stdin, as Harbor 0.24's claude-code agent pipes
+    # it, instead of as an argument. It then never appears on a command line that an agent's
+    # `pkill -f <word from its task>` could match.
+    instruction_on_stdin: bool = False
+    # Sandbox sessions: accept a task workdir of "/" (images without a WORKDIR). The runtime and session
+    # files then sit under /tmp inside it, as a harness's own files do there.
+    allow_root_workdir: bool = False
+    # Sandbox sessions: run Harbor 0.24's system-dependency step for its claude-code agent (curl, bash,
+    # nodejs, npm and procps, installed when missing) before installing Claude Code. As in Harbor, a failed
+    # install (a nonzero package-manager exit) fails session setup, so the episode is retried, never graded.
+    harbor_system_dependencies: bool = False
+    system_dependencies_timeout_seconds: float = Field(default=1800, gt=0, allow_inf_nan=False)
+    # Claude Code's --effort (low, medium, high, xhigh or max), as Harbor passes its reasoning effort.
+    reasoning_effort: Optional[str] = None
+    # The per-call output cap, as CLAUDE_CODE_MAX_OUTPUT_TOKENS; None keeps the CLI's own default.
+    max_output_tokens: Optional[int] = Field(default=None, gt=0)
+    # Further Claude Code client environment, e.g. {API_TIMEOUT_MS: "3600000"}. The variables the agent
+    # sets itself (endpoint, credentials, model, CLAUDE_CONFIG_DIR, the output cap) are rejected.
+    extra_env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("extra_env", mode="before")
+    @classmethod
+    def _stringify_numbers(cls, value: Any) -> Any:
+        # YAML and Hydra overrides turn API_TIMEOUT_MS=3600000 into an int.
+        if isinstance(value, Mapping):
+            return {
+                key: str(item) if isinstance(item, int) and not isinstance(item, bool) else item
+                for key, item in value.items()
+            }
+        return value
+
+    @field_validator("extra_env")
+    @classmethod
+    def _reject_managed_env(cls, value: dict[str, str]) -> dict[str, str]:
+        managed = sorted(_MANAGED_ENV & value.keys())
+        if managed:
+            raise ValueError(f"extra_env cannot set {', '.join(managed)}; use the agent's own settings")
+        return value
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -143,6 +237,8 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     config: ClaudeCodeAgentConfig
+    # Sandbox sessions run the CLI inside the sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)
@@ -195,11 +291,20 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         return base_url
 
+    def _fold_thinking(self) -> bool:
+        """Fold thinking into message text unless capture is on or the config turns folding off."""
+        capture = self._token_id_capture_enabled()
+        if self.config.fold_thinking is None:
+            return not capture
+        if self.config.fold_thinking and capture:
+            raise ValueError("fold_thinking=True is incompatible with training-token capture")
+        return self.config.fold_thinking
+
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
 
-        The base settings disable telemetry/attribution. When ``config.settings`` points at a
-        JSON file, its contents are layered on top: top-level keys override, and the ``env`` block
+        The base settings disable telemetry/attribution. ``config.settings`` accepts a JSON file
+        path or an inline mapping: top-level keys override, and the ``env`` block
         is shallow-merged so the telemetry defaults are preserved unless explicitly overridden.
         """
         settings: dict[str, Any] = {
@@ -210,7 +315,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             }
         }
         if self.config.settings:
-            user_settings = json.loads(Path(self.config.settings).expanduser().read_text())
+            user_settings = self.config.settings
+            if isinstance(user_settings, str):
+                user_settings = json.loads(Path(user_settings).expanduser().read_text())
             user_env = user_settings.get("env") or {}
             settings = {**settings, **user_settings, "env": {**settings["env"], **user_env}}
         return settings
@@ -240,7 +347,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def _build_command(
         self,
         model: str,
-        instruction: str,
+        instruction: Optional[str],
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_active: bool = False,
@@ -272,6 +379,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if self.config.bare and not skills_active:
             cmd.append("--bare")
         cmd += ["--model", model]
+        if self.config.reasoning_effort:
+            cmd += ["--effort", self.config.reasoning_effort]
         effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
         if effective_mcp_config:
             cmd += ["--mcp-config", effective_mcp_config]
@@ -281,14 +390,27 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--allowedTools", self.config.allowed_tools]
         if self.config.disallowed_tools:
             cmd += ["--disallowedTools", self.config.disallowed_tools]
+        if self.config.tools is not None:
+            cmd += ["--tools", self.config.tools]
+        if self.config.session_name:
+            cmd += ["--name", self.config.session_name]
         if self.config.thinking:
             cmd += ["--thinking", self.config.thinking]
         if self.config.max_thinking_tokens is not None:
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
         if self.config.max_turns is not None:
             cmd += ["--max-turns", str(self.config.max_turns)]
-        cmd += ["--", instruction]
+        # Without an instruction argument, `claude -p` reads the instruction from stdin.
+        if instruction is not None:
+            cmd += ["--", instruction]
         return cmd
+
+    def _client_env(self) -> dict[str, str]:
+        """Client settings shared by local and sandbox launches: extra_env and the output cap."""
+        env = dict(self.config.extra_env)
+        if self.config.max_output_tokens is not None:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(self.config.max_output_tokens)
+        return env
 
     async def _run_claude_code(
         self,
@@ -297,7 +419,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-        observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
+        observation_collector: Optional[Callable[[ClaudeCodeTranscripts, dict[str, Any]], None]] = None,
     ) -> tuple[list[Any], str, dict[str, Any]]:
         """Run Claude Code and return parsed output, model name, and run metadata.
 
@@ -311,6 +433,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         api_key = self.config.anthropic_api_key
 
         claude_config_dir = None
+        # Read once the CLI has ended, for its token usage and its observations.
+        transcripts: Optional[ClaudeCodeTranscripts] = None
         run_metadata: dict[str, Any] = {"status": "unknown"}
         try:
             # Inside the try so a bad skills.path (raising in stage_skills) still cleans up the
@@ -325,7 +449,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
+                **self._client_env(),
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
+                **_HEADLESS_RUN_ENV,
             }
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
@@ -358,9 +484,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         proc.kill()
                 stdout, _ = await communication
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
+                transcripts = await asyncio.to_thread(read_transcripts, claude_config_dir)
                 # Keep the actual partial work so capture can corroborate the terminal call.
                 output_items, run_metadata = parse_stream_json(
-                    stdout.decode(errors="replace"), fold_thinking=not self._token_id_capture_enabled()
+                    stdout.decode(errors="replace"),
+                    fold_thinking=self._fold_thinking(),
+                    transcript_records=transcripts.usage_records,
                 )
                 run_metadata.update(
                     status="incomplete",
@@ -380,8 +509,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
+            transcripts = await asyncio.to_thread(read_transcripts, claude_config_dir)
             output_items, run_metadata = parse_stream_json(
-                stdout_text, fold_thinking=not self._token_id_capture_enabled()
+                stdout_text,
+                fold_thinking=self._fold_thinking(),
+                transcript_records=transcripts.usage_records,
             )
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
@@ -393,7 +525,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             if claude_config_dir is not None:
                 try:
                     if observation_collector is not None:
-                        await asyncio.to_thread(observation_collector, claude_config_dir, run_metadata)
+                        if transcripts is None:
+                            transcripts = await asyncio.to_thread(read_transcripts, claude_config_dir)
+                        await asyncio.to_thread(observation_collector, transcripts, run_metadata)
                 except Exception:
                     LOG.exception("failed to collect Claude Code observations")
                 finally:
@@ -465,7 +599,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         mcp_config: Optional[str] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-        observation_collector: Optional[Callable[[Path, dict[str, Any]], None]] = None,
+        observation_collector: Optional[Callable[[ClaudeCodeTranscripts, dict[str, Any]], None]] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -522,6 +656,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
 
         input_tokens = run_metadata.get("input_tokens", 0)
+        # None when no cache count was reported; Anthropic reports no separate reasoning-token count.
+        cached_tokens = run_metadata.get("cached_tokens")
         output_tokens = run_metadata.get("output_tokens", 0)
 
         # Under capture, name the response by the last served id so terminal attribution can match it directly.
@@ -543,9 +679,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
                 total_tokens=input_tokens + output_tokens,
             ),
         )
@@ -567,16 +703,23 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "A supplied Claude binary requires sandbox_executable_sha256")
         access = body.sandbox_access
         owns_sandbox = access is None
+        if self.config.network_access == "model_and_tools":
+            raise AgentSeedRejectedError("Claude uses no tool grants; set network_access to model_only or inherit")
+        if not owns_sandbox and self.config.network_access != "inherit":
+            raise AgentSeedRejectedError(
+                "Claude network_access applies only to a sandbox it creates, not a borrowed one"
+            )
         if owns_sandbox and not self.config.sandbox_provider:
             raise HTTPException(422, "Claude requires sandbox_access or a configured sandbox_provider")
         spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config}) if owns_sandbox else None
         workdir = access.workdir if access else spec.workdir
         path = PurePosixPath(workdir or "")
+        root_workdir = self.config.allow_root_workdir and path == PurePosixPath("/")
         if (
             not path.is_absolute()
             or ".." in path.parts
             or "\x00" in workdir
-            or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or (path in (PurePosixPath("/"), PurePosixPath("/tmp")) and not root_workdir)
             or str(path).startswith(("/tmp/nemo-gym-claude-sessions", "/tmp/nemo-gym-claude-runtime-"))
         ):
             raise HTTPException(
@@ -587,6 +730,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         provider_ref = access.connection.provider_config_ref if access else self.config.sandbox_provider
         provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    # With neither a Gym model server nor anthropic_base_url, the CLI calls Anthropic's own API.
+                    # Only the allowlist needs that host; activation still leaves ANTHROPIC_BASE_URL unset.
+                    model_base_url=self._resolve_base_url() or "https://api.anthropic.com",
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -608,11 +763,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+            dependencies = self.config.harbor_system_dependencies
+            setup_limit = self.config.sandbox_install_timeout_seconds + (
+                self.config.system_dependencies_timeout_seconds if dependencies else 0
+            )
+            async with asyncio.timeout(setup_limit):
                 if owns_sandbox:
                     await sandbox.start(spec)
                     result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
                     self._check_sandbox_setup(result)
+                if dependencies:
+                    # Before anything else, as Harbor's install() runs it before installing Claude Code.
+                    await self._run_system_dependencies(sandbox)
                 result = await sandbox.exec(
                     _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
                     cwd="/",
@@ -632,6 +794,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     local_source=self.config.sandbox_local_executable_path,
                     expected=self.config.sandbox_executable_sha256,
                 )
+            state.sandbox_id = sandbox.sandbox_id
             return state
         except BaseException as error:
             try:
@@ -639,6 +802,22 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
             raise
+
+    async def _run_system_dependencies(self, sandbox: AsyncSandbox) -> str:
+        """Harbor's ensure_system_dependencies for Claude Code, as the sandbox's default user (root for
+        Terminal-Bench task sandboxes). Harbor errors the trial when the install fails; here a failed install
+        fails session setup, so the task never runs without the tools Harbor guarantees."""
+        started = monotonic()
+        result = await sandbox.exec(
+            system_dependencies_command(), timeout_s=self.config.system_dependencies_timeout_seconds
+        )
+        log = (result.stdout or "") + (result.stderr or "")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(
+                f"Harbor's system dependency step failed (exit={result.return_code}, error={result.error_type}) "
+                f"after {monotonic() - started:.0f}s: {log[-16000:]}"
+            )
+        return log
 
     @staticmethod
     def _check_sandbox_setup(result: SandboxExecResult) -> None:
@@ -712,12 +891,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
             "DISABLE_AUTOUPDATER": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            **_HEADLESS_RUN_ENV,
         }
         if base_url:
             env.update(
                 ANTHROPIC_BASE_URL=base_url,
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
+        env.update(self._client_env())
         artifacts = None
         failure = None
         try:
@@ -725,8 +906,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             async with self.sem:
                 mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
                 skills_path = self._configured_skills_path()
+                stdin = self.config.instruction_on_stdin
                 command = self._build_command(
-                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                    model, None if stdin else prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
                 )
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
@@ -737,6 +919,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "settings": self._build_settings(),
                         "mcp_config": self._get_static_mcp_config() if mcp_config else None,
                         "skills_path": skills_path,
+                        **({"prompt": prompt} if stdin else {}),
                     },
                     timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
                     close_timeout=self.config.session_close_timeout_seconds,
@@ -745,11 +928,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             failure = error
             artifacts = state.session.artifacts
         items, run_metadata = ([], {})
+        transcripts = None
         if artifacts is not None:
+            # Read once, for the token usage and the observations.
+            transcripts = await asyncio.to_thread(read_artifact_transcripts, artifacts)
             items, run_metadata = await asyncio.to_thread(
                 parse_stream_json,
                 artifacts.events,
-                fold_thinking=not self._token_id_capture_enabled(),
+                fold_thinking=self._fold_thinking(),
+                transcript_records=transcripts.usage_records if transcripts is not None else None,
             )
         cleanup = state.session.cleanup
         if cleanup and cleanup["timed_out"]:
@@ -763,7 +950,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if artifacts is not None:
             state.observations = await asyncio.to_thread(
                 parse_artifact_observations,
-                artifacts,
+                transcripts,
                 model_ref=self.config.model_server,
                 status=status,
                 error_type=reason,
@@ -773,6 +960,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
+        response = self._response_from_output(body, items, model, run_metadata, status=status)
+        state.observations = await self._reconcile_captured_calls(
+            state.observations, rollout_id=state.request.episode_id.capture_key, response=response
+        )
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup:
@@ -780,6 +971,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations.records.append(
                 SandboxObservation(
                     role="agent",
+                    sandbox_id=state.sandbox_id,
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
                     outcome=(
                         "timeout"
@@ -796,7 +988,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if failure is not None:
             raise failure
-        return self._response_from_output(body, items, model, run_metadata, status=status)
+        return response
 
     async def responses(
         self,
@@ -808,9 +1000,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(session_id)
             assert isinstance(state, ClaudeCodeSandboxSession)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-                raise HTTPException(409, "Claude activation does not match the seeded session and rollout")
+                raise AgentSessionConflictError("Claude activation does not match the seeded session and rollout")
             if state.session.closing:
-                raise HTTPException(409, "Claude session is closing")
+                raise AgentSessionConflictError("Claude session is closing")
             self._validate_sandbox_request(body)
             prompt, system = self._conversation_input(body)
             if state.task is None:
@@ -819,9 +1011,40 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     self._sandbox_response(state, state.activation_request, prompt=prompt, system=system)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "Claude sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "Claude sandbox sessions support one activation; retry the same request"
+                )
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
+
+    async def _reconcile_captured_calls(
+        self, observations: AgentObservationBundle, *, rollout_id: str | None, response: NeMoGymResponse | None = None
+    ) -> AgentObservationBundle:
+        """Resolve hidden helpers and reconcile usage against the invocation's captured calls."""
+        if rollout_id is None or self.config.model_server is None:
+            return observations
+        try:
+            capture_dirs = model_call_capture_dirs_from_config(self.server_client.global_config_dict)
+            if not capture_dirs:
+                return observations
+            await await_model_call_capture_quiescence(rollout_id, capture_dirs)
+            # The agent host reads the run's shared capture; the sandbox needs no access.
+            calls, _ = await asyncio.to_thread(
+                read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
+            )
+            calls = [call for call in calls if call.model_ref == self.config.model_server]
+            observations = associate_claude_code_compaction_calls(observations, calls)
+            if response is not None:
+                usage = captured_claude_code_usage(observations, calls)
+                if usage is not None:
+                    response.usage = usage
+                else:
+                    observations.gaps.append(ObservationGap(code="model_usage_reconciliation_unavailable"))
+            return observations
+        except Exception:
+            LOG.warning("Could not associate Claude Code compaction calls for rollout %s.", rollout_id, exc_info=True)
+            observations.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
+            return observations
 
     async def _create_episode(
         self,
@@ -833,11 +1056,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     ) -> AgentEpisode:
         observations: Optional[AgentObservationBundle] = None
 
-        def collect(config_dir: Path, run_metadata: dict[str, Any]) -> None:
+        def collect(transcripts: ClaudeCodeTranscripts, run_metadata: dict[str, Any]) -> None:
             nonlocal observations
             try:
                 observations = extract_claude_code_observations(
-                    config_dir,
+                    transcripts=transcripts,
                     model_ref=self.config.model_server,
                     root_status=run_metadata["status"],
                     root_duration_ms=run_metadata.get("duration_ms"),
@@ -865,12 +1088,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
+        observations = await self._reconcile_captured_calls(observations, rollout_id=rollout_id, response=response)
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Claude Code sandbox sessions must use EnvironmentServer /run")
+            raise AgentSessionConflictError("Claude Code sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(422, "Local Claude Code /run requires resources_server")
         async with self.sem:
@@ -938,3 +1162,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ClaudeCodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ClaudeCodeAgent.run_webserver()  # noqa: F401

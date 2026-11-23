@@ -26,13 +26,16 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializationInfo,
+    SerializerFunctionWrapHandler,
     Tag,
     ValidationInfo,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
+from nemo_gym.config.secret_utils import MASKED_VALUE, mask_url_passwords
 from nemo_gym.orchestration.executors.script_templates import bash_var
 
 
@@ -388,6 +391,17 @@ class SlurmComputeConfig(BaseComputeConfig):
     walltime: str | None = None
     node_pools: dict[str, NodePool] = {}
     extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
+    # Snapshot every node's Lustre metadata request counters at each phase of a benchmark's job into
+    # `<benchmark dir>/logs/lustre-md-stats-<slurm job id>.tsv`; `gym eval lustre-stats` reads it.
+    lustre_md_stats: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_lustre_md_stats(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Off, the saved config is the one a launcher without the field writes and can read back.
+        data = handler(self)
+        if not self.lustre_md_stats:
+            data.pop("lustre_md_stats", None)
+        return data
 
 
 class KubernetesComputeConfig(BaseComputeConfig):
@@ -421,13 +435,41 @@ ComputeConfig = Annotated[
 
 
 class ResumeConfig(_StrictModel):
-    # Non-timeout failures (job script bugs, OOM, etc.) are resubmitted at most this many
-    # times, so a broken benchmark doesn't requeue forever.
-    max_retries: int = 3
+    # Infrastructure retries the chain admits, at most this many: preemption, node failure and boot failure, or a
+    # retry the saved evidence names after another stop. A generic FAILED, an out-of-memory kill or a deadline stops
+    # the chain instead.
+    # Scheduler TIMEOUT continues planned segments within max_walltime; it is not a model timeout.
+    max_retries: int = Field(default=3, ge=0)
     # Optional cap on the chain's total accumulated walltime, as a Slurm-style
     # duration string (e.g. "48:00:00"). None means resume until max_retries is
-    # hit on a non-timeout failure, or the job completes/is cancelled.
+    # spent on infrastructure failures, or the job completes/is cancelled.
     max_walltime: str | None = None
+    # Partial overrides of the recovery outcome policy (RecoveryOutcomePolicyConfig): `by_failure_kind`,
+    # `by_status_code` and `default_action` choose which saved failures recovery retries, re-judges (verify) or
+    # fails. Entries it does not name keep their defaults. It is validated as the Python API validates it, at
+    # config load: registered failure kinds, status codes 400-599, and no `count_as_zero`. Recovery and the
+    # in-job continuation read it from the run's saved config. Precedence: an explicit Python `outcome_policy`
+    # argument to `recover()` / `inspect_recovery()` replaces it, and it replaces the defaults; the budget flags
+    # (`--extend-retries`, `--max-walltime`) are separate and unchanged. There is no CLI flag for it.
+    recovery_outcome_policy: dict[str, Any] | None = None
+
+    @field_validator("recovery_outcome_policy")
+    @classmethod
+    def _validate_recovery_outcome_policy(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            # Imported here: recovery imports the executors, which import this module.
+            from nemo_gym.eval.recovery.policy import configured_outcome_policy
+
+            configured_outcome_policy(value)
+        return value
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_recovery_outcome_policy(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A run without the section saves the same config, and the same resume_config accounting, as before it existed.
+        data = handler(self)
+        if self.recovery_outcome_policy is None:
+            data.pop("recovery_outcome_policy", None)
+        return data
 
 
 _COMMAND_AND_RUN = (
@@ -436,26 +478,69 @@ _COMMAND_AND_RUN = (
 )
 
 
+# `gym eval run` options for a task TARGET that exist only as command-line flags: a `run` key of that name is not
+# read, so a submitted target refuses it rather than run every task.
+_TARGET_FLAGS = frozenset({"only_tasks", "exclude_tasks", "skip_unloadable"})
+
+
 class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval prepare`. Flattened to +key=value tokens.
     prepare: dict[str, Any] = {}
     # Hydra overrides forwarded to `gym eval run`. policy_model wiring is injected here at
     # validation time so all executors see it uniformly via flatten_run_args.
     run: dict[str, Any] = {}
+    # A Harbor task TARGET (a task folder, a folder of task folders, or a `harbor:<dataset>` reference) with the
+    # harness (`agent`) and sandbox provider that run it. `gym eval run` receives them as its TARGET, `--agent` and
+    # `--sandbox`, ahead of the `run` overrides, which are `+key=value` tokens and can carry neither a positional
+    # argument nor a command-line flag. The run prepares the target itself; `prepare`, when set, still runs exactly
+    # as configured before it (for example a dataset adapter that writes the task folders the target names).
+    target: str | None = Field(default=None, min_length=1)
+    agent: str | None = Field(default=None, min_length=1)
+    sandbox: str | None = Field(default=None, min_length=1)
     # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
     # harness is not Gym's own runner -- one that provisions external machines and
     # drives Gym from there, for instance. `prepare` still runs first, and the
-    # driver exports NEMO_GYM_BENCH_DIR plus the policy's base URL, model name and
+    # driver exports NEMO_GYM_BENCH_DIR for both native and command benchmarks, using
+    # the bound run directory rather than the host working-directory alias. Command
+    # benchmarks additionally receive the policy's base URL, model name and
     # API key (when driver.policy_model is set) so the script can reach the served
     # model without repeating its address.
     command: str | None = None
+    # Post-run exports of this benchmark's rollouts, by exporter name (see `gym eval export`). Each value is that
+    # exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export.
+    export: dict[str, dict[str, Any] | None] = {}
 
     @model_validator(mode="after")
     def _validate_command(self, info: ValidationInfo) -> "BenchmarkRunConfig":
+        if self.command is not None and any(settings is not None for settings in self.export.values()):
+            raise ValueError(
+                "A benchmark sets both `command` and `export`, but an export reads the rollouts file `gym eval run` "
+                "writes, which `command` replaces. Drop `export`, or run through `gym eval run`."
+            )
         # A saved config holds the policy keys driver.policy_model wrote into a command's run at submit, which
         # the command reads as NEMO_GYM_POLICY_*. SubmitConfig checks a saved command, where the policy is known.
         if self.command is not None and self.run and not (info.context and info.context.get(SAVED_CONFIG)):
             raise ValueError(f"A benchmark {_COMMAND_AND_RUN}")
+        if self.target is None and (self.agent is not None or self.sandbox is not None):
+            raise ValueError(
+                "A benchmark sets `agent` or `sandbox` without a `target`; they apply to a task `target`."
+            )
+        if self.target is not None and self.agent is None:
+            raise ValueError(
+                "A benchmark sets a `target` without an `agent`; a task target needs a harness to run it."
+            )
+        if self.target is not None and (flags := sorted(_TARGET_FLAGS & set(self.run))):
+            # `gym eval run` reads these from its command line, not its config: under `run` they would be ignored.
+            raise ValueError(
+                f"A benchmark with a `target` sets {', '.join(f'`{flag}`' for flag in flags)} under `run`, where "
+                "`gym eval run` does not read them: it takes task selection and the unloadable waiver only as "
+                "command-line flags, which a submitted target does not pass."
+            )
+        if self.target is not None and self.command is not None:
+            raise ValueError(
+                "A benchmark sets both `command` and `target`, but a target runs through `gym eval run`, "
+                "which `command` replaces. Drop one."
+            )
         if self.command is not None and self.resume_config is not None:
             raise ValueError(
                 "A benchmark sets both `command` and `resumable`, but a resumed job only passes "
@@ -463,6 +548,15 @@ class BenchmarkRunConfig(_StrictModel):
                 "Drop `resumable`, or run through `gym eval run`."
             )
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_target(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A benchmark without a task target saves the same config as before the fields existed.
+        data = handler(self)
+        for key in ("target", "agent", "sandbox"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
     # True enables auto-resume with ResumeConfig defaults; pass a ResumeConfig to tune
     # max_retries/max_walltime. False (default) leaves fire-and-forget submission unchanged.
@@ -475,6 +569,25 @@ class BenchmarkRunConfig(_StrictModel):
         if self.resumable is False:
             return None
         return ResumeConfig() if self.resumable is True else self.resumable
+
+
+# A query parameter's value in a URL, which may carry a credential (`?api_key=...`).
+_URL_QUERY_VALUE = re.compile(r"(?P<name>[?&][^=&#\s]*=)[^&#\s]*")
+
+
+def _without_url_credentials(value: Any) -> Any:
+    """`value` with the user-info password and every query value of each URL in it masked, also inside a list."""
+    if isinstance(value, str):
+        return _URL_QUERY_VALUE.sub(rf"\g<name>{MASKED_VALUE}", mask_url_passwords(value))
+    if isinstance(value, (list, tuple)):
+        return [_without_url_credentials(item) for item in value]
+    return value
+
+
+def _shown_policy_value(key: str, value: Any) -> str:
+    """A policy run value as a conflict message shows it, with no credential: an API key is never printed, and a
+    URL keeps neither its password nor its query values."""
+    return "<redacted>" if key == "policy_api_key" else repr(_without_url_credentials(value))
 
 
 class GymInstallConfig(_StrictModel):
@@ -519,6 +632,9 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
 class JobConfig(_StrictModel):
     # Remote base directory. Each submit creates a timestamped subdirectory here.
     output_path: str
+    # Post-run exports every benchmark runs by default, by exporter name; a benchmark's own `export` override
+    # them. Benchmarks that run a `command` take none of them.
+    export: dict[str, dict[str, Any] | None] = {}
 
 
 class OtelConfig(_StrictModel):
@@ -743,20 +859,30 @@ class SubmitConfig(_StrictModel):
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     "policy_api_key": "dummy",  # pragma: allowlist secret
                 }
-                # A saved config holds the keys this block wrote at submit; only a value that differs conflicts.
+                # A config that went through this block once (a saved config, or a resolved one submitted again)
+                # holds the keys it wrote; a key with the value it would write again is accepted as it is, and only
+                # a value that differs conflicts.
                 for bench_name, benchmark in self.driver.benchmarks.items():
-                    conflicts = [
-                        k
-                        for k, v in policy_run.items()
-                        if k in benchmark.run and not (saved_config and benchmark.run[k] == v)
-                    ]
+                    conflicts = [k for k, v in policy_run.items() if k in benchmark.run and benchmark.run[k] != v]
                     if conflicts:
+                        differing = "; ".join(
+                            f"{k}={_shown_policy_value(k, benchmark.run[k])} in the run, "
+                            f"{_shown_policy_value(k, policy_run[k])} from driver.policy_model"
+                            for k in conflicts
+                        )
                         raise ValueError(
                             f"Benchmark '{bench_name}' run config already sets {conflicts} "
-                            f"but driver.policy_model is also set. Remove one."
+                            f"but driver.policy_model is also set ({differing}). Remove one."
                         )
                     benchmark.run.update(copy.deepcopy(policy_run))
 
+        return self
+
+    @model_validator(mode="after")
+    def _validate_exports(self) -> "SubmitConfig":
+        from nemo_gym.orchestration.exports import validate_exports
+
+        validate_exports(self)
         return self
 
     def _validate_pd_services(self, compute: "ComputeConfig") -> None:

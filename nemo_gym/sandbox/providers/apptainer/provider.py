@@ -42,7 +42,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
 
 LOGGER = logging.getLogger(__name__)
@@ -342,33 +344,41 @@ class ApptainerProvider:
             if daemonize:
                 return await self._run_daemonizing(argv, timeout_s=timeout_s)
 
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                env=self._subprocess_env,
-            )
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    proc.communicate(input=stdin),
-                    timeout=timeout_s,
+            # Output goes to files, not pipes: a process the command leaves running in the instance
+            # (`tmux new-session -d`, `server &`) can keep the write end of an output pipe open, and reading
+            # the pipe to EOF then waits until that process exits. Under uvloop, the event loop of Gym's
+            # servers, Terminus 2's tmux start never returned. With files, the command's exit ends the wait.
+            with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+                    stdout=out_f,
+                    stderr=err_f,
+                    start_new_session=True,
+                    env=self._subprocess_env,
                 )
-            except asyncio.TimeoutError as e:
-                # Graceful timeout: SIGTERM the process group first and give it a short grace period
-                # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
-                # handler), THEN SIGKILL if it hasn't exited.
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                with contextlib.suppress(asyncio.TimeoutError, Exception):
-                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
-                if proc.returncode is None:  # still alive after grace -> hard kill
+                try:
+                    await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+                except asyncio.CancelledError:
+                    await kill_cancelled_command(proc)
+                    raise
+                except asyncio.TimeoutError as e:
+                    # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                    # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                    # handler), THEN SIGKILL if it hasn't exited.
                     with contextlib.suppress(ProcessLookupError):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    with contextlib.suppress(Exception):
-                        await proc.wait()
-                raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    with contextlib.suppress(asyncio.TimeoutError, Exception):
+                        await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                    if proc.returncode is None:  # still alive after grace -> hard kill
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        with contextlib.suppress(Exception):
+                            await proc.wait()
+                    raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                out_f.seek(0)
+                err_f.seek(0)
+                stdout_b, stderr_b = out_f.read(), err_f.read()
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
             return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
@@ -391,6 +401,9 @@ class ApptainerProvider:
             )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            except asyncio.CancelledError:
+                await kill_cancelled_command(proc)
+                raise
             except asyncio.TimeoutError as e:
                 # Graceful timeout: SIGTERM the process group first and give it a short grace period
                 # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
@@ -467,6 +480,14 @@ class ApptainerProvider:
         for bind in extra_binds:
             argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
+        if any(arg in {"--contain", "--containall", "-c", "-C"} for arg in start_args) and not any(
+            arg in {"--workdir", "-W"} or arg.startswith("--workdir=") for arg in start_args
+        ):
+            # Containment must not move large compiler temporaries into Apptainer's small
+            # session tmpfs. Keep /tmp, /var/tmp, and home private and disk-backed instead.
+            private_workdir = staging_dir / ".apptainer-workdir"
+            private_workdir.mkdir(mode=0o700)
+            start_args += ["--workdir", str(private_workdir)]
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
@@ -801,7 +822,7 @@ class ApptainerProvider:
 
         # Always best-effort remove the host staging dir, even if stop failed.
         try:
-            shutil.rmtree(inst.staging_dir, ignore_errors=False)
+            _remove_writable_tree(inst.staging_dir)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
 

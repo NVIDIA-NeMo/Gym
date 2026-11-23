@@ -16,7 +16,7 @@
 
 `kb/knowledge/conventions/hot-path-overhead.md`: the span-group gate comes first and
 nothing — including imports — runs above it. Gym serves at 16k+ concurrency, so
-`server_utils.request` and every per-request handler is a hot path, and a user who turned
+`nemo_gym.client.http_client.request` and every per-request handler is a hot path, and a user who turned
 telemetry off must not pay for it.
 
 Absolute nanosecond figures are machine-specific and are NOT asserted on. Every assertion

@@ -51,6 +51,18 @@ from stirrup.prompts import MESSAGE_SUMMARIZER, MESSAGE_SUMMARIZER_BRIDGE_TEMPLA
 
 LOGGER = logging.getLogger(__name__)
 
+
+class CompactionSummaryError(RuntimeError):
+    """The policy model gave no usable compaction summary on any attempt: the model's outcome, not a fault.
+
+    ``messages`` is the context it was asked to summarize, so the episode can end on every completed turn.
+    """
+
+    def __init__(self, message: str, messages: list[ChatMessage]) -> None:
+        super().__init__(message)
+        self.messages = list(messages)
+
+
 _LEADING_THINK_OPEN_RE = re.compile(r"\A\s*<think\s*>", re.IGNORECASE)
 _THINK_CLOSE_RE = re.compile(r"</think\s*>", re.IGNORECASE)
 
@@ -179,6 +191,8 @@ class NeMoAgent(Agent):
         that field, including think-only responses. Sanitize at the adapter
         boundary and retry bad summaries before replacing any history.
         """
+        # A summary request that overflows drops turns from ``current_messages``; a failed compaction reports them all.
+        original_messages = list(messages)
         current_messages = messages
         while True:
             try:
@@ -245,9 +259,10 @@ class NeMoAgent(Agent):
                         "retrying" if attempt < len(attempts) else "no attempts remain",
                     )
                 else:
-                    raise RuntimeError(
+                    raise CompactionSummaryError(
                         "Compaction summarizer produced no usable text after "
-                        f"{len(attempts)} attempts; refusing to erase context"
+                        f"{len(attempts)} attempts; refusing to erase context",
+                        original_messages,
                     )
 
                 summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary_content)

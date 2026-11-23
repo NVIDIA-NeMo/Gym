@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -42,15 +43,15 @@ sys.modules.setdefault("ccc_eval", ccc_eval_stub)
 
 import resources_servers.competitive_coding_challenges.app as ccc_app
 from nemo_gym import PARENT_DIR
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
+from nemo_gym.client import ServerClient
+from nemo_gym.core import PROVIDER_UNAVAILABLE, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.app import (
     CompetitiveCodingChallengesResourcesServer,
     CompetitiveCodingChallengesResourcesServerConfig,
     CompetitiveCodingChallengesVerifyRequest,
 )
+from resources_servers.competitive_coding_challenges.ccc_eval import GRADED_ANSWER_KEY
 
 
 def _make_server(**config_overrides) -> CompetitiveCodingChallengesResourcesServer:
@@ -366,6 +367,81 @@ async def test_verify_returns_error_details_when_evaluator_fails(
     assert response.mask_sample is True
     assert response.failure_kind == "verifier_error"
     assert response.failure_reason == "boom"
+
+
+@pytest.mark.asyncio
+async def test_verify_emits_the_extracted_code_that_aggregation_reads() -> None:
+    # compute_metrics counts a missing `extracted_code` as no_answer, so verify must emit it for submitted code.
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request())
+
+    assert response.model_dump()["extracted_code"] == "int main() { return 0; }\n"
+    metrics = server.compute_metrics([[response.model_dump()]])
+    assert metrics["pass@1/no_answer"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_verify_overwrites_extracted_code_already_on_the_request() -> None:
+    # The request model allows extra fields; one carrying `extracted_code` must not collide with the computed value.
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
+    server._evaluator = evaluator
+    request = CompetitiveCodingChallengesVerifyRequest.model_validate(
+        {**_make_verify_request().model_dump(), "extracted_code": "stale"}
+    )
+
+    response = await server.verify(request)
+
+    assert response.model_dump()["extracted_code"] == "int main() { return 0; }\n"
+
+
+@pytest.mark.asyncio
+async def test_verify_reports_an_empty_answer_as_no_answer() -> None:
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request(text=""))
+
+    assert response.model_dump()["extracted_code"] is None
+    assert server.compute_metrics([[response.model_dump()]])["pass@1/no_answer"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_verify_reports_an_empty_code_block_as_no_answer() -> None:
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request(text="Here it is:\n```cpp\n  \n```"))
+
+    assert response.model_dump()["extracted_code"] is None
+    assert server.compute_metrics([[response.model_dump()]])["pass@1/no_answer"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_verify_votes_on_the_answer_the_evaluator_graded() -> None:
+    # SIMULATION problems grade the last ```txt block; voting on a ```cpp block or the whole text would split
+    # identical answers wrapped in different explanations (review on #5336).
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(
+        side_effect=lambda _entry: {"test_case_results": {}, GRADED_ANSWER_KEY: "MOVE\n"}
+    )
+    server._evaluator = evaluator
+    texts = ["First idea.\n```txt\nMOVE\n```", "Another explanation.\n```txt\nMOVE\n```"]
+
+    responses = [(await server.verify(_make_verify_request(text=text))).model_dump() for text in texts]
+
+    assert [r["extracted_code"] for r in responses] == ["MOVE\n", "MOVE\n"]
+    assert all(GRADED_ANSWER_KEY not in r["details"] for r in responses)
 
 
 @pytest.mark.asyncio
@@ -714,3 +790,68 @@ class TestSandboxPath:
         assert response.reward == 0.0 and response.mask_sample
         assert response.failure_kind == "verifier_error"
         assert response.details == {"error": "Problem 'prob-1' not found in metadata."}
+
+
+def test_log_appends_wait_for_another_workers_lock(tmp_path) -> None:
+    """With several workers appending to one debug log, an append waits for a lock another process holds."""
+    import fcntl
+    import json
+    import threading
+    import time
+
+    server = _make_server()
+    log = tmp_path / "log.jsonl"
+    other_worker = open(log, "a")
+    fcntl.flock(other_worker, fcntl.LOCK_EX)
+    released_at: list[float] = []
+
+    def release() -> None:
+        time.sleep(0.3)
+        released_at.append(time.monotonic())
+        other_worker.close()
+
+    releaser = threading.Thread(target=release)
+    releaser.start()
+    asyncio.run(
+        server._append_log_jsonl(
+            log_path=str(log),
+            competition_id="comp-1",
+            problem_id="prob-1",
+            subtask=None,
+            generated_sequence="g",
+            reward=1.0,
+            details={},
+        )
+    )
+    appended_at = time.monotonic()
+    releaser.join()
+
+    assert appended_at >= released_at[0]
+    assert json.loads(log.read_text())["reward"] == 1.0
+
+
+def test_log_appends_without_file_locks_still_write_the_record(tmp_path, monkeypatch) -> None:
+    """A filesystem without file locks makes flock raise; the record is written anyway."""
+    import errno
+    import fcntl
+    import json
+
+    def no_locks(*args) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(fcntl, "flock", no_locks)
+    server = _make_server()
+    log = tmp_path / "log.jsonl"
+    asyncio.run(
+        server._append_log_jsonl(
+            log_path=str(log),
+            competition_id="comp-1",
+            problem_id="prob-1",
+            subtask=None,
+            generated_sequence="g",
+            reward=1.0,
+            details={},
+        )
+    )
+
+    assert json.loads(log.read_text())["reward"] == 1.0

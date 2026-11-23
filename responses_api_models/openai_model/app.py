@@ -16,30 +16,68 @@ import asyncio
 import logging
 import random
 from contextlib import asynccontextmanager, nullcontext
-from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
+from copy import deepcopy
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
+from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-)
-from nemo_gym.openai_utils import (
-    MAX_NUM_TRIES,
-    NeMoGymAsyncOpenAI,
+from nemo_gym.client import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
-    ReasoningEffort,
 )
+from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
+from nemo_gym.telemetry import MeteredSemaphore
+from responses_api_models.openai_model.provider_refusals import provider_refusal, refusal_response
 
 
 LOG = logging.getLogger(__name__)
 ResponseT = TypeVar("ResponseT")
+
+
+def _normalize_reasoning_content(response: Any) -> Any:
+    """Correct known provider reasoning-item shapes before strict response validation.
+
+    Fills a missing or null ``summary`` with ``[]`` and relabels plain ``output_text`` reasoning content as
+    ``reasoning_text``. Other shapes are left for validation unchanged.
+    """
+    if not isinstance(response, dict) or not isinstance(response.get("output"), list):
+        return response
+    output = response["output"]
+    corrected_output = None
+    for item_index, item in enumerate(output):
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            continue
+        corrected_item = item
+        if item.get("summary") is None:
+            corrected_item = corrected_item | {"summary": []}
+        content = item.get("content")
+        if isinstance(content, list):
+            corrected_content = None
+            for part_index, part in enumerate(content):
+                if not isinstance(part, dict) or part.get("type") != "output_text":
+                    continue
+                if not isinstance(part.get("text"), str) or set(part) not in (
+                    {"type", "text"},
+                    {"type", "text", "annotations"},
+                ):
+                    continue
+                if "annotations" in part and part["annotations"] != []:
+                    continue
+                if corrected_content is None:
+                    corrected_content = content.copy()
+                corrected_content[part_index] = part | {"type": "reasoning_text"}
+            if corrected_content is not None:
+                corrected_item = corrected_item | {"content": corrected_content}
+        if corrected_item is not item:
+            if corrected_output is None:
+                corrected_output = output.copy()
+            corrected_output[item_index] = corrected_item
+    return response if corrected_output is None else response | {"output": corrected_output}
 
 
 class UpstreamRetriesExhaustedError(RuntimeError):
@@ -104,7 +142,19 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_model: str
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
+    provider_refusal_codes: frozenset[Literal["bio_policy", "content_filter", "content_policy_violation"]] = Field(
+        default_factory=frozenset,
+        description="Opt-in HTTP 400 policy-refusal codes represented as refusal content, preserving error evidence and unknown usage.",
+    )
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
+    session_key_headers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Headers that carry the session key to the upstream endpoint, e.g. for session-affinity routing. "
+            "The key reaches this server only when agents add the rollout prefix: set rollout_correlation, "
+            "observability_enabled or token capture."
+        ),
+    )
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
     max_rate_limit_wait_seconds: float = Field(default=3600.0, ge=0)
 
@@ -164,12 +214,13 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
     propagate_upstream_http_status_codes: frozenset[int] = Field(
-        default_factory=frozenset,
+        default_factory=lambda: frozenset({401, 403, 429}),
         description=(
             "Upstream HTTP error statuses returned to the caller with that status "
             "and the provider's error body, instead of HTTP 500. A status that "
             "upstream_retry_policy retries until it is exhausted still returns "
-            "HTTP 500. Empty keeps the historical generic exception behavior."
+            "HTTP 500. The default forwards a rejected credential (401, 403) and a rate limit (429), "
+            "so a caller names the real cause; an empty set keeps the historical generic exception behavior."
         ),
     )
     upstream_retry_policy: UpstreamRetryPolicy = Field(
@@ -213,9 +264,37 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    request_overrides: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Top-level fields forced onto every upstream /v1/responses and /v1/chat/completions request, over "
+            "what the caller sent (extra_body only fills fields the caller left unset). A value replaces the "
+            "caller's top-level field whole (`reasoning: {effort: high}` drops a caller's `reasoning.summary`). "
+            "Not applied to /v1/embeddings. `model`, `input`, `messages` and `stream` are refused. For harnesses "
+            "that cannot set these fields, e.g. the Codex CLI with a placeholder model name sends no `reasoning` "
+            "or `include`."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_request_overrides(self) -> "SimpleModelServerConfig":
+        # The model is always the configured one, and the payload and streaming mode are the caller's.
+        refused = sorted({"model", "input", "messages", "stream"} & set(self.request_overrides))
+        if refused:
+            raise ValueError(f"request_overrides cannot set {refused}")
+        return self
+
 
 class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
+
+    def _upstream_body(self, body: BaseModel) -> Dict[str, Any]:
+        """extra_body, then the caller's fields, then request_overrides; the model is always the configured one."""
+        body_dict = (
+            self.config.extra_body | body.model_dump(exclude_unset=True) | deepcopy(self.config.request_overrides)
+        )
+        body_dict["model"] = self.config.openai_model
+        return body_dict
 
     def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
         # OpenAI and subclasses such as LiteLLM retain their opt-in HTTP policy.
@@ -226,14 +305,26 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
+            # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
+            internal=False,
+            session_key_headers=self.config.session_key_headers,
             max_num_tries=self.config.upstream_max_num_tries,
+            # A provider that refuses connections fails the call after max_http_attempts tries, like an HTTP
+            # error; left unset, the transport would retry the connection forever.
+            max_connection_retries=self.config.max_http_attempts,
             request_timeout_seconds=self.config.upstream_request_timeout_seconds,
             connect_timeout_seconds=self.config.upstream_connect_timeout_seconds,
             max_http_attempts=self.config.max_http_attempts,
             max_rate_limit_wait_seconds=self.config.max_rate_limit_wait_seconds,
         )
         self._semaphore = (
-            asyncio.Semaphore(self.config.max_concurrent_requests)
+            MeteredSemaphore(
+                self.config.max_concurrent_requests,
+                component="model_server",
+                limit_name="upstream_requests",
+                server_name=self.config.name,
+                admission_timeout_s=self.config.upstream_pool_timeout_seconds,
+            )
             if self.config.max_concurrent_requests is not None
             else nullcontext()
         )
@@ -256,10 +347,8 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             return
 
         try:
-            await asyncio.wait_for(
-                self._semaphore.acquire(),
-                timeout=self.config.upstream_pool_timeout_seconds,
-            )
+            # The semaphore applies upstream_pool_timeout_seconds and counts the timeout.
+            await self._semaphore.acquire()
         except TimeoutError as exc:
             raise TimeoutError(
                 "Timed out acquiring an upstream provider slot after "
@@ -326,8 +415,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         raise UpstreamRetriesExhaustedError(retry_policy.max_attempts, last_error) from last_error
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.openai_model
+        body_dict = self._upstream_body(body)
         if self.config.drop_input_reasoning_items:
             input_items = body_dict.get("input")
             if isinstance(input_items, list):
@@ -336,7 +424,17 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 ]
 
         async def create_and_validate() -> NeMoGymResponse:
-            response_dict = await self._client.create_response(**body_dict)
+            try:
+                response_dict = await self._client.create_response(**body_dict)
+            except ClientResponseError as error:
+                raw_body = getattr(error, "response_content", None)
+                refusal = provider_refusal(error.status, raw_body, self.config.provider_refusal_codes)
+                if refusal is None:
+                    raise
+                return NeMoGymResponse.model_validate(
+                    refusal_response(self.config.openai_model, refusal, raw_body, request=body_dict)
+                )
+            response_dict = _normalize_reasoning_content(response_dict)
             reasoning = response_dict.get("reasoning") if isinstance(response_dict, dict) else None
             if (
                 self.config.reasoning_effort_none_replacement is not None
@@ -355,8 +453,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.openai_model
+        body_dict = self._upstream_body(body)
 
         async def create_and_validate() -> NeMoGymChatCompletion:
             response_dict = await self._client.create_chat_completion(**body_dict)

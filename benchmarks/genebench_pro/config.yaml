@@ -14,10 +14,7 @@ genebench_pro:
           type: benchmark
           jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
           prepare_script: benchmarks/genebench_pro/harbor/adapter.py
-          prepare_dependencies:
-            - huggingface_hub
-            - tqdm
-            - tyro
+          prepare_project: benchmarks/genebench_pro
           num_repeats: 4
 
       job:

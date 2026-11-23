@@ -25,20 +25,21 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import Field, JsonValue, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym.base_resources_server import (
-    ClosedResourcesSessionRecords,
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
+    MCPTool,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFences,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.mcp_auto_exposure import MCPTool
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture
 from resources_servers.partner_if.app import (
     NoAnswer,
     PartnerIFGradingConfig,
@@ -184,13 +185,13 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
     # Seed, calls, verify, close and retire hold the session's lock. A sandbox start awaits, and a close or a
     # repeated seed that ran meanwhile would leak its sandbox or start a second one.
     _session_locks: dict[str | None, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    _closed: ClosedResourcesSessionRecords[EpisodeId | None] = PrivateAttr()
+    _fences: ResourcesSessionFences[EpisodeId | None] = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         if self.config.num_workers not in (None, 1):
             raise ValueError("Mock-tool episodes live in the server's memory, so it requires num_workers=1")
-        self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         if self.config.backend is not None:
             self._backend = load_backend(self.config.backend)(self.config.fixture_path)
         else:
@@ -265,7 +266,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
         if row is None or contract_hash(contract) != contract_hash(
             GradingContract.model_validate(row["verifier_metadata"]["partner_if"])
         ):
-            raise HTTPException(409, "Task contract does not match the configured snapshot")
+            raise ResourcesSessionConflictError("Task contract does not match the configured snapshot")
         return row
 
     def _session_lock(self, session_id: str | None) -> asyncio.Lock:
@@ -282,10 +283,10 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
             self._sandboxes is not None
             and body.task_data.get("tool_backend", row["tool_backend"]) != row["tool_backend"]
         ):
-            raise HTTPException(409, "Task tool backend does not match the configured snapshot")
+            raise ResourcesSessionConflictError("Task tool backend does not match the configured snapshot")
         async with self._session_lock(identifier):
-            if identifier in self._closed:
-                raise HTTPException(409, "Session is closed")
+            if identifier in self._fences:
+                raise ResourcesSessionConflictError("Session is closed")
             episode = self._episodes.get(identifier)
             if episode is None:
                 # A start that fails or is cancelled stops its own sandbox, so a failed seed leaves nothing behind.
@@ -294,7 +295,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
                     seed=body, task=contract.task_id, tools=frozenset(self._tools[contract.task_id]), backend=backend
                 )
             elif episode.seed != body:
-                raise HTTPException(409, "Session ID belongs to another episode/task")
+                raise ResourcesSessionConflictError("Session ID belongs to another episode/task")
         request.session[SESSION_ID_KEY] = identifier
         return ResourcesSeedSessionResponse(resources_session_id=identifier)
 
@@ -320,17 +321,17 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         identifier = body.resources_session_id
         async with self._session_lock(identifier):
-            closed_episode = self._closed.get(identifier)
-            if closed_episode is not None and closed_episode != body.episode_id:
-                raise HTTPException(409, "Session belongs to another episode")
+            fenced_episode = self._fences.get(identifier)
+            if fenced_episode is not None and fenced_episode != body.episode_id:
+                raise ResourcesSessionConflictError("Session belongs to another episode")
             episode = self._episodes.get(identifier)
             if episode and episode.seed.episode_id != body.episode_id:
-                raise HTTPException(409, "Session belongs to another episode")
+                raise ResourcesSessionConflictError("Session belongs to another episode")
             if episode is not None:
                 # A backend that fails to stop raises and keeps its episode, so a retried close stops it again.
                 await episode.backend.stop()
                 del self._episodes[identifier]
-            self._closed.remember(identifier, body.episode_id)
+            self._fences.fence(identifier, body.episode_id)
         # Later requests for a closed session are refused, so it needs no lock; any waiting on this one see the close.
         self._session_locks.pop(identifier, None)
         return ResourcesCloseSessionResponse(resources_session_id=identifier)
@@ -338,7 +339,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
     async def retire_session_state(self, session_id: str) -> None:
         async with self._session_lock(session_id):
             episode = self._episodes.pop(session_id, None)
-            self._closed.remember(session_id, episode.seed.episode_id if episode is not None else None)
+            self._fences.fence(session_id, episode.seed.episode_id if episode is not None else None)
             if episode is not None:
                 await self._stop_quietly(episode)
         self._session_locks.pop(session_id, None)
@@ -351,7 +352,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
             if episode is not None and tool_name not in episode.tools:
                 raise HTTPException(404, "Not a tool of this task")
             if episode is None:
-                raise HTTPException(409, "Session was not seeded or is closed")
+                raise ResourcesSessionConflictError("Session was not seeded or is closed")
             try:
                 output = await episode.backend.call(tool_name, body)
             except ToolCallError as error:
@@ -371,7 +372,7 @@ class MockToolsResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
         row = self._contract(contract)
         params = body.responses_create_params.model_dump(exclude_none=True)
         if _actor_input(params) != _actor_input(row["responses_create_params"]):
-            raise HTTPException(409, "Actor input differs from the configured task")
+            raise ResourcesSessionConflictError("Actor input differs from the configured task")
         identifier = request.session.get(SESSION_ID_KEY)
         async with self._session_lock(identifier):
             episode = self._episodes.get(identifier)

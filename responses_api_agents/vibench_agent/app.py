@@ -43,22 +43,23 @@ from uuid import uuid4
 
 from fastapi import Body, Request
 
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.rollout_observability import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, get_global_config_dict
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import (
-    SESSION_ID_KEY,
-    get_response_json,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
-)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
@@ -163,7 +164,7 @@ class VibenchAgent(OpenCodeSandboxedAgent):
             return False
         return "docker" in provider_cfg
 
-    async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
+    async def _create_opencode_config(self, request: Request, *, image_input: bool = False) -> Dict[str, Any]:
         """Rewrite only the *host* of the parent's model URL.
 
         The parent builds this through ``base_url_for_run``, so the URL carries the run's
@@ -173,8 +174,8 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         exports an empty app with nothing logged, which no failure field reports because the
         build technically succeeded.
         """
-        config = await super()._create_opencode_config(request)
-        options = ((config.get("provider") or {}).get("nemo_gym") or {}).get("options")
+        config = await super()._create_opencode_config(request, image_input=image_input)
+        options = ((config.get("provider") or {}).get(self.config.opencode_provider_id) or {}).get("options")
         if not isinstance(options, dict) or not isinstance(options.get("baseURL"), str):
             return config
 
@@ -273,6 +274,8 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         # OpenCodeSandboxedAgentRunRequest is extra="allow"; BaseRunRequest is not, and
         # typing body as the latter silently drops the ViBench task fields (app, artifact,
         # prd_files, test_plans) so /seed_session rejects the request as missing 'app'.
+        if body.sandbox_provider_options or body.sandbox_uploads:
+            raise ValueError("vibench_agent does not apply sandbox_provider_options or sandbox_uploads")
         cookies = request.cookies
 
         seed_session_response = await self.server_client.post(

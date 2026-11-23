@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
     parse_codex_observations,
     parse_codex_usage,
@@ -95,6 +95,34 @@ def test_multiple_native_session_files_preserve_record_boundaries(tmp_path: Path
     bundle = read_codex_observations(tmp_path, "invocation", returncode=0, timed_out=False)
     assert len(bundle.records[0].conversation) == 2
     assert not bundle.gaps
+
+
+@pytest.mark.parametrize("separator", ["\u0085", " ", " "])
+def test_unicode_line_separators_inside_records_keep_the_tool_output(tmp_path: Path, separator: str) -> None:
+    output = f"Chunk ID: abc\nProcess exited with code 0\nOutput:\nfirst{separator}second"
+    records = [
+        {"type": "function_call", "call_id": "call-1", "name": "exec_command", "arguments": '{"cmd":"cat f"}'},
+        {"type": "function_call_output", "call_id": "call-1", "output": output},
+    ]
+    # Codex leaves these characters unescaped; the sandbox snapshot joins its files with "\n".
+    transcript = "\n".join(
+        json.dumps(
+            {"type": "response_item", "timestamp": f"2026-10-05T10:00:0{index}Z", "payload": payload},
+            ensure_ascii=False,
+        )
+        for index, payload in enumerate(records)
+    )
+    folder = tmp_path / "sessions"
+    folder.mkdir()
+    (folder / "episode.jsonl").write_text(transcript + "\n", encoding="utf-8")
+    for bundle in (
+        parse_codex_observations(transcript, "invocation", returncode=0, timed_out=False),
+        read_codex_observations(tmp_path, "invocation", returncode=0, timed_out=False),
+    ):
+        invocation, tool = bundle.records
+        assert invocation.conversation[1].output == output
+        assert tool.status == "completed"
+        assert not bundle.gaps
 
 
 def test_native_usage_uses_latest_cumulative_total_without_adding_details() -> None:
@@ -220,9 +248,9 @@ def test_native_web_search_retains_identity_action_and_status(status: str) -> No
 def _time_split(observations) -> tuple:
     """The run-health timeouts section's policy, tool and untracked shares for a 100-second timed-out rollout whose
     only model call ran for its first 40 seconds, with these observations attached as collection attaches them."""
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.health.timeouts import ELAPSED_S_KEY, read_rollout_timing, summarize_timeouts
-    from nemo_gym.rollout_collection import _attach_trajectory_record
+    from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.rollouts import ELAPSED_S_KEY, read_rollout_timing, summarize_timeouts
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 
     started = 1_000_000.0
     call = {
@@ -265,3 +293,196 @@ def test_a_transcript_that_could_not_be_read_leaves_tool_time_unknown() -> None:
 def test_a_record_it_could_not_read_leaves_tool_time_unknown(transcript: str, expected: tuple) -> None:
     """An unreadable record may have been a tool call; a token usage record it could not read was not."""
     assert _time_split(parse_codex_observations(transcript, "0-0", returncode=-9, timed_out=True)) == expected
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        None,
+        "missing_model",
+        "policy_request",
+        "different_summary",
+        "duplicate",
+        "shared_event",
+        "failed",
+        "transport",
+        "missing_id",
+    ],
+)
+def test_compaction_requires_native_event_and_unique_session_helper(damage):
+    from copy import deepcopy
+
+    from nemo_gym.config import ModelServerRef
+    from nemo_gym.trajectory import ContextCompactionObservation
+    from responses_api_agents.codex_agent.observability import (
+        _COMPACTION_PREFIX,
+        associate_codex_compaction_calls,
+    )
+
+    transcript = json.dumps(
+        {
+            "type": "compacted",
+            "timestamp": "2026-10-29T10:00:00Z",
+            "payload": {"message": _COMPACTION_PREFIX + "Keep the changes."},
+        }
+    )
+    bundle = parse_codex_observations(transcript, "root", returncode=0, timed_out=False)
+    model_ref = ModelServerRef(type="responses_api_models", name="policy")
+    attempt = {
+        "status": 200,
+        "compaction_response": {"response_id": "response-helper", "summary": "Keep the changes."},
+    }
+    attempts = [attempt]
+    if damage == "missing_model":
+        model_ref = None
+    elif damage == "policy_request":
+        del attempt["compaction_response"]
+    elif damage == "different_summary":
+        attempt["compaction_response"]["summary"] = "Different"
+    elif damage == "duplicate":
+        attempts.append(deepcopy(attempt))
+    elif damage == "shared_event":
+        bundle.records.append(bundle.records[-1].model_copy(deep=True))
+    elif damage == "failed":
+        attempt["status"] = 500
+    elif damage == "transport":
+        attempt["transport_error"] = "stream closed"
+    elif damage == "missing_id":
+        del attempt["compaction_response"]["response_id"]
+    joined = associate_codex_compaction_calls(bundle, attempts, model_ref=model_ref)
+    event = next(r for r in joined.records if isinstance(r, ContextCompactionObservation))
+    assert event.summary == "Keep the changes."
+    assert event.outcome == "completed"
+    assert [ref.response_id for ref in event.model_calls] == ([] if damage else ["response-helper"])
+    assert joined.records[0].model_calls == event.model_calls
+    assert bool(joined.gaps) == bool(damage)
+    assert bundle.records[-1].model_calls == []
+    if damage is None:
+        repeated = associate_codex_compaction_calls(joined, attempts, model_ref=model_ref)
+        assert repeated == joined
+        repeated = associate_codex_compaction_calls(joined, attempts * 2, model_ref=model_ref)
+        event = next(r for r in repeated.records if isinstance(r, ContextCompactionObservation))
+        assert not event.model_calls and repeated.gaps
+        assert not repeated.records[0].model_calls
+
+
+def test_codex_child_contexts_and_status_are_not_flattened_into_parent():
+    def session(identity, source, items, terminal):
+        events = [{"type": "session_meta", "payload": {"id": identity, "source": source}}]
+        events += [{"type": "response_item", "timestamp": "2026-11-09T12:00:00Z", "payload": item} for item in items]
+        events.append({"type": "event_msg", "payload": {"type": terminal}})
+        return "\n".join(json.dumps(event, ensure_ascii=False) for event in events)
+
+    parent = session(
+        "parent",
+        "exec",
+        [
+            {
+                "type": "function_call",
+                "name": "spawn_agent",
+                "call_id": "spawn",
+                "arguments": '{ "message": "child task" }',
+            },
+            {"type": "function_call_output", "call_id": "spawn", "output": '{"agent_id":"child"}'},
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "final",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Parent final", "annotations": []}],
+            },
+        ],
+        "task_complete",
+    )
+    child = session(
+        "child",
+        {"subagent": {"thread_spawn": {"parent_thread_id": "parent"}}},
+        [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Child-only\n α\u2028β"}]},
+        ],
+        "task_started",
+    )
+    bundle = parse_codex_observations(child + "\n" + parent, "episode", returncode=0, timed_out=False)
+    owners = {r.invocation_id: r for r in bundle.records if isinstance(r, AgentInvocation)}
+    assert set(owners) == {"episode", "episode.child"}
+    assert owners["episode"].status == "completed"
+    assert owners["episode.child"].status == "incomplete"
+    assert owners["episode.child"].parent_invocation_id == "episode"
+    assert owners["episode.child"].spawned_by_tool_call_id == "spawn"
+    assert len(owners["episode"].conversation) == 3
+    assert owners["episode.child"].conversation[0].content[0]["text"] == "Child-only\n α\u2028β"
+    assert not any(g.code == "subagent_hierarchy_unavailable" for g in bundle.gaps)
+
+
+@pytest.mark.parametrize("parent", ["root", "missing", "child"])
+def test_child_compaction_keeps_ownership_and_invalid_parent_is_explicit(parent):
+    from nemo_gym.config import ModelServerRef
+    from nemo_gym.trajectory import ContextCompactionObservation
+    from responses_api_agents.codex_agent.observability import _COMPACTION_PREFIX, associate_codex_compaction_calls
+
+    transcript = "\n".join(
+        json.dumps(event)
+        for event in [
+            {"type": "session_meta", "payload": {"id": "root", "source": "exec"}},
+            {
+                "type": "session_meta",
+                "payload": {"id": "child", "source": {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}},
+            },
+            {
+                "type": "compacted",
+                "timestamp": "2026-11-09T12:00:00Z",
+                "payload": {"message": _COMPACTION_PREFIX + "Child summary"},
+            },
+            {"type": "event_msg", "payload": {"type": "task_complete"}},
+        ]
+    )
+    bundle = parse_codex_observations(transcript, "episode", returncode=0, timed_out=False)
+    bundle = associate_codex_compaction_calls(
+        bundle,
+        [{"status": 200, "compaction_response": {"response_id": "summary", "summary": "Child summary"}}],
+        model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+    )
+    owners = {r.invocation_id: r for r in bundle.records if isinstance(r, AgentInvocation)}
+    event = next(r for r in bundle.records if isinstance(r, ContextCompactionObservation))
+    assert not owners["episode"].conversation and not owners["episode"].model_calls
+    assert event.invocation_id == "episode.child"
+    assert owners["episode.child"].model_calls == event.model_calls
+    assert event.model_calls[0].response_id == "summary"
+    assert any(g.code == "subagent_hierarchy_unavailable" for g in bundle.gaps) == (parent != "root")
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"id": ""}, {"id": 42}])
+def test_local_reader_marks_malformed_session_boundaries(tmp_path, metadata):
+    directory = tmp_path / "sessions"
+    directory.mkdir()
+    events = [
+        {"type": "session_meta", "payload": {"id": "root", "source": "exec"}},
+        {"type": "session_meta", "payload": metadata},
+        {
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "done"}]},
+        },
+    ]
+    (directory / "native.jsonl").write_text("\n".join(json.dumps(event) for event in events))
+    bundle = read_codex_observations(tmp_path, "invocation", returncode=0, timed_out=False)
+    assert any(gap.code == "subagent_hierarchy_unavailable" for gap in bundle.gaps)
+
+
+def test_native_prompt_images_are_preserved() -> None:
+    content = [
+        {"type": "input_text", "text": "image follows"},
+        {"type": "input_image", "image_url": "data:image/png;base64,image-bytes", "detail": "high"},
+    ]
+    transcript = json.dumps(
+        {
+            "type": "response_item",
+            "timestamp": "2026-11-10T12:00:00Z",
+            "payload": {"type": "message", "role": "user", "content": content},
+        }
+    )
+    bundle = parse_codex_observations(transcript, "images", returncode=0, timed_out=False)
+    observed = bundle.records[0].conversation[0].model_dump(mode="json")["content"]
+    assert observed[0]["text"] == "image follows"
+    assert observed[1]["image_url"] == content[1]["image_url"]
+    assert observed[1]["detail"] == "high"
+    assert not bundle.gaps

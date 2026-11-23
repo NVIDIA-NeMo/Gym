@@ -4,13 +4,30 @@
 """Bounded rate-limit retries for Codex providers, which disable native 429 retries."""
 
 import asyncio
+import json
 import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from aiohttp import web
 
-from nemo_gym.server_utils import request
+from nemo_gym.client import request
+from nemo_gym.core import StreamFailureReportReader
+
+
+def _invocation_for_request(body: bytes, invocation_id: str) -> str:
+    # Keep this mapping identical to the sandbox launcher's invocationForRequest.
+    try:
+        payload = json.loads(body)
+        metadata = payload.get("client_metadata") if isinstance(payload, dict) else None
+        if not isinstance(metadata, dict):
+            return f"{invocation_id}.unattributed"
+        thread, session = metadata.get("thread_id"), metadata.get("session_id")
+        if not isinstance(thread, str) or not thread or not isinstance(session, str) or not session:
+            return f"{invocation_id}.unattributed"
+        return invocation_id if thread == session else f"{invocation_id}.{thread}"
+    except ValueError:
+        return f"{invocation_id}.unattributed"
 
 
 @asynccontextmanager
@@ -24,7 +41,7 @@ async def rate_limit_proxy(base_url: str, invocation_id: str, *, max_retries: in
             for k, v in incoming.headers.items()
             if k.lower() not in {"host", "content-length", "connection", "x-session-id"}
         }
-        headers["x-session-id"] = invocation_id
+        headers["x-session-id"] = _invocation_for_request(body, invocation_id)
         for attempt in range(max_retries + 1):
             upstream = await request("POST", f"{base_url}/responses", data=body, headers=headers)
             try:
@@ -45,9 +62,16 @@ async def rate_limit_proxy(base_url: str, invocation_id: str, *, max_retries: in
                     },
                 )
                 await response.prepare(incoming)
-                async for chunk in upstream.content.iter_any():
-                    await response.write(chunk)
-                await response.write_eof()
+                # The model's report rides the stream's terminal event when its headers went out first.
+                reader = StreamFailureReportReader()
+                try:
+                    async for chunk in upstream.content.iter_any():
+                        reader.feed(chunk)
+                        await response.write(chunk)
+                    await response.write_eof()
+                finally:
+                    # A disconnect mid-stream still keeps what the stream reported so far.
+                    reader.observe()
                 return response
             finally:
                 upstream.release()

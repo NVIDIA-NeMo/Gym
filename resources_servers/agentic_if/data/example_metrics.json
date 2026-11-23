@@ -1,0 +1,103 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/agentic_if/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "TBD",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 400.2,
+        "Min": 279.0,
+        "Max": 535.0,
+        "Standard deviation": 101.37
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "task_name": {
+        "unique_count": 3,
+        "total_count": 3
+    },
+    "docker_image": {
+        "unique_count": 3,
+        "total_count": 3
+    },
+    "task_folder": {
+        "unique_count": 3,
+        "total_count": 3
+    },
+    "workdir": {
+        "unique_count": 3,
+        "total_count": 3
+    },
+    "instance_id": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "repo": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "language": {
+        "unique_count": 1,
+        "total_count": 2
+    },
+    "image_url": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "patch": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "pre_commands": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "problem_statement": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "f2p_patch": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "f2p_script": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "FAIL_TO_PASS": {
+        "unique_count": 2,
+        "total_count": 2
+    },
+    "PASS_TO_PASS": {
+        "unique_count": 2,
+        "total_count": 2
+    }
+}

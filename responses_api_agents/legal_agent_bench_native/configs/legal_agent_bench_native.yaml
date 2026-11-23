@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+legal_agent_bench_native_agent:
+  responses_api_agents:
+    legal_agent_bench_native:
+      num_workers: 1
+      entrypoint: app.py
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_turns: 60
+      agent_timeout_seconds: 10800
+      shell_timeout: 60
+      model_timeout_seconds: 1800
+      session_close_timeout_seconds: 60

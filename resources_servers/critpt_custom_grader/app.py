@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Stateless HTTP adapter over the sandbox-API grader.
+"""HTTP adapter over the sandbox-API grader, with optional per-episode execution tools.
 
-Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` read the whole request body, refuse one larger
-than MAX_REQUEST_BYTES, then parse and validate it inside the handler, so a malformed or oversized request answers a
+Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` parse and validate the request body
+inside the handler, so a malformed request answers a
 category-only error and never reaches core's body-logging validation handler. These two handlers never log request
 bodies, validation details, provider exceptions or task sources; the stock typed routes (``/close_session``,
 ``/aggregate_metrics``) keep core's behaviour.
@@ -13,9 +13,9 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import (
     BaseModel,
@@ -23,31 +23,52 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
 )
 
-from nemo_gym import failure_kinds
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BenchmarkDatasetConfig,
+    DatasetConfig,
+    get_global_config_dict,  # same import as resources_servers/swebench_pro/app.py
+)
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, failure_kinds
+from nemo_gym.data import normalize_task_fields
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.sandbox import (
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BenchmarkDatasetConfig, DatasetConfig
-from nemo_gym.global_config import get_global_config_dict  # same import as resources_servers/swebench_pro/app.py
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.task_data import normalize_task_fields
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.critpt_custom_grader.agentic_tools import (
+    AgenticExecutionConfig,
+    AgenticExecutionSessions,
+    get_code_execution_params,
+)
 from resources_servers.critpt_custom_grader.execution import (
+    CANDIDATE_UNCERTAINTY_REASONS,
     CLEANUP_STATUSES,
     FAILED_CATEGORIES,
     UNSCORABLE_CATEGORIES,
@@ -59,23 +80,41 @@ from resources_servers.critpt_custom_grader.execution import (
     validate_candidate_source,
 )
 from resources_servers.critpt_custom_grader.reference_cache import ReferenceCache
-from resources_servers.critpt_custom_grader.task_data import MAX_TASK_BYTES, TaskData, bounded_json, tolerance_text
+from resources_servers.critpt_custom_grader.submission import (
+    FinishRequest,
+    extract_finish_source,
+    finish_acknowledgement,
+)
+from resources_servers.critpt_custom_grader.task_data import (
+    SemanticValidatorDefinition,
+    TaskData,
+    bounded_json,
+    tolerance_text,
+    validate_semantic_registry,
+)
 
 
 logger = logging.getLogger(__name__)
 
-MAX_RESPONSE_BYTES = 1_048_576
-MAX_REQUEST_BYTES = 2 * MAX_TASK_BYTES + 2 * MAX_RESPONSE_BYTES
 _DOMAINS = frozenset({"reference", "comparator", "candidate"})
 _RESOLVED = frozenset({"deleted", "not_created"})
 # Candidate-code extraction: first ```python fence, else first bare ``` fence, else the whole response text.
 _PYTHON_FENCE = re.compile(r"```python[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
 _BARE_FENCE = re.compile(r"```[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
-# Framework-owned row keys that are never task data: the routing keys nemo_gym/task_materialization.py strips
-# (agent_ref, task_source, skills_ref) and the keys rollout collection and reverify attach to a row. Every _ng_* key
-# is dropped too.
+# Framework-owned row keys that are never task data: the routing keys nemo_gym/data/task_materialization.py strips
+# (agent_ref, task_source, skills_ref), the keys rollout collection and reverify attach to a row, and the
+# failure_report every /verify request carries (verification_failure_fields in nemo_gym/agents/agent_tools.py).
+# Every _ng_* key is dropped too.
 _FRAMEWORK_ROW_KEYS = frozenset(
-    {"agent_ref", "task_source", "skills_ref", "reuse_cached_deliverable", "deliverables_dir", "reference_ids"}
+    {
+        "agent_ref",
+        "task_source",
+        "skills_ref",
+        "reuse_cached_deliverable",
+        "deliverables_dir",
+        "reference_ids",
+        "failure_report",
+    }
 )
 _NG_FAILURE_CLASS_RESPONSE_INCOMPLETE = "critpt_custom_grader:response_incomplete"
 _NEEDS_REGENERATION_CATEGORIES = frozenset({"response_incomplete"})
@@ -136,8 +175,12 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     sandbox_spec: SandboxSpecConfig = Field(default_factory=SandboxSpecConfig)
     execution: ExecutionPolicy = Field(default_factory=ExecutionPolicy)
     comparison: ComparisonDefaults = Field(default_factory=ComparisonDefaults)
+    semantic_validators: dict[str, SemanticValidatorDefinition] = Field(default_factory=dict)
     reference_cache_dir: str | None = None
     startup_probe: bool = True
+    score_comparator_uncertain_as_incorrect: bool = False
+    answer_source: Literal["output_text", "finish_tool"] = "output_text"
+    agentic_execution: AgenticExecutionConfig | None = None
     verified: bool = False
     description: str | None = None
     value: str | None = None
@@ -150,6 +193,11 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     verified_url: str | None = None
     grading_mode: str | None = None
 
+    @field_validator("semantic_validators", mode="before")
+    @classmethod
+    def bounded_semantic_registry(cls, value: object) -> dict[str, SemanticValidatorDefinition]:
+        return validate_semantic_registry(value)
+
     @model_validator(mode="after")
     def consistent_sandbox_bounds(self) -> "CritPtCustomGraderConfig":
         """Refuse to start on a policy that disagrees with the spec, or on bounds that cannot hold one job.
@@ -158,8 +206,11 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
         ``create_timeout_s`` bounds the provider's create and readiness wait plus two transfers: the spec's files and
         the workdir setup. The comparator sandbox lives for almost the whole job and its stop may follow the job
         deadline, so a set ``ttl_s`` (the provider-side backstop) must cover the job deadline plus one cleanup bound;
-        a null ``ttl_s`` leaves the lifetime to the provider's default.
+        a null ``ttl_s`` leaves the lifetime to the provider's default. With ``semantic_validators`` configured a job
+        makes two more comparator uploads, which the job deadline must cover too.
         """
+        if self.agentic_execution is not None and self.answer_source != "finish_tool":
+            raise ValueError("agentic_execution requires answer_source: finish_tool")
         if self.execution.workdir != self.sandbox_spec.workdir:
             raise ValueError(
                 f"execution.workdir ({self.execution.workdir!r}) must equal sandbox_spec.workdir "
@@ -171,8 +222,16 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
                 f"execution.create_timeout_s ({self.execution.create_timeout_s:g}) must be at least "
                 f"sandbox_spec.ready_timeout_s + 2 * execution.transfer_timeout_s ({needed:g})"
             )
+        semantic = bool(self.semantic_validators)
+        minimum = self.execution.minimum_job_timeout_s(semantic_validators=semantic)
+        if semantic and self.execution.job_timeout_s is not None and self.execution.job_timeout_s < minimum:
+            raise ValueError(
+                f"execution.job_timeout_s ({self.execution.job_timeout_s:g}) must be at least {minimum:g} when "
+                "semantic_validators are configured"
+            )
         ttl = self.sandbox_spec.ttl_s
-        lifetime = self.execution.effective_job_timeout_s() + self.execution.cleanup_timeout_s
+        job_timeout_s = self.execution.effective_job_timeout_s(semantic_validators=semantic)
+        lifetime = job_timeout_s + self.execution.cleanup_timeout_s
         if ttl is not None and ttl < lifetime:
             raise ValueError(
                 f"sandbox_spec.ttl_s ({ttl:g}) must be at least the job deadline (execution.job_timeout_s, or its "
@@ -188,9 +247,16 @@ class CritPtRunRequest(BaseRunRequest):
 
     @field_validator("responses_create_params")
     @classmethod
-    def public_params(cls, value: dict) -> dict:
-        bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
+    def public_params(cls, value: dict, info: ValidationInfo) -> dict:
+        bounded_json(value, max_bytes=None)
         NeMoGymResponseCreateParamsNonStreaming.model_validate(value)
+        if (info.context or {}).get("answer_source") == "finish_tool":
+            if any(
+                tool.get("type") != "function" or tool.get("name") not in {"code_exec", "finish"}
+                for tool in value.get("tools") or []
+            ):
+                raise ValueError("unsupported task tool")
+            return value
         if value.get("tools"):
             raise ValueError("tools are not supported")
         if value.get("tool_choice") not in (None, "auto", "none"):
@@ -204,7 +270,7 @@ class CritPtVerifyRequest(CritPtRunRequest, BaseVerifyRequest):
     @field_validator("response")
     @classmethod
     def saved_response(cls, value: dict) -> dict:
-        bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
+        bounded_json(value, max_bytes=None)
         NeMoGymResponse.model_validate(value)
         return value
 
@@ -218,6 +284,7 @@ class CritPtVerifyResponse(BaseVerifyResponse):
     scored: bool
     category: str
     cleanup_status: str
+    candidate_uncertainty_reasons: tuple[str, ...] = ()
     sandbox_observations: list[dict[str, Any]] = Field(default_factory=list)
     failure_class: str | None = Field(default=None, alias="_ng_failure_class")
     failure_subcategory: str | None = Field(default=None, alias="_ng_failure_subcategory")
@@ -310,9 +377,21 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
     _grader: Any = PrivateAttr(default=None)
     _provider: Any = PrivateAttr(default=None)
     _probe_info: dict = PrivateAttr(default_factory=dict)
+    _agentic_sessions: AgenticExecutionSessions | None = PrivateAttr(default=None)
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        # Like chartography and visual_coding_opencode, a server that holds per-episode sandboxes runs with one
+        # worker: execution sandboxes are not exercised with several workers. Without them nothing is kept per episode.
+        if self.config.agentic_execution is None:
+            return None
+        return "execution sandboxes are not exercised with several workers"
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+        if self.config.answer_source == "finish_tool":
+            app.post("/finish")(self.finish)
+            if self.config.agentic_execution is not None:
+                app.post("/code_exec")(self.code_exec)
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -329,6 +408,28 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
     def _named_configs(self) -> dict | None:
         return get_global_config_dict() if isinstance(self.config.sandbox_provider, str) else None
+
+    def _validation_context(self) -> dict[str, Any]:
+        return {"answer_source": self.config.answer_source}
+
+    def _execution_sessions(self) -> AgenticExecutionSessions | None:
+        cfg = self.config.agentic_execution
+        if cfg is None:
+            return None
+        named = get_global_config_dict() if isinstance(cfg.sandbox_provider, str) else None
+        spec = cfg.sandbox_spec
+        values = spec.model_dump()
+        values["metadata"] = {
+            **resolve_provider_metadata(cfg.sandbox_provider, named),
+            **spec.metadata,
+            "nemo_gym_server": (self.config.name or "critpt_custom_grader")[:63],
+        }
+        return AgenticExecutionSessions(
+            cfg,
+            provider_config=resolve_provider_config(cfg.sandbox_provider, named),
+            sandbox_spec=SandboxSpec(**values),
+            close_retry_window_seconds=self.config.session_close_retry_window_seconds,
+        )
 
     def _sandbox_spec(self) -> SandboxSpec:
         cfg = self.config.sandbox_spec
@@ -359,6 +460,10 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         """
         if self._grader is not None:
             return
+        if self._agentic_sessions is not None:
+            # A previous shutdown may have kept unresolved handles. Never replace their cleanup owner.
+            await self._agentic_sessions.shutdown()
+            self._agentic_sessions = None
         provider = self._provider or create_provider(
             resolve_provider_config(self.config.sandbox_provider, self._named_configs())
         )
@@ -383,7 +488,9 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
                 default_rtol=self.config.comparison.default_rtol,
                 default_atol=self.config.comparison.default_atol,
                 reference_cache=ReferenceCache(self.config.reference_cache_dir),
+                semantic_validators=self.config.semantic_validators,
             )
+            self._agentic_sessions = self._execution_sessions()
         except BaseException:
             self._provider = None
             await _close_provider(provider)
@@ -397,8 +504,13 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         """
         grader, provider = self._grader, self._provider
         try:
-            if grader is not None:
-                await grader.shutdown()
+            try:
+                if self._agentic_sessions is not None:
+                    await self._agentic_sessions.shutdown()
+                    self._agentic_sessions = None
+            finally:
+                if grader is not None:
+                    await grader.shutdown()
         finally:
             try:
                 if provider is not None:
@@ -410,8 +522,6 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
     @staticmethod
     async def _read_json(request: Request) -> tuple[dict | None, JSONResponse | None]:
         body = await request.body()
-        if len(body) > MAX_REQUEST_BYTES:
-            return None, _error("request_limit", 413)
         try:
             value = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeError, RecursionError):
@@ -425,10 +535,37 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if error is not None:
             return error
         if "resources_session_id" in value:
-            return ResourcesSeedSessionResponse(resources_session_id=str(value["resources_session_id"]))
+            if self.config.answer_source != "finish_tool":
+                return ResourcesSeedSessionResponse(resources_session_id=str(value["resources_session_id"]))
+            try:
+                seed = ResourcesSeedSessionRequest.model_validate(value)
+            except Exception:
+                return _error("request_invalid", 422)
+            try:
+                fields, conflicts = normalize_task_fields(seed.task_data)
+                if conflicts:
+                    raise ValueError("conflicting task fields")
+                TaskData.model_validate(fields)
+            except Exception:
+                return _error("task_invalid", 422)
+            if self._agentic_sessions is not None:
+                try:
+                    response = await self._agentic_sessions.seed(seed)
+                    request.session[SESSION_ID_KEY] = seed.resources_session_id
+                    return response
+                except HTTPException as exc:
+                    return _error("session_conflict", exc.status_code)
+                except Exception as exc:
+                    logger.warning("execution seed failed (%s)", type(exc).__name__)
+                    return _error("execution_unavailable", 503)
+            if self.config.agentic_execution is not None:
+                return _error("server_not_ready", 503)
+            return ResourcesSeedSessionResponse(resources_session_id=seed.resources_session_id)
+        if self._agentic_sessions is not None or self.config.agentic_execution is not None:
+            return _error("session_identity_required", 422)
         # The request shape (prompt params, tools, tool_choice) first, as /verify does; then the task fields.
         try:
-            body = CritPtRunRequest.model_validate(value)
+            body = CritPtRunRequest.model_validate(value, context=self._validation_context())
         except Exception:
             return _error("request_invalid", 422)
         try:
@@ -436,6 +573,48 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         except Exception:
             return _error("task_invalid", 422)
         return BaseSeedSessionResponse()
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Close the episode session the body names, even when the caller lost its seed cookie."""
+        if self._agentic_sessions is not None:
+            return await self._agentic_sessions.close(body)
+        return await super().close_resources_session(body)
+
+    async def finish(self, request: Request) -> JSONResponse:
+        """Acknowledge the exact submitted answer without evaluating it or reading execution files."""
+        value, error = await self._read_json(request)
+        try:
+            if error is not None:
+                raise ValueError("invalid finish")
+            body = FinishRequest.model_validate(value)
+            return JSONResponse(finish_acknowledgement(body))
+        except (ValueError, UnicodeError):
+            # Stirrup's remote-tool bridge consumes detail on repairable 400/422 responses.
+            return JSONResponse({"detail": "invalid_finish"}, status_code=422)
+
+    async def code_exec(self, request: Request) -> JSONResponse:
+        """Run a command in this episode's persistent offline execution sandbox."""
+        value, error = await self._read_json(request)
+        try:
+            if error is not None:
+                raise ValueError("invalid command")
+            params = get_code_execution_params().model_validate(value)
+        except ValueError:
+            return JSONResponse({"detail": "invalid_code_exec"}, status_code=422)
+        if self._agentic_sessions is None:
+            return JSONResponse({"detail": "execution_unavailable"}, status_code=503)
+        session_id = request.session.get(SESSION_ID_KEY)
+        if not isinstance(session_id, str) or not session_id:
+            raise ResourcesSessionLostError("The request names no resources session")
+        try:
+            result = await self._agentic_sessions.execute(session_id, params.cmd)
+            return JSONResponse(result)
+        except HTTPException:
+            # A lost or expired resources session answers 404 through FastAPI, with the failure_kind in its detail.
+            raise
+        except Exception as exc:
+            logger.warning("execution tool failed (%s)", type(exc).__name__)
+            return JSONResponse({"detail": "execution_unavailable"}, status_code=503)
 
     def _response(
         self,
@@ -448,6 +627,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         terminal: bool = False,
         cleanup: str = "not_started",
         sandboxes: list[dict[str, Any]] | None = None,
+        candidate_uncertainty_reasons: tuple[str, ...] = (),
     ) -> CritPtVerifyResponse:
         if scored:
             failure_class = None
@@ -466,6 +646,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             scored=scored,
             category=category,
             cleanup_status=cleanup,
+            candidate_uncertainty_reasons=candidate_uncertainty_reasons,
             sandbox_observations=sandboxes or [],
             failure_class=failure_class,
             failure_kind=failure_class,
@@ -502,8 +683,33 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if result.outcome == "unscorable" and result.reward is None and result.category in UNSCORABLE_CATEGORIES:
             failure_class, terminal = UNSCORABLE_CATEGORIES[result.category]
             if result.failure_class == failure_class and result.terminal is terminal:
+                if (
+                    self.config.score_comparator_uncertain_as_incorrect
+                    and counts_valid
+                    and result.cases_attempted == result.case_count
+                    and bool(result.candidate_uncertainty_reasons)
+                    and all(reason in CANDIDATE_UNCERTAINTY_REASONS for reason in result.candidate_uncertainty_reasons)
+                    and result.category == "comparator_uncertain"
+                    and body.response.get("status") == "completed"
+                    and body.response.get("output")
+                ):
+                    return self._response(
+                        body,
+                        task,
+                        result.category,
+                        scored=True,
+                        cleanup=cleanup,
+                        sandboxes=observations,
+                        candidate_uncertainty_reasons=result.candidate_uncertainty_reasons,
+                    )
                 return self._response(
-                    body, task, result.category, terminal=terminal, cleanup=cleanup, sandboxes=observations
+                    body,
+                    task,
+                    result.category,
+                    terminal=terminal,
+                    cleanup=cleanup,
+                    sandboxes=observations,
+                    candidate_uncertainty_reasons=result.candidate_uncertainty_reasons,
                 )
         return self._response(body, task, "execution_unknown", cleanup="unknown", sandboxes=observations)
 
@@ -512,14 +718,33 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if error is not None:
             return error
         try:
-            body = CritPtVerifyRequest.model_validate(value)
+            body = CritPtVerifyRequest.model_validate(value, context=self._validation_context())
         except Exception:
             return _error("request_invalid", 422)
         try:
             task = _task(body)
         except Exception:
             return self._response(body, None, "task_invalid", terminal=True)
-        source = _source(body.response)
+        if self.config.answer_source == "finish_tool":
+            submission = extract_finish_source(body.response)
+            if submission.source is None:
+                return self._response(
+                    body,
+                    task,
+                    submission.category,
+                    scored=submission.scored,
+                    terminal=submission.category == "submission_invalid",
+                )
+            source = submission.source
+        else:
+            if (
+                body.response.get("status") == "incomplete"
+                and (body.response.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
+                and not body.response.get("error")
+            ):
+                # Exhausting the generation budget is a final model outcome, not a transient failure.
+                return self._response(body, task, "response_truncated", scored=True)
+            source = _source(body.response)
         if source is None:
             if _needs_regeneration(body.response):
                 return self._response(body, task, "response_incomplete")
@@ -594,3 +819,6 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CritPtCustomGraderServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CritPtCustomGraderServer.run_webserver()  # noqa: F401

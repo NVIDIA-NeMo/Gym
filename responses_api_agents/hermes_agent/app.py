@@ -13,49 +13,51 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import atexit
+import json
 import logging
 import os
 import re
-import shutil
+import signal
 import sys
 import tempfile
+import threading
 from asyncio import Semaphore
 from collections.abc import Mapping
+from pathlib import Path
 from time import monotonic, time
 from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
-import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
-from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
+from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
+    SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
+    resolve_agent_timeout,
+    restrict_sandbox_network,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
-)
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -68,9 +70,18 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    UnsupportedContentError,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -79,15 +90,15 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.tool_access import MCPToolAccess
-from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
-from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
-from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.hermes_agent.observability import normalize_hermes_messages
+from responses_api_agents.hermes_agent.runtime import builtin_toolsets, host_python
+from responses_api_agents.hermes_agent.sandbox import (
+    HarnessProcessInfo,
+    HermesPlatformUnsupportedError,
+    HermesSandboxSession,
+    parse_runtime_info,
+)
 
 
 # Legacy /run grades these request rejections and masks other provider failures.
@@ -95,23 +106,64 @@ from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, Harn
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
 _HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
+# Upstream truncation exits, including the previous pin's three-attempt limit.
+_OUTPUT_LIMIT_ERRORS = frozenset(
+    {
+        _TRUNCATION_ERROR,
+        "Response truncated due to output length limit",
+        "Response remained truncated after 3 continuation attempts",
+        "Response remained truncated after 4 continuation attempts",
+        "Model used all output tokens on reasoning with none left for the response. "
+        "Try lowering reasoning effort or increasing max_tokens.",
+    }
+)
+
+
+# Hermes 0.23.2 stamps every terminal failure with a `failure_reason` (agent/turn_failure_copy.py
+# `stamp_failure`) and words its error for a chat user. These two end the turn on a model limit. Context
+# overflow also sets `failed`, so without its reason it would read as a provider failure.
+_CONTEXT_OVERFLOW_REASON = "context_overflow"
+_OUTPUT_TRUNCATED_REASON = "truncated"
+
+
+def _is_context_overflow(result: Mapping[str, Any]) -> bool:
+    """Whether Hermes ended because the conversation no longer fits the model's context window."""
+    if result.get("failure_reason") == _CONTEXT_OVERFLOW_REASON:
+        # Hermes stamps two other endings the same way: a compression call that timed out and an output cap the
+        # endpoint rejected. Those are infrastructure and configuration failures, so require that compression
+        # ran out of room or was turned off.
+        return bool(result.get("compression_exhausted") or result.get("compaction_disabled")) and (
+            result.get("turn_exit_reason") != "context_compression_timeout"
+        )
+    error = str(result.get("error") or "")
+    return bool(result.get("partial")) and (
+        error.startswith("Context length exceeded")
+        or re.fullmatch(r"Prompt used [0-9]+ of [0-9]+ context tokens; no room to answer", error) is not None
+    )
+
+
+def _is_model_limit_ending(result: Mapping[str, Any]) -> bool:
+    """A Hermes ending that `failed` because of a model limit, which the verifier grades."""
+    return (
+        result.get("error") == _TRUNCATION_ERROR
+        or result.get("failure_reason") == _OUTPUT_TRUNCATED_REASON
+        or _is_context_overflow(result)
+    )
 
 
 def _is_limit_result(result: Mapping[str, Any]) -> bool:
-    """Recognize explicit Hermes limit results; tested on Hermes 26bb847a.
+    """Recognize explicit Hermes budget and output-limit results.
 
-    `partial` alone also covers invalid model output, so require a native limit reason.
+    `partial` alone also covers invalid model output, so require a Hermes limit reason.
     """
     error = str(result.get("error") or "")
     return (
         result.get("stop_reason") in {"wall_time", "max_iterations"}
+        or result.get("failure_reason") == _OUTPUT_TRUNCATED_REASON
         or error == _TRUNCATION_ERROR
         or (
             bool(result.get("partial"))
-            and (
-                error == "Response truncated due to output length limit"
-                or error.startswith("Request payload too large")
-            )
+            and (error in _OUTPUT_LIMIT_ERRORS or error.startswith("Request payload too large"))
         )
     )
 
@@ -170,7 +222,7 @@ def _trajectory_to_output_items(messages, n_input):
         if role == "assistant":
             reasoning_text = item.get("reasoning") or ""
             if reasoning_text:
-                content = ResponsesConverter._parse_think_tags(content)[1]
+                content = ChatCompletionsConverter._parse_think_tags(content)[1]
                 output_items.append(
                     NeMoGymResponseReasoningItem(
                         id=f"rsn-{len(output_items)}",
@@ -222,14 +274,15 @@ _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
-    """Rename Hermes' ``mcp_<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
+    """Rename Hermes' ``mcp__<server>__<tool>`` to Gym's ``mcp__<granted server>__<tool>``, which Gym strips.
 
-    Hermes replaces "-" and "." with "_" in both parts. The server part is matched against the granted names,
-    longest first so one name that extends another cannot capture its tools; a tool name that contained "-" or
-    "." keeps Hermes' replacement.
+    Hermes replaces every character outside ``[A-Za-z0-9_]`` with "_" in both parts. The server part is matched
+    against the granted names, longest first so one name that extends another cannot capture its tools; a tool
+    name keeps Hermes' replacement. Hermes shortens a name longer than 64 characters with a hash suffix, and such a
+    name stays as Hermes wrote it.
     """
     for server in sorted(server_names, key=len, reverse=True):
-        prefix = "mcp_" + server.replace("-", "_").replace(".", "_") + "_"
+        prefix = "mcp__" + re.sub(r"[^A-Za-z0-9_]", "_", server) + "__"
         if name.startswith(prefix):
             return f"mcp__{server}__{name[len(prefix) :]}"
     return name
@@ -253,7 +306,33 @@ if not LOG.handlers:
     LOG.addHandler(_SafeStderrHandler(level=logging.WARNING))
 
 
-def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Optional[str]]:
+def _hermes_message_content(content: str | list[dict[str, Any] | BaseModel]) -> str | list[dict[str, Any]]:
+    """Keep images and text in order using Hermes' Chat Completions content format.
+
+    Image data URIs have already been checked and normalized at the HTTP boundary.
+    Text-only content keeps the existing concatenation behavior.
+    """
+    if isinstance(content, str):
+        return content
+    parts = [part if isinstance(part, dict) else part.model_dump() for part in content]
+    if not any(part.get("type") == "input_image" for part in parts):
+        return "".join(part.get("text", "") for part in parts)
+    return [
+        # Chat has no "original" detail; use its highest supported level.
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": part["image_url"],
+                "detail": "high" if part.get("detail") == "original" else part.get("detail", "auto"),
+            },
+        }
+        if part.get("type") == "input_image"
+        else {"type": "text", "text": part.get("text", "")}
+        for part in parts
+    ]
+
+
+def _split_input_to_user_and_history(input_items) -> tuple[str | list[dict[str, Any]], list[dict], Optional[str]]:
     if isinstance(input_items, str):
         return input_items, [], None
     items = list(input_items)
@@ -270,14 +349,12 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
             system_message = first_content or ""
             items = items[1:]
 
-    user_message = ""
+    user_message: str | list[dict[str, Any]] = ""
     history: list[dict] = []
     for idx, item in enumerate(items):
         role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
         content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
-        if isinstance(content, list):
-            content = "".join((p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "")) for p in content)
-        content = content or ""
+        content = _hermes_message_content(content or "")
         if idx == len(items) - 1 and role == "user":
             user_message = content
         else:
@@ -299,14 +376,30 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     terminal_timeout: int = 180
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Hermes creates: `model_only` allows only the model server's host, `model_and_tools` "
+            "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that "
+            "borrows one rejects any other value than `inherit`. The Agent Server builds Hermes's runtime and "
+            "uploads it, so a restricted sandbox needs no network for setup."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
-    # Where uv builds for sandbox architectures other than the host's are cached.
-    uv_cache_dir: str = DEFAULT_UV_CACHE_DIR
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
+    # Hermes' `compression.threshold_tokens`: compress once a prompt reaches this many tokens, if that is lower
+    # than the compression_threshold trigger. Hermes raises compression_threshold to at least 0.75 for windows
+    # under 512,000 tokens, so this is the only way to compress earlier in such a window.
+    compression_threshold_tokens: Optional[int] = Field(default=None, gt=0)
+    # The model's context window, as Hermes' `model.context_length`. Compression triggers at
+    # compression_threshold of it. Unset, Hermes probes the endpoint, which the Gym model server does not
+    # answer, and falls back to its window for a model name it recognizes, else 256,000 tokens. Hermes refuses
+    # windows under 64,000 tokens.
+    context_length: Optional[int] = Field(default=None, ge=64_000)
     chat_template_kwargs_enabled: bool = True
     api_key: Optional[str] = None
     delegation_max_iterations: int = 50
@@ -329,9 +422,9 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 
 class HermesAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read Hermes 26bb847a native result flags and API errors; tested on that pin."""
+        """Map the Hermes worker's result flags and errors to Gym outcome kinds."""
         error = str(native_result.get("error") or "")
-        if native_result.get("partial") and error.startswith("Context length exceeded"):
+        if _is_context_overflow(native_result):
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if _is_limit_result(native_result):
             return AgentOutcome(failure_kind=AGENT_LIMIT)
@@ -369,9 +462,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 + ", ".join(sorted(unsupported)),
             )
         # Hermes exposes each MCP server as a toolset of the same name, so a name must not shadow a built-in one.
-        colliding = [
-            access.name for access in tool_accesses if isinstance(access, MCPToolAccess) and access.name in TOOLSETS
-        ]
+        granted = [access.name for access in tool_accesses if isinstance(access, MCPToolAccess)]
+        colliding = sorted(set(granted) & await asyncio.to_thread(builtin_toolsets)) if granted else []
         if colliding:
             raise AgentSeedRejectedError(
                 "MCP tool grants collide with Hermes toolsets: " + ", ".join(sorted(colliding))
@@ -411,15 +503,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         replaces the previous handler, so concurrent responses() calls clobber each other and the
         first to finish removes the only remaining handler — leaving later SIGTERMs unhandled and
         their trajectories lost. A single dispatcher over `active_agents` avoids that race."""
-        if self.sigterm_installed:
+        if self.sigterm_installed or threading.current_thread() is not threading.main_thread():
             return
-        import signal
 
         def _dispatch():
             for ag in list(self.active_agents):
                 self.interrupted_agents.add(id(ag))
-                if hasattr(ag, "interrupt"):
-                    ag.interrupt("timeout")
+                if ag.returncode is None:
+                    ag.terminate()
 
         try:
             asyncio.get_event_loop().add_signal_handler(signal.SIGTERM, _dispatch)
@@ -430,9 +521,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def _build_config(self, mcp_accesses: list[MCPToolAccess] | None = None) -> str:
         import yaml
 
+        model: str | dict[str, Any] = self._model_name()
+        if self.config.context_length is not None:
+            model = {"default": model, "context_length": self.config.context_length}
         config: dict[str, Any] = {
-            "model": self._model_name(),
-            "provider": "auto",
+            # No root `provider`: Hermes applies `model.context_length` only to the configured provider's route (the
+            # previous "auto" dropped it), and a configured provider would also become the fallback for failed
+            # auxiliary calls, sending compression to the trained policy route.
+            "model": model,
+            # Hermes 0.23.2's own CLI toolset; its tool set differs from the previous pin's (for example `todo_list`).
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
             "memory": {
@@ -442,6 +539,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "compression": {
                 "enabled": self.config.compression_enabled,
                 "threshold": self.config.compression_threshold,
+                "threshold_tokens": self.config.compression_threshold_tokens,
             },
             "terminal": {
                 "backend": self.config.terminal_backend,
@@ -471,17 +569,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
         self.sem = Semaphore(self.config.concurrency)
         self.active_agents = set()
         self.interrupted_agents = set()
-        # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
-        # process-global, so multiple HermesAgent instances in one process share them
-        os.environ["TERMINAL_ENV"] = self.config.terminal_backend
-        os.environ["TERMINAL_TIMEOUT"] = str(self.config.terminal_timeout)
-
-        # Build config.yaml with config parameters
-        hermes_home = tempfile.mkdtemp(prefix="hermes_agent_")
-        atexit.register(shutil.rmtree, hermes_home, True)
-        with open(os.path.join(hermes_home, "config.yaml"), "w") as _f:
-            _f.write(self._build_config())
-        os.environ["HERMES_HOME"] = hermes_home
 
     async def _initialize_agent_session_state(
         self,
@@ -500,27 +587,50 @@ class HermesAgent(SimpleResponsesAPIAgent):
             connection = body.sandbox_access.connection
             if not isinstance(connection, DirectSandboxConnection):
                 raise AgentSeedRejectedError("Hermes currently supports only direct sandbox connections")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "Hermes network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             provider_ref = connection.provider_config_ref
             workdir = body.sandbox_access.workdir
 
         provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
         # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
         # without use_absolute_ip) would make every model call fail and the episode score 0 unmasked.
-        assert_model_url_reachable_from_sandbox(
-            self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-            provider_name=next(iter(provider_config), None),
-        )
+        model_base_url = self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key)
+        try:
+            assert_model_url_reachable_from_sandbox(model_base_url, provider_name=next(iter(provider_config), None))
+        except ValueError as error:
+            # A model URL the sandbox cannot reach fails the same way on every attempt: refuse the seed.
+            raise AgentSeedRejectedError(str(error)) from error
         provider = create_provider(provider_config)
         try:
             if owns_sandbox:
-                sandbox = AsyncSandbox(provider)
                 sandbox_config = self.config.sandbox_config.copy()
                 # Provider TTLs outlive this server; reserve ten minutes for setup/cleanup overhead.
                 sandbox_config.setdefault(
                     "ttl_s",
                     self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
                 )
-                await sandbox.start(SandboxSpec(**sandbox_config))
+                spec = restrict_sandbox_network(
+                    SandboxSpec(**sandbox_config),
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=model_base_url,
+                    tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess)
+                    ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
+                )
+                sandbox = AsyncSandbox(provider)
+                await sandbox.start(spec)
             else:
                 sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
         except BaseException:
@@ -539,15 +649,16 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            await state.install_runtime(
-                install_timeout=self.config.sandbox_install_timeout_seconds, uv_cache_dir=self.config.uv_cache_dir
-            )
+            await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
             except BaseException:
                 LOG.exception("Could not clean failed Hermes setup %s; retaining session for close", agent_session_id)
                 raise AgentSessionSetupError(state, error=error) from error
+            if isinstance(error, HermesPlatformUnsupportedError):
+                # A rerun gets a sandbox from the same image: refuse the seed rather than fail with a retryable 500.
+                raise AgentSeedRejectedError(str(error)) from error
             raise
         return state
 
@@ -574,6 +685,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                         AgentInvocation(
                             invocation_id=invocation_id,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
+                            spawned_by_tool_call_id=raw_invocation.get("spawned_by_tool_call_id"),
                             status="incomplete" if root_context_limit else raw_invocation.get("status", "unknown"),
                             stop_reason="context_limit" if root_context_limit else raw_invocation.get("stop_reason"),
                             # Every call goes to the configured Model Server, so a response ID identifies the call.
@@ -592,7 +704,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     ToolCallObservation.model_validate(tool) for tool in raw_observations.get("tools") or []
                 )
                 records.extend(
-                    ContextCompactionObservation.model_validate(compaction)
+                    ContextCompactionObservation.model_validate(
+                        {
+                            **compaction,
+                            "model_calls": [
+                                {**ref, "model_ref": self.config.model_server}
+                                for ref in compaction.get("model_calls", [])
+                            ],
+                        }
+                    )
                     for compaction in raw_observations.get("compactions") or []
                 )
                 return AgentObservationBundle(
@@ -645,22 +765,20 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
         return AgentObservationBundle(source="hermes", records=records, gaps=gaps)
 
-    async def _run_sandbox_episode(
+    def _worker_payload(
         self,
-        *,
         body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
         agent_session_id: str,
-        state: HermesSandboxSession,
-    ) -> AgentEpisode:
+        rollout_id: str | None,
+        mcp_accesses: list[MCPToolAccess],
+    ) -> dict[str, Any]:
         params = self._conversation_params(body)
-        mcp_accesses = [
-            access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
-        ]
         enabled_toolsets = self.config.enabled_toolsets
         if enabled_toolsets is not None:
             # A restricted tool list would otherwise hide the tools this episode was granted.
             enabled_toolsets = [*enabled_toolsets, *(access.name for access in mcp_accesses)]
-        payload = {
+        return {
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
             "config_yaml": self._build_config(mcp_accesses),
@@ -672,11 +790,31 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "max_turns": self.config.max_turns,
             "model": self._model_name(),
             # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
-            "model_base_url": self.resolve_model_base_url(
-                self.config.model_server.name, state.request.episode_id.capture_key
+            "model_base_url": self.resolve_model_base_url(self.config.model_server.name, rollout_id),
+            # Compression is a side call that token capture does not deliver, so no training framework trains it: it
+            # keeps its own sampling.
+            "compression_model_base_url": self.resolve_model_base_url(
+                self.config.model_server.name, rollout_id, trained=False
             ),
             "terminal_timeout": self.config.terminal_timeout,
         }
+
+    async def _run_sandbox_episode(
+        self,
+        *,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        agent_session_id: str,
+        state: HermesSandboxSession,
+    ) -> AgentEpisode:
+        mcp_accesses = [
+            access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
+        ]
+        payload = self._worker_payload(
+            body,
+            agent_session_id=agent_session_id,
+            rollout_id=state.request.episode_id.capture_key,
+            mcp_accesses=mcp_accesses,
+        )
         timeout = self._agent_timeout_sec(body)
         timed_out = False
         started = monotonic()
@@ -722,7 +860,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             body=body,
             result=result,
             model_name=self._model_name(),
-            n_input=len(params["history"]) + 1,
+            n_input=len(payload["history"]) + 1,
             retain_provider_failure=True,
         )
         response = self.report_outcome(response, result)
@@ -786,14 +924,30 @@ class HermesAgent(SimpleResponsesAPIAgent):
             or conversation_roles[-1] != "user"
             or any(role not in ("user", "assistant") for role in conversation_roles)
         ):
-            raise HTTPException(422, "Hermes accepts text history ending with a user message")
+            raise HTTPException(422, "Hermes accepts user/assistant history ending with a user message")
         for item in body.input:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None))
-                not in ("input_text", "output_text")
-                for part in item.content
-            ):
-                raise HTTPException(422, "Hermes only supports text input")
+            if isinstance(item.content, str):
+                continue
+            for part in item.content:
+                part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+                if part_type in ("input_text", "output_text"):
+                    continue
+                if part_type != "input_image":
+                    raise HTTPException(422, f"Hermes does not support content part {part_type!r}")
+                if item.role != "user":
+                    raise HTTPException(422, "Hermes accepts images only in user messages")
+                uri = part.get("image_url") if isinstance(part, dict) else getattr(part, "image_url", None)
+                if not isinstance(uri, str):
+                    raise HTTPException(422, "Hermes input_image must hold a base64 data URI")
+                try:
+                    uri = MediaFile.from_data_uri(uri).to_data_uri()
+                except UnsupportedContentError as error:
+                    raise HTTPException(422, f"Hermes: {error}") from error
+                # Normalize the MIME label to the image bytes without mutating the caller's request.
+                if isinstance(part, dict):
+                    part["image_url"] = uri
+                else:
+                    part.image_url = uri
         return body
 
     def _agent_timeout_sec(self, body: NeMoGymResponseCreateParamsNonStreaming) -> float:
@@ -825,9 +979,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         # The pinned Hermes marks provider/API failures with `failed`, but model-limit and
         # invalid-tool outcomes with `partial`. Keep those partial patches gradable. Its model-caused
-        # `failed` outcomes are first-response truncation (run_agent.py) and a terminal rejection of the
-        # request by the model endpoint (HTTP 400, 413, 422): both reach the verifier unmasked.
-        failed = bool(result.get("failed")) and result.get("error") != _TRUNCATION_ERROR
+        # `failed` outcomes are context overflow and output truncation (by `failure_reason`) and a terminal
+        # rejection of the request by the model endpoint (HTTP 400, 413, 422): all reach the verifier unmasked.
+        failed = bool(result.get("failed")) and not _is_model_limit_ending(result)
         rejection_status = _model_rejection_status(result.get("error")) if failed else None
         provider_failed = failed and rejection_status is None
         if provider_failed and not retain_provider_failure:
@@ -917,116 +1071,75 @@ class HermesAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
     ) -> NeMoGymResponse:
-        from run_agent import AIAgent  # from hermes-agent on path  # pyright: ignore[reportMissingImports]
-
         if (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY) is not None:
             LOG.warning("Hermes host execution does not bound the run by %s", AGENT_TIMEOUT_METADATA_KEY)
-        params = self._conversation_params(body)
-
-        base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
-        model_name = self._model_name()
-
-        agent = AIAgent(
-            base_url=base_url,
-            api_key=self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
-            model=model_name,
-            use_streaming=False,
-            temperature=params["temperature"],
-            insert_reasoning=True,
-            max_iterations=self.config.max_turns,
-            max_tokens=params["max_tokens"],
-            enabled_toolsets=self.config.enabled_toolsets,
-            disabled_toolsets=self.config.disabled_toolsets,
-            quiet_mode=True,
-            skip_context_files=True,
-            skip_memory=True,
-            persist_session=False,
-            save_trajectories=False,
-        )
-        _original_build_api_kwargs = agent._build_api_kwargs
-
-        def _patched_build_api_kwargs(api_messages: list[dict[str, Any]]) -> dict[str, Any]:
-            return _model_api_kwargs(
-                _original_build_api_kwargs(api_messages),
-                preserve_reasoning_history=self.config.chat_template_kwargs_enabled,
-            )
-
-        agent._build_api_kwargs = _patched_build_api_kwargs
-        install_summary_compat(agent, preserve_reasoning_history=self.config.chat_template_kwargs_enabled)
-        observer = None
+        payload = self._worker_payload(body, agent_session_id=uuid4().hex, rollout_id=rollout_id, mcp_accesses=[])
+        payload["terminal_backend"] = self.config.terminal_backend
+        payload["api_key"] = self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym")  # pragma: allowlist secret
+        worker, interrupted = await self._run_host_worker(payload)
+        result = worker["result"]
         if observation_collector is not None:
             try:
-                observer = HermesAgentObserver(
-                    model_ref=self.config.model_server, capture_correlated=rollout_id is not None
-                ).instrument(agent)
+                observations = self._sandbox_observations(
+                    result,
+                    worker.get("observations"),
+                    runtime_info=parse_runtime_info(worker.get("runtime")),
+                )
             except Exception:
-                LOG.exception("failed to initialize Hermes observability")
-
-        # Interrupt the agent cleanly on SIGTERM so run_conversation returns with partial messages
-        # instead of being killed mid-turn (which would leave response.json unwritten). A single
-        # shared dispatcher interrupts every in-flight agent; we just register this one in the set.
-        self._ensure_sigterm_handler()
-        agent_id = id(agent)
-        self.active_agents.add(agent)
-
-        result = None
-        agent_error: Optional[BaseException] = None
-        interrupted_by_dispatch = False
-        try:
-            result = await asyncio.to_thread(
-                agent.run_conversation,
-                params["user_message"],
-                params["system_message"],
-                params["history"],
-                task_id=None,
-            )
-            if getattr(agent, "_gym_iteration_limit_reached", False):
-                result.setdefault("stop_reason", "max_iterations")
-        except BaseException as exc:
-            agent_error = exc
-            raise
-        finally:
-            self.active_agents.discard(agent)
-            interrupted_by_dispatch = agent_id in self.interrupted_agents
-            self.interrupted_agents.discard(agent_id)
-            if observation_collector is not None:
-                try:
-                    observations = (
-                        observer.finish(result, error=agent_error)
-                        if observer is not None
-                        else AgentObservationBundle(
-                            source="hermes",
-                            gaps=[ObservationGap(code="observation_capture_failed")],
-                        )
-                    )
-                except Exception:
-                    LOG.exception("failed to finish Hermes observability")
-                    observations = AgentObservationBundle(
-                        source="hermes",
-                        gaps=[ObservationGap(code="observation_capture_failed")],
-                    )
-                try:
-                    observation_collector(observations)
-                except Exception:
-                    LOG.exception("failed to return Hermes observations")
-
-        # Hermes' early error returns omit the aggregates included by its normal
-        # return. Preserve the actual runtime counters, including known zero after
-        # rejection, without inventing counts when a runtime does not expose them.
-        result = dict(result)
-        for field in ("prompt_tokens", "completion_tokens", "cache_read_tokens", "reasoning_tokens"):
-            count = getattr(agent, f"session_{field}", None)
-            if field not in result and type(count) is int and count >= 0:
-                result[field] = count
-
+                LOG.exception("Unable to project Hermes worker observations")
+                observations = AgentObservationBundle(
+                    source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
+                )
+            try:
+                observation_collector(observations)
+            except Exception:
+                LOG.exception("Unable to return Hermes observations")
         return self._response_from_result(
             body=body,
             result=result,
-            model_name=model_name,
-            interrupted_by_dispatch=interrupted_by_dispatch,
-            n_input=len(params["history"]) + 1,
+            model_name=self._model_name(),
+            interrupted_by_dispatch=interrupted,
+            n_input=len(payload["history"]) + 1,
             retain_provider_failure=True,
         )
+
+    async def _run_host_worker(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        python = await asyncio.to_thread(host_python)
+        runner = Path(__file__).with_name("sandbox_runner.py")
+        self._ensure_sigterm_handler()
+        with tempfile.TemporaryDirectory(prefix="gym-hermes-") as directory:
+            # The model's terminal tools must not be able to overwrite the training result file.
+            # Use an inherited private pipe for the host response. Sandbox sessions use their file-exchange API.
+            process = await asyncio.create_subprocess_exec(
+                str(python),
+                "-E",
+                "-s",
+                str(runner),
+                "--host",
+                directory,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            self.active_agents.add(process)
+            try:
+                output, _ = await process.communicate(json.dumps(payload).encode())
+            finally:
+                self.active_agents.discard(process)
+                interrupted = id(process) in self.interrupted_agents
+                self.interrupted_agents.discard(id(process))
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
+            if not output:
+                raise RuntimeError(f"Hermes worker exited with status {process.returncode} without a response")
+            worker = json.loads(output)
+            if process.returncode:
+                raise RuntimeError(f"Hermes worker failed ({worker.get('error_type')}): {worker.get('error')}")
+        return worker, interrupted
 
     async def responses(
         self,
@@ -1039,10 +1152,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         if isinstance(agent_session_id, str):
             if not isinstance(rollout_id, str):
-                raise HTTPException(409, "Agent sessions require an attempt-qualified rollout path")
+                raise AgentSessionConflictError("Agent sessions require an attempt-qualified rollout path")
             state = self._require_agent_session(agent_session_id)
             if state.request.episode_id.capture_key != rollout_id:
-                raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+                raise AgentSessionConflictError("Agent-session episode_id does not match the rollout route")
             if state.task is None:
                 # No await until the task and its immutable request binding are installed.
                 state.activation_request = body.model_copy(deep=True)
@@ -1059,7 +1172,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
                 state.task = asyncio.create_task(activate())
             elif body != state.activation_request:
-                raise HTTPException(409, "Hermes sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "Hermes sandbox sessions support one activation; retry the same request"
+                )
             assert state.task is not None
             # A disconnected HTTP waiter must not cancel the shared activation. Session close
             # owns cancellation; identical retries join this task or replay its result/error.
@@ -1111,7 +1226,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Use the agent session responses and close routes")
+            raise AgentSessionConflictError("Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Hermes /run requires resources_server; use Environment Server /run for sessions")
         async with self.sem:
@@ -1178,3 +1293,6 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HermesAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HermesAgent.run_webserver()  # noqa: F401

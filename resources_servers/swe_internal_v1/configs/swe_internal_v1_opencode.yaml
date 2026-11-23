@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Wires the opencode sandboxed agent to swe_internal_v1_resources_server for a training run.
-# `swe_internal_v1.yaml` alone only defines the resources server (enough for golden-patch validation,
+# `swe_internal_v1_legacy_agent.yaml` alone only defines the resources server (enough for golden-patch validation,
 # which never touches an agent); this separate file keeps that path free of the agent's much
 # larger opencode/sandbox config -- same split as swemer_v1.
 #
@@ -10,7 +10,7 @@
 
 config_paths:
   - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
-  - resources_servers/swe_internal_v1/configs/swe_internal_v1.yaml
+  - resources_servers/swe_internal_v1/configs/swe_internal_v1_legacy_agent.yaml
 
 swe_internal_v1_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent

@@ -35,6 +35,10 @@ agent_home.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
+    # CVDP exposes these project directories even for generation tasks with no
+    # starting RTL. Creating them does not add any reference solution content.
+    for directory in ("rtl", "verif", "docs", "rundir"):
+        Path(directory).mkdir(exist_ok=True)
     model_url = os.environ.get("NV_MODEL_URL", "")
     model_name = os.environ["NV_MODEL_NAME"]
     traj_dir = os.environ.get("NV_TRAJ_DIR", "/trajectories_mount")
@@ -47,9 +51,21 @@ def main() -> None:
     agent_class = os.environ["NV_AGENT_CLASS"]
     agent_cfg_class = os.environ["NV_AGENT_CFG_CLASS"]
 
-    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-    from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.server_utils import ServerClient
+    try:
+        from nemo_gym.client import ServerClient
+        from nemo_gym.config import ModelServerRef, ResourcesServerRef
+        from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+    except ModuleNotFoundError as exc:
+        # This runs against the nemo-gym the sandbox image installed, which can predate the package
+        # reorganization (#5166). A missing dependency other than nemo_gym still fails here.
+        if not (exc.name or "").startswith("nemo_gym."):
+            raise
+        from nemo_gym.config_types import ModelServerRef, ResourcesServerRef  # path before nemo_gym 0.8.0
+        from nemo_gym.openai_utils import (
+            NeMoGymEasyInputMessage,
+            NeMoGymResponseCreateParamsNonStreaming,
+        )  # path before nemo_gym 0.8.0
+        from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
 
     module = importlib.import_module(agent_module)
     AgentClass = getattr(module, agent_class)
@@ -78,7 +94,15 @@ def main() -> None:
             agent._resolve_model_base_url = lambda: v1
         if hasattr(agent, "resolve_model_base_url"):
             v1 = model_url if model_url.endswith("/v1") else model_url + "/v1"
-            object.__setattr__(agent, "resolve_model_base_url", lambda model_server_name, rollout_id=None: v1)
+            # Hermes resolves its compression URL with ``trained=False``. A parent that predates
+            # NV_UNTRAINED_MODEL_URL passes only the run URL.
+            untrained = os.environ.get("NV_UNTRAINED_MODEL_URL") or model_url
+            untrained_v1 = untrained if untrained.endswith("/v1") else untrained + "/v1"
+            object.__setattr__(
+                agent,
+                "resolve_model_base_url",
+                lambda *args, trained=True, **kwargs: v1 if trained else untrained_v1,
+            )
         if hasattr(agent, "_resolve_base_url"):
             agent._resolve_base_url = lambda: model_url
 

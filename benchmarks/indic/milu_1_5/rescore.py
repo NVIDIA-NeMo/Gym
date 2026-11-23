@@ -17,7 +17,7 @@ from tempfile import NamedTemporaryFile
 import orjson
 
 from benchmarks.indic.milu_1_5.prepare import COUNTS, LANGUAGES, OPTION_FIELDS, SOURCE_ID, SOURCE_REVISION
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.mcqa.app import MILU_V2_ANSWER_PATTERN, extract_boxed_and_normalized_answers
 
 

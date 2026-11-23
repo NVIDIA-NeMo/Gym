@@ -21,12 +21,8 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_models.litellm_model.app import (
     LiteLLMModelServer,
     LiteLLMModelServerConfig,
@@ -644,3 +640,78 @@ class TestLiteLLMModelServer:
             assert response.json() == {"error": {"code": "context_length_exceeded"}}
         operation = server._client.create_response if api == "responses" else server._client.create_chat_completion
         operation.assert_awaited_once()
+
+
+# -- Codex API-model profiles (configs/openai-*-codex-api.yaml) -----------------
+
+CODEX_TURN = {
+    "model": "gym-policy-model",
+    "instructions": "You are Codex.",
+    "input": [
+        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Optimize the kernel."}]},
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAAA-opaque"},
+        {"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": '{"cmd": "ls"}'},
+        {"type": "function_call_output", "call_id": "call_1", "output": "kernel.cu"},
+    ],
+    "tools": [
+        {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a command",
+            "strict": False,
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+        }
+    ],
+    "tool_choice": "auto",
+    "parallel_tool_calls": False,
+    "store": True,
+    "prompt_cache_key": "conv-123",
+}
+
+
+class TestRequestOverrides:
+    @pytest.mark.parametrize("field", ["model", "input", "messages", "stream"])
+    def test_request_overrides_refuse_the_model_payload_and_streaming(self, field: str) -> None:
+        with pytest.raises(ValueError, match=f"request_overrides cannot set \\['{field}'\\]"):
+            _make_server(request_overrides={field: "x", "store": False})
+
+    async def test_request_overrides_win_over_caller_and_extra_body(self) -> None:
+        server = _make_server(
+            extra_body={"store": True, "temperature": 0.5},
+            request_overrides={"store": False, "reasoning": {"effort": "high"}},
+        )
+        called = {}
+
+        async def create_chat_completion(**kwargs):
+            called.update(kwargs)
+            return deepcopy(CHAT_COMPLETION_RESPONSE)
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=create_chat_completion)
+        server._client.create_response = AsyncMock(return_value=deepcopy(NATIVE_RESPONSE))
+        with patch.object(server, "_check_proxy_version", AsyncMock()):
+            with TestClient(server.setup_webserver()) as client:
+                client.post("/v1/responses", json={"input": "hi", "store": True, "reasoning": {"effort": "low"}})
+                client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+        responses_kwargs = server._client.create_response.await_args.kwargs
+        assert responses_kwargs["store"] is False
+        assert responses_kwargs["reasoning"] == {"effort": "high"}
+        assert responses_kwargs["temperature"] == 0.5  # extra_body still fills unset fields
+        assert called["store"] is False and called["reasoning"] == {"effort": "high"}
+        # The config's overrides are not mutated by a request.
+        assert server.config.request_overrides == {"store": False, "reasoning": {"effort": "high"}}
+
+
+async def test_replayed_reasoning_without_an_id_goes_upstream_without_one() -> None:
+    """Codex replays reasoning without its id; the provider rejects encrypted content under any other id."""
+    server = _make_server()
+    server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    server._client.create_response = AsyncMock(return_value=deepcopy(NATIVE_RESPONSE))
+    turn = deepcopy(CODEX_TURN)
+    turn["input"].insert(1, {"type": "reasoning", "summary": [], "encrypted_content": "e1"})
+    with patch.object(server, "_check_proxy_version", AsyncMock()), TestClient(server.setup_webserver()) as client:
+        assert client.post("/v1/responses", json=turn).status_code == 200
+    sent = [i for i in server._client.create_response.await_args.kwargs["input"] if i.get("type") == "reasoning"]
+    assert sent[0] == {"type": "reasoning", "summary": [], "encrypted_content": "e1"}
+    assert sent[1]["id"] == "rs_1"  # a provider id is kept

@@ -20,8 +20,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from resources_servers.swebench import patch_capture
 from resources_servers.swebench.patch_capture import (
     PATCH_CAPTURE_MODES,
+    CaptureCommandError,
     PatchCapture,
     TipCandidate,
     capture_model_patch,
@@ -194,6 +196,36 @@ async def test_worktree_diff_failure_is_non_fatal_only_when_a_commit_was_capture
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [None, "timeout", "sandbox", "absent"])
+async def test_failed_command_error_says_whether_git_or_the_provider_failed(error_type):
+    fields = {} if error_type == "absent" else {"error_type": error_type}
+
+    class _Sandbox:
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=128, stdout="", stderr="fatal: index.lock exists", **fields)
+
+    with pytest.raises(CaptureCommandError) as error:
+        await capture_model_patch(_Sandbox(), "/repo", BASE)
+    # Still the RuntimeError, with the same message, that callers already catch.
+    assert isinstance(error.value, RuntimeError) and str(error.value) == "fatal: index.lock exists"
+    assert error.value.return_code == 128
+    assert error.value.error_type == (None if error_type == "absent" else error_type)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_code", [None, 0, 128])
+async def test_provider_error_never_accepts_stale_success_output(return_code: int | None) -> None:
+    class _Sandbox:
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=return_code, stdout=WORKTREE_DIFF, stderr="", error_type="sandbox")
+
+    with pytest.raises(CaptureCommandError) as error:
+        await capture_model_patch(_Sandbox(), "/repo", BASE)
+    assert error.value.error_type == "sandbox"
+    assert error.value.return_code == return_code
+
+
+@pytest.mark.asyncio
 async def test_unknown_mode_is_rejected_before_touching_the_sandbox():
     sb = _FakeSandbox()
     with pytest.raises(ValueError):
@@ -222,3 +254,55 @@ def test_response_fields_are_minimal_and_gate_the_patch():
     }
     assert cap.response_fields(include_patch=True)["model_patch"] == "x" * 10
     assert PatchCapture.static("p", "worktree", "golden").response_fields(True)["patch_source"] == "golden"
+
+
+class _UnreachableSandbox(_FakeSandbox):
+    """Raises on the first ``failures`` execs, as a sandbox the gateway briefly could not reach does."""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    async def exec(self, command: str, **kwargs):
+        if self.failures:
+            self.failures -= 1
+            self.commands.append(command)
+            raise ConnectionError("502: The sandbox could not be reached")
+        return await super().exec(command, **kwargs)
+
+
+@pytest.fixture
+def identity_delays(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The waits between attempts to set the committer identity, without waiting for them."""
+    delays: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    # patch_capture uses asyncio only to wait between attempts.
+    monkeypatch.setattr(patch_capture, "asyncio", SimpleNamespace(sleep=sleep))
+    return delays
+
+
+@pytest.mark.asyncio
+async def test_prepare_git_for_commits_retries_a_provider_error_with_a_doubling_delay(identity_delays: list[float]):
+    sb = _UnreachableSandbox(failures=2)
+    await prepare_git_for_commits(sb, "/repo", "t")
+    assert len(sb.commands) == 3 and len(set(sb.commands)) == 1
+    assert identity_delays == [2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_prepare_git_for_commits_gives_up_without_raising(identity_delays: list[float], capsys):
+    sb = _UnreachableSandbox(failures=10)
+    await prepare_git_for_commits(sb, "/repo", "t")  # must not raise
+    assert len(sb.commands) == patch_capture.GIT_IDENTITY_ATTEMPTS
+    assert len(identity_delays) == patch_capture.GIT_IDENTITY_ATTEMPTS - 1
+    assert "git identity setup failed" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_prepare_git_for_commits_does_not_retry_a_command_that_ran_and_failed(identity_delays: list[float]):
+    sb = _FakeSandbox(fail_on="config")
+    await prepare_git_for_commits(sb, "/repo", "t")
+    assert len(sb.commands) == 1 and identity_delays == []

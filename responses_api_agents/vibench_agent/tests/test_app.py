@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_agents.vibench_agent.app import (
     EXPORT_FILENAME,
     PRD_FILENAME,
@@ -285,7 +285,7 @@ class TestAggregateMetricsProxy:
 
         agent.server_client.post = fake_post
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
 
@@ -304,18 +304,19 @@ class TestSandboxModelUrl:
         assert rewrite_loopback_url_for_docker("http://10.0.0.8:9000") == "http://10.0.0.8:9000"
 
     @pytest.mark.asyncio
-    async def test_opencode_config_rewrites_only_the_host(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("provider_id", ["nemo_gym", "custom"])
+    async def test_opencode_config_rewrites_only_the_host(self, tmp_path, monkeypatch, provider_id):
         """Loopback is the container itself inside a bridged sandbox."""
-        agent = make_agent(tmp_path)
+        agent = make_agent(tmp_path, opencode_provider_id=provider_id)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.get_server_url",
+            "nemo_gym.agents.agent_tools.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
 
         config = await agent._create_opencode_config(_FakeRequest())
 
-        assert config["provider"]["nemo_gym"]["options"]["baseURL"] == "http://host.docker.internal:9000/v1"
+        assert config["provider"][provider_id]["options"]["baseURL"] == "http://host.docker.internal:9000/v1"
 
     @pytest.mark.asyncio
     async def test_the_runs_capture_path_survives_the_rewrite(self, tmp_path, monkeypatch):
@@ -324,7 +325,7 @@ class TestSandboxModelUrl:
         agent = make_agent(tmp_path)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.get_server_url",
+            "nemo_gym.agents.agent_tools.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
         monkeypatch.setattr(
@@ -343,7 +344,7 @@ class TestSandboxModelUrl:
         """sandbox_model_base_url is for providers whose boxes have their own address."""
         agent = make_agent(tmp_path, sandbox_model_base_url="http://sandbox-gw:7000/v1")
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.get_server_url",
+            "nemo_gym.agents.agent_tools.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
         monkeypatch.setattr(type(agent), "base_url_for_run", lambda self, base_url, body: f"{base_url}/ng-rollout/xyz")
@@ -357,7 +358,7 @@ class TestSandboxModelUrl:
         agent = make_agent(tmp_path)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: False)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.get_server_url",
+            "nemo_gym.agents.agent_tools.get_server_url",
             lambda name: "http://10.0.0.5:9000",
         )
 
@@ -376,3 +377,17 @@ class TestSandboxModelUrl:
         base = inspect.signature(OpenCodeSandboxedAgent._create_opencode_config)
         assert list(mine.parameters) == list(base.parameters)
         assert inspect.iscoroutinefunction(VibenchAgent._create_opencode_config)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "row", [{"sandbox_uploads": {"/work/a": "/data/a"}}, {"sandbox_provider_options": {"volumes": ["v"]}}]
+)
+async def test_run_rejects_row_sandbox_inputs(tmp_path, row):
+    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentRunRequest
+
+    agent = make_agent(tmp_path)
+    body = OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": []}, **row)
+    with pytest.raises(ValueError, match="does not apply"):
+        await agent.run(MagicMock(cookies={}), body)
+    agent.server_client.post.assert_not_called()

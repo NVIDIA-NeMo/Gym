@@ -10,8 +10,8 @@ import yaml
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
 
 
 def test_frozen_history_cannot_dispatch_live_tools():
@@ -61,7 +61,7 @@ SWE_FIELDS = HARBOR_FIELDS | {
     ids=["text", "mock_tools", "swe", "harbor"],
 )
 def test_gym_task_data_tooling_validates_the_same_contract(dataset, native_fields):
-    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+    from nemo_gym.data import TaskDataValidator, load_task_data_schema
 
     root = PARENT_DIR / "resources_servers/partner_if"
     adapter = load_task_data_schema(root)
@@ -73,7 +73,7 @@ def test_gym_task_data_tooling_validates_the_same_contract(dataset, native_field
 
 def test_the_swe_row_carries_every_task_field_of_its_wire():
     # So the swe case above fails when the SWE wire gains a field that the schema does not declare.
-    from nemo_gym.base_resources_server import BaseVerifyRequest
+    from nemo_gym.server_runtime import BaseVerifyRequest
     from resources_servers.partner_if.swe_app import SWEIFVerifyRequest
 
     wire = SWEIFVerifyRequest.model_fields.keys() - BaseVerifyRequest.model_fields.keys() - {"verifier_metadata"}
@@ -130,3 +130,76 @@ def test_the_swe_config_hands_its_sandbox_to_opencode_without_web_subagent_or_sk
     assert permission["bash"]["*git fetch*"] == "deny"
     # OpenCode places a tools map's keys before "*" and the last matching rule wins, so a tools map would undo them.
     assert "tools" not in agent.opencode_config
+
+
+@pytest.fixture
+def recorded_context_row() -> dict:
+    root = PARENT_DIR / "resources_servers/partner_if"
+    with (root / "data/example.jsonl").open() as rows:
+        row = json.loads(next(rows))
+    row["recorded_context_harness"] = {
+        "version": "gymnasium-v1",
+        "max_parent_turns": 6,
+        "max_policy_calls": 8,
+        "max_delegate_turns": 6,
+        "temperature": 0.7,
+        "top_p": 0.95,
+        "max_tokens": 8192,
+        "wire_format": "gym-responses-to-chat",
+    }
+    return row
+
+
+def test_gym_task_data_tooling_preserves_recorded_context_harness(recorded_context_row: dict) -> None:
+    from nemo_gym.data import TaskDataValidator, load_task_data_schema, normalize_task_fields
+
+    adapter = load_task_data_schema(PARENT_DIR / "resources_servers/partner_if")
+    validator = TaskDataValidator("partner_if", adapter, "synthetic-recorded-context.jsonl")
+    validator.validate_row(0, recorded_context_row)
+    assert validator.report.clean, validator.report.summary()
+    normalized, conflicts = normalize_task_fields(recorded_context_row)
+    assert not conflicts
+    validated = adapter.validate_python(normalized)
+    assert validated.recorded_context_harness.model_dump() == recorded_context_row["recorded_context_harness"]
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [
+        {"unexpected": True},
+        {"version": "unsupported"},
+        {"wire_format": "unsupported"},
+        {"max_parent_turns": 7},
+        {"max_policy_calls": 9},
+        {"max_delegate_turns": 7},
+        {"max_tokens": 8193},
+        {"max_policy_calls": True},
+        {"max_tokens": "8192"},
+        {"temperature": "0.7"},
+        {"temperature": float("inf")},
+        {"top_p": 1.1},
+    ],
+)
+def test_gym_task_data_tooling_rejects_malformed_recorded_context_harness(
+    recorded_context_row: dict, invalid_fields: dict
+) -> None:
+    from nemo_gym.data import TaskDataValidator, load_task_data_schema
+
+    recorded_context_row["recorded_context_harness"].update(invalid_fields)
+    adapter = load_task_data_schema(PARENT_DIR / "resources_servers/partner_if")
+    validator = TaskDataValidator("partner_if", adapter, "synthetic-recorded-context.jsonl")
+    validator.validate_row(0, recorded_context_row)
+    assert validator.report.rows == validator.report.error_rows == 1
+    assert not validator.report.clean
+
+
+def test_recorded_context_harness_does_not_relax_ordinary_row_fields(recorded_context_row: dict) -> None:
+    from nemo_gym.data import TaskDataValidator, load_task_data_schema
+
+    recorded_context_row.pop("recorded_context_harness")
+    recorded_context_row["recorded_context_harnes"] = {}
+    adapter = load_task_data_schema(PARENT_DIR / "resources_servers/partner_if")
+    validator = TaskDataValidator("partner_if", adapter, "synthetic-text.jsonl")
+    validator.validate_row(0, recorded_context_row)
+    assert validator.report.error_rows == 1
+    assert not validator.report.clean

@@ -28,8 +28,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym import failure_kinds
-from nemo_gym.sandbox.providers.base import SandboxProvider, SandboxSpec
+from nemo_gym.core import failure_kinds
+from nemo_gym.sandbox import SandboxProvider, SandboxSpec
 
 from .reference_cache import CachedReference, ReferenceCache, provider_class_name
 from .runner import (
@@ -61,13 +61,23 @@ from .sandbox_domain import (
     Unscorable,
     reported_exit,
 )
-from .task_data import MAX_CASES, MAX_TEXT_BYTES, WIRE_FORMAT, TaskData, bounded_json
+from .task_data import (
+    MAX_CASES,
+    MAX_TEXT_BYTES,
+    WIRE_FORMAT,
+    SemanticValidatorDefinition,
+    TaskData,
+    bounded_json,
+    validate_semantic_registry,
+)
 
 
 logger = logging.getLogger(__name__)
 PACKAGE_DIR = Path(__file__).resolve().parent
 RUNTIME_FILES = ("task_data.py", "codec.py", "symbolic.py", "runner.py")
 COMPARATOR_FILES = RUNTIME_FILES + ("comparator.py",)
+# The comparator of a task that selects a semantic validator also needs the module that runs it.
+SEMANTIC_COMPARATOR_FILES = COMPARATOR_FILES + ("semantic_validation.py",)
 DOMAINS = ("reference", "comparator", "candidate")
 _SAFE_PATH = SAFE_PATH
 _Unscorable = Unscorable  # the gate functions below and the tests use these private aliases
@@ -75,6 +85,9 @@ _reported_exit = reported_exit
 # Bounded transfers one job awaits: each run domain uploads runtime files, source and job and downloads one result
 # (plus one size probe); the comparator uploads its files once, then uploads a job and downloads a result twice.
 _JOB_TRANSFERS = 2 * (len(RUNTIME_FILES) + 4) + (len(COMPARATOR_FILES) + 6)
+# A job for a task that selects a semantic validator uploads two more files to the comparator: the module above and
+# the operator's validator source.
+_SEMANTIC_JOB_TRANSFERS = len(SEMANTIC_COMPARATOR_FILES) - len(COMPARATOR_FILES) + 1
 _ENVELOPE_KEYS = frozenset({"version", "mode", "nonce", "status", "code", "timed_out_case"})
 _WIRE_KEYS = frozenset({"format", "value"})
 _VERDICT_KEYS = frozenset({"version", "status", "equal", "side", "code", "path"})
@@ -179,19 +192,32 @@ class ExecutionPolicy(BaseModel):
         """One compare batch: a per-case budget per case plus 30 s of slack, never above ``compare_timeout_s``."""
         return min(self.compare_timeout_s, cases * self.compare_per_case_s + 30)
 
-    def minimum_job_timeout_s(self) -> float:
-        """Sum of every bound awaited inside one job, so a legal but slow job never trips ``job_deadline``."""
+    def minimum_job_timeout_s(self, *, semantic_validators: bool = False) -> float:
+        """Sum of every bound awaited inside one job, so a legal but slow job never trips ``job_deadline``.
+
+        ``semantic_validators`` says whether the server has semantic validators configured: a job for a task that
+        selects one makes ``_SEMANTIC_JOB_TRANSFERS`` more transfers.
+        """
         margin = 2 * self.exec_timeout_margin_s
+        transfers = _JOB_TRANSFERS + (_SEMANTIC_JOB_TRANSFERS if semantic_validators else 0)
         return (
             2 * (self.suite_timeout_s + margin)
             + 2 * (self.compare_timeout_s + margin)
             + 3 * self.create_timeout_s
-            + _JOB_TRANSFERS * (self.transfer_timeout_s + TRANSFER_GRACE_S)
+            + transfers * (self.transfer_timeout_s + TRANSFER_GRACE_S)
             + 3 * self.cleanup_timeout_s
         )
 
-    def effective_job_timeout_s(self) -> float:
-        return self.job_timeout_s if self.job_timeout_s is not None else self.minimum_job_timeout_s()
+    def effective_job_timeout_s(self, *, semantic_validators: bool = False) -> float:
+        if self.job_timeout_s is not None:
+            return self.job_timeout_s
+        return self.minimum_job_timeout_s(semantic_validators=semantic_validators)
+
+
+# Only bounded proof work after successful reference preflight can be finalized by the opt-in policy.
+CANDIDATE_UNCERTAINTY_REASONS = frozenset(
+    {"symbolic_undecided", "symbolic_growth_limit", "unordered_undecided", "unordered_budget", "comparator_timeout"}
+)
 
 
 @dataclass(frozen=True)
@@ -210,6 +236,7 @@ class GradeResult:
     first_failed_case: int | None
     cleanup: dict[str, str]
     sandboxes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    candidate_uncertainty_reasons: tuple[str, ...] = ()
 
 
 def _bounded_text(value: Any, limit: int) -> bool:
@@ -383,9 +410,12 @@ def build_compare_job(
     default_rtol: str | None = None,
     default_atol: str | None = None,
     per_case_s: int | None = None,
+    *,
+    semantic_validator: SemanticValidatorDefinition | None = None,
+    validator_source_path: str | None = None,
 ) -> dict:
     """Comparator input: trusted role, stored expectations and projected policy per case."""
-    return {
+    job = {
         "version": PROTOCOL_VERSION,
         "mode": COMPARE_MODE,
         "nonce": nonce,
@@ -400,6 +430,20 @@ def build_compare_job(
         ],
         "limits": _limits(policy, policy.compare_deadline_s(len(outcomes)), per_case_s),
     }
+    if task.semantic_validator is not None:
+        if semantic_validator is None or validator_source_path is None:
+            raise ValueError("semantic comparison requires an operator definition and comparator source path")
+        job["semantic_validator"] = {
+            "source_path": validator_source_path,
+            "entrypoint": semantic_validator.entrypoint,
+        }
+        for projected, case in zip(job["cases"], task.test_cases):
+            projected["inputs"] = {
+                "args": [value.model_dump(mode="json") for value in case.args],
+                "kwargs": {name: value.model_dump(mode="json") for name, value in case.kwargs.items()},
+            }
+            projected["validator_config"] = task.semantic_validator.config
+    return job
 
 
 def validate_candidate_source(source: Any, policy: ExecutionPolicy) -> str | None:
@@ -414,13 +458,17 @@ def validate_candidate_source(source: Any, policy: ExecutionPolicy) -> str | Non
     return None
 
 
-def _runtime_digest(spec: SandboxSpec) -> str:
+def _runtime_digest(
+    spec: SandboxSpec, semantic_validators: dict[str, SemanticValidatorDefinition] | None = None
+) -> str:
     """The runtime files, plus the operator's ``sandbox_spec.files`` (names and bytes) and ``sandbox_spec.env``.
 
-    Every sandbox receives the operator's files and environment too, so they can change a reference outcome.
+    Every sandbox receives the operator's files and environment too, so they can change a reference outcome. With
+    semantic validators configured, the validation module and every registered definition are part of the digest
+    too: registering, changing or removing any validator is a cache miss for every task, also one that selects none.
     """
     digest = hashlib.sha256()
-    for name in COMPARATOR_FILES:
+    for name in SEMANTIC_COMPARATOR_FILES if semantic_validators else COMPARATOR_FILES:
         digest.update(name.encode())
         digest.update((PACKAGE_DIR / name).read_bytes())
     operator = {
@@ -428,6 +476,11 @@ def _runtime_digest(spec: SandboxSpec) -> str:
         "env": sorted([name, value] for name, value in spec.env.items()),
     }
     digest.update(json.dumps(operator, separators=(",", ":")).encode("utf-8"))
+    if semantic_validators:
+        definitions = {
+            identifier: definition.model_dump(mode="json") for identifier, definition in semantic_validators.items()
+        }
+        digest.update(json.dumps(definitions, sort_keys=True, separators=(",", ":")).encode("utf-8"))
     return digest.hexdigest()
 
 
@@ -457,6 +510,7 @@ class Grader:
         default_rtol: str | None = None,
         default_atol: str | None = None,
         reference_cache: ReferenceCache | None = None,
+        semantic_validators: dict[str, SemanticValidatorDefinition | dict[str, str]] | None = None,
     ):
         self.policy = policy
         self._provider = provider
@@ -464,7 +518,10 @@ class Grader:
         self._default_rtol = default_rtol
         self._default_atol = default_atol
         self._cache = reference_cache
-        self._runtime_digest = _runtime_digest(spec)
+        self._semantic_validators = validate_semantic_registry(
+            {} if semantic_validators is None else semantic_validators
+        )
+        self._runtime_digest = _runtime_digest(spec, self._semantic_validators)
         self._provider_class = provider_class_name(provider)  # names the runtime in the cache key with the image
         self._semaphore = asyncio.Semaphore(policy.max_concurrent_jobs)
         self._draining = False
@@ -495,6 +552,8 @@ class Grader:
                 sandboxes,
             )
 
+        if task.semantic_validator is not None and task.semantic_validator.id not in self._semantic_validators:
+            return unscorable("task_invalid")
         contract = validate_candidate_source(candidate_source, self.policy)
         if contract is not None:
             return GradeResult(
@@ -513,7 +572,9 @@ class Grader:
                 try:
                     verdict = await asyncio.wait_for(
                         self._run_job(task, candidate_source, domains, counts, job_id),
-                        timeout=self.policy.effective_job_timeout_s(),
+                        timeout=self.policy.effective_job_timeout_s(
+                            semantic_validators=bool(self._semantic_validators)
+                        ),
                     )
                 except asyncio.TimeoutError:
                     verdict = unscorable("job_deadline")
@@ -534,6 +595,13 @@ class Grader:
     ) -> GradeResult:
         policy, cases = self.policy, len(task.test_cases)
         reference, comparator, candidate = domains["reference"], domains["comparator"], domains["candidate"]
+        semantic_validator = (
+            self._semantic_validators[task.semantic_validator.id] if task.semantic_validator is not None else None
+        )
+        comparator_files = _runtime_files(COMPARATOR_FILES)
+        if semantic_validator is not None:
+            comparator_files = _runtime_files(SEMANTIC_COMPARATOR_FILES)
+            comparator_files["validator_source.py"] = semantic_validator.source.encode("utf-8")
         comparator_ready = False
         key, cached = None, None
         if self._cache is not None:
@@ -585,7 +653,7 @@ class Grader:
                     raise Unscorable("reference_error")
                 # 2. Preflight: the comparator checks every reference value against stored expectations.
                 await self._create(comparator)
-                await comparator.upload(_runtime_files(COMPARATOR_FILES))
+                await comparator.upload(comparator_files)
                 comparator_ready = True
                 preflight_nonce = secrets.token_hex(16)
                 await comparator.upload(
@@ -600,6 +668,8 @@ class Grader:
                                 self._default_rtol,
                                 self._default_atol,
                                 per_case_s=policy.compare_per_case_s,
+                                semantic_validator=semantic_validator,
+                                validator_source_path=f"{comparator.workdir}/validator_source.py",
                             )
                         )
                     }
@@ -675,7 +745,7 @@ class Grader:
         # 4. Candidate value verdicts from the comparator domain. Expectations never left it.
         if not comparator_ready:
             await self._create(comparator)
-            await comparator.upload(_runtime_files(COMPARATOR_FILES))
+            await comparator.upload(comparator_files)
         comparison_nonce = secrets.token_hex(16)
         await comparator.upload(
             {
@@ -689,6 +759,8 @@ class Grader:
                         self._default_rtol,
                         self._default_atol,
                         per_case_s=policy.compare_per_case_s,
+                        semantic_validator=semantic_validator,
+                        validator_source_path=f"{comparator.workdir}/validator_source.py",
                     )
                 )
             }
@@ -696,6 +768,8 @@ class Grader:
         judged = await _run_domain(comparator, COMPARE_MODE, policy.compare_deadline_s(cases), comparison_nonce)
         await comparator.close()
         if judged["status"] == "timeout":
+            if semantic_validator is not None:
+                raise Unscorable("comparator_uncertain", cases)
             # The whole batch ran out of time after a clean preflight: candidate-attributable at the case the
             # runner timed out on (a per-case timeout inside one comparison is `uncertain`, see comparator._exhausted).
             timed_out_case = judged["timed_out_case"]
@@ -706,10 +780,34 @@ class Grader:
             raise Unscorable("result_invalid", cases)
         _validate_verdict_batch(judged["results"], "candidate", cases)
         statuses = {verdict["status"] for verdict in judged["results"]}
+        if semantic_validator is not None and "uncertain" in statuses:
+            raise Unscorable("comparator_uncertain", cases)
         decided_failures = statuses & {"mismatch", "invalid_candidate"}
         # Precedence: an expectation defect, then the first decided failure (a mismatch or an invalid output), which
         # names the category and the failed case, then uncertainty on any case.
-        if "invalid_expected" in statuses or ("uncertain" in statuses and not decided_failures):
+        if "invalid_expected" in statuses:
+            raise Unscorable("comparator_uncertain", cases)
+        if "uncertain" in statuses and not decided_failures:
+            uncertain = [verdict for verdict in judged["results"] if verdict["status"] == "uncertain"]
+            if all(
+                verdict["side"] == "comparator" and verdict["code"] in CANDIDATE_UNCERTAINTY_REASONS
+                for verdict in uncertain
+            ):
+                failure_class, terminal = UNSCORABLE_CATEGORIES["comparator_uncertain"]
+                return GradeResult(
+                    outcome="unscorable",
+                    reward=None,
+                    category="comparator_uncertain",
+                    failure_class=failure_class,
+                    terminal=terminal,
+                    job_id=job_id,
+                    case_count=cases,
+                    cases_attempted=cases,
+                    cases_equal=counts["equal"],
+                    first_failed_case=None,
+                    cleanup={},
+                    candidate_uncertainty_reasons=tuple(sorted({verdict["code"] for verdict in uncertain})),
+                )
             raise Unscorable("comparator_uncertain", cases)
         for index, verdict in enumerate(judged["results"]):
             status = verdict["status"]

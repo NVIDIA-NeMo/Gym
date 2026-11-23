@@ -54,7 +54,7 @@ uses as the base of that role's requests. The conversation input and NeMo User S
 are applied on top.
 
 At `/seed_session`, the Resources Server validates required fields, the configured NeMo User Sim revision, and
-the Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded
+the Nemotron-Personas version pinned for the row's locale (or `"synthetic"` for the committed example rows), and rejects guarded
 health rows. It then stores the resolved row and its canonical SHA-256 digest. At `/verify`, it rejects mismatched
 episode identity, task identity, resolved-row content, or trajectory identity.
 
@@ -150,7 +150,7 @@ onto the top-level persisted rollout. The nested `verification` object retains t
 - Simulation failure that NeMo User Sim attributes outside the Assistant: zero, `mask_sample: true`.
 - Scorer/evaluator error or timeout: zero, `mask_sample: true`.
 - Inconclusive scorer or missing required judge quality: zero, `mask_sample: true`.
-- Resources Server session unknown, closed, or expired at verification: zero, `mask_sample: true`, with
+- Resources session unknown, closed, or expired at verification: zero, `mask_sample: true`, with
   `failure_kind` `session_lost` or `session_expired`.
 
 Infrastructure failures, such as transport errors, participant timeouts, session 404 and 409 responses, and 408, 425, 429,

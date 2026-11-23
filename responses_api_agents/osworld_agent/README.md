@@ -33,7 +33,8 @@ semantics. `responses_create_params` supplies per-rollout sampling overrides.
 
 A completed response includes:
 
-- Gym `reward`, using binary or raw OSWorld reward according to `reward_mode`;
+- Gym `reward`, using `binary` (default), `raw`, or the opt-in `signed_v1`
+  mapping described below;
 - `runtime_eligible` plus `runtime_admission_reason` and policy identity;
   `mask_sample` remains the backward-compatible inverse carrier for
   infrastructure, timeout, and evaluator failures;
@@ -62,6 +63,39 @@ prompts may rewrite any earlier token or media position. Parser retries are
 also separate model calls and are not collapsed into the environment step.
 NeMo-RL can therefore reconstruct prefix-contiguous physical traces while one
 logical rollout retains one reward and advantage.
+
+When training-token capture owns the token arrays, the agent may not receive
+exact token evidence itself. In that case, `response.output` preserves one
+assistant message per **accepted** model call, including the original thinking
+text. A successful retry is included; parser-rejected attempts are not accepted
+history. Complete `trajectory_model_calls` evidence still preserves every
+attempt, its raw completion, acceptance flag, and parse error. Calls without a
+response or with empty served content
+(such as a local context-overflow refusal) provide no usable returned-content
+witness and are skipped; the capture ledger independently records what ran.
+An empty accepted history stays empty instead of falling back
+to synthesized step text. `terminal_response_id` identifies the last observed
+non-empty served response by its Chat completion ID. This lets the
+trainer join returned history to capture records without matching against
+parser-normalized actions. Capture-disabled responses and the existing exact
+per-call token-evidence path keep their previous behavior; that compatibility
+path still exports all exact calls, including parser retries.
+
+With NeMo-RL capture selection, `returned_history` selects the accepted output;
+`all_captured` explicitly opts into training captured rejected attempts too,
+subject to the trainer's completion and evidence checks. Neither capture nor
+the presence of a call in diagnostic evidence alone makes it accepted history.
+The scored terminal and selected ancestry must still be valid: if the last
+served call was rejected, its ID is not reassigned to an earlier accepted call.
+`returned_history` rejects that selection because the terminal is absent from
+accepted output. If a rejected terminal lacks that ID, response construction
+fails rather than permitting fallback to an earlier call. Likewise, if retry
+feedback makes an accepted call depend on
+a rejected captured parent, the trainer must reject the non-closed selection,
+not silently add that parent to the loss. Use an explicit compatible selection
+policy for these cases. This agent does not rewrite prompts or fabricate new
+capture roots to work around selection validation. Gym's runtime admission,
+evaluator score, and reward remain independent of this training selection.
 
 Training manifests should supply a model-independent caller-owned identity:
 
@@ -104,6 +138,45 @@ Sandbox path, OSWorld still owns `DesktopEnv`, setup, controllers, actions,
 and evaluators; Gym Sandbox owns only the VM container lifecycle, dynamic
 service endpoints, status, and cleanup.
 
+### Generated-task evaluators and reward modes
+
+Generated tasks can carry a `taskgen_plugins` block with schema
+`taskgen-plugins/1`: getter/metric names, Python source under
+`modules.getters` and `modules.metrics`, and a SHA-256 digest of those modules.
+`taskgen_plugins.register_task_plugins()` validates the block and registers
+the declared functions before `DesktopEnv.reset()` resolves them. It refuses
+to replace built-in OSWorld functions or reuse a name with a different digest
+within one task. Registrations last only for that task: `run_osworld_task()`
+clears them after closing the environment in its `finally` block, including
+partial registration, reset, rollout, evaluator, and environment-close failures.
+Cleanup removes only the exact callable objects installed by the loader,
+including aliases/partials, never built-ins or later replacements. Reused Ray
+workers therefore do not carry evaluator functions into the next task; different
+tasks may use the same name for different implementations or share a getter
+with different metrics. Tasks without this block are unchanged. The remote Resources
+Server path rejects these plugins because it cannot register their functions
+in the evaluator process.
+
+Plugin source executes as Python in the agent's evaluator process. Only use
+trusted task datasets; the digest checks content consistency, not authorship
+or sandbox isolation. This mechanism does not rewrite canonical OSWorld task
+setup or evaluator definitions.
+
+`reward_mode` maps the evaluator score and the agent's terminal action:
+
+| Mode | Reward |
+| --- | --- |
+| `binary` (default) | 1 when the evaluator score reaches 1.0; otherwise 0 |
+| `raw` | The evaluator score, including partial credit |
+| `signed_v1` (opt-in) | 1 on evaluator success; -1 for `DONE` without success; otherwise 0 |
+
+An infeasible task whose evaluator awards success for `FAIL` still earns 1.
+Infrastructure admission remains separate from reward mapping. `signed_v1`
+does not penalize reaching the step limit without `DONE`, so it can encourage
+continuing to the horizon; it is not a new benchmark default. Aggregate metrics
+continue to use the evaluator's raw score and binary success, independently
+of the selected training reward mapping.
+
 ## Runtime components
 
 | File | Responsibility |
@@ -113,20 +186,44 @@ service endpoints, status, and cleanup.
 | `rollout_outcome.py` | Termination classification and runtime admission; never changes actions, score, or reward |
 | `runner_registry.py` | Runner names, upstream class paths, and default observation/action contracts |
 | `adapter_agents.py` | Gym-owned model scaffolds, including `NemotronV3NanoOmniAgent` |
+| `model_protocol.py` | Model wire contracts and the selected-history message renderer interface |
+| `super35_protocol.py` | Super 3.5 VL tool-XML parsing, message rendering, and request options |
 | `trajectory.py` | Model-independent semantic trajectory identity, transitions, and evidence capabilities |
 | `exact_trace.py` | Optional exact model-call/token/media evidence for trace-aware trainers |
 | `action_parser.py` | Gym pyautogui/control-action parsing and validation |
 | `proxy.py` | Explicit proxy-task configuration validation and non-secret provenance |
 | `runtime_dependencies.py` | Version/import readiness check and explicit-install remediation for excluded packages |
+| `taskgen_plugins.py` | Validate, register, and clear task-scoped trusted evaluator functions without replacing OSWorld built-ins |
+| `reward_modes.py` | Map evaluator score and terminal action to the configured training reward |
 | `sandbox_desktop_env.py` | Scoped `DesktopEnv` compatibility wiring for the Gym Sandbox backend |
 | `sandbox_provider.py` | OSWorld provider contract backed by Gym Sandbox lifecycle and endpoints |
+
+### Shared Gym foundations
+
+The following foundations are already merged into Gym `main`:
+
+| Change | Contract used here |
+| --- | --- |
+| [#3591](https://github.com/NVIDIA-NeMo/Gym/pull/3591) | Isolated component runtimes, setup configuration, and rollout identity |
+| [#4128](https://github.com/NVIDIA-NeMo/Gym/pull/4128) | Shared training-token capture, lineage, and external-staging contracts |
+| [#4822](https://github.com/NVIDIA-NeMo/Gym/pull/4822) | Docker-create reconciliation and E2B service endpoints/worker transport |
+
+The taskgen, reward-mode, and served-history changes in
+[#4896](https://github.com/NVIDIA-NeMo/Gym/pull/4896) use these merged
+foundations; no additional stacked PR is needed for that scope.
+[#3368](https://github.com/NVIDIA-NeMo/Gym/pull/3368) is the separate optional
+simple-agent compaction migration, not OSWorld's `history_policy` implementation.
+[#4823](https://github.com/NVIDIA-NeMo/Gym/pull/4823) separately fixes shared
+HTTP-client shutdown and wildcard-host dialing. Neither change is bundled
+into #4896 or a prerequisite for merging its OSWorld-only changes. Workloads
+that need those separate capabilities should track their PRs explicitly.
 
 ### OSWorld source dependency
 
 This agent intentionally installs the immutable
 [`JeffPengCoder/OSWorld`](https://github.com/JeffPengCoder/OSWorld) fork at
 commit `f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5`, as declared in
-[`requirements.txt`](requirements.txt). That revision starts from upstream
+[`pyproject.toml`](pyproject.toml). That revision starts from upstream
 OSWorld `83e85344` and includes the `nv-gym` provider overlay, proxy-runtime
 repair, logging hardening, VLC gateway-auth fallback, the per-environment
 provider contract, opt-in setup/evaluator return-code semantics, and the
@@ -159,6 +256,7 @@ authority and evaluation review.
 | `pointer_agent` | Upstream PointerAgent planner/executor/verifier loop |
 | `m3_agent` | Upstream MiniMax M3 scaffold and protocol |
 | `nemotron_v3_nano_omni_agent` | Gym-owned Nemotron 3 Nano Omni scaffold and parser |
+| `nemotron_super35_agent` | Shared protocol agent with the Super 3.5 VL tool-XML protocol |
 | `qwen3_omni_agent` | Upstream Qwen3VL scaffold through Gym model transport |
 
 The benchmark directory contains the model- and runner-specific YAML overlays.
@@ -182,15 +280,245 @@ executed Code matches the validated Nano Omni prompt contract and avoids sending
 the same executable payload twice; this behavior is part of the standard
 `NemotronV3NanoOmniAgent`, not a run-local subclass or import overlay.
 
+The response this parser reads also depends on how the model is served. The
+chat template and `nano_v3` reasoning parser for Omni v3 are listed under
+[Serve the checkpoint](../../benchmarks/osworld/README.md#serve-the-checkpoint);
+other Nemotron generations ship their own tokenizer, template and parser.
+
 When adding or upgrading a model, capture representative lossless responses
 and add focused parser regressions for heading placement, fenced and unfenced
 Code, literal newline escaping, reasoning/content separation, tool calls, and
 terminal status syntax. Supported formats should remain explicit rather than
 recovering executable code from arbitrary prose.
 
+### Super 3.5 VL tool XML
+
+Select `benchmarks/osworld/configs/osworld_agent_super35.yaml`, or prepare the
+benchmark with `--profile super35`. This uses the Gym-owned
+`nemotron-super35-tool-xml-v3` protocol. It requests raw
+`<tool_call><function=...><parameter=...>` response content. Supported tools are `exec_py(code_block)`, argument-free
+`computer.wait`, and `computer.terminate(status, answer?)`. Mouse positions
+must be literal normalized coordinates in `[0, 1]`; Gym projects them to the
+screen dimensions before execution.
+
+The profile keeps the initial screenshot plus the latest three screenshots,
+up to four images per request, and retains complete assistant tool calls and
+thinking in chronological history. Observations are user turns. It passes
+`enable_thinking` and `truncate_history_thinking: false` through the policy
+transport. The profile enables `forward_request_chat_template_kwargs` on
+Gym's vLLM model adapter so those per-request options reach the backend.
+The protocol sends JSON-schema `tools` and `tool_choice: none` on every
+request, including retries. The model's chat template renders these definitions;
+the system message does not duplicate a handcrafted `<tools>` block. For this
+model's pinned template, `none` leaves the rendered prompt unchanged and requests
+text output so Gym can apply its strict XML parser. `skip_special_tokens: false`
+preserves the XML delimiter tokens. The
+endpoint must accept the exact dotted tool names `computer.wait` and
+`computer.terminate`. A gateway that rejects those names is incompatible with
+this profile; its HTTP error is an infrastructure failure, not a model score.
+
+Use a compatible Super 3.5 VL model service with reasoning separation and
+automatic tool extraction disabled. The default profile requires at least four
+images. The native vLLM 0.32.0 `nemotron_v3` reasoning engine can omit a repeated
+`</think>` delimiter from action content. The optional
+[`super35_reasoning` serving plugin](../../benchmarks/osworld/tools/README.md#super-35-reasoning-boundary)
+preserves the exact suffix after the first boundary, with CPU regression checks
+and a version-pinned launch command. It runs only in the serving environment;
+Gym's strict action parser remains unchanged. Reasoning-only trailing whitespace
+trimming remains explicit and requires retaining original generations for audit.
+
+Omit `--enable-auto-tool-choice` and `--tool-call-parser`. In vLLM 0.32.0,
+`qwen3_coder` can extract calls whose original XML is missing a delimiter.
+It can also discard tool XML with `tool_choice: none`, so that request option
+alone is insufficient while the serving tool parser remains enabled. The agent
+rejects returned native `tool_calls` on this raw-content contract. Gate a new
+serving version against its original completion or token IDs before scoring.
+
+`computer.wait` uses the runner's
+configured post-action delay. Gym still owns the horizon; malformed replies
+are bounded parser retries, not synthetic model-authored `FAIL` actions.
+Unsupported coordinate modes fail during configuration resolution and direct
+agent construction. Only `relative` is supported by this protocol.
+
+The strict local XML/JSON parser and coordinate conversion are unchanged. The v3
+transport preserves raw response content and reasoning without fenced-code
+recovery or delimiter repair. The parser function retains its existing native-call
+support for other explicit callers, but this profile requires raw XML so the
+server cannot silently expand its acceptance grammar. Freeze and record the
+serving reasoning parser too; retain the pre-parser completion or token IDs
+when claiming raw-generation integrity. An API envelope alone cannot prove
+what a serving parser consumed. Earlier v1/v2 scores describe different wire
+contracts and must retain their original configuration and provenance.
+
+After coordinate projection, the executor passes Python actions as the exact
+string argument to `exec(...)`. This host-owned wrapper lets compound statements
+run after DesktopEnv's semicolon-separated imports, including through a remote
+Resources Server. It does not insert characters into the parsed Python source
+or repair syntax. Trajectories retain the parsed action and the actual execution
+wrapper separately. Nano Omni and Qwen runner execution remain unchanged.
+
+This is an independently implemented Gym prompt and protocol. It does not
+load an external agent repository, change the Nano Omni defaults, or replace
+the scaffold pinned by a published recipe. Treat a change of protocol or
+history policy as a distinct benchmark configuration; existing scores do
+not qualify a different profile automatically.
+
+The R6 experiment used fixed history with three images including the current
+screenshot, a 100,000-token output budget including thinking, no MTP, and 128
+workers. Those settings are documented with the serving plugin; the checked-in
+profile retains its original four-image history and 4,096-token budget.
+
+### Adding a model protocol
+
+`OSWorldProtocolAgent` owns the model-call/retry loop and uses a registered
+`OSWorldModelProtocol` for its system prompt, assistant-history template,
+parser, optional message renderer, thinking-dependent template options, API
+tools, allowed coordinate modes, and execution wrapper.
+`NemotronV3NanoOmniAgent` remains a compatibility entrypoint with its existing
+Markdown defaults.
+
+Operator commands for switching models and running them concurrently are in
+the [benchmark guide](../../benchmarks/osworld/README.md#model-isolation-switching-and-regression).
+This section defines the developer contract. There is no automatic protocol
+inference from the model name and no registered v4 implementation at present.
+
+#### Ownership and compatibility boundaries
+
+| Layer | Owner and selection | What must remain stable for an existing recipe |
+| --- | --- | --- |
+| System prompt, instructions and assistant history | A named `OSWorldModelProtocol` in `MODEL_PROTOCOL_REGISTRY` | Prompt/template content and the protocol ID |
+| Observation roles and media ordering | Protocol-specific `message_renderer`, when present | Renderer behavior and its versioned ID |
+| Action parsing | The selected protocol's `parser` callable | Accepted grammar, rejection behavior, coordinate contract and parser ID |
+| Tools and template request options | Protocol fields applied by the shared agent and model transport | Tool schemas, `tool_choice`, `skip_special_tokens`, thinking/template options and response-preservation mode |
+| Action execution convention | Protocol `python_execution`; the shared client applies it | The selected `direct` or `exec` convention, parsed source and separately recorded execution wrapper |
+| Screenshot selection | Shared history-policy implementation, selected per agent | Policy name/parameters and actual selected image turns; instance state is reset per task |
+| Model calls and retries | Shared `OSWorldProtocolAgent` and transport | Retry budget, feedback, deadlines, failure classification and any context-length recovery |
+| Desktop lifecycle and reward | Selected backend, OSWorld action/evaluator path and Gym admission logic | Guest identity, task definitions, evaluator semantics and model/infrastructure distinction |
+| Tokenizer, chat template and serving reasoning parser | The separately deployed model service | Pinned revisions/digests, parser registration/selection and raw-generation-to-response integrity |
+
+Nano Omni and Super 3.5 have different protocol objects and parser functions.
+`NemotronV3NanoOmniAgent` subclasses the shared loop as a compatibility
+entrypoint; its default remains `nano-omni-v3-osworld-v1`. The Super runner
+selects `nemotron-super35-tool-xml-v3`. Its specialized flags are enabled through
+the selected protocol, not by mutating the Nano protocol. Qwen's existing
+`qwen3_omni_agent` runner continues to load upstream
+`mm_agents.qwen3vl_agent.Qwen3VLAgent` through Gym's transport adapter.
+
+This isolates model-specific choices, but changes to the shared loop,
+transport, history implementation or desktop execution can affect multiple
+runners. Treat registered protocol objects as constants: add a new registration
+for a changed contract, and do not mutate registry entries while experiments
+are running. Protocol IDs are recorded identities, not an automatic check of
+the remote checkpoint/template. Unknown explicit IDs raise an error; a
+misconfigured endpoint serving another model still requires deployment checks.
+
+Protocol resolution uses the explicit agent `model_protocol_id` first, then
+the runner's registered default, then the legacy Nano Omni default. New model
+profiles should set the ID explicitly. History selection is configured
+separately; choosing a protocol does not select an image policy automatically.
+
+#### Implementation steps
+
+For another screenshot-driven model, including a future v4:
+
+1. Freeze the checkpoint revision, tokenizer, chat template, expected model
+   response format and serving parser. Capture real original responses for
+   successful actions, terminal actions and malformed outputs. Do not assume
+   that a new generation uses the previous generation's format.
+2. Implement a protocol module, following the interface in
+   [`model_protocol.py`](model_protocol.py). Supply `protocol_id`, `parser_id`,
+   `instruction_template`, `step_template`, `text_history_template`, both
+   system-prompt variants, both assistant-history variants and the parser
+   callable. The parser returns `(action_description, actions, parsed_info)`;
+   history placeholders must be provided by `parsed_info`. Define the actual
+   model grammar explicitly and retain malformed original responses as evidence.
+3. Set optional renderer, API tools, template kwargs, coordinate restrictions,
+   response-preservation and execution fields only when required by this
+   model's contract. The Super 3.5 module is an example of those extension
+   points, not a template whose XML grammar and serving flags apply to every
+   model. Provide the independent protocol object in
+   `MODEL_PROTOCOL_REGISTRY` in `adapter_agents.py`; keep existing entries.
+4. Add a distinct entry to `RUNNER_REGISTRY` in `runner_registry.py`, with
+   `kind: model_protocol_agent`, agent class
+   `responses_api_agents.osworld_agent.adapter_agents.OSWorldProtocolAgent`,
+   the new default `model_protocol_id` and model-appropriate `agent_kwargs`.
+   Keep protocol and history configuration at the agent-config level, outside
+   `agent_kwargs`; configuration resolution rejects those misplaced keys.
+5. Add a benchmark YAML profile that selects the runner and explicit protocol
+   ID, model endpoint/transport, sampling, budgets and history policy. Wire its
+   agent and environment-server instance names consistently. To expose a new
+   CLI profile, add it to **both** `PROFILE_CONFIGS` and `PROFILE_AGENT_NAMES`
+   in `benchmarks/osworld/prepare.py`, and test the composed configuration.
+   Repeated `--config` flags replace the selected profile's config-path list,
+   but do not change the agent name chosen by `--profile`; they are not a
+   shortcut for registering a differently named model profile.
+6. Add behavior tests and perform the real-model checks below. Keep training
+   and evaluation contracts aligned, or declare the intended difference using
+   the existing parity mechanism. Publish a new score only after freezing the
+   complete run configuration; a passing protocol unit test is not a benchmark.
+
+When a new model needs its own planner, multi-stage executor, observation type
+or action space beyond the shared screenshot/pyautogui loop, use a separate
+runner/adapter. Preserve its own contract, as with the existing Pointer and
+Qwen paths, instead of adding model-name branches throughout the shared loop.
+
+An optional renderer receives `ProtocolMessageContext`: the instruction,
+system prompt, observations, serialized assistant history, current
+observation, and the history policy's selected image indices. It chooses
+message roles and media order without changing image selection or execution.
+Assistant-history templates may reference fields returned by the parser.
+Provide a versioned renderer ID; renderer identity and request options enter
+the wire contract. Bump parser/protocol IDs when changing their semantics.
+Agents with their own planning or execution loop continue to use the
+existing runner extension points.
+
+#### Validation before changing an existing recipe
+
+| Change | Required evidence |
+| --- | --- |
+| A new protocol or model-specific renderer | Tests with real response fixtures; ordinary actions, all supported terminal statuses, wait behavior, history roles/media order, coordinate boundaries, unsupported tools and malformed output; a representative real model/desktop smoke |
+| Shared model-call, retry, history or execution code | Existing Nano, Super 3.5 and affected upstream-runner tests; cross-model request/history assertions and representative smoke rollouts for affected behavior |
+| Serving template or reasoning/tool parser | The real pinned serving parser/tokenizer path; original completion text/token IDs compared with the response handed to Gym; documented pre-existing normalization/recovery behavior and whether each path was exercised |
+| Preparation/profile defaults | Composed-config tests for each affected profile, including omitted versus explicit sampling overrides, agent instance selection, backend and history policy |
+| Documentation only | Check links, command options and configuration examples against current code; no new model inference is required |
+| A full benchmark claim | Frozen source, checkpoint, serving stack, task input, guest image, prompt/protocol/parser/history identities, sampling, budgets, concurrency and timeouts; complete per-task outcomes and model/infrastructure failure accounting |
+
+Run the existing agent and preparation tests from the repository root using
+the prepared Gym development environment:
+
+```bash
+python -m pytest responses_api_agents/osworld_agent/tests benchmarks/osworld/tests/test_prepare.py
+pre-commit run --all-files
+```
+
+These tests cover the shared execution loop, existing runner contracts and
+profile composition. For a change to other benchmark tools, also run their
+targeted tests under `benchmarks/osworld/tests`. The optional Super 3.5 vLLM
+plugin has a separate [CPU regression command](../../benchmarks/osworld/tools/README.md#super-35-reasoning-boundary)
+that runs inside the pinned serving environment; Gym unit tests do not import
+or validate that deployment dependency automatically.
+
+For new prompt/configuration experiments, verify action-parser source parity
+and exact raw-response-to-parser-input integrity before scoring. Preserve the
+original model response, including malformed JSON, XML, Python and missing
+delimiters. Do not insert a missing bracket/tag, rewrite tool arguments or
+execute a host-repaired response. A bounded retry requests a new model response
+and retains both attempts. Existing compatibility paths, including legacy
+Markdown handling or a serving parser's reasoning-whitespace presentation,
+must be identified, frozen and audited rather than silently broadened.
+Neither a step cap nor exhausted parsing retries supplies a model-authored
+terminal failure. Keep model failures distinct from infrastructure failures.
+
+Changing a parser/renderer/protocol requires a new applicable identity and
+new experiment provenance. Do not hot-patch active experiments, overwrite
+completed runs, or reuse an old score for a new checkpoint/profile. The
+Super 3.5 R6 result is evidence for its frozen registered-runner/direct-vLLM
+deployment. It is not a new full-suite regression of Nano Omni v3, a validation
+of an unimplemented v4 model, or an end-to-end test of every Gym service/backend.
+
 ### Model protocol and history policy
 
-The Nemotron adapter keeps two independently selectable identities:
+The protocol agent keeps two independently selectable identities:
 
 - `model_protocol_id` selects prompts, message templates, and response parser;
 - `history_policy` selects which completed turns remain live screenshots and
@@ -331,7 +659,7 @@ Runner and model behavior:
 
 Evaluation and operations:
 
-- `reward_mode` is `binary` or `raw`; aggregate metrics always report both
+- `reward_mode` is `binary`, `raw`, or opt-in `signed_v1`; aggregate metrics always report both
   binary success and raw OSWorld reward rates over the measured, unmasked
   subset, following Gym's shared aggregation policy. Normal evaluated failures
   with reward zero stay in that subset. Report `coverage/measured_rollouts`,
@@ -375,21 +703,10 @@ gym eval run --no-serve
 
 The installer targets only the managed OSWorld agent venv. It does not modify
 the system Python, Gym's root venv, the model server, or the OSWorld VM. The
-installer reads the same `[pip].torch-backend` setting from `uv.toml` as
-`gym env prefetch`, so `torch` and `torchvision` come from the same CPU/CUDA
-wheel family. A plain
-PyPI `torchvision` install is not equivalent: it can appear version-compatible
-with an existing CPU `torch` while failing to load native operators such as
-`torchvision::nms`. The managed environment excludes OSWorld's Azure, Aliyun,
-and Volcengine VM
-provisioning SDKs: this adapter supports direct Docker plus Gym Docker and
-OpenSandbox lifecycle, and none of those paths imports the excluded providers.
-The pinned OSWorld task/setup/evaluator code remains installed unchanged. The
-public `benchmarks/osworld/tools/start_control.sh` wrapper checks that the
-required package versions are importable and fails with the exact setup
-commands when this explicit step has been omitted. The agent entrypoint repeats
-that non-mutating check so a direct `gym env start` also fails early and
-actionably; neither path installs packages automatically.
+installer synchronizes `runtime/uv.lock` with `uv sync --locked --inexact`,
+which preserves the base agent environment while adding the explicitly opted-in
+packages. The runtime project binds both Torch wheels to the CPU index. Commit
+both runtime manifest and lock when changing these optional packages.
 
 Choose a model-specific agent composition during preparation. For example:
 

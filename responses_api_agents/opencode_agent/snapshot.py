@@ -13,6 +13,10 @@ from pathlib import Path
 LOG = logging.getLogger(__name__)
 
 
+class NoRootSessionError(RuntimeError):
+    """The database holds no OpenCode root session yet: OpenCode had not written its first message."""
+
+
 def snapshot(
     database: Path, directory: Path, *, harness_session_id: str | None, previous_message_ids: Collection[str]
 ) -> None:
@@ -24,6 +28,8 @@ def snapshot(
         sessions = source.execute(
             "select id from session where parent_id is null order by time_created, id"
         ).fetchall()
+        if not sessions:
+            raise NoRootSessionError("Expected one OpenCode root session, found 0")
         if len(sessions) != 1:
             raise RuntimeError(f"Expected one OpenCode root session, found {len(sessions)}")
         rows = source.execute(
@@ -63,3 +69,16 @@ def snapshot(
                 source.backup(destination)
         except sqlite3.Error:
             LOG.exception("Failed to copy OpenCode observations")
+
+
+def stored_sessions(database: Path) -> list[dict[str, str | None]]:
+    """Every stored session's ID and parent ID, oldest first, as the owner's ``sessions.json`` lists them."""
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
+        rows = source.execute("select id, parent_id from session order by time_created, id").fetchall()
+    return [{"id": session_id, "parent_id": parent_id} for session_id, parent_id in rows]
+
+
+def stored_message_ids(database: Path) -> list[str]:
+    """Every stored message's ID, oldest first."""
+    with closing(sqlite3.connect(f"file:{database}?mode=ro", uri=True)) as source:
+        return [row[0] for row in source.execute("select id from message order by time_created, id")]

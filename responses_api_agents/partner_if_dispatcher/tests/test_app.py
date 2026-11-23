@@ -3,6 +3,7 @@
 """The episode adapter preserves the existing environment-server boundary."""
 
 import asyncio
+import copy
 import importlib
 import json
 from types import SimpleNamespace
@@ -16,8 +17,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 from environment_servers.legacy_agent.tests.test_app import _Client, _Upstream
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.server_utils import BaseServerConfig
+from nemo_gym.config import AggregateMetricsRequest, BaseServerConfig
 
 
 METRICS_SERVER = {"type": "resources_servers", "name": "partner_if"}
@@ -103,6 +103,7 @@ def test_routes_the_complete_episode_without_rewriting_native_fields(harness):
                 cleanup_timeout_seconds=180,
                 agent_server={"type": "responses_api_agents", "name": f"agent-{harness}"},
                 resources_server={"type": "resources_servers", "name": "resources"},
+                tool_servers=[],
             ),
             server_client=downstream,
         )
@@ -111,8 +112,8 @@ def test_routes_the_complete_episode_without_rewriting_native_fields(harness):
 
 
 def test_tool_executions_in_the_agent_reply_reach_the_agent_observations():
-    from nemo_gym.harness_capabilities.checker import inspect_record
-    from nemo_gym.rollout_collection import _attach_trajectory_record
+    from nemo_gym.rollouts.harness_capabilities import inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 
     module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
     invocation = {
@@ -292,12 +293,12 @@ async def test_metrics_server_failure_is_raised_not_replaced_by_empty_metrics():
 
 def test_example_config_runs_each_partner_if_example_in_its_own_environment():
     from nemo_gym import PARENT_DIR
-    from nemo_gym.global_config import (
+    from nemo_gym.client import ServerClient
+    from nemo_gym.config import (
         GlobalConfigDictParser,
         GlobalConfigDictParserConfig,
         get_first_server_config_dict,
     )
-    from nemo_gym.server_utils import ServerClient
 
     module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
     config = GlobalConfigDictParser().parse(
@@ -343,3 +344,146 @@ def test_example_config_runs_each_partner_if_example_in_its_own_environment():
         contract["task_id"]: environments[contract.get("evidence_mode", "text_response")] for contract in contracts
     }
     assert settings["resources_server"]["name"] == "partner_if"
+
+
+def recorded_row_and_reply():
+    import hashlib
+
+    from benchmarks.partner_if.tests.fixture_data import TASK
+    from resources_servers.partner_if.grading_contract import GradingContract
+    from resources_servers.partner_if.receipt import masked_fields
+    from resources_servers.partner_if.recorded_context_app import (
+        recorded_context_result_sha256,
+        recorded_context_task_data,
+    )
+    from tests.helpers.single_agent_turn import _agent_response
+
+    row = copy.deepcopy(TASK)
+    row["verifier_metadata"]["partner_if"]["task_id"] = "task-text"
+    task_data = recorded_context_task_data(row) | {"recorded_context_run_binding": {}}
+    contract = GradingContract.model_validate(row["verifier_metadata"]["partner_if"])
+    result = task_data | {
+        "responses_create_params": row["responses_create_params"],
+        "response": _agent_response().model_dump(mode="json"),
+        **masked_fields(contract, "partner_if:recorded_context_fixture_gap", "synthetic gap"),
+        "evaluation_completed": False,
+        "recorded_context": {
+            "task_data_sha256": hashlib.sha256(
+                json.dumps(task_data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            ).hexdigest()
+        },
+    }
+    result["recorded_context_result_sha256"] = recorded_context_result_sha256(result)
+    return row, {
+        "reward": 0,
+        "mask_sample": True,
+        "terminated": False,
+        "truncated": True,
+        "info": {"partner_if_recorded_context_result": result},
+    }
+
+
+def recorded_server(reply):
+    adapter, downstream = server(_Upstream(json.dumps(reply).encode()))
+    downstream.global_config_dict["agent-text"] = {
+        "responses_api_agents": {"gymnasium_agent": {"resources_server": METRICS_SERVER}}
+    }
+    downstream.global_config_dict["partner_if"] = {
+        "resources_servers": {"partner_if": {"entrypoint": "recorded_context_app.py"}}
+    }
+    return type(adapter)(config=adapter.config, server_client=downstream), downstream
+
+
+@pytest.mark.parametrize("own_selection", [False, True])
+def test_recorded_context_normalization_keeps_masking_failure_evidence_and_cleanup_warning(own_selection):
+    from nemo_gym.core import FailureBoundary, FailureReportRow, NgFailureEvent, failure_report_for
+
+    row, reply = recorded_row_and_reply()
+    report = failure_report_for(
+        NgFailureEvent(
+            boundary=FailureBoundary.ENVIRONMENT, failure_kind="environment_server_failed", failure_reason="cleanup"
+        )
+    )
+    selected = None
+    if own_selection:
+        from resources_servers.partner_if.recorded_context_app import recorded_context_result_sha256
+
+        selected = failure_report_for(
+            NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="judge"
+            )
+        )
+        resources_report = reply["info"]["partner_if_recorded_context_result"]
+        resources_report.update(FailureReportRow.fields(selected))
+        resources_report["recorded_context_result_sha256"] = recorded_context_result_sha256(resources_report)
+    reply.update(FailureReportRow.fields(report))
+    reply["info"]["cleanup_warning"] = {"operation": "close", "message": "unavailable"}
+    adapter, downstream = recorded_server(reply)
+    with TestClient(adapter.setup_webserver()) as client:
+        response = client.post("/run", json=row)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["mask_sample"] is True and result["evaluation_completed"] is False
+    assert result["reward"] == 0 and result["failure_kind"] == "partner_if:recorded_context_fixture_gap"
+    assert result["recorded_context"]["cleanup_warning"]["operation"] == "close"
+    combined = FailureReportRow.report(result)
+    assert set(report.events) <= combined.events.keys()
+    assert combined.failure_id == (selected.failure_id if selected else report.failure_id)
+    if selected:
+        assert set(selected.events) <= combined.events.keys()
+    assert result["agent_ref"] == {"name": "agent-text"}
+    assert len(downstream.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "fault", ["checksum", "actor", "task", "grade", "completion", "terminal", "envelope", "model_only"]
+)
+def test_invalid_recorded_context_reports_cannot_become_flat_successes(fault):
+    from resources_servers.partner_if.recorded_context_app import recorded_context_result_sha256
+
+    row, reply = recorded_row_and_reply()
+    result = reply["info"]["partner_if_recorded_context_result"]
+    if fault == "actor":
+        result["responses_create_params"] = {"input": "another actor"}
+    elif fault == "task":
+        result["task_name"] = "different task"
+    elif fault == "grade":
+        result.pop("if_result")
+    elif fault == "completion":
+        result["evaluation_completed"] = True
+    elif fault == "terminal":
+        reply.update(terminated=False, truncated=False)
+    elif fault == "envelope":
+        reply["reward"] = 1
+    elif fault == "model_only":
+        reply["response"] = {"partner_if_recorded_context_result": result}
+        reply["info"] = {}
+    # A matching checksum does not excuse an identity/grade mismatch.
+    result["recorded_context_result_sha256"] = (
+        recorded_context_result_sha256(result) if fault != "checksum" else "0" * 64
+    )
+    adapter, downstream = recorded_server(reply)
+    with TestClient(adapter.setup_webserver()) as client:
+        response = client.post("/run", json=row)
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Invalid recorded-context Resources result"}
+    assert len(downstream.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"_ng_rollout_id": "new-capture"},
+        {"_ng_rollout_id": "same-capture", "_ng_attempt_index": 1},
+        {"task_index": 27, "rollout_index": 4},
+    ],
+)
+def test_prior_recorded_grade_cannot_be_rebound_to_a_new_capture_or_attempt(identity):
+    row, prior_reply = recorded_row_and_reply()
+    adapter, downstream = recorded_server(prior_reply)
+    with TestClient(adapter.setup_webserver()) as client:
+        response = client.post("/run", json=row | identity)
+    assert response.status_code == 502
+    forwarded = json.loads(downstream.calls[0][2]["data"])
+    assert forwarded["recorded_context_run_binding"] == identity
+    assert forwarded["responses_create_params"] == row["responses_create_params"]

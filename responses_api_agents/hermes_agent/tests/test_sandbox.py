@@ -11,20 +11,30 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlparse
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.supervisor_client import CLEANUP_PHASE_COUNT, STOP_REQUEST_FILE, parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.agents import (
+    CLEANUP_PHASE_COUNT,
+    STOP_REQUEST_FILE,
+    AgentCloseSessionRequest,
+    AgentOutcomePolicyConfig,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    OutcomeAction,
+    SandboxPythonRuntime,
+    SandboxSession,
+    agent_outcome_policy,
+    parse_cleanup_receipt,
+)
+from nemo_gym.agents.base_responses_api_agent import _AgentSessionRecord
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -52,9 +62,11 @@ def agent(monkeypatch):
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
 
-    monkeypatch.setattr(
-        HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/episode-a1/v1"
-    )
+    def resolve_model_base_url(*args, trained=True):
+        # As in a run that carries sampling values: a role the framework does not train gets null.
+        return f"http://model:8000/ng-rollout/episode-a1{'' if trained else '/ng-sampling/null'}/v1"
+
+    monkeypatch.setattr(HermesAgent, "resolve_model_base_url", resolve_model_base_url)
     return result
 
 
@@ -355,7 +367,7 @@ async def test_close_failure_keeps_session_for_retry(
 
 @pytest.mark.parametrize("receipt", [None, {"cleanup_confirmed": False, "error": "cleanup failed"}])
 @pytest.mark.parametrize("launch_started,cleanup", [(False, None), (True, None), (True, {"cleanup_confirmed": True})])
-async def test_owned_close_falls_back_to_stop_without_receipt(agent, state, receipt, launch_started, cleanup):
+async def test_owned_close_falls_back_to_stop_when_exec_unavailable(agent, state, receipt, launch_started, cleanup):
     state.session.owns_sandbox = True
     state.session.launch_started = launch_started
     state.session.cleanup = cleanup
@@ -378,7 +390,8 @@ async def test_owned_close_falls_back_to_stop_without_receipt(agent, state, rece
         state.session.sandbox.exec.assert_awaited_once()
         assert download_json.await_count >= 1
     else:
-        state.session.sandbox.exec.assert_not_awaited()
+        state.session.sandbox.exec.assert_awaited_once()
+        assert "mv /tmp/nemo-gym-hermes-sessions/session" in state.session.sandbox.exec.await_args.args[0]
         download_json.assert_not_awaited()
 
 
@@ -396,7 +409,7 @@ async def test_owned_stop_failure_keeps_close_retryable(agent, state, failure):
     assert agent._session_records["session"].state is state
     assert agent._session_records["session"].closing
     assert state.session.launch_started and state.session.cleanup is None and not state.session.sandbox_stopped
-    assert "session" not in agent._closed_session_records
+    assert "session" not in agent._fenced_session_records
     response = await agent.close_agent_session(request(state), close)
     assert await agent.close_agent_session(request(state), close) == response
     assert state.session.sandbox.stop.await_count == 2
@@ -421,7 +434,7 @@ async def test_owned_stop_precedes_waiting_for_cancelled_activation(agent, state
             await stopped.wait()
             raise
 
-    state.session.sandbox.stop.side_effect = stopped.set
+    state.session.sandbox.stop.side_effect = lambda **_: stopped.set()
     download_json = mock_json_download(state.session.sandbox, side_effect=FileNotFoundError("missing cleanup receipt"))
     state.task = asyncio.create_task(activation())
     await started.wait()
@@ -465,7 +478,8 @@ def local_runner(agent, state, monkeypatch, tmp_path):
     directory.mkdir()
     state.session.session_dir = str(directory)
     state.session.workdir = str(tmp_path)
-    agent.config.session_close_timeout_seconds = 2
+    # This fixture runs real subprocesses; keep deadline behavior tests on their own short budgets.
+    agent.config.session_close_timeout_seconds = 15
     monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
     monkeypatch.setattr(
         hermes_sandbox, "_SANDBOX_RUNNER", str(Path(hermes_sandbox.__file__).with_name("sandbox_runner.py"))
@@ -484,7 +498,7 @@ def local_runner(agent, state, monkeypatch, tmp_path):
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=8)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
             return SimpleNamespace(
                 return_code=process.returncode,
                 stdout=stdout.decode(errors="replace"),
@@ -731,11 +745,13 @@ async def test_stop_before_launch_closes_without_starting_a_worker(agent, state,
         with pytest.raises(RuntimeError, match="exited without output"):
             await state.task
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
+        # The stop request fenced the launch, and the receipt says so.
         assert json.loads((directory / "cleanup.json").read_text()) == {
             "cleanup_confirmed": True,
             "error": None,
             "return_code": None,
             "timed_out": False,
+            "stopped": True,
         }
         await agent._close_agent_session_state(state)
         state.session.sandbox.disconnect.assert_awaited_once()
@@ -743,6 +759,77 @@ async def test_stop_before_launch_closes_without_starting_a_worker(agent, state,
         if not state.task.done():
             state.task.cancel()
         await asyncio.gather(state.task, return_exceptions=True)
+
+
+async def test_seed_import_check_ignores_task_hermes_home(tmp_path):
+    private_home, task_home = tmp_path / "runtime-home", tmp_path / "task-home"
+    private_home.mkdir()
+    task_home.mkdir()
+    from responses_api_agents.hermes_agent.runtime import host_python
+
+    code = (
+        hermes_sandbox._HERMES_RUNTIME.import_check
+        + "; import json, run_agent; print(json.dumps(str(run_agent._hermes_home)))"
+    )
+    process = await asyncio.create_subprocess_exec(
+        str(host_python()),
+        "-I",
+        "-c",
+        code,
+        cwd=task_home,
+        env={**os.environ, "HOME": str(private_home), "HERMES_HOME": str(task_home / ".hermes")},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert json.loads(stdout.splitlines()[-1]) == str(private_home / ".hermes")
+    assert not list(task_home.iterdir())
+
+
+async def test_the_runner_ignores_task_python_settings_but_preserves_them_for_tools(state, tmp_path, monkeypatch):
+    harness, task = tmp_path / "harness", tmp_path / "task"
+    harness.mkdir()
+    task.mkdir()
+    (harness / "sibling.py").write_text("VALUE = 'trusted'\n")
+    # These modules must not be imported by the harness, even when PYTHONPATH includes the task.
+    (task / "json.py").write_text("raise RuntimeError('task json imported')\n")
+    (task / "task_only.py").write_text("VALUE = 'task'\n")
+    runner = harness / "runner.py"
+    runner.write_text(
+        "import importlib.util, json, subprocess, sibling\n"
+        "assert sibling.VALUE == 'trusted'\n"
+        "assert importlib.util.find_spec('task_only') is None\n"
+        "print(json.dumps(subprocess.check_output(['python'], text=True).splitlines()))\n"
+    )
+    task_python = task / "python"
+    task_python.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "task-python" "$HOME" "$PATH" "$VIRTUAL_ENV" '
+        '"$PYTHONPATH" "$PYTHONHOME" "$PYTHONUSERBASE"\npwd\n'
+    )
+    task_python.chmod(0o755)
+    task_env = {
+        "HOME": str(task / "home"),
+        "PATH": f"{task}:{os.environ['PATH']}",
+        "VIRTUAL_ENV": str(task / "venv"),
+        "PYTHONPATH": str(task),
+        "PYTHONHOME": str(task / "not-a-python-install"),
+        "PYTHONUSERBASE": str(task / "user-site"),
+    }
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_RUNNER", str(runner))
+    state.upload_json = AsyncMock()
+    command = await state.stage_activation({})
+    process = await asyncio.create_subprocess_exec(
+        *command.argv,
+        cwd=task,
+        env={**os.environ, **task_env},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert json.loads(stdout) == ["task-python", *task_env.values(), str(task)]
 
 
 def test_cleanup_and_runtime_are_independent():
@@ -983,6 +1070,8 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
     agent.server_client.post.assert_not_called()
     payload = state.upload_json.await_args.args[1]
     assert payload["model_base_url"] == "http://model:8000/ng-rollout/episode-a1/v1"
+    # Compression is a side call no training framework trains, so it keeps its own sampling.
+    assert payload["compression_model_base_url"] == "http://model:8000/ng-rollout/episode-a1/ng-sampling/null/v1"
 
 
 @pytest.mark.parametrize(
@@ -1055,13 +1144,11 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
     )
     original = body.model_dump()
     result = {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}
-    runner = MagicMock()
-    runner.run_conversation.return_value = result
-    constructor = MagicMock(return_value=runner)
-    monkeypatch.setattr("run_agent.AIAgent", constructor)
-    monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+    host_worker = AsyncMock(return_value=({"result": result}, False))
+    monkeypatch.setattr(HermesAgent, "_run_host_worker", host_worker)
     await agent.responses(SimpleNamespace(session={}), body)
-    user_message, system_message, history = runner.run_conversation.call_args.args
+    host = host_worker.await_args.args[0]
+    user_message, system_message, history = host["user_message"], host["system_message"], host["history"]
 
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     state.upload_json = AsyncMock()
@@ -1088,12 +1175,8 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
         == system_message
         == ("Configured instruction\n\nRequest instruction\n\nInput system instruction")
     )
-    assert (
-        payload["temperature"]
-        == constructor.call_args.kwargs["temperature"]
-        == (temperature if temperature is not None else 0.7)
-    )
-    assert payload["max_tokens"] == constructor.call_args.kwargs["max_tokens"] == 500
+    assert payload["temperature"] == host["temperature"] == (temperature if temperature is not None else 0.7)
+    assert payload["max_tokens"] == host["max_tokens"] == 500
     assert body.model_dump() == original
     assert len(validations) == 2  # Exactly once per incoming request, not again in the runner.
 
@@ -1176,17 +1259,24 @@ async def test_task_timeout_reaches_the_sandbox_supervisor(agent, state, tmp_pat
     )
 
 
+@pytest.mark.parametrize(
+    "ending",
+    [
+        {"partial": True, "error": "Context length exceeded: max compression attempts (3) reached."},
+        # Hermes 0.23.2 marks an exhausted context `failed`; its `failure_reason` keeps it a model limit.
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "failure_retryable": False,
+            "compression_exhausted": True,
+            "error": "This conversation has grown too long for policy_model to read, and Hermes couldn't shrink it",
+        },
+    ],
+)
 @pytest.mark.parametrize("captured", [False, True])
-async def test_context_limit_keeps_partial_work_verifiable(agent, state, captured):
+async def test_context_limit_keeps_partial_work_verifiable(agent, state, captured, ending):
     messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Partial answer"}]
-    output = {
-        "result": {
-            "completed": False,
-            "partial": True,
-            "error": "Context length exceeded: max compression attempts (3) reached.",
-            "messages": messages,
-        }
-    }
+    output = {"result": {"completed": False, **ending, "messages": messages}}
     if captured:
         output["observations"] = {"invocations": [{"invocation_id": "root", "status": "failed", "messages": messages}]}
     state.execute = AsyncMock(return_value=output)
@@ -1203,6 +1293,33 @@ async def test_context_limit_keeps_partial_work_verifiable(agent, state, capture
     root = episode.observations.records[0]
     assert root.status == "incomplete"
     assert root.stop_reason == "context_limit"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Response truncated due to output length limit",
+        "Response remained truncated after 3 continuation attempts",
+        "Response remained truncated after 4 continuation attempts",
+        "Model used all output tokens on reasoning with none left for the response. "
+        "Try lowering reasoning effort or increasing max_tokens.",
+    ],
+)
+async def test_output_limit_keeps_partial_work_and_reports_agent_limit(agent, state, error):
+    """An exhausted output budget reaches the session response as `agent_limit`, with its partial work graded."""
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Partial answer"}]
+    state.execute = AsyncMock(
+        return_value={"result": {"completed": False, "partial": True, "error": error, "messages": messages}}
+    )
+
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+
+    assert episode.response.status == "failed"
+    assert episode.response.output[-1].content[0].text == "Partial answer"
+    assert json.loads(episode.response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_limit"}
+    assert agent_outcome_policy(episode.response) == OutcomeAction.VERIFY
 
 
 async def test_runner_stopped_at_the_deadline_is_a_partial_response(agent, state):
@@ -1364,7 +1481,7 @@ def test_text_history_and_system_message_are_preserved(agent):
 
 
 async def test_required_resources_tools_are_rejected_before_connect(agent, state):
-    from nemo_gym.tool_access import DirectHTTPToolAccess
+    from nemo_gym.server_runtime import DirectHTTPToolAccess
 
     state.request.tool_accesses = [DirectHTTPToolAccess(name="required", required=True, base_url="http://tools")]
     with pytest.raises(HTTPException, match="only MCP tool grants"):
@@ -1423,12 +1540,11 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
-    monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
+    monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=RuntimeError("installer failed")))
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
-    failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
-    # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
-    # remove session files.
-    sandbox.exec.side_effect = [ok, failed, ok, failed, ok]
+    failed = SimpleNamespace(return_code=1, stdout="", stderr="")
+    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok]
     cleanup = sandbox.stop if owns_sandbox else sandbox.disconnect
     if cleanup_fails:
         cleanup.side_effect = RuntimeError("cleanup unavailable")
@@ -1454,6 +1570,31 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
         sandbox.stop.assert_not_awaited()
 
 
+async def test_seed_refuses_sandbox_glibc_hermes_cannot_run(agent, state, monkeypatch):
+    import responses_api_agents.hermes_agent.app as module
+
+    sandbox = state.session.sandbox
+    factory = MagicMock(return_value=sandbox)
+    factory.connect = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
+    unsupported = hermes_sandbox.HermesPlatformUnsupportedError("Hermes requires glibc 2.28 or newer")
+    monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=unsupported))
+    ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
+    failed = SimpleNamespace(return_code=1, stdout="", stderr="")
+    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok]
+
+    # Every rerun gets a sandbox from the same image, so the seed is a final 422, not a retried 500.
+    with pytest.raises(AgentSeedRejectedError, match=r"glibc 2\.28") as refused:
+        await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    assert refused.value.status_code == 422
+    sandbox.disconnect.assert_awaited_once()
+    assert all(record.state is None for record in agent._session_records.values())
+
+
 @pytest.mark.parametrize("url", ["http://127.0.0.1:8000/ng-rollout/native-a1/v1", "http://[::1]:8000/v1"])
 async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, monkeypatch, url):
     import responses_api_agents.hermes_agent.app as module
@@ -1468,8 +1609,10 @@ async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, 
     factory.connect = AsyncMock(return_value=state.session.sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
 
-    with pytest.raises(ValueError, match=r"\+\+use_absolute_ip=true"):
+    # The same URL fails every attempt, so the seed is refused with a final 422 rather than a retried 500.
+    with pytest.raises(AgentSeedRejectedError, match=r"\+\+use_absolute_ip=true") as refused:
         await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
+    assert refused.value.status_code == 422
 
     # Refused before the sandbox was connected or anything uploaded, so there is nothing to clean up.
     create_provider.assert_not_called()
@@ -1477,6 +1620,157 @@ async def test_seed_refuses_loopback_model_url_on_remote_provider(agent, state, 
     state.session.sandbox.upload.assert_not_awaited()
     state.session.sandbox.exec.assert_not_awaited()
     assert all(record.state is None for record in agent._session_records.values())
+
+
+def _owned_seed_with_search_grant(state) -> AgentSeedSessionRequest:
+    body = state.request.model_copy(deep=True)
+    body.sandbox_access = None
+    body.tool_accesses = [
+        {
+            "kind": "mcp",
+            "name": "episode_search_tools",
+            "required": False,
+            "connection": {"url": "http://resources.example:7000/mcp", "headers": {"x-session": "token"}},
+        }
+    ]
+    return AgentSeedSessionRequest.model_validate(body.model_dump(mode="json"))
+
+
+def _owned_seed_with_several_grants(state, *, required: bool = True) -> AgentSeedSessionRequest:
+    """A required and an optional MCP grant on different hosts, plus an optional direct HTTP grant Hermes skips."""
+    body = _owned_seed_with_search_grant(state).model_dump(mode="json")
+    body["tool_accesses"] = [
+        {
+            "kind": "mcp",
+            "name": "episode_search_tools",
+            "required": required,
+            "connection": {"url": "http://resources.example:7000/mcp", "headers": {"x-session": "token"}},
+        },
+        {
+            "kind": "mcp",
+            "name": "episode_docs",
+            "required": False,
+            "connection": {"url": "http://docs.example:9000/mcp", "headers": {"x-session": "token"}},
+        },
+        {"kind": "direct_http", "name": "direct", "base_url": "http://direct.example", "required": False},
+    ]
+    return AgentSeedSessionRequest.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    ("network_access", "required", "allowed"),
+    [
+        ("inherit", True, None),
+        # A required grant under model_only is refused (see the refusal test), so this case grants optional ones.
+        ("model_only", False, ["model"]),
+        ("model_and_tools", True, ["config.example", "docs.example", "model", "resources.example"]),
+    ],
+)
+async def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(
+    agent, state, monkeypatch, network_access, required, allowed
+):
+    import responses_api_agents.hermes_agent.app as module
+
+    # A grant declared in the agent's configuration counts as well as the episode's.
+    agent.config = HermesAgentConfig.model_validate(
+        {
+            **agent.config.model_dump(),
+            "tool_accesses": [
+                {
+                    "kind": "mcp",
+                    "name": "configured_tools",
+                    "required": False,
+                    "connection": {"url": "http://config.example:8100/mcp", "headers": {"x-session": "token"}},
+                }
+            ],
+        }
+    )
+    agent.config.sandbox_provider = "runtime"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = network_access
+    sandbox = state.session.sandbox
+    monkeypatch.setattr(module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    monkeypatch.setattr(
+        module, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    )
+
+    body = _owned_seed_with_several_grants(state, required=required)
+    await agent.seed_agent_session(SimpleNamespace(session={}), body)
+
+    policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+        # The runner's payload calls the Model Server at the URL whose host the policy allows.
+        payload_url = agent.resolve_model_base_url(agent.config.model_server.name, body.episode_id.capture_key)
+        assert urlparse(payload_url).hostname in allowed
+
+
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(agent, state, monkeypatch, network_access):
+    import responses_api_agents.hermes_agent.app as module
+
+    agent.config.network_access = network_access
+    factory = MagicMock(return_value=state.session.sandbox)
+    factory.connect = AsyncMock(return_value=state.session.sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    create_provider = MagicMock()
+    monkeypatch.setattr(module, "create_provider", create_provider)
+
+    with TestClient(agent.setup_webserver()) as client:
+        rejected = client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json"))
+
+    assert rejected.status_code == 422, rejected.text
+    assert "borrowed" in rejected.json()["detail"]
+    create_provider.assert_not_called()
+    factory.connect.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("provider", "provider_options", "required", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, False, "not both"),
+        ("docker", {}, False, "requires the OpenSandbox network-policy provider"),
+        # model_only blocks a required grant's host, so the session would fail only after the sandbox exists.
+        ("opensandbox", {}, True, "model_and_tools"),
+    ],
+    ids=["explicit_policy", "provider_without_policies", "required_grant"],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(
+    agent, state, monkeypatch, provider, provider_options, required, reason
+):
+    import responses_api_agents.hermes_agent.app as module
+
+    agent.config.sandbox_provider = "runtime"
+    agent.config.sandbox_config = {
+        "image": "test-image",
+        "workdir": "/workspace",
+        "provider_options": provider_options,
+    }
+    agent.config.network_access = "model_only"
+    factory = MagicMock(return_value=state.session.sandbox)
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    # A non-host-network provider keeps the model URL check from refusing first.
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    created = SimpleNamespace(name=provider, aclose=AsyncMock())
+    monkeypatch.setattr(module, "create_provider", lambda config: created)
+    body = _owned_seed_with_several_grants(state, required=required)
+
+    with TestClient(agent.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.status_code == 422, refused.text
+    assert reason in refused.json()["detail"]
+    factory.assert_not_called()
+    created.aclose.assert_awaited_once()
+    assert body.agent_session_id not in agent._session_records
 
 
 async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monkeypatch, caplog):
@@ -1490,7 +1784,7 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
     factory.connect = AsyncMock(return_value=state.session.sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
 
-    with caplog.at_level("WARNING", logger="nemo_gym.base_responses_api_agent"):
+    with caplog.at_level("WARNING", logger="nemo_gym.agents.base_responses_api_agent"):
         result = await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
 
     assert result.agent_session_id == state.request.agent_session_id
@@ -1506,6 +1800,22 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
         ({"stop_reason": "wall_time"}, "agent_limit"),
         ({"failed": True, "error": "First response truncated due to output length limit"}, "agent_limit"),
         ({"partial": True, "error": "Response truncated due to output length limit"}, "agent_limit"),
+        ({"partial": True, "error": "Response remained truncated after 3 continuation attempts"}, "agent_limit"),
+        ({"partial": True, "error": "Response remained truncated after 4 continuation attempts"}, "agent_limit"),
+        (
+            {"partial": True, "error": "Prompt used 4080 of 4096 context tokens; no room to answer"},
+            "model_context_limit",
+        ),
+        (
+            {
+                "partial": True,
+                "error": (
+                    "Model used all output tokens on reasoning with none left for the response. "
+                    "Try lowering reasoning effort or increasing max_tokens."
+                ),
+            },
+            "agent_limit",
+        ),
         ({"partial": True, "error": "Request payload too large (413). Cannot compress further."}, "agent_limit"),
         (
             {"partial": True, "error": "Request payload too large: max compression attempts (3) reached."},
@@ -1520,6 +1830,41 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
             "model_context_limit",
         ),
         ({"partial": True, "error": "Model generated invalid tool call: nonexistent"}, "agent_invalid_output"),
+        # Hermes 0.23.2 endings, identified by their `failure_reason` rather than their chat wording.
+        (
+            {
+                "failed": True,
+                "failure_reason": "context_overflow",
+                "compression_exhausted": True,
+                "error": "This conversation has grown too long for policy_model to read, and Hermes couldn't shrink it",
+            },
+            "model_context_limit",
+        ),
+        (
+            {
+                "failed": True,
+                "failure_reason": "context_overflow",
+                "compaction_disabled": True,
+                "error": "This conversation is too long for policy_model and automatic shrinking is turned off",
+            },
+            "model_context_limit",
+        ),
+        (
+            {
+                "partial": True,
+                "failure_reason": "truncated",
+                "error": "The model's reply was cut off before it finished (it hit its output length limit)",
+            },
+            "agent_limit",
+        ),
+        (
+            {
+                "failed": True,
+                "failure_reason": "truncated",
+                "error": "The model's reply was cut off before it finished (it hit its output length limit)",
+            },
+            "agent_limit",
+        ),
     ],
 )
 def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, expected_kind):
@@ -1537,6 +1882,7 @@ def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, exp
         status="failed",
     )
     reported = agent.report_outcome(response, result)
+    assert json.loads(reported.metadata["ng_agent_outcome"])["failure_kind"] == expected_kind
     # Distinct overrides expose misclassification that the default verify policy hides.
     actions = {
         "agent_limit": OutcomeAction.RETRY,
@@ -1547,6 +1893,35 @@ def test_limit_and_invalid_output_keep_distinct_policy_routes(agent, result, exp
     assert agent_outcome_policy(reported, config=policy) == actions[expected_kind]
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "compression_exhausted": True,
+            "turn_exit_reason": "context_compression_timeout",
+            "error": "Context compression timed out before it could shrink the conversation",
+        },
+        {
+            "failed": True,
+            "failure_reason": "context_overflow",
+            "error": "The requested output length exceeds the provider's output cap for this model",
+        },
+    ],
+)
+def test_compression_timeout_and_output_cap_are_not_context_limits(agent, result):
+    """Hermes also stamps these with `context_overflow`; a slow compression call or a rejected cap is not the model's."""
+    assert agent.classify_outcome(result).failure_kind == "unknown"
+    response = agent._response_from_result(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+        result=result | {"messages": []},
+        model_name="model",
+        retain_provider_failure=True,
+    )
+    assert response.metadata["provider_failed"] == "true"
+
+
 @pytest.mark.parametrize("status", [400, 413])
 def test_http_status_alone_does_not_establish_context_overflow(agent, status):
     outcome = agent.classify_outcome({"failed": True, "error": f"Error code: {status}"})
@@ -1554,3 +1929,118 @@ def test_http_status_alone_does_not_establish_context_overflow(agent, status):
         "model_request_error",
         status,
     )
+
+
+_IMAGE_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+)
+
+
+@pytest.mark.parametrize("sandbox", [False, True])
+async def test_images_reach_host_and_sandbox_without_dropping_history(agent, state, monkeypatch, sandbox):
+    content = [
+        {"type": "input_text", "text": "before"},
+        {"type": "input_image", "image_url": _IMAGE_URI, "detail": "high"},
+        {"type": "input_text", "text": "between"},
+        {"type": "input_image", "image_url": _IMAGE_URI.replace("image/png", "image/jpeg"), "detail": "low"},
+    ]
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "system", "content": "instruction"},
+            {"role": "user", "content": content},
+            {"role": "assistant", "content": "prior answer"},
+            {"role": "user", "content": content},
+        ],
+    )
+    original = body.model_dump()
+    result = {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}
+    if sandbox:
+        agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+        state.execute = AsyncMock(return_value={"result": result})
+        await agent.responses(request(state), body)
+        payload = state.execute.await_args.args[0]
+        latest, history = payload["user_message"], payload["history"]
+        await agent.responses(request(state), body)
+        state.execute.assert_awaited_once()
+        with pytest.raises(HTTPException) as error:
+            await agent.responses(request(state), body.model_copy(update={"instructions": "different"}))
+        assert error.value.status_code == 409
+    else:
+        host_worker = AsyncMock(return_value=({"result": result}, False))
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", host_worker)
+        await agent.responses(SimpleNamespace(session={}), body)
+        host = host_worker.await_args.args[0]
+        latest, history = host["user_message"], host["history"]
+    expected = [
+        {"type": "text", "text": "before"},
+        {"type": "image_url", "image_url": {"url": _IMAGE_URI, "detail": "high"}},
+        {"type": "text", "text": "between"},
+        {"type": "image_url", "image_url": {"url": _IMAGE_URI, "detail": "low"}},
+    ]
+    assert latest == expected
+    assert history == [{"role": "user", "content": expected}, {"role": "assistant", "content": "prior answer"}]
+    assert body.model_dump() == original
+
+
+@pytest.mark.parametrize("sandbox", [False, True])
+@pytest.mark.parametrize(
+    ("role", "image", "message"),
+    [
+        ("user", {"image_url": "https://example.com/image.png"}, "base64 data URI"),
+        ("user", {"image_url": "data:image/png;base64,%%%"}, "invalid base64"),
+        ("user", {"image_url": "data:image/png;base64,é"}, "invalid base64"),
+        ("user", {"image_url": "data:image/png;base64,aGVsbG8="}, "no data of a supported media type"),
+        ("user", {"image_url": "data:image/svg+xml;base64,PHN2Zy8+"}, "Unsupported media type"),
+        ("user", {"file_id": "file-image"}, "base64 data URI"),
+        ("system", {"image_url": _IMAGE_URI}, "only in user messages"),
+        ("assistant", {"image_url": _IMAGE_URI}, "only in user messages"),
+    ],
+)
+async def test_invalid_images_fail_before_execution(agent, state, role, image, message, sandbox):
+    items = [{"role": role, "content": [{"type": "input_image", "detail": "auto", **image}]}]
+    if role != "user":
+        items.append({"role": "user", "content": "question"})
+    body = NeMoGymResponseCreateParamsNonStreaming(input=items)
+    agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+    agent._run_sandbox_episode = AsyncMock(side_effect=AssertionError("Must reject before execution"))
+    agent._create_response = AsyncMock(side_effect=AssertionError("Must reject before execution"))
+    with pytest.raises(HTTPException, match=message) as error:
+        await agent.responses(request(state) if sandbox else SimpleNamespace(session={}), body)
+    assert error.value.status_code == 422
+    assert state.task is None
+    agent._run_sandbox_episode.assert_not_awaited()
+    agent._create_response.assert_not_awaited()
+
+    result = episode(agent)
+    agent._run_sandbox_episode = AsyncMock(return_value=result)
+    agent._create_response = AsyncMock(return_value=result.response)
+    recovered = await agent.responses(
+        request(state) if sandbox else SimpleNamespace(session={}),
+        NeMoGymResponseCreateParamsNonStreaming(input="text recovery"),
+    )
+    assert recovered.status == "completed"
+    (agent._run_sandbox_episode if sandbox else agent._create_response).assert_awaited_once()
+
+
+@pytest.mark.parametrize("minor", [17, 27, None])
+async def test_hermes_explains_unsupported_glibc_before_downloading_wheels(tmp_path, minor):
+    from nemo_gym.agents import SandboxPlatform
+
+    with pytest.raises(hermes_sandbox.HermesPlatformUnsupportedError, match=r"Hermes requires glibc 2\.28 or newer"):
+        await hermes_sandbox._HERMES_RUNTIME._build_site_packages(
+            SandboxPlatform("x86_64", "gnu", minor), tmp_path / "bundle"
+        )
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize(("reported", "supported"), [("glibc 2.17", False), ("", False), ("glibc 2.28", True)])
+def test_portable_runtime_refuses_an_image_whose_glibc_cannot_load_it(monkeypatch, reported, supported):
+    from responses_api_agents.hermes_agent import runtime
+
+    monkeypatch.setattr(runtime.os, "confstr", lambda name: reported)
+    if supported:
+        runtime._require_supported_glibc()
+    else:
+        with pytest.raises(RuntimeError, match=r"Hermes requires glibc 2\.28 or newer"):
+            runtime._require_supported_glibc()

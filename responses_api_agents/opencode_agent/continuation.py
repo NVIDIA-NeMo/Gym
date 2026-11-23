@@ -6,7 +6,10 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
+from nemo_gym.agents import CleanupReceipt
+
+
+ERROR_EVENT_CHARS = 4000
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -37,8 +40,8 @@ def classify_opencode_run(
     for message in assistants:
         if message["info"].get("error"):
             error = error or json.dumps(message["info"]["error"])
-    if continuation and timed_out and has_opencode_error_event(stdout):
-        error = error or "OpenCode emitted an error event"
+    if continuation and timed_out and (event := opencode_error_event(stdout)) is not None:
+        error = error or f"OpenCode emitted an error event: {event}"
     resumable_checkpoint = bool(
         continuation
         and session_id
@@ -99,13 +102,20 @@ def classify_opencode_run(
     return OpenCodeRunOutcome(status="completed")
 
 
-def has_opencode_error_event(stdout: str) -> bool:
-    """An interrupted checkpoint must not hide an explicit OpenCode error event."""
+def opencode_error_event(stdout: str) -> str | None:
+    """Return the first explicit OpenCode error event, which an interrupted checkpoint must not hide."""
+    error = opencode_error_event_error(stdout)
+    return None if error is None else json.dumps(error)[:ERROR_EVENT_CHARS]
+
+
+def opencode_error_event_error(stdout: str) -> Any:
+    """Return the error object of the first explicit OpenCode error event (the event itself if it has none)."""
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
         if isinstance(event, dict) and event.get("type") == "error":
-            return True
-    return False
+            # The event names the failing boundary, for example an APIError with the provider's status.
+            return event.get("error") or event
+    return None
