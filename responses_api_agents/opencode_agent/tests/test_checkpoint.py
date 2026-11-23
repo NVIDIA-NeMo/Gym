@@ -1290,6 +1290,37 @@ async def test_a_re_bind_that_fails_releases_its_sandbox_connection(monkeypatch:
     assert state.session is None and state.restored == {"session": {}}
 
 
+async def test_a_re_bind_that_installs_the_session_files_again_stages_the_task_skills_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandbox = MagicMock(sandbox_id="fork")
+
+    async def run(command: str, **_: Any) -> SandboxExecResult:
+        if command.startswith("[ -e /rt/opencode ]"):
+            # The fork lacks the session's files, so they are installed again.
+            return SandboxExecResult(stdout="", stderr="", return_code=1)
+        if "task.json" in command:
+            return SandboxExecResult(stdout=json.dumps({"skills_dir": "/workspace/skills"}), stderr="", return_code=0)
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    sandbox.exec = AsyncMock(side_effect=run)
+    sandbox.disconnect = AsyncMock()
+    agent, state, body = _restored(monkeypatch, sandbox)
+    # Restored from a checkpoint of a session whose seed staged the task's skills.
+    state.task_skills = "/workspace/skills"
+    session = SimpleNamespace(root_dir="/sessions/s")
+    monkeypatch.setattr(SandboxSession, "rebind", staticmethod(lambda *_, **__: session))
+    monkeypatch.setattr(OpenCodeAgent, "_install_session_files", AsyncMock())
+
+    assert await agent._rebind_restored_agent_session_state(state, body) is state
+
+    # The skills go back into OpenCode's skills folder under the session root, where the seed put them.
+    copies = [call.args[0] for call in sandbox.exec.await_args_list if " cp -R -- " in call.args[0]]
+    assert len(copies) == 1 and copies[0].endswith(" /sessions/s/config/opencode/skills/")
+    assert "cp -R -- /workspace/skills/. " in copies[0]
+    assert state.task_skills == "/workspace/skills" and state.session is session
+
+
 # -- the saved reply and the evidence of a finished session ------------------------------------------------------
 
 # The activation of session ``s``; each test changes one field of it.
@@ -1588,6 +1619,38 @@ async def test_a_session_that_finished_before_its_checkpoint_closes_with_its_tra
     assert closed.trajectory.rollout_id == "r-a2"
     assert [turn.rollout_id for turn in closed.trajectory.turns] == ["r-a2", "r-a2"]
     assert _turns(closed.trajectory) == turns
+
+
+@pytest.mark.parametrize("skills", ["/workspace/skills", None], ids=["task_with_skills", "task_without_skills"])
+async def test_a_restored_session_keeps_the_skill_tool_its_task_skills_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, skills: str | None
+) -> None:
+    fixture = OpenCodeFixture(tmp_path, monkeypatch)
+    agent = _agent(fixture)
+    state = _open_session(agent)
+    # What the seed sets once stage_task_skills copied the task's skills into OpenCode's skills folder.
+    state.task_skills = skills
+
+    saved = await _checkpoint(agent)
+    restored_agent = _agent(fixture)
+    restored_agent.config.opencode_config = {"permission": {"*": "allow", "skill": "deny"}}
+    restored = await _restore(restored_agent, saved)
+    # The fork holds the session's files, the copied skills among them.
+    sandbox = MagicMock(sandbox_id="fork")
+    sandbox.exec = AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0))
+    connect = SimpleNamespace(connect=AsyncMock(return_value=sandbox))
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.AsyncSandbox", connect)
+    session = SimpleNamespace(root_dir="/sessions/s", session_dir="/sessions/s", workdir="/app")
+    monkeypatch.setattr(SandboxSession, "rebind", staticmethod(lambda *_, **__: session))
+    await restored_agent._rebind_restored_agent_session_state(restored, _borrowed_seed(attempt=2))
+
+    config = restored_agent._opencode1_launch(restored, _body(), prompt="fix the bug", system="")[0]
+
+    assert restored.task_skills == skills
+    # A task with skills keeps the skill tool after the restore; the profile's deny stays for any other task.
+    assert config["permission"] == {"*": "allow", "skill": "allow" if skills else "deny"}
+    # Only the check of the session's files ran: nothing was installed or copied again.
+    assert sandbox.exec.await_count == 1
 
 
 # -- checkpoint declarations -------------------------------------------------------------------------------------

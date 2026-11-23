@@ -1441,6 +1441,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "completed_activation": state.completed_activation,
                 "completed_reply": state.completed_reply,
                 "completed_request_digest": state.completed_request_digest,
+                # The skills the seed staged; without it a restored session falls back to the profile's rule for
+                # the skill tool.
+                "task_skills": state.task_skills,
             }
         return exported
 
@@ -1471,6 +1474,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 completed_activation=int(saved.get("completed_activation") or 0),
                 completed_reply=saved.get("completed_reply"),
                 completed_request_digest=saved.get("completed_request_digest"),
+                task_skills=saved.get("task_skills"),
                 restored=dict(saved),
             )
         for key, state in restored.items():
@@ -1555,6 +1559,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     ripgrep=self._pinned_file("ripgrep"),
                     plugin_dependencies=self._pinned_file("plugin_dependencies"),
                 )
+                if state.task_skills is not None:
+                    # The fork may lack the skills the seed copied under the session root as well: copy them again.
+                    state.task_skills = await stage_task_skills(sandbox, f"{root}/config/opencode/skills")
         except BaseException:
             # The seed that re-binds is retried: do not leave one connection behind per attempt.
             try:
