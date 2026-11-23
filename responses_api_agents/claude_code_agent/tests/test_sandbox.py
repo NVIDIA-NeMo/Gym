@@ -695,7 +695,7 @@ def _task_sandbox(task_context, *, copy_code=0):
         commands.append(command)
         if "task.json" in command:
             return result(task_context)
-        if " cp -R -- " in command:
+        if " cp -RL -- " in command:
             return result(code=copy_code)
         return result()
 
@@ -732,8 +732,8 @@ async def test_a_task_that_declares_skills_gets_them_in_the_cli_skills_folder_an
 
     config_dir = f"{state.session.session_dir}/config"
     assert state.task_skills == "/workspace/skills"
-    (copy,) = [command for command in commands if " cp -R -- " in command]
-    assert f"mkdir -p -- {config_dir}/skills && cp -R -- /workspace/skills/. {config_dir}/skills/" in copy
+    (copy,) = [command for command in commands if " cp -RL -- " in command]
+    assert f"mkdir -p -- {config_dir}/skills && cp -RL -- /workspace/skills/. {config_dir}/skills/" in copy
     payload = await _first_activation(monkeypatch, state)
     # Claude Code finds skills in CLAUDE_CONFIG_DIR/skills, and --bare would hide them from it.
     assert payload["env"]["CLAUDE_CONFIG_DIR"] == config_dir
@@ -748,7 +748,7 @@ async def test_a_task_without_skills_keeps_bare_and_copies_nothing(monkeypatch, 
     state = await _seed_in(monkeypatch, remote)
 
     assert state.task_skills is None
-    assert not any(" cp -R -- " in command for command in commands)
+    assert not any(" cp -RL -- " in command for command in commands)
     assert "--bare" in (await _first_activation(monkeypatch, state))["command"]
 
 
