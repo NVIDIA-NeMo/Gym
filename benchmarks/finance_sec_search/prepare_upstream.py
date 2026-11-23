@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare finance_sec_search benchmark with the published harness's prompt, edgar_search, and web_search.
+"""Prepare finance_sec_search benchmark as the upstream harness runs it.
 
-Thin wrapper around prepare.prepare() — used by config_edgar_search_web_search.yaml
-so gym eval prepare produces the edgar_search variant with web search.
+Thin wrapper around prepare.prepare() — used by config_upstream.yaml
+so gym eval prepare produces the upstream variant.
 """
 
 from pathlib import Path
@@ -24,7 +24,7 @@ from benchmarks.finance_sec_search.prepare import prepare as _prepare
 
 
 def prepare() -> Path:
-    return _prepare(include_web_search=True, edgar_search=True)
+    return _prepare(upstream=True)
 
 
 if __name__ == "__main__":

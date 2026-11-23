@@ -2,10 +2,10 @@
 config_paths:
   - resources_servers/finance_sec_search/configs/finance_sec_search.yaml
 
-# Isolated copy of the resource server for this benchmark. As in the published
-# benchmark, edgar_search calls sec-api.io (startup fails without SEC_API_KEY)
+# Isolated copy of the resource server for this benchmark. As in the upstream
+# harness, edgar_search calls sec-api.io (startup fails without SEC_API_KEY)
 # and searches stop at the date the prompt gives every question.
-finance_sec_search_edgar_search_benchmark_resources_server:
+finance_sec_search_upstream_benchmark_resources_server:
   _inherit_from: finance_sec_search_resources_server
   resources_servers:
     finance_sec_search:
@@ -14,24 +14,25 @@ finance_sec_search_edgar_search_benchmark_resources_server:
       max_end_date: "2025-04-07"
 
 # Benchmark agent — inherits from finance_agent, overrides datasets
-finance_sec_search_edgar_search_benchmark_agent:
+# Uses web_search, as upstream does (requires tavily_api_key in env.yaml)
+finance_sec_search_upstream_benchmark_agent:
   _inherit_from: finance_agent
   responses_api_agents:
     finance_agent:
       continue_if_not_tool_call: true
       resources_server:
-        name: finance_sec_search_edgar_search_benchmark_resources_server
+        name: finance_sec_search_upstream_benchmark_resources_server
       datasets:
-      - name: finance_sec_search_edgar_search
+      - name: finance_sec_search_upstream
         type: benchmark
-        jsonl_fpath: benchmarks/finance_sec_search/data/finance_sec_search_benchmark_edgar_search.jsonl
+        jsonl_fpath: benchmarks/finance_sec_search/data/finance_sec_search_benchmark_upstream.jsonl
         prompt_config: null
-        prepare_script: benchmarks/finance_sec_search/prepare_edgar_search.py
+        prepare_script: benchmarks/finance_sec_search/prepare_upstream.py
         num_repeats: 3
 
-finance_sec_search_edgar_search_benchmark_environment_server:
+finance_sec_search_upstream_benchmark_environment_server:
   _inherit_from: finance_agent_environment_server
   environment_servers:
     legacy_agent:
       agent_server:
-        name: finance_sec_search_edgar_search_benchmark_agent
+        name: finance_sec_search_upstream_benchmark_agent

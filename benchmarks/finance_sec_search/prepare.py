@@ -17,8 +17,8 @@
 Downloads public.csv from the Vals AI GitHub repository and converts each
 question to Gym benchmark format with responses_create_params and tool
 definitions matching the public finance_sec_search environment. The
-edgar_search variants instead use the published harness's prompt and its
-edgar_search tool, in place of sec_filing_search.
+upstream variant instead uses the upstream harness's prompt and tools:
+edgar_search in place of sec_filing_search, and web_search.
 
 Reference:
     - Dataset: https://github.com/vals-ai/finance-agent
@@ -35,8 +35,7 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "finance_sec_search_benchmark.jsonl"
 OUTPUT_FPATH_WEB = DATA_DIR / "finance_sec_search_benchmark_web_search.jsonl"
-OUTPUT_FPATH_EDGAR = DATA_DIR / "finance_sec_search_benchmark_edgar_search.jsonl"
-OUTPUT_FPATH_EDGAR_WEB = DATA_DIR / "finance_sec_search_benchmark_edgar_search_web_search.jsonl"
+OUTPUT_FPATH_UPSTREAM = DATA_DIR / "finance_sec_search_benchmark_upstream.jsonl"
 
 CSV_URL = "https://raw.githubusercontent.com/vals-ai/finance-agent/main/data/public.csv"
 
@@ -73,15 +72,15 @@ Question:
 """
 
 # ---------------------------------------------------------------------------
-# Published harness — the prompt and the edgar_search and web_search tools of
+# Upstream harness — the prompt and the edgar_search and web_search tools of
 # vals-ai/finance-agent (finance_agent/prompt.py, finance_agent/tools.py), used
-# by the edgar_search variants. Wording is kept as published ("to apply answer
+# by the upstream variant. Wording is kept as upstream has it ("to apply answer
 # questions"); every question is asked as of April 07, 2025, where the tools
 # stop searching.
 # ---------------------------------------------------------------------------
-PUBLISHED_MAX_END_DATE = "2025-04-07"
+UPSTREAM_MAX_END_DATE = "2025-04-07"
 
-PUBLISHED_PROMPT = """You are a financial agent. You are given a question and you need to answer it using the tools provided.
+UPSTREAM_PROMPT = """You are a financial agent. You are given a question and you need to answer it using the tools provided.
 You will not be able to interact with the user or ask clarifications, you must answer the question only based on the information provided.
 
 You should answer all questions as if the current date is April 07, 2025.
@@ -133,13 +132,13 @@ EDGAR_SEARCH_TOOL = {
             },
             "start_date": {
                 "type": "string",
-                "description": f"(optional) Start date for the search range in yyyy-mm-dd format. If the value is a date that is later than {PUBLISHED_MAX_END_DATE}, it will be set to {PUBLISHED_MAX_END_DATE}.",
+                "description": f"(optional) Start date for the search range in yyyy-mm-dd format. If the value is a date that is later than {UPSTREAM_MAX_END_DATE}, it will be set to {UPSTREAM_MAX_END_DATE}.",
                 "default": "1900-01-01",
             },
             "end_date": {
                 "type": "string",
-                "description": f"(optional) End date for the search range, in the same format as startDate. If the value is a date that is later than {PUBLISHED_MAX_END_DATE}, it will be set to {PUBLISHED_MAX_END_DATE}.",
-                "default": PUBLISHED_MAX_END_DATE,
+                "description": f"(optional) End date for the search range, in the same format as startDate. If the value is a date that is later than {UPSTREAM_MAX_END_DATE}, it will be set to {UPSTREAM_MAX_END_DATE}.",
+                "default": UPSTREAM_MAX_END_DATE,
             },
             "page": {
                 "type": "integer",
@@ -158,7 +157,7 @@ EDGAR_SEARCH_TOOL = {
     "strict": False,
 }
 
-PUBLISHED_WEB_TOOL = {
+UPSTREAM_WEB_TOOL = {
     "type": "function",
     "name": "web_search",
     "description": "Search the public internet for information. Each result will contain a url, a title, and one excerpt taken directly from the page.",
@@ -172,7 +171,7 @@ PUBLISHED_WEB_TOOL = {
             },
             "end_date": {
                 "type": "string",
-                "description": f"(optional) The end date to search range in the format YYYY-MM-DD. If the value is later than {PUBLISHED_MAX_END_DATE}, it will be set to {PUBLISHED_MAX_END_DATE}.",
+                "description": f"(optional) The end date to search range in the format YYYY-MM-DD. If the value is later than {UPSTREAM_MAX_END_DATE}, it will be set to {UPSTREAM_MAX_END_DATE}.",
             },
             "number_of_results": {
                 "type": "integer",
@@ -314,19 +313,19 @@ WEB_TOOL = {
 }
 
 TOOLS = [RETRIEVE_INFORMATION_TOOL, PARSE_HTML_TOOL, SEC_FILING_SEARCH_TOOL, SUBMIT_TOOL]
-EDGAR_SEARCH_TOOLS = [RETRIEVE_INFORMATION_TOOL, PARSE_HTML_TOOL, EDGAR_SEARCH_TOOL, SUBMIT_TOOL]
+UPSTREAM_TOOLS = [UPSTREAM_WEB_TOOL, RETRIEVE_INFORMATION_TOOL, PARSE_HTML_TOOL, EDGAR_SEARCH_TOOL, SUBMIT_TOOL]
 
 
-def _convert_row(row: dict, include_web_search: bool = False, edgar_search: bool = False) -> dict:
+def _convert_row(row: dict, include_web_search: bool = False, upstream: bool = False) -> dict:
     """Convert a single CSV row to Gym benchmark format with tools and prompt."""
     question = row["Question"]
     expected_answer = row["Answer"]
 
-    if edgar_search:
-        prompt, tools, web_tool = PUBLISHED_PROMPT, EDGAR_SEARCH_TOOLS, PUBLISHED_WEB_TOOL
+    if upstream:
+        prompt, tools = UPSTREAM_PROMPT, UPSTREAM_TOOLS
     else:
-        prompt, tools, web_tool = PROMPT, TOOLS, WEB_TOOL
-    tools = [web_tool] + tools if include_web_search else tools
+        prompt = PROMPT
+        tools = [WEB_TOOL] + TOOLS if include_web_search else TOOLS
 
     record = {
         "question": question,
@@ -347,19 +346,19 @@ def _convert_row(row: dict, include_web_search: bool = False, edgar_search: bool
     return record
 
 
-def prepare(include_web_search: bool = False, edgar_search: bool = False) -> Path:
+def prepare(include_web_search: bool = False, upstream: bool = False) -> Path:
     """Download Vals AI public.csv and convert to Gym benchmark JSONL.
 
     Args:
         include_web_search: Include the web_search tool in tool definitions.
             Default False (gym eval prepare calls prepare() with no args).
             Pass True or use --include-web-search on the CLI.
-        edgar_search: Use the published harness's prompt and edgar_search tool
-            instead of sec_filing_search. Pass True or use --edgar-search on the CLI.
+        upstream: Use the upstream harness's prompt and tools, web_search
+            included, instead of sec_filing_search. Pass True or use --upstream on the CLI.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    if edgar_search:
-        output_fpath = OUTPUT_FPATH_EDGAR_WEB if include_web_search else OUTPUT_FPATH_EDGAR
+    if upstream:
+        output_fpath = OUTPUT_FPATH_UPSTREAM
     else:
         output_fpath = OUTPUT_FPATH_WEB if include_web_search else OUTPUT_FPATH
 
@@ -369,12 +368,13 @@ def prepare(include_web_search: bool = False, edgar_search: bool = False) -> Pat
 
     reader = csv.DictReader(io.StringIO(csv_text))
     rows = list(reader)
-    print(f"Downloaded {len(rows)} questions (web_search={'enabled' if include_web_search else 'disabled'})")
+    web_search = include_web_search or upstream
+    print(f"Downloaded {len(rows)} questions (web_search={'enabled' if web_search else 'disabled'})")
 
     count = 0
     with open(output_fpath, "w", encoding="utf-8") as f:
         for row in rows:
-            record = _convert_row(row, include_web_search=include_web_search, edgar_search=edgar_search)
+            record = _convert_row(row, include_web_search=include_web_search, upstream=upstream)
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             count += 1
 
@@ -392,9 +392,9 @@ if __name__ == "__main__":
         help="Include web_search tool in tool definitions",
     )
     parser.add_argument(
-        "--edgar-search",
+        "--upstream",
         action="store_true",
-        help="Use the published harness's prompt and edgar_search tool instead of sec_filing_search",
+        help="Use the upstream harness's prompt and tools, web_search included, instead of sec_filing_search",
     )
     args = parser.parse_args()
-    prepare(include_web_search=args.include_web_search, edgar_search=args.edgar_search)
+    prepare(include_web_search=args.include_web_search, upstream=args.upstream)

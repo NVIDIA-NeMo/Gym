@@ -147,8 +147,8 @@ With a local corpus or index available, also set `sec_dump_path` and
 | `live` | sec-api.io | `sec_api_key` |
 
 Only datasets that expose `edgar_search` need a mode. The benchmark's default
-configs expose `sec_filing_search` and leave it unset; its edgar_search variants
-use `live`. A mode whose index or key is missing
+configs expose `sec_filing_search` and leave it unset; its upstream variant uses
+`live`. A mode whose index or key is missing
 fails at startup. The mode in use, and in local mode the date range the index
 covers, is logged at startup; `NEMO_GYM_LOG_LEVEL=WARNING` silences that.
 
