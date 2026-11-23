@@ -4,11 +4,9 @@
 
 import json
 import re
-from hashlib import sha256
 from typing import Annotated, Literal
 
-import yaml
-from pydantic import BaseModel, StringConstraints, TypeAdapter
+from pydantic import BaseModel, StringConstraints
 
 from nemo_gym.core import NeMoGymResponse
 
@@ -63,21 +61,6 @@ def answer_template(
         if not close:
             raise ValueError("stem_v11 is missing the end of its guidance section")
     return "\n\n".join((context.strip(), sep, guidelines.strip(), instructions.strip(), fields + inputs))
-
-
-def load_answer_rules(rules: AnswerRuleList | str, digest: str | None) -> AnswerRuleList:
-    if isinstance(rules, list):
-        if digest is not None:
-            raise ValueError("extra_answer_rules_sha256 requires a rule file")
-        return rules
-    with open(rules, "rb") as stream:
-        contents = stream.read()
-    if digest is not None and sha256(contents).hexdigest() != digest:
-        raise ValueError(f"STEM extra_answer_rules file {rules} differs from its saved SHA-256.")
-    try:
-        return TypeAdapter(AnswerRuleList).validate_python(yaml.safe_load(contents.decode("utf-8")))
-    except (ValueError, yaml.YAMLError) as exc:
-        raise ValueError(f"Invalid extra_answer_rules file {rules}: expected a YAML list of nonblank strings") from exc
 
 
 def add_answer_rules(template: str, rules: AnswerRuleList) -> str:

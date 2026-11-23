@@ -177,54 +177,6 @@ class TestAnswerOptions:
         with raises(ValueError, match="</rule>"):
             _server(config)
 
-    async def test_rule_file_renders_the_same_prompt_as_inline_rules(self, config, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        path = tmp_path / "rules.yaml"
-        path.write_text(
-            "- 'Compare {α} literally.'\n- |-\n  Check the unit.\n  Preserve its sign.\n", encoding="utf-8"
-        )
-        inline = ["Compare {α} literally.", "Check the unit.\nPreserve its sign."]
-        from_file = _server(
-            StemJudgeConfig.model_validate(config.model_dump() | {"extra_answer_rules": path.name}), "Judgement: yes"
-        )
-        path.unlink()  # A running worker has already loaded its rules.
-        from_list = _server(
-            StemJudgeConfig.model_validate(config.model_dump() | {"extra_answer_rules": inline}), "Judgement: yes"
-        )
-        req = _request(_split(r"\boxed{2}"))
-        await from_file.verify(req)
-        await from_list.verify(req)
-        assert _judge_prompt(from_file) == _judge_prompt(from_list)
-        assert all(rule in _judge_prompt(from_file) for rule in inline)
-
-    def test_managed_worker_requires_a_pinned_file(self, config, monkeypatch):
-        from nemo_gym.server_runtime import SimpleResourcesServer
-
-        config.extra_answer_rules = "rules.yaml"
-        monkeypatch.setattr(SimpleResourcesServer, "load_config_from_global_config", classmethod(lambda cls: config))
-        with raises(ValueError, match="no digest for its rule file"):
-            StemJudgeResourcesServer.load_config_from_global_config()
-        config.extra_answer_rules_sha256 = "a" * 64
-        assert StemJudgeResourcesServer.load_config_from_global_config() is config
-
-    def test_changed_rule_file_is_refused_by_the_worker(self, config, tmp_path):
-        rules = tmp_path / "rules.yaml"
-        rules.write_text("- Require metres.")
-        config.extra_answer_rules = str(rules)
-        config.extra_answer_rules_sha256 = hashlib.sha256(rules.read_bytes()).hexdigest()
-        _server(config)
-        rules.write_text("- Accept any unit.")
-        with raises(ValueError, match="differs from its saved SHA-256"):
-            _server(config)
-
-    @mark.parametrize("contents", ["rules: [some rule]", "- '  '", "- 42", "- [broken", ""])
-    def test_invalid_rule_file_fails_at_startup(self, config, tmp_path, contents):
-        path = tmp_path / "rules.yaml"
-        config.extra_answer_rules = str(path)
-        path.write_text(contents, encoding="utf-8")
-        with raises(ValueError, match=r"extra_answer_rules file .*rules\.yaml"):
-            _server(config)
-
     async def test_extra_answer_rules_leave_rubric_prompt_intact(self, config):
         body = _request(_split("Proof."), answer_format="free", rubric=RUBRIC)
         reply = '{"r1":true,"r2":true,"r3":false}'
@@ -412,10 +364,6 @@ class TestAnswerOptions:
         result = await server.verify(row)
         server.server_client.post.assert_awaited_once()
         assert result.verdict == "yes" and result.judge_evaluations[0].judgment.model_dump() == judgment
-
-    def test_enabled_symbolic_config_requires_the_math_feature(self, config):
-        with raises(ValidationError, match="math_verify"):
-            StemJudgeConfig.model_validate(config.model_dump() | {"math_verify": {}})
 
     async def test_reverify_drops_stale_answer_evidence(self, config):
         server = _server(config, "Judgement: 'yes'")

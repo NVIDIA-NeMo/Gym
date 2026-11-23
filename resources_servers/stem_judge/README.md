@@ -165,7 +165,7 @@ usual model arguments. It includes the base config and overrides its answer opti
 | Answer option | Base config | Question-bank preset |
 | --- | --- | --- |
 | `guideline_scope` | `stem` | `cross_domain` treats v11 examples as guidance for reference comparisons in any subject. |
-| `extra_answer_rules` | `[]` | An inline list or a path to a YAML list of rules for model-judged answer rows. |
+| `extra_answer_rules` | `[]` | A list of additional instructions for model-judged answer rows. |
 | `verdict_mode` | `binary` | `yes_no_unresolved` adds abstention. An explicit no is a measured zero. An abstention or unparseable verdict has unknown correctness and sets `mask_sample=true`. |
 | `verdict_format` | `line` | `json` saves the verdict, reason code and supporting evidence on model-judged answer rows. |
 | `box_parser` | `exact` | `last_command` recognizes whitespace before the opening brace, skips escaped commands, and rejects a malformed final box even when an earlier one is valid. |
@@ -211,29 +211,18 @@ rollouts. Gym's renderer rejects already materialized input.
 
 ### Adding rules to the answer judge
 
-Point `extra_answer_rules` at a UTF-8 YAML file containing a list of rule strings.
-Gym records the file’s SHA-256 in the resolved run configuration. Each worker checks
-the bytes it reads at startup against that digest. Editing the file changes the
-identity used for the next launch or resume. A worker receiving an older saved
-configuration without the file digest asks for a fresh configuration resolution.
-As with prompt templates, relative paths
-resolve from the STEM resources server directory. Absolute paths also work.
-The shipped [archive example](prompt_templates/archive_rules.yaml) contains one rule.
+Add `--config rules.yaml` to the launch command. Put the rules under the STEM
+instance they apply to. Gym includes this list in the resolved run configuration.
 
 ```yaml
 stem_judge:
   resources_servers:
     stem_judge:
-      extra_answer_rules: prompt_templates/archive_rules.yaml
+      extra_answer_rules:
+        - For archive classes, accept K-17 as an alias for Blue Ledger.
 ```
 
-Contents of `archive_rules.yaml`:
-
-```yaml
-- 'For archive classes, accept K-17 as an alias for Blue Ledger.'
-```
-
-You can also put the list directly under `extra_answer_rules` in the server config.
+For a working example, pass `--config resources_servers/stem_judge/examples/archive_rules.yaml`.
 Each string becomes a `<rule>` block immediately after the last built-in rule,
 before the verdict instructions. Braces in LaTeX, JSON and examples are literal.
 Custom answer templates using this option need a closing `</rule>` marker.
