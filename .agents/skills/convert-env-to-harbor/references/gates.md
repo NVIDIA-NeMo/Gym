@@ -169,7 +169,8 @@ gym dev compare <G4 rollouts.jsonl> <G5 rollouts.jsonl> --key <field>   # only w
 `_ng_task_id.task_id`, so read flips from `harbor_parity`'s per-task table there.
 
 `first-request` passes when at least one pair exists, every task is paired, and no pair reports `model differs`,
-`tools differs`, `sampling differs` (every top-level request key but `messages`, `tools`, `stream` and
+`tools differs` (the tool names, then each complete tool definition, in any order of tools and of object keys),
+`sampling differs` (every top-level request key but `messages`, `tools`, `stream` and
 `stream_options`, so `tool_choice` counts) or `roles differ`, and no contamination flag (`AGENTS.md`, `CLAUDE.md`,
 `Instructions from`, `<available_skills>`, counted in every message but the assistant's) has a count that differs
 between the sides or sits on a system-prompt line that differs. A capture file without an agent request is listed as
@@ -246,7 +247,10 @@ Go through every line; each that applies becomes a numbered difference with its 
 - **Prompt**: folded system prompt or system role, CLI quoting, trailing newlines, dropped `tools` /
   `parallel_tool_calls`, harness system prompt lines (working directory, date and timezone, provider prefix).
 - **Sampling**: temperature or top_p the rows carried natively; output-token cap per call (`max_output_tokens`).
-- **Tools and permissions**: tool list on the wire, permission profile, skills offered.
+- **Tools and permissions**: tool list on the wire, permission profile, skills offered, and each tool's complete
+  definition: a description can name a host path (OpenCode's `bash` names `<TMPDIR>/opencode`, the host's
+  temporary folder on a native local CLI; reasoning_gym; the remedy is a neutral `TMPDIR`,
+  [native-baseline.md](native-baseline.md#isolation)).
 - **Transcript scope**: native may grade subagent sessions or skip whitespace-only parts; the Harbor session export
   may not (math: a `task`-tool subagent's answer is graded natively, never on Harbor).
 - **Grading input**: the response vs a journal; call order (harness-reported vs arrival order) under parallel calls.

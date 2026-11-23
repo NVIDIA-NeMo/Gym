@@ -162,15 +162,16 @@ point; [reward-safety.md](reward-safety.md) has the failure modes a SWE task fol
 | The row's user message | `instruction.md`, byte for byte (Gym reads it with LF; Step 5) |
 | `capture_model_patch` against the row's base commit | `[[verifier.collect]]` runs `capture.py` (vendored `swebench/patch_capture.py` through `local_sandbox.py`); the base commit is on the hook's command line in `task.toml`, never in the agent's sandbox |
 | Grading in a fresh sandbox (`verification.py`) | `environment_mode = "separate"` on the plain pinned image; `tests/test.sh` finds a Python and runs `grade.py`, which calls the vendored verification module |
-| No verdict, unknown parser: masked | exit 75 without a reward |
+| No verdict, unknown parser: masked | exit 75 without a reward only before any agent code ran; a run without a verdict after that is a completed 0, and a grader failure after the tests started exits 1 without a reward |
 | Golden-patch mode | `solution/solve.sh` runs `git apply` with the eval script's flags on the golden patch |
 
 Reuse unchanged:
 
-- from `scale_swe/harbor/task-template/tests/nemo_gym/grade.py`: `_privilege_dropper`, `_give_root_ownership`,
-  `_protect_reward_path`, `_write_output`, `_no_verdict`, `_verdict`, `_capture_failed` and their constants
-  (`NO_VERDICT`, `REWARD_OWNER_UID`, `PROTECTED_DIRS`, `KEPT_CAPABILITIES`, the `prctl` numbers); the capture-status
-  rule (only `ok` is graded, every other outcome is a completed 0); the overlay bundle and the TOML writer with
+- from `scale_swe/harbor/task-template/tests/nemo_gym/grade.py`: every top-level name but its docstring and
+  `grade()` (the privilege drop, root ownership, the reward-path and mapped-file protection, the audit hook and the
+  after-tests check, the bounded capture reader, `main()` and their constants); swe_rebench's copy is identical, and
+  the `SHARED_GRADER_NAMES` test in `scale_swe/tests/test_harbor_adapter.py` keeps it so. Also the capture-status
+  rule (only `ok` is graded, every other outcome is a completed 0), the overlay bundle and the TOML writer with
   `_resource_keys` in `adapter.py`;
 - from `swe_rebench/harbor/task-template/`: `tests/nemo_gym/local_sandbox.py` (its `exec` honours `cwd` and it has
   `upload`, which the vendored `swebench/anti_cheat.py` needs; Scale-SWE's silently ignores `cwd`),
@@ -219,6 +220,11 @@ Rules this recipe adds:
   The provider config (`nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`) is not in the golden
   config. Lower the golden server's `num_workers` on a small machine. For the empty control, set `patch` to `""` in
   a copy of the rows.
+- Run the candidate rows with an empty patch too (`apply_golden_patch.py` has no empty mode: on the Harbor side,
+  `controls --empty` on the converted candidates, then `gym dataset validate`). Exclude a row the empty patch
+  resolves, like a row whose golden patch cannot be awarded: in scale_swe, `omni-us_jsonargparse_pr215` scores 1.0
+  with an empty patch because its FAIL_TO_PASS test passes on the base commit. A golden run that fails once on a
+  flaky test is re-run before its row is excluded (`ethereum_py-trie_pr110`: a property test, 3 of 3 on re-runs).
 - No Python 3.10+ in an image (P3 fails): `python.sh` uses the image's own when it has one, else installs the pinned
   standalone Python at seed (agent sandbox, off `PATH`) and in `test.sh` (verifier, before any agent code; a failed
   install exits 75). Record it as a difference; it needs egress to GitHub releases (P4). Bound the download so the

@@ -86,6 +86,7 @@ gym eval run --config <native config> <model flags> --split train --output <abs 
           XDG_CONFIG_HOME: ${.HOME}/.config
           XDG_CACHE_HOME: ${.HOME}/.cache
           XDG_STATE_HOME: ${.HOME}/.local/state
+          TMPDIR: /tmp        # the sandbox's temporary folder, which OpenCode's bash tool description names
   ```
   Supply both on `gym env start` and on the `gym eval run --no-serve` client as
   `++<native agent instance>.responses_api_agents.opencode_agent.workspace_root=<dir>` and
@@ -94,6 +95,9 @@ gym eval run --config <native config> <model flags> --split train --output <abs 
   any file, the native rows (which hold the answers) included; this cannot be closed in config. Keep the rows outside
   the workspace and HOME, record the exposure as a numbered difference, and grep the native transcripts for the rows
   file's name.
+- **Give the local CLI a neutral `TMPDIR`.** OpenCode's `bash` tool description names `<TMPDIR>/opencode`. Without
+  the `TMPDIR` line above, the native arm shows the host's temporary folder and the Harbor arm `/tmp/opencode`, and
+  `first-request` reports `tools differs: the definition of bash` on every pair (reasoning_gym, smoke and parity).
 - **Never set `OPENCODE_DISABLE_PROJECT_CONFIG` on the local path.** The local path writes its provider into the
   workspace's `opencode.json`; with that flag OpenCode ignores the file and exits before any model call.
 - **Pin the local binary.** The local path installs Node and OpenCode into the repository's agent folder unless

@@ -179,7 +179,10 @@ Before moving on:
   the server's golden-patch mode on the candidate rows instead
   ([families.md](references/families.md#swe-per-row-image-patch-capture-hidden-tests-scale_swe-swe_rebench)): it found
   a swe_rebench row whose tests download data the sandbox cannot reach. Exclude references the grader cannot award,
-  and rows with no reference.
+  and rows with no reference. For SWE, also run the candidates with an empty patch (`controls --empty` on the
+  converted candidates, then `gym dataset validate`) and exclude a row the empty patch resolves: in scale_swe one
+  parity row's FAIL_TO_PASS test passes on the base commit. Re-run a reference that fails once on a flaky test
+  before you exclude its row.
 - Pick the parity subset reproducibly; the smoke subset is its first 5 ids:
   ```bash
   python -m scripts.harbor_conversion_checks subset <rows.jsonl> --id-field <field|_index> --count 50 --seed <S> \
@@ -297,8 +300,10 @@ Read [reward-safety.md](references/reward-safety.md) before writing the verifier
 - Exit 75 without a reward (a mask) only where the native server masks, and only on facts the agent cannot write.
   Anything a collect hook writes in the agent's sandbox is agent-controlled: map it to a completed 0, never a mask.
 - When the verifier executes agent-written code (tests, a `conftest.py`, and the install step before them: `npm ci`,
-  `pip install -e .`, `mvn compile`), a separate sandbox is not a trust boundary: protect the reward path by
-  ownership and dropped capabilities around the whole eval script, as `scale_swe` does.
+  `pip install -e .`, `mvn compile`), a separate sandbox is not a trust boundary: protect the reward path and every
+  file the grader has mapped by ownership, drop capabilities around the whole eval script, and fail closed on any
+  import or file open after the tests start, as `scale_swe` does (reward-safety.md rule 2). Some routes stay open
+  until the harbor server reads the reward outside the verifier sandbox; list them in the adapter README.
 - Prove it with controls that must score 0 unmasked ([gates.md](references/gates.md#g3-negative-controls)):
   `controls --plant-reward`, plus `--plant-conftest` (pytest) or `--plant-hooks` (npm, Go, pytest) when the verifier
   runs agent output; for other languages write your own `--solution-dir` probe.
@@ -340,7 +345,7 @@ claim a gate you did not run: paste the command, the run folder and the result.
 | G3 negative | controls from a never-validated conversion, under their own dataset folder name, into a folder that must not exist: empty or wrong solution and the plant probes score 0 unmasked on both arms; `--strict --expect 0` PASS |
 | G4 native smoke | the smoke dataset's native rows, parity harness and model flags, model-call capture on |
 | G5 Harbor smoke | the smoke dataset, same harness and flags, `harbor_arm.yaml` and `harbor_arm_harness.yaml`, capture on |
-| G6 comparison | `first-request`: at least one pair, every task paired, no model, tool, sampling or role difference, no contamination flag whose count or system-prompt line differs between the sides; `harbor_parity --min-tasks 3` per-task table; masked and failed counts |
+| G6 comparison | `first-request`: at least one pair, every task paired, no model, tool (names and complete definitions), sampling or role difference, no contamination flag whose count or system-prompt line differs between the sides; `harbor_parity --min-tasks 3` per-task table; masked and failed counts |
 
 `gym dataset validate` exits 1 on a negative control by design, and labels a 0 "oracle solved": read the rewards and
 `failure_kind` from `rollouts_run_summary.json`. A smoke where every task scores 1 on both arms says nothing about

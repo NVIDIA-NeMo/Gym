@@ -252,8 +252,11 @@ Caveats:
    built-in skill's path and the date line. Negligible.
 4. **User message.** Byte-identical, CLI quoting included, through `argv_prompt_quoting: true`. Without it every
    task differs (outer quotes, escaped `"`).
-5. **Tools and permissions.** The same tools reach the model. The session applies its default permission profile
-   plus the native allows and `skill: allow`, so rules for tools the model does not see differ.
+5. **Tools and permissions.** The same tools reach the model, by name. One definition differs: the description of
+   OpenCode's `bash` tool names its temporary folder, `<TMPDIR>/opencode`, which is the host's temporary folder
+   natively and `/tmp/opencode` on Harbor (read from the request logs of the scripted-model runs). No reward effect
+   expected; start the native CLI with `TMPDIR=/tmp` to make the two equal. The session applies its default
+   permission profile plus the native allows and `skill: allow`, so rules for tools the model does not see differ.
 6. **Output cap.** 32000 tokens per call on both (`max_output_tokens: 32000`; the session default is 131072).
 7. **Timeout.** 900 s on both. Natively a timeout gives empty output and scores 0; on Harbor a timeout or an
    infrastructure failure may be masked. Matters only for runs that reach 900 s (none did).

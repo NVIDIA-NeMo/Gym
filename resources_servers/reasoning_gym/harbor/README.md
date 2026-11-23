@@ -164,7 +164,10 @@ Native arm on the same rows (`--native-rows-out`), with `configs/native_arm.yaml
 outside any git checkout and a fresh empty HOME per run (create both first; OpenCode writes state into HOME, so do
 not reuse one). Put an OpenCode 1.17.11 binary first on `PATH`; otherwise the local path installs one into the
 repository. To capture model requests for the first-request comparison, put the capture flags
-(`++observability_enabled=true ++model_call_capture_dir=<dir>`) on `gym env start`, not on the client.
+(`++observability_enabled=true ++model_call_capture_dir=<dir>`) on `gym env start`, not on the client. To give the
+native CLI the same temporary folder as the Harbor sandbox (difference 9), also add
+`++opencode_reasoning_gym_agent.responses_api_agents.opencode_agent.env.TMPDIR=/tmp` to `ISO`; the parity run below
+did not set it.
 
 ```bash
 N="--config environments/opencode_reasoning_gym/config.yaml --config $H/native_arm.yaml"
@@ -225,6 +228,12 @@ away from 0 and 1.
 7. **Model traffic.** The native local CLI makes an extra OpenCode title-generation request before the agent's call;
    the Harbor sandbox session makes none. No effect on reward, but a difference in calls and cost.
 8. **Egress.** Every Harbor seed (agent and verifier sandbox) installs from PyPI.
+9. **OpenCode's `bash` tool definition.** Its description names OpenCode's temporary folder, `<TMPDIR>/opencode`.
+   Natively that is the host's temporary folder; on Harbor it is `/tmp/opencode`. So `first-request`, which compares
+   complete tool definitions, reports `tools differs: the definition of bash` on every pair of the smoke and parity
+   captures. The two arms' tool definitions are equal once that path is replaced. No reward effect expected, but
+   the native arm shows the model a host path. Remedy: start the native local CLI with a neutral `TMPDIR` (see
+   "Run both arms"), so both arms show the same path.
 
 ## Reward safety
 
