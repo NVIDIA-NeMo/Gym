@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Evaluation Run"
+  short_description: "Run, recover and assess a Gym evaluation on Slurm"
+  default_prompt: "Use $nemo-gym-run-and-babysit-eval to run this Slurm evaluation to an accepted result, composing its config first if needed."
