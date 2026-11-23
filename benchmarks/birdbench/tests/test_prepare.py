@@ -118,6 +118,36 @@ class TestPrepareDialect:
         assert [r["id"] for r in rows] == [0, 1]
 
 
+class TestIsPreparedDataCurrent:
+    @staticmethod
+    def _write(tmp_path, name, table_heading):
+        fpath = tmp_path / name
+        row = {
+            "id": 0,
+            "db_id": "airline",
+            "sql_context": f"#### Tables\n{table_heading}\n  - `Code`:\n      data_type: STRING",
+        }
+        fpath.write_text(json.dumps(row) + "\n\n")
+        return fpath
+
+    def test_missing_file_is_not_current(self, tmp_path):
+        assert birdbench_prepare.is_prepared_data_current(tmp_path / "birdbench_spark_train.jsonl") is False
+
+    def test_spark_file_with_sanitized_headings_is_current(self, tmp_path):
+        fpath = self._write(tmp_path, "birdbench_spark_train.jsonl", "- `airline`.`Air_Carriers`:")
+        assert birdbench_prepare.is_prepared_data_current(fpath) is True
+
+    def test_spark_file_prepared_before_table_names_were_sanitized_is_stale(self, tmp_path):
+        fpath = self._write(tmp_path, "birdbench_spark_train.jsonl", "- `airline`.`Air Carriers`:")
+        assert birdbench_prepare.is_prepared_data_current(fpath) is False
+
+    def test_other_dialects_keep_their_names_and_stay_current(self, tmp_path):
+        fpath = self._write(tmp_path, "birdbench_postgres_train.jsonl", '- "airline"."air carriers":')
+        assert birdbench_prepare.is_prepared_data_current(fpath) is True
+        fpath = self._write(tmp_path, "birdbench_sqlite_train.jsonl", "- Air Carriers:")
+        assert birdbench_prepare.is_prepared_data_current(fpath) is True
+
+
 class TestBuildUberset:
     @staticmethod
     def _train(n):

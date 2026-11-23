@@ -57,6 +57,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxSnapshot,
     create_provider,
 )
+from nemo_gym.sandbox.providers.base import SupportsSandboxExecScopedProcesses
 from nemo_gym.sandbox.resource_telemetry import (
     ResourceProvider,
     ResourceSampler,
@@ -871,6 +872,16 @@ class AsyncSandbox:
             raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
         return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
 
+    async def exec_processes_terminated(self) -> bool:
+        """True only when the provider proves that no process of any exec of this sandbox can still run.
+
+        Providers without exec-scoped processes (``SupportsSandboxExecScopedProcesses``)
+        cannot prove it and always return False.
+        """
+        if not isinstance(self._provider, SupportsSandboxExecScopedProcesses):
+            return False
+        return await self._provider.exec_processes_terminated(self._require_handle())
+
     async def status(self) -> SandboxStatus:
         if self._handle is None:
             return SandboxStatus.UNKNOWN
@@ -1011,6 +1022,11 @@ class AsyncSandbox:
             return
         if not self._connected:
             raise RuntimeError("disconnect() is valid only for a sandbox rebuilt with connect()")
+        # Some providers allocate a client per attachment. Release that client
+        # even when the provider itself is shared across many episodes.
+        detach = getattr(self._provider, "disconnect_handle", None)
+        if detach is not None and self._handle is not None:
+            await detach(self._handle)
         if self._owns_provider:
             await self._provider.aclose()
         self._handle = None

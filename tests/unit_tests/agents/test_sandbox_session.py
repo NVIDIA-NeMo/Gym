@@ -714,6 +714,44 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.closed
 
 
+@pytest.mark.parametrize("provider_proves", [True, False])
+async def test_supervisor_without_receipt_after_normal_exit(session, receipt_reader, provider_proves):
+    # Seen in a real run: the launch exec returned, but cleanup.json never appeared.
+    receipt_reader.side_effect = FileNotFoundError("cleanup.json")
+    killed = SandboxExecResult(stdout="", stderr="", return_code=137)
+    claimed = SandboxExecResult(stdout="launch\n", stderr="", return_code=0)
+
+    def exec_(command, **kwargs):
+        if "--receipt" in command:
+            return killed
+        return claimed if command.startswith("readlink ") else OK
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.exec_processes_terminated = AsyncMock(return_value=provider_proves)
+    if provider_proves:
+        assert await execute(session) == "transcript"
+        # The receipt itself says the supervisor's own one is missing, so no consumer reads it as a clean stop.
+        assert session.cleanup == {
+            "cleanup_confirmed": True,
+            "return_code": None,
+            "error": None,
+            "timed_out": False,
+            "receipt_missing": True,
+        }
+        assert session.cleanup_receipt_missing and session.launch_return_code == 137
+        # Nothing left to stop: only the launch and the claim check ran.
+        assert session.sandbox.exec.await_count == 2
+        await session.close(timeout=1)
+        assert session.closed
+    else:
+        with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+            await execute(session)
+        assert session.cleanup is None and not session.cleanup_receipt_missing
+        with pytest.raises(RuntimeError, match="launch outcome is unknown"):
+            await session.close(timeout=1)
+        assert not session.closed
+
+
 async def test_expire_while_running_requests_the_timeout_path_once(session, receipt_reader):
     launched = asyncio.Event()
     finish = asyncio.Event()
@@ -1028,6 +1066,8 @@ async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, 
     "name,options,independent",
     [
         ("local", {}, True),
+        # Uploads are host-side copies in a worker thread; only commands take the exec semaphore.
+        ("bwrap", {"bwrap_path": "/bin/sh", "ro_binds": ["/usr"]}, True),
         ("opensandbox", {"operations": {"background_exec": True}}, True),
         # A running foreground command holds one of the shared HTTP pool's connections.
         ("opensandbox", {"operations": {"background_exec": False}}, False),

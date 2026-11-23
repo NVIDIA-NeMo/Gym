@@ -281,6 +281,39 @@ HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: th
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
 benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
+## Task-container settings
+
+These sandbox-session settings are off by default. They run OpenCode the way a harness started in
+the task container runs it, for benchmarks that grade such a harness. Local calls ignore them. OpenCode 2
+sessions refuse `reasoning_effort`, `interleaved_reasoning_field`, `output_token_policy`,
+`declare_model_limits` and `argv_prompt_quoting`, which set OpenCode 1's provider configuration and launch.
+
+- `reasoning_effort`: sent as chat `reasoning_effort` on every request (the model's `reasoningEffort`
+  option), e.g. `max`.
+- `interleaved_reasoning_field`: the assistant-message field that replays each turn's reasoning
+  (default `reasoning_content`; set the field the endpoint reads, e.g. `reasoning`).
+- `output_token_policy: remaining_context`: requests carry no `max_tokens`, so the endpoint chooses the
+  output budget from the context left (default `fixed`: `max_output_tokens`).
+- `declare_model_limits: false`: the model's size stays unknown to OpenCode, so it compacts only when
+  the endpoint reports a context overflow (default true: `context_window` and `max_output_tokens`).
+- `allow_root_workdir`: accept a task working directory of `/` (images without a `WORKDIR`); the
+  runtime and session files then sit under `/tmp` inside it, as a harness's own files do there.
+- `argv_prompt_quoting`: send the instruction as `opencode run` builds it from one argv word, which is
+  what a model sees when a launcher passes the instruction as an argument: wrapped in double quotes,
+  inner quotes escaped, when it contains a space.
+- `raise_oom_score_adj`: make OpenCode and its tools the memory-cgroup OOM killer's preferred victims
+  (`oom_score_adj` 1000, or 0 when the sandbox starts below zero), not the exec daemon or the supervisor.
+- `verify_after_agent_error`: return a failed run (a nonzero exit, an error on the last assistant turn, no
+  terminal assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is
+  in `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
+  harness runner started OpenCode (not its own exit 125, 126 or 127), the required Gym MCP tools connected
+  and were confirmed, a model step ran or OpenCode ran until its time limit, the run's output was captured,
+  neither the last assistant turn's error nor an error event OpenCode printed is a transient model-endpoint
+  failure (a retryable API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers
+  a command. A model error OpenCode reported itself (an API error or context overflow on a completed turn)
+  is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment Server's
+  outcome policy. Anything else stays an execution error and the episode is retried.
+
 ## Configuration compatibility
 
 The shipped YAML now uses `model: ${policy_model_name}`, `thinking: true` (the class
@@ -544,7 +577,8 @@ handled in `opencode2/`:
 - **Installation.** The installer downloads the same release asset names and checks each download against the
   release's SHA-256 (`OPENCODE_RELEASE_SHA256` in `runtime.py`); a 2.x version without pinned digests needs
   `sandbox_executable_path`. OpenCode 2 prints `opencode v2.2.7` for `--version`. It installs no plugin
-  dependencies, so `sandbox_plugin_dependencies_path` is refused. ripgrep is found as in OpenCode 1.
+  dependencies, so `sandbox_plugin_dependencies_path` is refused. ripgrep is found as in OpenCode 1. The
+  OpenCode 1 provider and launch settings of [Task-container settings](#task-container-settings) are refused too.
 - **Processes.** Every command runs with `--standalone`: without it, OpenCode 2 joins (or, for `session export`
   and `session import`, starts) a background OpenCode service with that service's configuration. Each run's
   private server exits with the CLI.
@@ -605,3 +639,74 @@ Local calls (unseeded requests and `/run`) download the pinned Linux release int
 of this directory; on another host, set `command` to an OpenCode 2 binary. A download that waits 60 s for data or
 takes longer than 10 minutes fails, and a later call retries it. Local calls run with the sandbox sessions'
 isolation and a fixed title, so OpenCode 2 makes no model call outside the rollout.
+
+## Partial-rollout checkpoints
+
+With checkpointing on, a one-activation session in a sandbox the agent borrows takes part in partial-rollout
+checkpoints (`checkpoint_mode = "exported"`). With checkpointing off, none of this applies and the setup above is
+unchanged.
+
+```yaml
+checkpoint:
+  enabled: true
+  control_auth_token: <token>
+  state_dir: /shared/<job-id>/checkpoint-state  # required by servers that checkpoint sandboxes
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_session_root: /tmp/nemo-gym-opencode-sessions
+      checkpoint_pause_allowance_seconds: 3600
+```
+
+| Setting | Default | Constraint |
+| --- | --- | --- |
+| `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on storage the sandbox snapshot covers. Each session keeps its supervisor files and OpenCode's HOME and data, with the saved conversation, in a directory under it. A restore that does not find the conversation starts the task afresh. |
+| `checkpoint_pause_allowance_seconds` | `3600` | Bounds the time a launch spends paused (see "Pause limits"). Size it to cover the longest checkpoint commit. `0` extends nothing and sets no limit on one pause. |
+
+- **At a checkpoint** the activation parks and OpenCode is paused in place: the process supervisor sends `SIGSTOP` to
+  every process the launch reaches and `SIGCONT` once the checkpoint resumes. Nothing is copied; the resources server
+  snapshots the sandbox. Paused time does not count against `timeout`.
+- **If a pause is not confirmed**, OpenCode is stopped first and the activation parks after the stop, so the snapshot
+  holds no running launch. After the checkpoint OpenCode is relaunched in a new `launch-K` directory under the session
+  root. A pause or continue request that fails in transport is sent again first (4 and 3 attempts in all, the delay
+  doubling from 1 s). A continue that still fails ends in the same stop and relaunch.
+- **A stop** sends TERM and, after the grace period (a third of `session_close_timeout_seconds`), KILL.
+  `opencode run` does not exit on TERM: measured with 1.17.11, it finished its running tool and made another model
+  call. A stop of `opencode run` therefore waits out the grace period and ends in KILL.
+- **Pause limits.** `checkpoint_pause_allowance_seconds` extends the provider's deadline for a launch's command; a
+  launch paused for longer than that fails the execution. One pause that lasts longer than the allowance makes the
+  supervisor end OpenCode as at its time limit (`--max-pause`; the receipt records `timed_out` and `pause_expired`),
+  so OpenCode is not left paused if the agent server dies during a checkpoint. That limit counts the supervisor's
+  polls, so time the sandbox itself does not run during a snapshot is not counted.
+- **Clocks.** A pause stops OpenCode's processes, not their clocks. A tool that runs across a pause sees the paused
+  time, so its timeout can fire when OpenCode continues: the shell tool's timeout (two minutes by default), an MCP
+  tool timeout, or a `timeout N` the model wrote. Model calls wait at the model server and are not affected.
+- **After a crash** nothing is continued: the restore forks the sandbox snapshot, the Environment Server seeds the
+  session again, and the agent re-binds the session to the fork, installing again any runtime or helper file the
+  snapshot lacks. A re-sent activation gets the reply the session already gave only when it is the same request;
+  a different request under that activation index, or an index out of order, is a 409. Otherwise OpenCode is
+  relaunched.
+- **A relaunch reprompts the saved conversation** when it starts with the task's prompt and the model answered at
+  least once: `reprompt_opencode.sh` starts `opencode serve` and re-posts the last user message with empty `parts`, so
+  no user turn is added. Otherwise OpenCode starts the task afresh from the original prompt in a fresh data
+  directory, the saved conversation is set aside (`data.set-aside-N`), and the reason is logged.
+- **A conversation that cannot be used.** One that cannot be downloaded from the sandbox is read again (3 attempts)
+  and then fails the activation; it may be intact, so it is not set aside. One that downloads but cannot be parsed is
+  set aside, and the task starts afresh.
+- **Interrupted tool calls.** A relaunch after a stop or crash in the middle of a tool call shows the model
+  `[Tool execution was interrupted]` as that tool's result (OpenCode's own text), while the command's partial effects
+  stay in the sandbox. Such a rollout is kept, not masked. Its observations carry the gap
+  `tool_call_interrupted_by_relaunch`, which a trainer can filter on.
+- **Permissions.** `opencode run` rejects permission requests. The reprompt helper rejects them the same way, so a
+  relaunch behaves like a first launch for configs with `ask` rules.
+
+These sessions are restart-only, so their episodes start over after a crash: sandboxes the agent owns, multi-turn
+continuation sessions, sessions that continue an imported conversation (`session_import_path`), and OpenCode 2
+sessions (the reprompt uses OpenCode 1's server API and store). Local calls (unseeded requests and `/run`) are
+restarts too.
+
+A checkpointed session's reply carries `metadata.harness_launches`, the number of OpenCode launches for the
+activation: `"1"` means no checkpoint or crash caused a relaunch. The session's checkpoint export keeps one record
+per launch: `launch`, `reprompted`, `interrupted_tool_calls`, `outcome` (`finished` or `stopped`), `return_code` and
+`paused_s`, the time the activation has spent parked so far.

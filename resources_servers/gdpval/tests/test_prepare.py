@@ -105,7 +105,7 @@ def test_prepare_defaults_the_fields_a_task_lacks(prepared):
     }
 
 
-@pytest.mark.parametrize("prompt_file", ["default-stirrup.yaml", "harness-neutral.yaml"])
+@pytest.mark.parametrize("prompt_file", ["default-stirrup.yaml", "harness-neutral.yaml", "nooa.yaml"])
 def test_every_benchmark_prompt_renders_a_prepared_record(prepared, prompt_file):
     config = load_prompt_config(str(_BENCHMARK / "prompts" / prompt_file))
 

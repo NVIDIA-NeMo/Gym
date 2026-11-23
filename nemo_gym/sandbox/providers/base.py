@@ -19,7 +19,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
@@ -350,6 +350,31 @@ class SandboxSnapshotInUseError(SandboxSnapshotError):
     """Raised when a provider refuses to delete a snapshot because something still uses it."""
 
 
+# What a snapshot of a sandbox can keep.
+SnapshotContent = Literal["files", "processes"]
+
+
+@dataclass(frozen=True)
+class SandboxCapabilities:
+    """What a provider class can do, declared as its ``capabilities`` class attribute.
+
+    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none.
+
+    Attributes:
+        snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots. With
+            ``"processes"``, a snapshot saves memory and running processes, and a sandbox created from it
+            continues them.
+    """
+
+    snapshot_keeps: frozenset[SnapshotContent] = frozenset()
+
+
+def provider_capabilities(provider: object) -> SandboxCapabilities:
+    """The capabilities ``provider`` declares; the defaults for a provider that declares none."""
+    capabilities = getattr(provider, "capabilities", None)
+    return capabilities if isinstance(capabilities, SandboxCapabilities) else SandboxCapabilities()
+
+
 @dataclass(frozen=True)
 class SandboxSnapshotInfo:
     """One snapshot in a provider's listing.
@@ -429,6 +454,20 @@ class SupportsSandboxBackgroundServices(Protocol):
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
+class SupportsSandboxExecScopedProcesses(Protocol):
+    """Optional: processes cannot outlive the exec that started them, and the provider can prove it.
+
+    ``exec_processes_terminated`` returns True only when no process started by any
+    exec of the sandbox can still run: every exec has returned, none is queued or
+    starting, and every process tree an exec started is gone. A caller that lost
+    track of a command it started can then confirm from the provider side that
+    nothing of it is left.
+    """
+
+    async def exec_processes_terminated(self, handle: SandboxHandle) -> bool: ...
 
 
 @runtime_checkable
@@ -635,6 +674,11 @@ class SupportsSandboxSnapshot(Protocol):
     A provider must keep the name a snapshot is taken with and return it from ``list_snapshots``. A caller finds
     its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
     other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
+
+    What a snapshot keeps depends on the provider, which declares it as ``capabilities.snapshot_keeps``
+    (:class:`SandboxCapabilities`); read it with ``provider_capabilities(provider).snapshot_keeps``. A provider whose
+    snapshots save memory and running processes, so that a sandbox created from one continues them, declares
+    ``"processes"`` beside ``"files"``.
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:

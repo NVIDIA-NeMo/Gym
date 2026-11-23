@@ -12,12 +12,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[3]
-SCRIPTS = (
-    ("hermes_agent/scripts/hermes_agent_deps.sh", "hermes_agent", "hermes-agent", "HERMES_SPEC"),
-    ("anyswe_agent/setup_scripts/hermes_agent_deps.sh", "hermes_agent", "hermes-agent", "HERMES_SPEC"),
-    ("cvdp_agent/setup_scripts/hermes_agent_deps.sh", "hermes_agent", "hermes-agent", "HERMES_SPEC"),
-    ("terminus_2_agent/scripts/terminus_2_agent_deps.sh", "terminus_2_agent", "harbor", "HARBOR_SPEC"),
-)
+SCRIPTS = (("terminus_2_agent/scripts/terminus_2_agent_deps.sh", "terminus_2_agent", "harbor", "HARBOR_SPEC"),)
 
 
 @pytest.mark.parametrize("script,agent,package,variable", SCRIPTS)
@@ -87,11 +82,61 @@ def test_portable_pin_uses_project_or_explicit_override(
     assert (tmp_path / "setup.log").read_text().splitlines() == ["python", "gym"]
     calls = (tmp_path / "calls.log").read_text().splitlines()
     install_calls = [line for line in calls if line.startswith("-m pip install ")]
-    if package == "hermes-agent":
-        assert install_calls == [
-            f"-m pip install --force-reinstall --no-deps {expected}",
-            f"-m pip install {expected}",
-        ]
-    else:
-        assert install_calls == [f"-m pip install {expected}"]
+    assert install_calls == [f"-m pip install {expected}"]
     assert calls[-1].startswith("-c ")
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "hermes_agent/scripts/hermes_agent_deps.sh",
+        "anyswe_agent/setup_scripts/hermes_agent_deps.sh",
+        "cvdp_agent/setup_scripts/hermes_agent_deps.sh",
+    ],
+)
+@pytest.mark.parametrize("override", [False, True])
+def test_hermes_portable_builder_uses_target_and_optional_source(tmp_path, script, override):
+    source = ROOT / "responses_api_agents" / script
+    target = tmp_path / source.name
+    target.write_bytes(source.read_bytes())
+    log = tmp_path / "calls"
+    (tmp_path / "_portable_python.sh").write_text(
+        'install_portable_python() { echo python >> "$CALL_LOG"; }\n'
+        'install_nemo_gym_deps() { echo gym >> "$CALL_LOG"; }\n'
+    )
+    uv = tmp_path / "uv"
+    uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >> "$CALL_LOG"\n')
+    uv.chmod(0o755)
+    arch = "aarch64-unknown-linux-gnu"
+    env = {
+        **os.environ,
+        "NEMO_GYM_ROOT": str(ROOT),
+        "DEPS_DIR": str(tmp_path / "deps"),
+        "ARCH": arch,
+        "CALL_LOG": str(log),
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+    }
+    env.pop("HERMES_SPEC", None)
+    extra = []
+    if override:
+        env["HERMES_SPEC"] = "git+https://example.com/experiment.git@explicit-pin"
+        extra = ["--source", env["HERMES_SPEC"]]
+    subprocess.run(["bash", str(target)], env=env, check=True)
+    assert log.read_text().splitlines() == [
+        "python",
+        "gym",
+        "run",
+        "--isolated",
+        "--no-dev",
+        "--locked",
+        "--directory",
+        str(ROOT),
+        "python",
+        "-m",
+        "responses_api_agents.hermes_agent.scripts.prepare_portable",
+        "--prefix",
+        env["DEPS_DIR"],
+        "--target",
+        arch,
+        *extra,
+    ]
