@@ -2015,6 +2015,9 @@ class RolloutReverificationHelper(BaseModel):
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                if "instance_config" in row:
+                    # Preserve the materialized task's training mask when the verifier omits this field.
+                    result.setdefault("instance_config", row["instance_config"])
                 for key in (AGENT_REF_KEY_NAME, *_IDENTITY_KEYS):
                     if key in row:
                         result[key] = row[key]

@@ -618,6 +618,24 @@ class TestVerify:
         result = await _server(config, _response(reply)).verify(_request(_split(r"\boxed{3}")))
         assert (result.reward, result.grading_status) == (0, status)
 
+    @mark.parametrize("rubric", [False, True])
+    async def test_base_grader_reads_closing_message_after_unphased_text(self, config, rubric):
+        final = '{"r1":true,"r2":true,"r3":false}' if rubric else "Judgement: yes"
+        server = _server(config, _response(_msg("Considering."), _reasoning(), _msg(final)))
+        row = {"rubric": RUBRIC, "answer_format": "free"} if rubric else {}
+        result = await server.verify(_request(_split(r"\boxed{2}"), **row))
+        assert (result.grading_status, result.reward) == ("judged", 1)
+
+    @mark.parametrize(
+        "reply,masked", [("Judgement: unresolved", True), ("unparseable", True), ("Judgement: no", False)]
+    )
+    async def test_training_mask_preserves_task_settings(self, config, reply, masked):
+        config.verdict_mode = "yes_no_unresolved"
+        instance = {"source": "archive"}
+        result = await _server(config, reply).verify(_request(_split(r"\boxed{2}"), instance_config=instance))
+        assert result.mask_sample is masked and result.instance_config.get("mask_sample", False) is masked
+        assert result.instance_config["source"] == "archive"
+
     async def test_rubric_does_not_score_an_earlier_block(self, config):
         reply = _msg('{"r1":true,"r2":true,"r3":false}')
         reply.content.extend(_msg("I cannot grade this rubric.").content)

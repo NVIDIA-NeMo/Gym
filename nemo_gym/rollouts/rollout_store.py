@@ -451,6 +451,11 @@ class RolloutStore:
             for k, v in failure.items()
             if k not in result and k not in _REJUDGE_GRADING_KEYS and not k.startswith(_REJUDGE_DROPPED_PREFIXES)
         }
+        # A judge outage writes a training mask into instance_config. The fresh verifier
+        # receives the original task config and owns that mask on the selected result.
+        instance = carried.get("instance_config")
+        if failure.get("mask_sample") is True and isinstance(instance, dict) and instance.get("mask_sample") is True:
+            carried["instance_config"] = {k: v for k, v in instance.items() if k != "mask_sample"}
         settled = carried | result | {REJUDGED_OBSERVATIONS_KEY: {k: v for k, v in failure.items() if k != "response"}}
         if "ng_trajectory" in failure:
             from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, VerifierInvocation

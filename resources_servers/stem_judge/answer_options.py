@@ -135,7 +135,7 @@ def judge_text(response: NeMoGymResponse, *, join_blocks: bool = False, allow_pa
             return None
         if getattr(final, "phase", None) == "commentary" or getattr(final, "status", "completed") != "completed":
             return None
-    if any(
+    if join_blocks and any(
         (item.type == "message" and (item.role != "assistant" or getattr(item, "phase", None) != "commentary"))
         or (item.type != "message" and getattr(item, "status", None) not in (None, "completed"))
         for item in prefix

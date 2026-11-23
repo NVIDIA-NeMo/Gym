@@ -619,6 +619,10 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
                 correctness=None if unknown else bool(reward),
                 mask_sample=unknown,
             )
+            if unknown:
+                # NeMo RL's loss mask reads this flag from the instance config.
+                instance = payload.get("instance_config")
+                payload["instance_config"] = {**(instance if isinstance(instance, dict) else {}), "mask_sample": True}
             if status == "judge_unparsed":
                 payload["failure_kind"] = JUDGE_UNPARSEABLE
                 payload["failure_reason"] = "Missing or incomplete final verdict"

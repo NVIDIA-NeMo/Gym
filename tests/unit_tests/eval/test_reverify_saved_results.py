@@ -277,10 +277,10 @@ def test_the_recover_outcome_names_the_reverify_part_of_a_mixed_resubmit() -> No
 # --- completion: settled into the source run ---------------------------------------------------------------------
 
 
-def _run(tmp_path: Path, outcomes: list[dict], *, not_started: int = 0) -> Path:
+def _run(tmp_path: Path, outcomes: list[dict], *, not_started: int = 0, task_fields: dict | None = None) -> Path:
     """A managed run with one rollout per outcome, each recorded as its attempt 0, and ``not_started`` more."""
     rows = [
-        {"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}}
+        {"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}, **(task_fields or {})}
         for i in range(len(outcomes) + not_started)
     ]
     source = tmp_path / "source.jsonl"
@@ -466,21 +466,27 @@ async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again
     assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 
-async def test_rejudgment_keeps_superseded_grade_only_in_prior_observations(tmp_path, verifier):
+@pytest.mark.parametrize("task_mask", [False, True])
+async def test_rejudgment_keeps_superseded_grade_only_in_prior_observations(tmp_path, verifier, task_mask):
     from nemo_gym.rollouts.rollout_records import REJUDGED_OBSERVATIONS_KEY
 
     archived = {"correctness": False, "verdict": "no", "library_reward": 0.0}
-    row = verify_transport_masked() | archived | {"source": "archive"}
-    output = _run(tmp_path, [row])
+    row = verify_transport_masked() | archived | {"instance_config": {"source": "archive", "mask_sample": True}}
+    task_fields = {"instance_config": {"source": "archive", "mask_sample": True}} if task_mask else {}
+    output = _run(tmp_path, [row], task_fields=task_fields)
     (identity,) = due_judge_failures(output)
-    verifier["grade"] = lambda request: {k: v for k, v in request.items() if k not in archived} | {
+    verifier["grade"] = lambda request: {
+        k: v for k, v in request.items() if k not in archived and k != "instance_config"
+    } | {
         "reward": 1.0,
         "judge_evaluations": [{"verdict_label": "Judgement: yes"}],
     }
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
     saved = _selected(output)[0][identity]
     assert saved["reward"] == 1 and saved["judge_evaluations"] == [{"verdict_label": "Judgement: yes"}]
-    assert saved["source"] == "archive" and archived.keys().isdisjoint(saved)
+    assert saved["instance_config"] == task_fields.get("instance_config", {"source": "archive"})
+    assert archived.keys().isdisjoint(saved)
+    assert saved[REJUDGED_OBSERVATIONS_KEY]["instance_config"]["mask_sample"] is True
     assert {k: saved[REJUDGED_OBSERVATIONS_KEY][k] for k in archived} == archived
 
 
