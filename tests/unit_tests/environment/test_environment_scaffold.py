@@ -343,6 +343,17 @@ def test_refuses_a_name_that_a_manifest_of_the_other_kind_declares(tmp_path: Pat
     assert not (tmp_path / "environments" / "sample").exists()
 
 
+def test_refuses_a_name_that_a_taskset_declares(tmp_path: Path) -> None:
+    scaffold_environment(root=tmp_path, kind="benchmark", name="sample")
+    (tmp_path / "tasksets").mkdir()
+    (tmp_path / "benchmarks" / "sample").rename(tmp_path / "tasksets" / "sample")
+
+    with pytest.raises(ScaffoldError, match="already declares the name 'sample'"):
+        scaffold_environment(root=tmp_path, kind="environment", name="sample")
+
+    assert not (tmp_path / "environments" / "sample").exists()
+
+
 def test_rejects_unsafe_root_paths(tmp_path: Path) -> None:
     root_file = tmp_path / "root-file"
     root_file.write_text("occupied\n", encoding="utf-8")

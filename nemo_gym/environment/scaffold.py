@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.config import ConfigError
 from nemo_gym.environment.manifest import (
+    TASKSETS_SUBDIR,
     Determinism,
     EnvironmentKind,
     EnvironmentManifest,
@@ -156,13 +157,13 @@ def scaffold_environment(
 
 
 def _require_unclaimed_name(asset_dir: Path, name: str) -> None:
-    """Refuse a name that a manifest in another folder of the root's benchmarks/ or environments/ tree declares.
+    """Refuse a name that a manifest in another folder of the root's benchmarks/, environments/ or tasksets/ declares.
 
     A name is a manifest's ID, whatever its kind, and stays the same when its folder moves, so a free folder does not
     mean a free name. Running the scaffold again for the manifest in ``asset_dir`` itself is still allowed.
     """
     root = asset_dir.parent.parent
-    trees = (root / BENCHMARKS_SUBDIR, root / ENVIRONMENTS_SUBDIR)
+    trees = (root / BENCHMARKS_SUBDIR, root / ENVIRONMENTS_SUBDIR, root / TASKSETS_SUBDIR)
     for manifest_path, manifest in (declared for tree in trees for declared in declared_manifests(tree)):
         if manifest.name == name and manifest_path.parent.resolve() != asset_dir.resolve():
             raise ScaffoldError(
