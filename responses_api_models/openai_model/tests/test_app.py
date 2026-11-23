@@ -108,10 +108,19 @@ class TestApp:
         assert self._setup_server(session_key_headers=["X-Session"])._client.session_key_headers == ["X-Session"]
         assert self._setup_server()._client.session_key_headers == []
 
-    async def test_spare_api_keys_from_one_comma_separated_string_reach_the_upstream_client(self):
-        server = self._setup_server(openai_spare_api_keys=" k1, ,k2 ")  # pragma: allowlist secret
-        assert server._client.spare_api_keys == ["k1", "k2"]
-        assert self._setup_server(openai_spare_api_keys="")._client.spare_api_keys == []
+    async def test_a_list_of_api_keys_reaches_the_upstream_client(self):
+        config = SimpleModelServerConfig(
+            host="0.0.0.0",
+            port=8081,
+            openai_base_url="https://api.openai.com/v1",
+            openai_api_key=["k0", "k1"],  # pragma: allowlist secret
+            openai_model="dummy_model",
+            entrypoint="",
+            name="test_model_server",
+        )
+        server = SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        assert server._client.current_api_key == "k0"
+        assert server._client.api_key == ["k0", "k1"]
 
     async def test_retry_configuration_is_scoped_to_model_server(self):
         judge = self._setup_server(max_http_attempts=5)
