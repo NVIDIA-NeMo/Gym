@@ -49,11 +49,11 @@ class GdpPdfSandboxConfig(GdpPdfConfig):
     sandbox_config: SandboxConfig = Field(default_factory=lambda: SandboxConfig(ttl_s=14400))
     documents_base_dir: str = "resources_servers/gdp_pdf/data"
     allow_unisolated_sandbox: bool = False
-    # model_only: each sandbox is created with an egress rule that allows only sandbox_model_server's host, on
-    # providers with network policies (OpenSandbox); the seed is refused where the rule cannot be enforced.
-    # inherit keeps the provider's network, which must then be a Docker internal network.
+    # model_only requests egress to the model server's host. inherit keeps the provider's network.
     sandbox_network_access: Literal["inherit", "model_only"] = "inherit"
     sandbox_model_server: Optional[ModelServerRef] = None
+    # Operator confirmation of the OpenSandbox deployment's egress mode. Gym cannot set this per sandbox.
+    opensandbox_dns_nft_confirmed: bool = False
 
 
 class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
@@ -132,8 +132,10 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
             return
         options = self.config.sandbox_config.provider_options
         if self.config.sandbox_network_access == "model_only":
-            # LentSandboxes adds the deny-by-default egress rule and refuses the seed on a provider without network
-            # policies or a model server on a loopback address. Host mounts would still break the isolation.
+            if "opensandbox" in provider and not self.config.opensandbox_dns_nft_confirmed:
+                raise ResourcesSeedRejectedError(
+                    "Confirm OpenSandbox uses dns+nft egress, then set opensandbox_dns_nft_confirmed=true"
+                )
             if options.get("volumes") or options.get("run_args"):
                 raise ResourcesSeedRejectedError("GDP.pdf model_only sandboxes take no extra mounts/run flags")
             return

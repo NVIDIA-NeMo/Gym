@@ -159,7 +159,7 @@ def _model_only_server(config, **overrides):  # noqa: F811
 
 async def test_model_only_lends_a_sandbox_that_reaches_only_the_model(setup, config, monkeypatch):  # noqa: F811
     _, sandbox, body, _ = setup
-    server = _model_only_server(config)
+    server = _model_only_server(config, opensandbox_dns_nft_confirmed=True)
     _use_provider(monkeypatch, {"opensandbox": {}})
     monkeypatch.setattr(f"{LENDING}.get_server_url", lambda name: {"policy_model": "http://10.0.0.5:8000"}[name])
     await server.seed_session(Request({"type": "http", "session": {}}), body)
@@ -174,6 +174,24 @@ async def test_model_only_lends_a_sandbox_that_reaches_only_the_model(setup, con
     assert result.model_dump()["allow_unisolated_sandbox"] is False
 
 
+async def test_model_only_requires_confirmed_ip_egress_or_recorded_opt_out(setup, config, monkeypatch):  # noqa: F811
+    _, sandbox, body, _ = setup
+    server = _model_only_server(config)
+    _use_provider(monkeypatch, {"opensandbox": {}})
+    monkeypatch.setattr(f"{LENDING}.get_server_url", lambda name: {"policy_model": "http://10.0.0.5:8000"}[name])
+    request = Request({"type": "http", "session": {}})
+    with pytest.raises(ResourcesSeedRejectedError, match="opensandbox_dns_nft_confirmed"):
+        await server.seed_session(request, body)
+    sandbox.start.assert_not_awaited()
+
+    server.config.allow_unisolated_sandbox = True
+    await server.seed_session(request, body)
+    assert sandbox.start.await_args.args[0].provider_options["network_policy"]["defaultAction"] == "deny"
+    server._judge_criterion = AsyncMock(return_value=module.CriterionEvaluation(criterion="cap", passed=True))
+    result = await server.verify(_verify_request("The cap is $5M."))
+    assert result.model_dump()["allow_unisolated_sandbox"] is True
+
+
 @pytest.mark.parametrize(
     "provider,model_url,options",
     [
@@ -184,7 +202,7 @@ async def test_model_only_lends_a_sandbox_that_reaches_only_the_model(setup, con
 )
 async def test_model_only_fails_closed(setup, config, monkeypatch, provider, model_url, options):  # noqa: F811
     _, sandbox, body, _ = setup
-    server = _model_only_server(config)
+    server = _model_only_server(config, opensandbox_dns_nft_confirmed=True)
     server.config.sandbox_config.provider_options = options
     _use_provider(monkeypatch, provider)
     monkeypatch.setattr(f"{LENDING}.get_server_url", lambda name: model_url)
