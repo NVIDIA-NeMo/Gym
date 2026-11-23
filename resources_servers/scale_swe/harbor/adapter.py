@@ -18,8 +18,11 @@ Server runs under ``single_agent_turn`` (``resources_servers/scale_swe/app.py``,
   ``capture_model_patch`` (``resources_servers/swebench/patch_capture.py``, vendored) with the server's
   ``patch_capture_mode``, and records whether the capture succeeded, hit a git error or failed for infrastructure.
 - **Grading**: ``environment_mode = "separate"`` on the unmodified row image. ``tests/test.sh`` runs
-  ``tests/nemo_gym/grade.py``, which calls the server's own ``verification.py`` (vendored unchanged) and exits 75
-  (masked) where the server masks a run without a verdict. A capture that yielded no patch is a completed 0, as
+  ``tests/nemo_gym/grade.py``, which calls the server's own ``verification.py`` (vendored unchanged). It exits 75
+  (masked) only where no agent code had run: a workdir missing from the image, a reward folder or mapped file it
+  cannot protect, a grader error before the tests, or an eval script that stopped before ``TEST_OUTPUT_BEGIN``. Any
+  other run without a verdict is a completed 0 (``no_verdict_after_tests``), and a grader failure after the tests
+  started exits 1 without a reward, a measured 0. A capture that yielded no patch is a completed 0, as
   everything the hook produced came from the agent's sandbox. The eval script runs as root without the capabilities
   that reach the reward folder, which ``grade.py`` hands to another uid first, so the agent's code cannot create or
   rewrite the reward file. Sandbox resources come from the server's config; the harbor server derives the same

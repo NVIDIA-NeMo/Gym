@@ -3,8 +3,8 @@
 """Grade one converted Scale-SWE task in Harbor's separate verifier sandbox (a fresh sandbox of the row's image).
 
 Adapted from the SWE rows-to-Harbor converter PR (#5789), ``scripts/swe_rows_to_harbor/grade.py``, with its known
-gaps fixed: a verification without a verdict exits 75 (masked) instead of scoring 0, as the Scale-SWE server masks it
-on its episode-session path, a lost patch is not graded, and the agent's code cannot write the reward.
+gaps fixed: a verification without a verdict that no agent code could have caused exits 75 (masked) instead of
+scoring 0, a lost patch is not graded, and the agent's code cannot write the reward.
 
 It repeats what ``ScaleSWEResourcesServer._verify`` does for an episode session once the patch is captured
 (``resources_servers/scale_swe/app.py``), calling the server's own ``verification.py``, vendored unchanged beside this
@@ -12,12 +12,15 @@ file:
 
 1. read the capture the ``[[verifier.collect]]`` hook left in ``/logs/artifacts/nemo_gym`` (``capture.py``). The
    hook ran in the agent's sandbox, where the agent is root and can make it report anything, so every outcome but a
-   readable patch is a completed 0, never a mask (see "Reward safety");
+   readable patch is a completed 0, never a mask. The files are read with a size bound and parsed defensively: a
+   symlink, a FIFO, a device, an oversized file or JSON nested too deep is a completed 0 too;
 2. build ``VerificationInputs`` as ``app._inputs`` does (test files dropped from the patch);
-3. write ``verification_files`` into this sandbox and run ``run_verification``, whose one ``sandbox.exec`` is served
+3. check that the workdir exists (the image's, before any agent code runs: missing, it masks);
+4. write ``verification_files`` into this sandbox and run ``run_verification``, whose one ``sandbox.exec`` is served
    by ``local_sandbox.LocalSandbox``, bounded by the server's ``evaluation_timeout``;
-4. a run without a verdict (``not completed``, or ``infrastructure_failure``) exits 75; otherwise write
-   ``reward.json``: ``reward`` is 1.0 when the instance resolves, the other keys are metrics.
+5. write ``reward.json``: ``reward`` is 1.0 when the instance resolves, the other keys are metrics. A run without a
+   verdict exits 75 only when the eval script stopped before ``TEST_OUTPUT_BEGIN`` (no agent code had run); every
+   other run without a verdict was ended by the agent's code and is a completed 0 (``no_verdict_after_tests``).
 
 Reward safety. The eval script runs the agent's patched code (its tests, a ``conftest.py`` it added) as root in this
 sandbox, and Harbor reads ``/logs/verifier/reward.json`` whatever test.sh's exit code. At the server the verdict is
@@ -26,18 +29,30 @@ computed outside the sandbox; here it is protected inside it:
 - before the eval script runs, every file another uid owns becomes root's (``_give_root_ownership``: root keeps
   write access to the repository without overriding permissions), then ``/``, ``/logs`` and ``/logs/verifier`` are
   handed to a uid nothing runs as (``REWARD_OWNER_UID``), so a root process without ``CAP_DAC_OVERRIDE`` or
-  ``CAP_FOWNER`` cannot create, rename or replace anything on the path to the reward file;
+  ``CAP_FOWNER`` cannot create, rename or replace anything on the path to the reward file. The wrapper's exit record
+  is created there first with exit code 1, so a test process that kills the wrapper before it writes the record
+  leaves a measured 0;
+- every file this process has mapped (its interpreter, libpython, the extension modules it imported, libc, ld.so,
+  locale data) is handed to ``REWARD_OWNER_UID`` without write bits (``_protect_mappings``), so the tests cannot
+  rewrite in place code this process runs. Read and execute access stay as they were; replacing such a file by
+  rename still works and cannot reach this process's mappings;
 - the eval script runs as root (uid 0, as at the server) with its capability bounding set cut down to
   ``KEPT_CAPABILITIES`` and ``no_new_privs`` set: it keeps root's ownership of root's files, but cannot override file
   permissions, change owners, switch uid, trace this process or create device nodes;
-- this process writes its outputs with its effective uid set to ``REWARD_OWNER_UID``, so a test process left running
-  cannot reopen ``reward.json`` and change it.
+- from the moment the eval script starts, an audit hook (``_arm_after_tests``) refuses every import, ``dlopen``,
+  ``exec``, fork, further subprocess and any ``open`` but of the outputs, so nothing read after the tests can carry
+  the tests' changes into this process; after the tests the mappings are checked again (``_check_mappings``). A
+  refusal, a changed mapping or any exception after the tests exits 1 without a reward: a measured 0, never a 1 and
+  never a mask;
+- this process writes its outputs as bytes with its effective uid set to ``REWARD_OWNER_UID``, so a test process left
+  running cannot reopen ``reward.json`` and change it.
 
-The agent's code can still kill this process (same uid): then no reward is written, which Harbor scores 0 (or masks,
-when the wrapper around test.sh was killed too), never a planted 1. The eval script keeps root's ownership of root's
-files, so in principle it could rewrite in place a file this process has already loaded (a shared library) and so
-reach this process: the protection is best effort against code running beside the grader, and closing that gap needs
-the verdict computed outside the sandbox (a harbor server change).
+The agent's code can still kill this process (same uid): then no reward is written, which Harbor scores 0. What
+this process cannot protect, because it happens after it exits: the Harbor server then runs programs found through
+``PATH`` in this sandbox as full root (the wrapper's ``date``, ``tar`` and ``gzip`` collecting the reward), and the
+tests own those files and folders, so a test can replace one and rewrite the reward; and a test can lower the
+wrapper's file size limit so its exit record ends up empty, which masks. Closing both needs the reward read outside
+the verifier sandbox (a Harbor server change).
 
 Standard library only. ``tests/test.sh`` runs it with the image's Python (3.9 or newer, isolated mode).
 """
@@ -45,12 +60,18 @@ Standard library only. ``tests/test.sh`` runs it with the image's Python (3.9 or
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures.thread  # noqa: F401  (asyncio.to_thread imports it lazily, after the agent's code ran)
+import codecs
+import concurrent.futures.thread  # noqa: F401  (asyncio.to_thread's module; imported before the tests start)
 import ctypes
+import errno
+import importlib
 import importlib.util
+import io
 import json
 import os
+import stat
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -60,9 +81,13 @@ ARTIFACTS = Path("/logs/artifacts/nemo_gym")
 LOGS = Path("/logs/verifier")
 # EX_TEMPFAIL: Harbor masks a separately run verifier that exits 75 without a reward.
 NO_VERDICT = 75
+# Exit code after the tests started when the grader cannot vouch for its own state: no reward, a measured 0.
+FAILED_CLOSED = 1
 # A uid no process in this sandbox runs as: the owner of every directory on the path to the reward file.
 REWARD_OWNER_UID = 47311
 PROTECTED_DIRS = (Path("/"), Path("/logs"), LOGS)
+# The Harbor wrapper's exit record (environment_servers/harbor/verifier.py, EXIT_RECORD_NAME).
+EXIT_RECORD_NAME = ".ng-exit"
 # Capabilities the eval script keeps (linux/capability.h). None reaches a file or process another uid owns, or the
 # uid itself: CAP_FSETID 4, CAP_KILL 5, CAP_NET_BIND_SERVICE 10, CAP_NET_RAW 13, CAP_AUDIT_WRITE 29.
 KEPT_CAPABILITIES = frozenset({4, 5, 10, 13, 29})
@@ -71,6 +96,50 @@ _PR_SET_NO_NEW_PRIVS = 38
 _PR_CAP_AMBIENT = 47
 _PR_CAP_AMBIENT_CLEAR_ALL = 4
 _LINUX_CAPABILITY_VERSION_3 = 0x20080522
+# Bounds on what the agent's sandbox left behind (capture.py writes a few KiB of JSON).
+CAPTURE_MAX_BYTES = 1 << 20
+PATCH_MAX_BYTES = 64 << 20
+CAPTURE_TEXT_MAX_CHARS = 4000
+CAPTURE_WARNINGS_MAX = 100
+PROC_MAPS = "/proc/self/maps"
+# Imported before the tests start, so that nothing the verdict needs is loaded afterwards.
+WARM_IMPORTS = (
+    "encodings.utf_8",
+    "encodings.ascii",
+    "encodings.latin_1",
+    "xml.parsers.expat",
+    "xml.etree.ElementTree",
+    "selectors",
+    "signal",
+    "subprocess",
+)
+# Audit events refused once the tests have started (the first subprocess.Popen is the eval script).
+REFUSED_AFTER_TESTS = frozenset(
+    {
+        "import",
+        "exec",
+        "ctypes.dlopen",
+        "os.exec",
+        "os.fork",
+        "os.forkpty",
+        "os.posix_spawn",
+        "os.spawn",
+        "os.system",
+        "subprocess.Popen",
+    }
+)
+_AFTER_TESTS = {"started": False, "refused": None, "allowed": frozenset()}
+
+
+class _FailClosed(BaseException):
+    """The grader can no longer vouch for its own state after the tests started: exit without a reward.
+
+    A ``BaseException``, so no ``except Exception`` in the vendored code can swallow it.
+    """
+
+
+class _Unreadable(Exception):
+    """An agent-written artifact that is not a regular file within its size bound."""
 
 
 class _CapHeader(ctypes.Structure):
@@ -85,7 +154,7 @@ def _privilege_dropper():
     """The function the eval script's process runs before ``exec``: root without the capabilities that reach the
     reward. libc and the capability count are looked up here, in this process, not after the fork.
 
-    An error in it makes ``subprocess`` raise in this process, which masks the sample before any agent code ran.
+    An error in it makes ``subprocess`` raise in this process after the tests count as started, which fails closed.
     """
     libc = ctypes.CDLL(None, use_errno=True)
     last_cap = int(Path("/proc/sys/kernel/cap_last_cap").read_text())
@@ -110,55 +179,79 @@ def _privilege_dropper():
     return drop
 
 
-def _give_root_ownership() -> int:
+def _give_root_ownership(top: str = "/") -> int:
     """Make uid 0 the owner of every entry on the root filesystem that another uid owns; returns how many.
 
     At the server the eval script's root overrides file permissions, so a repository an image built as another user
     (``testuser`` owns ``test/rsrc`` in the beets image) is as writable as root's own files. Without
     ``CAP_DAC_OVERRIDE`` only ownership gives that, so ownership moves to root; the group and mode stay.
+
+    The walk keeps its own list of folders instead of recursing (``os.walk`` recurses before Python 3.12), so a
+    folder tree as deep as the agent's restored artifacts can make it cannot exhaust the interpreter's stack.
     """
-    root_device = os.lstat("/").st_dev
-
-    def on_root_device(path: str) -> bool:
-        try:
-            return os.lstat(path).st_dev == root_device
-        except FileNotFoundError:
-            return False
-
+    root_device = os.lstat(top).st_dev
     changed = 0
-    for directory, subdirs, files in os.walk("/"):
-        # Stay on the root filesystem (no /proc, /sys, /dev or other mounts), as `find -xdev` does.
-        subdirs[:] = [name for name in subdirs if on_root_device(os.path.join(directory, name))]
-        for name in subdirs + files:
+    pending = [top]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as entries:
+                names = [entry.name for entry in entries]
+        except OSError:
+            continue  # as os.walk: a folder that cannot be listed is skipped
+        for name in names:
             path = os.path.join(directory, name)
             try:
-                if os.lstat(path).st_uid != 0:
-                    os.lchown(path, 0, -1)
-                    changed += 1
+                info = os.lstat(path)
             except FileNotFoundError:
                 continue
+            if stat.S_ISDIR(info.st_mode):
+                # Stay on the root filesystem (no /proc, /sys, /dev or other mounts), as `find -xdev` does.
+                if info.st_dev != root_device:
+                    continue
+                pending.append(path)
+            if info.st_uid != 0:
+                try:
+                    os.lchown(path, 0, -1)
+                except FileNotFoundError:
+                    continue
+                changed += 1
     return changed
 
 
 def _protect_reward_path() -> None:
-    """Hand the reward file's directories to ``REWARD_OWNER_UID`` and drop any reward file already there."""
+    """Hand the reward file's directories to ``REWARD_OWNER_UID``, drop any reward file already there, and leave an
+    exit record saying 1: the wrapper overwrites it with test.sh's real code (as root, keeping its owner), so a test
+    process that kills the wrapper before that write leaves a measured 0 instead of no record. It cannot stop the
+    wrapper's own write from failing after truncating the record (a file size limit a test process set on it): that
+    still masks."""
     for name in ("reward.json", "reward.txt"):
         (LOGS / name).unlink(missing_ok=True)
     for directory in PROTECTED_DIRS:
         os.chown(directory, REWARD_OWNER_UID, -1)
         os.chmod(directory, 0o755)
+    _write_output(EXIT_RECORD_NAME, f"{FAILED_CLOSED}\n")
 
 
 def _write_output(name: str, text: str) -> None:
     """Create ``/logs/verifier/<name>`` as ``REWARD_OWNER_UID``, so a process without full capabilities cannot
-    change it. Before ``_protect_reward_path`` the folder is Harbor's (mode 777), which that uid can write too."""
+    change it. Before ``_protect_reward_path`` the folder is Harbor's (mode 777), which that uid can write too.
+
+    The text is written as UTF-8 bytes with ``os.write``: no text layer, so no codec or locale is looked up."""
     os.seteuid(REWARD_OWNER_UID)
     try:
-        path = LOGS / name
-        path.unlink(missing_ok=True)
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-        with os.fdopen(descriptor, "w") as handle:
-            handle.write(text)
+        path = str(LOGS / name)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+        try:
+            data = memoryview(text.encode("utf-8", errors="replace"))
+            while data:
+                data = data[os.write(descriptor, data) :]
+        finally:
+            os.close(descriptor)
     finally:
         os.seteuid(0)
 
@@ -189,8 +282,8 @@ def _capture_failed(status: object, error: object, details: dict) -> int:
     """No patch came out of the agent's sandbox: a completed 0 with no test run.
 
     ``git_error`` and ``runner_failed`` are the server's ``_UnreadablePatchError`` (a measured 0 there too). Anything
-    else (``infra_error``, no or unreadable ``capture.json``) the server would mask, but here it comes from the agent's
-    sandbox, whose hook files and outputs the agent owns, so it is scored like an unreadable patch.
+    else (``infra_error``, no or unreadable ``capture.json`` or patch) the server would mask, but here it comes from
+    the agent's sandbox, whose hook files and outputs the agent owns, so it is scored like an unreadable patch.
     """
     unreadable = status in ("git_error", "runner_failed")
     details["error"] = f"Failed to extract model patch ({status}): {error}"
@@ -203,6 +296,212 @@ def _capture_failed(status: object, error: object, details: dict) -> int:
     return _verdict(0.0, metrics, details)
 
 
+def _fail_closed(error: BaseException) -> int:
+    """After the tests started: one line on stderr and no reward, which Harbor measures as 0 (exit 1, not 75)."""
+    line = f"[nemo_gym] failing closed after the tests started, no reward: {type(error).__name__}: {error}\n"
+    os.write(2, line.encode("utf-8", errors="replace"))
+    return FAILED_CLOSED
+
+
+def _read_agent_file(path: Path, limit: int) -> bytes:
+    """The bytes of an agent-written regular file of at most ``limit`` bytes; raises ``FileNotFoundError`` when it
+    is absent, ``_Unreadable`` or ``OSError`` otherwise. A symlink, FIFO, device, socket or directory is refused
+    without reading it, and at most ``limit + 1`` bytes are read (procfs reports size 0)."""
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise _Unreadable(f"{path.name} is not a regular file")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise _Unreadable(f"{path.name} is not a regular file")
+        if info.st_size > limit:
+            raise _Unreadable(f"{path.name} is larger than {limit} bytes")
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(descriptor, min(1 << 20, limit + 1 - total))
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise _Unreadable(f"{path.name} is larger than {limit} bytes")
+    finally:
+        os.close(descriptor)
+
+
+def _capture_summary(capture: dict) -> dict:
+    """``capture.json``'s top-level scalars for ``grading.json``; anything nested is replaced by its type name."""
+
+    def scalar(value: object) -> object:
+        if isinstance(value, str):
+            return value[:CAPTURE_TEXT_MAX_CHARS]
+        if value is None or isinstance(value, (bool, float)):
+            return value
+        if isinstance(value, int) and -(1 << 63) <= value < (1 << 63):
+            return value
+        return type(value).__name__
+
+    summary = {}
+    for key, value in capture.items():
+        if key == "warnings" and isinstance(value, list) and len(value) <= CAPTURE_WARNINGS_MAX:
+            if all(isinstance(item, str) for item in value):
+                summary[key] = [item[:CAPTURE_TEXT_MAX_CHARS] for item in value]
+                continue
+        summary[key[:CAPTURE_TEXT_MAX_CHARS]] = scalar(value)
+    return summary
+
+
+def _read_capture() -> tuple[dict | None, str | None, tuple[object, str] | None]:
+    """``(capture summary, patch text, None)``, or a ``(status, error)`` failure as the last item.
+
+    Every way the agent's sandbox can leave these files (absent, a symlink, a FIFO, oversized, not UTF-8, not JSON,
+    nested too deep, the wrong shape) is a failure, which the caller scores as a completed 0, never a mask.
+    """
+    try:
+        data = _read_agent_file(ARTIFACTS / "capture.json", CAPTURE_MAX_BYTES)
+    except FileNotFoundError:
+        return None, None, ("missing", "the patch capture hook left no capture.json")
+    except (OSError, _Unreadable) as error:
+        return None, None, ("unreadable", f"capture.json could not be read: {error}")
+    try:
+        capture = json.loads(data.decode("utf-8", errors="replace"))
+    except (ValueError, RecursionError) as error:
+        return None, None, ("unreadable", f"capture.json is not JSON: {type(error).__name__}: {str(error)[:200]}")
+    if not isinstance(capture, dict) or not isinstance(capture.get("status"), str):
+        return None, None, ("unreadable", "capture.json is not a JSON object with a string status")
+    summary = _capture_summary(capture)
+    if capture["status"] != "ok":
+        return summary, None, (summary["status"], str(summary.get("error")))
+    try:
+        patch = _read_agent_file(ARTIFACTS / "model_patch.diff", PATCH_MAX_BYTES)
+    except FileNotFoundError:
+        return summary, None, ("missing", "capture.json says ok but model_patch.diff is missing")
+    except (OSError, _Unreadable) as error:
+        return summary, None, ("unreadable", f"model_patch.diff could not be read: {error}")
+    return summary, patch.decode("utf-8", errors="replace"), None
+
+
+async def _inline_to_thread(func, /, *args, **kwargs):
+    """``asyncio.to_thread`` for this process: the same result, called inline, so no thread is ever started (a
+    thread's start or exit can load code after the tests)."""
+    return func(*args, **kwargs)
+
+
+async def _warm_event_loop() -> None:
+    await asyncio.to_thread(int)
+
+
+def _read_mappings() -> set[tuple[str, str, str]]:
+    """``(path, device, inode)`` of every file-backed mapping of this process, from ``/proc/self/maps``."""
+    descriptor = os.open(PROC_MAPS, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1 << 16)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    entries = set()
+    for line in b"".join(chunks).decode("utf-8", errors="replace").splitlines():
+        fields = line.split(None, 5)
+        if len(fields) == 6 and fields[5].startswith("/") and fields[4] != "0":
+            entries.add((fields[5], fields[3], fields[4]))
+    return entries
+
+
+def _mapped_paths() -> list[str]:
+    """The files this process has mapped that still have a path."""
+    return sorted({path for path, _, _ in _read_mappings() if not path.endswith(" (deleted)")})
+
+
+def _mapping_ids() -> set[tuple[str, str]]:
+    return {(device, inode) for _, device, inode in _read_mappings()}
+
+
+def _protected_mode(mode: int) -> int:
+    """No write bits anywhere; group and other get at least the owner's read and execute."""
+    owner_rx = (mode >> 6) & 0o5
+    return (mode & 0o555) | (owner_rx << 3) | owner_rx
+
+
+def _file_state(info: os.stat_result) -> tuple[int, int, int, int]:
+    return info.st_uid, info.st_mode, info.st_size, info.st_mtime_ns
+
+
+def _protect_mappings() -> dict:
+    """Hand every regular file this process has mapped to ``REWARD_OWNER_UID`` without write bits, keeping an open
+    descriptor and the state of each; a read-only filesystem counts as protected. Any other error raises (before the
+    tests: the caller masks)."""
+    started = time.monotonic()
+    kept = {}
+    for path in _mapped_paths():
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        try:
+            os.chmod(path, _protected_mode(info.st_mode))
+            os.chown(path, REWARD_OWNER_UID, -1)
+        except OSError as error:
+            if error.errno != errno.EROFS:
+                raise
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+        kept[path] = (descriptor, _file_state(os.fstat(descriptor)))
+    return {"mappings": _mapping_ids(), "kept": kept, "seconds": round(time.monotonic() - started, 3)}
+
+
+def _prepare_after_tests() -> dict:
+    """Load everything the verdict needs, make ``asyncio.to_thread`` inline, then protect the mapped files."""
+    for name in WARM_IMPORTS:
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            pass
+    # The encoding text files open with by default (the vendored code writes test_output.log with it).
+    codecs.lookup(io.TextIOWrapper(io.BytesIO()).encoding)
+    asyncio.to_thread = _inline_to_thread
+    asyncio.run(_warm_event_loop())
+    return _protect_mappings()
+
+
+def _after_tests_hook(event: str, args: tuple) -> None:
+    state = _AFTER_TESTS
+    if not state["started"]:
+        if event == "subprocess.Popen":
+            state["started"] = True
+        return
+    refusal = None
+    if event in REFUSED_AFTER_TESTS:
+        refusal = f"{event} {str(args[:1])[:200]} after the tests started"
+    elif event == "open" and not isinstance(args[0], int) and os.fsdecode(args[0]) not in state["allowed"]:
+        refusal = f"open of {os.fsdecode(args[0])[:200]!r} after the tests started"
+    if refusal is not None:
+        if state["refused"] is None:
+            state["refused"] = refusal
+        raise _FailClosed(refusal)
+
+
+def _arm_after_tests() -> None:
+    """Install the audit hook (it cannot be removed): the first ``subprocess.Popen`` starts the tests; after it only
+    the outputs and ``/proc/self/maps`` may be opened, and nothing may be imported, loaded, executed or spawned."""
+    names = ("reward.json", "grading.json", "test_output.log")
+    _AFTER_TESTS["allowed"] = frozenset({str(LOGS / name) for name in names} | {PROC_MAPS})
+    sys.addaudithook(_after_tests_hook)
+
+
+def _check_mappings(record: dict) -> None:
+    """After the tests: no new file mapping, and every protected file has the owner, mode, size and mtime it had."""
+    if _AFTER_TESTS["refused"] is not None:
+        raise _FailClosed(_AFTER_TESTS["refused"])
+    new = _mapping_ids() - record["mappings"]
+    if new:
+        raise _FailClosed(f"{len(new)} new file mapping(s) after the tests started")
+    for path, (descriptor, before) in record["kept"].items():
+        if _file_state(os.fstat(descriptor)) != before:
+            raise _FailClosed(f"a file the grader has mapped changed during the tests: {path}")
+
+
 def grade() -> int:
     sys.path.insert(0, str(HERE))
     from local_sandbox import LocalSandbox
@@ -211,36 +510,34 @@ def grade() -> int:
     row = task["row"]
     details: dict = {"instance_id": row["instance_id"]}
 
-    capture_path = ARTIFACTS / "capture.json"
-    if not capture_path.is_file():
-        return _capture_failed("missing", "the patch capture hook left no capture.json", details)
-    try:
-        capture = json.loads(capture_path.read_text(errors="replace"))
-    except ValueError as error:
-        return _capture_failed("unreadable", f"capture.json is not JSON: {error}", details)
-    if not isinstance(capture, dict):
-        return _capture_failed("unreadable", "capture.json is not a JSON object", details)
-    details["capture"] = capture
-    status = capture.get("status")
-    patch_path = ARTIFACTS / "model_patch.diff"
-    if status != "ok":
-        return _capture_failed(status, capture.get("error"), details)
-    if not patch_path.is_file():
-        return _capture_failed("missing", "capture.json says ok but model_patch.diff is missing", details)
-    patch = patch_path.read_text(errors="replace")
+    capture, patch, failure = _read_capture()
+    if capture is not None:
+        details["capture"] = capture
+    if failure is not None:
+        return _capture_failed(*failure, details)
 
     v = _load("nemo_gym_scale_swe_verification", HERE / "resources_servers/scale_swe/verification.py")
+    try:
+        model_patch = v.drop_test_patch_files(patch, row.get("f2p_patch") or "")
+    except MemoryError:
+        raise
+    except Exception as error:
+        # The agent's text through the server's regular expressions: its problem, a completed 0.
+        return _capture_failed("unreadable", f"the patch could not be split into files: {error!r}"[:500], details)
     # app.ScaleSWEResourcesServer._inputs
     inputs = v.VerificationInputs(
         instance_id=row["instance_id"],
         workdir=row["workdir"],
-        patch=v.drop_test_patch_files(patch, row.get("f2p_patch") or ""),
+        patch=model_patch,
         pre_commands=row.get("pre_commands") or "",
         f2p_patch=row.get("f2p_patch") or "",
         f2p_script=row.get("f2p_script") or "",
         fail_to_pass=v.as_id_list(row.get("FAIL_TO_PASS")),
         pass_to_pass=v.as_id_list(row.get("PASS_TO_PASS")),
     )
+    if not os.path.isdir(inputs.workdir):
+        # The image's own layout, before any agent code runs (the eval script would exit 97 here).
+        return _no_verdict(f"workdir {inputs.workdir} not present in the image", details)
     for sandbox_path, content in v.verification_files(inputs).items():
         target = Path(sandbox_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -252,7 +549,12 @@ def grade() -> int:
     except OSError as error:
         # Nothing of the agent's has run yet: this sandbox cannot keep the reward from the tests.
         return _no_verdict(f"could not protect the reward folder: {error}", details)
-    modules_before = set(sys.modules)
+    try:
+        record = _prepare_after_tests()
+    except OSError as error:
+        return _no_verdict(f"could not protect the files the grader has mapped: {error}", details)
+    details["protected_mappings"] = {"files": len(record["kept"]), "seconds": record["seconds"]}
+    _arm_after_tests()
     result = asyncio.run(
         v.run_verification(
             sandbox=LocalSandbox(preexec_fn=drop_privileges),
@@ -261,6 +563,7 @@ def grade() -> int:
             log_dir=LOGS,
         )
     )
+    _check_mappings(record)
     reason = v.infrastructure_failure(result)
     details.update(
         {
@@ -268,30 +571,38 @@ def grade() -> int:
             "test_results": result.test_results,
             "exec_error_type": result.exec_error_type,
             "test_patch_failed": result.test_patch_failed,
-            # Modules loaded after the agent's code ran, which can rewrite files root owns: expected empty.
-            "modules_imported_after_tests": sorted(set(sys.modules) - modules_before),
         }
     )
-    if reason is not None or not result.completed:
-        # app._verify: no verdict on an episode session is masked (the server first retries once on a fresh sandbox).
+    if reason is not None or (not result.completed and v.TEST_OUTPUT_BEGIN not in result.test_output):
+        # The eval script stopped before TEST_OUTPUT_BEGIN: no agent code had run (app._verify masks it too, after
+        # one retry on a fresh sandbox).
         return _no_verdict(reason or result.error or "No verdict", details)
+    # Otherwise the tests ran: a missing verdict (exit 97 from the tests, the test-patch marker in the output,
+    # which the agent's code and even its patch's file names can print) is the agent's doing, a completed 0.
+    no_verdict = not result.completed
     metrics = {
         "evaluation_completed": 1.0,
-        "resolved": float(bool(result.resolved)),
+        "resolved": float(bool(result.resolved) and not no_verdict),
         "patch_applied": float(bool(result.patch_applied)),
         "test_patch_failed": float(bool(result.test_patch_failed)),
         "model_patch_bytes": float(len(patch.encode("utf-8", errors="replace"))),
         "tests_observed": float((result.test_results or {}).get("tests_observed", 0)),
         "verifier_timed_out": float(result.exec_error_type == "timeout"),
+        "no_verdict_after_tests": float(no_verdict),
     }
-    return _verdict(1.0 if result.resolved else 0.0, metrics, details)
+    return _verdict(metrics["resolved"], metrics, details)
 
 
 def main() -> int:
     LOGS.mkdir(parents=True, exist_ok=True)
     try:
         return grade()
-    except Exception:
+    except _FailClosed as error:
+        return _fail_closed(error)
+    except Exception as error:
+        if _AFTER_TESTS["started"]:
+            # The tests could have caused it (a flood of output, a refused import): never a mask.
+            return _fail_closed(error)
         # The server masks a verification that raised (VERIFIER_ERROR).
         traceback.print_exc()
         return _no_verdict("the grader raised", {"traceback": traceback.format_exc()[-4000:]})
