@@ -1107,6 +1107,17 @@ def test_two_manifests_in_one_tree_cannot_declare_one_name(tmp_path: Path) -> No
             validate_environment(path)
 
 
+def test_a_benchmark_and_an_environment_manifest_cannot_declare_one_name(tmp_path: Path) -> None:
+    environment = _asset(tmp_path)
+    benchmark = _asset(tmp_path, kind="benchmark")
+
+    for path, other_tree in ((environment, "benchmarks"), (benchmark, "environments")):
+        with pytest.raises(
+            EnvironmentValidationError, match=f"also declared by .*{other_tree}/demo/manifest.yaml.*benchmarks/ and"
+        ):
+            validate_environment(path)
+
+
 def test_two_manifests_in_one_tree_cannot_declare_one_config(tmp_path: Path) -> None:
     # The config would be listed twice, under two IDs.
     manifest_path = _asset(tmp_path)

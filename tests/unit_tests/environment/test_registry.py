@@ -366,6 +366,30 @@ class TestEnvironmentCatalog:
         with pytest.raises(RegistryError, match="both declare name 'alpha'"):
             discover_environment_catalog()
 
+    def test_a_benchmark_and_an_environment_manifest_in_one_root_cannot_declare_one_name(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        _write_manifest(tmp_path, "environments", "alpha", _manifest("alpha"))
+        _write_manifest(tmp_path, "benchmarks", "moved", _manifest("alpha", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        with pytest.raises(RegistryError, match="both declare name 'alpha'.*benchmarks/ and environments/"):
+            discover_environment_catalog()
+
+    def test_a_benchmark_and_an_environment_manifest_in_different_roots_are_both_listed(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Shadowing across roots stays by kind and name.
+        high, low = tmp_path / "high", tmp_path / "low"
+        _write_manifest(high, "environments", "alpha", _manifest("alpha"))
+        _write_manifest(low, "benchmarks", "alpha", _manifest("alpha", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [high, low])
+
+        assert sorted((entry.kind, entry.name) for entry in discover_environment_catalog()) == [
+            ("benchmark", "alpha"),
+            ("environment", "alpha"),
+        ]
+
     def test_an_earlier_root_shadows_a_manifest_by_its_name(self, tmp_path: Path, monkeypatch) -> None:
         high = tmp_path / "high"
         low = tmp_path / "low"
@@ -441,8 +465,13 @@ class TestEnvironmentCatalog:
         assert ("benchmark", "suite/manifest") not in entries
 
     def test_resolution_requires_kind_only_for_cross_kind_collision(self, tmp_path: Path, monkeypatch) -> None:
+        # Two manifests can't share a name, but a manifest and a config without one can, as `biomnibench_da` does.
         _write_manifest(tmp_path, "environments", "shared", _manifest("shared"))
-        _write_manifest(tmp_path, "benchmarks", "shared", _manifest("shared", "benchmark"))
+        benchmark_config = tmp_path / "benchmarks" / "shared" / "config.yaml"
+        benchmark_config.parent.mkdir(parents=True)
+        benchmark_config.write_text(
+            "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n", encoding="utf-8"
+        )
         monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
 
         entries = discover_environment_catalog()

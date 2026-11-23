@@ -46,7 +46,12 @@ from nemo_gym.environment.manifest import (
     load_manifest,
     resolve_manifest_config_path,
 )
-from nemo_gym.environment.registry import _manifest_config, declared_manifests
+from nemo_gym.environment.registry import (
+    BENCHMARKS_SUBDIR,
+    ENVIRONMENTS_SUBDIR,
+    _manifest_config,
+    declared_manifests,
+)
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
@@ -981,24 +986,25 @@ def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManife
 
 
 def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest) -> None:
-    """Check that a manifest's name is the one ID of its config within the catalog tree.
+    """Check that a manifest's name is the one ID of its config within its search root.
 
-    A name is an ID and stays the same when folders move, so it need not match a path. No other manifest in the tree
-    may declare it, and no other manifest may point at its config, which would then be listed twice. A name other
-    than the manifest's folder path also may not be the path of another config: it would hide that config from the
-    catalog and from ``--benchmark`` and ``--environment``.
+    A name is an ID and stays the same when folders move, so it need not match a path. No other manifest in the
+    root's benchmarks/ and environments/ trees may declare it, whatever its kind, and no other manifest may point at
+    its config, which would then be listed twice. A name other than the manifest's folder path also may not be the
+    path of another config: it would hide that config from the catalog and from ``--benchmark`` and ``--environment``.
     """
     catalog_directory = _catalog_directory(manifest_path)
     if catalog_directory is None:
         return
     config_path = _manifest_config(manifest_path, manifest)
-    for other_path, other in declared_manifests(catalog_directory):
+    trees = (catalog_directory.parent / BENCHMARKS_SUBDIR, catalog_directory.parent / ENVIRONMENTS_SUBDIR)
+    for other_path, other in (declared for tree in trees for declared in declared_manifests(tree)):
         if other_path.resolve() == manifest_path:
             continue
         if other.name == manifest.name:
             raise EnvironmentValidationError(
                 f"Name '{manifest.name}' is also declared by {other_path}. A name is the ID of a manifest and must be "
-                f"unique within {catalog_directory.name}/."
+                "unique across benchmarks/ and environments/."
             )
         if config_path is not None and _manifest_config(other_path, other) == config_path:
             raise EnvironmentValidationError(
