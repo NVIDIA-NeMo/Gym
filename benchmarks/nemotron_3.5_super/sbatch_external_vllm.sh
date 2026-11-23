@@ -1326,8 +1326,13 @@ if (( should_run_eval )); then
     # Run the cleanup with the Gym venv's interpreter when there is one: through its "#!/usr/bin/env python3" shebang
     # the script got the CPU node's system Python, which is too old for its type hints and lacks aiohttp/yaml, so every
     # cleanup job failed and sandboxes were never reaped.
-    cleanup_python="$submit_dir/.venv/bin/python"
-    [ -x "$cleanup_python" ] || cleanup_python=python3
+    # GYM_PYTHON is the interpreter submit_batch.sh already runs its preflight with.
+    cleanup_python="${GYM_PYTHON:-$submit_dir/.venv/bin/python}"
+    if [ ! -x "$cleanup_python" ]; then
+        echo "Warning: $cleanup_python is not executable; the cleanup job will use python3, which is probably" \
+            "too old on the CPU node. Set GYM_PYTHON to the Gym venv's python." >&2
+        cleanup_python=python3
+    fi
     if ! cleanup_job_id=$(
         sbatch \
             --parsable \

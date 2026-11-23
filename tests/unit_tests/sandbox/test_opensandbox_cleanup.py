@@ -599,11 +599,6 @@ def cleanup_command(call: list[str]) -> list[str]:
     return shlex.split(wrap.removeprefix("--wrap="))
 
 
-def cleanup_interpreter() -> str:
-    venv_python = Path.cwd().resolve() / ".venv/bin/python"
-    return str(venv_python) if os.access(venv_python, os.X_OK) else "python3"
-
-
 def read_sbatch_calls(path: Path) -> list[list[str]]:
     calls: list[list[str]] = []
     current: list[str] | None = None
@@ -660,8 +655,7 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
         f"--output={submit_dir}/slurm-logs/%j-gym-cleanup-7001.log",
         cleanup_call[-1],
     ]
-    assert cleanup_command(cleanup_call) == [
-        cleanup_interpreter(),
+    assert cleanup_command(cleanup_call)[1:] == [
         cleanup_script,
         "--domain",
         "sandbox.example",
@@ -684,6 +678,79 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
     assert "cleanup_sandboxes.py" not in batch_command
     assert "cleanup_server()" in batch_command
     assert "attacker" not in batch_command
+
+
+def run_launcher_from(submit_dir: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(SBATCH_SCRIPT.resolve()), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        cwd=submit_dir,
+        env=env,
+        text=True,
+    )
+
+
+def make_executable(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+@pytest.mark.parametrize("gym_python", [None, "set", "missing"])
+@pytest.mark.parametrize("has_venv", [False, True])
+def test_cleanup_job_interpreter_choice(tmp_path: Path, gym_python: str | None, has_venv: bool) -> None:
+    """GYM_PYTHON wins, then the submit directory's venv, then python3 with a warning on stderr."""
+    submit_dir = tmp_path / "submit"
+    submit_dir.mkdir()
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
+    env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
+    venv_python = make_executable(submit_dir / ".venv/bin/python") if has_venv else None
+    if gym_python == "set":
+        env["GYM_PYTHON"] = make_executable(tmp_path / "gym env/bin/python")
+    elif gym_python == "missing":
+        env["GYM_PYTHON"] = str(tmp_path / "nowhere/python")
+
+    result = run_launcher_from(submit_dir, env)
+
+    assert result.returncode == 0, result.stderr
+    _main_call, cleanup_call = read_sbatch_calls(calls_path)
+    interpreter = cleanup_command(cleanup_call)[0]
+    if gym_python == "set":
+        assert interpreter == env["GYM_PYTHON"]
+        assert "Warning" not in result.stderr
+    elif gym_python == "missing":
+        assert interpreter == "python3"
+        assert f"Warning: {env['GYM_PYTHON']} is not executable" in result.stderr
+    elif has_venv:
+        assert interpreter == venv_python
+        assert "Warning" not in result.stderr
+    else:
+        assert interpreter == "python3"
+        assert f"Warning: {submit_dir.resolve()}/.venv/bin/python is not executable" in result.stderr
+
+
+def test_cleanup_job_partition_qos_and_quoting_come_from_the_environment(tmp_path: Path) -> None:
+    submit_dir = tmp_path / "submit"
+    submit_dir.mkdir()
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
+    env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
+    env["SBATCH_CPU_PARTITION"] = "cpu_short"
+    env["SBATCH_CPU_QOS"] = "cpu-high"
+    env["NEMO_GYM_USER"] = "name with 'quote' and $dollar"
+
+    result = run_launcher_from(submit_dir, env)
+
+    assert result.returncode == 0, result.stderr
+    _main_call, cleanup_call = read_sbatch_calls(calls_path)
+    assert "--partition=cpu_short" in cleanup_call
+    assert "--qos=cpu-high" in cleanup_call
+    # The wrapped command survives the shell that sbatch runs it with: one argument per value.
+    command = cleanup_command(cleanup_call)
+    assert command[command.index("--user") + 1] == "name with 'quote' and $dollar"
 
 
 @pytest.mark.parametrize("walltime", [None, "20:00:00"])
