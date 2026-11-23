@@ -9,7 +9,6 @@ omniscience_omniscience_resources_server:
   resources_servers:
     omniscience:
       judge_responses_create_params:
-        # Room for Luna to reason before it grades, as in EFB and nemotron_recipes/super-3.5.
         max_output_tokens: 32768
 
 omniscience_omniscience_simple_agent:

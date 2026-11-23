@@ -50,8 +50,6 @@ policy_api_key: dummy  # pragma: allowlist secret
 policy_model_name: dummy
 
 # Keep the reference request limit separate from the shared model connection.
-# The AA-Omniscience judge here is Gemini (shared_model_endpoints.yaml): keep its request without
-# the Luna default's reasoning effort and with the 2048-token cap it was run with.
 genrm_model:
   responses_api_models:
     openai_model:

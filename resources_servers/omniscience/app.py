@@ -192,7 +192,7 @@ def parse_judge_grade(judge_text: str) -> str | None:
                 _GRADE_KEYWORDS.get(token, token) for token in _GRADE_TOKEN_RE.findall(match.group("grades"))
             )
         if not _VERDICT_TAIL_RE.match(rests[0]):
-            suspects |= letters  # Not a verdict on its own, but it may contradict one.
+            suspects |= letters
             continue
         if not all(_VERDICT_TAIL_RE.match(rest) for rest in rests[1:]):
             return None
