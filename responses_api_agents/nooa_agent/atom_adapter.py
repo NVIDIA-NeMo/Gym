@@ -57,11 +57,21 @@ async def invoke_atom_with_submission(
     if not callable(getattr(agent, "finish", None)):
         raise RuntimeError("invoke_atom_with_submission needs a benchmark whose resources server serves `finish`")
     SUBMIT_DIR.mkdir(parents=True, exist_ok=True)
-    result = await invoke_atom(agent, request)
+    try:
+        result = await invoke_atom(agent, request)
+    except Exception as error:
+        # A failed turn (e.g. a malformed Done) can leave finished files behind; submit them before the error is
+        # graded, or the judge sees none.
+        await _submit(agent, f"Atom's turn ended with an error: {error}")
+        raise
+    await _submit(agent, result.report or result.solution_description)
+    return result
+
+
+async def _submit(agent: AtomHarness, reason: str) -> None:
     paths = sorted(str(path) for path in SUBMIT_DIR.rglob("*") if path.is_file())
     if not paths:
         logger.warning("Atom saved no files in %s; nothing submitted", SUBMIT_DIR)
-        return result
-    output = await agent.finish(reason=result.report or result.solution_description, paths=paths)
+        return
+    output = await agent.finish(reason=reason, paths=paths)
     logger.info("finish(%d files) -> %s", len(paths), output)
-    return result

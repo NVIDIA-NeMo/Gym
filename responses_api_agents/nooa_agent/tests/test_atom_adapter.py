@@ -297,3 +297,19 @@ async def test_submission_adapter_submits_nothing_for_an_empty_folder(
 async def test_submission_adapter_requires_a_finish_tool() -> None:
     with pytest.raises(RuntimeError, match="finish"):
         await atom_adapter.invoke_atom_with_submission(SimpleNamespace(), None)
+
+
+@pytest.mark.asyncio
+async def test_submission_adapter_submits_the_files_of_a_failed_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "report.pdf").write_bytes(b"%PDF")
+    monkeypatch.setattr(atom_adapter, "SUBMIT_DIR", tmp_path)
+    monkeypatch.setattr(atom_adapter, "invoke_atom", AsyncMock(side_effect=RuntimeError("code retries exhausted")))
+    agent = _FinishingAgent()
+
+    with pytest.raises(RuntimeError, match="code retries exhausted"):
+        await atom_adapter.invoke_atom_with_submission(agent, None)
+
+    agent.finish.assert_awaited_once()
+    assert agent.finish.await_args.kwargs["paths"] == [str(tmp_path / "report.pdf")]
