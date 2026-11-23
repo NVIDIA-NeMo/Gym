@@ -423,6 +423,8 @@ abandon() {
             [[ $word == *"/$SUPERVISOR_NAME" || $word == "$SUPERVISOR_NAME" ]] && shell=${fields[1]}
         done 2>/dev/null <"/proc/${fields[1]}/cmdline"
     fi
+    # The shell is reached by PID and start time, like every other process, so a later holder of its PID is not.
+    [[ $shell ]] && stat_fields "$shell" && reached[shell]=${fields[19]}
     now
     limit=$((NOW + ${cleanup:-1000}))
     while :; do
@@ -432,8 +434,8 @@ abandon() {
             [[ $pid != "$$" ]] && stat_fields "$pid" || continue
             [[ ${fields[0]} == [ZX] ]] && continue
             parent[pid]=${fields[1]} start[pid]=${fields[19]}
-            if [[ $pid == "$shell" || ($pid == "$supervisor" && ${fields[19]} == "$started") ||
-                ${reached[pid]-} == "${fields[19]}" ]] || marked "$pid" "${fields[19]}"; then
+            if [[ ($pid == "$supervisor" && ${fields[19]} == "$started") || ${reached[pid]-} == "${fields[19]}" ]] ||
+                marked "$pid" "${fields[19]}"; then
                 doomed[pid]=1
             fi
         done

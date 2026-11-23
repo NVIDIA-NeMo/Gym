@@ -410,6 +410,55 @@ def test_abandon_does_not_signal_a_pid_reused_between_its_scan_and_the_signal(tm
     assert not Path(f"{receipt}.kills").exists()
 
 
+# abandon() over a scripted process table: the supervisor is gone from the scan, and the shell that started it (named
+# by the supervisor's parent and its command line) exits after the first round, its PID handed on to a process that
+# started later. The table changes only between rounds. kill is recorded, never sent.
+ABANDON_SHELL_REUSED = r"""
+source "$1"
+receipt=$2 cleanup=$3 shell_pid=$4 supervisor=$5 round=0
+SUPERVISOR_NAME=sleep  # The command line of the process lending the shell's PID.
+kill() { echo "$2" >>"$receipt.kills"; }
+sleep() { ((++round)); command sleep "$@"; }
+marked() { return 1; }
+stat_fields() {
+    fields=()
+    if [[ $1 == "$supervisor" ]]; then
+        fields[0]=S fields[1]=$shell_pid fields[2]=$1 fields[19]=100
+    elif [[ $1 == "$shell_pid" ]] && ((!round)); then
+        fields[0]=S fields[1]=1 fields[2]=$1 fields[19]=200
+    elif [[ $1 == "$shell_pid" ]]; then
+        fields[0]=S fields[1]=1 fields[2]=$1 fields[19]=300
+    else
+        return 1
+    fi
+}
+abandon "$supervisor.100"
+"""
+
+
+def test_abandon_kills_the_launch_shell_but_not_a_later_holder_of_its_pid(tmp_path: Path) -> None:
+    # A real process lends the shell's PID and its command line; what abandon reads in its stat is scripted. The
+    # supervisor's PID is free, so the scan never lists it.
+    lender = subprocess.Popen(["sleep", "60"])
+    receipt = tmp_path / CLEANUP_RECEIPT_FILE
+    try:
+        result = subprocess.run(
+            ["bash", "-c", ABANDON_SHELL_REUSED, "abandon", str(SUPERVISOR_SCRIPT), str(receipt), "200"]
+            + [str(lender.pid), str(_dead_pid())],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert lender.poll() is None, "no signal was sent"
+    finally:
+        lender.kill()
+        lender.wait()
+    assert result.returncode == 0, result.stderr
+    assert json.loads(receipt.read_text())["cleanup_confirmed"] is True
+    # Killed once as the shell; the process that holds its PID from the second round on is left alone.
+    assert Path(f"{receipt}.kills").read_text().split() == [str(lender.pid)]
+
+
 # -- check_restored --------------------------------------------------------------------------------------------------
 
 
