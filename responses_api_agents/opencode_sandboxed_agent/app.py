@@ -1554,7 +1554,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ) from provider_failure
         result_stdout = result.stdout or ""
         stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
-        if len(stdout_parts) < 2:
+        # A confirmed command deadline is the agent reaching its time limit. A provider that returns no output for the
+        # killed command leaves no launch marker, which says nothing about the run, so capture goes on from the
+        # session export. Without an export the run still fails before grading. Any other result without the marker
+        # stays an ungraded harness failure.
+        if len(stdout_parts) < 2 and result.error_type != "timeout":
             raise NgFailureEvent(
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
