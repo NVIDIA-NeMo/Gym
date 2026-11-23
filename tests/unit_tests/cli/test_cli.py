@@ -2087,13 +2087,15 @@ class TestListEnvironments:
         assert "alpha" not in out
 
     def test_modality_filter_keeps_entries_that_list_the_input(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        self._mock_catalog(monkeypatch, overrides={"modality": "image"})
+        text_only = replace(self._ALPHA, name="gamma", modality=("text",))
+        self._mock_catalog(monkeypatch, overrides={"modality": "image"}, entries=(self._ALPHA, self._BETA, text_only))
 
         list_environments()
 
         out = capsys.readouterr().out
         assert "alpha" in out
         assert "beta" not in out
+        assert "gamma" not in out
 
     def test_filter_reports_entries_missing_metadata(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"modality": "text"})
