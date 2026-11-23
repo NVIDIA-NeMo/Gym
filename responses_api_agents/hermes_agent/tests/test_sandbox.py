@@ -2151,8 +2151,11 @@ def test_hermes_lists_and_loads_a_skill_staged_in_its_home(tmp_path):
         " 'view': json.loads(skill_view('demo'))}))\n"
     )
     env = {**os.environ, "HERMES_HOME": str(tmp_path / hermes_sandbox.HERMES_HOME_FOLDER), "HOME": str(tmp_path)}
+    # The pinned Hermes runs in its own host environment, not the Agent Server's.
+    from responses_api_agents.hermes_agent.runtime import host_python
+
     result = json.loads(
-        subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True).stdout
+        subprocess.run([str(host_python()), "-c", script], env=env, capture_output=True, text=True, check=True).stdout
     )
     assert "<available_skills>" in result["prompt"] and "demo: Demo skill." in result["prompt"]
     assert result["view"]["success"] is True and "The magic word is pineapple." in result["view"]["content"]
