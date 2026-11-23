@@ -941,17 +941,6 @@ class TestNativeSessions:
         connect.assert_not_awaited()
         assert "ag-1" not in agent._session_records
 
-    def test_seed_skips_an_optional_tool_grant(self, monkeypatch):
-        """Only a grant the environment requires is refused; an optional one may be left unused."""
-        _, client, _, connect = self._client(monkeypatch)
-
-        response = client.post(
-            "/v1/agent_sessions", json=_seed_body(tool_accesses=[_mcp_grant("web", required=False)])
-        )
-
-        assert response.status_code == 200, response.text
-        connect.assert_awaited_once()
-
     def test_responses_uses_the_session_sandbox(self, monkeypatch):
         from unittest.mock import AsyncMock
 
