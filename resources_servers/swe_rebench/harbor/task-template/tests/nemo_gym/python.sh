@@ -6,7 +6,7 @@
 # when it has one; otherwise (SWE-rebench-V2's Dart images ship none) it installs a pinned python-build-standalone
 # release into DIR, checked against its sha256, and prints that. Prints nothing and returns 1 when neither works.
 NEMO_GYM_PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20251014/cpython-3.12.12%2B20251014-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
-NEMO_GYM_PBS_SHA256="c74addcd1b033a6e4d60ead3ab47fcc995569027e01d3061c4a934f363c4a0cf"
+NEMO_GYM_PBS_SHA256="c74addcd1b033a6e4d60ead3ab47fcc995569027e01d3061c4a934f363c4a0cf"  # pragma: allowlist secret
 
 nemo_gym_python() {
   local dir=$1 candidate path archive
