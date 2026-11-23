@@ -104,8 +104,26 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return fields
 
 
-def assistant_text(response: NeMoGymResponse, *, judge_reply: bool = False, allow_partial: bool = False) -> str | None:
-    """Read the closing assistant message. Compaction items are opaque provider bookkeeping."""
+def _block_text(block) -> str | None:
+    if isinstance(block, dict) and block.get("type") == "input_text":
+        return block.get("text")
+    if getattr(block, "type", None) == "output_text":
+        return block.text
+    return None
+
+
+def policy_text(response: NeMoGymResponse) -> str:
+    """Read the last assistant message, even if provider bookkeeping follows it."""
+    for item in reversed(response.output):
+        if item.type == "message" and item.role == "assistant":
+            if isinstance(item.content, str):
+                return item.content
+            return "\n".join(text for block in item.content if (text := _block_text(block)) is not None)
+    return ""
+
+
+def judge_text(response: NeMoGymResponse, *, join_blocks: bool = False, allow_partial: bool = False) -> str | None:
+    """Read the closing judge message. Binary and rubric parsers use its closing text block."""
     items = [item for item in response.output if item.type != "compaction"]
     if not items:
         return None
@@ -113,18 +131,11 @@ def assistant_text(response: NeMoGymResponse, *, judge_reply: bool = False, allo
     if final.type != "message" or final.role != "assistant":
         return None
     if not allow_partial:
-        complete = response.status in (None, "completed") and response.incomplete_details is None
-        # A content-filter finish can still carry a completed policy answer for the judge to grade.
-        filtered_policy = (
-            not judge_reply
-            and response.status == "incomplete"
-            and getattr(response.incomplete_details, "reason", None) == "content_filter"
-        )
-        if response.error or not (complete or filtered_policy):
+        if response.error or response.status not in (None, "completed") or response.incomplete_details is not None:
             return None
         if getattr(final, "phase", None) == "commentary" or getattr(final, "status", "completed") != "completed":
             return None
-    if judge_reply and any(
+    if any(
         (item.type == "message" and (item.role != "assistant" or getattr(item, "phase", None) != "commentary"))
         or (item.type != "message" and getattr(item, "status", None) not in (None, "completed"))
         for item in prefix
@@ -134,14 +145,11 @@ def assistant_text(response: NeMoGymResponse, *, judge_reply: bool = False, allo
         return final.content
     parts = []
     for block in final.content:
-        if isinstance(block, dict) and block.get("type") == "input_text" and isinstance(block.get("text"), str):
-            parts.append(block["text"])
-        elif getattr(block, "type", None) == "output_text":
-            parts.append(block.text)
-        elif judge_reply:
+        text = _block_text(block)
+        if text is None:
             return None
-    # The policy can include refusals alongside its answer. Judge JSON can span adjacent text blocks.
-    return ("" if judge_reply else "\n").join(parts) or None
+        parts.append(text)
+    return ("".join(parts) if join_blocks else parts[-1]) if parts else None
 
 
 def parse_json_judgment(text: str | None, *, verdict_mode: VerdictMode) -> JsonJudgment | None:

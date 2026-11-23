@@ -94,9 +94,10 @@ from resources_servers.stem_judge.answer_options import (
     VerdictMode,
     add_answer_rules,
     answer_template,
-    assistant_text,
     final_verdict,
+    judge_text,
     parse_json_judgment,
+    policy_text,
 )
 from resources_servers.stem_judge.task_data import RubricCriterion, TaskData, reference_of
 
@@ -258,7 +259,7 @@ def final_answer(response: NeMoGymResponse) -> tuple[Optional[str], str]:
     """
     if _is_length_truncated(response):
         return None, "truncated"
-    text = (assistant_text(response) or "").strip()
+    text = policy_text(response).strip()
     if not text:
         return None, "empty_final_answer"
     return text, "ok"
@@ -509,7 +510,9 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             question=question, expected_answer=render_reference(expected), generated_answer=solution
         )
         json_answer = self.config.verdict_format == "json"
-        evaluation, text = await self._call_judge(prompt, json_answer=json_answer)
+        evaluation, text = await self._call_judge(
+            prompt, json_answer=json_answer, join_blocks=json_answer or self.config.verdict_mode == "yes_no_unresolved"
+        )
         if json_answer:
             evaluation.judgment = parse_json_judgment(text, verdict_mode=self.config.verdict_mode)
             verdict = evaluation.judgment.label if evaluation.judgment else None
@@ -549,7 +552,9 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             body, expected, answer_format, "judged", reward, solution, [evaluation], rubric_score=score
         )
 
-    async def _call_judge(self, prompt: str, *, json_answer: bool = False) -> tuple[JudgeEvaluation, Optional[str]]:
+    async def _call_judge(
+        self, prompt: str, *, json_answer: bool = False, join_blocks: bool = False
+    ) -> tuple[JudgeEvaluation, Optional[str]]:
         """One judge call. Returns the evaluation and the text of the judge's last message, if any."""
         cfg = self.config
         params = cfg.judge_responses_create_params.model_copy(deep=True)
@@ -579,7 +584,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         if judge_response.status == "incomplete":
             # A cut-off reply has no final judgement; a verdict-like line in it could be quoted text.
             return evaluation, None
-        return evaluation, assistant_text(judge_response, judge_reply=True)
+        return evaluation, judge_text(judge_response, join_blocks=join_blocks)
 
     async def _finish(
         self,
@@ -638,7 +643,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         evaluations: list[JudgeEvaluation],
     ) -> str:
         """One JSONL record for the generation log."""
-        judge_texts = [assistant_text(e.response, judge_reply=True, allow_partial=True) or "" for e in evaluations]
+        judge_texts = [judge_text(e.response, join_blocks=True, allow_partial=True) or "" for e in evaluations]
         record = {
             "ts": time.time(),
             "step": _extract_step(body),
@@ -647,7 +652,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
             "expected_answer": expected,
             "answer_format": answer_format,
             "rubric": [c.model_dump() for c in body.rubric] if body.rubric else None,
-            "generation": assistant_text(body.response, allow_partial=True) or "",
+            "generation": policy_text(body.response),
             "judged_generation": judged,
             "grading_status": status,
             "reward": reward,

@@ -466,6 +466,24 @@ async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again
     assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 
+async def test_rejudgment_keeps_superseded_grade_only_in_prior_observations(tmp_path, verifier):
+    from nemo_gym.rollouts.rollout_records import REJUDGED_OBSERVATIONS_KEY
+
+    archived = {"correctness": False, "verdict": "no", "library_reward": 0.0}
+    row = verify_transport_masked() | archived | {"source": "archive"}
+    output = _run(tmp_path, [row])
+    (identity,) = due_judge_failures(output)
+    verifier["grade"] = lambda request: {k: v for k, v in request.items() if k not in archived} | {
+        "reward": 1.0,
+        "judge_evaluations": [{"verdict_label": "Judgement: yes"}],
+    }
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+    saved = _selected(output)[0][identity]
+    assert saved["reward"] == 1 and saved["judge_evaluations"] == [{"verdict_label": "Judgement: yes"}]
+    assert saved["source"] == "archive" and archived.keys().isdisjoint(saved)
+    assert {k: saved[REJUDGED_OBSERVATIONS_KEY][k] for k in archived} == archived
+
+
 @pytest.mark.parametrize("initial", ["judge_unparsed", "judge_failed"])
 @pytest.mark.parametrize("structured", [False, True], ids=["line", "json"])
 async def test_rejudged_abstention_stops_retries_on_the_saved_attempt(tmp_path, verifier, initial, structured):

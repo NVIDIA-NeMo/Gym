@@ -125,6 +125,9 @@ def raw_outcomes_are_selected(path: Path, *, artifacts: tuple[Path, ...] | None 
 _REJUDGE_GRADING_KEYS = frozenset(
     {
         "reward",
+        "correctness",
+        "verdict",
+        "library_reward",
         "mask_sample",
         "evaluation_completed",
         "failure_kind",

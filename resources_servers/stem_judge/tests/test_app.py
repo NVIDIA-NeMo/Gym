@@ -611,6 +611,30 @@ class TestVerify:
         result = await _server(config, filtered("Judgement: yes")).verify(answer)
         assert result.grading_status == "judge_unparsed" and result.mask_sample
 
+    @mark.parametrize("last,status", [("Final Verdict: no", "judged"), ("I cannot decide.", "judge_unparsed")])
+    async def test_binary_verdict_uses_the_closing_block(self, config, last, status):
+        reply = _msg("Tentative Judgement: 'yes'.")
+        reply.content.extend(_msg(last).content)
+        result = await _server(config, _response(reply)).verify(_request(_split(r"\boxed{3}")))
+        assert (result.reward, result.grading_status) == (0, status)
+
+    async def test_rubric_does_not_score_an_earlier_block(self, config):
+        reply = _msg('{"r1":true,"r2":true,"r3":false}')
+        reply.content.extend(_msg("I cannot grade this rubric.").content)
+        result = await _server(config, _response(reply)).verify(
+            _request(_split("proof"), answer_format="free", rubric=RUBRIC)
+        )
+        assert result.grading_status == "judge_unparsed" and result.rubric_score is None
+
+    async def test_policy_answer_before_trailing_reasoning_is_graded_and_logged(self, config, tmp_path):
+        config.generation_log_dir = str(tmp_path)
+        server = _server(config, "Judgement: yes")
+        answer = r"\boxed{2}"
+        result = await server.verify(_request(_response(_msg(answer), _reasoning())))
+        assert (result.reward, result.grading_status) == (1, "judged")
+        assert _judge_prompt(server).endswith(answer)
+        assert json.loads(next(tmp_path.glob("*.jsonl")).read_text())["generation"] == answer
+
     async def test_policy_text_with_refusal_is_graded_but_mixed_judge_verdict_is_unparseable(self, config):
         refusal = NeMoGymResponseOutputRefusal(type="refusal", refusal="Declined another part.")
         policy = _msg("First line.")
