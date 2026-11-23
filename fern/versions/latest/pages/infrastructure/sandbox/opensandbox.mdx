@@ -438,8 +438,8 @@ the default keep-alive entrypoint. Closing the main sandbox deletes its sidecars
   IP, so a deny-by-default main sandbox still reaches its sidecars. A sidecar under a deny-by-default policy cannot
   open a connection to the main sandbox.
 - `sandbox.sidecar(name).exec(*argv)` quotes the argv into one shell command, so the sidecar image needs a POSIX
-  shell. With `on_stdout`, the command runs on one streamed request for as long as it runs, also when
-  `operations.background_exec` is set, and stdout arrives one line at a time.
+  shell. `on_stdout` receives stdout one line at a time from the streamed request. With
+  `operations.background_exec`, it receives what each poll finds new, stdout and stderr together.
 - A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.
 - A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs. The
   connect fails when one of them is gone.

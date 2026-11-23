@@ -34,7 +34,10 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 
 
 class FakeSandbox:
-    """The SDK sandbox: records creates and kills, and runs commands by echoing them."""
+    """The SDK sandbox: records creates and kills, and runs commands by echoing them.
+
+    A background command stays running for two status polls and writes one line before each poll.
+    """
 
     created: list[dict[str, Any]] = []
     killed: list[str] = []
@@ -45,7 +48,10 @@ class FakeSandbox:
 
     def __init__(self, sandbox_id: str) -> None:
         self.id = sandbox_id
-        self.commands = SimpleNamespace(run=self._run)
+        self.polls = 0
+        self.commands = SimpleNamespace(
+            run=self._run, get_command_status=self._status, get_background_command_logs=self._logs
+        )
         self.files = SimpleNamespace(read_bytes_stream=self._read)
 
     @classmethod
@@ -68,10 +74,20 @@ class FakeSandbox:
         return SimpleNamespace(status=SimpleNamespace(state="RUNNING"))
 
     async def _run(self, command: str, *, opts: Any, handlers: Any = None) -> Any:
+        if getattr(opts, "background", False):
+            return SimpleNamespace(id="execution-1", logs=SimpleNamespace(stdout=[], stderr=[]), error=None)
         if handlers is not None:
             await handlers.on_stdout(SimpleNamespace(text="PORT 8080"))
         line = SimpleNamespace(text=f"{self.id}: {command}")
         return SimpleNamespace(logs=SimpleNamespace(stdout=[line], stderr=[]), exit_code=0, error=None)
+
+    async def _status(self, _execution_id: str) -> Any:
+        self.polls += 1
+        return SimpleNamespace(running=self.polls < 3, exit_code=None if self.polls < 3 else 0, error=None)
+
+    async def _logs(self, _execution_id: str, cursor: int | None = None) -> Any:
+        output = "".join(f"line {poll}\n" for poll in range(1, self.polls + 1))
+        return SimpleNamespace(content=output[cursor or 0 :], cursor=len(output))
 
     async def _read(self, path: str) -> Any:
         async def chunks() -> Any:
@@ -80,7 +96,8 @@ class FakeSandbox:
         return chunks()
 
     async def kill(self) -> None:
-        if self.id == type(self).fail_kill:
+        # A closed SDK handle has no client left to send the delete with.
+        if self.id == type(self).fail_kill or self.id in type(self).closed:
             raise RuntimeError("delete refused")
         type(self).killed.append(self.id)
 
@@ -170,6 +187,22 @@ async def test_sidecar_commands_and_downloads_go_to_the_sidecars_sandbox(provide
     assert (tmp_path / "log.txt").read_text() == "sandbox-1:/out/log.txt"
 
 
+async def test_a_polled_sidecar_command_hands_over_its_output_as_it_arrives(provider) -> None:
+    polled = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None},
+        create={"retries": 0},
+        operations={"background_exec": True, "background_poll_initial_s": 0.01, "background_poll_interval_s": 0.01},
+    )
+    sandbox = await AsyncSandbox(polled, _SPEC).start()
+    streamed: list[str] = []
+
+    result = await sandbox.sidecar("tools").exec("serve", timeout_s=5, on_stdout=streamed.append)
+
+    # Two polls while it runs, then the rest once it has ended; no request stays open for the command.
+    assert streamed == ["line 1\n", "line 2\n", "line 3\n"]
+    assert result.stdout == "line 1\nline 2\nline 3\n" and result.return_code == 0
+
+
 async def test_closing_the_sandbox_deletes_its_sidecars(provider) -> None:
     handle = await provider.create(_SPEC)
 
@@ -188,10 +221,11 @@ async def test_a_sidecar_that_cannot_be_deleted_is_retried_by_the_next_close(pro
     # The main sandbox is deleted all the same.
     assert FakeSandbox.killed == ["sandbox-2"]
     FakeSandbox.fail_kill = None
+    # The repeated close deletes the sidecar only: the main sandbox is gone, and its SDK handle is closed.
     await provider.close(handle)
 
-    assert FakeSandbox.killed == ["sandbox-2", "sandbox-2", "sandbox-1"]
-    assert provider._sidecars == {}
+    assert FakeSandbox.killed == ["sandbox-2", "sandbox-1"]
+    assert provider._sidecars == {} and provider._deleted_with_sidecars_left == set()
 
 
 async def test_a_main_sandbox_that_cannot_start_deletes_its_sidecars(provider) -> None:
@@ -277,3 +311,29 @@ async def test_a_sandbox_whose_sidecar_is_gone_is_not_reattached(provider) -> No
     assert FakeSandbox.closed == ["sandbox-2"]
     assert borrower._sidecars == {}
     assert FakeSandbox.killed == []
+
+
+async def test_a_borrower_releases_the_sidecar_handles_it_connected(provider) -> None:
+    owner = await AsyncSandbox(provider, _SPEC).start()
+    descriptor = await owner.serialize()
+    borrower = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    borrowed = await AsyncSandbox.connect(descriptor, provider=borrower, owns_provider=False)
+    assert list(borrower._sidecars) == ["sandbox-2"]
+    await borrowed.disconnect()
+
+    # Released, not deleted: the owner still reaches the sidecar.
+    assert borrower._sidecars == {} and borrower._connected_sidecars == set()
+    assert FakeSandbox.closed == ["sandbox-1"] and FakeSandbox.killed == []
+    assert (await owner.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: status"
+
+
+async def test_a_reconnect_on_the_owners_provider_keeps_the_owners_sidecar_handles(provider) -> None:
+    owner = await AsyncSandbox(provider, _SPEC).start()
+    handles = dict(provider._sidecars["sandbox-2"])
+
+    reattached = await AsyncSandbox.connect(await owner.serialize(), provider=provider, owns_provider=False)
+    await reattached.disconnect()
+
+    assert provider._sidecars == {"sandbox-2": handles}
+    assert FakeSandbox.closed == []

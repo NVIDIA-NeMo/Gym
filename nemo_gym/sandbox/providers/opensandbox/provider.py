@@ -1232,6 +1232,10 @@ class OpenSandboxProvider:
         self._parked_poll_scopes: dict[str, int] = {}
         # Each sidecar is a sandbox of its own; their handles by the main sandbox's id, then by sidecar name.
         self._sidecars: dict[str, dict[str, SandboxHandle]] = {}
+        # Main sandboxes whose sidecar handles `connect` made, which `disconnect_handle` releases.
+        self._connected_sidecars: set[str] = set()
+        # Main sandboxes already deleted by a close that left a sidecar behind; a repeated close skips them.
+        self._deleted_with_sidecars_left: set[str] = set()
 
     def uploads_independent_of_execs(self) -> bool:
         """A foreground command holds one of the shared HTTP pool's connections for as long as it runs, so
@@ -2020,8 +2024,10 @@ class OpenSandboxProvider:
                 raise opensandbox_failure(operation="connect", sandbox_id=sandbox_id, cause=error) from error
             raise
         sidecars: dict[str, SandboxHandle] = {}
+        # A sandbox this provider already holds the sidecars of (it created it, or connected it before) keeps them.
+        sidecar_ids = {} if sandbox_id in self._sidecars else descriptor.get("sidecar_ids") or {}
         try:
-            for name, sidecar_id in (descriptor.get("sidecar_ids") or {}).items():
+            for name, sidecar_id in sidecar_ids.items():
                 sidecars[name] = await self.connect({"sandbox_id": sidecar_id})
         except BaseException:
             # A sandbox whose sidecar is gone is not reattached. Release the local handles connected so far.
@@ -2036,7 +2042,22 @@ class OpenSandboxProvider:
             raise
         if sidecars:
             self._sidecars[sandbox_id] = sidecars
+            self._connected_sidecars.add(sandbox_id)
         return handle
+
+    async def disconnect_handle(self, handle: SandboxHandle) -> None:
+        """Release the sidecar handles ``connect`` made for a borrowed sandbox; the sandboxes keep running."""
+        if handle.sandbox_id not in self._connected_sidecars:
+            return
+        self._connected_sidecars.discard(handle.sandbox_id)
+        for sidecar in self._sidecars.pop(handle.sandbox_id, {}).values():
+            with suppress(Exception):
+                await self._await_sdk_call(
+                    sidecar.raw.close(),
+                    operation="close",
+                    sandbox_id=sidecar.sandbox_id,
+                    timeout_s=self._operations.close_timeout_s,
+                )
 
     async def pause(self, handle: SandboxHandle) -> None:
         """Pause a sandbox and wait until it reports paused.
@@ -3117,9 +3138,7 @@ class OpenSandboxProvider:
         effective_retries = self._command_retry_count() if retries is None else retries
 
         async def _dispatch() -> SandboxExecResult:
-            # A polled background command reports its output only once it ends, so a caller that follows stdout
-            # gets the streamed request.
-            if self._operations.background_exec and on_stdout is None:
+            if self._operations.background_exec:
                 return await self._exec_background(
                     handle,
                     effective_command,
@@ -3127,6 +3146,7 @@ class OpenSandboxProvider:
                     sdk_timeout_s=sdk_timeout_s,
                     total_timeout_s=timeout_s,
                     retries=effective_retries,
+                    on_stdout=on_stdout,
                 )
 
             run_kwargs: dict[str, Any] = {"opts": RunCommandOpts(**opts_kwargs)}
@@ -3331,6 +3351,7 @@ class OpenSandboxProvider:
         sdk_timeout_s: float | None,
         total_timeout_s: int | float | None,
         retries: int,
+        on_stdout: Callable[[str], None] | None = None,
     ) -> SandboxExecResult:
         """Register this command's poll for checkpoint polling scopes, and release it on every exit."""
         poll = _BackgroundCommandPoll(parked=handle.sandbox_id in self._parked_poll_scopes)
@@ -3344,6 +3365,7 @@ class OpenSandboxProvider:
                 total_timeout_s=total_timeout_s,
                 retries=retries,
                 poll=poll,
+                on_stdout=on_stdout,
             )
         finally:
             polls = self._command_polls[handle.sandbox_id]
@@ -3361,12 +3383,14 @@ class OpenSandboxProvider:
         total_timeout_s: int | float | None,
         retries: int,
         poll: _BackgroundCommandPoll,
+        on_stdout: Callable[[str], None] | None = None,
     ) -> SandboxExecResult:
         """Run a command as a background execution polled via short requests.
 
         The logs endpoint returns one combined stream, so unlike the foreground
         path ``stdout`` carries both streams and ``stderr`` is set only when the
-        sandbox itself reports an error.
+        sandbox itself reports an error. ``on_stdout`` receives that combined
+        output as each poll finds more of it.
 
         Gym enforces ``total_timeout_s`` itself: once its own deadline passes
         while the command is still running, it interrupts the command and
@@ -3428,6 +3452,8 @@ class OpenSandboxProvider:
         diagnostic_remaining_s = 0.0
         status_failure_error: NgFailureEvent | None = None
         seen_running = False
+        # How many bytes of the command's output `on_stdout` has received.
+        forwarded = 0
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
             # A parked sandbox is being snapshotted and may not answer: ask once the park ends,
@@ -3543,6 +3569,21 @@ class OpenSandboxProvider:
                 if status.running is False:
                     break
                 seen_running = True
+                if on_stdout is not None:
+                    try:
+                        new = await self._await_sdk_call(
+                            handle.raw.commands.get_background_command_logs(execution_id, forwarded),
+                            operation="command logs",
+                            sandbox_id=handle.sandbox_id,
+                            timeout_s=status_timeout_s,
+                        )
+                    except Exception as error:
+                        # Not the command's failure: a later poll, or the read at its end, forwards what this missed.
+                        LOGGER.debug("OpenSandbox command output not read while it runs: %r", error)
+                    else:
+                        if new.content:
+                            on_stdout(new.content)
+                            forwarded += len(new.content.encode())
                 if command_deadline is not None and not timed_out and loop.time() >= command_deadline:
                     timed_out = await self._interrupt_at_deadline(
                         handle, execution_id, timeout_s=command_timeout_s, request_timeout_s=status_timeout_s
@@ -3617,6 +3658,8 @@ class OpenSandboxProvider:
             logs = None
             output_deleted = True
         stdout = getattr(logs, "content", None) or None
+        if on_stdout is not None and stdout and (rest := stdout.encode()[forwarded:]):
+            on_stdout(rest.decode(errors="replace"))
         status_error = getattr(status, "error", None)
         stderr = status_error or None
         if output_deleted:
@@ -4085,20 +4128,27 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and its sidecars, and close local SDK resources."""
-        sidecars = self._sidecars.get(handle.sandbox_id)
+        sandbox_id = handle.sandbox_id
+        sidecars = self._sidecars.get(sandbox_id)
         if not sidecars:
-            self._sidecars.pop(handle.sandbox_id, None)
+            self._sidecars.pop(sandbox_id, None)
+            self._connected_sidecars.discard(sandbox_id)
             return await self._close_one(handle)
-        # Each is deleted whatever happens to the others. A sidecar that cannot be deleted stays registered, so a
-        # repeated close retries it.
-        results = await asyncio.gather(
-            self._close_one(handle), *map(self._close_one, sidecars.values()), return_exceptions=True
-        )
-        for name, result in zip(list(sidecars), results[1:]):
-            if not isinstance(result, BaseException):
+        # Each is deleted whatever happens to the others. One that cannot be deleted is retried by a repeated close,
+        # which leaves alone a main sandbox it has deleted: that one's SDK handle is closed.
+        members = [*sidecars.items(), *([] if sandbox_id in self._deleted_with_sidecars_left else [(None, handle)])]
+        results = await asyncio.gather(*(self._close_one(member) for _, member in members), return_exceptions=True)
+        for (name, _), result in zip(members, results):
+            if isinstance(result, BaseException):
+                continue
+            if name is None:
+                self._deleted_with_sidecars_left.add(sandbox_id)
+            else:
                 del sidecars[name]
         if not sidecars:
-            self._sidecars.pop(handle.sandbox_id, None)
+            del self._sidecars[sandbox_id]
+            self._connected_sidecars.discard(sandbox_id)
+            self._deleted_with_sidecars_left.discard(sandbox_id)
         for result in results:
             if isinstance(result, BaseException):
                 raise result
