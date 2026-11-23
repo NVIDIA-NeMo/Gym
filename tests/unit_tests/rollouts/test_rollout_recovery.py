@@ -223,9 +223,11 @@ def test_resume_allows_new_server_addresses_and_operational_options(saved_manife
         "resume_from_cache": True,
         "num_samples_in_parallel": 10,
         "count_missing_rollouts_as_zero": True,
+        "dispatch_reservation_interval_s": 0.0,
     }
     servers["policy"]["responses_api_models"]["vllm_model"].update(host="host-B", port=200, api_key="new")
     current = RunManifest.create(source, rows, config, servers)
+    assert current.config_digest == saved.config_digest
     assert validate_resume(path, current, materialized).run_id == saved.run_id
     assert "credential" not in path.read_text()
     assert "model-A" not in path.read_text()
@@ -418,6 +420,8 @@ def runner_config(tmp_path, monkeypatch):
         disable_aggregation=True,
         disable_health_check=True,
         num_samples_in_parallel=1,
+        # Rows dispatch one at a time; at 0 each reservation is written at once instead of an interval apart.
+        dispatch_reservation_interval_s=0.0,
     )
 
 
@@ -458,6 +462,7 @@ async def test_native_recovery_preserves_terminal_failures_and_unscored_completi
         max_resident_rollout_tasks=1,
         disable_aggregation=True,
         disable_health_check=True,
+        dispatch_reservation_interval_s=0.0,
     )
     await RolloutCollectionHelper().run_from_config(config)
     store = RolloutStore.read(Path(config.output_jsonl_fpath))

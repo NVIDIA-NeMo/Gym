@@ -1,0 +1,2 @@
+system: fixture judge
+user: "{prompt}\n{response}"

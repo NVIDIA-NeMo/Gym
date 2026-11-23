@@ -142,7 +142,7 @@ class LocalSandbox:
                 await process.wait()
         return SandboxExecResult(stdout.decode(errors="replace"), stderr.decode(errors="replace"), process.returncode)
 
-    async def disconnect(self):
+    async def disconnect(self, **_):
         self.events.append("disconnect")
         self.disconnected = True
 
