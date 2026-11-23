@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reuse the SOTA build stages and Slurm settings in NeMo-RL's worker environment.
+config_paths:
+  - benchmarks/nemotron_3.5_super/build_container_configs/nemo_rl_vllm.yaml
+
+# vllm: null
+mooncake: null
+flashinfer: null
+# vllm_router: null
+warmup: null
+run: null
