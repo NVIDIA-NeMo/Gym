@@ -941,15 +941,15 @@ async def run_page_check(function, *args):
 
 
 def build_page(raw: str, title: Any, final_url: str, max_chars: int) -> CachedPage:
-    """The page as served and cached: data URIs removed, the provider's title or else the first heading, and the
-    Markdown cut at ``max_chars`` (the protocol's cap, with the omitted count for the truncation indicator)."""
+    """The page as served and cached: data URIs removed, the Markdown cut at ``max_chars`` (the protocol's cap, with
+    the omitted count for the truncation indicator), and the provider's title or else the first heading of the cut
+    Markdown, so a heading past the cut is never served as the title."""
     markdown = _DATA_URI_RE.sub("[data URI removed]", raw)
+    omitted = max(len(markdown) - max_chars, 0)
+    markdown = markdown[:max_chars]
     if not isinstance(title, str) or not title.strip():
         title = markdown_heading_title(markdown)
-    omitted = max(len(markdown) - max_chars, 0)
-    return CachedPage(
-        final_url=final_url, title=cap_title(title.strip()), markdown=markdown[:max_chars], omitted=omitted
-    )
+    return CachedPage(final_url=final_url, title=cap_title(title.strip()), markdown=markdown, omitted=omitted)
 
 
 def content_block(blocklist: Blocklist, page: CachedPage) -> Optional[Block]:
@@ -1281,12 +1281,13 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
         return block or self._blocklist.text_block(snippet, "result snippet")
 
     def _log_block(self, tool: str, session_id: str, block: Block, dropped_result: bool = False) -> None:
-        """The protocol's audit log: every refusal and every dropped result with the family and rule that matched.
-        Both at WARNING, which Python's last-resort handler emits even where no root logger is configured (Gym's
-        server processes configure none), so the audit trail does not depend on --verbose."""
+        """The protocol's audit log ("log blocked calls and the matching rule"): every refusal at WARNING, which
+        Python's last-resort handler emits even where no root logger is configured (Gym's server processes
+        configure none). A dropped search result is the filter's routine work, up to ``max_results`` a search, so
+        it is logged at INFO with the same fields and shows only under --verbose."""
         subject = block.subject if block.family == QUESTION_SPAN_FAMILY else block.subject[:200]
         if dropped_result:
-            logger.warning(
+            logger.info(
                 "hle_web_tools dropped a %s result (session %s): family=%s rule=%r where=%s subject=%r",
                 tool,
                 session_id,

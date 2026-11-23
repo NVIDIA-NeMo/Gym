@@ -5,7 +5,7 @@
 # prepare_opencode_legacy.py. The published HLE-Diamond with-tools numbers (lastexam.ai/blog/hle-diamond) are over
 # all 1000 questions, so a 728-row number from opencode_hle_tools is not comparable with them; this preset has the
 # comparable denominator. Everything else is opencode_hle_tools.yaml's: agent, image, tool server, egress policy,
-# environment note and judge settings (question_extract_regex, max_output_tokens 4096, judge on loopback); a test
+# environment note, judge settings (question_extract_regex, max_output_tokens 4096) and loopback pins; a test
 # holds the two agents equal apart from `datasets` and the rest of the composition equal.
 #
 # Dataset: benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl, prompt_config null. Each row's

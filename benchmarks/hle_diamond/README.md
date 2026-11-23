@@ -258,11 +258,12 @@ Headline metric: `mean/reward`, accuracy over every evaluated row. Additional me
 - Coverage: the upstream harness divides by all 1000 questions and counts a failed API call or a
   missing judge verdict as incorrect, whereas `mean/reward` is over the rows present in the rollouts
   file (a failed `/run` ends the run by default, or is dropped from the score with
-  `++route_failures_to_sidecar=true`). To use the upstream denominator, run with
-  `++count_missing_rollouts_as_zero=true` (and `'++count_failure_classes_as_zero=[agent_run_error]'`
-  when failures are routed to the sidecar) and report `coverage/imputed`; otherwise compare the
-  rollouts file's row count with 1000 (728 for the text configs) and report rows evaluated / 1000
-  next to every accuracy.
+  `++route_failures_to_sidecar=true`). `++count_missing_rollouts_as_zero=true` counts a rollout that left
+  no row as wrong and reports the count as `coverage/imputed`; a failed rollout recorded in the failures
+  sidecar stays out of `mean/reward` (`coverage/failed/<class>`) unless its class is named in
+  `count_failure_classes_as_zero`. The upstream denominator is reached only when every row is scored:
+  resume until `coverage/scored` equals 1000 (728 for the text configs), and otherwise report rows
+  evaluated / 1000 next to every accuracy.
 
 Upstream also reports a calibration error from the model's stated confidence; it is not computed here.
 
@@ -576,7 +577,8 @@ Before treating a run as comparable, check on the pilot rows:
 - The judge is the dedicated one: `judge_evaluations[*].response.model` echoes the requested alias
   (`azure/openai/o3-mini` by default; the served snapshot is not verifiable, so record the alias and
   the run date), and `judgement_parsing_issue_rate` is near zero.
-- Coverage: rows evaluated / 1000, or `coverage/imputed` with the upstream denominator (see Scoring).
+- Coverage: rows evaluated / 1000 (`coverage/scored`), with `coverage/imputed` and `coverage/failed/<class>`
+  when not every row is scored (see Scoring).
 
 ### Sandboxed presets on a local Docker host
 
@@ -1111,16 +1113,19 @@ reference image (`OPENCODE_REFERENCE_SANDBOX_IMAGE`, default `gym-opencode-hle-r
 granted instead. The Environment Server seeds the `web_tools` server for every episode with the row
 (`/seed_session` reads the question from `task_data`) and grants its MCP tools from the agent's
 `tool_servers`; the sandbox reaches the tool server by address (`absolute_ip_server_types` adds the
-Resources servers) while the judge resources server and, with `judge_openai.yaml`, the judge model pin
-`host: 127.0.0.1`, so the sandbox reaches exactly the model server's host and the tool server's;
+Resources servers) while the judge resources server (`config.yaml`, every preset), the judge model
+(`judge_openai.yaml`) and the Environment Server (this preset) pin `host: 127.0.0.1`, so the sandbox
+reaches exactly the model server's host and the tool server's, with or without an explicit `default_host`;
 `web_fetch` of a long page or PDF gets `mcp_tool_timeout_seconds: 300`; the effort travels on the model
 server's `extra_body` (Prompting > Reasoning effort); and the rows and aggregate are the session presets'
 (Reading sandboxed results). The judge, on this preset only, runs as upstream's: `[question]` is the bare
 question (`question_extract_regex` cuts the folded instruction off) and the call is capped at
 `max_output_tokens: 4096` (Scoring). Run it with `TAVILY_API_KEY` exported in the shell that starts the
-servers; the `++count_missing_rollouts_as_zero=true` flag gives upstream's denominator (every row, a
-failed call counted as wrong; add `'++count_failure_classes_as_zero=[agent_run_error]'` when failures
-are routed to the sidecar) and `coverage/imputed` says how many rows it imputed:
+servers; the `++count_missing_rollouts_as_zero=true` flag counts a rollout that left no row as wrong and
+`coverage/imputed` says how many it imputed. A failed session rollout is a failures-sidecar row instead
+(`environment_server_failed` or the agent's failure kind), stays out of `mean/reward` and shows under
+`coverage/failed/<class>`, so resume the run until `coverage/scored` equals the row count before comparing
+with upstream's denominator:
 
 ```bash
 export TAVILY_API_KEY=...   # the web_tools server's search and extraction backend
@@ -1178,8 +1183,8 @@ all at upstream commit `22ed3074b1e7b134bcbc09028d0ba320839b0655`: <!-- pragma: 
 | §2 No specialist solvers, chess engines, OCR tools or task libraries | matched | Only `ripgrep` is added; a test scans the Dockerfile and lock for forbidden tokens, and the offline verification found none. The OpenCode binary and its plugin files are harness-side, as upstream's vendor CLIs are. |
 | §2 (implicit) The model is told nothing beyond what the harness says | cannot match exactly | A two-sentence environment note is appended to OpenCode's instructions: internet disabled, the two tools by the names OpenCode shows (`web_tools_web_search`, `web_tools_web_fetch`), Python 3.11 and the twelve packages. It names nothing the image lacks (tested); state it next to every number. |
 | §3 Expose only `web_search(query)` and `web_fetch(url)` | matched | The MCP token lists exactly the two; the server refuses to start with any other set. OpenCode shows them as `<grant>_<tool>` (`web_tools_web_search`, `web_tools_web_fetch`); upstream states no naming requirement for its wrapper. |
-| §3 `web_search`: URLs, titles, snippets; at most 20 results per call before filtering | matched | Tavily `/search` with `max_results` 20 (bounded `le=20`), no answer, no page bodies, no images; survivors at most 20. |
-| §3 `web_fetch`: main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | matched | Tavily `/extract` in Markdown; cut at 60,000 with `[Content truncated at 60,000 characters; N characters omitted]`; a page of any length is served cut (no size refusal); `data:` URIs removed, `include_images: false`; `max_fetch_chars` cannot exceed 60,000. Unverified: PDF rendering is Tavily's and no live PDF fetch is recorded. |
+| §3 `web_search`: URLs, titles, snippets; at most 20 results per call before filtering | matched (server) / harness analogue (what the model sees) | Tavily `/search` with `max_results` 20 (bounded `le=20`), no answer, no page bodies, no images; survivors at most 20. A reply over 50 KiB reaches the model as an empty preview and a saved-file path (the `web_fetch` row): 52 of 7,521 search replies, in 26 rows, in the 2026-11-18 pilot. |
+| §3 `web_fetch`: main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | matched (server) / harness analogue (what the model sees) | Tavily `/extract` in Markdown; cut at 60,000 with `[Content truncated at 60,000 characters; N characters omitted]`; a page of any length is served cut (no size refusal); `data:` URIs removed, `include_images: false`; `max_fetch_chars` cannot exceed 60,000. Unverified: PDF rendering is Tavily's and no live PDF fetch is recorded. OpenCode 1.17.11 receives the reply as one line of JSON (MCP structured content) and keeps only whole lines up to 50 KiB, so any reply over 50 KiB (every cut page, and uncut pages above about 51,000 bytes) reaches the model as an empty preview plus the path of a saved file. Read and Grep show only the first 2,000 characters of that one-line file; the rest is reachable only through `bash`. In the 2026-11-18 pilot 356 of 2,115 fetch replies, in 210 rows, hit this. |
 | §3 Load `docs/blocklist.json` | matched | Byte-exact copy (SHA-256 `3abaf35e…6575`), digest checked at start; all seven families present, unknown families rejected. |
 | §3 `domains`: exact hostnames and all their subdomains | matched | Host or `.`-suffix match after UTS #46/IDNA normalisation, on requested, returned, redirected and wrapped URLs and `site:` operands. |
 | §3 `url_prefixes`: URL prefixes, ignoring case, scheme and leading `www.` removed | matched | As written plus the canonical form; a prefix with a query also matches its `key=value` pairs in any order (a superset). |
@@ -1190,19 +1195,19 @@ all at upstream commit `22ed3074b1e7b134bcbc09028d0ba320839b0655`: <!-- pragma: 
 | §3 `answer_title_allow_hosts`: exempt from `answer_title_patterns` only | matched | Host or subdomain short-circuits the answer-title check only; every other family still applies. |
 | §3 `web_search`: check the query before the backend; filter every result by URL, title and snippet; refuse a blocked `site:` domain or a long verbatim span of the question | matched | Query check before the Tavily call; per-result filter; `site:` operands parsed to hostnames (a non-hostname operand is refused); span rule at 8 consecutive words (upstream states no length; the 8 is Gym's choice); a session without a seeded question fails closed. |
 | §3 `web_fetch`: check the URL before fetching, including blocked URLs inside proxy/archive links after percent-decoding; after fetching check title and Markdown; apply to cached responses too | matched | Breadth-first expansion through percent-decoding, WHATWG normalisation and archive/proxy wrappers before any fetch; the final URL, title and Markdown as served are checked on fresh fetches and on cache hits (a blocklist change evicts a cached page). |
-| §3 Log blocked calls and the matching rule for auditing | matched | Every refusal and every dropped result at WARNING with family, rule, where and a 200-character subject, emitted without `--verbose`. |
+| §3 Log blocked calls and the matching rule for auditing | matched | Every refusal at WARNING with family, rule, where and a 200-character subject, emitted without `--verbose`. Dropped search results are logged with the same fields at INFO, shown only under `--verbose`. |
 | §4 Run each model through its provider's harness (Claude Code 2.1.278/2.1.280, Codex CLI 0.155.1, Gemini CLI 0.60.0, Muse Code 1.3.0) | cannot match | OpenCode 1.17.11 (binary digest checked in the sandbox and at image build) for every model, with OpenCode's own system prompt ahead of the instruction. The harness mapping below says what each row would take in Gym. |
 | `run_model_predictions.py`: `SYSTEM_PROMPT` verbatim | matched (text) / cannot match (placement) | The text is byte-exact (tested). Upstream sends it as the system message with the bare question as the user message; here it follows the question in one user message behind OpenCode's native prompt. Upstream's with-tools runs went through vendor CLIs whose prompt delivery is undocumented, so no placement is provably theirs; this one is stated. |
-| `run_judge_results.py`: `JUDGE_PROMPT`, structured `correct: yes\|no` | matched (criteria) / cannot match (parse) | `benchmarks/hle/prompts/judge.txt` carries the same criteria with three label renames (`Judgement:`, `Reasoning:`, `Confidence:`), upstream's `0|\%|` / `100|\%|` spelled `0%` / `100%`, and one blank line fewer; the verdict is the last `Judgement: yes\|no` label in free text, case-insensitive, not a schema-enforced field. |
+| `run_judge_results.py`: `JUDGE_PROMPT`, structured `correct: yes\|no` | matched (criteria) / cannot match (parse) | `benchmarks/hle/prompts/judge.txt` carries the same criteria with three label renames (`Judgement:`, `Reasoning:`, `Confidence:`), upstream's `0\|\%\|` / `100\|\%\|` spelled `0%` / `100%`, and one blank line fewer; the verdict is the last `Judgement: yes\|no` label in free text, case-insensitive, not a schema-enforced field. |
 | Judge model `o3-mini-2025-01-31` | cannot match (snapshot) | Compose `judge_openai.yaml` (every documented run line does); `HLE_DIAMOND_JUDGE_MODEL` defaults to the gateway alias `azure/openai/o3-mini`, whose served snapshot is neither pinned nor echoed. Record alias and run date. Without the override the policy grades itself. |
-| Judge call: `max_completion_tokens=4096`, one user message, no system message; `[question]` is `question['question']` | matched (this preset) | `judge_responses_create_params.max_output_tokens: 4096`, `judge_system_message: ""`, and `question_extract_regex` cuts the folded instruction so the judge sees the bare question. A verdict cut off by the cap scores 0 as `no_verdict`, as upstream. |
+| Judge call: `max_completion_tokens=4096`, one user message, no system message; `[question]` is `question['question']` | matched (this preset) | `judge_responses_create_params.max_output_tokens: 4096`, `judge_system_message: ""`, and `question_extract_regex` cuts the folded instruction so the judge sees the bare question. A reply cut off by the cap is not retried: with no label it scores 0 (`truncated_judge_output`, plus `no_verdict`, or `unparseable_judge_output` when the cut falls in the reasoning), and a label written before the cut counts. Upstream's structured parse raises on a length finish, so the row stays unjudged (wrong in that pass) until the judge is rerun. |
 | `[response]` is the model's whole completion | harness analogue | The last assistant message of the OpenCode session (upstream does not say what text was judged for the CLI harnesses). |
 | Confidence extracted by the judge; calibration error reported | cannot match | Not computed; `reward` is the accuracy only. |
-| Accuracy over every question (`n` = all rows; a failed call counts as wrong); Wald 95 % half-width | matched (denominator) / own interval | The documented run line passes `++count_missing_rollouts_as_zero=true` (add `'++count_failure_classes_as_zero=[agent_run_error]'` with `++route_failures_to_sidecar=true`) and reports `coverage/imputed`; Gym's reward profile emits its own confidence interval, not upstream's Wald half-width. |
+| Accuracy over every question (`n` = all rows; a failed call counts as wrong); Wald 95 % half-width | matched when every row is scored / own interval | Upstream reruns failed calls and divides by all questions; here resume the run until every row is scored and report `coverage/scored` / 1000. `++count_missing_rollouts_as_zero=true` imputes only rollouts that left no row: a failed session rollout is a failures-sidecar row (`environment_server_failed` or the agent's failure kind, not `agent_run_error`), stays out of `mean/reward` and shows under `coverage/failed/<class>`. Gym's reward profile emits its own confidence interval, not upstream's Wald half-width. |
 | HLE-Diamond: 1,000 questions, 272 with an image | harness analogue (`opencode_hle_tools_full`, run 2026-11-18 on local Docker) / cannot match (`opencode_hle_tools`) | `opencode_hle_tools_full` runs all 1000 rows on this agent with the dataset's bytes and no `detail`, but not with upstream's `[text, image_url]` content: OpenCode routes the staged file through its Read tool, so the model's first message carries two synthetic text parts, the image and the staged path ahead of the question text (Image questions through OpenCode). A vision-capable policy model is required. `opencode_hle_tools` runs the 728 text rows: report 728/1000 next to every number from it. |
 | No temperature sent | matched | The preset and its chain set none; OpenCode forwards one only when the request carries it. On `vllm_model`, confirm `sampling_overrides` carry none. |
 | Output budget (no with-tools figure; `>= 8192` recommended for reasoning models) | matched where stated | 32,768 output tokens per call in a 229,376 context, 14,400 s run budget, OpenCode's default step cap and compaction. |
-| "All models are evaluated with reasoning high" | matched (OpenAI-style) / cannot assert (Claude via gateway) | `++policy_model.responses_api_models.<model>.extra_body.reasoning_effort=high` on the run line, verified in the model-call capture; Claude models through this gateway ignore the parameter. |
+| "All models are evaluated with reasoning high" | matched (OpenAI-style) / cannot assert (Claude via gateway) | `++policy_model.responses_api_models.<model>.extra_body.reasoning_effort=high` on the run line; check it in the run's `*_resolved_config.yaml`, not in the model-call capture, which records OpenCode's request before the model server adds `extra_body` (Reading sandboxed results > Confirm effort); Claude models through this gateway ignore the parameter. |
 | One prediction per question, no repeats | matched | `num_repeats: 1`, `--num-repeats 1`. |
 | Single judge pass; correct iff `yes` | matched | `check_twice_swap: false`, `use_per_record_regex: false`; the last label decides. |
 
@@ -1246,8 +1251,10 @@ as `family=question_span rule='8 consecutive words of the question' where=query 
 manual `web_fetch` of a Hugging Face dataset page was refused as a blocked site. The server-side
 checks hold on the session harness (the server's tests cover the episode seed and the MCP grant), but
 that pilot ran another harness on another image with open egress, so its 3/5 says nothing about this
-preset. The pilot below ran it as it now is on the session harness and the reference image, on local Docker
-with open egress; no OpenSandbox run exists.
+preset. The pilot below ran it on the session harness and the reference image, on local Docker with open
+egress, and differed from the preset as committed in two ways: the model read the local-Docker note in
+place of the preset's own, and each row had 2,400 s and 120 OpenCode steps (the preset: 14,400 s, no step
+cap). No OpenSandbox run exists.
 
 **Acknowledged Docker pilot, 2026-11-18** (the acknowledged command of Sandboxed presets on a local Docker
 host with `--model-type litellm_model`, GPT-6 Astra `azure/openai/gpt-6-astra` with `reasoning_effort: high`
@@ -1261,12 +1268,33 @@ rows at the timeout. The 272 image rows through the same composition with the da
 process exited; every first policy call carried the image as described above. Composed over all 1,000
 questions, two runs of one configuration: **827/1000 = 82.7 %** against the published 82.9 % for GPT-6
 Astra with tools (knowledge 403/500 = 80.6 %, reasoning 424/500 = 84.8 %). Captured tool calls were
-`hle_tools_web_search` and `hle_tools_web_fetch` plus OpenCode's native tools, no other web tool; the
-reference note was in every request, SageMath, Lean and `/opt/science` in none. 48 of the 1,000 rows end
-with the agent asking the user a question instead of an `Answer:` line, as an interactive coding agent
-does when it cannot verify; upstream's protocol adds no nudge and neither does this preset. One run, one
-repeat, no confidence interval, open egress: a comparison, not a reproduction (Reference preset >
-OpenSandbox gate).
+`hle_tools_web_search` and `hle_tools_web_fetch` plus OpenCode's native tools, `bash` among them. Every
+agent turn (7,164 requests; the 130 context-compaction requests carry OpenCode's summarisation prompt and
+no note) carried the local-Docker note, which tells the model "Direct internet access from this machine
+is NOT restricted", in place of the preset's own; SageMath, Lean and `/opt/science` were in none. 48 of
+the 1,000 rows end with the agent asking the user a question instead of an `Answer:` line, as an
+interactive coding agent does when it cannot verify; upstream's protocol adds no nudge and neither does
+this preset. One run, one repeat, no confidence interval, open egress: a comparison, not a reproduction
+(Reference preset > OpenSandbox gate).
+
+**What the open egress let through** (two independent audits of the pilot's saved tool calls, which agree
+to within a few rows). The image ships `requests` and nothing stopped `bash` from reaching the web, so the
+pilot is not a result of the two tools alone. 134 to 137 of the 1,000 rows attempted a network call from
+`bash`. 102 rows fetched web content directly with `requests` or `urllib` (both audits; 109 in either), and
+they scored 68/102 = 66.7 % against 759/898 = 84.5 % for the rest. 57 rows installed packages (56 with
+`pip`, 12 with `apt`; the audits counted 51 and 55, each missing some quiet installs), which upstream's
+protocol forbids. 10 rows fetched a chess engine (Stockfish or Fairy-Stockfish: 5 through GitHub's release
+API, one of which downloaded and ran the release binary, and 8 as the Debian package), one GNU Go and one
+a Lean 4.24.0 toolchain, which it forbids as chess engines and specialist solvers. At least 12 rows
+reached hosts the blocklist refuses, all `github.com` or `githubusercontent.com` (engine releases, word
+lists, fonts, one repository README, and the Lean toolchain through a redirect; redirects were not
+otherwise tracked); no URL or command matched a benchmark-leak rule. Under OpenSandbox's deny-all policy
+none of these calls leaves the sandbox. Separately, OpenCode hid long tool replies from the model (fidelity table, `web_fetch`
+row): 356 of 2,115 `web_fetch` replies in 210 rows, and 52 of 7,521 `web_search` replies in 26 rows,
+arrived as an empty preview and a saved-file path. That is every page the server cut at 60,000 characters
+and at least 46 shorter ones; the model recovered more than the first 2,000 characters of 39 of the 356,
+through `bash`. Rows with a hidden fetch scored 166/210 = 79.0 % against 661/790 = 83.7 % for the rest.
+
 The pilot ran before the tool server was renamed from `hle_tools` to `web_tools`: the model saw the tools
 as `hle_tools_web_search` and `hle_tools_web_fetch`, and a refusal began "Refused by the HLE web-tool
 policy" (the local-Docker note names no tool). The names and the refusal text no longer mention the
@@ -1301,7 +1329,8 @@ same-settings passes; 5 rows differ from both of those passes (2 down, 3 up), ea
 equivalence call under a normal `Judgement:` line, none decided on format. The cap changed no verdict:
 no judge call under this preset's settings came within 1,900 tokens of it and none ended incomplete. One
 uncapped call spent 4,702 tokens (4,480 of reasoning) on a row all three passes score correct, so a
-cut-off verdict is possible under the cap, as it is upstream, and was not observed. The earlier settings
+cut-off reply is possible under the cap, as it is upstream, and was not observed (the handling differs:
+here the reply is scored at once, upstream leaves the row unjudged until a rerun). The earlier settings
 have one pass, so the 2- to 3-row difference in the totals is not itself significant; the `no_verdict`
 mechanism is. Every other OpenCode and Pi preset (session, full and legacy) leaves
 `question_extract_regex` unset and sends the judge the same folded message as the third row.

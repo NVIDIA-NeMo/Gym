@@ -5,7 +5,8 @@
 # docs/blocklist.json (all seven rule families, query and fetch refusals, content re-checks) with Tavily as the
 # search and extraction backend. The Environment Server seeds the web_tools server for every episode and grants
 # its MCP tools to the agent (the agent's tool_servers); the sandbox reaches only the model server and that
-# server (the judge servers are pinned to loopback below). This is the preset that follows upstream's protocol
+# server (the judge servers and the Environment Server are pinned to loopback: config.yaml, judge_openai.yaml
+# and the end of this file). This is the preset that follows upstream's protocol
 # (sections 1-3) on every point Gym controls; benchmarks/hle_diamond/README.md > Sandboxed agents (with tools)
 # > Upstream web tools carries the fidelity table, requirement by requirement, against upstream commit
 # 22ed3074b1e7b134bcbc09028d0ba320839b0655.
@@ -44,16 +45,25 @@ hle_diamond_opencode_reference_agent:
 # - the judge's [question] is the bare dataset question. prompts/opencode.yaml folds the answer-format instruction
 #   after the question in the one user message, so the regex cuts it off (first capture group; no match leaves
 #   the text whole, so a bare question passes through unchanged);
-# - the judge call is capped at 4096 output tokens (upstream: max_completion_tokens=4096). A verdict cut off by
-#   the cap scores 0 as no_verdict, as it would upstream;
-# - the judge server stays on loopback: absolute_ip_server_types moves every Resources server to the routable
-#   address so the sandbox can reach web_tools, and a server's own host wins over that, so the sandbox reaches
-#   exactly the model server and web_tools (judge_openai.yaml pins its judge model the same way).
+# - the judge call is capped at 4096 output tokens (upstream: max_completion_tokens=4096). A reply cut off by
+#   the cap is not retried: with no label it scores 0 (truncated_judge_output, plus no_verdict, or
+#   unparseable_judge_output when the cut falls in the reasoning), and a label written before the cut counts.
+#   Upstream's structured parse raises on a length finish, so the row stays unjudged (wrong in that pass)
+#   until the judge is rerun.
+# The judge server itself stays on loopback on every preset (config.yaml pins its host, judge_openai.yaml its
+# judge model's): absolute_ip_server_types moves every Resources server to the routable address so the sandbox
+# can reach web_tools, and a server's own host wins over that.
 hle_diamond_equivalence_llm_judge_resources_server:
   resources_servers:
     equivalence_llm_judge:
-      host: 127.0.0.1
       question_extract_regex: '^(.*?)\n\nYour response should be in the following format:'
       judge_responses_create_params:
         input: []
         max_output_tokens: 4096
+# The Environment Server stays on loopback too: an explicit default_host moves every server that sets no host of
+# its own to that address, and the sandbox must reach only the model server and web_tools. Only the collector
+# calls its /run, from the Gym host.
+hle_diamond_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      host: 127.0.0.1

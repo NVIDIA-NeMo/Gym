@@ -111,9 +111,9 @@ async def test_domains_rule_drops_results_from_blocked_hosts_and_their_subdomain
             result("https://example.com/ok", snippet="kept"),
         ],
     )
-    # Dropped results are audit log lines like refusals (the protocol: "log blocked calls and the matching rule"),
-    # so they go out at WARNING, which Python's last-resort handler emits even where Gym configures no root logger.
-    with caplog.at_level(logging.WARNING, logger=module.__name__):
+    # A dropped result is the filter's routine work (up to 20 a search), not a blocked call: it is logged with the
+    # matching rule at INFO, shown under --verbose, and never at WARNING, which prints by default.
+    with caplog.at_level(logging.INFO, logger=module.__name__):
         response = await search(server, "riemann surfaces")
     assert response.result_count == 1
     assert "example.com/ok" in response.text
@@ -122,9 +122,7 @@ async def test_domains_rule_drops_results_from_blocked_hosts_and_their_subdomain
         "dropped a web_search result (session session-a): family=domains rule='hf.co' where=result URL" in caplog.text
     )
     assert "family=domains rule='huggingface.co'" in caplog.text
-    assert all(
-        record.levelno == logging.WARNING for record in caplog.records if "dropped a web_search" in record.message
-    )
+    assert all(record.levelno == logging.INFO for record in caplog.records if "dropped a web_search" in record.message)
 
 
 async def test_url_prefix_rule_ignores_case_scheme_and_leading_www(server, caplog):
@@ -547,7 +545,7 @@ async def test_long_urls_and_headings_are_handled_in_linear_time(server, url, pa
     assert response.refused is (page is None)
     assert backend.extract.await_count == (0 if page is None else 1)
     if page is not None:
-        assert response.text.startswith("Title: a ")
+        assert response.text.startswith("Title: a\n")  # the heading as served: cut at the cap with the page
 
 
 @pytest.mark.parametrize("title", ["x" + " " * 20_000 + "y", "a | " * 5_000], ids=["blank-run", "separators"])
@@ -638,22 +636,36 @@ async def test_pages_longer_than_the_cap_are_served_cut_and_checked_as_served(se
     assert (
         refused.refused
         and "blocked pattern" in refused.text
+        and "HLE" not in refused.text  # the model is not told the benchmark's name
         and "https://example.com/inside" not in server._page_cache
     )
-    stub_backend(server, page="# HLE answers\n\n" + "z" * 70_000)
-    assert (await fetch(server, "https://example.com/title")).refused  # the title is checked whatever the length
+    # The provider's title is checked on its own: it refuses a page whose served Markdown is clean.
+    titled = {"url": "https://example.com/title", "title": "HLE answers", "raw_content": "z" * 70_000}
+    stub_backend(server).extract = AsyncMock(return_value={"results": [titled]})
+    assert (await fetch(server, "https://example.com/title")).refused
+    # Without a provider title the title is the first heading of the served Markdown: a heading past the cut is
+    # neither served as the title nor checked.
+    stub_backend(server, page="v" * 60_010 + "\n# HLE answers\n\nbody")
+    late = await fetch(server, "https://example.com/late-heading")
+    assert not late.refused and late.text.startswith("URL: ") and "HLE answers" not in late.text
     # The cut page is what the cache holds and what the cache-hit recheck sees.
     backend = stub_backend(server, page="w" * 70_000)
     first = await fetch(server, "https://example.com/cached")
     second = await fetch(server, "https://example.com/cached")
     assert backend.extract.await_count == 1 and first.text == second.text and second.truncated
+    server._blocklist.patterns_case_sensitive.append(re.compile(r"w{60001}"))
+    assert (await fetch(server, "https://example.com/cached")).text == first.text  # past the cut: never served
     server._blocklist.patterns_case_sensitive.append(re.compile(r"w{60000}"))
     assert (await fetch(server, "https://example.com/cached")).refused
 
 
-def test_the_fetch_cap_cannot_exceed_the_protocols():
+async def test_the_fetch_cap_cannot_exceed_the_protocols():
     """max_fetch_chars is a deployment knob below the protocol's 60,000, never above it (as max_results is)."""
-    assert make_server(max_fetch_chars=1_000).config.max_fetch_chars == 1_000
+    lowered = make_server(max_fetch_chars=1_000)
+    stub_backend(lowered, page="x" * 1_500)
+    served = await fetch(lowered, "https://example.com/long")
+    assert served.truncated and "x" * 1_000 in served.text and "x" * 1_001 not in served.text
+    assert served.text.endswith("[Content truncated at 1,000 characters; 500 characters omitted]")
     with pytest.raises(ValidationError):
         make_server(max_fetch_chars=module.PROTOCOL_MAX_FETCH_CHARS + 1)
 

@@ -533,11 +533,13 @@ class TestConfigs:
         differing = {key for key in set(agent_dict) | set(reference) if agent_dict.get(key) != reference.get(key)}
         assert differing - {"port"} == {"tool_servers", "system_prompt"}
 
-    def test_hle_tools_sandbox_reaches_exactly_the_model_server_and_the_tool_server(self, monkeypatch):
-        """`absolute_ip_server_types` moves every model and Resources server to the routable address, which the
-        egress policy then opens on every port. The judge resources server (preset) and the judge model
-        (judge_openai.yaml) pin their own loopback host, and a server's own host wins over the type-scoped
-        address, so the sandbox reaches exactly two hosts' ports: the model server's and web_tools'."""
+    @pytest.mark.parametrize("default_host", [None, "192.0.2.20"], ids=["resolved_address", "explicit_default_host"])
+    def test_hle_tools_sandbox_reaches_exactly_the_model_server_and_the_tool_server(self, monkeypatch, default_host):
+        """`absolute_ip_server_types` moves every model and Resources server to the routable address, and an
+        explicit `default_host` moves every server without a host of its own; the egress policy then opens that
+        address on every port. The judge resources server (config.yaml), the judge model (judge_openai.yaml) and
+        the Environment Server (preset) pin their own loopback host, and a server's own host wins either way, so
+        the sandbox reaches exactly two servers: the model server and web_tools."""
         import nemo_gym.config.global_config as global_config
         from nemo_gym.config import GlobalConfigDictParser
 
@@ -558,6 +560,7 @@ class TestConfigs:
                     "benchmarks/hle_diamond/judge_openai.yaml",
                 ]
             },
+            {"default_host": default_host} if default_host else {},
         )
         # The full parse (not the offline listing parse, which skips the use_absolute_ip host lookup).
         config = GlobalConfigDictParser().parse(
@@ -569,17 +572,15 @@ class TestConfigs:
             )
         )
 
+        # Every started server, not a list of names: a server added to the composition must not take the routable
+        # address unnoticed.
         hosts = {
-            name: get_first_server_config_dict(config, name)["host"]
-            for name in ("policy_model", "web_tools", JUDGE_SERVER, "hle_diamond_judge_model", REFERENCE_AGENT)
+            instance.name: instance.get_inner_run_server_config_dict()["host"]
+            for instance in GlobalConfigDictParser().filter_for_server_instance_configs(config)
         }
-        assert hosts == {
-            "policy_model": "192.0.2.20",
-            "web_tools": "192.0.2.20",
-            JUDGE_SERVER: "127.0.0.1",
-            "hle_diamond_judge_model": "127.0.0.1",
-            REFERENCE_AGENT: "127.0.0.1",
-        }
+        assert {name for name, host in hosts.items() if host != "127.0.0.1"} == {"policy_model", "web_tools"}
+        assert hosts["policy_model"] == hosts["web_tools"] == "192.0.2.20"
+        assert {JUDGE_SERVER, "hle_diamond_judge_model", REFERENCE_AGENT} <= set(hosts)
         assert config["head_server"]["host"] == "127.0.0.1"
 
     def test_hle_tools_judge_reads_the_bare_question_under_upstreams_output_cap(self):
@@ -589,7 +590,6 @@ class TestConfigs:
         from resources_servers.equivalence_llm_judge.app import _extract_question_text
 
         judge = get_first_server_config_dict(_resolve("opencode_hle_tools.yaml"), JUDGE_SERVER)
-        assert judge["host"] == "127.0.0.1"
         assert OmegaConf.to_container(judge["judge_responses_create_params"]) == {
             "input": [],
             "max_output_tokens": 4096,

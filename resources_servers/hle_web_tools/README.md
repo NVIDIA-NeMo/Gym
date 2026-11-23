@@ -39,7 +39,7 @@ from that preset.
 | Tool | Protocol | Here |
 | --- | --- | --- |
 | `web_search(query)` | URLs, titles and snippets; at most 20 results per call before filtering | Tavily `/search` with `max_results: 20`, `search_depth: advanced`, no generated answer, no page bodies, no images; every result is filtered by URL, title and snippet; the survivors (at most 20) are rendered as `[n] title / URL / Snippet`, a title longer than 1,000 characters cut with `…` (the text families still see the whole title) |
-| `web_fetch(url)` | main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | Tavily `/extract` with `format: markdown` (PDF rendering is Tavily's, unverified live); `data:` URIs (base64 or percent-encoded, with or without a media type of at most 127 characters per type and subtype, and with up to 16 `name=value` media-type parameters, each name at most 127 characters and each value at most 256; a URI past these bounds is left in place) are replaced by `[data URI removed]` up to the first whitespace, quote, `)` or `>`, so a payload wrapped over several lines keeps its later lines; the Markdown is cut at `max_fetch_chars` (60,000) with `[Content truncated at 60,000 characters; N characters omitted]`; the `Title:` line above it (the provider's title, else the first heading) is cut at 1,000 characters with `…` |
+| `web_fetch(url)` | main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | Tavily `/extract` with `format: markdown` (PDF rendering is Tavily's, unverified live); `data:` URIs (base64 or percent-encoded, with or without a media type of at most 127 characters per type and subtype, and with up to 16 `name=value` media-type parameters, each name at most 127 characters and each value at most 256; a URI past these bounds is left in place) are replaced by `[data URI removed]` up to the first whitespace, quote, `)` or `>`, so a payload wrapped over several lines keeps its later lines; the Markdown is cut at `max_fetch_chars` (60,000) with `[Content truncated at 60,000 characters; N characters omitted]`; the `Title:` line above it (the provider's title, else the first heading of the Markdown as served, so never one past the cut) is cut at 1,000 characters with `…` |
 
 Tavily is the backend for both, a difference from upstream's wrapper next to the sandbox-seeded session
 residual above: the protocol does not name a search or extraction provider, so which
@@ -160,7 +160,7 @@ Beyond the families, the protocol's own refusals:
   ("check both the title and Markdown" of a response "capped at 60,000 characters"). A page is never
   refused for its length: a page of any size is served cut, with the truncation indicator, and text past
   the cut is neither served nor checked. That bounds the scan at the cap. The page work (sanitizing, the
-  heading fallback for the title, the cut, the content checks, and the rechecks on a cache hit) runs in a
+  cut, the heading fallback for the title from the cut Markdown, the content checks, and the rechecks on a cache hit) runs in a
   pool of two worker processes started with `spawn`, not on the event loop. A thread would not do:
   Python's `re` keeps the GIL for a whole scan, and the scan of an adversarial page takes about 0.25 s
   (60,000 characters of `抱抱脸` against the pinned blocklist); the data-URI pass over the whole provider
@@ -173,14 +173,22 @@ Beyond the families, the protocol's own refusals:
   the same final-URL, title and content checks on a hit, so a policy that changes after a page was cached
   still applies.
 
-Every refused call and every search result dropped by the filter is logged at WARNING with the tool,
-the session, the family, the rule, where it matched and the first 200 characters of the matched subject
-(the protocol's "log blocked calls and the matching rule for auditing"; WARNING because Python's
-last-resort handler emits it even where, as in Gym's server processes, no root logger is configured):
+Every refused call is logged at WARNING with the tool, the session, the family, the rule, where it
+matched and the first 200 characters of the matched subject (the protocol's "log blocked calls and the
+matching rule for auditing"). Gym's server processes configure no root logger, so Python's last-resort
+handler prints the line to stderr with no level, logger name or time, behind Gym's `(<server name>)` prefix:
 
 ```text
-WARNING hle_web_tools blocked a web_search call (session 3f...): family=question_span rule='8 consecutive words of the question' where=query subject='8 words'
-WARNING hle_web_tools dropped a web_search result (session 3f...): family=domains rule='huggingface.co' where=result URL subject='https://huggingface.co/datasets/...'
+(web_tools) hle_web_tools blocked a web_search call (session 3f...): family=question_span rule='8 consecutive words of the question' where=query subject='8 words'
+```
+
+A search result dropped by the filter is logged with the same fields at INFO (up to 20 lines a search),
+so it appears only when the run sets `--verbose`, where both kinds of line carry the level and the logger
+(`__main__`: the server runs as a script):
+
+```text
+(web_tools) WARNING:__main__:hle_web_tools blocked a web_search call (session 3f...): family=question_span rule='8 consecutive words of the question' where=query subject='8 words'
+(web_tools) INFO:__main__:hle_web_tools dropped a web_search result (session 3f...): family=domains rule='huggingface.co' where=result URL subject='https://huggingface.co/datasets/...'
 ```
 
 The model reads a refusal that names the reason at the family level ("the source is a blocked site",
@@ -238,8 +246,9 @@ twelve pinned packages, a shell, OpenCode) under `network_access: model_and_tool
 resource removed and this server granted instead. Its Environment Server seeds this server for every
 episode with the task row and grants `web_search` and `web_fetch` to the agent over MCP from the agent's
 `tool_servers` (OpenCode shows them to the model as `web_tools_web_search` and `web_tools_web_fetch`);
-the sandbox reaches the server by address, while the preset pins the judge servers to loopback so the
-sandbox reaches exactly the model server and this one. `benchmarks/hle_diamond/opencode_hle_tools_full.yaml`
+the sandbox reaches the server by address, while the judge servers (`config.yaml`, `judge_openai.yaml`)
+and the Environment Server (the preset) stay on loopback, so the sandbox reaches exactly the model server
+and this one. `benchmarks/hle_diamond/opencode_hle_tools_full.yaml`
 is the same preset over all 1000 HLE-Diamond questions, the 272 image questions included (the dataset is
 the only difference; it needs a vision-capable policy model). Live runs of either preset need
 `TAVILY_API_KEY` in the environment of the process that starts the servers; see that benchmark's README,
@@ -276,7 +285,7 @@ query URLs stay allowed; `site:` operands are parsed to hostnames; long URLs and
 are handled within a second; a page check leaves the event loop free (the test fails when the check runs
 inline); data URIs are stripped on fresh and cached fetches without eating the prose after them; a page of
 any length is served cut at the cap and checked as served, fresh and from the cache; dropped results are
-logged at WARNING; and `max_fetch_chars` cannot exceed the protocol's cap.
+logged at INFO; and `max_fetch_chars` cannot exceed the protocol's cap.
 
 ## Licensing
 
