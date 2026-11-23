@@ -2010,6 +2010,58 @@ def test_an_unset_or_missing_agent_runtime_refuses_to_start_the_server(task_asse
         )
 
 
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_a_blank_agent_runtime_path_is_unset_and_nothing_is_packed(
+    task_assets: Path, monkeypatch: MonkeyPatch, blank: str
+) -> None:
+    # An exported but empty DEEPSWE_PI_RUNTIME composes to "", which as a Path is "." and resolves to the Gym checkout.
+    pack = MagicMock()
+    monkeypatch.setattr(app_module, "_pack_runtime_directory", pack)
+    config = _config(task_assets, agent_runtime_paths={"pi": blank})
+    assert config.agent_runtime_paths == {"pi": None}
+    with pytest.raises(ValueError, match=re.escape("agent_runtime_paths.pi is not set")):
+        DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    pack.assert_not_called()
+
+
+def test_an_empty_runtime_variable_leaves_the_preset_runtime_unset(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEEPSWE_PI_RUNTIME", "")
+    recipe = OmegaConf.load(_DEEPSWE_BENCHMARKS / "pi.yaml")
+    initial = OmegaConf.merge(recipe, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT)
+    composed = OmegaConf.to_container(
+        GlobalConfigDictParser().parse_no_environment(initial_global_config_dict=initial), resolve=True
+    )
+    paths = composed["deepswe_pi_resources_server"]["resources_servers"]["deepswe"]["agent_runtime_paths"]
+
+    assert paths == {"pi": ""}
+    assert _config(task_assets, agent_runtime_paths=paths).agent_runtime_paths == {"pi": None}
+
+
+@pytest.mark.parametrize("held", ["gym checkout", "filesystem root", "tasks", "tasks parent"])
+def test_an_agent_runtime_holding_the_checkout_or_the_tasks_refuses_to_start(
+    task_assets: Path, monkeypatch: MonkeyPatch, held: str
+) -> None:
+    # A runtime directory is copied whole into every agent sandbox, where verifier tests and reference patches must
+    # never go.
+    pack = MagicMock()
+    monkeypatch.setattr(app_module, "_pack_runtime_directory", pack)
+    runtime = {
+        "gym checkout": Path("."),
+        "filesystem root": Path("/"),
+        "tasks": task_assets,
+        "tasks parent": task_assets.parent,
+    }[held]
+    refused = r"agent_runtime_paths\.pi is .*, which holds the (Gym repository|DeepSWE tasks)"
+    with pytest.raises(ValueError, match=refused):
+        DeepSWEResourcesServer(
+            config=_config(task_assets, agent_runtime_paths={"pi": runtime}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+    pack.assert_not_called()
+
+
 @pytest.mark.parametrize("name", ["rg", "", ".hidden", "-flag", "a/b", "..", "pi runtime"])
 def test_an_agent_runtime_name_is_one_plain_path_component(task_assets: Path, tmp_path: Path, name: str) -> None:
     with pytest.raises(ValueError, match="must be one path component"):
@@ -2092,6 +2144,35 @@ def test_each_harness_recipe_admits_every_episode_at_once(
     )
 
     assert config[f"deepswe_{harness}_agent"]["responses_api_agents"][agent_type].get("concurrency") == concurrency
+
+
+@pytest.mark.parametrize(
+    "harness,agent_type", [("openclaw", "openclaw_agent"), ("pi", "pi_agent"), ("codex", "codex_agent")]
+)
+def test_each_runtime_copying_preset_admits_episodes_before_their_deadline_starts(
+    harness: str, agent_type: str
+) -> None:
+    # Every agent sandbox receives the harness runtime, at most two uploads at a time per resources server, while its
+    # episode's deadline runs. An episode waits for admission before its deadline starts, so the admission limit bounds
+    # how long the last copy of a full burst waits.
+    recipe = yaml.safe_load((_DEEPSWE_BENCHMARKS / f"{harness}.yaml").read_text(encoding="utf-8"))
+    base = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "configs" / "deepswe.yaml").read_text(encoding="utf-8")
+    )
+    environment = recipe[f"deepswe_{harness}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    agent = recipe[f"deepswe_{harness}_agent"]["responses_api_agents"][agent_type]
+    admitted = environment["max_concurrent_episodes"]
+    episode = environment["default_episode_timeout_seconds"]
+
+    # At 40 s per copy (Codex's archive is about 370 MB), the last copy leaves the agent's whole budget and an hour for
+    # sandbox start, patch collection and verification.
+    assert admitted / 2 * 40 + agent["timeout"] + 3600 <= episode
+    # The queue outlasts a whole run, one full admission at a time, even if every episode used its full bound.
+    rows = (
+        base["deepswe_resources_server"]["resources_servers"]["deepswe"]["expected_task_count"]
+        * agent["datasets"][0]["num_repeats"]
+    )
+    assert environment["queue_timeout_seconds"] >= -(-rows // admitted) * episode
 
 
 @pytest.mark.parametrize("return_code,error_type", [(1, None), (0, "timeout")])

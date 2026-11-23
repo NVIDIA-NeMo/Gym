@@ -165,9 +165,10 @@ The agent sandbox cannot download a harness runtime, so each config gets one in 
 `agent_runtime_paths` maps a name to a file or directory on the resources server's host. The resources server copies
 each into every agent sandbox, after ripgrep and before the agent session starts: a file to
 `/tmp/nemo-gym-deepswe/<name>` as an executable, a directory's contents into `/tmp/nemo-gym-deepswe/<name>/`. It packs
-a directory once at startup and sends it as one gzip tar, which the sandbox's `tar` unpacks. A name left unset (the
-environment variable is missing) or a path that does not exist stops the server at startup. The harness then checks
-what it finds there against its pinned version and refuses the seed otherwise.
+a directory once at startup and sends it as one gzip tar, which the sandbox's `tar` unpacks. A name left unset or
+blank (the environment variable is missing or empty), a path that does not exist, or a directory that holds the Gym
+checkout or the DeepSWE tasks stops the server at startup. The harness then checks what it finds there against its
+pinned version and refuses the seed otherwise.
 
 Build a Node runtime with the harness's own installer on an x86_64 Linux host with network, at the version the
 benchmark pins and at the path it will have in the sandbox:
@@ -180,8 +181,10 @@ bash responses_api_agents/codex_agent/install_codex_runtime.sh /tmp/nemo-gym-dee
 
 The task images are Debian with glibc, so a runtime built on a glibc host runs there. One way to get such a host is
 a sandbox of a task image with network, from which the directory is downloaded. Each runtime is a few hundred
-megabytes, and every agent sandbox receives its copy, at most two uploads at a time per resources server; at high
-concurrency, a runtime mounted read-only into the sandboxes avoids that cost.
+megabytes, and every agent sandbox receives its copy, at most two uploads at a time per resources server, while its
+episode's deadline runs. So these presets admit at most 128 episodes at once (`max_concurrent_episodes`), and the
+others wait for admission before their deadline starts. At high concurrency, a runtime mounted read-only into the
+sandboxes avoids that cost.
 
 ```bash
 export DEEPSWE_PI_RUNTIME=/path/to/pi-runtime

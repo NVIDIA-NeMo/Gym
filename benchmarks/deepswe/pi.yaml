@@ -62,3 +62,9 @@ deepswe_pi_environment_server:
         name: deepswe_pi_agent
       # Pi's run (10800) plus seed, runtime copy and verification, within the agent sandbox's ttl_s (18000).
       default_episode_timeout_seconds: 18000
+      # Every agent sandbox first receives the harness runtime (a few hundred MB), at most two uploads at a time per
+      # resources server, while its episode's deadline runs. An episode waits for admission before its deadline
+      # starts, so admitting 128 at once keeps the last copy of a full burst within about 45 minutes at 40 s a copy.
+      max_concurrent_episodes: 128
+      # Longer than a whole run takes 128 at a time, even if every episode used its full 18,000 seconds.
+      queue_timeout_seconds: 259200

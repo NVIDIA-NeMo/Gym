@@ -21,6 +21,7 @@ import sys
 import tarfile
 import tempfile
 import uuid
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
@@ -219,6 +220,14 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # a reported command deadline and a conclusive result are not run again; a patch that breaks the
     # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
     inconclusive_verification_retries: int = Field(default=2, ge=0)
+
+    @field_validator("agent_runtime_paths", mode="before")
+    @classmethod
+    def treat_blank_runtime_paths_as_unset(cls, paths: object) -> object:
+        """A blank path (an exported but empty DEEPSWE_PI_RUNTIME) is unset; as a Path it would be the Gym root."""
+        if isinstance(paths, Mapping):
+            return {name: None if isinstance(path, str) and not path.strip() else path for name, path in paths.items()}
+        return paths
 
     @field_validator("agent_runtime_paths")
     @classmethod
@@ -448,6 +457,12 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         # name -> (host file to upload, whether it is a directory's archive to unpack)
         self._agent_runtimes: dict[str, tuple[Path, bool]] = {}
         self._agent_runtime_archive_dir: tempfile.TemporaryDirectory | None = None
+        # A runtime directory is copied whole into every agent sandbox, so it must not hold the Gym checkout or the
+        # tasks, whose verifier tests and reference patches the agent must never see.
+        held_paths = {
+            "the Gym repository": NEMO_GYM_ROOT.resolve(),
+            "the DeepSWE tasks": _resolve_repo_path(self.config.tasks_dir),
+        }
         for name, configured in self.config.agent_runtime_paths.items():
             if configured is None:
                 raise ValueError(
@@ -455,6 +470,12 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                     "(see the benchmark config's header)"
                 )
             source = _resolve_repo_path(configured)
+            for held, path in held_paths.items():
+                if source == path or source in path.parents:
+                    raise ValueError(
+                        f"agent_runtime_paths.{name} is {source}, which holds {held}; give the harness runtime's own "
+                        "file or directory"
+                    )
             if source.is_file():
                 self._agent_runtimes[name] = (source, False)
             elif source.is_dir():
