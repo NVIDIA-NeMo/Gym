@@ -38,8 +38,10 @@ class FakeSandbox:
 
     created: list[dict[str, Any]] = []
     killed: list[str] = []
+    closed: list[str] = []
     fail_image: str | None = None
     fail_kill: str | None = None
+    fail_connect: str | None = None
 
     def __init__(self, sandbox_id: str) -> None:
         self.id = sandbox_id
@@ -55,6 +57,8 @@ class FakeSandbox:
 
     @classmethod
     async def connect(cls, sandbox_id: str, **_kwargs: Any) -> "FakeSandbox":
+        if sandbox_id == cls.fail_connect:
+            raise ValueError("no such sandbox")
         return cls(sandbox_id)
 
     async def check_ready(self, *_args: Any) -> None:
@@ -81,18 +85,28 @@ class FakeSandbox:
         type(self).killed.append(self.id)
 
     async def close(self) -> None:
+        type(self).closed.append(self.id)
+
+
+class FakeConnectionConfig:
+    def __init__(self, **_kwargs: Any) -> None:
+        pass
+
+    def with_transport_if_missing(self) -> "FakeConnectionConfig":
+        return self
+
+    async def close_transport_if_owned(self) -> None:
         return None
 
 
 @pytest.fixture
 def provider(monkeypatch: pytest.MonkeyPatch) -> opensandbox_provider.OpenSandboxProvider:
-    FakeSandbox.created, FakeSandbox.killed = [], []
-    FakeSandbox.fail_image = FakeSandbox.fail_kill = None
-    connection_config = lambda **_kwargs: SimpleNamespace(with_transport_if_missing=lambda: None)  # noqa: E731
+    FakeSandbox.created, FakeSandbox.killed, FakeSandbox.closed = [], [], []
+    FakeSandbox.fail_image = FakeSandbox.fail_kill = FakeSandbox.fail_connect = None
     monkeypatch.setattr(
         opensandbox_provider,
         "_require_opensandbox_sdk",
-        lambda: (FakeSandbox, connection_config, SimpleNamespace, object, object),
+        lambda: (FakeSandbox, FakeConnectionConfig, SimpleNamespace, object, object),
     )
     monkeypatch.setattr(opensandbox_provider, "_to_image_spec", lambda image, _auth: image)
     return opensandbox_provider.OpenSandboxProvider(
@@ -161,7 +175,7 @@ async def test_closing_the_sandbox_deletes_its_sidecars(provider) -> None:
 
     await provider.close(handle)
 
-    assert FakeSandbox.killed == ["sandbox-1", "sandbox-2"]
+    assert sorted(FakeSandbox.killed) == ["sandbox-1", "sandbox-2"]
     assert provider._sidecars == {}
 
 
@@ -171,11 +185,13 @@ async def test_a_sidecar_that_cannot_be_deleted_is_retried_by_the_next_close(pro
 
     with pytest.raises(NgFailureEvent, match="Sandbox kill failed"):
         await provider.close(handle)
-    assert FakeSandbox.killed == []
+    # The main sandbox is deleted all the same.
+    assert FakeSandbox.killed == ["sandbox-2"]
     FakeSandbox.fail_kill = None
     await provider.close(handle)
 
-    assert FakeSandbox.killed == ["sandbox-1", "sandbox-2"]
+    assert FakeSandbox.killed == ["sandbox-2", "sandbox-2", "sandbox-1"]
+    assert provider._sidecars == {}
 
 
 async def test_a_main_sandbox_that_cannot_start_deletes_its_sidecars(provider) -> None:
@@ -188,13 +204,25 @@ async def test_a_main_sandbox_that_cannot_start_deletes_its_sidecars(provider) -
     assert provider._sidecars == {}
 
 
+async def test_a_sidecar_that_cannot_start_deletes_the_sidecars_before_it(provider) -> None:
+    FakeSandbox.fail_image = "judge:3"
+    spec = SandboxSpec(image="task:1", sidecars=[_TOOLS, {"name": "judge", "image": "judge:3"}])
+
+    with pytest.raises(ValueError, match="no such image"):
+        await provider.create(spec)
+
+    assert [created["image"] for created in FakeSandbox.created] == ["tools:2"]
+    assert FakeSandbox.killed == ["sandbox-1"]
+    assert provider._sidecars == {}
+
+
 async def test_a_sidecar_shares_the_main_sandboxs_egress_policy_and_the_main_sandbox_may_reach_it(
     provider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     hosts: dict[str, dict[str, str]] = {}
 
     async def network_address(handle: Any) -> str:
-        return {"sandbox-1": "10.0.0.5"}[handle.sandbox_id]
+        return "10.0.0.5"
 
     async def set_hosts(handle: Any, addresses: dict[str, str]) -> None:
         hosts[handle.sandbox_id] = addresses
@@ -216,6 +244,13 @@ async def test_a_sidecar_shares_the_main_sandboxs_egress_policy_and_the_main_san
     }
     assert hosts == {"sandbox-2": {"tools": "10.0.0.5"}}
 
+    # An empty policy denies by default, so it gets the same treatment.
+    await provider.create(SandboxSpec(image="task:1", provider_options={"network_policy": {}}, sidecars=[_TOOLS]))
+
+    sidecar, main = FakeSandbox.created[2:]
+    assert sidecar["network_policy"] == {}
+    assert main["network_policy"] == {"egress": [{"action": "allow", "target": "10.0.0.5"}]}
+
 
 async def test_a_reconnected_sandbox_reaches_its_sidecars(provider) -> None:
     sandbox = await AsyncSandbox(provider, _SPEC).start()
@@ -227,3 +262,18 @@ async def test_a_reconnected_sandbox_reaches_its_sidecars(provider) -> None:
     result = await borrowed.sidecar("tools").exec("status", timeout_s=5)
 
     assert result.stdout == "sandbox-1: status"
+
+
+async def test_a_sandbox_whose_sidecar_is_gone_is_not_reattached(provider) -> None:
+    sandbox = await AsyncSandbox(provider, _SPEC).start()
+    descriptor = await sandbox.serialize()
+    FakeSandbox.fail_connect = "sandbox-1"
+    borrower = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    with pytest.raises(NgFailureEvent, match="Sandbox connect failed"):
+        await AsyncSandbox.connect(descriptor, provider=borrower)
+
+    # The main sandbox's local handle is released, and the borrower keeps no record of it.
+    assert FakeSandbox.closed == ["sandbox-2"]
+    assert borrower._sidecars == {}
+    assert FakeSandbox.killed == []

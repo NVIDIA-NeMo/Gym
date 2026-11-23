@@ -441,7 +441,10 @@ the default keep-alive entrypoint. Closing the main sandbox deletes its sidecars
   shell. With `on_stdout`, the command runs on one streamed request for as long as it runs, also when
   `operations.background_exec` is set, and stdout arrives one line at a time.
 - A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.
-- A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs.
+- A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs. The
+  connect fails when one of them is gone.
+- Pausing and resuming act on the main sandbox only. Its sidecars keep running, and are deleted when their TTL or
+  sandbox lease ends.
 
 ## Resource Mapping
 

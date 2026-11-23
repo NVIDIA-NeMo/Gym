@@ -24,7 +24,7 @@ import re
 import shlex
 import uuid
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -2019,8 +2019,23 @@ class OpenSandboxProvider:
             if isinstance(error, Exception) and not isinstance(error, NgFailureEvent):
                 raise opensandbox_failure(operation="connect", sandbox_id=sandbox_id, cause=error) from error
             raise
-        for name, sidecar_id in (descriptor.get("sidecar_ids") or {}).items():
-            self._sidecars.setdefault(sandbox_id, {})[name] = await self.connect({"sandbox_id": sidecar_id})
+        sidecars: dict[str, SandboxHandle] = {}
+        try:
+            for name, sidecar_id in (descriptor.get("sidecar_ids") or {}).items():
+                sidecars[name] = await self.connect({"sandbox_id": sidecar_id})
+        except BaseException:
+            # A sandbox whose sidecar is gone is not reattached. Release the local handles connected so far.
+            for connected in (handle, *sidecars.values()):
+                with suppress(Exception):
+                    await self._await_sdk_call(
+                        connected.raw.close(),
+                        operation="close_after_connect_failure",
+                        sandbox_id=connected.sandbox_id,
+                        timeout_s=self._operations.close_timeout_s,
+                    )
+            raise
+        if sidecars:
+            self._sidecars[sandbox_id] = sidecars
         return handle
 
     async def pause(self, handle: SandboxHandle) -> None:
@@ -2965,13 +2980,14 @@ class OpenSandboxProvider:
                     ttl_s=spec.ttl_s,
                     ready_timeout_s=spec.ready_timeout_s,
                     metadata=spec.metadata,
-                    provider_options={"network_policy": policy} if policy else {},
+                    # An empty policy still denies by default, so it is passed on like any other.
+                    provider_options={"network_policy": policy} if policy is not None else {},
                 )
                 sidecars[sidecar.name] = await self._create_with_retries(_normalize_spec(sidecar_spec))
             addresses: dict[str, str] = {}
             if self._networking.enabled:
                 addresses = {name: await self.network_address(sidecar) for name, sidecar in sidecars.items()}
-            if policy and addresses:
+            if policy is not None and addresses:
                 # The sidecars start first: the main sandbox's policy must allow their addresses, and a policy
                 # is fixed at create. These rules lead, so no rule of the task's own denies a sidecar.
                 allowed = [{"action": "allow", "target": address} for address in addresses.values()]
@@ -4069,12 +4085,26 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and its sidecars, and close local SDK resources."""
-        sidecars = self._sidecars.get(handle.sandbox_id, {})
-        for name in list(sidecars):
-            await self.close(sidecars[name])
-            # Dropped only once it is gone, so a repeated close retries the rest.
-            del sidecars[name]
-        self._sidecars.pop(handle.sandbox_id, None)
+        sidecars = self._sidecars.get(handle.sandbox_id)
+        if not sidecars:
+            self._sidecars.pop(handle.sandbox_id, None)
+            return await self._close_one(handle)
+        # Each is deleted whatever happens to the others. A sidecar that cannot be deleted stays registered, so a
+        # repeated close retries it.
+        results = await asyncio.gather(
+            self._close_one(handle), *map(self._close_one, sidecars.values()), return_exceptions=True
+        )
+        for name, result in zip(list(sidecars), results[1:]):
+            if not isinstance(result, BaseException):
+                del sidecars[name]
+        if not sidecars:
+            self._sidecars.pop(handle.sandbox_id, None)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    async def _close_one(self, handle: SandboxHandle) -> None:
+        """Terminate one sandbox and close its local SDK resources."""
         renewal_error = await self._stop_renewal(handle.sandbox_id)
 
         # DELETE is idempotent, so a lost reply can be reconciled. Attempts and
