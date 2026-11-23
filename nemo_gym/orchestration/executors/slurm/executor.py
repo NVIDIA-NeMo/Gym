@@ -22,6 +22,7 @@ import getpass
 import re
 import shlex
 import tempfile
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -39,7 +40,8 @@ from nemo_gym.orchestration.api import (
     SubmitConfig,
     VllmPDServiceConfig,
 )
-from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
+from nemo_gym.orchestration.executors.capabilities import Inspectable, LogReadable, Resubmittable, Terminable
 from nemo_gym.orchestration.executors.connection import (
     Connection,
     get_connection,
@@ -73,12 +75,25 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
 from nemo_gym.orchestration.executors.slurm.script import (
     _resolve_env,
     build_sbatch_script,
+    planned_log_sources,
+)
+from nemo_gym.orchestration.executors.slurm_control import parse_terminate_output, render_terminate_script
+from nemo_gym.orchestration.executors.slurm_logs import parse_log_output, render_read_log_script
+from nemo_gym.orchestration.executors.slurm_status import (
+    parse_read_files_output,
+    parse_status_output,
+    render_read_files_script,
+    render_status_script,
 )
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
     LOGS_DIRNAME,
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
+    JobKey,
+    JobRef,
+    LogSource,
+    ObservedStatus,
     SubmissionRecord,
     new_gym_job_id,
     utc_now,
@@ -132,7 +147,7 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
-class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
+class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Terminable, LogReadable, Inspectable):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
     Every service and the driver are launched via `srun --container-image` so they
@@ -181,7 +196,16 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
                     + token_export
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
-                record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
+                record = self._build_record(
+                    cluster,
+                    compute,
+                    gym_job_id,
+                    now,
+                    remote_run_dir,
+                    benchmark_names,
+                    output,
+                    planned_log_sources(config, compute),
+                )
                 record.environment = self.submission_environment(
                     config,
                     required_env=compute.forward_env,
@@ -274,6 +298,43 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
         ref = install.ref if install is not None else None
         return ref if ref is not None and re.fullmatch(r"[0-9a-f]{40}", ref) else None
 
+    def connection_key(self, record: SubmissionRecord) -> str:
+        return record.hostname or "local"
+
+    def query_states(self, refs: list[JobRef]) -> dict[JobKey, ObservedStatus]:
+        """One script on one connection: a single squeue, a single sacct and each job directory's state files."""
+        if not refs:
+            return {}
+        with get_connection(refs[0].record.hostname) as conn:
+            output = conn.run(render_status_script(refs))
+        return parse_status_output(output, refs)
+
+    def read_run_files(self, record: SubmissionRecord, paths: list[Path]) -> dict[Path, str | None]:
+        with get_connection(record.hostname) as conn:
+            output = conn.run(render_read_files_script(paths))
+        return parse_read_files_output(output, paths)
+
+    def terminate(self, record: SubmissionRecord, job: BenchmarkJob) -> None:
+        """Cancel everything of `job` that is queued or running, the pending jobs first, in one script."""
+        with get_connection(record.hostname) as conn:
+            output = conn.run(render_terminate_script(job))
+        _, errors = parse_terminate_output(output)
+        if errors:
+            raise RuntimeError(f"Could not stop {job.benchmark}: {'; '.join(errors)}")
+
+    def stream_logs(
+        self, record: SubmissionRecord, job: BenchmarkJob, *, source: LogSource, tail: int | None, follow: bool
+    ) -> Iterator[str]:
+        """The lines of `source`, read in one call; the location is relative to the job directory."""
+        if follow:
+            raise UnsupportedOperationError("slurm executor cannot follow a log yet; use --tail N")
+        if tail is not None and tail < 0:
+            raise ValueError(f"--tail must be 0 or more, got {tail}.")
+        path = Path(job.job_dir) / source.location
+        with get_connection(record.hostname) as conn:
+            output = conn.run(render_read_log_script(path, tail))
+        return iter(parse_log_output(output, path))
+
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
         """The resolved config `persist()` saved for this run, so a resubmit repeats what submit did."""
@@ -290,6 +351,7 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
         remote_run_dir: Path,
         benchmark_names: list[str],
         output: str,
+        log_sources: list[LogSource],
     ) -> SubmissionRecord:
         results = _parse_sbatch_results(output)
         benchmarks = []
@@ -304,6 +366,7 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
                     job_dir=str(remote_run_dir / name),
                     job_id=job_id,
                     error=error,
+                    log_sources=log_sources,
                 )
             )
         return SubmissionRecord(

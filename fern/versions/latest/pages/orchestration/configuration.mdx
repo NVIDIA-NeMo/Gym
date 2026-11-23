@@ -175,6 +175,9 @@ Each key under `driver.benchmarks` is a benchmark name. It must match `^[A-Za-z0
 | --- | --- | --- |
 | `prepare` | `{}` | Overrides forwarded to `gym eval prepare`. When non-empty, `gym eval prepare` runs in the driver before the benchmark. |
 | `run` | `{}` | Overrides forwarded to `gym eval run`. |
+| `target` | `null` | A Harbor task `TARGET`: a task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` reference. The driver passes it to `gym eval run` ahead of the `run` overrides, so a task run needs no `command`; `gym eval run` prepares the target itself, and a non-empty `prepare` still runs exactly as configured before it (for example a dataset adapter that writes the task folders the target names). The rows, run config and verifier logs the run prepares are kept in the benchmark's job directory (`artifacts/harbor/`, through `+harbor_output_root`), so a continuation in a fresh checkout finds the same files. For a resumable run, the target must resolve to the same folder on every allocation: an absolute path on shared storage, or a `harbor:` reference with `NEMO_GYM_DATASETS_DIR` set to a folder that outlives the allocation. Requires `agent`; cannot be combined with `command`. |
+| `agent` | `null` | The harness that runs the `target`, as `--agent` (a folder under `responses_api_agents/`, such as `opencode_agent`). |
+| `sandbox` | `null` | The sandbox provider for the `target`'s task containers, as `--sandbox` (for example `opensandbox`). |
 | `command` | `null` | A shell script that runs **instead of** `gym eval run`. See [Custom Harness](/orchestration/how-to/custom-harness). Cannot be combined with `run` or `resumable`. |
 | `resumable` | `false` | `true` for auto-resume with defaults, or `{max_retries, max_walltime}` to tune it. See [Resumable Runs](/orchestration/how-to/resumable-runs). |
 | `node_local` | `false` | `true`, or a mapping, gives the driver a directory on its node's own disk, archived into the benchmark directory once per Slurm job. Slurm only. See [node_local](#node_local). |
@@ -299,6 +302,7 @@ Schema validation runs when the config is composed, before anything is rendered 
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
+- **Benchmark `target`** without an `agent`, `agent` or `sandbox` without a `target`, an empty `target` or `agent`, `target` combined with `command`, or `target` with `only_tasks`, `exclude_tasks` or `skip_unloadable` under `run` (`gym eval run` takes those only as command-line flags) is rejected.
 - **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 
 Mount source existence, SSH reachability, and OTel destination checks happen later, at submit time.

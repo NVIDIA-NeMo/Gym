@@ -4,6 +4,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
@@ -11,7 +12,7 @@ import httpx
 import pytest
 from fastapi import Body, FastAPI
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel, ValidationError
 
 from nemo_gym.client.server_client import ServerClient
@@ -31,6 +32,7 @@ from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, Episode
 from nemo_gym.server_runtime.episode_tools import ToolResult, ToolSpec, TypedToolset, episode_tool
 from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
 from nemo_gym.server_runtime.tool_access import (
+    END_ACTIVATION_HEADER,
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
     DirectHTTPToolAccess,
@@ -99,6 +101,16 @@ class _Counter:
     async def overdraw(self, arguments: _Amount) -> ToolResult:
         """Refuse to take more than the total, with an error result the agent handles."""
         return ToolResult(output={"detail": f"the total is {self.total}"}, is_error=True)
+
+    @episode_tool
+    async def submit(self, arguments: _Amount) -> ToolResult:
+        """Add an amount and end the agent's activation, as a submission that ends a turn does."""
+        return ToolResult(output=await self.add(arguments), ends_activation=True)
+
+    @episode_tool
+    async def submit_nan(self, arguments: _Nothing) -> ToolResult:
+        """End the activation with a result JSON cannot carry, as a broken submission tool does."""
+        return ToolResult(output=float("nan"), ends_activation=True)
 
     @episode_tool
     async def rollout(self, arguments: _Nothing) -> str | None:
@@ -324,6 +336,31 @@ def test_a_reply_says_whether_the_call_was_an_error(path: str, body: Any, status
     assert replies[0].status_code == status
     assert (replies[0].headers.get(TOOL_ERROR_HEADER) == "true") is flagged
     assert [call.is_error for call in recorded] == [flagged]
+
+
+@pytest.mark.parametrize(
+    "path, body, ends",
+    [
+        pytest.param("/add", {"amount": 2}, False, id="result"),
+        pytest.param("/submit", {"amount": 2}, True, id="ends-activation"),
+        pytest.param("/submit", {"amount": "two"}, False, id="failed-call"),
+        pytest.param("/submit_nan", {}, False, id="not-json"),
+    ],
+)
+def test_a_reply_says_whether_the_call_ends_the_activation(path: str, body: Any, ends: bool) -> None:
+    """Only a result the tool marks with ``ends_activation`` carries the header; a call that never ran, or whose result
+    is replaced by an error, does not, so the agent shows the model the error."""
+    replies: list[httpx.Response] = []
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post(path, json=body, headers=_headers(served)))
+
+    server, http = _server(agent)
+    asyncio.run(server.run_request(_request()))
+
+    assert (replies[0].headers.get(END_ACTIVATION_HEADER) == "true") is ends
+    if ends:
+        assert replies[0].json() == {"total": 2}
 
 
 @pytest.mark.parametrize("path", ["/run", "/aggregate_metrics", "/ng-rollout/3-0/run", "/add/../run", "/a/b"])
@@ -652,19 +689,18 @@ def test_a_handled_failure_in_a_tool_fails_the_episode() -> None:
 @asynccontextmanager
 async def _mcp_session(app: FastAPI, headers: dict[str, str]) -> AsyncIterator[ClientSession]:
     """An MCP client session against ``app``'s /mcp, in-process."""
+    # MCP 2 takes an httpx2 client; MCP 1 takes an httpx client.
+    if version("mcp").startswith("2."):
+        import httpx2 as http_client_module
+    else:
+        http_client_module = httpx
 
-    def client_factory(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
-        transport = httpx.ASGITransport(app=app)
-        return httpx.AsyncClient(transport=transport, base_url=BASE_URL, headers=headers, timeout=timeout, auth=auth)
-
-    async with streamablehttp_client(f"{BASE_URL}/mcp", headers=headers, httpx_client_factory=client_factory) as (
-        read,
-        write,
-        _,
-    ):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
+    transport = http_client_module.ASGITransport(app=app)
+    async with http_client_module.AsyncClient(transport=transport, base_url=BASE_URL, headers=headers) as client:
+        async with streamable_http_client(f"{BASE_URL}/mcp", http_client=client) as streams:
+            async with ClientSession(streams[0], streams[1]) as session:
+                await session.initialize()
+                yield session
 
 
 def _mcp_headers(served: ServedTools) -> dict[str, str]:
@@ -674,6 +710,11 @@ def _mcp_headers(served: ServedTools) -> dict[str, str]:
 
 def _text(result: Any) -> str:
     return result.content[0].text
+
+
+def _wire(result: Any) -> dict[str, Any]:
+    """A tool result's fields under their MCP wire names, which MCP 1 and 2 both serialize."""
+    return result.model_dump(by_alias=True)
 
 
 async def _run_with_lifespan(app: FastAPI, *runs: Awaitable[_Response]) -> list[_Response]:
@@ -737,7 +778,7 @@ def test_mcp_lists_the_episodes_tools_and_shares_its_calls_with_direct_http() ->
     assert {tool.name: tool.description for tool in seen["tools"]} == {
         spec.name: spec.description for spec in TypedToolset(_Counter()).specs()
     }
-    assert seen["mcp"].isError is False and seen["mcp"].structuredContent == {"total": 2}
+    assert _wire(seen["mcp"])["isError"] is False and _wire(seen["mcp"])["structuredContent"] == {"total": 2}
     assert seen["http"] == {"total": 5}
     assert [(call.name, call.arguments) for call in seen["calls"]] == [("add", {"amount": 2}), ("add", {"amount": 3})]
     assert response.result == "total=5 calls=2"
@@ -764,7 +805,7 @@ def test_mcp_without_the_episodes_token_refuses_the_listing_and_calls(headers: d
     (response,) = asyncio.run(_run_with_lifespan(app, server.run_request(_request())))
 
     assert "needs a valid" in str(seen["listing"])
-    assert seen["call"].isError is True and "needs a valid" in _text(seen["call"])
+    assert _wire(seen["call"])["isError"] is True and "needs a valid" in _text(seen["call"])
     assert response.result == "total=0 calls=0"
 
 
@@ -784,7 +825,7 @@ def test_an_mcp_call_after_the_episode_ends_is_refused() -> None:
 
     late = asyncio.run(scenario())
 
-    assert late.isError is True and "is not running" in _text(late)
+    assert _wire(late)["isError"] is True and "is not running" in _text(late)
 
 
 class _TwoToolsets(_Server):
@@ -839,7 +880,7 @@ def test_an_mcp_call_the_tool_cannot_run_is_an_error_result_and_recorded(
     server, app = _app(agent, tool_transports=["mcp"])
     asyncio.run(_run_with_lifespan(app, server.run_request(_request())))
 
-    assert seen["result"].isError is True and detail in _text(seen["result"])
+    assert _wire(seen["result"])["isError"] is True and detail in _text(seen["result"])
     assert [(call.name, call.arguments, call.is_error) for call in seen["calls"]] == [(name, arguments, True)]
 
 

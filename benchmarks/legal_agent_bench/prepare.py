@@ -6,68 +6,66 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
-from resources_servers.legal_agent_bench.prepare import EXPECTED_TASK_COUNT, INDEX_FILENAME, prepare_assets
+from nemo_gym.config import get_global_config_dict
+from resources_servers.legal_agent_bench.environment_prepare import prepare_environment
+from resources_servers.legal_agent_bench.prepare import (
+    EXPECTED_TASK_COUNT,
+    INDEX_FILENAME,
+    prepare_assets,
+    read_task_selection,
+)
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "legal_agent_bench_benchmark.jsonl"
-BENCHMARK_AGENT_NAME = "legal_agent_bench_benchmark_harbor_agent"
 
 
-def _render_benchmark_index(source_index: Path) -> str:
-    rendered_rows: list[str] = []
-
-    with source_index.open(encoding="utf-8") as source:
-        for line_number, line in enumerate(source, 1):
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid LAB task index JSON on line {line_number}: {exc}") from exc
-
-            if not isinstance(row, dict):
-                raise ValueError(f"LAB task index line {line_number} must contain a JSON object")
-
-            row["agent_ref"] = {
-                "name": BENCHMARK_AGENT_NAME,
-                "type": "responses_api_agents",
-            }
-            rendered_rows.append(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-
-    if len(rendered_rows) != EXPECTED_TASK_COUNT:
-        raise ValueError(f"Expected {EXPECTED_TASK_COUNT} LAB benchmark rows, found {len(rendered_rows)}")
-
-    return "".join(rendered_rows)
-
-
-def _atomic_write(output_path: Path, content: str) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    file_descriptor, temp_name = tempfile.mkstemp(dir=output_path.parent, prefix=f".{output_path.name}.")
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(file_descriptor, "w", encoding="utf-8") as output:
-            output.write(content)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temp_path, output_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
-def prepare(*, force: bool = False) -> Path:
-    """Prepare shared LAB assets and write the benchmark-specific task index."""
-    prepared = prepare_assets("all", force=force)
+def prepare(
+    *, force: bool = False, input: str | Path | None = None, output: str | Path | None = None, image: str | None = None
+) -> Path:
+    """Prepare all LAB tasks, or select them with +prepare_script_args.input=/path/to/tasks.jsonl."""
+    options = {}
+    for key, variable in (
+        ("tasks_dir", "LEGAL_AGENT_BENCH_TASK_CACHE_DIR"),
+        ("skills_dir", "LEGAL_AGENT_BENCH_SKILLS_DIR"),
+    ):
+        if value := os.environ.get(variable):
+            options[key] = value
+    if input is not None:
+        task_ids = read_task_selection(input)
+        options["task_ids"] = task_ids
+    prepared = prepare_assets("all", force=force, **options)
     tasks_dir = prepared.get("tasks")
     if tasks_dir is None:
         raise RuntimeError("LAB asset preparation did not return a task cache")
 
-    content = _render_benchmark_index(Path(tasks_dir) / INDEX_FILENAME)
-    _atomic_write(OUTPUT_FPATH, content)
-    print(f"Wrote {EXPECTED_TASK_COUNT} Legal Agent Bench tasks to {OUTPUT_FPATH}", flush=True)
-    return OUTPUT_FPATH
+    source_index = Path(input).expanduser() if input is not None else Path(tasks_dir) / INDEX_FILENAME
+    rows = []
+    for number, line in enumerate(source_index.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError("expected an object")
+        except ValueError as error:
+            raise ValueError(f"Invalid LAB task index JSON on line {number}: {error}") from error
+        rows.append(row)
+    if input is None and len(rows) != EXPECTED_TASK_COUNT:
+        raise ValueError(f"Expected {EXPECTED_TASK_COUNT} LAB benchmark rows, found {len(rows)}")
+    lab = get_global_config_dict().get("lab", {})
+    return prepare_environment(
+        tasks_dir=Path(tasks_dir),
+        skills_dir=Path(prepared["skills"]),
+        rows=rows,
+        output=Path(output) if output is not None else OUTPUT_FPATH,
+        image=image or os.environ.get("LEGAL_AGENT_BENCH_IMAGE"),
+        agent_timeout_seconds=float(lab.get("agent_timeout_seconds", 10800)),
+        verifier_timeout_seconds=float(lab.get("verifier_timeout_seconds", 3600)),
+    )
 
 
 if __name__ == "__main__":

@@ -30,6 +30,16 @@ class Scenario:
     tier: PriorityTier = "P0"
     compaction: bool | None = None
 
+    def default_responses(self, *, final_responses: int = 1) -> list[dict]:
+        """Build ordinary replies before execution; compaction requires an explicit schedule."""
+        if self.compaction:
+            raise ValueError("compaction scenario requires an explicit reply schedule for this harness")
+        kinds = ["tool"] * self.tool_steps + ["final"] * final_responses
+        return [
+            {"kind": kind, "input_tokens": 20 + len(self.http_errors) + index, "output_tokens": 8}
+            for index, kind in enumerate(kinds)
+        ]
+
     def task(self) -> dict:
         """Only the task reaches the harness; expectations stay in the runner."""
         return {
