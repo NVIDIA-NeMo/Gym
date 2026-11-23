@@ -56,6 +56,7 @@ from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
+    ConfigError,
     ModelServerRef,
     get_first_server_config_dict,
     get_global_config_dict,
@@ -261,6 +262,10 @@ class SWEBenchWrapperServerConfig(BaseModel):
     opencode_setup_dir: Optional[Path] = None
 
 
+_CONFIG_TRANSPORT_ERROR_FILE = "nemo-gym-config-transport-error"
+_CONFIG_TRANSPORT_ERROR_EXIT = 78
+
+
 def _agent_config_env(config: "SWEBenchWrapperInstanceConfig", python: str | None) -> str:
     """Carry the resolved config through the rollout mount, with an inline fallback for an older Gym."""
     quoted = config.ng_global_config_dict_str
@@ -270,8 +275,9 @@ def _agent_config_env(config: "SWEBenchWrapperInstanceConfig", python: str | Non
     # Write inside the mounted rollout directory. Shell builtins accept the long literal without
     # exporting it to an exec environment; the EXIT trap removes it on success and failure.
     template = shlex.quote(str(config.base_mounted_dir / "nemo-gym-config-XXXXXX.yaml"))
+    error_file = shlex.quote(str(config.base_mounted_dir / _CONFIG_TRANSPORT_ERROR_FILE))
     write_file = (
-        f"( ng_config_file=$(mktemp {template}) && "
+        f"( rm -f -- {error_file} && ng_config_file=$(mktemp {template}) && "
         "trap 'rm -f \"$ng_config_file\"' EXIT && "
         "trap 'exit 143' TERM && trap 'exit 130' INT && trap 'exit 129' HUP && "
         f'printf %s {quoted} >"$ng_config_file" && '
@@ -289,8 +295,11 @@ def _agent_config_env(config: "SWEBenchWrapperInstanceConfig", python: str | Non
     return write_file + (
         f"if {shlex.quote(python)} -c {shlex.quote(reads_file)} >/dev/null 2>&1; then "
         f"{file_env}; else "
-        f'{shlex.quote(python)} -c {shlex.quote(check_inline)} "$ng_config_file" && '
-        'export NEMO_GYM_CONFIG_DICT="$(cat "$ng_config_file")" NEMO_GYM_CONFIG_DICT_FILE=\'\'; fi && '
+        f'if {shlex.quote(python)} -c {shlex.quote(check_inline)} "$ng_config_file"; then '
+        'export NEMO_GYM_CONFIG_DICT="$(cat "$ng_config_file")" NEMO_GYM_CONFIG_DICT_FILE=\'\'; '
+        f"else printf %s 'Container Gym cannot read config files and this config cannot fit in its environment. "
+        f"Update the container Gym or use a smaller config.' >{error_file}; exit {_CONFIG_TRANSPORT_ERROR_EXIT}; "
+        "fi; fi && "
     )
 
 
@@ -2873,6 +2882,14 @@ class RunOpenHandsAgent(BaseModel):
             )
 
         if active_command.process.returncode != 0:
+            transport_error = self.config.persistent_dir / _CONFIG_TRANSPORT_ERROR_FILE
+            if (
+                command.mode == "agent"
+                and active_command.process.returncode == _CONFIG_TRANSPORT_ERROR_EXIT
+                and transport_error.is_file()
+            ):
+                # This is a pre-inference configuration failure, never a negative model result.
+                raise ConfigError(transport_error.read_text())
             raise RuntimeError(
                 f"Command failed with return code {active_command.process.returncode}. "
                 f"Logs:\n{active_command.log_file_path.read_text(errors='replace')}"
@@ -2960,6 +2977,9 @@ class RunOpenHandsAgent(BaseModel):
             update_and_read_metrics(self.config.metrics_fpath, metrics.model_dump())
             if self.config.debug:
                 profiler.stop()
+            if isinstance(e, ConfigError):
+                # Propagate through Ray/response assembly instead of scoring a model that never ran.
+                raise
             return None
 
         generation_apptainer_spinup_timestamp = float(

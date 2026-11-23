@@ -3912,3 +3912,103 @@ def test_agent_config_cleans_file_after_sigterm(tmp_path):
     result = subprocess.run(["bash", str(script)], capture_output=True, text=True)
     assert result.returncode == 143
     assert list(config.persistent_dir.glob("nemo-gym-config-*.yaml")) == []
+
+
+@pytest.fixture
+def capability_negative_python(tmp_path: Path) -> str:
+    """Run real Python while modeling an installed Gym without file transport."""
+    import shlex
+
+    executable = tmp_path / "older-gym-python"
+    executable.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in *NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME*) exit 1;; esac\n'
+        f'exec {shlex.quote(sys.executable)} "$@"\n'
+    )
+    executable.chmod(0o700)
+    return str(executable)
+
+
+@pytest.mark.parametrize("size", [123_000, 140_000])
+def test_older_gym_transport_checks_real_environment_limit(
+    tmp_path: Path, capability_negative_python: str, size: int
+) -> None:
+    import shlex
+
+    text = "large: " + "x" * size
+    params = _make_instance_config(str(tmp_path), ng_global_config_dict_str=shlex.quote(text))
+    params.base_mounted_dir = params.persistent_dir
+    script = tmp_path / "transport.sh"
+    read = "import os; print(len(os.environ['NEMO_GYM_CONFIG_DICT']))"
+    script.write_text(
+        swe_app._agent_config_env(params, capability_negative_python)
+        + f"{shlex.quote(sys.executable)} -c {shlex.quote(read)} )"
+    )
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    error = params.persistent_dir / swe_app._CONFIG_TRANSPORT_ERROR_FILE
+    if size == 123_000:
+        assert result.returncode == 0, result.stderr
+        assert int(result.stdout.strip()) == len(text)
+        assert not error.exists()
+    else:
+        assert result.returncode == swe_app._CONFIG_TRANSPORT_ERROR_EXIT
+        assert result.stdout == ""
+        assert "Update the container Gym or use a smaller config" in error.read_text()
+    assert list(params.persistent_dir.glob("nemo-gym-config-*.yaml")) == []
+
+
+@pytest.mark.asyncio
+async def test_unsupported_transport_cannot_become_unmasked_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capability_negative_python: str
+) -> None:
+    import shlex
+
+    text = "large: " + "x" * 140_000
+    params = _make_instance_config(str(tmp_path), debug=False, ng_global_config_dict_str=shlex.quote(text))
+    params.base_mounted_dir = params.persistent_dir
+    script = tmp_path / "transport.sh"
+    script.write_text(swe_app._agent_config_env(params, capability_negative_python) + "echo MODEL_RAN )")
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    assert result.returncode == swe_app._CONFIG_TRANSPORT_ERROR_EXIT
+    assert "MODEL_RAN" not in result.stdout
+    active = MagicMock(watchdog_stats={}, watchdog_task=None, overlay_dirname=None)
+    active.process.returncode = result.returncode
+    active.process.communicate = AsyncMock(return_value=(b"", b""))
+    params.agent_command = ExecuteContainerCommandArgs(
+        command="unused", expected_file_pattern="unused", mode="agent", timeout=10
+    )
+    worker = RunOpenHandsAgent(config=params)
+    wrapper = _create_wrapper(monkeypatch)
+
+    async def run_worker(_params):
+        return await worker.process_single_datapoint()
+
+    with (
+        patch.object(worker, "_start_container_command", new_callable=AsyncMock, return_value=active),
+        patch.object(worker, "_kill_active_command", new_callable=AsyncMock) as kill_eval,
+        patch.object(worker, "_openhands_dir_copy_from_host", return_value=None),
+        patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, side_effect=run_worker),
+        patch.object(wrapper, "get_openhands_trajectory_from_completions") as assemble_reward,
+    ):
+        with pytest.raises(swe_app.ConfigError, match="Update the container Gym or use a smaller config"):
+            await wrapper._inner_responses(params, MagicMock())
+        kill_eval.assert_awaited_once()
+        assemble_reward.assert_not_called()
+    metrics = json.loads(params.metrics_fpath.read_text())
+    assert "resolved" not in metrics
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,marker", [("agent", False), ("eval", True)])
+async def test_transport_error_requires_agent_exit_and_marker(tmp_path: Path, mode: str, marker: bool) -> None:
+    params = _make_instance_config(str(tmp_path), debug=False)
+    if marker:
+        (params.persistent_dir / swe_app._CONFIG_TRANSPORT_ERROR_FILE).write_text("transport unavailable")
+    log = tmp_path / "command.log"
+    log.write_text("unrelated command failure")
+    active = MagicMock(watchdog_stats={}, watchdog_task=None, overlay_dirname=None, log_file_path=log)
+    active.process.returncode = swe_app._CONFIG_TRANSPORT_ERROR_EXIT
+    active.process.communicate = AsyncMock(return_value=(b"", b""))
+    command = ExecuteContainerCommandArgs(command="unused", expected_file_pattern="unused", mode=mode, timeout=10)
+    with pytest.raises(RuntimeError, match="Command failed with return code 78"):
+        await RunOpenHandsAgent(config=params)._finish_container_command(active, command)
