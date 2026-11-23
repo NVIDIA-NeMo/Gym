@@ -41,8 +41,11 @@ Each completed response carries `stop_reason`, the reason the loop ended:
 
 A training filter can mask `context_full` and still score `max_output_tokens`. A response built from a failed model
 request carries no `stop_reason`. On the legacy `/run` path, `mask_stop_reasons` (default empty) names the values whose
-rows come back with `mask_sample: true` and their reward kept, and `mask_agent_errors: true` masks a row that ended in
-an agent error (scored 0 with `agent_error`, for example after a judge that never answered). `/run` verifies a
+rows come back with `mask_sample: true`, their reward kept and the stop's `failure_kind` (`max_steps`: `agent_limit`,
+`timeout`: `agent_timeout`, `context_full`: `model_context_limit`, the others `browsecomp_agent:<stop_reason>`) unless
+the resources server already set one, so a trainer can tell a budget stop from an infrastructure mask. `mask_agent_errors:
+true` masks a row that ended in an agent error (scored 0 with `agent_error`, for example after a judge that never
+answered). `/run` verifies a
 timed-out rollout too: the resources server scores it 0 without the judge and releases the session's tool sandbox and
 workspace.
 

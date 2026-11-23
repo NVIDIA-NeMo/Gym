@@ -56,6 +56,9 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -201,8 +204,9 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     rollout_timeout_s: Optional[float] = Field(default=None, ge=0)
     # Legacy /run only. A rollout whose response ends with one of these `stop_reason` values comes back with
     # mask_sample true and its reward kept, so a training framework leaves it out of the loss: for example a run
-    # cut by max_steps, rollout_timeout_s or a full context window, whose 0 says little about the answer. Empty
-    # masks none.
+    # cut by max_steps, rollout_timeout_s or a full context window, whose 0 says little about the answer. The row
+    # carries the stop's failure kind (STOP_REASON_FAILURE_KINDS) unless the resources server set one. Empty masks
+    # none.
     mask_stop_reasons: list[Literal["answered", "max_steps", "timeout", "max_output_tokens", "context_full"]] = Field(
         default_factory=list
     )
@@ -245,6 +249,17 @@ class BrowsecompAgentRunRequest(BaseRunRequest):
 
 class BrowsecompAgentVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
+
+
+# The failure kind of a row masked by ``mask_stop_reasons``: the rollout's own budget (steps, wall clock, context)
+# ended it, which a training framework can tell apart from an infrastructure failure by kind.
+STOP_REASON_FAILURE_KINDS = {
+    "max_steps": AGENT_LIMIT,
+    "timeout": AGENT_TIMEOUT,
+    "context_full": MODEL_CONTEXT_LIMIT,
+    "max_output_tokens": "browsecomp_agent:max_output_tokens",
+    "answered": "browsecomp_agent:answered",
+}
 
 
 class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
@@ -1351,6 +1366,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 stop_reason = (last_response_json or {}).get("stop_reason")
                 if stop_reason is not None and stop_reason in self.config.mask_stop_reasons:
                     update["mask_sample"] = True
+                    # A kind the resources server already set (an infrastructure failure) takes precedence.
+                    if getattr(last_verify_response, "failure_kind", None) is None:
+                        update["failure_kind"] = STOP_REASON_FAILURE_KINDS[stop_reason]
+                        update["failure_reason"] = f"the rollout stopped on {stop_reason}"
                 last_verify_response = last_verify_response.model_copy(update=update)
             reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
             outcome = "success" if (reward is not None and reward > 0) else "failure"

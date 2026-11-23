@@ -645,18 +645,21 @@ class TestRolloutTimeout:
         assert result.mask_sample is False
 
     @pytest.mark.parametrize(
-        ("stop_reason", "mask_stop_reasons", "masked"),
+        ("stop_reason", "mask_stop_reasons", "masked", "failure_kind"),
         [
-            ("max_steps", ["max_steps", "timeout", "context_full"], True),
-            ("timeout", ["max_steps", "timeout", "context_full"], True),
-            ("context_full", ["max_steps", "timeout", "context_full"], True),
-            ("answered", ["max_steps", "timeout", "context_full"], False),
-            ("max_output_tokens", ["max_steps", "timeout", "context_full"], False),
-            ("max_steps", [], False),
-            (None, ["max_steps"], False),
+            ("max_steps", ["max_steps", "timeout", "context_full"], True, "agent_limit"),
+            ("timeout", ["max_steps", "timeout", "context_full"], True, "agent_timeout"),
+            ("context_full", ["max_steps", "timeout", "context_full"], True, "model_context_limit"),
+            ("answered", ["max_steps", "timeout", "context_full"], False, None),
+            ("max_output_tokens", ["max_steps", "timeout", "context_full"], False, None),
+            ("max_output_tokens", ["max_output_tokens"], True, "browsecomp_agent:max_output_tokens"),
+            ("max_steps", [], False, None),
+            (None, ["max_steps"], False, None),
         ],
     )
-    async def test_run_masks_configured_stop_reasons(self, stop_reason, mask_stop_reasons, masked) -> None:
+    async def test_run_masks_configured_stop_reasons(
+        self, stop_reason, mask_stop_reasons, masked, failure_kind
+    ) -> None:
         agent = BrowsecompAgent(
             config=_make_config(mask_stop_reasons=mask_stop_reasons), server_client=MagicMock(spec=ServerClient)
         )
@@ -675,6 +678,8 @@ class TestRolloutTimeout:
 
         assert result.mask_sample is masked
         assert result.reward == 1.0  # the mask keeps the judged reward
+        # The kind tells a budget stop apart from an infrastructure mask.
+        assert getattr(result, "failure_kind", None) == failure_kind
 
     async def test_run_keeps_a_mask_the_resources_server_set(self) -> None:
         agent = BrowsecompAgent(config=_make_config(), server_client=MagicMock(spec=ServerClient))
@@ -692,6 +697,26 @@ class TestRolloutTimeout:
         result = await agent.run(_request(), _run_body())
 
         assert result.mask_sample is True
+
+    async def test_a_stop_reason_mask_keeps_the_resources_server_kind(self) -> None:
+        agent = BrowsecompAgent(
+            config=_make_config(mask_stop_reasons=["context_full"]), server_client=MagicMock(spec=ServerClient)
+        )
+        response = _make_model_response([_make_msg("Exact Answer: Paris")]) | {"stop_reason": "context_full"}
+        verify_json = {
+            "reward": 0.0,
+            "response": response,
+            "responses_create_params": {"input": [{"role": "user", "content": "q"}]},
+            "mask_sample": True,
+            "failure_kind": "provider_unavailable",
+        }
+        agent.server_client.post = AsyncMock(
+            side_effect=[_http(), _http(json.dumps(response).encode()), _http(json.dumps(verify_json).encode())]
+        )
+        result = await agent.run(_request(), _run_body())
+
+        assert result.mask_sample is True
+        assert result.failure_kind == "provider_unavailable"
 
     def test_mask_stop_reasons_rejects_an_unknown_reason(self) -> None:
         with pytest.raises(ValueError):

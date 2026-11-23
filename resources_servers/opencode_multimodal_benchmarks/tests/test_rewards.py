@@ -273,15 +273,15 @@ def test_shared_tool_failure_is_not_inferred_from_model_visible_output(status):
 _ROLLOUT_TIMEOUT = {"status": "incomplete", "error_type": "timeout"}
 
 
-def test_tool_cut_by_rollout_timeout_is_scored_as_a_failed_call():
-    """The rollout's wall-clock timeout is the model's budget, so the cut tool is trained, not masked."""
-    from resources_servers.opencode_multimodal_benchmarks.rewards import trajectory_tool_reward
-
-    reward = trajectory_tool_reward(
-        tool_response(), trajectory("incomplete", root=_ROLLOUT_TIMEOUT), 0, bonus_config()
+def test_tool_cut_by_rollout_timeout_is_a_rollout_timeout():
+    """The rollout's wall-clock timeout is the model's budget: not missing evidence, but not scored either."""
+    from resources_servers.opencode_multimodal_benchmarks.rewards import (
+        RolloutTimeoutToolEvidence,
+        trajectory_tool_reward,
     )
-    assert reward.tool_error_count == 1 and reward.bash_success_count == 0
-    assert reward.auxiliary_reward == pytest.approx(-0.05)
+
+    with pytest.raises(RolloutTimeoutToolEvidence, match="rollout timeout"):
+        trajectory_tool_reward(tool_response(), trajectory("incomplete", root=_ROLLOUT_TIMEOUT), 0, bonus_config())
 
 
 @pytest.mark.parametrize(
@@ -294,10 +294,15 @@ def test_tool_cut_by_rollout_timeout_is_scored_as_a_failed_call():
     ],
 )
 def test_unfinished_tool_without_a_rollout_timeout_stays_unusable(status, root):
-    from resources_servers.opencode_multimodal_benchmarks.rewards import ToolEvidenceError, trajectory_tool_reward
+    from resources_servers.opencode_multimodal_benchmarks.rewards import (
+        RolloutTimeoutToolEvidence,
+        ToolEvidenceError,
+        trajectory_tool_reward,
+    )
 
-    with pytest.raises(ToolEvidenceError, match="Unfinished"):
+    with pytest.raises(ToolEvidenceError, match="Unfinished") as raised:
         trajectory_tool_reward(tool_response(), trajectory(status, root=root), 0, bonus_config())
+    assert not isinstance(raised.value, RolloutTimeoutToolEvidence)
 
 
 def test_child_tool_cannot_supply_missing_parent_evidence():
@@ -347,7 +352,7 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
 
 
 @pytest.mark.asyncio
-async def test_training_verifier_trains_a_rollout_cut_mid_tool_by_its_timeout():
+async def test_training_verifier_masks_a_rollout_cut_mid_tool_by_its_timeout_as_an_agent_timeout():
     from unittest.mock import MagicMock
 
     from nemo_gym.client import ServerClient
@@ -371,8 +376,10 @@ async def test_training_verifier_trains_a_rollout_cut_mid_tool_by_its_timeout():
         ng_trajectory=trajectory("incomplete", root=_ROLLOUT_TIMEOUT),
     )
     saved = (await server.verify(body)).model_dump(mode="json")
-    assert saved["mask_sample"] is False
-    assert saved["reward"] == pytest.approx(-0.05)
+    assert saved["mask_sample"] is True
+    assert saved["reward"] == 0.0
+    # The model's own budget, unlike a verifier error, so a trainer can keep it in group statistics.
+    assert saved["failure_kind"] == "agent_timeout"
 
 
 @pytest.mark.parametrize("status,bonus", [("completed", 0.1), ("failed", -0.05)])
