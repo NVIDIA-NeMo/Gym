@@ -169,3 +169,251 @@ class TestPrepare:
         out = pb_prepare.prepare(source_path=synthetic_release, output_path=tmp_path / "smoke.jsonl", limit=2)
         rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
         assert len(rows) == 2
+
+    def test_include_hints_appends_non_empty_hints_to_prompt_only(
+        self, synthetic_release: Path, tmp_path: Path
+    ) -> None:
+        out = pb_prepare.prepare(
+            source_path=synthetic_release,
+            output_path=tmp_path / "hints.jsonl",
+            include_hints=True,
+        )
+        rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+        first_text = "".join(
+            item.get("text", "") for item in rows[0]["responses_create_params"]["input"][0]["content"]
+        )
+        second_text = "".join(
+            item.get("text", "") for item in rows[1]["responses_create_params"]["input"][0]["content"]
+        )
+        assert first_text == "How many squares are in ?"
+        assert second_text.endswith("\n\nImage 1 is 1x1.")
+        # Judge question stays clean without appended hint.
+        assert "1x1" not in rows[1]["verifier_metadata"]["question"]
+
+    def test_include_hints_and_normalize_coords_1000_are_mutually_exclusive(
+        self, synthetic_release: Path, tmp_path: Path
+    ) -> None:
+        with pytest.raises(ValueError, match="cannot be used together"):
+            pb_prepare.prepare(
+                source_path=synthetic_release,
+                output_path=tmp_path / "invalid.jsonl",
+                include_hints=True,
+                normalize_coords_1000=True,
+            )
+        with pytest.raises(ValueError, match="cannot be used together"):
+            pb_prepare.convert_record(
+                {
+                    "index": 0,
+                    "problem": "<|image_1|>Q?",
+                    "image": [_data_url("image/png", _TINY_PNG)],
+                    "answer": "A",
+                    "error_category": "ocr_error",
+                },
+                include_hints=True,
+                normalize_coords_1000=True,
+            )
+
+
+def _png_with_size(width: int, height: int) -> str:
+    # Header-only PNG with IHDR width/height bytes sufficient for dimension parsing.
+    header = (
+        b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + width.to_bytes(4, "big") + height.to_bytes(4, "big")
+    )
+    return _data_url("image/png", header)
+
+
+def _jpeg_with_size(width: int, height: int, *, sof_marker: int = 0xC0) -> str:
+    # SOI + APP0 (16 bytes) + SOF0/SOF2 segment carrying height/width + EOI.
+    app0 = b"\xff\xe0" + (16).to_bytes(2, "big") + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    sof_body = b"\x08" + height.to_bytes(2, "big") + width.to_bytes(2, "big") + b"\x03\x01\x11\x00"
+    sof = bytes([0xFF, sof_marker]) + (len(sof_body) + 2).to_bytes(2, "big") + sof_body
+    return _data_url("image/jpeg", b"\xff\xd8" + app0 + sof + b"\xff\xd9")
+
+
+def _gif_with_size(width: int, height: int, *, version: bytes = b"GIF89a") -> str:
+    return _data_url(
+        "image/gif", version + width.to_bytes(2, "little") + height.to_bytes(2, "little") + b"\x00\x00\x00"
+    )
+
+
+def _webp_vp8_with_size(width: int, height: int) -> str:
+    # Lossy VP8 bitstream: 12-byte RIFF header + 'VP8 ' chunk header + 6-byte frame header + 16-bit W/H.
+    chunk_data = b"\x00\x00\x00\x9d\x01\x2a" + width.to_bytes(2, "little") + height.to_bytes(2, "little")
+    riff = b"RIFF" + (4 + 8 + len(chunk_data)).to_bytes(4, "little") + b"WEBP"
+    return _data_url("image/webp", riff + b"VP8 " + len(chunk_data).to_bytes(4, "little") + chunk_data)
+
+
+def _webp_vp8l_with_size(width: int, height: int) -> str:
+    # Lossless VP8L bitstream: signature byte 0x2f + packed 14-bit (width-1) and 14-bit (height-1).
+    packed = ((width - 1) & 0x3FFF) | (((height - 1) & 0x3FFF) << 14)
+    chunk_data = b"\x2f" + packed.to_bytes(4, "little") + b"\x00\x00\x00\x00\x00"
+    riff = b"RIFF" + (4 + 8 + len(chunk_data)).to_bytes(4, "little") + b"WEBP"
+    return _data_url("image/webp", riff + b"VP8L" + len(chunk_data).to_bytes(4, "little") + chunk_data)
+
+
+def _webp_vp8x_with_size(width: int, height: int) -> str:
+    # Extended VP8X header: 4-byte flags + 24-bit (width-1) + 24-bit (height-1).
+    chunk_data = b"\x00\x00\x00\x00" + (width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little")
+    riff = b"RIFF" + (4 + 8 + len(chunk_data)).to_bytes(4, "little") + b"WEBP"
+    return _data_url("image/webp", riff + b"VP8X" + len(chunk_data).to_bytes(4, "little") + chunk_data)
+
+
+class TestImageDimensions:
+    @pytest.mark.parametrize(
+        ("image_url", "expected"),
+        [
+            (_png_with_size(2048, 1536), (2048, 1536)),
+            (_jpeg_with_size(1600, 1067, sof_marker=0xC0), (1600, 1067)),
+            (_jpeg_with_size(1365, 2047, sof_marker=0xC2), (1365, 2047)),
+            (_gif_with_size(640, 480, version=b"GIF87a"), (640, 480)),
+            (_gif_with_size(320, 240, version=b"GIF89a"), (320, 240)),
+            (_webp_vp8_with_size(1280, 720), (1280, 720)),
+            (_webp_vp8l_with_size(1920, 1080), (1920, 1080)),
+            (_webp_vp8x_with_size(4096, 2160), (4096, 2160)),
+        ],
+        ids=["png", "jpeg_baseline", "jpeg_progressive", "gif87a", "gif89a", "webp_vp8", "webp_vp8l", "webp_vp8x"],
+    )
+    def test_parses_dimensions_across_all_supported_image_headers(
+        self, image_url: str, expected: tuple[int, int]
+    ) -> None:
+        assert pb_prepare._image_dimensions(image_url) == expected
+
+    def test_rejects_unsupported_or_truncated_image_bytes(self) -> None:
+        with pytest.raises(ValueError, match="Unable to read image dimensions"):
+            pb_prepare._image_dimensions(_data_url("image/bmp", b"BM\x00\x00\x00\x00"))
+        with pytest.raises(ValueError, match="Unable to read image dimensions"):
+            pb_prepare._image_dimensions(_data_url("image/jpeg", b"\xff\xd8\xff\xd9"))
+
+
+class TestNormalizeCoords1000:
+    def test_converts_row_col_and_unlabeled_pixel_coords_to_1000(self) -> None:
+        img = _png_with_size(2000, 1000)
+        row_col = pb_prepare.convert_record(
+            {
+                "index": 10,
+                "problem": (
+                    "<|image_1|>The origin of the pixel coordinate system is located at the top-left corner of the image, "
+                    "with row increasing vertically downward and col increasing horizontally to the right. "
+                    "Where is pixel position (row=250, col=1500)?\nA. Sky\nB. Road"
+                ),
+                "image": [img],
+                "answer": "B",
+                "hint": "The image dimensions are width=2000 px and height=1000 px.",
+                "error_category": "visual_localization_error",
+                "source_bmk": "DA-2K",
+            },
+            normalize_coords_1000=True,
+        )
+        q = row_col["verifier_metadata"]["question"]
+        assert "[750, 250]" in q
+        assert "row=" not in q
+        assert "pixel" not in q.lower()
+        assert "[0, 1000]" in q
+
+        bracket_xy = pb_prepare.convert_record(
+            {
+                "index": 11,
+                "problem": "<|image_1|>Given that the coordinates use the pixel coordinate system, what is at pixel coordinates [1000, 500]?",
+                "image": [img],
+                "answer": "A",
+                "hint": "The image dimensions are width=2000 px and height=1000 px.",
+                "error_category": "visual_localization_error",
+                "source_bmk": "DA-2K",
+            },
+            normalize_coords_1000=True,
+        )
+        assert "[500, 500]" in bracket_xy["verifier_metadata"]["question"]
+        assert "pixel" not in bracket_xy["verifier_metadata"]["question"].lower()
+
+        paren_rc = pb_prepare.convert_record(
+            {
+                "index": 12,
+                "problem": "<|image_1|>Which object does the pixel coordinate (250, 1000) fall on?",
+                "image": [img],
+                "answer": "A",
+                "hint": "",
+                "error_category": "visual_localization_error",
+                "source_bmk": "DA-2K",
+            },
+            normalize_coords_1000=True,
+        )
+        assert "[500, 250]" in paren_rc["verifier_metadata"]["question"]
+
+    def test_converts_0_1_points_bboxes_and_scalar_options(self) -> None:
+        img = _data_url("image/png", _TINY_PNG)
+        bbox_row = pb_prepare.convert_record(
+            {
+                "index": 20,
+                "problem": (
+                    "<|image_1|>Use [x, y] in normalized coordinates (0-1 range). Read [0.678, 0.119, 1.000, 0.195]."
+                ),
+                "image": [img],
+                "answer": "hi",
+                "hint": "Coordinates are given in [x1, y1, x2, y2] format.",
+                "error_category": "ocr_error",
+            },
+            normalize_coords_1000=True,
+        )
+        assert "(0-1000 range)" in bbox_row["verifier_metadata"]["question"]
+        assert "[678, 119, 1000, 195]" in bbox_row["verifier_metadata"]["question"]
+
+        paren_row = pb_prepare.convert_record(
+            {
+                "index": 21,
+                "problem": "<|image_1|>Range over [0,1], coordinate (0.135,0.324) is on?",
+                "image": [img],
+                "answer": "A",
+                "hint": "Coordinates are given in [x, y] format.",
+                "error_category": "ocr_error",
+            },
+            normalize_coords_1000=True,
+        )
+        assert "[0, 1000]" in paren_row["verifier_metadata"]["question"]
+        assert "[135, 324]" in paren_row["verifier_metadata"]["question"]
+
+        scalar_row = pb_prepare.convert_record(
+            {
+                "index": 22,
+                "problem": (
+                    "<|image_1|>Using normalized coordinates (0-1 range), find x:\nA.0.801\nB.0.901\nC.0.701\nD.0.601"
+                ),
+                "image": [img],
+                "answer": "B",
+                "hint": "",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        sq = scalar_row["verifier_metadata"]["question"]
+        assert "(0-1000 range)" in sq
+        assert "A.801\nB.901\nC.701\nD.601" in sq
+
+    def test_leaves_already_1000_and_cartesian_math_untouched(self) -> None:
+        img = _data_url("image/png", _TINY_PNG)
+        already_1000 = "<|image_1|>Count lines in [171, 239, 799, 293] (ranging from 0 to 1000)."
+        row_1000 = pb_prepare.convert_record(
+            {
+                "index": 30,
+                "problem": already_1000,
+                "image": [img],
+                "answer": "2",
+                "hint": "Coordinates are given in [x1, y1, x2, y2] format.",
+                "error_category": "visual_counting_error",
+            },
+            normalize_coords_1000=True,
+        )
+        assert row_1000["verifier_metadata"]["question"] == already_1000
+
+        cartesian = "<|image_1|>Where does the curve cross (0.5, 0.25) on the figure's axes?"
+        row_math = pb_prepare.convert_record(
+            {
+                "index": 31,
+                "problem": cartesian,
+                "image": [img],
+                "answer": "(2, -1)",
+                "hint": "",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        assert row_math["verifier_metadata"]["question"] == cartesian

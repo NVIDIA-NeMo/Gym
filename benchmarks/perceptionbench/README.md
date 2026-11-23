@@ -51,6 +51,25 @@ gym eval prepare --benchmark perceptionbench
 SHA-256 and 3,000-row count, and writes `benchmarks/perceptionbench/data/perceptionbench_benchmark.jsonl`
 (gitignored).
 
+### Optional prompt flags (mutually exclusive, off by default)
+
+Both flags deviate from upstream `MoonshotAI/PerceptionBench` (`eval/eval.py`) and **must not be used together**
+(combining them raises a `ValueError` because upstream hints state raw pixel dimensions and `[0, 1]` formats that
+contradict `[0, 1000]` coordinates):
+
+- **`include_hints` (`--include-hints` / `++prepare_script_args.include_hints=true`):** Appends upstream non-empty
+  `hint` strings (257 items: image pixel dimensions on 116 `DA-2K` items and `[x, y]` / `[x1, y1, x2, y2]` format
+  notes on 141 items) to the user prompt.
+- **`normalize_coords_1000` (`--normalize-coords-1000` / `++prepare_script_args.normalize_coords_1000=true`):**
+  Rewrites image pixel coordinates and `[0, 1]` coordinates across 259 items into integer `[0, 1000]` `[x, y]` /
+  `[x1, y1, x2, y2]` format (top-left origin), leaving already-`[0, 1000]` and non-image figure/board coordinates
+  untouched.
+
+When regenerating with a different flag via `gym eval prepare`, pass `+use_cached_prepared_benchmarks=false`, and
+pass `+overwrite_metrics_conflicts=true` on the subsequent `gym eval run` (because the updated prompts change the
+cached word-count stats in `perceptionbench_benchmark_metrics.json`). Alternatively, write to a separate `--output`
+path when invoking `benchmarks/perceptionbench/prepare.py` directly.
+
 ## Validate and test
 
 ```bash
