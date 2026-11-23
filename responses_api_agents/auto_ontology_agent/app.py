@@ -252,7 +252,10 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         model_urls = [model_base_url]
         if self.config.non_reasoning_model_server is not None:
             model_urls.append(
-                self.resolve_model_base_url(self.config.non_reasoning_model_server.name, body.episode_id.capture_key)
+                # Not a trained role: it keeps its own sampling, not the rollout's policy sampling.
+                self.resolve_model_base_url(
+                    self.config.non_reasoning_model_server.name, body.episode_id.capture_key, trained=False
+                )
             )
             # A restricted network opens the policy's host, on every port: the other Model Server must share it.
             hosts = {urlparse(url).hostname for url in model_urls}
@@ -482,7 +485,9 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
                 {
                     "non_reasoning_model": self.config.non_reasoning_model,
                     "non_reasoning_model_base_url": self.resolve_model_base_url(
-                        self.config.non_reasoning_model_server.name, state.request.episode_id.capture_key
+                        self.config.non_reasoning_model_server.name,
+                        state.request.episode_id.capture_key,
+                        trained=False,
                     ),
                 }
                 if self.config.non_reasoning_model_server is not None
@@ -685,7 +690,9 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         rollout_id = request.path_params.get("rollout_id")
         if rollout_id != state.request.episode_id.capture_key:
             raise AgentSessionConflictError("The activation's rollout does not match the seeded session")
-        refuse_unsupported_request_fields(body, model=self.config.model, honored={"input"})
+        # a-Interact's one activation carries the server's tools, which the interactive pipeline calls.
+        honored = {"input", "tools"} if state.tool_access is not None else {"input"}
+        refuse_unsupported_request_fields(body, model=self.config.model, honored=honored)
         if state.activation is None:
             # No await before the activation is installed: a retry joins it.
             state.activation_request = body.model_copy(deep=True)

@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
+from nemo_gym.config import ModelServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from responses_api_agents.auto_ontology_agent import a_interact, episode_runner
 from responses_api_agents.auto_ontology_agent import app as agent_app
@@ -407,8 +408,18 @@ async def test_an_a_interact_activation_buys_the_task_s_context_then_runs_the_ta
 
     monkeypatch.setattr(agent_app, "request", request)
     monkeypatch.setattr(agent_app, "raise_for_status", raise_for_status)
-    monkeypatch.setattr(AutoOntologyAgent, "resolve_model_base_url", lambda *args, **kwargs: MODEL_URL)
-    agent = _agent(pipeline="interactive", knowledge_dir=str(tmp_path))
+    resolved: dict[str, bool] = {}
+
+    def resolve_model_base_url(self, name: str, rollout_id: str, *, trained: bool = True) -> str:  # noqa: ANN001
+        resolved[name] = trained
+        return MODEL_URL
+
+    monkeypatch.setattr(AutoOntologyAgent, "resolve_model_base_url", resolve_model_base_url)
+    agent = _agent(
+        pipeline="interactive",
+        knowledge_dir=str(tmp_path),
+        non_reasoning_model_server=ModelServerRef(type="responses_api_models", name="non_reasoning_model"),
+    )
     session = _FakeSession({})
     staged[f"{session.session_dir}/result.json"] = json.dumps(
         {"sql": "SELECT 1", "reason": "done", "tool_calls": 3, "submit_reply": "Phase 1 correct! (Reward: 0.7)."}
@@ -443,3 +454,37 @@ async def test_an_a_interact_activation_buys_the_task_s_context_then_runs_the_ta
     assert task["tools"]["execute"]["url"] == f"{C_INTERACT_GRANT['base_url']}/execute"
     assert "```sql\nSELECT 1\n```" in response.output[0].content[0].text
     assert state.invocations[0].stop_reason == "done"
+    # The non-reasoning role keeps its own sampling; the policy takes the rollout's.
+    assert resolved == {"policy_model": True, "non_reasoning_model": False}
+
+
+async def test_an_a_interact_activation_with_the_server_s_tools_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _agent(pipeline="interactive")
+    seed = _a_interact_seed()
+    state = AutoOntologySessionState(
+        request=seed,
+        task=None,
+        session=_FakeSession({}),  # type: ignore[arg-type]
+        catalog_port=34567,
+        tool_access=agent.effective_tool_accesses(seed)[0],
+    )
+    ran: list[NeMoGymResponseCreateParamsNonStreaming] = []
+
+    monkeypatch.setattr(AutoOntologyAgent, "_require_agent_session", lambda self, session_id: state)
+    monkeypatch.setattr(AutoOntologyAgent, "_agent_session_id_from_request", lambda self, request: "session")
+    body = _request().model_copy(update={"tools": [{"type": "function", "name": "submit_sql", "parameters": {}}]})
+
+    class _Answer(str):
+        def model_copy(self, deep: bool = False) -> str:
+            return str(self)
+
+    async def answer(self, state, body):  # noqa: ANN001, ANN202
+        ran.append(body)
+        return _Answer("answered")
+
+    monkeypatch.setattr(AutoOntologyAgent, "_run_episode", answer)
+    request = type("Request", (), {"path_params": {"rollout_id": "rollout"}})()
+
+    # The tools are the server's, which the interactive pipeline calls: they are honored, not refused.
+    assert await agent.responses(request, body) == "answered"
+    assert ran == [body]
