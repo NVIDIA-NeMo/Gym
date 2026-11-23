@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 import multiprocessing
 import os
 import tarfile
@@ -105,6 +106,30 @@ class TestApp:
             ),
         )
         CVDPAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.parametrize(
+        ("overrides", "deprecated"),
+        [
+            ({"simple_agent": False}, True),
+            ({"simple_agent": False, "prepared_repository_dir": "heavy_workspaces"}, False),
+            ({"simple_agent": True}, False),
+        ],
+    )
+    def test_the_sandboxed_harness_flavor_warns_that_it_is_deprecated(self, caplog, overrides, deprecated) -> None:
+        config = CVDPAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            resources_server=ResourcesServerRef(type="resources_servers", name=""),
+            model_server=ModelServerRef(type="responses_api_models", name=""),
+            **overrides,
+        )
+        with caplog.at_level(logging.WARNING):
+            CVDPAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        assert ("is deprecated" in caplog.text) is deprecated
+        if deprecated:
+            assert "Migrating from cvdp_agent_generic_*" in caplog.text
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
         config = CVDPAgentConfig(

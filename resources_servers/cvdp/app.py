@@ -449,6 +449,18 @@ class CVDPResourcesServer(SimpleResourcesServer):
         return app
 
     # ---------------------------------------------------------------- agent sessions
+    #
+    # The session lifecycle overrides seed_session, close_resources_session and retire_session_state instead of
+    # implementing the session state hooks (initialize_session_state, release_session_state, has_session_state),
+    # because the hooks' flow differs in three ways:
+    # - The seed must return sandbox_access, the descriptor the agent reattaches with. The hooks' typed seed returns
+    #   only the resources_session_id.
+    # - verify, not close, stops the sandbox, and only once the files are out: a failed harvest keeps the sandbox for
+    #   a resent verify. ``verifying`` releases the state when it exits, even when scoring raises.
+    # - Only the harvest holds the session lock; grading in the task harness runs outside it.
+    # The overrides keep the hooks' contract otherwise (check_resources_session_contract in tests/test_sessions.py):
+    # idempotent same-episode seeds, 409 for another episode, close fences, and session_release_pending while a
+    # sandbox is still held.
 
     async def seed_session(
         self,

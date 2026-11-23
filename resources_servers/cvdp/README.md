@@ -95,6 +95,57 @@ They differ where a lent sandbox needs it: Hermes runs only the `terminal` and `
 `opencode_agent`'s command deny-list and without web, subagent and skill tools, and Claude Code calls the policy model
 server's `/v1/messages` route with a pinned version.
 
+### Migrating from `cvdp_agent_generic_*`
+
+Replace the legacy config and agent name with the session one; the dataset, `cvdp_sim_image` and the report step are
+unchanged.
+
+| Legacy config and `--agent` | Session config | Session `--agent` |
+| --- | --- | --- |
+| `responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml`, `cvdp_agent_generic_hermes` | `resources_servers/cvdp/configs/cvdp_agentic_hermes.yaml` | `cvdp_agentic_hermes_agent` |
+| `responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_opencode.yaml`, `cvdp_agent_generic_opencode` | `resources_servers/cvdp/configs/cvdp_agentic_opencode.yaml` | `cvdp_agentic_opencode_agent` |
+| `responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_claude.yaml`, `cvdp_agent_generic_claude` | `resources_servers/cvdp/configs/cvdp_agentic_claude_code.yaml` | `cvdp_agentic_claude_code_agent` |
+
+For example, this legacy run:
+
+```bash
+gym env start \
+    --config responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml \
+    --resources-server cvdp \
+    --model-type vllm_model
+
+gym eval run --no-serve \
+    --agent cvdp_agent_generic_hermes \
+    --config responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml \
+    --input resources_servers/cvdp/data/<dataset>.jsonl \
+    --output results/rollouts.jsonl \
+    --resources-server cvdp \
+    --model-type vllm_model
+```
+
+becomes:
+
+```bash
+gym env start \
+    --config resources_servers/cvdp/configs/cvdp_agentic_hermes.yaml \
+    --model-type vllm_model
+
+gym eval run --no-serve \
+    --agent cvdp_agentic_hermes_agent \
+    --input resources_servers/cvdp/data/<dataset>.jsonl \
+    --output results/rollouts.jsonl
+```
+
+- The session configs bring their own resources server, so drop `--resources-server cvdp`.
+- Claude Code calls the policy model server (`${policy_model_name}`) instead of `anthropic_model_name`,
+  `anthropic_api_key` and `anthropic_base_url`.
+- Settings that lived on `cvdp_agent` move. `agent_kwargs` become fields of the harness agent's block in the session
+  config. `timeout` becomes that agent's own budget (Hermes: `sandbox_runner_timeout_seconds`) under the Environment
+  Server's `default_episode_timeout_seconds`. `concurrency` is `gym eval run --concurrency`. `image` is
+  `cvdp_sim_image`, and `sandbox_provider` is the `cvdp_agentic_sandbox` block in `configs/cvdp_agentic.yaml`.
+- Heavy-agentic repository tasks (`cvdp_agent_heavy_claude.yaml`) have no session config yet; keep running them through
+  `cvdp_agent`.
+
 ### `cvdp_agent`
 
 Both legacy flavors are the **same agent class — `CVDPAgent`** (`responses_api_agents/cvdp_agent/app.py`); you pick the flavor with the **`simple_agent`** config flag. They differ only in **how the candidate RTL is produced and graded**:

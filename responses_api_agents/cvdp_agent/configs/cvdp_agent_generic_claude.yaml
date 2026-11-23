@@ -1,6 +1,7 @@
 # Deprecated legacy relay path: cvdp_agent runs Claude Code in a sandbox of its own behind legacy_agent.
 # Use resources_servers/cvdp/configs/cvdp_agentic_claude_code.yaml, where the cvdp resources server lends the task
-# sandbox to claude_code_agent through an agent session. This config stays for existing runs.
+# sandbox to claude_code_agent through an agent session. This config stays for existing runs, and as the base of
+# cvdp_agent_heavy_claude.yaml: heavy-agentic repository tasks have no session config yet.
 cvdp_agent_generic_claude:
   responses_api_agents:
     cvdp_agent:
