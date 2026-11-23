@@ -124,8 +124,9 @@ class ModelCallCaptureConfig(BaseModel):
     # records only the named servers, e.g. the judge and simulator servers and not the policy. Unlisted servers still
     # strip the rollout prefix and keep token capture.
     model_call_capture_servers: Optional[list[str]] = None
-    # Record the calls of one rollout group in every N. The group is the capture key without its
-    # `_g<index>` sibling and `-a<attempt>` suffixes, so a prompt's siblings and retries are kept or dropped together.
+    # Record the calls of one rollout group in every N. The group is the capture key without its `-a<attempt>` suffix
+    # and, for a NeMo RL key, its `_g<index>` sibling suffix, so a rollout's retries, and a NeMo RL prompt's sibling
+    # generations, are kept or dropped together.
     model_call_capture_sample_every: int = Field(default=1, ge=1)
     # Stop recording new calls while the capture directory's filesystem has less free space than
     # this (checked at most every 30 s per process). 0 disables the check.
@@ -146,8 +147,9 @@ class ModelCallCaptureConfig(BaseModel):
         return self.model_call_capture_servers is None or model_server_name in self.model_call_capture_servers
 
 
-# The sibling and attempt suffixes of a NeMo RL capture key (`<group>_g<i>[-a<n>]`).
-_CAPTURE_GROUP_SUFFIX = re.compile(r"_g\d+(?:-a\d+)?\Z")
+# The sibling suffix of a NeMo RL capture key (`<group>_g<i>`) and the `-a<n>` attempt suffix that any capture key
+# carries on a retry (`maybe_rollout_id_from_run_body` reserves it).
+_CAPTURE_GROUP_SUFFIX = re.compile(r"(?:_g\d+)?(?:-a\d+)?\Z")
 
 
 class _CaptureGate:

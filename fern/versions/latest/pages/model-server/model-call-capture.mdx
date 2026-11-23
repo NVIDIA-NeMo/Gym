@@ -323,6 +323,11 @@ the training-token records (ledger rows, manifest records and failures, receipts
 an unnamed agent, so a single-agent record keeps its earlier shape. `ModelCallRecord` always has both and
 sets them to `null`. Read an absent field and `null` as the same thing: the agent is unnamed.
 
+A call that a Gym server made while handling a rollout, such as a judge call from a resources server's
+`/verify`, also carries `caller_server`: the top-level config name of the server that made it, read from its
+`NEMO_GYM_CONFIG_PATH`. The field is
+absent when the caller is not a Gym server. It is in the raw record only, not in `ModelCallRecord`.
+
 Writes are flushed and fsynced. Capture failures are logged without failing model requests. Resume
 attempts use an `-a<n>` suffix so their data does not mix with an earlier attempt. Before dispatch,
 the collector clears any existing capture for the exact rollout-attempt id.
@@ -368,6 +373,29 @@ policy_model:
     vllm_model:
       entrypoint: app.py
 ```
+
+### Record only some calls
+
+A long run that records every call can fill its capture directory. Three more top-level fields choose
+which calls the capture store records. Their defaults record every call.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model_call_capture_servers` | `list[str]` | `null` | Names of the model servers that record, for example the judge and not the policy. `null` records every model server. An unlisted server still serves rollout-prefixed calls and keeps training token capture. |
+| `model_call_capture_sample_every` | `int` | `1` | Record one rollout group in every N, chosen by a hash of the group. The group is the rollout id without its `-a<n>` attempt suffix and, for a NeMo RL id (`<group>_g<i>`), its `_g<i>` sibling suffix. A rollout's retries, and a NeMo RL prompt's sibling generations, are kept or left out together. |
+| `model_call_capture_min_free_gib` | `float` | `0` | Stop recording new calls while the capture directory's filesystem has less free space than this, and resume when space returns. Each model server process checks at most every 30 seconds and logs a warning when it pauses or resumes. `0` turns the check off. |
+
+```yaml
+observability_enabled: true
+model_call_capture_dir: /absolute/path/to/model-calls
+model_call_capture_servers: [judge_model]
+model_call_capture_sample_every: 8
+model_call_capture_min_free_gib: 50
+```
+
+The rollout-record attachment and rollout health checks read only the recorded calls, so they see the calls
+left out as missing. Use these fields when you need only the calls you keep, for example judge calls during
+training, and not for an evaluation run whose rollout health you check.
 
 ### Trajectory schema selection
 

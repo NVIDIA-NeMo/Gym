@@ -54,10 +54,6 @@ def _group_admitted(group: str, sample_every: int) -> bool:
     return zlib.crc32(group.encode()) % sample_every == 0
 
 
-def _groups(sample_every: int, *, admitted: bool) -> str:
-    return next(f"group{i}" for i in range(1000) if _group_admitted(f"group{i}", sample_every) is admitted)
-
-
 def test_defaults_keep_every_call_of_every_server(tmp_path) -> None:
     config = ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path)
     assert config.model_call_capture_servers is None
@@ -97,7 +93,17 @@ def test_server_allowlist_records_only_listed_servers(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     "rollout_id, group",
-    [("abc", "abc"), ("abc_g0", "abc"), ("abc_g12", "abc"), ("abc_g3-a1", "abc"), ("a_g1_b_g2", "a_g1_b")],
+    [
+        ("abc", "abc"),
+        ("abc_g0", "abc"),
+        ("abc_g12", "abc"),
+        ("abc_g3-a1", "abc"),
+        ("a_g1_b_g2", "a_g1_b"),
+        # Rollout collection's own keys are `<task>-<rollout>`, and a re-dispatch appends `-a<n>`.
+        ("3-0", "3-0"),
+        ("3-0-a1", "3-0"),
+        ("3-0-a12", "3-0"),
+    ],
 )
 def test_capture_group_drops_sibling_and_attempt_suffixes(rollout_id: str, group: str) -> None:
     assert _CaptureGate.group_of(rollout_id) == group
@@ -105,14 +111,17 @@ def test_capture_group_drops_sibling_and_attempt_suffixes(rollout_id: str, group
 
 def test_sample_every_keeps_or_drops_whole_prompt_groups(tmp_path) -> None:
     sample_every = 4
-    kept, dropped = _groups(sample_every, admitted=True), _groups(sample_every, admitted=False)
+    groups = [f"group{i}" for i in range(16)]
+    assert {_group_admitted(group, sample_every) for group in groups} == {True, False}
     client = TestClient(_app(tmp_path, model_server_name="judge_model", model_call_capture_sample_every=sample_every))
 
-    for group in (kept, dropped):
-        # A prompt's sibling generations and their retries all share the group's decision.
-        for rollout_id in (f"{group}_g0", f"{group}_g7", f"{group}_g7-a1"):
+    for group in groups:
+        expected_records = 1 if _group_admitted(group, sample_every) else 0
+        # A prompt's sibling generations and their retries all share the group's decision, and so does the retry
+        # of a rollout whose key has no sibling suffix.
+        for rollout_id in (f"{group}_g0", f"{group}_g7", f"{group}_g7-a1", group, f"{group}-a1"):
             assert client.post(f"/ng-rollout/{rollout_id}/v1/responses", json={"input": "x"}).status_code == 200
-            assert len(CaptureStore(tmp_path).read(rollout_id)) == (1 if group == kept else 0)
+            assert len(CaptureStore(tmp_path).read(rollout_id)) == expected_records, rollout_id
 
 
 def test_sample_every_keeps_about_one_group_in_n(tmp_path) -> None:
