@@ -87,6 +87,10 @@ Agent-owned sandboxes inherit provider metadata defaults, then `sandbox_config.m
 
 ### Pi and OpenCode prompt and tool controls
 
+In a borrowed sandbox, OpenCode 1 passes the owner’s `SandboxAccess.env` values to task shell commands. The task’s home and XDG directories keep their original values.
+
+In an OpenCode 1 sandbox session, set `bash_timeout_seconds` to cap the duration of each Bash tool call. A shorter timeout requested by the model still applies. Set `opencode_config.tool_output.max_bytes` or `max_lines` to a positive integer to limit the tool output returned to the model.
+
 Both `pi_agent` and `opencode_agent` accept `system_prompt_mode: append|replace`,
 defaulting to `append`. Replacement uses the harness's custom system prompt for
 the combined configured system prompt, request instructions and input system

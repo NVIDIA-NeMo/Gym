@@ -12,9 +12,15 @@ export const TaskEnvironment = async () => {
       throw new Error(`Invalid task directory: ${key}`);
     }
   }
+  const bashTimeoutMs = Number(process.env.NEMO_GYM_BASH_TIMEOUT_MS);
   const hooks = {
     "shell.env": async (_input, output) => {
       Object.assign(output.env, env);
+    },
+    "tool.execute.before": async (input, output) => {
+      if (input.tool !== "bash" || !(bashTimeoutMs > 0) || !output?.args) return;
+      const asked = Number(output.args.timeout);
+      output.args.timeout = asked > 0 ? Math.min(asked, bashTimeoutMs) : bashTimeoutMs;
     },
   };
   // OpenCode logs plugin initialization failures and continues without the hook.
