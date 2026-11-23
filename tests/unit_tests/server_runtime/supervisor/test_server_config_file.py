@@ -327,3 +327,70 @@ def test_a_start_that_fails_after_writing_the_file_removes_it(tmp_path: Path, mo
 
     assert spinup.called
     assert not Path(envs[0][NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME]).exists()
+
+
+def test_private_config_is_removed_on_interpreter_exit(tmp_path):
+    script = """
+import os, sys
+from pathlib import Path
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
+supervisor = ServerSupervisor()
+config = 'value: ' + 'x' * 140000
+__import__('tempfile').tempdir = sys.argv[1]
+env = supervisor._config_dict_env(config, [], {})
+print(env['NEMO_GYM_CONFIG_DICT_FILE'], flush=True)
+"""
+    result = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True, check=True)
+    path = Path(result.stdout.strip())
+    assert path.parent == tmp_path
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("during_start", [True, False])
+def test_library_sigterm_removes_config_and_keeps_failure_exit(tmp_path, during_start):
+    script = """
+import os, signal, sys
+from pathlib import Path
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
+class Supervisor(ServerSupervisor):
+    def _start(self, config):
+        self._config_dict_file = Path(sys.argv[1])
+        self._config_dict_file.write_text('private')
+        if sys.argv[2] == 'True':
+            os.kill(os.getpid(), signal.SIGTERM)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+Supervisor().start(None)
+os.kill(os.getpid(), signal.SIGTERM)
+"""
+    path = tmp_path / "config.yaml"
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(path), str(during_start)], capture_output=True, text=True
+    )
+    assert result.returncode == 143, result.stderr
+    assert not path.exists()
+
+
+def test_library_start_keeps_custom_sigterm_policy(monkeypatch):
+    import signal
+
+    supervisor = _supervisor()
+    policy = lambda *_: None
+    monkeypatch.setattr(signal, "getsignal", lambda _: policy)
+    install = MagicMock()
+    monkeypatch.setattr(signal, "signal", install)
+    monkeypatch.setattr(supervisor, "_start", lambda _: None)
+    supervisor.start(None)
+    install.assert_not_called()
+
+
+def test_library_start_on_worker_thread_does_not_install_signal_handler(monkeypatch):
+    import signal
+    from concurrent.futures import ThreadPoolExecutor
+
+    supervisor = _supervisor()
+    install = MagicMock()
+    monkeypatch.setattr(signal, "signal", install)
+    monkeypatch.setattr(supervisor, "_start", lambda _: None)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(supervisor.start, None).result()
+    install.assert_not_called()

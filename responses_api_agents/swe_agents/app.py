@@ -15,7 +15,6 @@
 # limitations under the License.
 import asyncio
 import base64
-import errno
 import glob
 import hashlib
 import importlib.util
@@ -57,13 +56,12 @@ from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
-    ConfigError,
     ModelServerRef,
     get_first_server_config_dict,
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.config.global_config import OmegaConf
+from nemo_gym.config.global_config import MAX_CONFIG_DICT_ENV_BYTES, OmegaConf
 from nemo_gym.core import (
     AGENT_LIMIT,
     AGENT_TIMEOUT,
@@ -261,6 +259,39 @@ class SWEBenchWrapperServerConfig(BaseModel):
     base_results_dir: Path
     openhands_setup_dir: Optional[Path] = None
     opencode_setup_dir: Optional[Path] = None
+
+
+def _agent_config_env(config: "SWEBenchWrapperInstanceConfig", python: str | None) -> str:
+    """Carry the resolved config through the rollout mount, with an inline fallback for an older Gym."""
+    quoted = config.ng_global_config_dict_str
+    yaml_text = shlex.split(quoted)[0]
+    if len(yaml_text.encode()) <= MAX_CONFIG_DICT_ENV_BYTES:
+        return f"( export NEMO_GYM_CONFIG_DICT={quoted} NEMO_GYM_CONFIG_DICT_FILE='' && "
+    # Write inside the mounted rollout directory. Shell builtins accept the long literal without
+    # exporting it to an exec environment; the EXIT trap removes it on success and failure.
+    template = shlex.quote(str(config.base_mounted_dir / "nemo-gym-config-XXXXXX.yaml"))
+    write_file = (
+        f"( ng_config_file=$(mktemp {template}) && "
+        "trap 'rm -f \"$ng_config_file\"' EXIT && "
+        "trap 'exit 143' TERM && trap 'exit 130' INT && trap 'exit 129' HUP && "
+        f'printf %s {quoted} >"$ng_config_file" && '
+    )
+    file_env = 'export NEMO_GYM_CONFIG_DICT="" NEMO_GYM_CONFIG_DICT_FILE="$ng_config_file"'
+    if python is None:
+        # OpenCode uses its model-server URL rather than a Python Gym client.
+        return write_file + file_env + " && "
+    reads_file = "from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME"
+    check_inline = (
+        "import subprocess,sys; from pathlib import Path; "
+        "text=Path(sys.argv[1]).read_text(); "
+        "subprocess.run(['/bin/sh','-c',':'],env={'NEMO_GYM_CONFIG_DICT':text},check=True)"
+    )
+    return write_file + (
+        f"if {shlex.quote(python)} -c {shlex.quote(reads_file)} >/dev/null 2>&1; then "
+        f"{file_env}; else "
+        f'{shlex.quote(python)} -c {shlex.quote(check_inline)} "$ng_config_file" && '
+        'export NEMO_GYM_CONFIG_DICT="$(cat "$ng_config_file")" NEMO_GYM_CONFIG_DICT_FILE=\'\'; fi && '
+    )
 
 
 class ExecuteContainerCommandArgs(BaseModel):
@@ -1988,7 +2019,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             f"{log_cmd}"
             f"{profiling_cmd}"
             f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
-            f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
+            f"{_agent_config_env(self.config, '/openhands_setup/OpenHands/.venv/bin/python')}"
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} &&"
             "export VIRTUAL_ENV=/openhands_setup/OpenHands/.venv && "
             "export PATH=$PATH:/openhands_setup/OpenHands/.venv/bin && "
@@ -2041,6 +2072,8 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         for a in positional_args[: last_set + 1]:
             agent_main_cmd += f"    {a} " if a else "    '' "
 
+        # Keep config cleanup in a subshell so the outer script's log-copy EXIT trap still runs.
+        agent_main_cmd += " )"
         agent_script_name = f"agent_script_{agent_run_id}.sh"
         agent_script_path = self.config.persistent_dir / agent_script_name
         with open(agent_script_path, "w") as f:
@@ -2381,7 +2414,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             "cd /opencode_setup/opencode && "
             f'date +"%s.%N" > {self.config.generation_apptainer_spinup_timestamp_mounted_fpath} && '
             f"export NEMO_GYM_METRICS_FPATH={self.config.base_mounted_dir}/nemo_gym_metrics.json && "
-            f"export NEMO_GYM_CONFIG_DICT={self.config.ng_global_config_dict_str} && "
+            f"{_agent_config_env(self.config, None)}"
             f"export NEMO_GYM_MODEL_SERVER_NAME={self.config.model_server_name} && "
             f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
             f"export COMMAND_EXEC_TIMEOUT={self.config.command_exec_timeout} && "
@@ -2424,6 +2457,8 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         for a in positional_args[: last_set + 1]:
             agent_main_cmd += f"    {a} " if a else "    '' "
 
+        # Keep config cleanup in a subshell so the outer script's log-copy EXIT trap still runs.
+        agent_main_cmd += " )"
         agent_script_name = f"agent_script_{agent_run_id}.sh"
         agent_script_path = self.config.persistent_dir / agent_script_name
         # set +e inside the trap so a failing log-copy (e.g. when $HOME != /root
@@ -3121,19 +3156,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         # `results_dir` so runs can point it at a shared filesystem. The key is
         # absent only for hand-built config dicts that bypassed the parser.
         global_config_dict = get_global_config_dict()
-        # The agent script exports the whole config as one environment variable inside the agent's container, and
-        # Linux refuses to start a program with a variable over 32 memory pages. Every rollout would then end
-        # without a patch and score 0.0, so the server stops here instead.
         config_dict_yaml = OmegaConf.to_yaml(global_config_dict)
-        try:
-            Popen(["/bin/sh", "-c", ":"], env={"PATH": os.defpath, "NEMO_GYM_CONFIG_DICT": config_dict_yaml}).wait()
-        except OSError as error:
-            if error.errno != errno.E2BIG:
-                raise
-            raise ConfigError(
-                f"The config is {len(config_dict_yaml.encode()):,} bytes, too long for the environment variable that "
-                "swe_agents exports into its agent container. Run swe_agents with a smaller config."
-            ) from error
         configured_results_root = global_config_dict.get(RESULTS_DIR_KEY_NAME)
         results_root = Path(configured_results_root) if configured_results_root else RESULTS_DIR
         base_results_dir = results_root / f"swebench_results_{run_session_id}"

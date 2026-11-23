@@ -30,7 +30,7 @@ import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
 from nemo_gym.client import ServerClient
-from nemo_gym.config import CACHE_DIR_KEY_NAME, ConfigError, ModelServerRef
+from nemo_gym.config import CACHE_DIR_KEY_NAME, ModelServerRef
 from nemo_gym.config.config_types import OmegaConf
 from nemo_gym.core import (
     AGENT_LIMIT,
@@ -2247,15 +2247,10 @@ class TestSWEBenchWrapper:
         assert wrapper._swe_bench_wrapper_server_config is not None
         assert wrapper._swe_bench_wrapper_server_config.run_session_id is not None
 
-    @pytest.mark.skipif(sys.platform != "linux", reason="the limit on one environment variable is Linux's")
-    def test_a_config_too_long_to_export_into_the_agent_container_stops_the_start(self, monkeypatch) -> None:
-        """The agent script exports the whole config as one variable; over the limit every rollout would score 0.0."""
-        # Linux refuses one environment variable over 32 memory pages.
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        _create_wrapper(monkeypatch, tasks="a" * (31 * page_size))
-
-        with pytest.raises(ConfigError, match="too long for the environment variable"):
-            _create_wrapper(monkeypatch, tasks="a" * (32 * page_size))
+    def test_a_config_too_long_for_one_variable_reaches_container_setup(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch, tasks="a" * 140_000)
+        quoted = wrapper._swe_bench_wrapper_server_config.ng_global_config_dict_str
+        assert "a" * 140_000 in quoted
 
     def test_resolve_absolute_path_none(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
@@ -3856,3 +3851,64 @@ def test_masked_failure_names_the_first_matching_kind(metrics: dict, expected_ki
         kind, reason = masked_failure
         assert kind == expected_kind
         assert reason
+
+
+@pytest.mark.parametrize("python_reads_file", [True, False])
+def test_large_agent_config_uses_private_mounted_file(tmp_path, python_reads_file):
+    import shlex
+
+    config_text = "policy_model_name: test\nlarge: " + "x" * 140_000
+    config = _make_instance_config(str(tmp_path), ng_global_config_dict_str=shlex.quote(config_text))
+    config.base_mounted_dir = config.persistent_dir
+    python = sys.executable if python_reads_file else "/nonexistent/python"
+    command = swe_app._agent_config_env(config, python)
+    if python_reads_file:
+        read = (
+            "import os,stat; from pathlib import Path; "
+            "from nemo_gym.config.global_config import maybe_get_global_config_dict; "
+            "p=Path(os.environ['NEMO_GYM_CONFIG_DICT_FILE']); "
+            "assert stat.S_IMODE(p.stat().st_mode)==0o600; "
+            "print(len(maybe_get_global_config_dict().large))"
+        )
+        tail = f"{shlex.quote(sys.executable)} -c {shlex.quote(read)}"
+    else:
+        tail = "echo SHOULD_NOT_RUN"
+    # Invoke from a file: bash -c would put the large config itself in one argv entry.
+    script = tmp_path / "agent.sh"
+    script.write_text(command + tail + " )")
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    if python_reads_file:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "140000"
+    else:
+        assert result.returncode != 0
+        assert "SHOULD_NOT_RUN" not in result.stdout
+    assert list(config.persistent_dir.glob("nemo-gym-config-*.yaml")) == []
+
+
+def test_opencode_large_config_cleans_file_after_command_failure(tmp_path):
+    import shlex
+
+    config = _make_instance_config(str(tmp_path), ng_global_config_dict_str=shlex.quote("x" * 140_000))
+    config.base_mounted_dir = config.persistent_dir
+    command = swe_app._agent_config_env(config, None)
+    assert 'NEMO_GYM_CONFIG_DICT=""' in command
+    script = tmp_path / "agent.sh"
+    script.write_text("trap 'echo LOG_CLEANUP' EXIT\n" + command + "exit 7 )")
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    assert result.returncode == 7
+    assert "LOG_CLEANUP" in result.stdout
+    assert list(config.persistent_dir.glob("nemo-gym-config-*.yaml")) == []
+
+
+def test_agent_config_cleans_file_after_sigterm(tmp_path):
+    import shlex
+
+    config = _make_instance_config(str(tmp_path), ng_global_config_dict_str=shlex.quote("x" * 140_000))
+    config.base_mounted_dir = config.persistent_dir
+    command = swe_app._agent_config_env(config, None)
+    script = tmp_path / "agent.sh"
+    script.write_text(command + 'kill -TERM "$BASHPID" )')
+    result = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    assert result.returncode == 143
+    assert list(config.persistent_dir.glob("nemo-gym-config-*.yaml")) == []

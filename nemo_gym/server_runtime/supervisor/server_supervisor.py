@@ -15,10 +15,12 @@
 """Starting, watching, and stopping the servers of a Gym run: the supervisor behind `gym env start`."""
 
 import asyncio
+import atexit
 import errno
 import os
 import re
 import shlex
+import signal
 import socket
 import sys
 from math import isfinite
@@ -26,7 +28,7 @@ from pathlib import Path
 from signal import SIGINT, SIGKILL
 from subprocess import PIPE, Popen, TimeoutExpired
 from tempfile import mkstemp
-from threading import Lock, Thread
+from threading import Lock, Thread, current_thread, main_thread
 from time import monotonic, sleep, time
 from typing import IO, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
@@ -705,6 +707,7 @@ class ServerSupervisor:  # pragma: no cover
     _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
     # The file that holds a config too long for an environment variable, until shutdown.
     _config_dict_file: Path | None = None
+    _sigterm_handler = None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -713,6 +716,7 @@ class ServerSupervisor:  # pragma: no cover
         Callers reach their own `shutdown()` only after this returns.
         Managed servers run in their own sessions, so shutdown owns delivery of their interrupt.
         """
+        # Do not replace an application's signal policy or install a handler from a worker thread.
         for attempt in (1, 2):
             self._processes = dict()
             self._output_tails = dict()
@@ -720,6 +724,16 @@ class ServerSupervisor:  # pragma: no cover
             self._h2_ping_sidecar = None
             # Until every server is ready, a server that exits is a failed start (see poll()).
             self._servers_ready = False
+            if current_thread() is main_thread() and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL:
+
+                def on_sigterm(signum, frame):
+                    try:
+                        self.shutdown()
+                    finally:
+                        raise SystemExit(128 + signum)
+
+                self._sigterm_handler = on_sigterm
+                signal.signal(signal.SIGTERM, on_sigterm)
             try:
                 self._start(global_config_dict_parser_config)
                 return
@@ -938,6 +952,7 @@ class ServerSupervisor:  # pragma: no cover
         # The config holds API keys: mkstemp makes the file readable by this user only.
         descriptor, path = mkstemp(prefix="nemo-gym-config-", suffix=".yaml")
         self._config_dict_file = Path(path)
+        atexit.register(self._remove_config_dict_file)
         with open(descriptor, "w", encoding="utf-8") as file:
             file.write(config_dict_yaml_str)
         return {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: "", NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME: path}
@@ -1168,12 +1183,20 @@ Process `{process_name}` stderr:
             else:
                 sleep(max(0.0, min(sleep_interval, deadline - monotonic())))
 
-    def shutdown(self) -> None:
-        # First, so that a shutdown cut short while it waits for the servers leaves no file. The config holds API
-        # keys, and nothing that reads the file starts from here on.
+    def _remove_config_dict_file(self) -> None:
         if self._config_dict_file is not None:
             self._config_dict_file.unlink(missing_ok=True)
             self._config_dict_file = None
+        atexit.unregister(self._remove_config_dict_file)
+
+    def shutdown(self) -> None:
+        # First, so that a shutdown cut short while it waits for the servers leaves no file. The config holds API
+        # keys, and nothing that reads the file starts from here on.
+        self._remove_config_dict_file()
+        if current_thread() is main_thread() and self._sigterm_handler is not None:
+            if signal.getsignal(signal.SIGTERM) is self._sigterm_handler:
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            self._sigterm_handler = None
 
         memory_profiler = getattr(self, "_memory_profiler", None)
         if memory_profiler is not None:
