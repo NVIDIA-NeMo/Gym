@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass to every `gym dataset validate` and `gym eval run` of the converted dataset. Every task declares
+# `artifacts`, so this verifies each one in a fresh sandbox of the task image (overlay included), where nothing the
+# agent did in its own sandbox can change the grader or the reward file. Without it the agent's sandbox grades, and
+# an agent with root there can write its own reward: the dataset is tamper-safe only when run with this file.
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      separate_verifier_for_artifacts: true

@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Written into the dataset by resources_servers/math_with_judge/harbor/adapter.py.
+
+[dataset]
+name = "nemo-gym/dapo-math-17k"
+version = "1.0.0"
+description = "DAPO-Math-17k graded by the math_with_judge Resources Server's math-verify check (LLM judge off)"
+
+[gym]
+license = "Apache 2.0"
+
+[gym.defaults]
+timeout_multiplier = 1.0
+resource_multiplier = 1.0
