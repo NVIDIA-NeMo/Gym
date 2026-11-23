@@ -23,6 +23,10 @@ continue.request      Continue shell       Holds sequence number N to continue a
 continued.json        Supervisor           Acknowledges continue N once the processes run again
 ===================== ==================== ===========================================
 
+A supervisor launched with ``pause_mode="hold"``, for a sandbox whose snapshot keeps its processes,
+acknowledges a pause without stopping anything; the harness keeps running and its model calls are held
+instead.
+
 Pause and continue are re-armable: each checkpoint writes a sequence number greater than the last,
 and an acknowledgement names the number it answers, so a request is never mistaken for an earlier
 one and no file has to be removed. A pause written before the launch holds the launch until its
@@ -111,12 +115,23 @@ class CleanupReceipt(TypedDict):
 
 
 class PauseAcknowledgement(TypedDict):
-    """A supervisor's answer to pause or continue request ``seq``, from ``paused.json`` or ``continued.json``."""
+    """A supervisor's answer to pause or continue request ``seq``, from ``paused.json`` or ``continued.json``.
+
+    ``mode`` is the supervisor's pause mode and ``identity`` its ``PID.START``, ``None`` before it launched;
+    acknowledgements written before either existed have neither.
+    """
 
     seq: int
     confirmed: bool
     pids: list[int]
     error: str | None
+    mode: NotRequired[Literal["stop", "hold"]]
+    identity: NotRequired[str | None]
+
+
+# How a supervisor pauses: ``stop`` sends SIGSTOP and SIGCONT to every process it reaches; ``hold`` sends nothing,
+# for a sandbox whose snapshot keeps its processes running.
+PauseMode = Literal["stop", "hold"]
 
 
 # What a pause or continue request found:
@@ -233,6 +248,7 @@ def supervised_launch_command(
     cleanup_timeout: float,
     pausable: bool = False,
     max_pause: float | None = None,
+    pause_mode: PauseMode = "stop",
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -245,9 +261,10 @@ def supervised_launch_command(
     TERM disposition.
 
     With ``pausable``, the supervisor also serves pause and continue requests in
-    ``session_dir`` (see ``request_pause`` and ``request_continue``). ``max_pause`` bounds
-    one pause: past it the supervisor ends the harness as at its time limit, so a harness
-    whose agent server died during a checkpoint does not stay paused for good.
+    ``session_dir`` (see ``request_pause`` and ``request_continue``), in ``pause_mode``.
+    ``max_pause`` bounds one pause: past it the supervisor ends the harness as at its time
+    limit, so a harness whose agent server died during a checkpoint does not stay paused
+    for good.
     """
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     pause_options = (
@@ -256,6 +273,7 @@ def supervised_launch_command(
         f"--continue-file {quote(f'{session_dir}/{CONTINUE_REQUEST_FILE}')} "
         f"--continued {quote(f'{session_dir}/{CONTINUED_FILE}')} "
         + (f"--max-pause {_seconds(max_pause)} " if max_pause else "")
+        + (f"--pause-mode {pause_mode} " if pause_mode != "stop" else "")
         if pausable
         else ""
     )
@@ -401,9 +419,20 @@ async def remove_session_directory(
 
 
 async def request_pause(
-    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, seq: int, timeout: float = DEFAULT_PAUSE_TIMEOUT
+    sandbox: AsyncSandbox,
+    *,
+    session_dir: str,
+    workdir: str | None,
+    seq: int,
+    timeout: float = DEFAULT_PAUSE_TIMEOUT,
+    launch_sent: bool = False,
 ) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
-    """Ask the supervisor in ``session_dir`` to pause the harness, as request ``seq``, and wait for its answer."""
+    """Ask the supervisor in ``session_dir`` to pause the harness, as request ``seq``, and wait for its answer.
+
+    With ``launch_sent``, the launch command is already on its way: a launch that has not claimed yet is waited
+    for, within ``timeout``, so its supervisor's acknowledgement is returned. ``not_launched`` then means that no
+    supervisor started in that time.
+    """
     return await _request(
         sandbox,
         session_dir=session_dir,
@@ -412,6 +441,7 @@ async def request_pause(
         acknowledgement_file=PAUSED_FILE,
         seq=seq,
         timeout=timeout,
+        wait_for_launch=launch_sent,
     )
 
 
@@ -442,11 +472,14 @@ async def _request(
     acknowledgement_file: str,
     seq: int,
     timeout: float,
+    wait_for_launch: bool = False,
 ) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
     """Write request ``seq`` and wait for the supervisor's acknowledgement or the cleanup receipt, in one exec.
 
-    A session directory without a launch claim has no supervisor yet: the request stays for the launch to read.
-    A launch the stop fenced counts as finished.
+    A session directory without a launch claim has no supervisor yet: the request stays for the launch to read,
+    and the answer is ``not_launched`` at once. With ``wait_for_launch`` the claim is waited for as well, and
+    ``not_launched`` is the answer only when none appeared within ``timeout``. A launch the stop fenced counts as
+    finished.
     """
     receipt = quote(f"{session_dir}/{CLEANUP_RECEIPT_FILE}")
     request = quote(f"{session_dir}/{request_file}")
@@ -455,17 +488,21 @@ async def _request(
     claim = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
     # The receipt is read first: a finished harness is never paused. The request is written before the claim is
     # read, so a supervisor that claims the launch afterwards reads the request when it starts.
+    read_claim = f"claim=$(readlink {claim} 2>/dev/null); "
+    fenced = '[ "$claim" = stop ] && { echo finished; exit 0; }; '
+    unclaimed = '[ -n "$claim" ] || { echo not_launched; exit 0; }; '
     script = (
         f"[ -f {receipt} ] && {{ echo finished; exit 0; }}; "
         f"[ -d {quote(session_dir)} ] || {{ echo not_launched; exit 0; }}; "
         f"printf '%s' {seq} > {temporary} && mv -f {temporary} {request} || exit 1; "
-        f'claim=$(readlink {claim} 2>/dev/null); [ -n "$claim" ] || {{ echo not_launched; exit 0; }}; '
-        '[ "$claim" = stop ] && { echo finished; exit 0; }; '
+        # A launch that was not sent is not waited for; one that was is read again every round.
+        f"{read_claim}{'' if wait_for_launch else unclaimed}{fenced}"
         f"for _ in $(seq 1 {max(1, int(timeout * 20))}); do "
         f"[ -f {receipt} ] && {{ echo finished; exit 0; }}; "
+        f"{read_claim + fenced if wait_for_launch else ''}"
         f"if [ -f {acknowledgement} ]; then ack=$(cat {acknowledgement}); "
         f'case "$ack" in *{quote(f'"seq": {seq},')}*) echo acknowledged; printf "%s\\n" "$ack"; exit 0;; esac; fi; '
-        "sleep 0.05; done; echo timeout"
+        f"sleep 0.05; done; {unclaimed}echo timeout"
     )
     # The provider may queue the command behind others, and its own timeout starts only once the command runs:
     # with every slot taken, by this harness among others, the request would wait for a harness to end.
