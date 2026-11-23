@@ -132,6 +132,7 @@ def format_row(row: dict[str, Any], prompt_config: Any = None) -> dict[str, Any]
     """Convert one source row to Gym JSONL; materialize the prompt when ``prompt_config`` is given."""
     image = row["image"] or ""
     entry = {
+        "task_id": row["id"],
         "question": row["question"],
         "expected_answer": row["answer"],
         # Metadata for analysis and slicing; not used for grading.

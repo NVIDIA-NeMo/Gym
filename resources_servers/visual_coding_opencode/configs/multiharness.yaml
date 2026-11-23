@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Five native pairings of the visual-coding resources server; prepare each row with
+# `prepare_multiharness.py --harness NAME` (add --file-input for claude_code).
+config_paths:
+  - resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml
+  - responses_api_agents/pi_agent/configs/pi_agent.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+  - responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml
+  - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
+
+# Claude Code and other harnesses read the image through a tool, so the tool result carries an image. The alias keeps
+# that image inline for them without changing `policy_model`, which other benchmarks may share.
+visual_coding_policy_model:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      inline_tool_output_images: true
+
+visual_coding_pi_agent:
+  _inherit_from: pi_agent
+  responses_api_agents:
+    pi_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: visual_coding_policy_model}
+      concurrency: 64
+      timeout: 1800
+      max_output_tokens: 32768
+      context_window: 131072
+      auto_compaction: false
+      image_input: true
+
+visual_coding_pi_environment_server:
+  _copy: visual_coding_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: visual_coding_pi_agent}
+
+visual_coding_codex_agent:
+  _inherit_from: codex_agent
+  responses_api_agents:
+    codex_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: visual_coding_policy_model}
+      concurrency: 64
+      timeout: 1800
+      model_context_window: 131072
+      inherit_sandbox_environment: true
+
+visual_coding_codex_environment_server:
+  _copy: visual_coding_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: visual_coding_codex_agent}
+
+visual_coding_claude_code_agent:
+  _inherit_from: claude_code_agent
+  responses_api_agents:
+    claude_code_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: visual_coding_policy_model}
+      concurrency: 64
+      timeout: 1800
+      claude_code_version: 2.1.108
+      anthropic_api_key: ""
+      model: ${policy_model_name}
+
+visual_coding_claude_code_environment_server:
+  _copy: visual_coding_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: visual_coding_claude_code_agent}
+
+visual_coding_openclaw_agent:
+  _inherit_from: openclaw_agent
+  responses_api_agents:
+    openclaw_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: visual_coding_policy_model}
+      concurrency: 64
+      timeout: 1800
+      context_window: 131072
+      max_output_tokens: 32768
+      image_input: true
+
+visual_coding_openclaw_environment_server:
+  _copy: visual_coding_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: visual_coding_openclaw_agent}

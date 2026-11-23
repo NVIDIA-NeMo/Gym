@@ -45,7 +45,7 @@ class ExecOnlySandbox:
     async def download(self, source, destination):
         shutil.copyfile(source, destination)
 
-    async def disconnect(self):
+    async def disconnect(self, **_):
         self.disconnected = True
 
     async def exec(self, command, *, cwd=None, timeout_s=30):

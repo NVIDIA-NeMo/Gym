@@ -42,6 +42,8 @@ from nemo_gym.environment.validation import (
         "moldetox",
         "scicodepile",
         "partner_if",
+        # Its user simulator's endpoint is a deployment setting, so composition resolves without it.
+        "bird_interact",
     ],
 )
 def test_current_benchmark_manifests_match_runtime_composition(name: str) -> None:
@@ -54,6 +56,60 @@ def test_current_benchmark_manifests_match_runtime_composition(name: str) -> Non
         resolve_manifest_config_path(path, manifest), dataset_owner=manifest.dataset_owner
     )
     assert _mirror_differences(manifest, composition) == {}
+
+
+def test_static_wiring_fills_an_auxiliary_models_endpoint_but_no_other_missing_value() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.environment.validation import _StaticWiringParser
+
+    config = OmegaConf.create(
+        {
+            "user_model_base_url": "???",
+            "user_model_api_key": "???",
+            "user_model_name": "???",
+            "unrelated_setting": "???",
+            "user_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "base_url": "${user_model_base_url}",
+                        "api_key": "${user_model_api_key}",
+                        "model": "${user_model_name}",
+                    }
+                }
+            },
+        }
+    )
+
+    _StaticWiringParser()._recursively_swap_keys(config)
+
+    assert OmegaConf.to_container(config.user_model, resolve=True) == {
+        "responses_api_models": {
+            "vllm_model": {
+                "base_url": "https://model.invalid/v1",
+                "api_key": "static-validation",
+                "model": "static-validation",
+            }
+        }
+    }
+    assert OmegaConf.is_missing(config, "unrelated_setting")
+
+
+def test_static_wiring_keeps_a_supplied_model_setting() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.environment.validation import _StaticWiringParser
+
+    config = OmegaConf.create(
+        {
+            "user_model_base_url": "https://simulator.example/v1",
+            "user_model": {"responses_api_models": {"vllm_model": {"base_url": "${user_model_base_url}"}}},
+        }
+    )
+
+    _StaticWiringParser()._recursively_swap_keys(config)
+
+    assert config.user_model.responses_api_models.vllm_model.base_url == "https://simulator.example/v1"
 
 
 def test_manifest_resolves_dataset_interpolation_against_its_config(tmp_path: Path, monkeypatch) -> None:
@@ -1235,6 +1291,62 @@ def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: P
     _replace_manifest(manifest_path, resources_server="wrong_server")
     with pytest.raises(EnvironmentValidationError, match="composition is stale"):
         validate_environment(manifest_path, validate_datasets=False)
+
+
+@pytest.mark.parametrize("selected_input", [None, "benchmarks/demo/data/selected.jsonl"])
+def test_manifest_composition_resolves_dynamic_dataset_defaults(tmp_path: Path, selected_input: str | None) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    config_path = manifest_path.with_name("config.yaml")
+    config_path.write_text(
+        config_path.read_text().replace(
+            "jsonl_fpath: benchmarks/demo/data/example.jsonl",
+            "jsonl_fpath: ${oc.select:prepare_script_args.input,benchmarks/demo/data/example.jsonl}",
+        )
+    )
+    expected_path = "benchmarks/demo/data/example.jsonl"
+    expected_rows = 1
+    if selected_input is not None:
+        config_path.write_text(config_path.read_text() + f"\nprepare_script_args:\n  input: {selected_input}\n")
+        manifest = load_manifest(manifest_path)
+        _replace_manifest(
+            manifest_path,
+            datasets=[manifest.datasets[0].model_copy(update={"jsonl_fpath": selected_input})],
+        )
+        original_data = (manifest_path.parent / "data/example.jsonl").read_text()
+        (manifest_path.parent / "data/selected.jsonl").write_text(original_data * 2)
+        expected_path = selected_input
+        expected_rows = 2
+
+    report = validate_environment(manifest_path)
+
+    assert Path(report.datasets[0].path) == tmp_path / expected_path
+    assert report.datasets[0].rows == expected_rows
+
+
+@pytest.mark.parametrize("value", ["${undefined_key}", "${oc.env:LAB_TEST_UNSET_VARIABLE}"])
+def test_dataset_path_resolution_uses_validation_error(
+    tmp_path: Path, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LAB_TEST_UNSET_VARIABLE", raising=False)
+    manifest = _asset(tmp_path, kind="benchmark")
+    config = manifest.with_name("config.yaml")
+    config.write_text(
+        config.read_text().replace("jsonl_fpath: benchmarks/demo/data/example.jsonl", f"jsonl_fpath: {value}")
+    )
+    with pytest.raises(ConfigInterpolationError):
+        validate_environment(manifest)
+
+
+def test_dataset_validation_ignores_undeclared_runtime_fields(tmp_path: Path) -> None:
+    manifest = _asset(tmp_path, kind="benchmark")
+    config = manifest.with_name("config.yaml")
+    from omegaconf import OmegaConf
+
+    raw = OmegaConf.load(config)
+    raw.demo_agent.responses_api_agents.simple_agent.datasets[0].ignored = "${runtime_only_value}"
+    OmegaConf.save(raw, config)
+
+    assert validate_environment(manifest).datasets[0].rows == 1
 
 
 @pytest.mark.parametrize("mutation", [None, "missing_params", "empty_id", "extra_envelope"])

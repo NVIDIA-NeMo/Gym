@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Exact build-isolation dependency versions for the verified prime-agent-runtime source.
+# Hatchling is required by prime-agent-runtime; other entries are its Python 3.13 build dependency closure.
+hatchling==1.32.4
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+tomlkit==0.15.2
+trove-classifiers==2026.9.21.13
