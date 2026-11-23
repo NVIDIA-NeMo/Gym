@@ -86,5 +86,8 @@ taken. On a remote sandbox provider, give the Model Server an address the sandbo
 - **Request controls:** Auto Ontology's loop sets its own sampling, limits and instructions. An activation that sets
   another field, such as `temperature`, `max_output_tokens`, `tool_choice` or `instructions`, is refused with a 422.
 - **BIRD-Interact:** c-Interact only; a-Interact's tools would stand in for Auto Ontology's own. Auto Ontology runs
-  read-only queries, so it cannot solve a management task. The c-Interact trajectory holds each turn's input and
-  answer; the model calls are in the Model Server's capture.
+  read-only queries, so it cannot solve a management task. The close's records hold each turn's input and answer; the
+  model calls are in the Model Server's capture. The trajectory reports the turns unavailable (`turns_unavailable`).
+- **The Environment Server's tools:** a call the server refuses (HTTP 4xx) replies with the refusal, and a refused
+  question does not count against the allowance. A call the server does not answer (a refused connection, a timeout
+  or HTTP 5xx) fails the activation as an infrastructure error, so the task is not graded as the model's failure.

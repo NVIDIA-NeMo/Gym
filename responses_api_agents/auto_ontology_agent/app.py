@@ -316,12 +316,17 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="observation_capture_failed"))
         trajectory = None
         if state.request.continuation is not None:
-            # Each turn's input and answer. The model calls are in the Model Server's capture; the trajectory
-            # builder reports their absence here.
+            # Each turn's input and answer. This server does not see the model calls, so it cannot report the turns:
+            # it says so, rather than report a trajectory with no turns, which rollout health reads as none taken.
             trajectory = TrajectoryRecord(
                 task_id=state.request.task_id.task_id,
                 rollout_id=state.request.episode_id.capture_key,
                 invocations=state.invocations,
+                gaps=[
+                    ObservationGap(
+                        code="turns_unavailable", detail="The model calls are in the Model Server's capture"
+                    )
+                ],
             )
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -426,6 +431,7 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
     ) -> None:
         if not isinstance(state, AutoOntologySessionState):
             raise TypeError("Expected Auto Ontology session state")
+        refuse_unsupported_request_fields(body, model=self.config.model, honored={"input", "tools"})
         system, message = request_texts(body)
         try:
             if state.dialogue is None:
@@ -477,7 +483,8 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             )
             raise
         for call in episode.get("environment_tool_calls") or []:
-            if call.get("name") == c_interact.ASK_TOOL:
+            # A question the server refused was not asked: it neither answers nor counts against the allowance.
+            if call.get("name") == c_interact.ASK_TOOL and "reply" in call:
                 dialogue.exchanges.append(
                     c_interact.Exchange.from_reply(str(call["arguments"].get("question", "")), call["reply"])
                 )

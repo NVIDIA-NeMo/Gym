@@ -79,8 +79,24 @@ def model_failure(error: BaseException) -> dict[str, Any]:
     }
 
 
+class ToolCallError(RuntimeError):
+    """A call of an Environment Server's tool that the server did not answer.
+
+    ``refused`` is True when the server refused the call's arguments (HTTP 4xx). Otherwise the call got no reply (a
+    refused connection, a timeout or a server error): the task cannot go on without the server, so the activation
+    fails as an infrastructure error, not as the model's.
+    """
+
+    def __init__(self, message: str, *, refused: bool) -> None:
+        super().__init__(message)
+        self.refused = refused
+
+
 def call_tool(endpoint: dict[str, Any], arguments: dict[str, Any]) -> str:
-    """POST ``arguments`` to an Environment Server's tool and return its reply: a JSON string's text, or the JSON."""
+    """POST ``arguments`` to an Environment Server's tool and return its reply: a JSON string's text, or the JSON.
+
+    A call the server does not answer raises ToolCallError.
+    """
     headers = {"Content-Type": "application/json", **endpoint.get("headers", {})}
     if cookies := endpoint.get("cookies"):
         headers["Cookie"] = "; ".join(f"{name}={value}" for name, value in cookies.items())
@@ -92,9 +108,9 @@ def call_tool(endpoint: dict[str, Any], arguments: dict[str, Any]) -> str:
             reply = response.read().decode(errors="replace")
     except urllib.error.HTTPError as error:
         body = error.read().decode(errors="replace")
-        return f"The tool call failed with HTTP {error.code}: {body[:2000]}"
+        raise ToolCallError(f"The tool call failed with HTTP {error.code}: {body[:2000]}", refused=error.code < 500)
     except (urllib.error.URLError, TimeoutError) as error:
-        return f"The tool call failed: {error}"
+        raise ToolCallError(f"The tool call failed: {error}", refused=False) from error
     try:
         output = json.loads(reply)
     except json.JSONDecodeError:
@@ -103,7 +119,11 @@ def call_tool(endpoint: dict[str, Any], arguments: dict[str, Any]) -> str:
 
 
 def extra_tools(task: dict[str, Any], calls: list[dict[str, Any]]) -> list[Any]:
-    """The task's Environment Server tools, as Auto Ontology's extra tools that record each call in ``calls``."""
+    """The task's Environment Server tools, as Auto Ontology's extra tools that record each call in ``calls``.
+
+    A call the server refused replies with the refusal, which the model reads. A call that got no reply is recorded
+    with its error: Auto Ontology's loop catches what a tool raises, so ``run`` raises it once the loop returns.
+    """
     if not task.get("tools"):
         return []
     # Only an episode with such tools needs an Auto Ontology that takes them.
@@ -113,7 +133,13 @@ def extra_tools(task: dict[str, Any], calls: list[dict[str, Any]]) -> list[Any]:
         name = tool["definition"]["function"]["name"]
 
         def run(**arguments: Any) -> str:
-            reply = call_tool(tool, arguments)
+            try:
+                reply = call_tool(tool, arguments)
+            except ToolCallError as error:
+                calls.append({"name": name, "arguments": arguments, "error": str(error), "refused": error.refused})
+                if error.refused:
+                    return str(error)
+                raise
             calls.append({"name": name, "arguments": arguments, "reply": reply})
             return reply
 
@@ -171,6 +197,8 @@ def run(task: dict[str, Any]) -> dict[str, Any]:
         custom_prompts=task.get("custom_prompts") or None,
         **options,
     )
+    if undelivered := [call for call in calls if "error" in call and not call["refused"]]:
+        raise ToolCallError(undelivered[0]["error"], refused=False)
     submission = result.submission
     sql = submission.sql if submission is not None and submission.db_response is not None else None
     submit = task.get("submit")

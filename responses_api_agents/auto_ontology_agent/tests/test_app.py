@@ -589,11 +589,18 @@ async def test_c_interact_turns_ask_the_user_submit_through_the_server_and_remem
                 "reason": "submitted",
                 "tool_calls": 4,
                 "environment_tool_calls": [
+                    # Refused by the server, so not asked: it neither answers nor spends a question.
+                    {
+                        "name": "ask_user",
+                        "arguments": {"question": ""},
+                        "error": "The tool call failed with HTTP 422: question is empty",
+                        "refused": True,
+                    },
                     {
                         "name": "ask_user",
                         "arguments": {"question": "What makes a member active?"},
                         "reply": "A visit this year.\n\n[SYSTEM NOTE: Clarification turns remaining: 4/5]",
-                    }
+                    },
                 ],
                 "submit_reply": "SQL failed Phase 1. Your SQL is not correct.\nBudget remaining: 0 bird-coins",
             },
@@ -640,8 +647,8 @@ async def test_c_interact_turns_ask_the_user_submit_through_the_server_and_remem
 
     closed = await agent._close_agent_session_state(state)
 
-    # The trajectory builder reports the missing model calls; the agent adds no gap of its own.
-    assert closed.trajectory.gaps == []
+    # The server does not see the model calls: the trajectory says its turns are unavailable, rather than none taken.
+    assert [gap.code for gap in closed.trajectory.gaps] == ["turns_unavailable"]
     invocations = closed.trajectory.invocations
     assert [(i.invocation_id, i.activation_id, i.status, i.stop_reason) for i in invocations] == [
         ("root", 1, "completed", "submitted"),
@@ -722,26 +729,82 @@ def test_a_tool_reply_is_a_json_strings_text_or_the_json(
 
 
 @pytest.mark.parametrize(
-    ("error", "reply"),
+    ("error", "refused"),
     [
+        (urllib.error.HTTPError("http://env/ask_user", 422, "Unprocessable", {}, io.BytesIO(b"no question")), True),
         (
             urllib.error.HTTPError("http://env/submit_sql", 500, "Internal Server Error", {}, io.BytesIO(b"boom")),
-            "The tool call failed with HTTP 500: boom",
+            False,
         ),
-        (urllib.error.URLError("connection refused"), "The tool call failed: <urlopen error connection refused>"),
-        (TimeoutError("timed out"), "The tool call failed: timed out"),
+        (urllib.error.URLError("connection refused"), False),
+        (TimeoutError("timed out"), False),
     ],
 )
-def test_a_failed_tool_call_replies_with_its_error(
-    monkeypatch: pytest.MonkeyPatch, error: Exception, reply: str
+def test_a_tool_call_the_server_does_not_answer_raises(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, refused: bool
 ) -> None:
     def urlopen(request, timeout):  # noqa: ANN001, ANN202
         raise error
 
     monkeypatch.setattr(episode_runner.urllib.request, "urlopen", urlopen)
 
-    # The model reads the error as the tool's result, and the episode goes on.
-    assert episode_runner.call_tool({"url": "http://env/submit_sql"}, {"sql": "SELECT 1"}) == reply
+    with pytest.raises(episode_runner.ToolCallError) as failed:
+        episode_runner.call_tool({"url": "http://env/submit_sql"}, {"sql": "SELECT 1"})
+    # A 4xx refused the arguments; anything else is a call the server never answered.
+    assert failed.value.refused is refused
+
+
+@pytest.fixture
+def extra_tool_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Auto Ontology's ExtraTool, which the agent's own environment does not install."""
+    import sys
+    from dataclasses import dataclass
+
+    @dataclass
+    class ExtraTool:
+        definition: dict
+        run: Any
+
+    module = SimpleNamespace(ExtraTool=ExtraTool)
+    monkeypatch.setitem(sys.modules, "auto_ontology.retrieval.text_to_sql.react.loop", module)
+
+
+def _ask_tool(monkeypatch: pytest.MonkeyPatch, error: Exception) -> tuple[Any, list[dict[str, Any]]]:
+    def urlopen(request, timeout):  # noqa: ANN001, ANN202
+        raise error
+
+    monkeypatch.setattr(episode_runner.urllib.request, "urlopen", urlopen)
+    calls: list[dict[str, Any]] = []
+    tool = {"definition": {"type": "function", "function": {"name": "ask_user"}}, "url": "http://env/ask_user"}
+    [extra] = episode_runner.extra_tools({"tools": [tool]}, calls)
+    return extra.run, calls
+
+
+def test_a_refused_question_replies_with_the_refusal(monkeypatch: pytest.MonkeyPatch, extra_tool_module: None) -> None:
+    ask, calls = _ask_tool(
+        monkeypatch, urllib.error.HTTPError("http://env/ask_user", 422, "Unprocessable", {}, io.BytesIO(b"empty"))
+    )
+
+    assert ask(question="") == "The tool call failed with HTTP 422: empty"
+    assert calls == [
+        {
+            "name": "ask_user",
+            "arguments": {"question": ""},
+            "error": "The tool call failed with HTTP 422: empty",
+            "refused": True,
+        }
+    ]
+
+
+def test_an_unanswered_question_fails_the_episode_after_the_loop(
+    monkeypatch: pytest.MonkeyPatch, extra_tool_module: None
+) -> None:
+    ask, calls = _ask_tool(monkeypatch, urllib.error.URLError("connection refused"))
+
+    # Auto Ontology's loop catches what a tool raises; run() raises the recorded failure once the loop returns.
+    with pytest.raises(episode_runner.ToolCallError):
+        ask(question="What is active?")
+    assert calls[0]["refused"] is False and "connection refused" in calls[0]["error"]
 
 
 def test_an_episode_that_raises_writes_its_error(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
