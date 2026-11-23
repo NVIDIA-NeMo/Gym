@@ -36,3 +36,5 @@ gym eval run --no-serve \
 ## Requires
 
 A judge model server (`genrm_model`) must be configured. The judge grades model responses against gold answers using the AA-Omniscience grading rubric. Artificial Analysis grades v1.1 with GPT-5.6 Luna (medium reasoning effort); scores are comparable with theirs only under the same grader.
+
+The default judge is GPT-5.6 Luna at medium reasoning effort on `https://inference-api.nvidia.com/v1` (`benchmarks/omniscience/judge_luna.yaml`), with a 32,768-token judge output cap. Set `JUDGE_API_KEY`, or set `omniscience_judge_base_url`, `omniscience_judge_api_key` and `omniscience_judge_model_name` at the top level of your config to use another endpoint, key or model.
