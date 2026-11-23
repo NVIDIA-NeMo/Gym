@@ -319,20 +319,27 @@ def _discover_registry_tree(
     kind: CatalogKind,
     *,
     claimed: frozenset[tuple[CatalogKind, str]] = frozenset(),
+    declared_by: Optional[Dict[str, Path]] = None,
 ) -> Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry]:
-    """Discover one catalog tree without importing or resolving runnable components."""
+    """Discover one catalog tree without importing or resolving runnable components.
+
+    ``declared_by`` maps each manifest name already read in this search root to its file. The catalog passes one
+    mapping for a root's benchmarks/ and environments/ trees, so that a name is unique across both.
+    """
     if not tree_dir.is_dir():
         return {}
 
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     manifest_configs: set[Path] = set()
-    declared_by: Dict[str, Path] = {}
+    declared_by = {} if declared_by is None else declared_by
     for manifest_path, manifest in declared_manifests(tree_dir):
-        # A name is an ID wherever its folder sits, so no two manifests in one tree declare the same one.
+        # A name is an ID wherever its folder sits and whatever its kind, so no two manifests in one search root
+        # declare the same one.
         if manifest.name in declared_by:
             raise RegistryError(
                 f"Manifests '{declared_by[manifest.name]}' and '{manifest_path}' both declare name '{manifest.name}'. "
-                f"A name is the ID of a manifest and must be unique within '{tree_dir}'."
+                "A name is the ID of a manifest and must be unique across the benchmarks/ and environments/ trees "
+                f"of '{tree_dir.parent}'."
             )
         declared_by[manifest.name] = manifest_path
         key = (kind, manifest.name)
@@ -383,8 +390,11 @@ def discover_environment_catalog() -> tuple[EnvironmentCatalogEntry, ...]:
     """Discover manifest and legacy runnable units across all workload locations."""
     entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
     for root in component_search_roots():
+        declared_by: Dict[str, Path] = {}
         for kind, subdir in (("environment", ENVIRONMENTS_SUBDIR), ("benchmark", BENCHMARKS_SUBDIR)):
-            discovered = _discover_registry_tree(root / subdir, kind, claimed=frozenset(entries))
+            discovered = _discover_registry_tree(
+                root / subdir, kind, claimed=frozenset(entries), declared_by=declared_by
+            )
             entries.update(discovered)
         entries.update(_discover_resource_workloads(root / RESOURCES_SERVERS_SUBDIR, claimed=frozenset(entries)))
     return tuple(sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.name, entry.kind)))
