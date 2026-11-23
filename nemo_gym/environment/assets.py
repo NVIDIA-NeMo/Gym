@@ -67,12 +67,16 @@ def asset_config_path(flag: str, value: str) -> str:
 
     if flag in _CATALOG_FLAGS:
         # Imported here so that commands that never select a benchmark or environment, such as --help, stay fast.
-        from nemo_gym.environment.registry import _listing_for_selection
+        from nemo_gym.environment.registry import RegistryError, _listing_for_selection
 
         trees = [root / parent for root in roots]
-        # The catalog's first step, so that this selects what `gym list` shows: the highest-priority root that lists
-        # the name wins, and a name that two manifests in one root declare fails here as it fails there.
+        # The catalog's first step, so that this selects what `gym list` shows: the highest-priority root that has the
+        # name wins. When that root cannot list it, because two of its manifests declare the name or the catalog
+        # refuses its manifest, selecting the name fails as `gym list` does. Other names still select, so a copied
+        # folder that keeps its manifest's name stops only that name.
         listing = _listing_for_selection(flag, value)
+        if (flag, value) in listing.refused:
+            raise RegistryError(listing.refused[(flag, value)])
         listed = listing.entries.get((flag, value))
         if listed is not None:
             for config_path in (listed.config_path, *listing.shadowed.get((flag, value), ())):

@@ -194,17 +194,35 @@ def test_a_name_that_is_another_configs_path_selects_what_the_catalog_lists(root
 def test_a_name_two_manifests_in_one_root_declare_fails_to_select_as_it_fails_to_list(
     roots: tuple[Path, Path], kinds: tuple[str, str]
 ) -> None:
-    # A copied folder that keeps its manifest's name, in the same tree or the other one.
+    # The original moved to group/demo and kept its name; a copy at its former folder declares the name too, in the same
+    # tree or the other one. The folder can't tell which one the author meant.
     _, later = roots
     original_kind, copy_kind = kinds
-    _write_manifest(later, f"{original_kind}s", "demo", _manifest("demo", original_kind))
-    _write_manifest(later, f"{copy_kind}s", "aa_demo_copy", _manifest("demo", copy_kind))
+    _write_manifest(later, f"{original_kind}s", "group/demo", _manifest("demo", original_kind))
+    _write_manifest(later, f"{copy_kind}s", "demo", _manifest("demo", copy_kind))
+    other = _write_manifest(later, "environments", "other", _manifest("other"))
 
     with pytest.raises(RegistryError, match="both declare name 'demo'"):
         discover_environment_catalog()
     for kind in set(kinds):
-        with pytest.raises(RegistryError, match="both declare name 'demo'"):
+        with pytest.raises(RegistryError, match="both declare name 'demo'") as error:
             asset_config_path(kind, "demo")
+        assert f"{original_kind}s/group/demo/manifest.yaml" in str(error.value)
+        assert f"{copy_kind}s/demo/manifest.yaml" in str(error.value)
+    # Only that name stops; another one still selects, and the copy runs by its path with --config.
+    assert _selected("other") == other.with_name("config.yaml").resolve()
+
+
+def test_a_duplicate_name_in_a_shadowed_root_does_not_stop_selecting_it(roots: tuple[Path, Path]) -> None:
+    # The earlier root supplies `demo`, so the later root's two manifests of that name don't decide what runs.
+    earlier, later = roots
+    selected = _write_manifest(earlier, "environments", "demo", _manifest("demo"))
+    _write_manifest(later, "environments", "demo", _manifest("demo"))
+    _write_manifest(later, "environments", "copy", _manifest("demo"))
+
+    with pytest.raises(RegistryError, match="both declare name 'demo'"):
+        discover_environment_catalog()
+    assert _selected("demo") == selected.with_name("config.yaml").resolve()
 
 
 @pytest.mark.parametrize(
@@ -217,11 +235,13 @@ def test_a_manifest_the_catalog_refuses_fails_to_select_as_it_fails_to_list(
     # A benchmark manifest under environments/, or a manifest whose config is missing.
     _, later = roots
     _write_manifest(later, "environments", "demo", _manifest("demo", kind), with_config=with_config)
+    other = _write_manifest(later, "environments", "other", _manifest("other"))
 
     with pytest.raises(RegistryError, match=error):
         discover_environment_catalog()
     with pytest.raises(RegistryError, match=error):
         _selected("demo")
+    assert _selected("other") == other.with_name("config.yaml").resolve()
 
 
 def test_a_loose_benchmark_config_in_an_earlier_root_wins_as_in_the_list(roots: tuple[Path, Path]) -> None:
