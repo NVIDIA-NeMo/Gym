@@ -1282,6 +1282,7 @@ def build_sbatch_script(
             agent=benchmark.agent,
             sandbox=benchmark.sandbox,
             output_root=f"{remote_bench_dir}/{ARTIFACTS_DIRNAME}/harbor",
+            run_keys=run_args.keys(),
         )
         gym_cmd = render_gym_cmd(
             "eval run", "GYM_CMD", target_args + [output_path] + extra_flags + flatten_run_args(run_args)

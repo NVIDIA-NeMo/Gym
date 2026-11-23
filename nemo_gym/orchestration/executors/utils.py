@@ -15,6 +15,7 @@
 
 import re
 import shlex
+from collections.abc import Collection
 from typing import Any
 
 from nemo_gym.config.global_config import ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME, FORWARD_CONFIGURATION_REFUSALS_KEY_NAME
@@ -49,7 +50,14 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
 LAPTOP_RUN_KEYS = (ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME, FORWARD_CONFIGURATION_REFUSALS_KEY_NAME)
 
 
-def render_target_args(target: str | None, *, agent: str | None, sandbox: str | None, output_root: str) -> list[str]:
+def render_target_args(
+    target: str | None,
+    *,
+    agent: str | None,
+    sandbox: str | None,
+    output_root: str,
+    run_keys: Collection[str] = (),
+) -> list[str]:
     """The shell-quoted TARGET, ``--agent``, ``--sandbox`` and output root of a task run, which go ahead of its
     Hydra overrides.
 
@@ -59,7 +67,9 @@ def render_target_args(target: str | None, *, agent: str | None, sandbox: str | 
     in the benchmark's job directory instead.
 
     A submitted run turns off what a task-folder run on a laptop turns on (the default route's address for the model
-    server, and configuration refusals forwarded to OpenCode and Pi), so it behaves as any other submitted run.
+    server, and configuration refusals forwarded to OpenCode and Pi), so it behaves as any other submitted run. A
+    setting the benchmark's own ``run`` block names (``run_keys``, its top-level keys) is left to that block, whose
+    ``+key=value`` would otherwise collide with the default here.
 
     Empty without a target, so a benchmark that sets none renders exactly as before.
     """
@@ -71,7 +81,7 @@ def render_target_args(target: str | None, *, agent: str | None, sandbox: str | 
     if sandbox is not None:
         args += ["--sandbox", shlex.quote(sandbox)]
     args.append(shlex.quote(f"+{HARBOR_OUTPUT_ROOT_KEY}={hydra_literal(output_root)}"))
-    args += [shlex.quote(f"++{key}=false") for key in LAPTOP_RUN_KEYS]
+    args += [shlex.quote(f"++{key}=false") for key in LAPTOP_RUN_KEYS if key not in run_keys]
     return args
 
 

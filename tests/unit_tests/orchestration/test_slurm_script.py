@@ -3700,6 +3700,22 @@ def test_a_submitted_task_run_keeps_the_laptop_run_settings_off():
     assert f"++{FORWARD_CONFIGURATION_REFUSALS_KEY_NAME}=false" in args
 
 
+def test_a_laptop_run_setting_the_benchmarks_run_block_names_is_left_to_it(tmp_path, monkeypatch):
+    """A `run:` key renders as `+key=value`, which Hydra refuses after a `++key=false` for the same key: the job
+    would exit before any rollout. The default is left out for it, and the command parses as `run_target` parses it."""
+    from nemo_gym.data.tasks.harbor.build_options import _merged_cli_config
+    from nemo_gym.orchestration.executors.utils import flatten_run_args, render_target_args
+
+    monkeypatch.chdir(tmp_path)
+    run = {"forward_configuration_refusals": True}
+    tokens = render_target_args(
+        "/data/t", agent="opencode_agent", sandbox=None, output_root="/jobs", run_keys=run.keys()
+    ) + flatten_run_args(run)
+    config = _merged_cli_config([shlex.split(token)[0] for token in tokens[3:]])
+    assert config.forward_configuration_refusals is True
+    assert config.absolute_ip_route_fallback is False
+
+
 @pytest.mark.parametrize(
     "root", ["/jobs/a/artifacts/harbor", "/jobs/a b/artifacts/harbor", "/jobs/(x) 'y'/harbor", "/jobs/a=b,c/harbor"]
 )

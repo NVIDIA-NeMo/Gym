@@ -237,6 +237,7 @@ def _driver_command(
             agent=benchmark.agent,
             sandbox=benchmark.sandbox,
             output_root=f"{run_dir}/{ARTIFACTS_DIRNAME}/harbor",
+            run_keys=benchmark.run.keys(),
         )
         gym_cmd = render_gym_cmd(
             "eval run", "GYM_CMD", target_args + [output_path] + extra_flags + flatten_run_args(benchmark.run)

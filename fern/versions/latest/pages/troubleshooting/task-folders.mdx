@@ -154,7 +154,8 @@ servers stay on loopback. `+default_host` moves every server to the address, inc
 with a failure reason such as `HTTP 400: max_tokens is too large`. The terminal's dropped-rollout line reads
 `class=model_request_rejected`, and the run summary names `model_request_rejected` as each such task's
 `failure_kind`. When the reason is an output limit, the line after `Run summary written to` names
-`--max-output-tokens`. Other harnesses, and `--benchmark` runs, handle such a refusal as on any other run:
+`--max-output-tokens`. Other harnesses, `--benchmark` runs, and runs `gym eval submit` sends to a cluster handle
+such a refusal as on any other run:
 `openai_model` answers it with HTTP 500, and a Model Server that passes the 400 on, such as `vllm_model`, hands it to
 the harness, which reports it as a graded `model_request_error`.
 
