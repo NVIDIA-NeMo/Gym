@@ -16,6 +16,7 @@ from typing import Literal, NotRequired, TypedDict, cast
 
 from pydantic import TypeAdapter
 
+from nemo_gym.agents.utils.setup_retry import exec_idempotent
 from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
     CONTINUE_REQUEST_FILE,
@@ -67,6 +68,13 @@ _ADOPT_CONTINUE_ATTEMPTS = 3
 # Each receipt poll is one command of at most this many seconds; a longer one could outlive a provider's stream limit.
 _RECEIPT_POLL_WINDOW_S = 50.0
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _provider_oom_killed(error: BaseException) -> bool:
+    """Whether ``error`` is the provider's confirmation that an OOM kill took the whole sandbox."""
+    return (
+        isinstance(error, NgFailureEvent) and error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED
+    )
 
 
 def _reuse_or_start[T](
@@ -473,24 +481,39 @@ class SandboxSession[Artifacts]:
             return await self.sandbox.exec(command_line, cwd=self.workdir, timeout_s=provider_timeout)
         except Exception as error:
             # A provider-confirmed OOM kill took the whole sandbox: nothing is left there to ask or to wait for.
-            oom_killed = (
-                isinstance(error, NgFailureEvent)
-                and error.boundary == "sandbox"
-                and error.failure_kind == PROVIDER_OOM_KILLED
-            )
-            if oom_killed or not await self._supervisor_started():
+            if _provider_oom_killed(error) or not await self._supervisor_started():
                 raise
             LOG.warning("%s launch connection lost (%s); waiting for its cleanup receipt", self.harness, error)
-            return await self._wait_for_receipt(
+            result = await self._wait_for_receipt(
                 deadline=launched_at + provider_timeout, window_s=_RECEIPT_POLL_WINDOW_S
             )
+            # A wait that found no receipt fails the launch, and names the error that lost the connection as its
+            # cause. A receipt answers for the launch, so the lost connection is not reported.
+            if result.error_type == "timeout":
+                raise TimeoutError(f"{self.harness} sandbox supervisor exceeded its execution deadline") from error
+            if result.error_type:
+                raise RuntimeError(
+                    f"{self.harness} sandbox execution failed: {result.error_type}: {result.stderr}"
+                ) from error
+            return result
 
     async def _supervisor_started(self) -> bool:
-        """Whether the launch's supervisor claimed the launch; False when the sandbox cannot say."""
+        """Whether the launch command claimed the launch; False when the sandbox cannot say after repeated asks.
+
+        The claim is a symbolic link whose target names who took it and is no file, so the link itself is read.
+        """
         claim = quote(f"{self.session_dir}/{LAUNCH_CLAIM_FILE}")
         pid = quote(f"{self.session_dir}/{SUPERVISOR_PID_FILE}")
         try:
-            probe = await self.sandbox.exec(f"[ -e {pid} ] || [ -e {claim} ]", cwd=self.workdir, timeout_s=30)
+            # The probe only reads, so it is repeated: the interruption that lost the launch's connection can
+            # refuse the first ask too, and that says nothing about the launch.
+            probe = await exec_idempotent(
+                self.sandbox,
+                f'[ -e {pid} ] || [ "$(readlink {claim} 2>/dev/null)" = launch ]',
+                what="supervisor start probe",
+                cwd=control_cwd(session_dir=self.session_dir, workdir=self.workdir),
+                timeout_s=30,
+            )
         except Exception:
             LOG.warning("%s could not check whether its supervisor started", self.harness, exc_info=True)
             return False
@@ -572,16 +595,20 @@ class SandboxSession[Artifacts]:
         receipt = quote(f"{self.session_dir}/{CLEANUP_RECEIPT_FILE}")
         failures = 0
         failing_since = 0.0
+        warned = False  # One warning for each run of failed polls; a held pause keeps ``failures`` at zero.
         while (window := min(window_s, deadline - monotonic())) > 0:
             asked = monotonic()
             try:
                 result = await self.sandbox.exec(
                     f"for _ in $(seq 1 {max(1, int(window))}); do "
                     f"[ -f {receipt} ] && {{ cat {receipt}; exit 0; }}; sleep 1; done; exit 3",
-                    cwd=self.workdir,
+                    # The receipt is in the session directory: the task may have moved its workdir.
+                    cwd=control_cwd(session_dir=self.session_dir, workdir=self.workdir),
                     timeout_s=window + 10,
                 )
             except Exception as error:
+                if _provider_oom_killed(error):
+                    raise  # The whole sandbox is gone: no later poll can answer.
                 # A poll whose command raised (a dropped connection) is one failed poll, not the end of the wait.
                 result = SandboxExecResult(stdout=None, stderr=repr(error), return_code=-1, error_type="poll_failed")
             if result.return_code == 0 and not result.error_type:
@@ -605,13 +632,15 @@ class SandboxSession[Artifacts]:
                             return_code=-1,
                             error_type=result.error_type or "failed",
                         )
-                if failures <= 1:
+                if not warned:
+                    warned = True
                     LOG.warning(
                         "%s receipt poll failed (%s); retrying", self.harness, result.error_type or result.stderr
                     )
                 await asyncio.sleep(1)
             else:
                 failures = 0
+                warned = False
                 if monotonic() - asked < 1:
                     await asyncio.sleep(1)  # A poll that could not wait (no seq in the image) must not spin.
         return SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type="timeout")
@@ -702,11 +731,31 @@ class SandboxSession[Artifacts]:
 
         ``finished`` when the harness had already ended. Before its launch, the pause is recorded and holds the
         launch until ``continue_harness``. Pausing again before a continue requests the same pause again.
+
+        ``timeout`` covers the whole call: the wait for another pause or continue request of this session to end,
+        then the request, which gets what is left. Unconfirmed when the other request outlasts it.
         """
         if not self.pausable:
             raise RuntimeError(f"{self.harness} sandbox session was not launched pausable")
-        async with self._control:
-            return await self._pause(timeout=timeout)
+        return await self._controlled(self._pause, timeout=timeout)
+
+    async def _controlled(
+        self, request: Callable[..., Awaitable[HarnessPauseResult]], *, timeout: float
+    ) -> HarnessPauseResult:
+        """Run a pause or continue ``request`` under the control lock, within ``timeout`` for the lock and it."""
+        deadline = monotonic() + timeout
+        try:
+            async with asyncio.timeout(timeout):
+                await self._control.acquire()
+        except TimeoutError:
+            return HarnessPauseResult(
+                status="unconfirmed",
+                error=f"another pause or continue request held the session for the whole {timeout:g}s timeout",
+            )
+        try:
+            return await request(timeout=max(0.0, deadline - monotonic()))
+        finally:
+            self._control.release()
 
     async def _pause(self, *, timeout: float) -> HarnessPauseResult:
         if self.cleanup is not None or self.sandbox_stopped or self.closing:
@@ -762,9 +811,11 @@ class SandboxSession[Artifacts]:
             parked.close()
 
     async def continue_harness(self, *, timeout: float = DEFAULT_PAUSE_TIMEOUT) -> HarnessPauseResult:
-        """Continue a harness ``pause_harness`` paused; ``confirmed`` at once when nothing is paused."""
-        async with self._control:
-            return await self._continue(timeout=timeout)
+        """Continue a harness ``pause_harness`` paused; ``confirmed`` at once when nothing is paused.
+
+        ``timeout`` covers the whole call, as in ``pause_harness``.
+        """
+        return await self._controlled(self._continue, timeout=timeout)
 
     async def _continue(self, *, timeout: float) -> HarnessPauseResult:
         if self.cleanup is not None or self.sandbox_stopped or self.closing:

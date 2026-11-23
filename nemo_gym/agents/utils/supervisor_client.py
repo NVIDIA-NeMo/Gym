@@ -646,7 +646,8 @@ async def abandon_launch(
     For a launch a restore brought back that will not be taken over, so that nothing of it (a harness still
     pointed at a dead model server, say) runs again before a relaunch. Uses the supervisor script the launch
     uploaded to ``session_dir``. Returns the receipt: the supervisor's own if it had finished, else a stopped,
-    ``abandoned`` one. Raises the harness termination failure if a process it killed did not exit.
+    ``abandoned`` one. Raises the harness termination failure if a process it killed did not exit, and
+    ``RuntimeError`` if the abandonment failed beside the receipt of a launch that had finished.
     """
     if not _IDENTITY.fullmatch(identity):
         raise ValueError(f"malformed supervisor identity {identity!r}")
@@ -663,4 +664,7 @@ async def abandon_launch(
     except Exception as error:
         raise RuntimeError(f"{harness} abandoned launch left no receipt") from error
     _raise_terminal_failure(receipt, harness=harness)
+    if result.return_code != 0:
+        # The receipt is an earlier one, of a launch that had finished: it does not answer for this abandonment.
+        raise RuntimeError(f"{harness} launch could not be abandoned: exit {result.return_code}: {result.stderr}")
     return parse_cleanup_receipt(receipt)

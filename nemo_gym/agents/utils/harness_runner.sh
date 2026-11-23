@@ -102,12 +102,15 @@ read_clock() {
 # polls: a gap counts as at most a second, so the time it spent stopped does not use up the wait, and a relay that
 # came up meanwhile is seen before the wait is checked.
 start_relay() {
-    local status= waited=0 last step clock
+    local status= waited=0 last step clock relay_program
     relay_log=$(dirname "$MODEL_RELAY_STATUS")/relay.log
     relay_link=$(dirname "$MODEL_RELAY_STATUS")/gym-model-relay
     read_clock
     last=$clock
-    [[ -x ${MODEL_RELAY_COMMAND[0]-} ]] && ln -sfn "${MODEL_RELAY_COMMAND[0]}" "$relay_link" || return 1
+    # The link is read from the status directory: a name found on PATH or relative to here is made absolute.
+    relay_program=$(type -P -- "${MODEL_RELAY_COMMAND[0]-}") || return 1
+    [[ $relay_program == /* ]] || relay_program=$PWD/$relay_program
+    [[ -x $relay_program ]] && ln -sfn "$relay_program" "$relay_link" || return 1
     relay_args=("${MODEL_RELAY_COMMAND[@]:1}")
     rm -f "$MODEL_RELAY_STATUS"
     relay_watchdog 2>>"$relay_log" &

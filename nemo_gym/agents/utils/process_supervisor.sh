@@ -409,11 +409,12 @@ serve_pause() {
 # Abandon the launch of the supervisor whose identity is $1 (PID.START), after a restore of a snapshot that
 # kept its processes (see the header). Kills, and never continues, the supervisor, the shell that started it
 # outside its own group, every process carrying its marker, and their descendants, until none runs or the
-# cleanup timeout passes. Writes a stopped, abandoned receipt unless the supervisor wrote one; succeeds when
-# nothing it killed still runs.
+# cleanup timeout passes. A process reached once stays reached, by PID and start time: one that outlives its
+# parent is reparented, out of the tree a later scan walks. Writes a stopped, abandoned receipt unless the
+# supervisor wrote one; succeeds when nothing it reached still runs.
 abandon() {
     local supervisor=${1%%.*} entry pid shell= word limit changed confirmed=true error=null
-    local -a parent=() doomed=()
+    local -a parent=() doomed=() start=() reached=()
     [[ $1 == *.* && $supervisor =~ ^[0-9]+$ && ${1#*.} =~ ^[0-9]+$ ]] || { echo "--abandon needs PID.START" >&2; return 2; }
     started=${1#*.} marker=NEMO_GYM_SUPERVISOR=$1
     # The shell that started the supervisor in a new process group waits for it and passes on its status.
@@ -425,14 +426,14 @@ abandon() {
     now
     limit=$((NOW + ${cleanup:-1000}))
     while :; do
-        parent=() doomed=()
+        parent=() doomed=() start=()
         for entry in /proc/[0-9]*; do
             pid=${entry#/proc/}
             [[ $pid != "$$" ]] && stat_fields "$pid" || continue
             [[ ${fields[0]} == [ZX] ]] && continue
-            parent[pid]=${fields[1]}
-            if [[ $pid == "$shell" || ($pid == "$supervisor" && ${fields[19]} == "$started") ]] ||
-                marked "$pid" "${fields[19]}"; then
+            parent[pid]=${fields[1]} start[pid]=${fields[19]}
+            if [[ $pid == "$shell" || ($pid == "$supervisor" && ${fields[19]} == "$started") ||
+                ${reached[pid]-} == "${fields[19]}" ]] || marked "$pid" "${fields[19]}"; then
                 doomed[pid]=1
             fi
         done
@@ -445,7 +446,10 @@ abandon() {
             done
         done
         ((${#doomed[@]})) || break
-        for pid in "${!doomed[@]}"; do kill -KILL "$pid" 2>/dev/null; done
+        for pid in "${!doomed[@]}"; do
+            reached[pid]=${start[pid]}
+            kill -KILL "$pid" 2>/dev/null
+        done
         now
         if ((NOW >= limit)); then
             confirmed=false error='"An abandoned process did not exit"'

@@ -418,6 +418,26 @@ def test_a_relay_command_runs_under_a_neutral_name_with_an_environment_of_its_ow
 
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+@pytest.mark.parametrize("named", ["on_path", "relative_to_cwd"])
+def test_a_relay_program_named_on_path_or_relative_to_the_cwd_is_started(tmp_path: Path, named: str) -> None:
+    # The neutral link is read from the relay's status directory, so the program it names must be resolved first.
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "relay-runtime").symlink_to(sys.executable)
+    program = "relay-runtime" if named == "on_path" else "./runtime/relay-runtime"
+    params, status = _relay_params(
+        tmp_path, RELAY_CHECK, MODEL_RELAY_COMMAND=[program, str(tmp_path / "stub_relay.py")]
+    )
+    path = f"{tmp_path / 'runtime'}{os.pathsep}{os.environ['PATH']}" if named == "on_path" else os.environ["PATH"]
+
+    result = _run(params, env={**os.environ, "PATH": path})
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    assert (tmp_path / "stdout.log").read_text().split()[:2] == ["1", "gym-model-relay"]
+    assert not (tmp_path / "relay" / "unavailable").exists()
+    assert _process_ends(json.loads(status.read_text())["pid"]), "the relay ends with the command"
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
 def test_a_relay_command_that_cannot_run_leaves_the_command_on_the_fallback_environment(tmp_path: Path) -> None:
     script = 'import os; print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.environ.get("MODEL_BASE_URL"))'
     params, _ = _relay_params(

@@ -38,6 +38,7 @@ from nemo_gym.agents.utils.supervisor_client import (
     request_pause,
     supervised_launch_command,
 )
+from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from tests.unit_tests.agents.test_harness_pause import FakeActivation, LocalSandbox, _wait_for
@@ -280,6 +281,90 @@ async def test_abandon_launch_raises_when_a_process_it_killed_did_not_exit(tmp_p
         await abandon_launch(sandbox, str(tmp_path), identity="12.34", timeout=1, harness="test")
     assert is_harness_termination_failure(raised.value)
     assert not receipt.exists()
+
+
+async def test_abandon_launch_raises_when_it_failed_beside_the_receipt_of_a_finished_launch(tmp_path: Path) -> None:
+    # The launch had finished, with a confirmed receipt, while a service it marked still ran: an abandonment that
+    # could not kill that service must not pass for a success on the strength of the earlier receipt.
+    finished = {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False, "stopped": False}
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="still running", return_code=1)
+
+    async def download(source: str, destination: Path) -> None:
+        destination.write_text(json.dumps(finished))
+
+    sandbox.download.side_effect = download
+    with pytest.raises(RuntimeError, match="could not be abandoned: exit 1: still running") as raised:
+        await abandon_launch(sandbox, str(tmp_path), identity="12.34", timeout=1, harness="test")
+    assert not isinstance(raised.value, NgFailureEvent)
+
+
+# abandon() over a scripted process table: the harness (marked) and its unmarked child are seen once, the harness
+# then exits, and the child is reparented. $6 says what becomes of the child. kill is recorded, never sent.
+ABANDON_REPARENTED = r"""
+source "$1"
+receipt=$2 cleanup=$3 harness_pid=$4 child_pid=$5 later=$6 killed=0 seen=0
+kill() { echo "$2" >>"$receipt.kills"; killed=1; }
+marked() { [[ $1 == "$harness_pid" ]]; }
+stat_fields() {
+    fields=()
+    if [[ $1 == "$harness_pid" ]] && ((!killed)); then
+        fields[0]=S fields[1]=0 fields[2]=$1 fields[19]=100
+    elif [[ $1 == "$child_pid" ]] && ((!killed)); then
+        fields[0]=S fields[1]=$harness_pid fields[2]=$harness_pid fields[19]=200
+    elif [[ $1 == "$child_pid" && $later == stuck ]]; then
+        fields[0]=D fields[1]=1 fields[2]=$harness_pid fields[19]=200
+    elif [[ $1 == "$child_pid" && $later == exits ]] && ((seen++ < 3)); then
+        fields[0]=D fields[1]=1 fields[2]=$harness_pid fields[19]=200
+    elif [[ $1 == "$child_pid" && $later == reused ]]; then
+        fields[0]=S fields[1]=1 fields[2]=$1 fields[19]=300
+    else
+        return 1
+    fi
+}
+abandon "$harness_pid.100"
+"""
+
+
+@pytest.mark.parametrize(
+    ("later", "confirmed", "child_kills"),
+    [
+        # Still running, in uninterruptible sleep, under another parent: not confirmed, and killed again each round.
+        ("stuck", False, None),
+        # The same, until it exits: confirmed then, and not before.
+        ("exits", True, 4),
+        # Its PID now names a process that started later: that one is not killed.
+        ("reused", True, 1),
+    ],
+)
+def test_abandon_keeps_a_process_it_reached_after_its_parent_exited(
+    tmp_path: Path, later: str, confirmed: bool, child_kills: int | None
+) -> None:
+    # Two real processes lend their PIDs, so the scan of /proc lists them; what it reads about them is scripted.
+    lenders = [subprocess.Popen(["sleep", "60"]) for _ in range(2)]
+    receipt = tmp_path / CLEANUP_RECEIPT_FILE
+    try:
+        harness, child = (str(lender.pid) for lender in lenders)
+        result = subprocess.run(
+            ["bash", "-c", ABANDON_REPARENTED, "abandon", str(SUPERVISOR_SCRIPT), str(receipt), "200", harness, child]
+            + [later],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert all(lender.poll() is None for lender in lenders), "no signal was sent"
+    finally:
+        for lender in lenders:
+            lender.kill()
+            lender.wait()
+    kills = Path(f"{receipt}.kills").read_text().split()
+    assert result.returncode == (0 if confirmed else 1), result.stderr
+    assert json.loads(receipt.read_text())["cleanup_confirmed"] is confirmed
+    assert kills.count(harness) == 1
+    if child_kills is None:
+        assert kills.count(child) > 2
+    else:
+        assert kills.count(child) == child_kills
 
 
 # -- check_restored --------------------------------------------------------------------------------------------------
@@ -681,6 +766,109 @@ async def test_a_lost_launch_connection_is_finished_from_the_supervisors_receipt
     await sandbox.launch
 
 
+class InterruptedSandbox(DroppingSandbox):
+    """A ``DroppingSandbox`` whose interruption also refuses the first start probes, or whose task moved its workdir."""
+
+    def __init__(self, session_dir: Path, *, refused_probes: int = 0, moved_workdir: Path | None = None) -> None:
+        super().__init__(session_dir, start=True)
+        self.refused_probes = refused_probes
+        self.moved_workdir = moved_workdir
+        self.probes = 0
+
+    async def exec(self, command, *, cwd=None, timeout_s=30, **kwargs):
+        if "readlink" in command:
+            self.probes += 1
+            if self.moved_workdir is not None:
+                self.moved_workdir.rename(self.moved_workdir.with_name("moved"))
+                self.moved_workdir = None
+            if self.probes <= self.refused_probes:
+                raise ConnectionError("gateway restarting")
+        return await super().exec(command, cwd=cwd, timeout_s=timeout_s, **kwargs)
+
+
+async def _run_interrupted(tmp_path: Path, sandbox: InterruptedSandbox, workdir: Path) -> SandboxSession:
+    session = SandboxSession(
+        sandbox=sandbox,  # type: ignore[arg-type]
+        session_dir=str(tmp_path / "launch-1"),
+        workdir=str(workdir),
+        harness="test",
+        pausable=True,
+    )
+    result = await asyncio.wait_for(
+        session.execute(
+            stage_activation=_worker_stage(tmp_path / "launch-1"),
+            collect=AsyncMock(return_value="artifacts"),
+            timeout=60,
+            close_timeout=3,
+        ),
+        30,
+    )
+    assert result == "artifacts"
+    assert len((tmp_path / "launch-1" / "ticks").read_text()) == 60, "the harness ran to its end"
+    assert session.cleanup is not None and session.cleanup["return_code"] == 4
+    await sandbox.launch
+    return session
+
+
+async def test_a_start_probe_the_sandbox_refuses_once_is_repeated_before_the_launch_is_given_up(
+    tmp_path: Path,
+) -> None:
+    sandbox = InterruptedSandbox(tmp_path / "launch-1", refused_probes=1)
+    await _run_interrupted(tmp_path, sandbox, tmp_path)
+    assert sandbox.probes == 2
+
+
+async def test_a_lost_launch_is_recovered_after_the_task_moved_its_workdir(tmp_path: Path) -> None:
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    sandbox = InterruptedSandbox(tmp_path / "launch-1", moved_workdir=workdir)
+    await _run_interrupted(tmp_path, sandbox, workdir)
+    assert not workdir.exists() and sandbox.probes == 1
+
+
+@pytest.mark.parametrize(
+    ("marker", "started"),
+    [
+        # The claim is a dangling link (to "launch", which is no file): the link itself says the launch was claimed.
+        ("claim", True),
+        ("pid", True),
+        ("none", False),
+        # A stop took the claim first, so the launch never ran.
+        ("stop", False),
+    ],
+)
+async def test_a_claimed_launch_counts_as_started_before_its_pid_file_is_written(
+    tmp_path: Path, marker: str, started: bool
+) -> None:
+    session_dir = tmp_path / "launch-1"
+    session_dir.mkdir()
+    if marker in ("claim", "stop"):
+        (session_dir / "launch.claim").symlink_to("launch" if marker == "claim" else "stop")
+    elif marker == "pid":
+        (session_dir / "supervisor.pid").write_text("1\n")
+    session = SandboxSession(
+        sandbox=LocalSandbox(),  # type: ignore[arg-type]
+        session_dir=str(session_dir),
+        workdir=str(tmp_path / "missing"),  # the probe addresses the session directory alone
+        harness="test",
+        pausable=True,
+    )
+    assert await session._supervisor_started() is started
+
+
+async def test_a_receipt_is_read_after_the_task_removed_its_workdir(tmp_path: Path) -> None:
+    (tmp_path / CLEANUP_RECEIPT_FILE).write_text(json.dumps({"cleanup_confirmed": True, "return_code": 0}))
+    session = SandboxSession(
+        sandbox=LocalSandbox(),  # type: ignore[arg-type]
+        session_dir=str(tmp_path),
+        workdir=str(tmp_path / "missing"),
+        harness="test",
+        pausable=True,
+    )
+    result = await asyncio.wait_for(session._wait_for_receipt(deadline=monotonic() + 600, window_s=5), 10)
+    assert (result.return_code, result.error_type) == (0, None)
+
+
 async def test_a_launch_whose_supervisor_never_started_fails_at_once(tmp_path: Path) -> None:
     session, _ = _dropping_session(tmp_path, start=False)
     with pytest.raises(TimeoutError, match="Request timed out"):
@@ -755,7 +943,7 @@ async def test_failed_receipt_polls_do_not_end_the_wait_before_they_span_the_fai
 
 
 async def test_failed_receipt_polls_are_not_counted_while_a_checkpoint_holds_the_harness(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session._RECEIPT_POLL_FAILURE_S", 0.0)
     monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.asyncio.sleep", AsyncMock())
@@ -765,8 +953,10 @@ async def test_failed_receipt_polls_are_not_counted_while_a_checkpoint_holds_the
     ]
     session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
     session._pause_seq, session._continued_seq = 2, 1  # A pause is held: the sandbox may be mid-snapshot.
-    result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
+    with caplog.at_level("WARNING"):
+        result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
     assert result.return_code == 0 and sandbox.exec.await_count == 9
+    assert caplog.text.count("receipt poll failed") == 1, "one warning for the run of failed polls"
 
 
 async def test_five_raised_receipt_polls_give_up(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -777,3 +967,99 @@ async def test_five_raised_receipt_polls_give_up(monkeypatch: pytest.MonkeyPatch
     result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
     assert (result.return_code, result.error_type) == (-1, "poll_failed") and sandbox.exec.await_count == 5
     assert "sandbox gone" in (result.stderr or "")
+
+
+def _oom_killed() -> NgFailureEvent:
+    return NgFailureEvent(boundary="sandbox", failure_kind=PROVIDER_OOM_KILLED, failure_reason="OOMKilled")
+
+
+async def test_a_receipt_poll_the_provider_answers_with_an_oom_kill_raises_it() -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [ConnectionError("stream lost"), _oom_killed()]
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    with pytest.raises(NgFailureEvent) as raised:
+        await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
+    # Not one more failed poll: the whole sandbox is gone, and the launch must be reported as OOM-killed.
+    assert raised.value.failure_kind == PROVIDER_OOM_KILLED and sandbox.exec.await_count == 2
+
+
+async def test_an_adopted_launch_whose_sandbox_is_oom_killed_is_recorded_as_such(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = _oom_killed()
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+
+    async def continued(*, timeout: float) -> SimpleNamespace:
+        return SimpleNamespace(status="confirmed", error=None)
+
+    monkeypatch.setattr(session, "_continue", continued)
+    monkeypatch.setattr(session, "_finish", AsyncMock())
+    with pytest.raises(NgFailureEvent) as raised:
+        await session.adopt(pause_seq=1, collect=AsyncMock(), timeout=60, close_timeout=3)
+    assert session.execution_oom is raised.value
+
+
+async def test_a_lost_launch_whose_receipt_never_comes_names_the_lost_connection_as_its_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session._RECEIPT_POLL_FAILURE_S", 0.0)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.asyncio.sleep", AsyncMock())
+    lost = TimeoutError("Request timed out")
+    sandbox = AsyncMock()
+    # The launch command, the start probe (the supervisor started), then five receipt polls.
+    sandbox.exec.side_effect = [lost, SandboxExecResult(stdout="", stderr="", return_code=0)] + [
+        ConnectionError("sandbox gone")
+    ] * 5
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    with pytest.raises(RuntimeError, match="poll_failed.*sandbox gone") as raised:
+        await session._exec_launch("launch", provider_timeout=600)
+    assert raised.value.__cause__ is lost
+
+
+async def test_a_lost_launch_whose_receipt_comes_does_not_report_the_lost_connection() -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [
+        TimeoutError("Request timed out"),
+        SandboxExecResult(stdout="", stderr="", return_code=0),
+        SandboxExecResult(stdout=json.dumps({"cleanup_confirmed": True}), stderr=None, return_code=0),
+    ]
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    result = await session._exec_launch("launch", provider_timeout=600)
+    assert (result.return_code, result.error_type) == (0, None)
+
+
+@pytest.mark.parametrize("request_name", ["pause_harness", "continue_harness"])
+async def test_a_pause_or_continue_that_waits_out_its_timeout_for_another_request_is_unconfirmed(
+    request_name: str,
+) -> None:
+    sandbox = AsyncMock()
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    # As ``adopt`` holds the lock across its continue attempts.
+    async with session._control:
+        asked = monotonic()
+        result = await asyncio.wait_for(getattr(session, request_name)(timeout=0.3), 5)
+        waited = monotonic() - asked
+    assert result.status == "unconfirmed" and "another pause or continue request" in (result.error or "")
+    assert 0.25 <= waited < 3
+    assert sandbox.exec.await_count == 0 and not session._control.locked()
+
+
+@pytest.mark.parametrize("request_name", ["pause_harness", "continue_harness"])
+async def test_a_pause_or_continue_gives_its_request_what_the_wait_for_another_left_of_its_timeout(
+    monkeypatch: pytest.MonkeyPatch, request_name: str
+) -> None:
+    session = SandboxSession(sandbox=AsyncMock(), session_dir="/s", workdir="/w", harness="test", pausable=True)
+    budgets: list[float] = []
+
+    async def request(*, timeout: float) -> SimpleNamespace:
+        budgets.append(timeout)
+        return SimpleNamespace(status="confirmed")
+
+    monkeypatch.setattr(session, "_pause", request)
+    monkeypatch.setattr(session, "_continue", request)
+    await session._control.acquire()
+    asyncio.get_running_loop().call_later(0.5, session._control.release)
+    result = await asyncio.wait_for(getattr(session, request_name)(timeout=10), 5)
+    assert result.status == "confirmed" and not session._control.locked()
+    assert len(budgets) == 1 and 5 < budgets[0] <= 9.6

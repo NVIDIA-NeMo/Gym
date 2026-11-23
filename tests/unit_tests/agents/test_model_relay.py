@@ -38,6 +38,14 @@ JS_RUNTIME = _js_runtime()
 pytestmark = pytest.mark.skipif(JS_RUNTIME is None, reason="no JavaScript runtime (node or bun) on this machine")
 
 
+# Replies no retry can mend, each sent whole; the upstream then keeps the connection open.
+MALFORMED_REPLIES = {
+    "bad_status_line": b"HTTP/1.1 fine OK\r\nContent-Length: 2\r\n\r\n{}",
+    "bad_content_length": b"HTTP/1.1 200 OK\r\nContent-Length: two\r\n\r\n{}",
+    "bad_chunk_size": b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n{}\r\n",
+}
+
+
 class Upstream:
     """A local HTTP/1.1 model server whose behaviour each test picks: it records every request it reads."""
 
@@ -90,6 +98,10 @@ class Upstream:
                 await asyncio.sleep(0.2)
                 writer.transport.abort()
                 return
+            if self.mode in MALFORMED_REPLIES:
+                writer.write(MALFORMED_REPLIES[self.mode])
+                await writer.drain()
+                await asyncio.Event().wait()
             if self.mode == "hold":
                 await asyncio.Event().wait()
             if self.mode == "hold_after_headers":
@@ -358,6 +370,104 @@ async def test_an_upstream_unreachable_past_the_hold_timeout_gets_a_502(tmp_path
         assert status == 502 and "unreachable" in json.loads(body)["error"]["message"]
     finally:
         relay.stop()
+
+
+async def test_an_upstream_that_accepts_but_never_completes_tls_gets_a_502_within_the_hold_timeout(
+    tmp_path: Path,
+) -> None:
+    accepted: list[asyncio.StreamWriter] = []
+
+    async def stall(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        accepted.append(writer)
+        await reader.read()  # takes the ClientHello and answers nothing
+
+    silent = await asyncio.start_server(stall, "127.0.0.1", 0)
+    relay = RelayProcess(tmp_path, hold_timeout_s=1.0)
+    relay.point(1, f"https://127.0.0.1:{silent.sockets[0].getsockname()[1]}/v1")
+    try:
+        await relay.start()
+        started = asyncio.get_running_loop().time()
+        status, _, body = await asyncio.wait_for(call(relay.port, "/v1/responses", b"{}"), 15)
+        waited = asyncio.get_running_loop().time() - started
+        assert status == 502 and "no connection to the upstream" in json.loads(body)["error"]["message"]
+        # The time the attempt waited to connect counts against the hold timeout, so the call ends about there.
+        assert 0.9 <= waited < 8 and len(accepted) == 1
+        await wait_until(lambda: relay.status()["inflight"] == 0)
+    finally:
+        relay.stop()
+        for writer in accepted:
+            writer.transport.abort()
+        silent.close()
+        await silent.wait_closed()
+
+
+@pytest.mark.parametrize(
+    ("mode", "cause"),
+    [
+        ("bad_status_line", "bad status line"),
+        ("bad_content_length", "bad content-length"),
+        ("bad_chunk_size", "bad chunk size"),
+    ],
+)
+async def test_a_reply_the_relay_cannot_use_gets_a_502_at_once_and_is_not_asked_for_again(
+    relay: RelayProcess, mode: str, cause: str
+) -> None:
+    upstream = await Upstream(mode).start()
+    relay.point(1, upstream.url())
+    await relay.start()
+    # Well inside the 30 s an unreachable upstream is retried for.
+    status, _, body = await asyncio.wait_for(call(relay.port, "/v1/responses", b"{}"), 10)
+    message = json.loads(body)["error"]["message"]
+    assert status == 502 and "cannot use the upstream" in message and cause in message
+    await asyncio.sleep(0.5)
+    assert len(upstream.requests) == 1
+    await upstream.stop()
+
+
+@pytest.mark.parametrize(
+    ("address", "cause"),
+    [
+        ("ftp://127.0.0.1:9/v1", "unsupported upstream"),
+        ("http:///v1", "unsupported upstream"),
+        ("http://127.0.0.1:99999/v1", "bad port"),
+    ],
+)
+async def test_an_upstream_address_the_relay_cannot_use_gets_a_502_at_once_and_a_later_endpoint_is_served(
+    relay: RelayProcess, address: str, cause: str
+) -> None:
+    relay.point(1, address)
+    await relay.start()
+    status, _, body = await asyncio.wait_for(call(relay.port, "/v1/responses", b"{}"), 10)
+    message = json.loads(body)["error"]["message"]
+    assert status == 502 and "cannot use the upstream" in message and cause in message
+
+    upstream = await Upstream().start()
+    relay.point(2, upstream.url())
+    status, _, _ = await asyncio.wait_for(call(relay.port, "/v1/responses", b"{}"), 10)
+    assert status == 200 and len(upstream.requests) == 1
+    await upstream.stop()
+
+
+async def test_a_chunk_size_cut_short_by_a_closed_upstream_is_sent_again(relay: RelayProcess) -> None:
+    # A closed stream leaves part of a line: that is an interrupted response, not a reply the relay cannot use.
+    served = 0
+
+    async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        nonlocal served
+        await reader.readuntil(b"\r\n\r\n")
+        served += 1
+        head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        writer.write(head + (b"z" if served == 1 else b"2\r\n{}\r\n0\r\n\r\n"))
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    relay.point(1, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1")
+    await relay.start()
+    status, _, body = await asyncio.wait_for(call(relay.port, "/v1/responses", b""), 15)
+    assert (status, body, served) == (200, b"{}", 2)
+    server.close()
+    await server.wait_closed()
 
 
 async def test_an_error_reply_of_the_model_server_is_passed_on_not_retried(relay: RelayProcess) -> None:

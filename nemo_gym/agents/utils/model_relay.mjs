@@ -16,8 +16,13 @@
  *   with its first body byte. When the endpoint's ``gen`` changes, every request sent under an earlier one that has
  *   not started its response is sent again to the new upstream; a response already started is cut with a reset.
  * - An upstream that cannot be reached, or resets a request before its response starts, is retried with backoff
- *   while the endpoint stays the same, for up to ``--hold-timeout-s``; then the harness gets a 502. Error replies of
- *   the model server reach the harness as they are.
+ *   while the endpoint stays the same, for up to ``--hold-timeout-s``; then the harness gets a 502. An attempt that
+ *   does not connect within 30 seconds, or within what is left of that time, is one such failure, and the time it
+ *   waited counts. A connected upstream is given as long as it needs to answer. Error replies of the model server
+ *   reach the harness as they are.
+ * - An upstream the relay cannot use is not retried, and the harness gets a 502 that names the cause at once: an
+ *   address that is not http or https, or has no host or a bad port, and a reply with a malformed status line,
+ *   Content-Length or first chunk size.
  * - Status file (``--status``): ``{"pid", "start", "port", "gen", "held", "inflight", "resent"}``, about every second;
  *   ``start`` is the process start time from /proc, so a reader can tell a restarted relay from the one it knew.
  *   harness_runner.sh and supervisor_client.py read it with patterns, so its layout is fixed.
@@ -41,6 +46,8 @@ const PAUSE_REQUEST_FILE = "pause.request";
 const CONTINUE_REQUEST_FILE = "continue.request";
 // Retry delays for an unreachable upstream; the last one repeats.
 const BACKOFF_MS = [200, 500, 1000, 2000, 5000];
+// One attempt to connect (name lookup, TCP and TLS) gets this long, or what is left of the hold timeout if less.
+const CONNECT_TIMEOUT_MS = 30000;
 const READ_SIZE = 65536;
 const CRLF2 = Buffer.from("\r\n\r\n");
 const EMPTY = Buffer.alloc(0);
@@ -62,6 +69,9 @@ const HOP_BY_HOP = new Set([
 
 /** A request the relay cannot read or forward. */
 class RelayError extends Error {}
+
+/** An upstream address or reply the relay cannot use, which sending the request again would not change. */
+class UnusableUpstream extends RelayError {}
 
 /** The stream ended before the bytes a reader needed; ``partial`` holds what arrived. */
 class IncompleteRead extends Error {
@@ -120,7 +130,7 @@ function upstreamTarget(upstream, target) {
   const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)([^?#]*)/.exec(upstream);
   const scheme = match ? match[1].toLowerCase() : "";
   if (scheme !== "http" && scheme !== "https") {
-    throw new RelayError(`unsupported upstream ${JSON.stringify(upstream)}`);
+    throw new UnusableUpstream(`unsupported upstream ${JSON.stringify(upstream)}`);
   }
   const secure = scheme === "https";
   const netloc = match[2].slice(match[2].lastIndexOf("@") + 1);
@@ -137,10 +147,10 @@ function upstreamTarget(upstream, target) {
   }
   hostname = hostname.toLowerCase();
   if (!hostname) {
-    throw new RelayError(`unsupported upstream ${JSON.stringify(upstream)}`);
+    throw new UnusableUpstream(`unsupported upstream ${JSON.stringify(upstream)}`);
   }
   if (portText && (!/^[0-9]+$/.test(portText) || Number(portText) > 65535)) {
-    throw new RelayError(`bad port in upstream ${JSON.stringify(upstream)}`);
+    throw new UnusableUpstream(`bad port in upstream ${JSON.stringify(upstream)}`);
   }
   const port = portText ? Number(portText) : secure ? 443 : 80;
   const suffix = target === "/v1" || target.startsWith("/v1/") || target.startsWith("/v1?") ? target.slice(3) : target;
@@ -309,7 +319,9 @@ async function readChunk(reader) {
   const line = await reader.readLine();
   const text = line.toString("latin1").split(";", 1)[0].trim();
   if (!/^[0-9a-fA-F]+$/.test(text)) {
-    throw new RelayError(`bad chunk size ${JSON.stringify(line.toString("latin1").slice(0, 40))}`);
+    // ``whole``: the line arrived to its end, so its text is what the sender wrote, not what a closed stream left.
+    const whole = line.length > 0 && line[line.length - 1] === 10;
+    throw Object.assign(new RelayError(`bad chunk size ${JSON.stringify(line.toString("latin1").slice(0, 40))}`), { whole });
   }
   const size = parseInt(text, 16);
   if (size === 0) {
@@ -469,9 +481,12 @@ class Change {
 
 /** One connection attempt, which an endpoint change cancels by destroying its socket. */
 class Attempt {
-  constructor() {
+  constructor(connectTimeoutMs) {
     this.cancelled = false;
     this.socket = null;
+    this.started = performance.now();
+    this.connected = false;
+    this.connectTimeoutMs = connectTimeoutMs;
   }
 
   cancel() {
@@ -482,6 +497,7 @@ class Attempt {
   }
 }
 
+/** Open a socket to ``where`` within the attempt's connect timeout: name lookup, TCP and, when secure, TLS. */
 function connect(where, attempt) {
   return new Promise((resolve, reject) => {
     const socket = where.secure
@@ -494,6 +510,7 @@ function connect(where, attempt) {
     attempt.socket = socket;
     const connected = where.secure ? "secureConnect" : "connect";
     const done = () => {
+      clearTimeout(timer);
       socket.off("error", failed);
       socket.off("close", closed);
       socket.off(connected, ready);
@@ -508,8 +525,16 @@ function connect(where, attempt) {
     };
     const ready = () => {
       done();
+      attempt.connected = true;
       resolve(socket);
     };
+    // Only the connection is timed: an upstream that is connected may take as long as it needs to answer.
+    const timer = setTimeout(() => {
+      done();
+      socket.destroy();
+      const seconds = (attempt.connectTimeoutMs / 1000).toFixed(1);
+      reject(Object.assign(new Error(`no connection to the upstream within ${seconds}s`), { code: "ETIMEDOUT" }));
+    }, attempt.connectTimeoutMs);
     socket.on("error", () => {}); // the Reader records later errors; an error must never be unhandled
     socket.once("error", failed);
     socket.once("close", closed);
@@ -643,7 +668,7 @@ class Relay {
         [statusLine, headers] = head;
         status = Number(statusLine.split(" ")[1]);
         if (!Number.isInteger(status)) {
-          throw new RelayError(`bad status line ${JSON.stringify(statusLine.slice(0, 80))}`);
+          throw new UnusableUpstream(`bad status line ${JSON.stringify(statusLine.slice(0, 80))}`);
         }
         if (status >= 200 || status === 101) {
           break; // an interim 1xx response precedes the real one
@@ -658,12 +683,18 @@ class Relay {
       } else if (values.has("content-length")) {
         const length = values.get("content-length");
         if (!/^[0-9]+$/.test(length)) {
-          throw new RelayError(`bad content-length ${JSON.stringify(length.slice(0, 40))}`);
+          throw new UnusableUpstream(`bad content-length ${JSON.stringify(length.slice(0, 40))}`);
         }
         response.framing = "length";
         response.remaining = Number(length);
       }
-      response.first = await response.nextChunk();
+      try {
+        response.first = await response.nextChunk();
+      } catch (error) {
+        // A chunk size that arrived whole and is no number is the upstream's own reply; one cut short is a
+        // response that was interrupted, which is sent again.
+        throw error instanceof RelayError && error.whole ? new UnusableUpstream(error.message) : error;
+      }
       return response;
     } catch (error) {
       socket.destroy();
@@ -689,7 +720,8 @@ class Relay {
       const changed = this.changed;
       const gen = this.gen;
       const upstream = this.upstream;
-      const attempt = new Attempt();
+      const spent = failingSince === null ? 0 : performance.now() - failingSince;
+      const attempt = new Attempt(Math.max(1, Math.min(CONNECT_TIMEOUT_MS, this.holdTimeoutMs - spent)));
       const opening = track(
         upstream === null
           ? Promise.reject(new RelayError(`no endpoint in ${this.endpointPath}`))
@@ -709,8 +741,14 @@ class Relay {
       try {
         response = await opening.promise;
       } catch (error) {
+        if (error instanceof UnusableUpstream) {
+          log("WARNING", `${request.method} ${request.target}: gen ${gen} upstream cannot be used, not retried: ${error.message}`);
+          await this.replyError(client, 502, `model relay cannot use the upstream: ${error.message}`);
+          return;
+        }
         const now = performance.now();
-        failingSince = failingSince === null ? now : failingSince;
+        // An attempt that never connected was failing from its start: the time it waited counts.
+        failingSince = failingSince === null ? (attempt.connected ? now : attempt.started) : failingSince;
         if (now - failingSince >= this.holdTimeoutMs) {
           const seconds = Math.round((now - failingSince) / 1000);
           log("WARNING", `${request.method} ${request.target}: upstream unreachable for ${seconds}s: ${describe(error)}`);
