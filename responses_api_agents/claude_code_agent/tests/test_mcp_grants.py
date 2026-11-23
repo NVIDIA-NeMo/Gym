@@ -57,7 +57,9 @@ def events(*items):
 
 
 def owned_seed_mocks(monkeypatch, provider_name="opensandbox"):
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="sandbox-actual", exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock()
+    )
     constructor = MagicMock(return_value=remote)
     constructor.connect = AsyncMock(return_value=remote)
     monkeypatch.setattr(app, "AsyncSandbox", constructor)
