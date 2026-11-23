@@ -1361,16 +1361,18 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 break
 
             if last_verify_response is not None:
-                # Every row carries timed_out, so its mean is the share of samples stopped by the limit.
-                update = {"timed_out": int(bool((last_response_json or {}).get("timed_out")))}
+                stop_mask = {}
                 stop_reason = (last_response_json or {}).get("stop_reason")
                 if stop_reason is not None and stop_reason in self.config.mask_stop_reasons:
-                    update["mask_sample"] = True
+                    stop_mask["mask_sample"] = True
                     # A kind the resources server already set (an infrastructure failure) takes precedence.
                     if getattr(last_verify_response, "failure_kind", None) is None:
-                        update["failure_kind"] = STOP_REASON_FAILURE_KINDS[stop_reason]
-                        update["failure_reason"] = f"the rollout stopped on {stop_reason}"
-                last_verify_response = last_verify_response.model_copy(update=update)
+                        stop_mask["failure_kind"] = STOP_REASON_FAILURE_KINDS[stop_reason]
+                        stop_mask["failure_reason"] = f"the rollout stopped on {stop_reason}"
+                # Every row carries timed_out, so its mean is the share of samples stopped by the limit.
+                last_verify_response = last_verify_response.model_copy(
+                    update={"timed_out": int(bool((last_response_json or {}).get("timed_out")))} | stop_mask
+                )
             reward = getattr(last_verify_response, "reward", None) if last_verify_response is not None else None
             outcome = "success" if (reward is not None and reward > 0) else "failure"
             print(f"[browsecomp][end][{qid}] outcome={outcome} reward={reward} attempts={attempt + 1}", flush=True)
