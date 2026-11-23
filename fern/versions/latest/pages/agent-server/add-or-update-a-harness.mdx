@@ -805,8 +805,8 @@ the window is the model's own limit. Keep the provider's error text in the respo
 `error.message` so the rule can read it. When the reply carries the Model Server's
 `failure_report`, `report_outcome` also adds a selected `model_request_rejected` event caused by
 that 400 and keeps every original event, because an Environment Server fails a reply whose
-selected failure disagrees with its outcome. Only a task-folder run (`gym eval run <task folder>`)
-sets `forward_configuration_refusals`, and only for OpenCode and Pi
+selected failure disagrees with its outcome. Only a task-folder run on your machine (`gym eval run <task folder>`,
+not `--benchmark` and not `gym eval submit`) sets `forward_configuration_refusals`, and only for OpenCode and Pi
 (`CONFIGURATION_REFUSAL_HARNESSES` in `nemo_gym/data/tasks/harbor/prepare.py`), whose
 `report_outcome` passes on the provider's text; it also makes `openai_model` forward such a 400
 instead of answering HTTP 500. On every other run, `openai_model` answers that 400 with HTTP 500, and a Model Server

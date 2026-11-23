@@ -130,8 +130,8 @@ a sandbox reaches only when the network routes to it and no firewall blocks the 
 
 On a task-folder run, when the hostname does not resolve, or resolves to loopback, Gym advertises the address of
 the interface the default route uses, on a laptop often its Wi-Fi or VPN address, and logs a warning naming it. The
-run stops only when there is no such route, for example offline. Any other run, a `--benchmark` run included, stops
-when the hostname gives no usable address, as it always has.
+run stops only when there is no such route, for example offline. Any other run, a `--benchmark` run or one
+`gym eval submit` sends to a cluster included, stops when the hostname gives no usable address, as it always has.
 
 **Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. When the default
 route's interface is not the one the sandboxes reach (a VPN, several networks), set the Model Server's own `host`,
@@ -142,7 +142,8 @@ add `+default_host=<an address the sandboxes reach>`. A deployment that needs ot
 
 The Model Server listens on that one address, not on loopback or `0.0.0.0`, and checks no credential on incoming
 calls. During the run, any machine that can reach the address and port, such as another host on the same Wi-Fi,
-office network or VPN, can send it requests, which it forwards to `<url>` with your `--model-api-key`. The other
+office network or VPN, can send it requests, which it forwards to the endpoint `--model-url` names, with your
+`--model-api-key`. The other
 servers stay on loopback. `+default_host` moves every server to the address, including the head server, whose
 `/global_config_dict_yaml` endpoint returns the merged configuration (credentials masked unless
 `head_server_serve_credentials` is `true`). Run on a network you trust.

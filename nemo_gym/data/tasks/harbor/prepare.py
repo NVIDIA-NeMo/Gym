@@ -1216,7 +1216,8 @@ def build_run(
     A task-folder run on a laptop also falls back to the default route's address for the model server
     (``absolute_ip_route_fallback``) and asks for a harness's configuration refusals
     (``forward_configuration_refusals``). A Harbor-backed ``--benchmark`` run (``benchmark_run``) sets neither and
-    behaves as any other benchmark run.
+    behaves as any other benchmark run; a run ``gym eval submit`` sends to a cluster turns both off on its command line
+    (``render_target_args``).
     """
     refuse_example_dataset(prepared.dataset)
     split = prepared.dataset.effective_type

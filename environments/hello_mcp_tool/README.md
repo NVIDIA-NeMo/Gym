@@ -14,7 +14,7 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 - `environment/tools/server.py` implements a `get_greeting` tool and logs each call to `/logs/agent/hello-tools-calls.jsonl`.
 - `environment/Dockerfile` installs the server and its dependencies in the task environment.
 - `instruction.md` asks the agent to use the tool and save its result.
-- `tests/test.sh` checks that the tool was called for `NeMo Gym` and that its greeting was saved, so an agent that writes the greeting without the tool scores 0.
+- `tests/test.sh` checks that the server logged a `get_greeting` call for `NeMo Gym` and that its greeting was saved, so an agent that only writes the greeting scores 0. The log shows that the tool ran; it does not stop an agent that writes the log itself.
 - `solution/solve.sh` calls the tool over MCP, as an agent would, and saves the greeting.
 
 ## Run it

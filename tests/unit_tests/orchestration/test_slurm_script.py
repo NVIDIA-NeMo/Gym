@@ -3645,7 +3645,8 @@ def test_a_task_target_leads_the_run_and_prepare_runs_as_configured(tmp_path):
         "opensandbox",
     ]
     assert run[9] == f"+harbor_output_root={root}"
-    assert run[10].startswith("+output_jsonl_fpath=")
+    assert run[10:12] == ["++absolute_ip_route_fallback=false", "++forward_configuration_refusals=false"]
+    assert run[12].startswith("+output_jsonl_fpath=")
     assert "+num_samples_in_parallel=8" in run
 
 
@@ -3679,8 +3680,24 @@ def test_a_task_target_is_shell_quoted():
         "--agent",
         "opencode_agent",
         "'+harbor_output_root=/jobs/a b'",
+        "++absolute_ip_route_fallback=false",
+        "++forward_configuration_refusals=false",
     ]
     assert render_target_args(None, agent=None, sandbox=None, output_root="/jobs") == []
+
+
+def test_a_submitted_task_run_keeps_the_laptop_run_settings_off():
+    """`build_run` turns these on for `gym eval run <task folder>`; a submitted run overrides them on its command
+    line, which Hydra merges after the run config, so it behaves as main's submitted runs."""
+    from nemo_gym.config.global_config import (
+        ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME,
+        FORWARD_CONFIGURATION_REFUSALS_KEY_NAME,
+    )
+    from nemo_gym.orchestration.executors.utils import render_target_args
+
+    args = render_target_args("/data/t", agent="opencode_agent", sandbox="docker", output_root="/jobs")
+    assert f"++{ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME}=false" in args
+    assert f"++{FORWARD_CONFIGURATION_REFUSALS_KEY_NAME}=false" in args
 
 
 @pytest.mark.parametrize(

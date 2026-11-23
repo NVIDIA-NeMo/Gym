@@ -17,6 +17,7 @@ import re
 import shlex
 from typing import Any
 
+from nemo_gym.config.global_config import ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME, FORWARD_CONFIGURATION_REFUSALS_KEY_NAME
 from nemo_gym.data.tasks.harbor.prepare import HARBOR_OUTPUT_ROOT_KEY
 from nemo_gym.utils.text import hydra_literal
 
@@ -44,6 +45,10 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
     return args
 
 
+# Settings `build_run` turns on for a task-folder run on a laptop; a submitted run keeps them off.
+LAPTOP_RUN_KEYS = (ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME, FORWARD_CONFIGURATION_REFUSALS_KEY_NAME)
+
+
 def render_target_args(target: str | None, *, agent: str | None, sandbox: str | None, output_root: str) -> list[str]:
     """The shell-quoted TARGET, ``--agent``, ``--sandbox`` and output root of a task run, which go ahead of its
     Hydra overrides.
@@ -52,6 +57,9 @@ def render_target_args(target: str | None, *, agent: str | None, sandbox: str | 
     on every allocation, so the default (relative to the working directory) would name the rows by a different
     absolute path each time and a continuation would no longer match the run it resumes; the caller passes a folder
     in the benchmark's job directory instead.
+
+    A submitted run turns off what a task-folder run on a laptop turns on (the default route's address for the model
+    server, and configuration refusals forwarded to OpenCode and Pi), so it behaves as any other submitted run.
 
     Empty without a target, so a benchmark that sets none renders exactly as before.
     """
@@ -63,6 +71,7 @@ def render_target_args(target: str | None, *, agent: str | None, sandbox: str | 
     if sandbox is not None:
         args += ["--sandbox", shlex.quote(sandbox)]
     args.append(shlex.quote(f"+{HARBOR_OUTPUT_ROOT_KEY}={hydra_literal(output_root)}"))
+    args += [shlex.quote(f"++{key}=false") for key in LAPTOP_RUN_KEYS]
     return args
 
 

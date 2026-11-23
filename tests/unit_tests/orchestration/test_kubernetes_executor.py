@@ -561,3 +561,4 @@ def test_a_task_target_reaches_the_kubernetes_run_with_a_run_directory_output_ro
     assert run.index("/data/tasks") < run.index("+output_jsonl_fpath=")
     assert "--agent" in run and "opencode_agent" in run and "--sandbox" in run
     assert f"+harbor_output_root={run_dir}/artifacts/harbor" in run
+    assert "++absolute_ip_route_fallback=false" in run and "++forward_configuration_refusals=false" in run

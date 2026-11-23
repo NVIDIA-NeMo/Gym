@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+import types
 from pathlib import Path
 
 import pytest
@@ -1206,6 +1207,11 @@ class TestHelloMCPToolExample:
         server = importlib.util.module_from_spec(spec)
         # A __pycache__ beside server.py would join the image's build inputs and force a rebuild of a recorded image.
         monkeypatch.setattr(sys, "dont_write_bytecode", True)
+        # The image installs mcp<2 for the server; this test runs only its tool function, so FastMCP (renamed in mcp 2)
+        # is a stand-in that registers the function as written, whatever mcp this environment has.
+        fastmcp = types.ModuleType("mcp.server.fastmcp")
+        fastmcp.FastMCP = lambda name: types.SimpleNamespace(tool=lambda: lambda function: function)
+        monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp)
         spec.loader.exec_module(server)
         monkeypatch.setattr(server, "CALLS_LOG", tmp_path / str(server.CALLS_LOG).lstrip("/"))
         greeting = tmp_path / "workspace" / "tool-greeting.txt"

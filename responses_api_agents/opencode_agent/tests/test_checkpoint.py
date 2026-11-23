@@ -1734,7 +1734,12 @@ async def test_a_stopped_launch_with_no_budget_left_is_reported_as_timed_out_and
 
     # The activation's deadline passed while the launch was being stopped.
     await agent._run_launches(
-        state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() - 1
+        state,
+        MagicMock(),
+        _fresh_payload,
+        prompt="fix the bug",
+        timeout=10,
+        deadline=asyncio.get_running_loop().time() - 1,
     )
 
     # Preparing a relaunch would discard the stopped launch's output: it stays, under a receipt that says timeout.
@@ -1756,7 +1761,12 @@ async def test_a_budget_that_runs_out_while_the_saved_conversation_is_read_repor
     # The budget check before the preparation passes; reading the conversation then takes the rest.
     await asyncio.wait_for(
         agent._run_launches(
-            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 0.2
+            state,
+            MagicMock(),
+            _fresh_payload,
+            prompt="fix the bug",
+            timeout=10,
+            deadline=asyncio.get_running_loop().time() + 0.2,
         ),
         10,
     )
@@ -1769,16 +1779,20 @@ async def test_a_budget_that_runs_out_while_the_saved_conversation_is_read_repor
 async def test_a_budget_spent_by_the_time_the_relaunch_is_prepared_reports_the_stopped_launch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    now = [100.0]
-    monkeypatch.setattr("responses_api_agents.opencode_agent.app.monotonic", lambda: now[0])
+    # The budget is on the event loop's clock; moving that clock on stands in for the preparation's commands.
+    loop = asyncio.get_running_loop()
+    real_time, ahead = loop.time, [0.0]
+    monkeypatch.setattr(loop, "time", lambda: real_time() + ahead[0])
     agent, state, session = _agent_and_stopped_launch()
 
     async def aside(*, timeout: float) -> None:
-        now[0] += 5  # the commands of the preparation took the budget, each within its own timeout
+        ahead[0] += 5  # the commands of the preparation took the budget, each within its own timeout
 
     state.set_conversation_aside.side_effect = aside
 
-    await agent._run_launches(state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=103.0)
+    await agent._run_launches(
+        state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=loop.time() + 3
+    )
 
     # The fresh start had already set the conversation aside and cleared its evidence.
     state.set_conversation_aside.assert_awaited_once()
@@ -1797,7 +1811,12 @@ async def test_a_relaunch_that_times_out_before_its_harness_starts_reports_the_s
     agent, state, session = _agent_and_stopped_launch()
 
     await agent._run_launches(
-        state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
+        state,
+        MagicMock(),
+        _fresh_payload,
+        prompt="fix the bug",
+        timeout=10,
+        deadline=asyncio.get_running_loop().time() + 60,
     )
 
     _assert_reported_as_a_timeout_of_the_stopped_launch(state, session)
@@ -1816,7 +1835,12 @@ async def test_a_relaunch_whose_harness_started_keeps_its_own_timeout(monkeypatc
 
     with pytest.raises(TimeoutError, match="exceeded its execution deadline"):
         await agent._run_launches(
-            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
+            state,
+            MagicMock(),
+            _fresh_payload,
+            prompt="fix the bug",
+            timeout=10,
+            deadline=asyncio.get_running_loop().time() + 60,
         )
     # The relaunch ran: the stopped launch's output is not put back in place of its own.
     assert session.cleanup is None and state.launch_count == 2
@@ -1828,6 +1852,11 @@ async def test_a_preparation_that_fails_within_the_budget_still_fails_the_activa
 
     with pytest.raises(type(error), match=str(error)):
         await agent._run_launches(
-            state, MagicMock(), _fresh_payload, prompt="fix the bug", timeout=10, deadline=time.monotonic() + 60
+            state,
+            MagicMock(),
+            _fresh_payload,
+            prompt="fix the bug",
+            timeout=10,
+            deadline=asyncio.get_running_loop().time() + 60,
         )
     state.execute.assert_not_awaited()
