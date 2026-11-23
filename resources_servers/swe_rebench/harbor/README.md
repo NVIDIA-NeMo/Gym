@@ -98,7 +98,7 @@ run them on a copy if the folder must stay byte for byte as converted.
 | Prompt: the row's single user message | `instruction.md`, byte for byte (Gym's reader turns CRLF into LF) |
 | `capture_model_patch` against the row's `base_commit` | `[[verifier.collect]]` runs `capture.py` (vendored `swebench/patch_capture.py`); the base commit is on the hook's command line, not in the agent's sandbox |
 | Grading in a fresh sandbox of the image (`verification.py`, `log_parsers.py`) | `environment_mode = "separate"` on the plain image; `tests/test.sh` runs `tests/nemo_gym/grade.py`, which calls the vendored `verification.py` and `log_parsers.py`; the upstream parser tree (MIT) sits at `tests/nemo_gym/parser_cache/SWE-rebench-V2-c71902a8cf8d/`, where `resolve_parser` finds it without cloning; the Maven and Gradle mirror files come from `responses_api_agents/swe_agents/maven_mirror/` |
-| No verdict, unknown parser: masked | `test.sh` exits 75 without a reward |
+| No verdict, unknown parser: masked | `test.sh` exits 75 without a reward for an unknown parser or a missing repository directory (both before any agent code runs); a run without a verdict after the tests started is a completed 0 (difference 14) |
 | Golden-patch mode | `solution/solve.sh` applies `patch` with the eval script's `git apply` flags |
 
 Vendored Python modules carry a one-line header with their source path, the commit and the sha256 of the original;
@@ -231,6 +231,20 @@ of the home directory, add `++swe_rebench_resources_server.resources_servers.swe
 This conversion was produced as a dry run of the `convert-env-to-harbor` skill. Only smoke-size evidence exists; no
 50-task parity run was made.
 
+After the grader hardening in [Reward safety](#reward-safety) (mapped-file protection, the audit hook, the bounded
+capture reader, differences 14 to 16), datasets regenerated from this revision were re-run on real sandboxes:
+
+- Reference solutions: 7 of 7 scored 1.0 (JavaScript, Java, Go, Python, TypeScript, Rust, Dart), none masked,
+  every task verified in a separate sandbox, with no "Permission denied" line that the earlier reference runs did
+  not show.
+- The empty control and `--plant-hooks` each scored 0, unmasked, on the 5 smoke tasks.
+- A mutation control whose build and test hooks try to rewrite in place every file the grader has mapped scored 0,
+  unmasked, on the 5 smoke tasks. On the 4 tasks where a hook ran (no hook covers the Java task's Maven build),
+  every write to a mapped file was refused.
+
+The model smoke and the `--plant-reward` and `--plant-conftest` probes below were not re-run with the hardened
+grader. The rest of this section is the evidence from before the hardening:
+
 - Reference solutions: 7 tasks, one per language, each scored 1.0 with `gym dataset validate`, none masked:
   `vuejs__eslint-plugin-vue-2334` (JavaScript), `raml-org__raml-java-parser-155` (Java), `mgechev__revive-477` (Go),
   `tox-dev__pipdeptree-279` (Python), `syuilo__aiscript-257` (TypeScript), `taiki-e__cargo-hack-70` (Rust) and
@@ -262,11 +276,15 @@ Each with its expected effect on reward:
    The server grades the empty patch on a git error (0 on rows that need their golden patch) and masks an
    infrastructure error.
 5. **No retry of a verification without a verdict.** The server retries once on a fresh sandbox before masking; the
-   task masks at once (exit 75). Slightly more masks under flaky infrastructure.
+   task masks at once (exit 75) when it masks at all (difference 14). Slightly more masks under flaky
+   infrastructure.
 6. **The eval script runs as root without the capabilities that reach the reward** (`CAP_DAC_OVERRIDE`,
    `CAP_FOWNER`, `CAP_CHOWN`, `CAP_SETUID`, `CAP_SETGID` and others; see Reward safety); files other uids own are
    handed to root first. A build that needs those capabilities behaves as for a non-root user; none of the 7
-   reference runs showed "Permission denied".
+   reference runs showed "Permission denied". The files the grader has mapped (its interpreter, libpython, the
+   extension modules it loaded, libc, ld.so, locale data) belong to another uid without write bits while the tests
+   run: a build step that rewrites one in place fails with "Permission denied"; replacing one by rename (pip, npm,
+   dpkg) still works.
 7. **Grader Python**: the image's 3.10+ or the standalone 3.12 (natively the server's). The parsers are pure
    standard-library regular expressions; no effect expected.
 8. **Verifier time limit**: `[verifier].timeout_sec` is `evaluation_timeout` (3600 s) + 900 s for the standalone
@@ -282,6 +300,19 @@ Each with its expected effect on reward:
 13. **Capture interpreter**: the capture hook runs the Python the seed recorded in `/var/lib/nemo_gym/python_bin`;
     an agent that replaces that interpreter loses its capture (a measured `runner_failed`, 0). Natively the capture
     runs only git. No effect for agents that leave the system Python alone.
+14. **A run without a verdict is a completed 0, not a mask.** The server masks (after one retry) an exit 97, the
+    test-patch marker, a test run killed by a signal without a conclusive failure, and a parser that raised. The
+    eval script's install block already runs the agent's code (its build files and package hooks) before
+    `TEST_OUTPUT_BEGIN`, so every one of these can be the agent's doing: each scores 0 with `no_verdict_after_tests`
+    1. Only an unknown parser and a missing repository directory, both checked before any agent code runs, mask. A
+    row whose held-out test patch really does not apply scores 0 on the reference run (gate G2); leave it out.
+15. **A grader failure after the tests started is a measured 0, not a mask.** An exception, a refused import or file
+    access, or a changed mapped file after the eval script started exits 1 without a reward (see Reward safety). The
+    server masks a verification that raised. A privilege drop that fails in the eval script's process is one of
+    these: it scored a mask before, a 0 now.
+16. **Capture files are bounded**: a `capture.json` over 1 MiB or a `model_patch.diff` over 64 MiB, or either one
+    not a regular file (a symlink, a FIFO, a directory), is a completed 0 like any other failed capture. The server
+    reads the patch with no such cap; the largest patch in the reference runs was 21 KB.
 
 `resource_requests`, the sandbox ready timeout (1200 s) and the episode timeout (18000 s) are harbor server settings
 (`configs/harbor_arm.yaml`), not task fields. The prompt (apart from difference 1), tools, sampling and agent budget
@@ -289,25 +320,40 @@ Each with its expected effect on reward:
 
 ## Reward safety
 
-As in the Scale-SWE tasks: every task verifies in a separate sandbox; the eval script runs the agent's patched code
-as uid 0 without the capabilities that reach the reward folder, which `grade.py` first hands to another uid (47311),
-and `grade.py` writes the reward as that uid. Every capture outcome but a readable patch is a completed 0, never a
-mask. The dataset needs no server option for this; `configs/harbor_arm.yaml` carries the native scheduling settings.
+As in the Scale-SWE tasks (that README's "Reward safety" has the full argument; the protection code in `grade.py` is
+the same, and a test keeps the two copies identical): every task verifies in a separate sandbox; the eval script
+runs the agent's patched code as uid 0 without the capabilities that reach the reward folder, which `grade.py` first
+hands to another uid (47311), creating the wrapper's exit record there with exit 1; the files `grade.py` has mapped
+are handed to that uid without write bits, so the tests cannot rewrite in place code the grader runs; once the eval
+script starts, an audit hook refuses every import, library load, `exec`, fork, further subprocess and every open but
+of the outputs, and after the tests the mappings are checked again; anything that goes wrong after the tests started
+exits 1 without a reward (a measured 0, never a mask); and `grade.py` writes the reward as bytes, as that uid. The
+capture files are read only as regular files within their size bound, and every capture outcome but a readable
+patch is a completed 0, never a mask. The dataset needs no server option for this; `configs/harbor_arm.yaml` carries
+the native scheduling settings.
 
 What the agent's code can still do:
 
-- **Kill the grader.** Killing `grade.py` leaves no reward (scored 0); killing the wrapper around `test.sh` too
-  leaves no exit record (Harbor masks the run).
-- **Reach the grader through files root owns.** The privilege drop stops the eval script from overriding file
-  permissions, changing owners, switching uid or tracing `grade.py`, but not from rewriting in place a file root owns
-  that `grade.py` has loaded or still loads (a shared library, a Python module; `grading.json` lists the modules
-  imported after the tests in `modules_imported_after_tests`, expected empty). The protection is best effort.
-- **Mask a failing episode with the test-patch marker.** Test output containing
-  `___NEMO_GYM_SWE_REBENCH_TEST_PATCH_FAILED___` makes `verification.py` report no verdict, so the sample is masked
-  on both arms, as the native server does. A failing episode can become a masked one, never a reward.
+- **Kill the grader.** Killing `grade.py` leaves no reward (scored 0); killing the wrapper around `test.sh` before it
+  writes its exit record leaves the record `grade.py` created (exit 1), also a 0.
+- **Mask through the wrapper's exit record (open).** A test process can lower the wrapper's file size limit, so the
+  wrapper's own write empties the record and fails; the harbor server masks a run whose record is empty.
+- **Rewrite the reward after `grade.py` exits (open).** The harbor server then runs `date`, `tar` and `gzip` in this
+  sandbox as root with every capability, found through `PATH`, and the tests own those programs and folders: a test
+  that replaces one with a script rewriting `reward.json` forges the score.
 - **Hold the grader with a detached process.** A test process that starts its own session (`setsid`) and keeps the
   output pipe open holds `grade.py` until `[verifier].timeout_sec` (3600 + 900 s), which leaves no reward and scores
   a measured 0.
+- **Forge the test output.** The verdict is read from the eval script's output, as at the server: a test hook that
+  reports failing tests as passed scores 1 on both arms.
+- **Mask through the sandbox provider (open).** Test code can end the verifier without an exit status, which the
+  harbor server masks. The Scale-SWE README gives the two routes measured on real sandboxes: rewriting a shared
+  library the server's later `bash` loads, and `kill -9 -1`.
+- **Reach `grade.py` below Python.** Library loads from C (name service, `iconv`, unwinding) are not audited; the path
+  after the tests makes none, and one would show as a new mapping in the check.
+
+The Scale-SWE README says how the two open routes were shown. Closing them and the provider mask needs the reward
+read and the exit status recorded outside the verifier sandbox (a harbor server change).
 
 ## Requirements and known limits
 
@@ -324,10 +370,13 @@ What the agent's code can still do:
   the sandbox and is not vendored: CPython under the PSF license plus the third-party libraries the distribution
   bundles, built by astral-sh/python-build-standalone (MPL-2.0 tooling).
 - Without `CAP_CHOWN` or `CAP_SETPCAP`, `grade.py` cannot protect the reward and masks the sample before any test
-  runs. Without a root that can change its effective uid (`CAP_SETUID`, and uid 47311 usable), `grade.py` cannot
-  write any output: every episode, the oracle included, ends with no reward and scores 0, so gate G2 shows it at
-  once.
-- `grade.py` and `capture.py` read and write the patch, their JSON files and the eval script with Python's default
-  encoding, which follows each image's locale (UTF-8 under a UTF-8 or C locale). The images span seven languages;
-  under another locale a patch with non-ASCII text can be altered, which can change its reward, or the sample can be
-  masked.
+  runs; the same holds when it cannot hand a file it has mapped to the reward uid (a read-only filesystem counts as
+  protected). A privilege drop that fails in the eval script's own process, after it started, scores 0. Without a
+  root that can change its effective uid (`CAP_SETUID`, and uid 47311 usable), `grade.py` cannot write any output:
+  every episode, the oracle included, ends with no reward and scores 0, so gate G2 shows it at once.
+- `capture.py` writes the patch and its JSON file, and `grade.py` writes the eval script and the patch into the
+  verifier sandbox, with Python's default encoding, which follows each image's locale (UTF-8 under a UTF-8 or C
+  locale). The images span seven languages; under another locale a patch with non-ASCII text can be altered, which
+  can change its reward. `grade.py` reads the capture as UTF-8 and writes its outputs as UTF-8 bytes. A locale whose
+  codec would be loaded after the tests is loaded before them; an XML report in an encoding whose codec is not yet
+  loaded makes the parser load it after the tests, which is refused and scores 0, never 1.
