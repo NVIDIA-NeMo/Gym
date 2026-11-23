@@ -46,6 +46,7 @@ from nemo_gym.eval.recovery.markers import (
     CANCELLED_FOLLOWUP_MARKER,
     CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
+    DRIVER_FAILURE_NAME,
     FOLLOW_UP_SUBMISSION_REFUSED,
     GUARDED_DRIVER_FAILURE_KINDS,
     NO_ELIGIBLE_RETRY_REASON,
@@ -119,8 +120,6 @@ NO_PROGRESS_SEGMENT_REASON = (
     "the segment saved no rollout: its walltime is shorter than this run's setup (Gym install and server start-up)"
     " plus a rollout, so the next segment would repeat it; the chain does not retry it; raise the walltime"
 )
-# Where the driver step's DRIVER_FAILURE_ENV points: the next segment's guard ends the chain with the kind in it.
-DRIVER_FAILURE_NAME = ".gym_driver_failure"
 SPINUP_TIMEOUT_REASON = (
     f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
     "the chain does not retry it; raise the limit with gym eval resubmit --recover --server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"

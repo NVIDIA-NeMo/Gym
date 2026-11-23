@@ -23,5 +23,6 @@ Replace `claude_code` with `codex`, `pi`, or `hermes` to change the harness.
 - The judge defaults to Grok 4.3 on xAI (`XAI_API_KEY`), as upstream does. Override it with `JOB_BENCH_JUDGE_BASE_URL`,
   `JOB_BENCH_JUDGE_API_KEY`, and `JOB_BENCH_JUDGE_MODEL`, and keep it fixed across compared runs.
 - `harness_agent` runs the agent inside the task sandbox, so `JOB_BENCH_SANDBOX_IMAGE` must include `python3` and Gym's
-  dependencies.
+  dependencies. For `hermes`, it also needs the Hermes worker; see "Presets that run this agent's host path" in
+  `responses_api_agents/hermes_agent/README.md`.
 - Set `JOB_BENCH_SPLIT=easy` before `prepare` for the smaller split.

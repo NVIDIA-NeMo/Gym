@@ -42,7 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.secret_utils import mask_url_passwords
+from nemo_gym.config.secret_utils import is_credential_name, mask_url_passwords
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     AGENT_TIMEOUT,
@@ -917,27 +917,12 @@ def _normalize_runtime_references(value: Any) -> Any:
     return value
 
 
-# A setting holding a credential, matched on its name lower-cased with `-`, `.`, spaces and case changes as `_`:
-# `exa_api_key`, `X-Api-Key`, `service_key`, `Authorization`, `X-Session`, `X_TOKEN`, `my_service_pw`, but not
-# `max_tokens`, `author`, `reference_key` or `record_terminal_session`. A `..._key` counts only after a word that names
-# an account or a service, since other `..._key` settings (`metric_key`, `reference_key`) select what is measured.
-_CREDENTIAL_NAME = re.compile(
-    r"api_?key|secret|passw(or)?d|credential|private_?key|access_?key|cookie"
-    r"|(^|_)(token|pw|pwd|pass|bearer|o?auth)$|(^|_)o?auth(orization|entication)?(_|$)"
-    r"|(^|_)(service|client|signing|license|master|account|subscription|encryption|session|app)_key$"
-    r"|^(x_)?session(_id)?$"
-)
 _REDACTED = "<redacted>"
 # An environment variable or config reference by name, a `NAME=value` assignment, and an HTTP credential scheme.
 _ENV_REFERENCE = re.compile(r"\$\{oc\.env:\s*([A-Za-z_][A-Za-z0-9_]*)[^{}]*\}")
 _CONFIG_REFERENCE = re.compile(r"\$\{([A-Za-z_][\w.\-]*)\}")
 _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$", re.DOTALL)
 _HTTP_CREDENTIAL = re.compile(r"(?i)^(bearer|basic)\s+\S+$")
-
-
-def _is_credential_name(name: object) -> bool:
-    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name))
-    return bool(_CREDENTIAL_NAME.search(re.sub(r"[\s.\-]", "_", normalized).lower()))
 
 
 def _credential_safe(value: Any, *, secret: bool = False) -> Any:
@@ -950,9 +935,9 @@ def _credential_safe(value: Any, *, secret: bool = False) -> Any:
     """
     if isinstance(value, dict):
         named = value.get("name", value.get("key"))
-        pair = isinstance(named, str) and _is_credential_name(named)
+        pair = isinstance(named, str) and is_credential_name(named)
         return {
-            key: _credential_safe(item, secret=secret or _is_credential_name(key) or (pair and key == "value"))
+            key: _credential_safe(item, secret=secret or is_credential_name(key) or (pair and key == "value"))
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -964,13 +949,13 @@ def _credential_safe(value: Any, *, secret: bool = False) -> Any:
     if not isinstance(value, str):
         return value
     value = _ENV_REFERENCE.sub(
-        lambda m: _grammar_safe_marker(_REDACTED, m) if _is_credential_name(m[1]) else m[0], value
+        lambda m: _grammar_safe_marker(_REDACTED, m) if is_credential_name(m[1]) else m[0], value
     )
     value = _CONFIG_REFERENCE.sub(
-        lambda m: _grammar_safe_marker(_REDACTED, m) if _is_credential_name(m[1].split(".")[-1]) else m[0], value
+        lambda m: _grammar_safe_marker(_REDACTED, m) if is_credential_name(m[1].split(".")[-1]) else m[0], value
     )
     assignment = _ASSIGNMENT.match(value)
-    if assignment and _is_credential_name(assignment[1]):
+    if assignment and is_credential_name(assignment[1]):
         return f"{assignment[1]}={_REDACTED}"
     credential = _HTTP_CREDENTIAL.match(value)
     return f"{credential[1]} {_REDACTED}" if credential else mask_url_passwords(value)
@@ -1261,7 +1246,7 @@ _SEMANTIC_ASSET_PATH = re.compile(r"(^|_)(prompt|prompts|template|templates|rubr
 def _is_semantic(key: str) -> bool:
     segments = key.split(".")
     # A credential is redacted, so only its presence can differ; the key used does not change what is measured.
-    if any(_is_credential_name(segment) for segment in segments):
+    if any(is_credential_name(segment) for segment in segments):
         return False
     # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
     if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
