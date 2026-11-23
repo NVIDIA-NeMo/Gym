@@ -33,7 +33,9 @@ from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -662,6 +664,12 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> Terminus2SessionState:
         """Borrow the resources server's sandbox for this episode."""
+        required = sorted(access.name for access in self.effective_tool_accesses(body) if access.required)
+        if required:
+            raise AgentSeedRejectedError(
+                "Terminus 2 sessions drive only their terminal and cannot use required tool grants: "
+                + ", ".join(required)
+            )
         if body.sandbox_access is None:
             raise HTTPException(422, "Terminus 2 needs sandbox_access from the resources server")
         connection = body.sandbox_access.connection
@@ -877,7 +885,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=context.n_cache_tokens or 0),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=context.n_cache_tokens),
             output_tokens=context.n_output_tokens or 0,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=(context.n_input_tokens or 0) + (context.n_output_tokens or 0),
@@ -999,7 +1007,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
                 state.task = asyncio.create_task(activate())
             elif body != state.activation_request:
-                raise HTTPException(409, "Terminus 2 sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("Terminus 2 sessions support one activation; retry the same request")
             # A disconnected HTTP waiter must not cancel the shared run; close owns cancellation, and
             # identical retries join this task or replay its result or error.
             return (await asyncio.shield(state.task)).model_copy(deep=True)

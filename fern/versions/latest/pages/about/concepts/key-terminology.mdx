@@ -61,6 +61,8 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server, or by a task folder's `tests/` (or its dataset's shared `verifier.py`), run in the task's sandbox or a fresh one. Also called scorer or grader. See [Build Verifiers](/build-verifiers) and [Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers). |
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
+| **Sandbox lease** | The short timeout a provider creates a sandbox with and renews while the process that created it lives (`create.renew_ttl_s` on OpenSandbox and E2B), so a process that dies leaves its sandboxes for one lease instead of their full lifetime. Unrelated to the checkpoint settings' `lease_grace_seconds`. |
+| **Sandbox capabilities** | What a sandbox provider class can do, declared as its `capabilities` (`SandboxCapabilities`) and read with `provider_capabilities()`. `snapshot_keeps` says what a snapshot keeps: files only, or running processes too. |
 
 ### Sessions
 
@@ -81,7 +83,7 @@ Resources servers and agent servers keep per-episode state in sessions. Use thes
 | **Owner** | With several workers, the worker that holds a session's state and serves its requests; its owner file names it. | claim, claimant |
 | **Claim** | Checkpoint restore only: a replacement attempt takes the restored record; one nobody took is **unclaimed**. | claim for routing ownership |
 | **Terminal** | A refusal the environment server does not retry. | final |
-| **Conflict** | A 409 refusal of a session request. The shared session code (`ResourcesSessionFences` and `SimpleResponsesAPIAgent`) raises `ResourcesSessionConflictError` or `AgentSessionConflictError`, and new session code should too; many existing servers and agents still raise a plain 409 `HTTPException`. | `HTTPException(409, ...)` in new session code |
+| **Conflict** | A 409 refusal of a session request: resources servers raise `ResourcesSessionConflictError` and agent servers raise `AgentSessionConflictError`. Session routing answers its own 409s without these errors, such as for a cookie and body that name different sessions, or for a session ID another worker already owns. | `HTTPException(409, ...)` in session code |
 
 Other features use some of these words in their own senses and keep them:
 
@@ -98,6 +100,7 @@ Other features use some of these words in their own senses and keep them:
 | --- | --- |
 | **Model / policy model** | The model being trained or evaluated — local weights or a remote endpoint, usually via the Model server. See [Model Server](/model-server). |
 | **Agent harness** | How the model interacts with the environment: loops model calls, routes tools, manages context, and decides when the task is done. See [Agent Server](/agent-server). |
+| **Pause mode** | How a harness running in a sandbox is paused for a checkpoint: `pause_mode` on `SandboxSession`. In **stop mode** (`stop`, the default) the harness's supervisor sends SIGSTOP to every process it reaches, and SIGCONT to continue them. In **hold mode** (`hold`) it sends no signal: it only acknowledges the pause and names itself, and the harness keeps running. Hold mode is for a provider whose snapshot keeps processes. See [Make a Harness Checkpointable](/main/agent-server/checkpointable-harness). |
 | **Agent** | Model + agent harness. |
 | **Rollout driver** | Coordinates an episode and records its trajectory. |
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |

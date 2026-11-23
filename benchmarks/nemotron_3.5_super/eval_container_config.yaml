@@ -6,11 +6,11 @@ config_paths:
 - benchmarks/scicode/config.yaml
 - benchmarks/omniscience/config.yaml
 - benchmarks/nemotron_3.5_super/benchmark_configs/hle_no_tools.yaml
-- benchmarks/swebench/verified/opencode.yaml
-- benchmarks/swebench/multilingual/opencode.yaml
+- benchmarks/swebench/verified/opencode_legacy_agent.yaml
+- benchmarks/swebench/multilingual/opencode_legacy_agent.yaml
 - benchmarks/deepswe/opencode.yaml
-- benchmarks/terminal_bench_2_1/terminus_2.yaml
-- benchmarks/swebench/pro/opencode.yaml
+- benchmarks/terminal_bench_2_1/terminus_2_legacy_agent.yaml
+- benchmarks/swebench/pro/opencode_legacy_agent.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
 - benchmarks/nemotron_3.5_super/sandbox_utils.yaml
 - benchmarks/nemotron_3.5_super/shared_model_endpoints.yaml
@@ -53,7 +53,14 @@ policy_model_name: dummy
 genrm_model:
   responses_api_models:
     openai_model:
+      _delete_key: extra_body
       max_concurrent_requests: 16
+
+omniscience_omniscience_resources_server:
+  resources_servers:
+    omniscience:
+      judge_responses_create_params:
+        max_output_tokens: 2048
 
 policy_model:
   responses_api_models:

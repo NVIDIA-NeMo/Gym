@@ -14,6 +14,7 @@
 # limitations under the License.
 """Same-run live delivery certification through the actual SDK exporter and managed Store."""
 
+import hashlib
 import json
 import stat
 from concurrent.futures import Future
@@ -27,7 +28,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.artifacts.exporters as registry
 import nemo_gym.artifacts.exporters.mlflow as module
-from nemo_gym.artifacts.exporters.base import _artifact_version
+from nemo_gym.artifacts.exporters.base import ExportState, _artifact_version
 from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.resolved_config import write_resolved_config
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
@@ -81,7 +82,7 @@ class Client:
     def get_run(self, run_id):
         return SimpleNamespace(
             info=SimpleNamespace(run_id=run_id, status=self.status),
-            data=SimpleNamespace(metrics=self.metrics, tags=self.tags, params=self.params),
+            data=SimpleNamespace(metrics=self.metrics, params=self.params, tags=self.tags),
         )
 
     def set_terminated(self, run_id, status):
@@ -92,9 +93,7 @@ class Client:
 
 
 @pytest.fixture
-def live(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
-) -> tuple[RunArtifacts, module.MLflowExporter, Client]:
+def live(tmp_path, monkeypatch, request):
     output = tmp_path / "artifacts" / "rollouts.jsonl"
     output.parent.mkdir()
     source = tmp_path / "inputs.jsonl"
@@ -140,8 +139,7 @@ def live(
             "mlflow_run_name": "run",
         }
     )
-    if getattr(request, "param", False):
-        config[INPUT_READ_ROOTS_KEY_NAME] = ["/controller"]
+    config = OmegaConf.merge(config, getattr(request, "param", {}))
     write_resolved_config(config, output)
     aggregate = [{"agent_ref": {"name": "agent"}, "agent_metrics": {"mean/reward": 0.5}, "key_metrics": {}}]
     artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(aggregate))
@@ -152,28 +150,172 @@ def live(
     exporter.setup()
     exporter.export_config()
     exporter.export_metrics(flatten_aggregate_metrics(aggregate))
-    exporter.export_rollouts(exporter._read_rollouts(artifacts))
+    if config.upload_rollouts:
+        exporter.export_rollouts(exporter._read_rollouts(artifacts))
     monkeypatch.setattr(registry, "_EXPORTERS", [exporter])
     monkeypatch.setattr(registry, "_RUN_FAILED", False)
     return artifacts, exporter, client
 
 
+HTTP_STATUS_CONFIG = {"agent_outcome_policy": {"by_status_code": {400: "fail", 413: "fail", 422: "fail"}}}
+
+
 @pytest.mark.parametrize(
-    "live,controller_roots",
-    [(False, []), (True, ["/controller"])],
-    indirect=["live"],
-    ids=["authored-config", "runtime-read-roots"],
+    "live",
+    [HTTP_STATUS_CONFIG, HTTP_STATUS_CONFIG | {"upload_rollouts": False}],
+    ids=["with-rollouts", "metadata-only"],
+    indirect=True,
 )
-def test_final_live_delivery_uses_same_run_and_existing_consumer(live, controller_roots: list[str]) -> None:
+def test_live_delivery_with_integer_config_keys_certifies_the_delivered_json(live, monkeypatch):
     artifacts, exporter, client = live
-    assert list(exporter.global_config_dict.get(INPUT_READ_ROOTS_KEY_NAME, [])) == controller_roots
+    post = _post_run_client(monkeypatch)
+    saved_config = artifacts.resolved_config_yaml_fpath.read_bytes()
+    scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+
+    receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
+    assert receipt["run_id"] == "live-run"
+    assert receipt["artifacts"] == _artifact_version(artifacts)
+    assert receipt["uploaded_rollouts"] is exporter.global_config_dict.upload_rollouts
+    assert client.status == "FINISHED"
+    assert post.runs == []
+    assert ("rollouts.json" in client.artifacts) is exporter.global_config_dict.upload_rollouts
+    assert client.artifacts["global_config.json"]["agent_outcome_policy"]["by_status_code"] == {
+        "400": "fail",
+        "413": "fail",
+        "422": "fail",
+    }
+    assert artifacts.resolved_config_yaml_fpath.read_bytes() == saved_config
+    assert OmegaConf.load(artifacts.resolved_config_yaml_fpath).agent_outcome_policy.by_status_code == {
+        400: "fail",
+        413: "fail",
+        422: "fail",
+    }
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    changed[0].pop("_ng_run_health_metrics")
+    assert changed == scientific
+    assert _collected_mlflow(artifacts)["receipt"]["current"] is True
+
+
+@pytest.mark.parametrize(
+    "live",
+    [HTTP_STATUS_CONFIG, HTTP_STATUS_CONFIG | {"upload_rollouts": False}],
+    ids=["with-rollouts", "metadata-only"],
+    indirect=True,
+)
+def test_post_run_export_with_integer_config_keys_preserves_saved_artifacts(live, monkeypatch):
+    artifacts, live_exporter, _ = live
+    before = _artifact_version(artifacts)
+    post = _post_run_client(monkeypatch)
+    settings = OmegaConf.create(
+        {key: value for key, value in live_exporter.global_config_dict.items() if key.startswith("mlflow_")}
+    )
+    result = module.MLflowExporter(settings).export(artifacts)
+
+    assert result.state is ExportState.SUCCEEDED
+    upload = live_exporter.global_config_dict.upload_rollouts
+    assert result.detail == {"run_id": "post-run", "uploaded_rollouts": upload, "live_run_id": "live-run"}
+    assert post.runs == ["post-run"] and post.status == "FINISHED"
+    assert ("rollouts.json" in post.artifacts) is upload
+    assert post.artifacts["global_config.json"]["agent_outcome_policy"]["by_status_code"] == {
+        "400": "fail",
+        "413": "fail",
+        "422": "fail",
+    }
+    assert _artifact_version(artifacts) == before
+    receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
+    assert receipt == {
+        "version": 1,
+        "run_id": "post-run",
+        "artifacts": before,
+        "uploaded_rollouts": upload,
+        "rollout_projection_version": 1,
+    }
+    assert _collected_mlflow(artifacts)["receipt"]["current"] is True
+
+
+@pytest.mark.parametrize("post_run", [False, True], ids=["live", "post-run"])
+def test_config_key_collisions_are_rejected_before_opening_a_backend(live, monkeypatch, post_run):
+    artifacts, live_exporter, _ = live
+    config = OmegaConf.create(live_exporter.global_config_dict)
+    config["nested"] = [{"statuses": {400: "fail", "400": "retry"}}]
+    settings = OmegaConf.create({key: value for key, value in config.items() if key.startswith("mlflow_")})
+    if post_run:
+        OmegaConf.save(config, artifacts.resolved_config_yaml_fpath)
+    else:
+        settings = config
+        settings.output_jsonl_fpath = str(artifacts.rollouts_jsonl_fpath.with_stem("collision"))
+    before = _artifact_version(artifacts)
+    connections = []
+
+    def connect(**kwargs):
+        connections.append(kwargs)
+        return Client()
+
+    monkeypatch.setattr(module, "MlflowClient", connect)
+    exporter = module.MLflowExporter(settings)
+    if post_run:
+        result = exporter.export(artifacts)
+        assert result.state is ExportState.FAILED and "collid" in result.error
+    else:
+        with pytest.raises(ValueError, match="collid"):
+            exporter.setup()
+        assert not artifacts.rollouts_jsonl_fpath.with_name("collision_mlflow_run_id").exists()
+    assert connections == []
+    assert not artifacts.export_done_fpath("mlflow").exists()
+    assert _artifact_version(artifacts) == before
+
+
+@pytest.mark.parametrize(
+    "live",
+    [{"sampling": {"temperature": 0.95, "seed": 7, "choices": [1, None, "café", False]}}],
+    indirect=True,
+)
+def test_string_config_digest_and_strict_rollout_json_are_unchanged(live):
+    _, exporter, client = live
+    original = OmegaConf.to_container(exporter.global_config_dict, resolve=False)
+    assert client.artifacts["global_config.json"] == original
+    assert (
+        exporter._delivered_config_digest
+        == hashlib.sha256(orjson.dumps(original, option=orjson.OPT_SORT_KEYS)).digest()
+    )
+    table = client.artifacts["rollouts.json"]
+    with pytest.raises(TypeError, match="Dict key must be str"):
+        exporter._log_rollouts([{"reward": 1.0, "nested": {400: "fail"}}])
+    assert client.artifacts["rollouts.json"] == table
+
+
+@pytest.mark.parametrize("live", [{"secrets": {"opaque": 2**70}}], indirect=True)
+def test_live_setup_validates_the_credential_safe_configuration(live, monkeypatch):
+    artifacts, exporter, client = live
+    post = _post_run_client(monkeypatch)
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+
+    assert exporter.global_config_dict.secrets.opaque == 2**70
+    assert client.artifacts["global_config.json"]["secrets"] == {"opaque": "****"}
+    assert client.status == "FINISHED" and post.runs == []
+    assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "live-run"
+
+
+def test_a_reopened_run_logs_integer_config_keys_in_its_segment(live):
+    _, exporter, client = live
+    exporter.reopened = True
+    exporter.global_config_dict["agent_outcome_policy"] = HTTP_STATUS_CONFIG["agent_outcome_policy"]
+    exporter.export_config()
+    exporter.export_metrics({})
+
+    segments = [value for path, value in client.artifacts.items() if path.startswith("config/segment_")]
+    assert len(segments) == 1
+    assert segments[0]["agent_outcome_policy"]["by_status_code"] == {"400": "fail", "413": "fail", "422": "fail"}
+    assert not exporter._delivery_failed
+
+
+def test_final_live_delivery_uses_same_run_and_existing_consumer(live):
+    artifacts, exporter, client = live
     before = _artifact_version(artifacts)
     scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
     assert not artifacts.export_done_fpath("mlflow").exists()
-    saved_config = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
-    assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved_config
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
-    assert client.run_tags == {}
     receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
     assert receipt == {
         "version": 1,
@@ -182,13 +324,6 @@ def test_final_live_delivery_uses_same_run_and_existing_consumer(live, controlle
         "uploaded_rollouts": True,
         "rollout_projection_version": 1,
     }
-    exported_config = client.artifacts[exporter.CONFIG_ARTIFACT_FILE]
-    assert exported_config == saved_config
-    assert INPUT_READ_ROOTS_KEY_NAME not in saved_config
-    assert INPUT_READ_ROOTS_KEY_NAME not in exported_config
-    assert client.params["mlflow_run_name"] == "run"
-    assert not any(key.startswith(INPUT_READ_ROOTS_KEY_NAME) for key in client.params)
-    assert list(exporter.global_config_dict.get(INPUT_READ_ROOTS_KEY_NAME, [])) == controller_roots
     assert client.status == "FINISHED"
     after = _artifact_version(artifacts)
     assert {k: v for k, v in after.items() if k != "aggregate_metrics_json_fpath"} == {
@@ -207,7 +342,7 @@ def test_final_live_delivery_uses_same_run_and_existing_consumer(live, controlle
         "uploaded_rollouts": True,
         "rollout_projection_version": 1,
     }
-    from nemo_gym.orchestration.recovery import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     assert mlflow_errors(collected, "FINISHED", observed_run_id="live-run") == []
 
@@ -309,7 +444,7 @@ def _post_run_client(monkeypatch) -> Client:
 
 def test_a_reopened_live_run_is_exported_after_the_run_with_a_bound_receipt(live, monkeypatch):
     artifacts, exporter, client = live
-    from nemo_gym.orchestration.recovery import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     # A later segment reopened the live run an earlier segment opened, and completes the run.
     exporter.reopened = True
@@ -551,7 +686,7 @@ def test_live_receipt_rejects_verifier_observations_not_in_acknowledged_rows(liv
 
 @pytest.mark.parametrize("projection", [None, 0, 2, True, "1"])
 def test_old_or_unknown_projection_receipt_cannot_certify_canonical_delivery(live, projection):
-    from nemo_gym.orchestration.recovery import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     artifacts, exporter, client = live
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
@@ -587,7 +722,7 @@ def test_malformed_canonical_observations_cannot_be_silently_certified(live):
 
 def test_postrun_mlflow_export_keeps_canonical_evidence_and_projection_receipt(live, monkeypatch):
     artifacts, live_exporter, live_client = live
-    from nemo_gym.orchestration.recovery import mlflow_errors
+    from nemo_gym.eval.recovery.gate import mlflow_errors
 
     client = Client()
     monkeypatch.setattr(module, "MlflowClient", lambda **kwargs: client)
@@ -968,10 +1103,10 @@ def test_existing_unhashable_health_summary_is_not_treated_as_absent(live, raw):
 @pytest.mark.parametrize("case", ["healthy", "wrong", "recovered", "invalid"])
 def test_health_export_projects_validated_collector_facts_without_changing_scores(live, monkeypatch, case):
     """Explicit collector projection boundary; real classifier, persisted metadata and SDK delivery."""
-    import nemo_gym.orchestration.recovery as recovery
     from nemo_gym.cli.eval import _prepare_run_health_metrics
-    from tests.unit_tests.orchestration.test_llm_judge_trial_coverage import _recovered_fixture
-    from tests.unit_tests.orchestration.test_tool_trial_coverage import fixture
+    from nemo_gym.eval.recovery import evidence
+    from tests.helpers.recovery_health import fixture
+    from tests.unit_tests.eval.recovery.test_llm_judge_trial_coverage import _recovered_fixture
 
     artifacts, exporter, client = live
     if case in {"recovered", "invalid"}:
@@ -990,7 +1125,7 @@ def test_health_export_projects_validated_collector_facts_without_changing_score
     }
     before = collected.model_dump()
     scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
-    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
+    monkeypatch.setattr(evidence, "select_managed_evidence", lambda *_: collected)
     values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
     assert collected.model_dump() == before
     assert values["health/response/known"] == 1
@@ -1170,10 +1305,12 @@ def test_noncolliding_sanitized_scientific_metric_still_exports(live, monkeypatc
 @pytest.mark.parametrize("case", ["settled_zero", "missing"])
 def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omissions(live, monkeypatch, case):
     """49 scored trials, then one settled zero (or one missing row), and 50 rows an accepted stage omitted."""
-    import nemo_gym.orchestration.recovery as recovery
     from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION
     from nemo_gym.cli.eval import _prepare_run_health_metrics
-    from tests.unit_tests.orchestration.test_evaluation_health import _run
+    from nemo_gym.eval.recovery import evidence
+    from nemo_gym.eval.recovery.gate import trial_health
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from tests.helpers.recovery_health import _run
 
     artifacts, _, _ = live
     collected = _run(49, settled={"model_transport_error": 1} if case == "settled_zero" else None)
@@ -1188,10 +1325,10 @@ def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omission
                 ACCEPTED_STAGE_OMISSION: {"stage_index": 1, "tolerate_unresolved": True},
             }
         )
-    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
-    decision = recovery.decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    monkeypatch.setattr(evidence, "select_managed_evidence", lambda *_: collected)
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
     assert decision.counts.get("omitted") == 50
-    passed, reason = recovery.trial_health(decision, collected)
+    passed, reason = trial_health(decision, collected)
     values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
     assert values["health/trial/expected"] == 50 and values["health/trial/omitted"] == 50
     assert values["health/trial/counts_known"] == 0
@@ -1209,3 +1346,20 @@ def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omission
         assert values["health/trial/failed_lower_bound"] == 0
         assert values["health/trial/failure_rate_lower_bound"] == 0
         assert values["health/trial_failures/rate"] == 0 and values["health/response_failures/rate"] == 0
+
+
+@pytest.mark.parametrize("live", [{INPUT_READ_ROOTS_KEY_NAME: ["/controller"]}], indirect=True)
+def test_live_delivery_omits_controller_read_roots_from_saved_and_exported_config(live) -> None:
+    artifacts, exporter, client = live
+    assert list(exporter.global_config_dict[INPUT_READ_ROOTS_KEY_NAME]) == ["/controller"]
+    saved_config = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
+    assert INPUT_READ_ROOTS_KEY_NAME not in saved_config
+    assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved_config
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    exported_config = client.artifacts[exporter.CONFIG_ARTIFACT_FILE]
+    assert exported_config == saved_config
+    assert INPUT_READ_ROOTS_KEY_NAME not in exported_config
+    assert not any(key.startswith(INPUT_READ_ROOTS_KEY_NAME) for key in client.params)
+    assert client.status == "FINISHED"
+    # The worker-side config keeps its read roots; only the authored artifact omits them.
+    assert list(exporter.global_config_dict[INPUT_READ_ROOTS_KEY_NAME]) == ["/controller"]

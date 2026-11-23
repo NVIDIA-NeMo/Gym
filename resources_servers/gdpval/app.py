@@ -47,13 +47,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set, Tuple, Union
 
+import anyio
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
 from nemo_gym.client import SESSION_ID_KEY, get_server_url
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.core import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, EpisodeId, TaskId
+from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    JUDGE_FAILED,
+    MODEL_CONTEXT_LIMIT,
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    EpisodeId,
+    FailureClass,
+    OutcomeAction,
+    TaskId,
+)
 from nemo_gym.environment import is_deliverable
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
@@ -84,16 +96,25 @@ from resources_servers.gdpval.judge_panel import (
 )
 from resources_servers.gdpval.judge_telemetry import JudgeTelemetrySink, classify_judge_error
 from resources_servers.gdpval.reference_files import download_reference_files
+from resources_servers.gdpval.s3_references import S3ReferenceCache, is_s3_uri
 from resources_servers.gdpval.scoring import SCORING_ERROR_KEY, is_permanent_judge_error
 from resources_servers.gdpval.task_data import TaskData
 from resources_servers.gdpval.task_sandbox import (
+    DEFAULT_RENDER_BUDGET_S,
     WORKDIR,
     GDPValSandboxConfig,
     collect_deliverables,
     missing_files,
+    stage_reference_files,
     start_task_sandbox,
 )
 from resources_servers.gdpval.tavily_search import TavilySearch, fetch_web_page, web_client
+from resources_servers.gdpval.web_guard import (
+    BLOCKED_MESSAGE,
+    DEFAULT_BLOCKED_WEB_PATTERNS,
+    WebGuard,
+    load_web_exclusions,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -115,6 +136,7 @@ def _is_invalid_judge_result(judge_result: Any) -> bool:
 
 
 _DEFAULT_JUDGE_PROMPT_FPATH = str(Path(__file__).parent / "prompts" / "judge_prompt.j2")
+_DEFAULT_WEB_EXCLUSIONS_FPATH = str(Path(__file__).parent / "search_exclusions.json")
 _DEFAULT_REFERENCE_ELO = 1000.0
 
 
@@ -150,6 +172,8 @@ class ReferenceModelConfig(BaseModel):
     deliverables, laid out as ``<deliverables_dir>/task_<task_id>/`` (optionally
     with ``repeat_<n>/`` subdirs) containing the same files the agent would
     persist (deliverable artifacts + finish_params.json + reference_files/).
+    It may also be an ``s3://`` URI with that layout; /verify then downloads
+    only the judged task (see ``s3_references.py``).
     ``elo`` is the reference's known rating (e.g. a published Arena/AA number),
     held fixed when the eval model's MLE rating is fit.
     """
@@ -319,6 +343,17 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # and the writable reference directories, and fails if the check fails; the host
     # javaldx check and apt install are skipped. None uses `libreoffice` on PATH.
     libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
+    # Command that runs LibreOffice inside the task sandbox, e.g. [libreoffice]. When set, /verify
+    # renders each Office file to its <name>.pdf sidecar in the sandbox before the sandbox stops, so
+    # the server needs no LibreOffice of its own and the host install and startup check are skipped.
+    # Without libreoffice_command, comparison mode then converts nothing on the host: references must
+    # carry their PDFs. The agent controls that sandbox, so it can forge its own renders; see the README.
+    sandbox_libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
+    # Seconds that sandbox rendering may take per rollout, all files together. A run of LibreOffice is
+    # capped at 150 s; files left when the budget runs out are judged without a render.
+    sandbox_render_budget_s: float = Field(default=DEFAULT_RENDER_BUDGET_S, gt=0)
+    # Where /verify caches the tasks of s3:// reference deliverables; None uses a directory under the temp dir.
+    reference_cache_dir: Optional[str] = None
 
     # How deliverable/reference files are presented to the judge:
     # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
@@ -337,8 +372,10 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_pdf_include_text: bool = True
     # Exact request-wide image cap for raster and PDF-overflow transports.
     judge_max_images_per_request: int = 450
-    # Include nested task inputs while leaving submission directories shallow.
-    judge_reference_files_recursive: bool = False
+    # Show the judges the task's input files. GDPval stores each one a directory down
+    # (reference_files/<hash>/<name>), so without recursion the judges see none of them.
+    # Submission directories stay shallow either way.
+    judge_reference_files_recursive: bool = True
     # Use the eval tree's prepared copies of the original benchmark inputs,
     # persisted from host downloads separately from model-authored submissions.
     # Enable only after validating those inputs during preparation.
@@ -421,6 +458,13 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # attempts at most, rotating keys on 401/403/429 and 5xx.
     tavily_api_key: Union[str, List[str]]
     tavily_max_sweeps: int = Field(default=1, ge=1)
+    # Case-insensitive regexes that web_search and fetch_web_page refuse in a query or URL and drop
+    # from search results, so the agent cannot look up GDPval's published answers. The current
+    # task's id is always added. An empty list leaves only the task id. See web_guard.py.
+    blocked_web_patterns: List[str] = Field(default_factory=lambda: list(DEFAULT_BLOCKED_WEB_PATTERNS))
+    # Sites web_search and fetch_web_page refuse outright, in the format of benchmarks/hle/search_exclusions.json.
+    # None uses search_exclusions.json beside this file (Hugging Face and the sites hosting GDPval submissions).
+    web_exclusions_fpath: Optional[str] = None
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
@@ -523,9 +567,13 @@ class GDPValVerifyRequest(BaseVerifyRequest):
     expected_final_stage_index: Optional[int] = None
     expected_stage_row_count: Optional[int] = None
     accepted_stage_row_count: Optional[int] = None
-    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index")
-    ng_rollout_index: Optional[int] = Field(default=None, alias="_ng_rollout_index")
-    ng_attempt_index: Optional[int] = Field(default=None, alias="_ng_attempt_index")
+    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index", exclude_if=lambda value: value is None)
+    ng_rollout_index: Optional[int] = Field(
+        default=None, alias="_ng_rollout_index", exclude_if=lambda value: value is None
+    )
+    ng_attempt_index: Optional[int] = Field(
+        default=None, alias="_ng_attempt_index", exclude_if=lambda value: value is None
+    )
 
 
 # The reference model has no deliverable for this task, so no battle can be
@@ -533,6 +581,9 @@ class GDPValVerifyRequest(BaseVerifyRequest):
 # nemo_gym: the class name is GDPVal vocabulary.
 REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
 EVAL_MISSING_FAILURE_CLASS = "eval_missing"
+# Sandbox rendering is on, so the server converts nothing, and a reference deliverable has an Office file without a
+# PDF. Judging would show the judge an empty reference; the reference set needs its PDFs.
+REFERENCE_UNRENDERED_FAILURE_CLASS = "reference_unrendered"
 TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
 PERMANENT_JUDGE_ERROR_FAILURE_CLASS = "permanent_judge_error"
 
@@ -561,9 +612,42 @@ def _permanent_judge_failure(
     )
 
 
-# The agent ran out of wall time. With the agent's answer kept, this is the model's result: never run again and left
-# out of the fit (`is_answered_agent_deadline`). Without one it is retried like any other timeout.
-_AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
+# The agent ran out of wall time: the model's result, with no deliverable to judge. The row is not masked. In comparison
+# mode it is scored as a loss against every reference (`_no_deliverable_loss`), so it stays in the denominator and the
+# Elo fit; in rubric mode it is a zero. It keeps no outcome action, so recovery still runs a timeout whose window held a
+# server-side fault again (`is_infrastructure_agent_timeout`) and settles a clean one as the model's final result.
+_AGENT_TIMEOUT = {
+    "failure_kind": AGENT_TIMEOUT,
+    "failure_outcome_attribution": FailureClass.MODEL,
+    "failure_reason": "The agent ran out of wall time before it delivered",
+}
+
+# The ``judge_response.manual_imputation`` values of a row scored as a loss without a judgment.
+_IMPUTED_LOSS_KINDS = frozenset({"eval_missing_as_loss", "model_failure_as_loss"})
+
+# The rubric judge's submission text for collected files that hold no extractable text.
+_NO_READABLE_SUBMISSION_TEXT = "[The submitted files contain no readable text.]"
+
+# Stop reasons the agent reports when the model itself ended the run without a deliverable.
+_MODEL_STOP_FAILURE_KINDS = {
+    "context_limit": MODEL_CONTEXT_LIMIT,
+    "max_iterations": AGENT_LIMIT,
+    "max_turns": AGENT_LIMIT,
+}
+
+
+def _model_stop_failure(body: "GDPValVerifyRequest") -> Optional[Dict[str, Any]]:
+    """The row fields of a run the model ended itself (context or turn limit); None for any other stop."""
+    kind = _MODEL_STOP_FAILURE_KINDS.get((body.response.metadata or {}).get("stop_reason"))
+    if kind is None:
+        return None
+    return {
+        "failure_kind": kind,
+        "failure_outcome_action": OutcomeAction.COUNT_AS_ZERO,
+        "failure_outcome_attribution": FailureClass.MODEL,
+        "failure_reason": f"The agent stopped without a deliverable ({kind})",
+    }
+
 
 # judge_deliverables=false saves the deliverables without judging them, so the row is masked under this kind.
 JUDGING_DISABLED = "gdpval:judging_disabled"
@@ -608,7 +692,8 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
 class _TaskSession:
     episode_id: EpisodeId
     task_id: TaskId
-    repeat: int
+    # The repeat directory's key (persisted_layout.repeat_key_from_rollout_id).
+    repeat: str
     sandbox: Optional[AsyncSandbox]
     reference_dir: Path
     # The finish or abandon_task_finish call the agent made.
@@ -656,11 +741,16 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._judge_prompt_fpath: str = self.config.judge_prompt_template_fpath or _DEFAULT_JUDGE_PROMPT_FPATH
         self._judge_telemetry = JudgeTelemetrySink(self.config.judge_telemetry_output_dir)
         self._tavily = TavilySearch(api_keys=self.config.tavily_api_key, max_sweeps=self.config.tavily_max_sweeps)
+        self._web_domains, self._web_url_substrings = load_web_exclusions(
+            self.config.web_exclusions_fpath or _DEFAULT_WEB_EXCLUSIONS_FPATH
+        )
         if self.config.num_workers not in (None, 1):
             raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
+        # Sessions whose seed failed and whose sandbox did not stop; the session's close or the shutdown stops them.
+        self._failed_seeds: dict[str, _TaskSession] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
-        self._claimed_directories: Dict[Tuple[str, int], str] = {}
+        self._claimed_directories: Dict[Tuple[str, str], str] = {}
         self._locks = ResourcesSessionLocks()
         self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
             self.config.session_close_retry_window_seconds
@@ -683,6 +773,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 raise ValueError(
                     "reward_mode=comparison requires reference_deliverables_dir or reference_models to be set"
                 )
+        reference_cache_dir = Path(
+            self.config.reference_cache_dir or Path(tempfile.gettempdir()) / "gdpval-reference-cache"
+        )
+        self._s3_references = S3ReferenceCache(reference_cache_dir)
         if self.config.libreoffice_command is not None:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
@@ -692,6 +786,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
             probe_dirs = [Path(persist_dir)] if persist_dir else []
             # /verify also converts reference deliverables in place.
             for ref_id, ref in self._references.items():
+                if is_s3_uri(ref.deliverables_dir):
+                    # Downloaded per task at /verify into the cache, which the server owns and converts in.
+                    probe_dirs.append(reference_cache_dir)
+                    continue
                 ref_dir = Path(ref.deliverables_dir)
                 if not ref_dir.is_dir():
                     raise RuntimeError(f"Reference {ref_id!r}: deliverables_dir {ref_dir} is not a directory")
@@ -712,7 +810,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     'and must not leave files that the server cannot delete. See "Office to PDF conversion" in '
                     "resources_servers/gdpval/README.md."
                 )
-        elif self.config.preconvert_office_to_pdf:
+        elif self.config.preconvert_office_to_pdf and self.config.sandbox_libreoffice_command is None:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
             if not ensure_libreoffice() and self.config.reward_mode == "comparison":
@@ -723,6 +821,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     "deployment container, or set preconvert_office_to_pdf=false to opt out."
                 )
         super().model_post_init(context)
+
+    @property
+    def _renders_only_in_sandbox(self) -> bool:
+        # Without a libreoffice_command, sandbox rendering means the server never runs LibreOffice in comparison mode,
+        # even when the host has it: that is what keeps model-written files away from it.
+        return self.config.sandbox_libreoffice_command is not None and self.config.libreoffice_command is None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -757,23 +861,27 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     )
                 request.session[SESSION_ID_KEY] = session_id
                 return await self._seed_response(session_id, session)
+            # A seed never replaces a failed seed's sandbox that still runs, so no sandbox is left without an owner,
+            # and only the failed seed's own episode and task may stop it.
+            failed_seed = self._failed_seeds.get(session_id)
+            if failed_seed is not None and (failed_seed.episode_id, failed_seed.task_id) != (
+                body.episode_id,
+                body.task_id,
+            ):
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            await self._release_failed_seed(session_id)
             try:
                 task = TaskData.model_validate(body.task_data)
             except ValidationError as error:
                 raise ResourcesSeedRejectedError(f"task_data is not a GDPVal task: {error}") from error
             if body.task_id.task_id != task.task_id:
                 raise ResourcesSeedRejectedError("TaskId does not match the GDPVal task_id")
-            try:
-                repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
-            except ValueError as error:
-                # A retry sends the same rollout_id, so no retry can fix it.
-                raise ResourcesSeedRejectedError(str(error)) from error
+            repeat = persisted_layout.repeat_key_from_rollout_id(body.episode_id.rollout_id)
             directory = (task.task_id, repeat)
             owner = self._claimed_directories.get(directory)
             if owner is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Session {owner} already holds task {task.task_id} repeat {repeat}; "
+                raise ResourcesSessionConflictError(
+                    f"Session {owner} already holds task {task.task_id} repeat {repeat}; "
                     "a second live session would overwrite its deliverables",
                 )
             self._claimed_directories[directory] = session_id
@@ -784,8 +892,6 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     self.config.sandbox_provider,
                     self.config.sandbox_config,
                     task_id=task.task_id,
-                    reference_dir=reference_dir,
-                    reference_files=reference_files,
                     workdir=self._sandbox_workdir,
                 )
             except BaseException:
@@ -793,11 +899,17 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 shutil.rmtree(reference_dir, ignore_errors=True)
                 raise
             session = _TaskSession(body.episode_id, body.task_id, repeat, sandbox, reference_dir)
+            # The session holds the sandbox from here, so a failed upload or reply stops it on the same path.
             try:
+                await stage_reference_files(sandbox, reference_dir, reference_files, self._sandbox_workdir)
                 response = await self._seed_response(session_id, session)
             except BaseException:
                 self._claimed_directories.pop(directory, None)
-                await self._release(session)
+                try:
+                    await self._release(session)
+                except Exception:
+                    self._failed_seeds[session_id] = session
+                    LOGGER.exception("Failed to stop the sandbox of a failed GDPVal seed for session %s", session_id)
                 raise
             self._sessions[session_id] = session
             request.session[SESSION_ID_KEY] = session_id
@@ -832,6 +944,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         async with self._locks.locked(session_id):
             fenced_episode = self._fences.get(session_id)
+            failed_seed = self._failed_seeds.get(session_id)
+            if failed_seed is not None and failed_seed.episode_id != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            await self._release_failed_seed(session_id)
             if fenced_episode is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
@@ -853,7 +969,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if session.sandbox is not None:
             await session.sandbox.stop()
             session.sandbox = None
-        await asyncio.to_thread(shutil.rmtree, session.reference_dir, ignore_errors=True)
+        # Shielded like the stop, so a close that a disconnect cancels still removes the reference files and then,
+        # with no await left, its record and fence; otherwise a re-seed would find a record without a sandbox.
+        with anyio.CancelScope(shield=True):
+            await asyncio.to_thread(shutil.rmtree, session.reference_dir, ignore_errors=True)
 
     async def shutdown(self) -> None:
         for session_id, session in list(self._sessions.items()):
@@ -862,7 +981,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
             except Exception:
                 LOGGER.exception("Failed to stop the sandbox of GDPVal session %s", session_id)
         self._sessions.clear()
+        for session_id in list(self._failed_seeds):
+            try:
+                await self._release_failed_seed(session_id)
+            except Exception:
+                LOGGER.exception("Failed to stop the sandbox of failed GDPVal seed %s", session_id)
+        self._failed_seeds.clear()
         self._claimed_directories.clear()
+
+    async def _release_failed_seed(self, session_id: str) -> None:
+        """Stop the sandbox a failed seed of ``session_id`` left running; it stays tracked until its stop succeeds."""
+        session = self._failed_seeds.get(session_id)
+        if session is not None:
+            await self._release(session)
+            del self._failed_seeds[session_id]
 
     def _cached_deliverables_dir(self, body: GDPValVerifyRequest) -> str:
         directory = persisted_layout.repeat_dir(
@@ -882,7 +1014,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
     async def finish(self, request: Request, body: FinishRequest) -> str:
         session = self._get_session(request)
         if session.sandbox is None:
-            raise HTTPException(status_code=409, detail="The task sandbox is no longer available")
+            raise ResourcesSessionConflictError("The task sandbox is no longer available")
         missing = await missing_files(session.sandbox, body.paths, self._sandbox_workdir)
         if missing:
             raise HTTPException(
@@ -896,12 +1028,27 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._get_session(request).finish_call = {"tool": "abandon_task_finish", **body.model_dump()}
         return body.reason
 
-    async def web_search(self, body: WebSearchRequest) -> str:
-        async with web_client() as client:
-            return await self._tavily.search(body.query, client)
+    def _web_guard(self, request: Request) -> WebGuard:
+        # A call outside a seeded session still gets the pattern guard, just without a task id.
+        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
+        return WebGuard(
+            self.config.blocked_web_patterns,
+            session.task_id.task_id if session else None,
+            self._web_domains,
+            self._web_url_substrings,
+        )
 
-    async def fetch_web_page(self, body: FetchWebPageRequest) -> str:
+    async def web_search(self, request: Request, body: WebSearchRequest) -> str:
+        guard = self._web_guard(request)
+        if guard.blocks(body.query):
+            return f"<error>{BLOCKED_MESSAGE}</error>"
         async with web_client() as client:
+            return await self._tavily.search(body.query, client, guard)
+
+    async def fetch_web_page(self, request: Request, body: FetchWebPageRequest) -> str:
+        guard = self._web_guard(request)
+        async with web_client() as client:
+            client.event_hooks["request"].append(guard.check_request)
             return await fetch_web_page(body.url, client)
 
     async def _collect_deliverables(self, session: _TaskSession) -> str:
@@ -911,7 +1058,13 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 self.config.persist_deliverables_dir, session.task_id.task_id, session.repeat
             )
             await collect_deliverables(
-                session.sandbox, session.finish_call, session.reference_dir, task_dir, self._sandbox_workdir
+                session.sandbox,
+                session.finish_call,
+                session.reference_dir,
+                task_dir,
+                self._sandbox_workdir,
+                render_libreoffice_command=self.config.sandbox_libreoffice_command,
+                render_budget_s=self.config.sandbox_render_budget_s,
             )
             await self._release(session)
             session.deliverables_dir = str(task_dir)
@@ -1078,6 +1231,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         body, masked = await resolve_deliverables(self, request, body)
         if masked is not None:
+            if self.config.reward_mode == "comparison" and not masked.get("mask_sample"):
+                return await self._verify_comparison(body, model_failure=masked)
             return GDPValVerifyResponse(**body.model_dump(), verify_mode=self.config.reward_mode, **masked)
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)
@@ -1097,6 +1252,27 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 verify_mode="rubric",
                 judge_response={"scoring_error": "missing_rubric"},
                 **_gdpval_failure("missing_rubric", terminal=True),
+            )
+
+        directory = Path(body.deliverables_dir) if body.deliverables_dir else None
+        if directory is not None and not directory.is_dir():
+            # The persisted files are gone (a cleaned persist dir, a reverify on another host). Grading the
+            # agent's final message instead would score its claims about files nobody can see.
+            return GDPValVerifyResponse(
+                **(body.model_dump() | lost_session_verification(f"deliverables_dir {directory} is not a directory")),
+                verify_mode="rubric",
+            )
+        # Collection publishes the finish marker atomically with the submitted files, so a directory with the
+        # marker holds the whole submission: its files are graded, never the agent's claims about them. A
+        # directory without the marker (a hand-made text deliverable) still falls back to the response text below.
+        collected = directory is not None and (directory / persisted_layout.FINISH_PARAMS_FILE).is_file()
+        if collected and not any(is_deliverable(path) for path in directory.iterdir()):
+            return GDPValVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                verify_mode="rubric",
+                judge_response={"manual_imputation": "no_deliverable_as_zero"},
+                **(_model_stop_failure(body) or {}),
             )
 
         judges = self._resolve_judges()
@@ -1129,6 +1305,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
             read = await asyncio.to_thread(read_deliverable_files, body.deliverables_dir)
             if read:
                 deliverable_text = read
+            elif collected:
+                # Submitted files with no extractable text (a blank workbook, a scanned PDF): the judge sees the
+                # files' renders, if any, and this note, not the agent's description of the files.
+                deliverable_text = _NO_READABLE_SUBMISSION_TEXT
             blocks = await asyncio.to_thread(
                 convert_deliverables_to_content_blocks,
                 body.deliverables_dir,
@@ -1214,7 +1394,52 @@ class GDPValResourcesServer(SimpleResourcesServer):
             for msg in errors[:5]:
                 LOGGER.warning("preconvert %s: %s", label, msg)
 
-    async def _verify_comparison(self, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
+    def _no_deliverable_loss(
+        self,
+        body: GDPValVerifyRequest,
+        ref_dirs_by_id: Dict[str, List[Path]],
+        imputation: str,
+        failure_fields: Optional[Dict[str, Any]] = None,
+    ) -> GDPValVerifyResponse:
+        """A row with no deliverable, scored as every comparison trial lost against every reference."""
+        per_reference = {
+            ref_id: {
+                "wins": 0,
+                "losses": self.config.num_comparison_trials * len(dirs),
+                "ties": 0,
+                "reference_elo": self._references[ref_id].elo,
+                "ref_repeat_count": len(dirs),
+            }
+            for ref_id, dirs in ref_dirs_by_id.items()
+        }
+        total_losses = sum(counts["losses"] for counts in per_reference.values())
+        return GDPValVerifyResponse(
+            **body.model_dump(),
+            reward=0.0,
+            verify_mode="comparison",
+            judge_response={
+                "manual_imputation": imputation,
+                "per_reference": per_reference,
+                "total_wins": 0,
+                "total_losses": total_losses,
+                "total_ties": 0,
+                "total_judged": total_losses,
+                "total_invalid": 0,
+                "ref_errors": {},
+            },
+            win=False,
+            loss=True,
+            tie=False,
+            total_wins=0,
+            total_losses=total_losses,
+            total_ties=0,
+            per_reference=per_reference,
+            **{key: value for key, value in (failure_fields or {}).items() if key != "reward"},
+        )
+
+    async def _verify_comparison(
+        self, body: GDPValVerifyRequest, *, model_failure: Optional[Dict[str, Any]] = None
+    ) -> GDPValVerifyResponse:
         from openai import OpenAI
 
         from resources_servers.gdpval.comparison import (
@@ -1245,7 +1470,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # simply skipped — the eval model just isn't judged against it here.
         ref_dirs_by_id: Dict[str, List[Path]] = {}
         for ref_id, ref_cfg in active_references.items():
-            ref_task_root = persisted_layout.task_dir(ref_cfg.deliverables_dir, body.task_id)
+            ref_root = ref_cfg.deliverables_dir
+            if is_s3_uri(ref_root):
+                ref_root = await self._s3_references.local_root(ref_root, body.task_id)
+            ref_task_root = persisted_layout.task_dir(ref_root, body.task_id)
             dirs = [d for d in persisted_layout.repeat_dirs(ref_task_root) if task_attempted(str(d))]
             if dirs:
                 ref_dirs_by_id[ref_id] = dirs
@@ -1273,46 +1501,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **_gdpval_failure(REFERENCE_MISSING_FAILURE_CLASS, terminal=True),
             )
 
+        if model_failure is not None:
+            # The model delivered nothing (it ran out of time): a battle it lost against every reference, never a
+            # masked row, so the pairwise fit keeps it.
+            return self._no_deliverable_loss(body, ref_dirs_by_id, "model_failure_as_loss", model_failure)
+
         if eval_task_dir is None or not task_attempted(str(eval_task_dir)):
             print(f"[gdpval] eval deliverable missing for task {body.task_id}", flush=True)
+            model_stop = _model_stop_failure(body)
+            if model_stop is not None:
+                return self._no_deliverable_loss(body, ref_dirs_by_id, "model_failure_as_loss", model_stop)
             if (
                 self.config.count_eval_missing_as_loss
                 and body.stage_index == 1
                 and body.task_id in self.config.missing_eval_task_ids
             ):
-                per_reference = {
-                    ref_id: {
-                        "wins": 0,
-                        "losses": self.config.num_comparison_trials * len(dirs),
-                        "ties": 0,
-                        "reference_elo": self._references[ref_id].elo,
-                        "ref_repeat_count": len(dirs),
-                    }
-                    for ref_id, dirs in ref_dirs_by_id.items()
-                }
-                total_losses = sum(counts["losses"] for counts in per_reference.values())
-                return GDPValVerifyResponse(
-                    **body.model_dump(),
-                    reward=0.0,
-                    verify_mode="comparison",
-                    judge_response={
-                        "manual_imputation": "eval_missing_as_loss",
-                        "per_reference": per_reference,
-                        "total_wins": 0,
-                        "total_losses": total_losses,
-                        "total_ties": 0,
-                        "total_judged": total_losses,
-                        "total_invalid": 0,
-                        "ref_errors": {},
-                    },
-                    win=False,
-                    loss=True,
-                    tie=False,
-                    total_wins=0,
-                    total_losses=total_losses,
-                    total_ties=0,
-                    per_reference=per_reference,
-                )
+                return self._no_deliverable_loss(body, ref_dirs_by_id, "eval_missing_as_loss")
             if self.config.strict_comparison_trials:
                 raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: eval_missing")
             # Terminal for the same reason as reference_missing above: a
@@ -1326,7 +1530,33 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **_gdpval_failure(EVAL_MISSING_FAILURE_CLASS, terminal=True),
             )
 
-        if self.config.preconvert_office_to_pdf:
+        if self.config.preconvert_office_to_pdf and self._renders_only_in_sandbox:
+            from resources_servers.gdpval.preconvert import find_convertible_files
+
+            # The sandbox rendered the eval submission; references are judged only from the PDFs they carry.
+            unrendered = [
+                str(path)
+                for dirs in ref_dirs_by_id.values()
+                for ref_dir in dirs
+                for path, _ in find_convertible_files(ref_dir, recursive=False)
+            ]
+            if unrendered:
+                print(
+                    f"[gdpval] reference Office files without a PDF for task {body.task_id}: {unrendered}",
+                    flush=True,
+                )
+                if self.config.strict_comparison_trials:
+                    raise RuntimeError(
+                        f"strict comparison trial contract failed for task {body.task_id}: reference_unrendered"
+                    )
+                return GDPValVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verify_mode="comparison",
+                    judge_response={"error": "reference_unrendered", "unrendered": unrendered},
+                    **_gdpval_failure(REFERENCE_UNRENDERED_FAILURE_CLASS, terminal=True),
+                )
+        elif self.config.preconvert_office_to_pdf:
             await self._preconvert_and_log(eval_task_dir, label=f"eval/{body.task_id}")
             for ref_id, dirs in ref_dirs_by_id.items():
                 for ref_dir in dirs:
@@ -1998,7 +2228,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     judge_response = vr.get("judge_response")
                     if (
                         isinstance(judge_response, dict)
-                        and judge_response.get("manual_imputation") == "eval_missing_as_loss"
+                        and judge_response.get("manual_imputation") in _IMPUTED_LOSS_KINDS
                     ):
                         imputed.append(vr)
                     elif sum(_votes(vr)) > 0:

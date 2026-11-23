@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 from tqdm.auto import tqdm
 
@@ -48,6 +49,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
+    get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
 )
@@ -64,12 +66,13 @@ from nemo_gym.data.hf_utils import (
 )
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.data.task_data import (
+    SERVER_DIR_MARKERS,
     TaskDataSchemaError,
     TaskDataValidator,
     find_server_dir,
     load_task_data_schema,
 )
-from nemo_gym.data.task_materialization import materialize_task
+from nemo_gym.data.task_materialization import materialize_task, require_row_in_taskset
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 
 
@@ -537,23 +540,42 @@ class DatasetValidatorState(BaseModel):
     other_metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
-def _declares_prepared_dataset(value: object, dataset: DatasetConfig) -> bool:
+def _declares_prepared_dataset(value: object, dataset: DatasetConfig, *, context: DictConfig) -> bool:
     if isinstance(value, Mapping):
-        if str(value.get("jsonl_fpath", "")) == str(dataset.jsonl_fpath) and value.get("prepare_script") is not None:
-            return True
-        return any(_declares_prepared_dataset(item, dataset) for item in value.values())
+        if value.get("prepare_script") is not None and "jsonl_fpath" in value:
+            try:
+                candidate = OmegaConf.merge(context, {"_prepared_dataset_path": value["jsonl_fpath"]})
+                if str(candidate._prepared_dataset_path) == str(dataset.jsonl_fpath):
+                    return True
+            except InterpolationResolutionError:
+                pass  # An unrelated dataset must not prevent a useful preparation hint.
+        return any(_declares_prepared_dataset(item, dataset, context=context) for item in value.values())
     if isinstance(value, list):
-        return any(_declares_prepared_dataset(item, dataset) for item in value)
+        return any(_declares_prepared_dataset(item, dataset, context=context) for item in value)
     return False
 
 
 def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
     for raw_config_path in global_config.get("config_paths") or []:
         config_path = _resolve_under_cwd_or_install(raw_config_path)
-        config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=False)
-        if _declares_prepared_dataset(config, dataset):
+        config = OmegaConf.load(config_path)
+        context = OmegaConf.merge(config, global_config)
+        if _declares_prepared_dataset(OmegaConf.to_container(config, resolve=False), dataset, context=context):
             return f"gym eval prepare --config {raw_config_path}"
     return "gym eval prepare --config <config path>"
+
+
+def _missing_server_dir_hint(impl_key: str, base_folder: str, instance_name: str) -> str:
+    """Why a schema home resolved to no server directory, and what to do about it.
+
+    A dangling ``resources_server`` reference never reaches this point (``_schema_home_for`` returns None for
+    it), so the directory that is missing is the implementation's own.
+    """
+    return (
+        f"no {base_folder}/{impl_key} directory holding one of {', '.join(SERVER_DIR_MARKERS)} under the "
+        f"component search roots. Check that `{impl_key}`, the implementation {instance_name} resolves to, has a "
+        "server directory, or add its root to the search roots (NEMO_GYM_EXTRA_ROOTS / --search-dir)."
+    )
 
 
 class TrainDataProcessor(BaseModel):
@@ -667,7 +689,30 @@ class TrainDataProcessor(BaseModel):
         in_scope_dataset_types = config.in_scope_dataset_types
         agent_configs_with_in_scope_datasets: List[ServerInstanceConfig] = []
         for agent_config in agent_configs_with_data:
-            in_scope_datasets = [d for d in agent_config.datasets if d.type in in_scope_dataset_types]
+            raw_datasets = (
+                get_first_server_config_dict(global_config_dict, agent_config.name).get("datasets", [])
+                if agent_config.name in global_config_dict
+                else []
+            )
+            in_scope_datasets = []
+            for index, dataset in enumerate(agent_config.datasets):
+                if dataset.type not in in_scope_dataset_types:
+                    continue
+                if index < len(raw_datasets):
+                    raw = raw_datasets[index]
+                    values = dataset.model_dump()
+                    if isinstance(dataset, DatasetConfig) and dataset.source is not None:
+                        # Revalidation restores these aliases from source; passing both would be ambiguous.
+                        values.pop("gitlab_identifier", None)
+                        values.pop("huggingface_identifier", None)
+                    try:
+                        for field in ("jsonl_fpath", "prepare_script", "prepare_project", "prompt_config"):
+                            if field in type(dataset).model_fields and field in raw:
+                                values[field] = raw[field]
+                    except InterpolationResolutionError as error:
+                        raise ValueError(f"Could not resolve paths for dataset {dataset.name!r}: {error}") from error
+                    dataset = type(dataset).model_validate(values)
+                in_scope_datasets.append(dataset)
             if not in_scope_datasets:
                 continue
 
@@ -1175,6 +1220,12 @@ This could be due to a change in how metrics are calculated, leading to outdated
         impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
+            # Say so: a schema home that resolves to no server directory used to switch the gate off silently.
+            warnings.warn(
+                f"Skipping task_data validation for {d.jsonl_fpath}: "
+                + _missing_server_dir_hint(impl_key, base_folder, c.name),
+                stacklevel=2,
+            )
             return None
         try:
             adapter = load_task_data_schema(server_dir)
@@ -1219,6 +1270,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
         impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
+            warnings.warn(
+                f"Skipping the dataset metrics hook lookup for {c.name}: "
+                + _missing_server_dir_hint(impl_key, base_folder, c.name),
+                stacklevel=2,
+            )
             return None
         try:
             return load_dataset_metrics_hook(server_dir)
@@ -1231,6 +1287,8 @@ This could be due to a change in how metrics are calculated, leading to outdated
         server_instance_configs: List[ServerInstanceConfig],
         task_data_validation: str = "warn",
         num_repeats: Optional[Union[int, Dict[str, int]]] = None,
+        *,
+        output_dir: Path,
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
@@ -1244,7 +1302,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 if d.type == "benchmark" and d.prompt_config:
                     prompt_cfg = load_prompt_config(d.prompt_config)
 
-                data_path = Path(d.jsonl_fpath)
+                data_path = output_dir / Path(d.jsonl_fpath).name
                 # Per-declaration output: every declaration of a jsonl_fpath gets its own prepared
                 # file (previously a second declaration silently truncated the first, so all copies
                 # carried the last declarer's stamp). Candidates are tried until one is unused, so
@@ -1260,8 +1318,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 )
                 prepare_path = next(p for p in candidates if p not in used_prepare_paths)
                 used_prepare_paths.add(prepare_path)
-                # Create the artifact dir if needed (the prepared file is written next to the
-                # cwd-relative jsonl_fpath, which may not exist when collating from a fresh cwd).
+                # Prepared rows belong to this run; source datasets may be shared or read-only.
                 prepare_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # The routing stamp: task_source names the declaring instance; the agent is
@@ -1303,7 +1360,13 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         # Count each source row once, using its original JSONL line index.
                         if validator is not None and row_index % d.num_repeats == 0:
                             validator.validate_row(row_index // d.num_repeats, row)
-                        if d.taskset is not None:
+                        if d.taskset is not None and is_materialized_task_row(row):
+                            # A prepared task row already names its taskset; it must be this dataset's.
+                            try:
+                                require_row_in_taskset(row, d.taskset)
+                            except ValueError as error:
+                                raise ValueError(f"{d.jsonl_fpath} row {row_index}: {error}") from error
+                        elif d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
                             # retain their capture keys after materialization, and keep a row's
                             # request to skip token capture.
@@ -1390,6 +1453,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 server_instance_configs=server_instance_configs,
                 task_data_validation=config.effective_task_data_validation,
                 num_repeats=config.num_repeats,
+                output_dir=parent / "prepared" / type,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:

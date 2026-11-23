@@ -16,8 +16,13 @@ swe_rebench_resources_server:
       evaluation_timeout: 3600
       is_verifying_golden_patch: false
       apply_anti_cheating: true
+      # A seed whose scrub did not complete fails (and the rollout is retried) instead of handing the agent
+      # a git history that may hold the fix.
+      anti_cheat_required: true
 
       sandbox_provider: sandbox
+      enforce_agent_no_network: false
+      sandbox_model_server: null
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
@@ -68,6 +73,8 @@ swe_rebench_golden_patch_resources_server:
       num_workers: 8
 
       sandbox_provider: sandbox
+      enforce_agent_no_network: false
+      sandbox_model_server: null
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200

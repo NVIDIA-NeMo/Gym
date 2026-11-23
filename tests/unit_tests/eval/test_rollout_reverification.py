@@ -1007,6 +1007,23 @@ class TestBuildVerifyPayload:
         assert result["task"] == "q1"
         assert "reward" not in result and NG_FAILURE_CLASS_KEY not in result
 
+    def test_preserves_a_saved_source_and_its_binding(self) -> None:
+        """A verifier that grades a saved source again gets the source, its SHA256 and its binding."""
+        saved = {"source_artifact": "<svg/>", "source_sha256": "a" * 64, "source_binding_sha256": "b" * 64}
+        pair = InputRolloutPair(
+            input={"task": "q1"},
+            rollout={
+                "response": {"output": "x"},
+                "reward": 0.0,
+                NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
+                **saved,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert result == {"task": "q1", "response": {"output": "x"}, **saved}
+
 
 # ---------------------------------------------------------------------------
 # Judge-failure recovery helpers (--judge-failed-only)
@@ -1605,7 +1622,12 @@ class TestRunVerificationPayloads:
     async def test_identity_stamps_stay_on_the_row_and_out_of_the_verify_request(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        row = self._make_row("agent_a") | {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+        row = self._make_row("agent_a") | {
+            "_ng_environment_server": "env_a",
+            "_ng_result_type": "legacy_agent",
+            "_ng_run_id": "source-run",
+            "_ng_attempt_index": 2,
+        }
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
         mock_client.post = AsyncMock(return_value=MagicMock())
@@ -1615,7 +1637,9 @@ class TestRunVerificationPayloads:
 
         sent = mock_client.post.await_args.kwargs["json"]
         assert "_ng_environment_server" not in sent and "_ng_result_type" not in sent
+        assert "_ng_run_id" not in sent and "_ng_attempt_index" not in sent
         assert returned["_ng_environment_server"] == "env_a"
+        assert (returned["_ng_run_id"], returned["_ng_attempt_index"]) == ("source-run", 2)
 
     @pytest.mark.parametrize("context_location", ["top_level", "task_data", "both"])
     @pytest.mark.parametrize("materialized", [False, True])
@@ -3597,11 +3621,16 @@ class TestRunFromConfigJudgeFailedOnly:
             return []
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
-    async def test_recovered_and_carried_rows_group_under_the_environment_server_of_the_run(
+    async def test_recovered_and_carried_rows_preserve_collection_identity(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Aggregation groups by the Environment Server stamp, so a recovered row must keep it as a carried one does."""
-        stamp = {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+        stamp = {
+            "_ng_environment_server": "env_a",
+            "_ng_result_type": "legacy_agent",
+            "_ng_run_id": "source-run",
+            "_ng_attempt_index": 2,
+        }
         self._setup_fixture(
             tmp_path,
             materialized=[self._mat(t) for t in range(3)],
@@ -3617,6 +3646,7 @@ class TestRunFromConfigJudgeFailedOnly:
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2]
         assert {(r["_ng_environment_server"], r["_ng_result_type"]) for r in rows} == {("env_a", "legacy_agent")}
         assert {rollout_run_key(r) for r in rows} == {"env_a"}
+        assert {(r["_ng_run_id"], r["_ng_attempt_index"]) for r in rows} == {("source-run", 2)}
 
     async def test_recovers_only_judge_failed_rows_and_merges_with_successes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

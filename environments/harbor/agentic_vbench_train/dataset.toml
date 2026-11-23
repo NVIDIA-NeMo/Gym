@@ -1,0 +1,28 @@
+# Agentic-VBench training tasks on the Harbor task shape: generated video-editing tasks of the four benchmark
+# families (Repair, Assembly, Sequencing, Repurpose), written into this folder by
+# `python -m benchmarks.agentic_vbench.prepare_harbor_env --tasks-root <root>` from a task root in the pinned
+# checkout's layout, with the adjustments the benchmark entry applies (see ../agentic_vbench/README.md). The
+# tasks are not the 100 pinned benchmark tasks: those are the evaluation set and never enter this split.
+#
+# `dataset.toml` declares no source: the tasks come from the training root the prepare script was given (the task
+# folders, the manifest and the preparation records are gitignored beside this file), and `gym eval run
+# agentic_vbench_train ...` and `gym dataset validate agentic_vbench_train` resolve the entry name to it.
+[dataset]
+name = "nvidia/agentic-vbench-train"
+version = "0.1.0"
+
+[gym]
+type = "train"
+domain = "agent"
+# The generated tasks derive from the benchmark's own clips and verifiers (PhiloLabs/agentic-vbench, Apache-2.0).
+license = "Apache 2.0"
+# The harness the recipe trains (OpenCode inside the task container, as the benchmark's published runs); a run with
+# another sandboxed session harness is possible with `--allow-unsupported-pairing` but is not what the entry
+# validates.
+allowed_agents = ["opencode_agent"]
+
+[gym.defaults]
+# The benchmark's published runs gave every verifier three times its declared budget: the repurpose judges
+# transcribe the agent's clip before they score it, and some repair metrics are single-threaded. The agent budgets
+# stay as the tasks declare them.
+verifier_timeout_multiplier = 3.0

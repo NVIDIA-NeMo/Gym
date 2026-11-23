@@ -51,12 +51,12 @@ if TYPE_CHECKING:
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config.global_config import MODEL_SAMPLING_KEY_NAME
+from nemo_gym.config.global_config import MODEL_SAMPLING_KEY_NAME, model_call_sampling_config
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, FailureClass, validate_failure_kind
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import observe_failure
-from nemo_gym.core.model_call_sampling import ModelCallSampling, model_call_sampling_config
+from nemo_gym.core.model_call_sampling import ModelCallSampling
 from nemo_gym.core.outcome_policy import OutcomeAction
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -306,6 +306,20 @@ class ResourcesSeedSessionRequest(BaseModel):
     episode_id: EpisodeId
     task_id: TaskId
     task_data: dict[str, JsonValue]
+    # The task's own responses_create_params, which task_data leaves out: the prompt params /verify also receives.
+    # A server whose seed_request_model declares a `responses_create_params` field gets them in its seed request,
+    # for a session built from the task's history or tools; every other server's task_data validates as before.
+    responses_create_params: dict[str, JsonValue] | None = None
+
+    # A return annotation would replace the model's serialization schema with that container schema.
+    @model_serializer(mode="wrap")
+    def _serialize_responses_create_params(self, handler: SerializerFunctionWrapHandler):
+        """Leave the key out when there are no params, so tool-server seeds keep the wire shape an older server's
+        extra="forbid" model accepts."""
+        result = handler(self)
+        if self.responses_create_params is None:
+            result.pop("responses_create_params", None)
+        return result
 
 
 def reject_partial_typed_seed(value: object) -> object:
@@ -388,11 +402,12 @@ class ResourcesSeedRejectedError(HTTPException, ValueError):
 
 
 class ResourcesSessionConflictError(HTTPException, ValueError):
-    """Refuse a seed or close that conflicts with what this server recorded for the session.
+    """Refuse a session request that conflicts with what this server recorded for the session.
 
     Examples: a ``resources_session_id`` already bound to another episode or task, a close that names another
-    episode, or a seed for a session that already closed. FastAPI answers it with HTTP 409, which an Environment
-    Server treats as terminal. It is also a ``ValueError`` for direct callers.
+    episode, a seed for a session that already closed, or a verify that names another task than the seed. FastAPI
+    answers it with HTTP 409, which an environment server treats as terminal. It is also a ``ValueError`` for direct
+    callers.
     """
 
     def __init__(self, detail: str) -> None:
@@ -1104,6 +1119,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """
         return None
 
+    def _typed_seed_fields(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
+        """What a typed seed's ``seed_request_model`` validates: its ``task_data``, plus the task's
+        ``responses_create_params`` when the model declares that field and the seed carries them."""
+        if (
+            body.responses_create_params is None
+            or "responses_create_params" not in self.seed_request_model.model_fields
+        ):
+            return body.task_data
+        return {**body.task_data, "responses_create_params": body.responses_create_params}
+
     async def seed_session(
         self,
         body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
@@ -1182,7 +1207,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ResourcesSessionConflictError("A typed seed cannot replace a cookie-seeded session")
             if session_id not in self._session_episodes:
                 try:
-                    task = self.seed_request_model.model_validate(body.task_data)
+                    task = self.seed_request_model.model_validate(self._typed_seed_fields(body))
                 except ValidationError as error:
                     raise ResourcesSeedRejectedError(
                         f"task_data is not a valid {self.seed_request_model.__name__}: {error}"
