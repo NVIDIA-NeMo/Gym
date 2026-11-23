@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The native arm of a parity run: pass after resources_servers/swe_rebench/configs/swe_rebench.yaml and your sandbox
+# provider's config (the full command is in ../README.md, "Run both arms").
+# OpenCode runs in a remote sandbox and must reach the policy model: advertise a routable address.
+use_absolute_ip: true
+# Optional: keep the server's clone of the upstream log parsers out of the home directory
+# (++swe_rebench_resources_server.resources_servers.swe_rebench.log_parser_cache_dir=<dir>).
+
+swe_rebench_resources_server:
+  resources_servers:
+    swe_rebench:
+      verified: false
+      # The pairing ships only an `example` split, which single_agent_turn does not run: the rows go in as `train`.
+      datasets:
+        - name: swe_rebench
+          type: train
+          taskset: swe_rebench
+          # You supply this: ++swe_rebench_native_rows=<absolute path>, the rows the adapter wrote with
+          # --native-rows-out for the same --ids-file as the Harbor dataset.
+          jsonl_fpath: ${swe_rebench_native_rows}
+          num_repeats: 1
+          license: Creative Commons Attribution 4.0 International
