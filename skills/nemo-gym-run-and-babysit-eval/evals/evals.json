@@ -3,7 +3,7 @@
   "evals": [
     {
       "id": "gym-eval-001-existing-config",
-      "prompt": "I have a working Gym evaluation config and want to run it unchanged. Prepare the smoke submission and acceptance-check commands. Preserve the supplied model deployment and benchmark protocol; do not invent model settings. Read the supplied evidence at /workspace/input/gym-eval-001-existing-config/evidence.json. This is an offline review: do not install packages, contact endpoints or schedulers, or dispatch jobs. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "prompt": "I have a working Gym evaluation config and want to run it unchanged. Prepare the smoke submission and acceptance-check commands. Preserve the supplied model deployment and benchmark protocol; do not invent model settings. Read the supplied evidence at /workspace/input/gym-eval-001-existing-config/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, or dispatch jobs. Give the concrete requested result, with commands when useful, in at most 700 words.",
       "expected_output": "A bounded smoke recipe preserving the supplied policy, with resolve-only and dry-run checks, a separate smoke output, limit=5 and num_repeats=1, followed by evidence-based inspect and acceptance criteria.",
       "assertions": [
         "Preserves the supplied model path, served name, parallelism and serving flags instead of re-deriving them.",
@@ -19,7 +19,7 @@
     },
     {
       "id": "gym-eval-002-new-config",
-      "prompt": "Prepare a complete Slurm evaluation YAML for this new model on IFBench. I only want the config and validation commands today, not submission. Use the site environment variable names and serving dimensions I supplied. Read the supplied evidence at /workspace/input/gym-eval-002-new-config/evidence.json. This is an offline review: do not install packages, contact endpoints or schedulers, or dispatch jobs. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "prompt": "Prepare a complete Slurm evaluation YAML for this new model on IFBench. I only want the config and validation commands today, not submission. Use the site environment variable names and serving dimensions I supplied. Read the supplied evidence at /workspace/input/gym-eval-002-new-config/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, or dispatch jobs. Give the concrete requested result, with commands when useful, in at most 700 words.",
       "expected_output": "A complete config wiring the supplied vLLM policy and IFBench protocol, using a full Gym commit and supplied environment variables, plus resolve-only, dry-run and server-config validation commands. No job is submitted.",
       "assertions": [
         "Wires services.policy to driver.policy_model: policy and driver.policy_model_type: vllm_model, preserving the requested parallelism and GPU capacity.",
@@ -159,7 +159,7 @@
     },
     {
       "id": "gym-eval-011-unpinned",
-      "prompt": "Review whether this evaluation config is ready to submit. I copied the Gym version setting from an old example. Give the smallest required correction and validation steps, without picking a different checkpoint. Read the supplied evidence at /workspace/input/gym-eval-011-unpinned/evidence.json. This is an offline review: do not install packages, contact endpoints or schedulers, or dispatch jobs. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "prompt": "Review whether this evaluation config is ready to submit. I copied the Gym version setting from an old example. Give the smallest required correction and validation steps, without picking a different checkpoint. Read the supplied evidence at /workspace/input/gym-eval-011-unpinned/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, or dispatch jobs. Give the concrete requested result, with commands when useful, in at most 700 words.",
       "expected_output": "Replace moving Gym ref main with the supplied full public commit, leave the checkpoint unchanged, and resolve/dry-run the corrected submission before any smoke or full run.",
       "assertions": [
         "Rejects the moving branch ref main as insufficiently reproducible for submission/recovery.",

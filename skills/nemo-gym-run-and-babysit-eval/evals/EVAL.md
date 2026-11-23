@@ -40,8 +40,9 @@ included. Assertions are authored from intended outcomes rather than generated f
 
 ## Notes
 
-Every entry explicitly selects its own fixture directory with `files: ["files/<case-id>"]`. The evaluator stages it at
-`/workspace/input/<case-id>/evidence.json`. No case can read another case's evidence or the judge's expected answer.
+Every entry explicitly selects its own fixture directory with `files: ["files/<case-id>"]`. The evaluator stages its
+`evidence.json` or `evidence.yaml` under `/workspace/input/<case-id>/`. No case can read another case's evidence or the
+judge's expected answer.
 The with-skill and without-skill arms receive identical requests, input files, runtime policy, expected outcomes and
 assertions. Outcomes never require reading a particular instruction file or invoking a bundled script. The two
 negative cases use JSON `null` for `expected_skill`; routing is measured separately from outcome correctness.
