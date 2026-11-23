@@ -412,6 +412,17 @@ async def test_the_python_build_is_downloaded_once_and_checked_on_every_use(pyth
         await sandbox_python._python_archive(platform)
 
 
+async def test_python_3_14_is_downloaded_from_the_release_that_publishes_it(python_build, monkeypatch) -> None:
+    monkeypatch.setattr(sandbox_python, "_PYTHON_314_SHA256", {"x86_64/gnu": python_build.pinned})
+
+    await sandbox_python._python_archive(SandboxPlatform("x86_64", "gnu", 35), version="3.14.7")
+
+    assert python_build.urls == [
+        "https://github.com/astral-sh/python-build-standalone/releases/download/20260805/"
+        "cpython-3.14.7%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    ]
+
+
 async def test_a_python_build_that_does_not_match_its_pin_is_not_cached(python_build, tmp_path) -> None:
     python_build.body = b"something else"
 
