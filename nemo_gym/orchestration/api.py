@@ -613,12 +613,15 @@ class BenchmarkRunConfig(_StrictModel):
         return self
 
     @model_serializer(mode="wrap")
-    def _omit_unset_target(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        # A benchmark without a task target saves the same config as before the fields existed.
+    def _omit_unset_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A benchmark without a task target or node_local saves the same config as before the fields existed.
+        # Pydantic keeps only one model_serializer per class, so every omitted field goes here.
         data = handler(self)
         for key in ("target", "agent", "sandbox"):
             if data.get(key) is None:
                 data.pop(key, None)
+        if self.node_local is False:
+            data.pop("node_local", None)
         return data
 
     # True enables auto-resume with ResumeConfig defaults; pass a ResumeConfig to tune
@@ -641,14 +644,6 @@ class BenchmarkRunConfig(_StrictModel):
         if self.node_local is False:
             return None
         return NodeLocalConfig() if self.node_local is True else self.node_local
-
-    @model_serializer(mode="wrap")
-    def _omit_unset_node_local(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        # A run without it saves the same config as before the setting existed.
-        data = handler(self)
-        if self.node_local is False:
-            data.pop("node_local", None)
-        return data
 
 
 # A query parameter's value in a URL, which may carry a credential (`?api_key=...`).
