@@ -1725,7 +1725,7 @@ def test_unobserved_dialect_under_capture_prefix_marks_incomplete(tmp_path):
 
 def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
     class _BrokenSink:
-        async def mark_incomplete(self, rollout_id, model_call_id=""):
+        async def mark_incomplete(self, rollout_id, model_call_id="", *, identity=None):
             raise RuntimeError("sink down")
 
     forwarded, sent = _run_capture_middleware_on(
@@ -1734,6 +1734,25 @@ def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
 
     assert forwarded == ["/v1/completions"]
     assert sent[0]["status"] == 200
+
+
+def test_an_unobserved_dialect_marks_the_rollout_under_the_calling_agent_instance(tmp_path):
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
+
+    token_store = TokenCaptureStore(tmp_path)
+    forwarded, _sent = _run_capture_middleware_on(
+        "/ng-rollout/hole-0/ng-agent-instance/judge.1/training-token-capture/v1/completions", token_store=token_store
+    )
+
+    assert forwarded == ["/v1/completions"]
+    # ``_run_capture_middleware_on`` names the model server ``srv``; the mark has no call id.
+    [mark] = token_store.incomplete_path_for("hole-0").read_text().splitlines()
+    assert json.loads(mark) == {
+        "model_call_id": "",
+        "agent_instance": "judge.1",
+        "agent_kind": "judge",
+        "model_ref": {"type": "responses_api_models", "name": "srv"},
+    }
 
 
 def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path):
@@ -1993,3 +2012,35 @@ def test_a_handled_upstream_error_reply_names_its_failure():
     assert response.headers["content-type"].startswith("application/json")
     report = FailureHeader.decode(response.headers)
     assert report is not None and report.failure_id == model.event_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["responses", "chat/completions"])
+async def test_capture_forwards_nonstreaming_body_before_app_returns(tmp_path, surface):
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    sent = []
+    response_body = {"type": "http.response.body", "body": b'{"id":"reply","output":[]}', "more_body": False}
+
+    async def app(scope, receive, send):
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
+        await send(response_body)
+        # ASGI applications may keep running background work after delivering a JSON response.
+        # Only SSE terminal events need to wait for capture persistence.
+        assert sent[-1] == response_body
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"input":[]}', "more_body": False}
+
+    async def send(message):
+        sent.append(dict(message))
+
+    await _CaptureMiddleware(app, store=store, model_server_name="model")(
+        {"type": "http", "path": f"/ng-rollout/plain-response/v1/{surface}", "headers": []},
+        receive,
+        send,
+    )
+    assert sent[-1] == response_body
+    assert len(store.read("plain-response")) == 1

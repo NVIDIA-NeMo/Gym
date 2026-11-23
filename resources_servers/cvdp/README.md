@@ -1,5 +1,7 @@
 # CVDP Benchmark
 
+For heavy repository tasks, follow the [CVDP heavy preparation and run procedure](https://docs.nvidia.com/nemo/gym/main/build-verifiers/verification-patterns/execution-and-state-match#cvdp-heavy-repository-tasks).
+
 This resources server is for model evaluation purposes. It is reproducing [CVDP](https://github.com/NVlabs/cvdp_benchmark).
 
 Models are given a hardware design specification and asked to produce a SystemVerilog
@@ -66,11 +68,11 @@ with a real harness agent (`hermes_agent`, `opencode_agent` or `claude_code_agen
    and coreutils besides the simulators.
 3. `verify` archives `rtl/` and `verif/` (and any target file outside them), copies the archive out, stops the
    sandbox, and grades the RTL and testbench sources that differ from what was staged, plus the target files, in the
-   task's harness as before. An agent that wrote nothing is graded on the text of its response, as the legacy agentic
-   flavor is, and a response with no text at all still scores 0. Files the agent made unreadable are made readable
-   again before archiving, and GNU tar skips any that still are not, so they cannot mask the sample. A verify whose
-   session is gone, whose harvest the provider failed, or whose tar failed to write the archive (exit 2, such as a
-   full disk) is a masked sample instead of a 0.
+   task's harness as before. As on the legacy agentic flavor, an agent that wrote nothing is graded on the text of
+   its response, and the files an agent wrote are graded even when its response has no text. Files the agent made
+   unreadable are made readable again before archiving, and GNU tar skips any that still are not, so they cannot
+   mask the sample. A verify whose session is gone, whose harvest the provider failed, or whose tar failed to write
+   the archive (exit 2, such as a full disk) is a masked sample instead of a 0.
 4. `close_session` stops a sandbox that verify has not.
 
 Apptainer reattaches a sandbox only on the host and as the user that started it, so the resources server and the
@@ -204,6 +206,37 @@ OSS_PNR_IMAGE=nvidia/cvdp-sim:v1.0.0
 
 The data can be found [on Hugging Face](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset). 
 
+### Optional: pinned public non-agentic v1.1.0 preparation
+
+To reproduce the public 302-task, non-commercial v1.1.0 generation split without
+running upstream `local_export`, run from the Gym repository root:
+
+```bash
+python -m resources_servers.cvdp.scripts.convert_to_gym \
+    --from-hf \
+    --output resources_servers/cvdp/data/cvdp_v1.1.0_nonagentic_code_generation_no_commercial_gym.jsonl
+```
+
+This mode downloads `cvdp_v1.1.0_nonagentic_code_generation_no_commercial.jsonl`
+from `nvidia/cvdp-benchmark-dataset` at commit
+`5b807d945f6a99aa645f7e43a64a2115e281b4bf`. It checks the raw SHA-256, the 302-task
+count, and the converted output SHA-256 before replacing the destination. A failed
+check leaves any previous output intact. Add `--dataset <raw.jsonl>` to use a local
+copy without contacting Hugging Face; the same integrity checks apply.
+
+The prompts use CVDP's bundled category/schema helpers: single-file answers are
+plain text and multifile answers are JSON. Starting RTL is retained; reference
+answers are excluded. In `.vlt` harness files only, this recipe removes the
+unsupported `PROCASSINIT` lint directive, retaining all other rules.
+
+To intentionally prepare a different compatible source, supply `--hf-revision`,
+`--hf-file`, `--expected-sha256`, `--expected-output-sha256`, and `--expected-count`
+with reviewed values. The defaults are specific to this split, not agentic,
+heavy-agentic, or commercial data. The original export/conversion workflow below
+remains available for those datasets. This command only prepares JSONL; prepare
+verifier images separately as described below and point your chosen config at
+the resulting file. It does not change configs, upload to a registry, or run evaluation.
+
 ## Step 1 — Download dataset from HF
 
 ```bash
@@ -323,6 +356,10 @@ gym eval run --no-serve \
 At the end of this step, you should have rollouts.jsonl, rollouts_agent_metrics.json, rollouts_materialized_inputs.jsonl, rollouts_reward_profiling.jsonl.
 
 ### Step 3 — Generate report
+
+The report requires measured rollouts and rejects masked or explicitly incomplete
+verifications. Resolve inconclusive tasks before reporting; dropping them alone
+would let the composite reporter count missing samples as failures.
 
 ```bash
 python resources_servers/cvdp/scripts/cvdp_pass_at_k_report.py \

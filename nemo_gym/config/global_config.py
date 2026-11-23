@@ -40,7 +40,7 @@ import rich
 from omegaconf import MISSING, DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import InterpolationResolutionError
 from openai import __version__ as openai_version
-from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym.artifacts.exporters import setup_exporters
@@ -98,6 +98,12 @@ ray_version = _installed_version("ray")
 _GLOBAL_CONFIG_DICT = None
 _SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
+# Names a file that holds the config, for a config too long for an environment variable.
+NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT_FILE"
+# Linux refuses to start a process ("Argument list too long") when one environment variable is longer than 32
+# memory pages, which is 128 KiB with 4 KiB pages, the smallest page size. A config near that length reaches a
+# server in a file.
+MAX_CONFIG_DICT_ENV_BYTES = 120 * 1024
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
 ENTRYPOINT_KEY_NAME = "entrypoint"
@@ -106,6 +112,10 @@ HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
 HEAD_SERVER_DEPS_KEY_NAME = "head_server_deps"
 HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
+# true: the head server's /global_config_dict_yaml keeps credential values (api keys, passwords, *_token). By default
+# it masks them: anything on the head server's network (an agent sandbox sharing its loopback) can read that route,
+# and Gym-launched servers get the unmasked config from their environment instead.
+HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME = "head_server_serve_credentials"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
@@ -153,7 +163,7 @@ MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # See ``nemo_gym/models/token_capture/config.py``.
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
 # Set by a training framework whose rows carry model-call sampling values.
-# See ``nemo_gym/core/model_call_sampling.py``.
+# See ``ModelCallSamplingConfig`` below, and ``nemo_gym/core/model_call_sampling.py`` for the values themselves.
 MODEL_CALL_SAMPLING_BLOCK = "model_call_sampling"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
@@ -174,6 +184,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     DISALLOWED_PORTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
+    HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME,
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
@@ -227,6 +238,8 @@ ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
+        "agentic_mme_agent",
+        "agentvista_agent",
         "browsecomp_agent",
         "claude_code_agent",
         "cline_agent",
@@ -238,6 +251,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",
+        "legal_agent_bench_native",
         "kilocode_agent",
         "langchain_deepagents_agent",
         "kimi_code_agent",
@@ -250,10 +264,13 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "pi_agent",
         "pool_agent",
         "prime_agent",
+        "qwen_code_agent",
         "simple_agent",
         "simple_strands_agent",
         "stirrup_agent",
+        "terminus_2_agent",
         "terminus_2_sandboxed_agent",
+        "wildclawbench_agent",
     }
 )
 # Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
@@ -271,6 +288,7 @@ _LEGACY_RELAY_KEPT_KEYS = (
     "port",
     "num_workers",
     "uvicorn_reuse_port",
+    "default_episode_timeout_seconds",
 )
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
@@ -288,6 +306,46 @@ SERVER_TYPE_KEYS: Tuple[str, ...] = (
     MODEL_SERVER_TYPE_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
 )
+
+
+class ModelCallSamplingConfig(BaseModel):
+    """The global ``model_call_sampling`` block. A training framework sets it when its rows carry values.
+
+    Its presence marks the run: resources servers then send ``null`` with the model calls they make through Gym's
+    server client while handling a request, so their judges keep their own sampling.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Model Servers of the agents the framework trains. A generation call without a segment fails on them, so a path
+    # that drops the values fails instead of sampling with others. They cannot also pin sampling with
+    # ``sampling_overrides``; they may pin only ``logprobs`` and ``top_logprobs``, which change what the engine reports.
+    required_model_servers: list[str] = Field(default_factory=list)
+
+
+def model_call_sampling_config(global_config_dict: Optional[Mapping[str, Any]]) -> Optional[ModelCallSamplingConfig]:
+    """Return the run's ``model_call_sampling`` block, or ``None`` when the run sets none.
+
+    Raises ``ValueError`` when ``required_model_servers`` names a server that is not a Model Server of the run: a
+    misspelled name would otherwise leave the trained agent's Model Server unenforced, without an error.
+    """
+    if not isinstance(global_config_dict, Mapping):
+        return None
+    block = global_config_dict.get(MODEL_CALL_SAMPLING_BLOCK)
+    if block is None:
+        return None
+    config = ModelCallSamplingConfig.model_validate(block)
+    model_servers = {
+        name
+        for name, value in global_config_dict.items()
+        if isinstance(value, Mapping) and MODEL_SERVER_TYPE_KEY_NAME in value
+    }
+    if unknown := sorted(set(config.required_model_servers) - model_servers):
+        raise ValueError(
+            f"{MODEL_CALL_SAMPLING_BLOCK}.required_model_servers names servers that are not Model Servers in this "
+            f"run: {unknown}"
+        )
+    return config
 
 
 def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
@@ -553,7 +611,18 @@ class GlobalConfigDictParser(BaseModel):
         original_get_args_parser = hydra_main_module.get_args_parser
 
         def new_get_args_parser():
-            parser: ArgumentParser = original_get_args_parser()
+            # Python 3.14's argparse checks each help string in add_argument and rejects hydra-core 1.3.x's
+            # `--shell-completion`, whose help is an object rather than a str ("badly formed help string"). The check
+            # is skipped only while hydra builds its parser; Gym replaces hydra's help, so that string is never shown.
+            # hydra-core 1.4 applies the same workaround itself; remove this once Gym requires hydra-core>=1.4.
+            original_check_help = getattr(ArgumentParser, "_check_help", None)
+            if original_check_help is not None:
+                ArgumentParser._check_help = lambda self, action: None
+            try:
+                parser: ArgumentParser = original_get_args_parser()
+            finally:
+                if original_check_help is not None:
+                    ArgumentParser._check_help = original_check_help
             # Set the conflict handlers to resolve so we can disable the help.
             parser.conflict_handler = "resolve"
             for action_group in parser._action_groups:
@@ -1255,6 +1324,84 @@ the check."""
             elif OmegaConf.is_missing(original, key):
                 composed[key] = MISSING
 
+    def _raise_on_ignored_agent_type(
+        self, global_config_dict: DictConfig, selected_instances: List[_AgentInstance]
+    ) -> None:
+        """Refuse an `--agent-type` selection that no task of the composed config runs on.
+
+        Composition puts the selected agent in place of the workload's only when the selected config leaves
+        `resources_server.name` unset (`???`) or is a LangGraph agent. Session agents (codex_agent, hermes_agent,
+        opencode_agent, ...) set `resources_server: null` instead, so selecting one only adds an instance nothing
+        routes to, while every task still runs on the agent the workload binds. Each dataset the run would collect
+        (those of type `split`, when the run sets one) must resolve, as rollout dispatch resolves it, to an agent of
+        a type the selected config declares. A config that declares no agent instance selects nothing to check, and
+        a dataset that cannot be routed is left to data preparation to report.
+        """
+        selected_types = {instance.agent_type for instance in selected_instances}
+        if not selected_types:
+            return
+        loaded = [instance.name for instance in selected_instances if instance.name in global_config_dict]
+        bind_name = loaded[0] if len(loaded) == 1 else "<selected agent instance>"
+        split = global_config_dict.get("split")
+        agent_types = {agent.name: agent.agent_type for agent in self._agent_instances(global_config_dict)}
+        mismatches: List[str] = []
+        rebinds: List[str] = []
+        for owner_name, owner in global_config_dict.items_ex(resolve=False):
+            if owner_name in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS or not isinstance(owner, DictConfig):
+                continue
+            servers = owner.get(RESOURCES_SERVER_TYPE_KEY_NAME, owner.get(AGENT_SERVER_TYPE_KEY_NAME))
+            if not isinstance(servers, DictConfig) or len(servers) != 1:
+                continue
+            server = next(iter(servers.values()))
+            datasets = server.get("datasets") if isinstance(server, DictConfig) else None
+            for dataset in datasets if isinstance(datasets, ListConfig) else []:
+                if not isinstance(dataset, DictConfig) or (split is not None and dataset.get("type") != split):
+                    continue
+                taskset = dataset.get("taskset")
+                try:
+                    agent_name = resolve_dataset_agent(
+                        global_config_dict, str(owner_name), dataset.get("agent"), taskset=taskset
+                    )
+                except ConfigError:
+                    continue
+                agent_type = agent_types.get(agent_name) if agent_name is not None else None
+                if agent_type is None or agent_type in selected_types:
+                    continue
+                source = f"taskset {taskset!r}" if taskset is not None else f"dataset {dataset.get('name')!r}"
+                environment_name = taskset_environment_server_name(global_config_dict, taskset)
+                if environment_name is None:
+                    mismatches.append(f"  - {source} of {owner_name} runs on {agent_name} ({agent_type})")
+                    continue
+                server_type = next(iter(global_config_dict[environment_name][ENVIRONMENT_SERVER_TYPE_KEY_NAME]))
+                mismatches.append(
+                    f"  - {source} of {owner_name} routes to {environment_name}, which runs {agent_name} ({agent_type})"
+                )
+                rebinds.append(
+                    f"++{environment_name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{AGENT_SERVER_REF_KEY_NAME}"
+                    f".name={bind_name}"
+                )
+        if not mismatches:
+            return
+
+        selected = ", ".join(f"{instance.name} ({instance.agent_type})" for instance in selected_instances)
+        listing = "\n".join(dict.fromkeys(mismatches))
+        message = (
+            f"--agent-type loaded {selected}, but these tasks would still run on another agent:\n{listing}\n\n"
+            "--agent-type puts the selected agent in place of the workload's only when its config leaves "
+            "`resources_server.name` unset (`???`) or it is a LangGraph agent. Session agents set "
+            "`resources_server: null`, so they run only where the workload config binds them. Drop --agent-type to run "
+            "the configured agent, or run a config that binds the selected one: `gym list benchmarks` lists the "
+            "benchmark configs that ship, and 'Swap the agent or the benchmark' in the Integrate Existing Agents guide "
+            "shows how to write one."
+        )
+        if rebinds:
+            message += (
+                "\nTo bind it from the command line, override the Environment Server's agent_server; the routed "
+                "resources server's `allowed_agents` must list the agent, or pass --allow-unsupported-pairing:\n"
+                + "\n".join(f"  {rebind}" for rebind in dict.fromkeys(rebinds))
+            )
+        raise AgentCompositionError(message)
+
     def _front_agents_without_environment_server(self, global_config_dict: DictConfig) -> None:
         """Give every agent an environment server, since rollout collection reaches agents only through one.
 
@@ -1617,13 +1764,19 @@ For example, on the command line:
         # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
         OmegaConf.set_struct(cli_global_config_dict, False)
 
+        # The config `--agent-type` loaded. Its LangGraph agent is the one composition puts in place of the workload's
+        # agent, and after composition the workload must run the selected agent (see _raise_on_ignored_agent_type).
         selected_agent = None
-        selected_config_path = cli_global_config_dict.pop("_selected_langgraph_config", None)
+        selected_instances: List[_AgentInstance] = []
+        selected_config_path = cli_global_config_dict.pop("_selected_agent_config", None)
         if selected_config_path:
             selected_instances = self._agent_instances(_load_config_yaml(selected_config_path))
-            if len(selected_instances) != 1 or selected_instances[0].agent_type != "langgraph_agent":
-                raise AgentCompositionError("The selected LangGraph config must declare exactly one LangGraph agent.")
-            selected_agent = selected_instances[0].name
+            if any(instance.agent_type == "langgraph_agent" for instance in selected_instances):
+                if len(selected_instances) != 1:
+                    raise AgentCompositionError(
+                        "The selected LangGraph config must declare exactly one LangGraph agent."
+                    )
+                selected_agent = selected_instances[0].name
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
@@ -1692,6 +1845,8 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
+        # Before the relays below, so an ignored selection fails before the warning about its unrouted instance.
+        self._raise_on_ignored_agent_type(global_config_dict, selected_instances)
         # NOTE(martas): this is for catching agents not attached to an environment server
         self._front_agents_without_environment_server(global_config_dict)
 
@@ -2021,7 +2176,8 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
     """The global config dict when this process already has one; never triggers a CLI parse.
 
     Returns the cached dict, or the one the parent injected via
-    NEMO_GYM_CONFIG_DICT (caching it), or None in a bare process. Library code
+    NEMO_GYM_CONFIG_DICT or the file NEMO_GYM_CONFIG_DICT_FILE names (caching it),
+    or None in a bare process. Library code
     that only wants to *consult* the config should use this instead of
     `get_global_config_dict`, which falls through to a full CLI/hydra parse.
     """
@@ -2030,6 +2186,9 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
         return _GLOBAL_CONFIG_DICT
 
     nemo_gym_config_dict_str_from_env = getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME)
+    config_dict_file = getenv(NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME)
+    if not nemo_gym_config_dict_str_from_env and config_dict_file:
+        nemo_gym_config_dict_str_from_env = Path(config_dict_file).read_text(encoding="utf-8")
     if nemo_gym_config_dict_str_from_env:
         global_config_dict = OmegaConf.create(nemo_gym_config_dict_str_from_env)
 
@@ -2088,7 +2247,7 @@ def get_global_config_dict(
 
     Then, the global config dict will be cached and reused.
 
-    If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME. The config dict will be read directly off this variable, cached, and returned with no additional validation.
+    If this function is run by a child server of the main proc, that child will have been spun up with an environment variable with key NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, or with NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME naming a file for a config too long for a variable. The config dict will be read directly off this variable or file, cached, and returned with no additional validation.
     """
     existing_global_config_dict = maybe_get_global_config_dict()
     if existing_global_config_dict is not None:

@@ -17,6 +17,7 @@ import re
 import shlex
 from typing import Any
 
+from nemo_gym.data.tasks.harbor.prepare import HARBOR_OUTPUT_ROOT_KEY
 from nemo_gym.utils.text import hydra_literal
 
 
@@ -27,6 +28,12 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
         full_key = f"{prefix}.{key}" if prefix else key
         if isinstance(value, dict):
             args.extend(flatten_run_args(value, full_key))
+        elif isinstance(value, list) and any(isinstance(v, (dict, list, tuple)) for v in value):
+            try:
+                text = hydra_literal(value)
+            except ValueError as error:
+                raise ValueError(f"The `run` override {full_key!r} cannot be passed to the job: {error}") from error
+            args.append(shlex.quote(f"+{full_key}={text}"))
         elif isinstance(value, list):
             items = ",".join(str(v) for v in value)
             args.append(shlex.quote(f"+{full_key}=[{items}]"))
@@ -37,15 +44,37 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
     return args
 
 
+def render_target_args(target: str | None, *, agent: str | None, sandbox: str | None, output_root: str) -> list[str]:
+    """The shell-quoted TARGET, ``--agent``, ``--sandbox`` and output root of a task run, which go ahead of its
+    Hydra overrides.
+
+    ``output_root`` is where the run keeps the rows and run config it prepares. The driver works in a fresh checkout
+    on every allocation, so the default (relative to the working directory) would name the rows by a different
+    absolute path each time and a continuation would no longer match the run it resumes; the caller passes a folder
+    in the benchmark's job directory instead.
+
+    Empty without a target, so a benchmark that sets none renders exactly as before.
+    """
+    if target is None:
+        return []
+    args = [shlex.quote(target)]
+    if agent is not None:
+        args += ["--agent", shlex.quote(agent)]
+    if sandbox is not None:
+        args += ["--sandbox", shlex.quote(sandbox)]
+    args.append(shlex.quote(f"+{HARBOR_OUTPUT_ROOT_KEY}={hydra_literal(output_root)}"))
+    return args
+
+
 _EXPORT_SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
 
 
 def flatten_export_args(settings: dict[str, Any], prefix: str = "") -> list[str]:
     """Flatten export settings into shell-quoted `+key.path=value` tokens that Hydra reads back unchanged.
 
-    Unlike `flatten_run_args`, which only shell-quotes, each value is encoded for Hydra first, so a string keeps
-    its type and its characters, and numbers, booleans and null keep theirs. The shell quotes are gone by the time
-    Hydra parses the argument, which is why shell quoting alone is not enough.
+    Unlike `flatten_run_args`, which shell-quotes scalars and flat lists as they are, each value is encoded for
+    Hydra first, so a string keeps its type and its characters, and numbers, booleans and null keep theirs. The
+    shell quotes are gone by the time Hydra parses the argument, which is why shell quoting alone is not enough.
     """
     args = []
     for key, value in settings.items():

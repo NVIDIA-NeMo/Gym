@@ -39,6 +39,7 @@ entries and some servers enforce it, so the default list is trimmable.
 
 import asyncio
 import json
+from collections.abc import Collection, Iterator
 from contextlib import nullcontext
 from time import time
 from typing import Any, Dict, List, Literal, Optional
@@ -58,6 +59,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # Turn separators. The transcript emits exactly one newline before each role
@@ -166,16 +168,23 @@ def litellm_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def render_transcript(messages: List[Dict[str, Any]]) -> str:
+def render_transcript(messages: List[Dict[str, Any]], assistant_text: bool = False) -> str:
     """Flatten a conversation to a `Role: content` transcript.
 
     One newline precedes each role marker and no blank lines separate turns,
     which is what makes the stop markers land exactly on turn boundaries.
+
+    An assistant turn with tool calls renders as its calls only, which is what
+    the reference bridge showed the model. With `assistant_text`, text the turn
+    carried alongside its calls renders first, as its own "Assistant:" line.
     """
     blocks = []
     for message in messages:
         role = message.get("role")
         if message.get("tool_calls"):
+            text = message_text(message.get("content")).strip() if assistant_text else ""
+            if text:
+                blocks.append(f"\nAssistant: {text}")
             calls = [litellm_tool_call(call) for call in message["tool_calls"]]
             blocks.append(f"\nAssistant (tool call): {json.dumps(calls, ensure_ascii=False)}")
             continue
@@ -224,6 +233,41 @@ def close_json_prefix(text: str) -> Optional[str]:
     return text + "".join(reversed(stack))
 
 
+def complete_elements_prefix(text: str) -> Optional[str]:
+    """The complete elements of the JSON array that opens `text`, closed, or None if there are none.
+
+    For a generation cut off inside the array: the elements before the cut are whole, so they are
+    kept, and the element the cut landed in is dropped rather than completed. An array that closed
+    before the cut (the cut landed on or after its `]`) is returned whole.
+    """
+    if not text.startswith("["):
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    last_end = -1
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth == 1:
+                last_end = index
+            elif depth == 0:
+                return text[: index + 1]
+    return text[: last_end + 1] + "]" if last_end >= 0 else None
+
+
 def _loads(text: str) -> Any:
     # strict=False admits raw control characters (e.g. a literal newline) inside
     # strings. Heredocs dominate these edits, and a base model sometimes writes a
@@ -231,36 +275,54 @@ def _loads(text: str) -> Any:
     return json.loads(text, strict=False)
 
 
-def parse_bash_tool_calls(raw: str, max_calls: int = 3) -> List[Dict[str, Any]]:
-    """The `bash` tool calls in a base model's generation, at most `max_calls`.
+def _generated_calls(
+    raw: str, keep_complete: bool = False, truncated: bool = False
+) -> Iterator[tuple[str, Dict[str, Any]]]:
+    """(name, arguments) for each call in the first JSON array of a generation.
 
-    The harness executes every call in a turn, in order, so all are returned --
-    capped, as the reference caps a base model's calls per turn at 3. Accepts
-    each call nested ({"function": {"name", "arguments"}}, the shape the
+    Accepts each call nested ({"function": {"name", "arguments"}}, the shape the
     transcript shows the model) or flat ({"name", "arguments"}), and arguments
-    as a JSON object or a JSON-encoded string. Empty list when none parse.
+    as a JSON object or a JSON-encoded string. Calls whose arguments are not an
+    object are skipped.
+
+    With `keep_complete`, the calls written in full still count when the array
+    cannot be closed or parsed whole. With `truncated` too (the generation hit
+    max_tokens), only those count: the call the cut landed in is dropped even
+    where closing its brackets would parse, since its arguments may be partial
+    (a missing key, a number cut short).
     """
     start = raw.find("[")
     if start < 0:
-        return []
-    closed = close_json_prefix(raw[start:])
-    if closed is None:
-        return []
-    try:
-        calls = _loads(closed)
-    except json.JSONDecodeError:
-        return []
+        return
+    text = raw[start:]
+    if keep_complete and truncated:
+        attempts = [complete_elements_prefix]
+    elif keep_complete:
+        attempts = [close_json_prefix, complete_elements_prefix]
+    else:
+        attempts = [close_json_prefix]
+    calls = None
+    for attempt in attempts:
+        closed = attempt(text)
+        if closed is None:
+            continue
+        try:
+            calls = _loads(closed)
+        except json.JSONDecodeError:
+            continue
+        break
+    if calls is None:
+        return
     if isinstance(calls, dict):
         calls = [calls]
     if not isinstance(calls, list):
-        return []
-    found: List[Dict[str, Any]] = []
+        return
     for call in calls:
         if not isinstance(call, dict):
             continue
         function = call["function"] if isinstance(call.get("function"), dict) else call
         name = function.get("name")
-        if not isinstance(name, str) or name.strip() != "bash":
+        if not isinstance(name, str):
             continue
         arguments = function.get("arguments")
         if isinstance(arguments, str):
@@ -268,11 +330,48 @@ def parse_bash_tool_calls(raw: str, max_calls: int = 3) -> List[Dict[str, Any]]:
                 arguments = _loads(arguments)
             except json.JSONDecodeError:
                 continue
-        if not isinstance(arguments, dict):
-            continue
+        if isinstance(arguments, dict):
+            yield name.strip(), arguments
+
+
+def parse_bash_tool_calls(raw: str, max_calls: int = 3) -> List[Dict[str, Any]]:
+    """The `bash` tool calls in a base model's generation, at most `max_calls`.
+
+    The harness executes every call in a turn, in order, so all are returned --
+    capped, as the reference caps a base model's calls per turn at 3. Only the
+    `command` argument is kept, and a call without a non-blank one is dropped.
+    Empty list when none parse.
+    """
+    found: List[Dict[str, Any]] = []
+    for name, arguments in _generated_calls(raw):
         command = arguments.get("command")
-        if isinstance(command, str) and command.strip():
+        if name == "bash" and isinstance(command, str) and command.strip():
             found.append({"name": "bash", "arguments": {"command": command}})
+            if len(found) >= max_calls:
+                break
+    return found
+
+
+def parse_tool_calls(
+    raw: str, tool_names: Collection[str], max_calls: int = 3, truncated: bool = False
+) -> List[Dict[str, Any]]:
+    """The calls in a base model's generation that name one of `tool_names`, at most `max_calls`.
+
+    For tool sets other than mini-swe-agent's `bash` (e.g. AutomationBench's
+    api_search / api_fetch / base64_encode): arguments are passed through as
+    the model wrote them, since only the tool knows its own schema. Calls to
+    other names are dropped. Empty list when none parse.
+
+    A generation cut off mid-call (`truncated`: it hit max_tokens) keeps the
+    calls it completed before the cut; the cut call is dropped, never completed. A base model batching many calls
+    otherwise loses the whole turn to its last one: on AutomationBench, Super
+    3.5 base lost a fifth of its rollouts this way, mostly to runaway batches
+    that ran past max_tokens after more calls than the cap keeps.
+    """
+    found: List[Dict[str, Any]] = []
+    for name, arguments in _generated_calls(raw, keep_complete=True, truncated=truncated):
+        if name in tool_names:
+            found.append({"name": name, "arguments": arguments})
             if len(found) >= max_calls:
                 break
     return found
@@ -309,6 +408,19 @@ class BaseModelServerConfig(BaseResponsesAPIModelConfig):
     # at 3; the harness executes every call it keeps.
     max_tool_calls_per_turn: int = 3
 
+    # The tools a function-calling turn may name. None is mini-swe-agent's wire:
+    # `bash` only, keeping just its `command`. A list accepts calls to any of
+    # those names with whatever JSON-object arguments the model wrote.
+    tool_names: Optional[List[str]] = None
+
+    # Render the text an assistant turn carried alongside its tool calls, as an
+    # "Assistant:" line before the calls. Off by default: the reference bridge
+    # dropped it, and DeepSWE's prompts are checked byte-for-byte against it.
+    # Turn it on where no such reference exists and the traces narrate their
+    # calls (AutomationBench). The primer still opens the candidate's turn on
+    # the tool-call line, so the candidate itself cannot write text first.
+    render_assistant_text: bool = False
+
     max_tokens: int = 1024
     temperature: float = 0.6
     top_p: Optional[float] = None
@@ -339,16 +451,24 @@ class BaseModelServer(SimpleResponsesAPIModel):
         self._stop = list(defaults["stop"] if self.config.stop is None else self.config.stop)
         return super().model_post_init(context)
 
-    def _parse_calls(self, text: str) -> List[Dict[str, Any]]:
+    def _parse_calls(self, text: str, truncated: bool = False) -> List[Dict[str, Any]]:
         if self.config.wire != "function_calling":
             return []
+        if self.config.tool_names is not None:
+            return parse_tool_calls(text, self.config.tool_names, self.config.max_tool_calls_per_turn, truncated)
         return parse_bash_tool_calls(text, self.config.max_tool_calls_per_turn)
 
     def build_prompt(self, messages: List[Dict[str, Any]]) -> str:
         header = ""
         if self.config.tool_definitions_json:
             header = f"\nTool definitions:\n{self.config.tool_definitions_json}\n\n"
-        return header + render_transcript(messages) + self._steer + self._primer + self._prefill
+        return (
+            header
+            + render_transcript(messages, self.config.render_assistant_text)
+            + self._steer
+            + self._primer
+            + self._prefill
+        )
 
     async def _complete(
         self, messages: List[Dict[str, Any]], body_dict: Dict[str, Any]
@@ -403,7 +523,7 @@ class BaseModelServer(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         text, usage, finish_reason = await self._complete(body_dict.get("input") or [], body_dict)
 
-        calls = self._parse_calls(text)
+        calls = self._parse_calls(text, truncated=finish_reason == "length")
         output_items: List[Dict[str, Any]]
         if calls:
             output_items = [
@@ -467,7 +587,7 @@ class BaseModelServer(SimpleResponsesAPIModel):
             body_dict.setdefault("max_output_tokens", body_dict["max_tokens"])
         text, usage, finish_reason = await self._complete(body_dict.get("messages") or [], body_dict)
         message: Dict[str, Any] = {"role": "assistant", "content": text}
-        calls = self._parse_calls(text)
+        calls = self._parse_calls(text, truncated=finish_reason == "length")
         if calls:
             message = {
                 "role": "assistant",
@@ -505,3 +625,5 @@ class BaseModelServer(SimpleResponsesAPIModel):
 
 if __name__ == "__main__":
     BaseModelServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = BaseModelServer.run_webserver()

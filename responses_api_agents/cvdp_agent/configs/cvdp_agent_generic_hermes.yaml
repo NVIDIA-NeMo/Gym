@@ -29,7 +29,8 @@ cvdp_agent_generic_hermes:
         apptainer:
           create:
             mount_point: /code
-            extra_start_args: [--writable-tmpfs]
+            # Hide host temporary directories, home, CWD, and site-wide filesystem binds.
+            extra_start_args: [--writable-tmpfs, --containall, --no-mount, "hostfs,bind-paths,cwd"]
       container_workdir: /code
       deps_provision: archive
 

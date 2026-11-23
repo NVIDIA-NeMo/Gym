@@ -11,28 +11,54 @@ import sys
 import threading
 import time
 import urllib.request
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock
 
 import openai
 import pytest
 import uvicorn
-from run_agent import AIAgent
-from tools.mcp_tool import shutdown_mcp_servers
 
 from nemo_gym.agents import STOP_REQUEST_FILE, SUPERVISOR_SCRIPT
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import (
+    AGENT_LIMIT,
+    MODEL_CONTEXT_LIMIT,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_runtime import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.trajectory import AgentInvocation
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,
     ExampleMCPWeatherResourcesServerConfig,
 )
+from responses_api_agents.hermes_agent import sandbox_runner
 from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig
-from responses_api_agents.hermes_agent.sandbox_runner import _run, _use_model_server
+from responses_api_agents.hermes_agent.runtime import host_python
+from responses_api_agents.hermes_agent.sandbox_runner import _use_model_server
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
+
+
+def _run(payload: dict, session: Path) -> dict:
+    input_file = session / "input.json"
+    output_file = session / "output.json"
+    input_file.write_text(json.dumps(payload))
+    process = subprocess.run(
+        [str(host_python()), "-E", "-s", sandbox_runner.__file__, str(input_file), str(output_file)],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=120,
+    )
+    if not output_file.exists():
+        raise RuntimeError(process.stderr)
+    output = json.loads(output_file.read_text())
+    if process.returncode:
+        raise RuntimeError(output.get("error") or process.stderr)
+    return output
 
 
 def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported() -> None:
@@ -53,6 +79,7 @@ def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported()
             {
                 "invocation_id": "root.child-1",
                 "parent_invocation_id": "root",
+                "spawned_by_tool_call_id": "call-delegate",
                 "status": "incomplete",
                 "stop_reason": "max_iterations",
             },
@@ -69,6 +96,9 @@ def test_sandbox_iteration_limit_stays_on_child_when_observations_are_imported()
     assert invocations[0].status == "completed"
     assert invocations[0].stop_reason is None
     assert invocations[1].parent_invocation_id == "root"
+    # The delegating tool call is what links a child invocation to the parent's trajectory.
+    assert invocations[0].spawned_by_tool_call_id is None
+    assert invocations[1].spawned_by_tool_call_id == "call-delegate"
     assert invocations[1].status == "incomplete"
     assert invocations[1].stop_reason == "max_iterations"
 
@@ -95,6 +125,9 @@ class _ModelServer:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if not self.path.endswith("/chat/completions"):
+                    self.send_error(404)
+                    return
                 server.requests.append(body)
                 server.request_headers.append(dict(self.headers))
                 answer = server.answers[min(len(server.requests), len(server.answers)) - 1]
@@ -150,11 +183,9 @@ class _ResourcesServer:
 @pytest.fixture
 def restore_process_globals(monkeypatch: pytest.MonkeyPatch):
     """The runner changes process-wide state; restore it so other tests see the originals."""
-    monkeypatch.setattr(AIAgent, "__init__", AIAgent.__init__)
     for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "HERMES_HOME", "TERMINAL_ENV", "TERMINAL_TIMEOUT"):
         monkeypatch.delenv(name, raising=False)
     yield
-    shutdown_mcp_servers()
 
 
 def _payload(model_base_url: str, **overrides) -> dict:
@@ -232,8 +263,8 @@ sys.meta_path.insert(0, WatchImports())
 import sandbox_runner
 status = sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))
 import run_agent
-from tools.memory_tool import MEMORY_DIR
-from tools.process_registry import CHECKPOINT_PATH
+from tools.memory_tool import get_memory_dir
+from tools.process_registry import _checkpoint_path
 keys = ['HOME', 'PATH', 'PYTHONPATH', 'PYTHONHOME']
 child_code = 'import json, os, sys; print(json.dumps({k: os.environ.get(k) for k in sys.argv[1:]}))'
 child = subprocess.check_output(
@@ -242,8 +273,8 @@ child = subprocess.check_output(
 pathlib.Path(sys.argv[4]).write_text(json.dumps({
     'imports': imports,
     'import_home': str(run_agent._hermes_home),
-    'memory_dir': str(MEMORY_DIR),
-    'checkpoint_path': str(CHECKPOINT_PATH),
+    'memory_dir': str(get_memory_dir()),
+    'checkpoint_path': str(_checkpoint_path()),
     'task_dotenv_loaded': os.environ.get('HERMES_TASK_ENV_LOADED'),
     'environment': {key: os.environ.get(key) for key in keys},
     'child_environment': json.loads(child),
@@ -255,11 +286,11 @@ raise SystemExit(status)
         input_path.write_text(json.dumps(payload))
         result = subprocess.run(
             [
-                sys.executable,
+                str(host_python()),
                 "-I",
                 "-c",
                 driver,
-                json.dumps([str(Path(sandbox_runner.__file__).parent), *sys.path]),
+                json.dumps([str(Path(sandbox_runner.__file__).parent)]),
                 str(input_path),
                 str(output_path),
                 str(report_path),
@@ -280,6 +311,7 @@ raise SystemExit(status)
     expected_config = {
         "model": "policy_model",
         "provider": "auto",
+        "tools": {"tool_search": {"enabled": "off"}},
         "auxiliary": {
             "compression": {
                 "provider": "custom",
@@ -350,7 +382,8 @@ def test_sandbox_rejection_preserves_runtime_token_totals(
     assert "400" in result["error"]
     assert result["prompt_tokens"] == (10 if has_completed_call else 0)
     assert result["completion_tokens"] == (2 if has_completed_call else 0)
-    assert len(server.requests) == (4 if has_completed_call else 3)
+    # This release treats HTTP 400 as terminal on the first rejected request.
+    assert len(server.requests) == (2 if has_completed_call else 1)
     assert output["observations"]["invocations"][0]["status"] == "failed"
 
 
@@ -370,10 +403,26 @@ def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, res
             return {"completed": True, "messages": self._session_messages}
 
         def interrupt(self, message):
-            assert message == ("sandbox cancellation" if marker == "present" else "sandbox timeout")
+            assert message == ("sandbox timeout" if marker == "absent" else "sandbox cancellation")
 
-    monkeypatch.setattr("run_agent.AIAgent", Agent)
-    monkeypatch.setattr(sandbox_runner, "_use_model_server", lambda _url: None)
+    import yaml
+
+    from responses_api_agents.hermes_agent import model_kwargs, sandbox_observer
+
+    dependency = ModuleType("run_agent")
+    dependency.AIAgent = Agent
+    monkeypatch.setitem(sys.modules, "run_agent", dependency)
+    delegation = ModuleType("tools.delegate_tool_config")
+    delegation.gateway_delegation_inline_scope = lambda inline: nullcontext()
+    monkeypatch.setitem(sys.modules, "tools", ModuleType("tools"))
+    monkeypatch.setitem(sys.modules, "tools.delegate_tool_config", delegation)
+    monkeypatch.setitem(sys.modules, "hermes_yaml", yaml)
+    monkeypatch.setattr(model_kwargs, "configure_model_calls", lambda *_args, **_kwargs: None)
+    instrument = sandbox_observer.SandboxHermesObserver.instrument
+    monkeypatch.setattr(
+        sandbox_observer.SandboxHermesObserver, "instrument", lambda self, agent, **_: instrument(self, agent)
+    )
+    monkeypatch.setattr(sandbox_runner, "_use_model_server", lambda *_args: None)
     payload = _payload("http://unused/v1")
     if marker != "omitted":
         marker_path = tmp_path / "custom-stop-marker"
@@ -381,8 +430,9 @@ def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, res
         if marker == "present":
             marker_path.touch()
     output_path = tmp_path / "output.json"
-    result = _run(payload, tmp_path, output_path=output_path)["result"]
-    expected = "cancelled" if marker == "present" else "wall_time"
+    result = sandbox_runner._run(payload, tmp_path, output_path=output_path)["result"]
+    # Only the sandbox has a deadline. The host worker (no marker path) stops only when Gym shuts down.
+    expected = "wall_time" if marker == "absent" else "cancelled"
     assert result["stop_reason"] == expected
     assert result["interrupted"] and not result["completed"]
     checkpoint = json.loads(output_path.read_text())["result"]
@@ -406,7 +456,7 @@ def test_granted_mcp_tools_reach_the_seeded_resources_session(tmp_path, restore_
                 "id": "call-1",
                 "type": "function",
                 "function": {
-                    "name": "mcp_example_mcp_weather_get_weather",
+                    "name": "mcp__example_mcp_weather__get_weather",
                     "arguments": json.dumps({"city": "Paris"}),
                 },
             }
@@ -442,7 +492,7 @@ def test_granted_mcp_tools_reach_the_seeded_resources_session(tmp_path, restore_
         )
 
     offered = [tool["function"]["name"] for tool in model_server.requests[0]["tools"]]
-    assert offered == ["mcp_example_mcp_weather_get_weather"]
+    assert offered == ["mcp__example_mcp_weather__get_weather"]
     assert output["result"]["final_response"] == "The weather in Paris is sunny and 72 F."
     # The call carried the seed's token, so it landed in the session the seed created.
     assert [state["weather_calls"] for state in resources.session_id_to_state.values()] == [
@@ -476,19 +526,9 @@ def test_required_mcp_server_that_does_not_connect_fails_before_the_model(tmp_pa
 
 @pytest.mark.parametrize("template_enabled", [False, True])
 @pytest.mark.parametrize("execution", ["sandbox", "local"])
-@pytest.mark.parametrize("conflicting_override", [False, True])
 def test_iteration_limit_summary_reaches_the_model_server(
-    tmp_path, restore_process_globals, monkeypatch, template_enabled, execution, conflicting_override
+    tmp_path, restore_process_globals, monkeypatch, template_enabled, execution
 ) -> None:
-    if conflicting_override:
-        original = AIAgent._build_api_kwargs
-
-        def with_override(self, messages):
-            kwargs = original(self, messages)
-            kwargs.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})["enable_thinking"] = True
-            return kwargs
-
-        monkeypatch.setattr(AIAgent, "_build_api_kwargs", with_override)
     tool_call = {
         "content": None,
         "tool_calls": [
@@ -509,7 +549,8 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 _payload(model_server.base_url, chat_template_kwargs_enabled=template_enabled),
                 tmp_path,
             )
-            assert output["result"]["final_response"] == "summary of the work"
+            assert output["result"]["final_response"].splitlines()[0] == "summary of the work"
+            assert output["result"]["messages"][-1]["content"] == "summary of the work"
             assert output["result"]["stop_reason"] == "max_iterations"
             assert output["observations"]["invocations"][0]["stop_reason"] == "max_iterations"
             assert output["observations"]["invocations"][0]["status"] == "incomplete"
@@ -611,9 +652,6 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
 
     assert [sync.choices[0].message.content, asynchronous.choices[0].message.content] == ["sync", "async"]
     assert len(model_server.requests) == 2
-    # Delegated children are AIAgents Hermes constructs itself; the Model Server rejects streaming.
-    child = AIAgent(base_url=model_server.base_url, api_key="gym", model="m", quiet_mode=True)
-    assert child.use_streaming is False
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
@@ -654,7 +692,8 @@ class Agent:
 module = types.ModuleType('run_agent')
 module.AIAgent = Agent
 sys.modules['run_agent'] = module
-import sandbox_runner
+import sandbox_runner, model_kwargs
+model_kwargs.configure_model_calls = lambda *_args, **_kwargs: None
 raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])))
 """
     process = subprocess.Popen(
@@ -672,7 +711,7 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--",
-            sys.executable,
+            str(host_python()),
             "-I",
             "-c",
             driver,
@@ -732,16 +771,77 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
 
 def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_process_globals):
     import yaml
-    from agent.auxiliary_client import call_llm
 
     with _ModelServer([_completion({"content": "done"})]) as server:
         _run(_payload(server.base_url, max_turns=4), tmp_path)
-        response = call_llm(task="compression", messages=[{"role": "user", "content": "Summarize"}])
-    assert response.choices[0].message.content == "done"
+        probe = "from agent.auxiliary_client import call_llm; print(call_llm(task='compression', messages=[{'role':'user','content':'Summarize'}]).choices[0].message.content)"
+        response = subprocess.check_output(
+            [str(host_python()), "-I", "-c", probe],
+            text=True,
+            env={**os.environ, "HERMES_HOME": str(tmp_path / "hermes-home")},
+        )
+    assert response.strip().endswith("done")
     assert server.requests[-1]["messages"] == [{"role": "user", "content": "Summarize"}]
     config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
     assert config["auxiliary"]["compression"]["base_url"] == server.base_url
     assert config["auxiliary"]["compression"]["model"] == "policy_model"
+
+
+@pytest.mark.parametrize("image_only", [False, True])
+@pytest.mark.parametrize(
+    "detail,sent_detail", [("auto", "auto"), ("low", "low"), ("high", "high"), ("original", "high")]
+)
+def test_prompt_images_reach_pinned_hermes_model_requests(
+    tmp_path, restore_process_globals, image_only, detail, sent_detail
+) -> None:
+    """Exercise the installed Hermes loop, not a mock of its multimodal input handling."""
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+    image_uri = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+    )
+    content = [
+        {"type": "input_text", "text": "before"},
+        {"type": "input_image", "image_url": image_uri, "detail": detail},
+        {"type": "input_text", "text": "after"},
+    ]
+    if image_only:
+        content = [content[1]]
+    adapter = HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "model"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = adapter._validate_request(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "prior answer"},
+                {"role": "user", "content": content},
+            ]
+        )
+    )
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        # Hermes marks a response at its iteration ceiling incomplete, even with a final answer.
+        output = _run(_payload(server.base_url, max_turns=4, **adapter._conversation_params(body)), tmp_path)
+    expected = [
+        {"type": "text", "text": "before"},
+        {"type": "image_url", "image_url": {"url": image_uri, "detail": sent_detail}},
+        {"type": "text", "text": "after"},
+    ]
+    if image_only:
+        expected = [expected[1]]
+    assert output["result"]["completed"], output["result"]
+    assert len(server.requests) == 1
+    user_messages = [message for message in server.requests[0]["messages"] if message["role"] == "user"]
+    assert [message["content"] for message in user_messages] == [expected, expected]
+    assert any(message["content"] == "prior answer" for message in server.requests[0]["messages"])
 
 
 def test_compression_auxiliary_uses_its_own_route_when_the_payload_has_one(tmp_path, restore_process_globals):
@@ -753,3 +853,142 @@ def test_compression_auxiliary_uses_its_own_route_when_the_payload_has_one(tmp_p
         _run(_payload(server.base_url, compression_model_base_url=compression_url), tmp_path)
     config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
     assert config["auxiliary"]["compression"]["base_url"] == compression_url
+
+
+@pytest.mark.parametrize("max_turns", [1, 3], ids=["summary", "normal"])
+def test_training_token_bundles_follow_their_exact_turn(tmp_path, max_turns):
+    bundles = [
+        {"prompt_token_ids": [17], "generation_token_ids": [23], "generation_log_probs": [-0.4]},
+        {"prompt_token_ids": [17, 23, 30], "generation_token_ids": [41, 42], "generation_log_probs": [-0.5, -0.2]},
+    ]
+    answers = [
+        _completion(
+            {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "t",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": '{"command":"echo ok"}'},
+                    }
+                ],
+                **bundles[0],
+            }
+        ),
+        _completion({"content": "finished", **bundles[1]}),
+    ]
+    with _ModelServer(answers) as model:
+        output = _run(_payload(model.base_url, max_turns=max_turns), tmp_path)
+    assert len(model.requests) == 2
+    for body in model.requests:
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+    replay = next(m for m in model.requests[1]["messages"] if m["role"] == "assistant")
+    assert {key: replay.get(key) for key in bundles[0]} == bundles[0]
+    turns = [m for m in output["result"]["messages"] if m["role"] == "assistant"]
+    assert [{key: m.get(key) for key in bundles[0]} for m in turns] == bundles
+
+
+def _length_cut(index: int, **message) -> dict:
+    """A chat completion cut at the output limit, carrying one distinct sampled token bundle."""
+    response = _completion(
+        {"prompt_token_ids": [100 + index], "generation_token_ids": [200 + index], "generation_log_probs": [-0.5]}
+        | message
+    )
+    response["choices"][0]["finish_reason"] = "length"
+    return response
+
+
+def _hermes(**overrides) -> HermesAgent:
+    return HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+            **overrides,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+def test_continuation_ceiling_keeps_every_sampled_fragment_for_training(tmp_path) -> None:
+    """At its continuation ceiling Hermes stitches the fragments into one row without token IDs; Gym keeps them."""
+    with _ModelServer([_length_cut(i, content=f"part-{i} ") for i in range(6)]) as model:
+        result = _run(_payload(model.base_url, max_turns=8, max_tokens=64), tmp_path)["result"]
+    response = _hermes()._response_from_result(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="fix bug"), result=result, model_name="model", n_input=1
+    )
+
+    assert len(model.requests) == 4
+    assert result["error"] == "Response remained truncated after 4 continuation attempts"
+    assert _hermes().classify_outcome(result).failure_kind == AGENT_LIMIT
+    messages = [item for item in response.output if item.type == "message"]
+    assert [item.generation_token_ids for item in messages] == [[200], [201], [202], [203]]
+    assert [item.content[0].text for item in messages] == [f"part-{i}" for i in range(4)]
+    assert not any("_length_continuation" in key for row in result["messages"] for key in row)
+
+
+def test_truncation_retries_stay_within_configured_max_tokens(tmp_path) -> None:
+    """Hermes doubles the output cap on each continuation; Gym's max_tokens stays the per-call budget."""
+    with _ModelServer([_length_cut(i, content=f"part-{i} ") for i in range(6)]) as model:
+        _run(_payload(model.base_url, max_turns=8, max_tokens=64), tmp_path)
+
+    assert [request["max_tokens"] for request in model.requests] == [64] * 4
+
+
+def test_truncated_tool_call_limit_is_an_agent_limit(tmp_path) -> None:
+    """Hermes retries a length-cut tool call four times, then ends with `failure_reason: truncated`."""
+    call = {"id": "call", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "ec'}}
+    with _ModelServer([_length_cut(i, content=None, tool_calls=[call]) for i in range(6)]) as model:
+        result = _run(_payload(model.base_url, max_turns=8, max_tokens=64), tmp_path)["result"]
+
+    assert len(model.requests) == 5
+    assert result["failure_reason"] == "truncated"
+    assert _hermes().classify_outcome(result).failure_kind == AGENT_LIMIT
+
+
+def test_configured_context_length_reaches_the_pinned_worker(tmp_path) -> None:
+    """The configured window reaches Hermes: a prompt that fills it is a model context limit, not a truncation."""
+    agent = _hermes(context_length=65536)
+    answers = []
+    for index in range(6):
+        answer = _length_cut(index, content=f"part-{index} ")
+        answer["usage"] = {"prompt_tokens": 65500, "completion_tokens": 64, "total_tokens": 65564}
+        answers.append(answer)
+    with _ModelServer(answers) as model:
+        result = _run(
+            _payload(model.base_url, config_yaml=agent._build_config(), max_turns=8, max_tokens=64), tmp_path
+        )["result"]
+
+    assert result["error"] == "Prompt used 65500 of 65536 context tokens; no room to answer"
+    assert agent.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT
+
+
+def test_delegated_child_records_the_delegate_task_call_that_spawned_it(tmp_path) -> None:
+    """The child finishes inside the delegate_task call and names the call that spawned it."""
+    delegate = {
+        "id": "call-delegate",
+        "type": "function",
+        "function": {"name": "delegate_task", "arguments": json.dumps({"goal": "Reply with the word done."})},
+    }
+    answers = [
+        _completion({"content": None, "tool_calls": [delegate]}) | {"id": "chatcmpl-parent-1"},
+        _completion({"content": "done"}) | {"id": "chatcmpl-child"},
+        _completion({"content": "The child finished."}) | {"id": "chatcmpl-parent-2"},
+    ]
+    answers[0]["choices"][0]["finish_reason"] = "tool_calls"
+    with _ModelServer(answers) as model:
+        output = _run(_payload(model.base_url, enabled_toolsets=["delegation"], max_turns=4), tmp_path)
+
+    # The parent's final request carries the child's answer in the delegate_task result.
+    assert len(model.requests) == 3
+    delegate_result = next(m for m in model.requests[2]["messages"] if m.get("tool_call_id") == "call-delegate")
+    assert "done" in delegate_result["content"]
+    assert "background" not in delegate_result["content"]
+    children = [
+        invocation
+        for invocation in output["observations"]["invocations"]
+        if invocation.get("parent_invocation_id") == "root"
+    ]
+    assert [child["spawned_by_tool_call_id"] for child in children] == ["call-delegate"]

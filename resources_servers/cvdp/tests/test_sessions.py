@@ -221,17 +221,17 @@ def test_an_agent_that_wrote_nothing_is_graded_on_its_response_text(server, root
     assert len(stopped) == 1
 
 
-def test_a_response_with_no_text_scores_zero_even_with_files(server, root, stopped, graded):
-    # output_text joins every message in the trajectory, so this is an agent that never wrote any text, not one
-    # whose last item is a tool call.
+def test_a_response_with_no_text_still_grades_the_files(server, root, stopped, graded):
+    # output_text joins every message in the trajectory, so this is an agent that never wrote any text. As on the
+    # legacy path, the files it wrote are graded anyway.
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed())
     _solve(root)
 
     verified = _verify(client, _verify_body(""))
 
-    assert (verified["reward"], verified["mask_sample"]) == (0.0, False)
-    assert graded == [], "the empty-answer rule is unchanged from the legacy paths"
+    assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+    assert graded == [{"rtl/top.sv": TOP, "verif/tb.sv": TESTBENCH + "// more checks\n"}]
 
 
 def test_a_repeated_verify_grades_the_harvested_files_again(server, root, stopped, graded):
@@ -552,6 +552,7 @@ def test_seeding_again_is_idempotent_for_its_episode_and_refused_for_another(ser
         {"verifier_metadata": {"categories": ["cid005", "medium"]}},
         {"verifier_metadata": _metadata() | {"categories": ["medium"]}},
         {"verifier_metadata": _metadata() | {"categories": ["005", "medium"]}},
+        {"verifier_metadata": _metadata() | {"repository_workspace_sha256": "0" * 64}},
     ],
 )
 def test_a_row_that_no_retry_can_fix_is_refused_as_final_without_a_sandbox(server, root, task_data, monkeypatch):

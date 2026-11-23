@@ -33,7 +33,7 @@ from nemo_gym.models.token_capture.control_routes import install_rollout_control
 from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.models.token_capture.lineage import FileLineageStore
 from nemo_gym.models.token_capture.protocols import CaptureAdmissionError, RolloutRetiredError
-from nemo_gym.models.token_capture.records import ParentResolutionStatus
+from nemo_gym.models.token_capture.records import CallIdentity, ParentResolutionStatus
 from nemo_gym.models.token_capture.sink import NG_COMMIT_COORDS_FIELD, CaptureContext, current_capture_context
 from nemo_gym.models.token_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
@@ -430,7 +430,7 @@ async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path
 
     restored_ledger, restored, restored_controller = await _ledger_participant(tmp_path / "after")
     await restored_controller.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
-    resolution = await restored_ledger.resolve("r-a1", [USER_1, ASSISTANT_1, USER_2])
+    resolution = await restored_ledger.resolve("r-a1", [USER_1, ASSISTANT_1, USER_2], identity=CallIdentity())
     manifest = RolloutManifest.model_validate(await restored_ledger.manifest("r-a1"))
 
     assert commit["manifest"]["record_count"] == 1 and commit["episode_ids"] == ["r"]
@@ -486,7 +486,7 @@ async def test_restore_refuses_a_model_server_that_has_served_calls(tmp_path: Pa
             _restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}, {"rollout_id": "s"}])
         )
 
-    assert not await restored_ledger.has_rows("r-a1")
+    assert not await restored_ledger.has_rows("r-a1", identity=CallIdentity())
 
 
 def _held_call(participant: PolicyModelParticipant, capture_key: str, model_call_id: str, request_items: list) -> None:
@@ -645,6 +645,77 @@ async def test_undelivered_rows_are_excluded_on_any_capture_path(tmp_path: Path)
     assert live_rows == ["c1", "c2"]
     assert commit["manifest"]["record_count"] == 1
     assert '"c1"' in rows and '"c2"' not in rows
+
+
+async def test_a_call_that_ends_while_held_is_left_out_of_the_commit_and_deleted_at_resume(tmp_path: Path) -> None:
+    """A call ends while admission is closed, before its response starts (here its client leaves).
+    The ledger has rows for it (here a committed row the stand-in handler wrote early; with the capture middleware,
+    an intent row and sometimes a failure row). The commit leaves them out and the resume deletes them from the
+    live ledger, so neither the restored attempt nor the continued one carries a call no client got an answer for."""
+    ledger = FileLineageStore(tmp_path / "store")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    participant = PolicyModelParticipant(ledger)
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    release = asyncio.Event()
+    app = _captured_app(participant, ledger, release)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
+        call = asyncio.create_task(client.post("/ng-rollout/r/v1/chat/completions"))
+        # The call has recorded its row and is held before the checkpoint opens.
+        await wait_until(lambda: [row["model_call_id"] for row in ledger.export_rows("r")] == ["c1", "c2"])
+        await controller.prepare(CheckpointRequest(**control()))
+        # The client goes away while the response is held.
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        await wait_until(lambda: participant.gate.disconnected == {"c2": "r"})
+        live_rows = [row["model_call_id"] for row in ledger.export_rows("r")]
+        snapshot = participant.gate.snapshot()
+        commit = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
+        await controller.resume(CheckpointRequest(**control()))
+        await wait_until(lambda: [row["model_call_id"] for row in ledger.export_rows("r")] == ["c1"])
+        after_resume = [row["model_call_id"] for row in ledger.export_rows("r")]
+
+    rows = (tmp_path / "ckpt" / "gym" / "model" / "policy" / commit["manifest"]["records_file"]).read_text()
+    assert live_rows == ["c1", "c2"], "the disconnected call's row was in the live ledger"
+    assert snapshot.disconnected == {"c2": "r"} and participant.gate.tickets == set()
+    assert '"c1"' in rows and '"c2"' not in rows, "the commit left the disconnected call out"
+    assert after_resume == ["c1"], "the resume deleted it from the live ledger"
+    assert participant.gate.disconnected == {}, "cleared for the next checkpoint"
+
+
+async def test_only_a_held_call_that_ends_while_admission_is_closed_is_recorded_as_disconnected() -> None:
+    gate = PolicyModelParticipant().gate
+
+    def entered(model_call_id: str | None):
+        ticket = gate.enter("r")
+        if model_call_id is not None:
+            ticket.capture = CaptureContext(
+                capture_key="r", model_call_id=model_call_id, token_sink=None, request_items=[]
+            )
+        return ticket
+
+    await gate.exit(entered("ended-before"))
+    streaming, uncaptured, held = entered("streaming"), entered(None), entered("held")
+    streaming.response_started = True
+    await gate.close(CheckpointRequest(**control()))
+    for ticket in (streaming, uncaptured, held):
+        await gate.exit(ticket)
+
+    # Not a call that ended before the checkpoint, one whose response had started, or one without a capture.
+    assert gate.snapshot().disconnected == {"held": "r"}
+    assert gate.take_disconnected() == {"held": "r"} and gate.disconnected == {}
+    gate.open()
+
+
+async def test_deleting_calls_the_ledger_does_not_hold_leaves_it_untouched(tmp_path: Path) -> None:
+    ledger = FileLineageStore(tmp_path / "store")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    before = ledger.export_rows("r")
+
+    assert ledger.delete_calls("r", ["c9"]) == 0
+    assert ledger.export_rows("r") == before
+    assert ledger.delete_calls("r", ["c1", "c9"]) == 1
+    assert ledger.export_rows("r") == []
 
 
 async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
@@ -1032,9 +1103,9 @@ async def test_retiring_an_attempt_retires_the_ledgers_of_it_and_every_earlier_a
     # A retired ledger has no rows and refuses reads, so a reader cannot mistake it for an empty live one.
     for key in ("r", "r-a1"):
         with pytest.raises(RolloutRetiredError):
-            await ledger.has_rows(key)
+            await ledger.has_rows(key, identity=CallIdentity())
     assert (tmp_path / "r.lineage.retired").exists() and (tmp_path / "r-a1.lineage.retired").exists()
-    assert await ledger.has_rows("r-a2")
+    assert await ledger.has_rows("r-a2", identity=CallIdentity())
 
 
 async def test_a_restore_retires_the_ledgers_of_the_attempts_it_continues(tmp_path: Path) -> None:
@@ -1050,7 +1121,7 @@ async def test_a_restore_retires_the_ledgers_of_the_attempts_it_continues(tmp_pa
     # Attempt 0 continues as attempt 1, so attempt 0's ledger is released and fenced against late rows.
     assert [row["model_call_id"] for row in restored_ledger.export_rows("r-a1")] == ["c1"]
     with pytest.raises(RolloutRetiredError):
-        await restored_ledger.has_rows("r")
+        await restored_ledger.has_rows("r", identity=CallIdentity())
     assert (tmp_path / "ledger" / "r.lineage.retired").exists()
 
 
@@ -1611,7 +1682,11 @@ async def test_a_failed_publication_poisons_the_call_and_sends_no_answer(tmp_pat
     assert isinstance(outcome, OSError)
     assert _answers(sent) == []
     assert ledger.export_rows("r") == [
-        {"model_call_id": contexts[0].model_call_id, "failure_reason": INVALID_COMMIT_COORDS_REASON}
+        {
+            "model_call_id": contexts[0].model_call_id,
+            "failure_reason": INVALID_COMMIT_COORDS_REASON,
+            **contexts[0].identity.columns(),
+        }
     ]
     assert not participant.gate.tickets
 

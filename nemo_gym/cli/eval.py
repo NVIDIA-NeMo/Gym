@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -33,7 +34,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import yaml
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 from rich.table import Table
 
 from nemo_gym._moved_paths import moved_names_getattr
@@ -87,7 +88,6 @@ from nemo_gym.data.tasks.harbor.materialize import (
     write_rows,
 )
 from nemo_gym.data.tasks.harbor.prepare import (
-    DEFAULT_OUTPUT_ROOT,
     HARBOR_TARGET_KEY,
     ORACLE_AGENT,
     AgentSelection,
@@ -97,6 +97,7 @@ from nemo_gym.data.tasks.harbor.prepare import (
     _listed,
     build_run,
     harbor_benchmark,
+    output_root_from_overrides,
     prepare_target,
     resolve_agent,
     resolve_sandbox_config,
@@ -129,7 +130,7 @@ from nemo_gym.eval.eval_plan import (
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
-from nemo_gym.server_runtime.supervisor.server_supervisor import RunHelper
+from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
 from nemo_gym.utils.path_utils import materialized_path_for
 
 
@@ -276,7 +277,7 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
     Examples:
 
     ```bash
-    gym eval plan --benchmark terminal_bench_2_1/terminus_2 --out plan.json
+    gym eval plan --benchmark terminal_bench_2_1/terminus_2_legacy_agent --out plan.json
     gym eval plan --schema
     ```
     """
@@ -419,8 +420,8 @@ def e2e_rollout_collection():  # pragma: no cover
 
     write_resolved_config(global_config_dict, output_fpath)
 
-    rh = RunHelper()
-    rh.start(None)
+    supervisor = ServerSupervisor()
+    supervisor.start(None)
 
     rch = RolloutCollectionHelper()
     rch._termination_requested = lambda: _terminated
@@ -490,7 +491,7 @@ def e2e_rollout_collection():  # pragma: no cover
                     disabled=not health_check_enabled,
                 )
         finally:
-            rh.shutdown()
+            supervisor.shutdown()
     _exit_if_terminated()
     try:
         _check_collection_completion(
@@ -517,21 +518,25 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     from nemo_gym.artifacts.exporters.base import _artifact_version
     from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
     from nemo_gym.artifacts.run_artifacts import RunArtifacts
-    from nemo_gym.orchestration.recovery import (
+    from nemo_gym.eval.recovery.decision import IdentityState
+    from nemo_gym.eval.recovery.evidence import (
         COLLECT_SCRIPT,
         CollectedEvidence,
-        IdentityState,
-        RecoveryOutcomePolicyConfig,
-        _observed_trial_operations,
-        decide_from_collected,
-        decision_classification,
-        failure_facts,
-        fault_report,
-        response_health,
         select_managed_evidence,
+    )
+    from nemo_gym.eval.recovery.gate import (
+        failure_facts,
+        response_health,
+        trial_verdict,
+    )
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
+    from nemo_gym.eval.recovery.trials import (
+        _observed_trial_operations,
+        decision_classification,
+        fault_report,
         trial_faults,
         trial_population,
-        trial_verdict,
     )
     from nemo_gym.rollouts.rollout_recovery import atomic_output_file, saved_failure_classification
 
@@ -823,15 +828,22 @@ def _check_collection_completion(
 def _check_saved_completion(output: Path) -> None:
     """Distinguish a valid partial run from successful CLI completion."""
     from nemo_gym.rollouts.rollout_records import coverage_path_for
-    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError, has_only_intentional_gaps
+    from nemo_gym.rollouts.rollout_recovery import (
+        IncompleteEvaluationError,
+        has_only_intentional_gaps,
+        unsettled_masked_note,
+    )
 
     coverage = coverage_path_for(output.resolve())
     if coverage.exists():
         report = json.loads(coverage.read_text())
         if report.get("complete") is False:
+            # Settled, not merely completed: an omission never covers a masked result that is not settled. Reports
+            # that predate ``settled`` have no masked buckets, so their completed count is their settled count.
+            settled = report.get("settled", report["successful"])
             if has_only_intentional_gaps(
                 expected=report["expected"],
-                completed=report["successful"],
+                completed=settled,
                 intentionally_omitted=report.get("intentionally_omitted", 0),
             ):
                 return
@@ -842,8 +854,8 @@ def _check_saved_completion(output: Path) -> None:
                 else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
             )
             raise IncompleteEvaluationError(
-                f"{report['successful']}/{report['expected']} samples completed. "
-                f"Partial artifacts retained at {output}. {guidance}",
+                f"{settled}/{report['expected']} samples completed. "
+                f"Partial artifacts retained at {output}. {guidance} {unsettled_masked_note(report)}".rstrip(),
                 retryable=retryable,
                 # Older coverage reports predate per-invocation progress.
                 made_progress=report.get("progress_outcomes_recorded", report.get("outcomes_recorded", 1)) > 0,
@@ -888,6 +900,7 @@ def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
     original rejection.
     """
     from nemo_gym.rollouts import IncompleteEvaluationError, RolloutStore
+    from nemo_gym.rollouts.rollout_recovery import unsettled_masked_note
 
     try:
         store = RolloutStore.read(output, import_legacy=False)
@@ -903,9 +916,10 @@ def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
         else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
     )
     return IncompleteEvaluationError(
-        f"{coverage['successful'] - coverage.get('masked_retryable', 0) + coverage['final_zeros']}/{coverage['expected']} "
+        f"{coverage['settled']}/{coverage['expected']} "
         "samples completed after the "
-        f"saved-answer re-verification. Partial artifacts retained at {output}. {guidance}",
+        f"saved-answer re-verification. Partial artifacts retained at {output}. {guidance} "
+        f"{unsettled_masked_note(coverage)}".rstrip(),
         retryable=retryable,
         # exit code 1 is a retryable rejection that made no progress; any other rejection keeps progress.
         made_progress=getattr(rejected, "exit_code", 75) != 1,
@@ -925,7 +939,7 @@ def _saved_run_complete(output: Path) -> bool:
         coverage = store.coverage()
     except Exception:  # the original rejection stands
         return False
-    completed = coverage["successful"] - coverage.get("masked_retryable", 0) + coverage["final_zeros"]
+    completed = coverage["settled"]
     return completed == coverage["expected"] or has_only_intentional_gaps(
         expected=coverage["expected"], completed=completed, intentionally_omitted=coverage["intentionally_omitted"]
     )
@@ -947,7 +961,8 @@ def _rejudge_saved_judge_failures(
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
     ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
     incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
-    (always False without ``complete_only``).
+    (always False without ``complete_only``). Recomputed metrics also refresh the per-agent completion files written
+    during collection; when they cannot be refreshed, the files are removed rather than left with the old scores.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
@@ -958,20 +973,32 @@ def _rejudge_saved_judge_failures(
     else:
         run_config = dict(global_config_dict)
     scored = 0
+    raised = False
+    before = _saved_artifact_state(output)
     try:
         scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
     except Exception as error:  # an optional pass after the run is saved; recovery still sees the failures
+        raised = True
         print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
     # A pass that raised after saving its grades can still have completed a strict run: settled completeness,
-    # not a normal return, decides whether its metrics are rebuilt.
+    # not a normal return, decides whether its metrics are rebuilt. A pass can also save evidence without returning
+    # a count: grades before it raised, or new judge failures from re-grades that all failed again. The saved files,
+    # not the count, show that.
+    changed = _saved_artifact_state(output) != before
     complete = complete_only and _saved_run_complete(output)
-    if not scored and not complete:
+    if not scored and not complete and not changed and not (complete_only and raised):
         return complete
     if scored:
         print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
     if collection_config.disable_aggregation or not aggregate:
         return complete
     if complete_only and not complete:
+        # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
+        # pass settled: the aggregation that rewrites it is skipped with the metrics. No completion file can follow
+        # it either, so they are removed.
+        if scored or raised or changed:
+            _remove_completion_files(output)
+            _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
         return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
@@ -984,7 +1011,33 @@ def _rejudge_saved_judge_failures(
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+        _remove_completion_files(output)
+        return complete
+    _refresh_completion_files(output, run_config)
     return complete
+
+
+def _refresh_completion_files(output: Path, run_config: Mapping[str, Any]) -> None:
+    """Bring the per-agent completion files in line with the run-wide metrics just recomputed in place, or remove them
+    when they cannot be refreshed, rather than leave them with the scores from before the re-judgment."""
+    from nemo_gym.rollouts.rollout_collection import refresh_agent_complete_files
+
+    try:
+        refresh_agent_complete_files(output, OmegaConf.create(run_config))
+    except Exception as error:  # the recomputed run-wide metrics stand; only the per-agent copies are behind them
+        print(
+            f"Per-agent completion files were not refreshed after the re-judgment ({type(error).__name__}: {error}); "
+            f"they are removed, and {output.stem}_aggregate_metrics.json holds every agent's metrics.",
+            flush=True,
+        )
+        _remove_completion_files(output)
+
+
+def _remove_completion_files(output: Path) -> None:
+    """Remove the per-agent completion files of a run whose grades changed after they were written."""
+    from nemo_gym.utils.path_utils import agent_complete_dir_for
+
+    shutil.rmtree(agent_complete_dir_for(output), ignore_errors=True)
 
 
 class _SettledHealthSettings(RunHealthConfig):
@@ -994,12 +1047,37 @@ class _SettledHealthSettings(RunHealthConfig):
     health_check_workers: int | None = None
     health_check_ignored_checks: List[str] = Field(default_factory=list)
 
+    @field_validator("health_check_ignored_checks", mode="before")
+    @classmethod
+    def _normalize_ignored_checks(cls, value: Any) -> List[str]:
+        """The forms collection and aggregation accept, a comma-separated string included."""
+        from nemo_gym.rollouts.rollout_health import normalize_ignored_checks
+
+        return list(normalize_ignored_checks(value))
+
+
+def _saved_artifact_state(output: Path) -> tuple[Any, ...]:
+    """The rollouts file and failures sidecar as saved, to tell whether a pass changed either."""
+    from nemo_gym.utils.path_utils import failures_path_for
+
+    state = []
+    for path in (output, failures_path_for(output)):
+        try:
+            stat = path.stat()
+            state.append((stat.st_size, stat.st_mtime_ns))
+        except OSError:
+            state.append(None)
+    return tuple(state)
+
 
 def _refresh_settled_source(
-    run_config: DictConfig | Mapping[str, Any], output: Path, *, workdir: Path
+    run_config: DictConfig | Mapping[str, Any], output: Path, *, workdir: Path, metrics: bool = True
 ) -> dict[str, bool]:
     """Recompute the settled run's aggregate metrics in place and rewrite its quality summary from the settled rows,
-    as the run's own completion does after its saved-answer pass.
+    as the run's own completion does after its saved-answer pass. ``metrics=False`` rewrites only the quality summary,
+    for a strict run that stays incomplete and publishes no score.
+
+    The per-agent completion files follow the recomputed metrics, or are removed when they cannot.
 
     A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it). A health
     check that selects the Store's attempts itself reads it as it is; an earlier one reads it only through a
@@ -1019,17 +1097,20 @@ def _refresh_settled_source(
         run_config = dict(run_config)
     refreshed = {"metrics_recomputed": False, "health_summary_recomputed": False}
     try:
-        aggregation = RolloutAggregationConfig.model_validate(
-            run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
-        )
-        asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
-        refreshed["metrics_recomputed"] = True
+        if metrics:
+            aggregation = RolloutAggregationConfig.model_validate(
+                run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
+            )
+            asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
+            refreshed["metrics_recomputed"] = True
+            _refresh_completion_files(output, run_config)
     except Exception as error:
         print(
             f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+        _remove_completion_files(output)
     projection = None
     try:
         settings = _SettledHealthSettings.model_validate(run_config)
@@ -1282,15 +1363,15 @@ def export_run() -> None:  # pragma: no cover
 def reverify_rollouts():  # pragma: no cover
     from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 
-    rh = RunHelper()
-    rh.start(None)
+    supervisor = ServerSupervisor()
+    supervisor.start(None)
     try:
         global_config_dict = get_global_config_dict()
         config = RolloutReverificationConfig.model_validate(global_config_dict)
         # The judge-only recovery job's pass settles, refreshes the run and ends with a receipt; any other runs as before.
         _reverify_with_receipt(global_config_dict, config)
     finally:
-        rh.shutdown()  # stop the servers this command started
+        supervisor.shutdown()  # stop the servers this command started
 
 
 @exit_cleanly_on_config_error
@@ -1741,6 +1822,7 @@ def _prepare_for_agent(
             shared_storage=shared_storage_from_overrides(overrides, sandbox),
             gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
             compose_overlay=compose_overlay_from_overrides(overrides),
+            output_root=output_root_from_overrides(overrides),
             rows_name=_rows_name(agent),
             registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
             agent=agent.impl_name,
@@ -1819,7 +1901,7 @@ def _benchmark_agent(
     if agent_type:
         agent = replace(resolve_agent(agent_type), benchmark_settings=benchmark.agent.benchmark_settings)
         loaded.add(Path(asset_config_path("agent-type", agent_type)).resolve())
-        overrides = [token for token in overrides if not token.startswith("+_selected_langgraph_config=")]
+        overrides = [token for token in overrides if not token.startswith("+_selected_agent_config=")]
     else:
         agent = benchmark.agent
     collection = _without_config_paths(overrides, loaded)
@@ -2000,12 +2082,14 @@ def validate_target(
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
         preparation = preparation_overrides if preparation_overrides is not None else overrides
+        # `+harbor_output_root` (a submitted run's job directory) moves both, as it does for a model's run.
+        output_root = output_root_from_overrides(preparation)
         prepared = prepare_target(
             args.target,
-            output_root=DEFAULT_OUTPUT_ROOT / "validation",
+            output_root=output_root / "validation",
             # A template renders where `gym eval run` renders it: one rendered dataset, one set of records (an image
             # built for it once), while the oracle's rows and results stay under validation/.
-            render_root=DEFAULT_OUTPUT_ROOT,
+            render_root=output_root,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build_options_from_overrides(preparation),
@@ -2253,6 +2337,28 @@ def compare_suite() -> None:
     written = write_suite_reports(result, output, config.report_format)
     print(render_suite_summary(result))
     for path in written:
+        print(f"Wrote: {path}")
+
+
+@exit_cleanly_on_config_error
+def plan_repeats() -> None:
+    """Plan fixed benchmark, model, or suite repeats from direct standard-deviation inputs."""
+    from nemo_gym.eval.comparison.planning.report import (
+        render_repeat_planning_summary,
+        write_repeat_planning_reports,
+    )
+    from nemo_gym.eval.comparison.planning.runner import build_repeat_planning_result, invoked_command
+    from nemo_gym.eval.comparison.planning.schema import RepeatPlanningCLIConfig
+
+    config_dict = get_global_config_dict()
+    if not config_dict.get("repeat_plan_fpath") and not (config_dict.get("help") or config_dict.get("h")):
+        raise ConfigError("gym eval plan-repeats requires --plan PATH.")
+    config = RepeatPlanningCLIConfig.model_validate(config_dict)
+    result = build_repeat_planning_result(config, invoked_command())
+    output_dir = Path(config.output_dirpath) if config.output_dirpath else result.plan_fpath.parent
+    report_paths = write_repeat_planning_reports(result, output_dir, config.report_format)
+    print(render_repeat_planning_summary(result))
+    for path in report_paths:
         print(f"Wrote: {path}")
 
 
