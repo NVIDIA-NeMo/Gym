@@ -198,6 +198,8 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 
 The skills path is resolved like `input_jsonl_fpath` (relative paths check the working directory, then the Gym root). For distributed runs the directory must be on storage accessible to the agent process.
 
+When the model calls the `Skill` tool, Claude Code answers the call with `Launching skill: <name>` and then sends the skill's text (`Base directory for this skill: ...` followed by its `SKILL.md`) as a user message of its own. `response.output` keeps that text as a `user` input message right after the call's `function_call_output`, where the model read it; it is not model output. The exported `trajectory.json` shows it in the observation of the step that holds the `Skill` call. The stream does not say which call the message belongs to, so Gym takes the link from Claude Code's session transcript (`sourceToolUseID`); a run whose transcripts could not be read leaves the text out.
+
 ## Limitations
 
 - With `model_server`, model calls go through Gym and can be captured. Direct Anthropic or

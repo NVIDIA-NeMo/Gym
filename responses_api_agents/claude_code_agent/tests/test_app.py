@@ -41,7 +41,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import AnthropicConverter
 from nemo_gym.models.token_capture import TokenEntry, resolve_terminal, stamp_continuation
-from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation, transcript_to_atif
 from responses_api_agents.claude_code_agent import sandbox as adapter
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
@@ -54,6 +54,7 @@ from responses_api_agents.claude_code_agent.app import (
     parse_stream_json,
 )
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations, read_transcripts
+from responses_api_agents.claude_code_agent.parsing import tool_call_messages
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -1768,6 +1769,230 @@ class TestCaptureFriendlyTranscript:
         assert attribution.model_call_id == "parent", attribution.reason
         assert attribution.method == "response_id"
         assert "corroborated_by=item_id+content_cumulative" in attribution.reason
+
+
+# A real Claude Code 2.1.292 run that loads the calculator skill (tests/fixtures/claude_code_skill_call.json says what
+# was shortened). The Skill tool answers "Launching skill: calculator"; the skill's text follows as a user message
+# that the stream marks only isSynthetic and the transcript links to the call with sourceToolUseID.
+SKILL_RUN = json.loads((Path(__file__).parent / "fixtures" / "claude_code_skill_call.json").read_text())
+SKILL_ENTRY = next(entry for entry in SKILL_RUN["transcript"] if entry.get("sourceToolUseID"))
+SKILL_TEXT = SKILL_ENTRY["message"]["content"][0]["text"]
+SKILL_CALL_ID = SKILL_ENTRY["sourceToolUseID"]
+
+
+def _write_skill_transcript(config_dir: Path) -> None:
+    path = config_dir / "projects" / "-workspace" / "session.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(entry) + "\n" for entry in SKILL_RUN["transcript"]))
+
+
+def _item_shapes(items: list) -> list[tuple[str, str | None]]:
+    return [(item.type, getattr(item, "role", None) or getattr(item, "name", None)) for item in items]
+
+
+SKILL_RUN_SHAPES = [
+    ("function_call", "Skill"),
+    ("function_call_output", None),
+    ("message", "user"),
+    ("function_call", "Bash"),
+    ("function_call_output", None),
+    ("message", "assistant"),
+]
+
+
+class TestLoadedSkillText:
+    """The text the Skill tool loads is model input after the Skill call's result, and the output keeps it there."""
+
+    @pytest.mark.parametrize("fold_thinking", [True, False])
+    def test_skill_text_follows_the_skill_calls_result(self, fold_thinking: bool) -> None:
+        stream = _capture_stream(SKILL_RUN)
+        items, metadata = parse_stream_json(
+            stream, fold_thinking=fold_thinking, transcript_records=SKILL_RUN["transcript"]
+        )
+        assert _item_shapes(items) == SKILL_RUN_SHAPES
+        skill_call, launched, loaded = items[:3]
+        assert skill_call.call_id == launched.call_id == SKILL_CALL_ID
+        assert launched.output == "Launching skill: calculator"
+        assert isinstance(loaded, NeMoGymEasyInputMessage)
+        assert loaded.content == SKILL_TEXT and loaded.content.startswith("Base directory for this skill: ")
+
+        # Without the transcript nothing links the stream's message to its call, so it is left out, as before. The
+        # other items and the usage are the same either way; only the position-based msg-<n> ids move.
+        without, without_metadata = parse_stream_json(stream, fold_thinking=fold_thinking)
+        assert _item_shapes(without) == [shape for shape in SKILL_RUN_SHAPES if shape != ("message", "user")]
+        assert [item.model_dump(exclude={"id"}) for item in items if item is not loaded] == [
+            item.model_dump(exclude={"id"}) for item in without
+        ]
+        assert metadata == without_metadata
+        assert (metadata["input_tokens"], metadata["cached_tokens"], metadata["output_tokens"]) == (
+            1981 + 13203 + 23881,
+            23881,
+            80,
+        )
+
+    def test_trajectory_ties_the_skill_text_to_the_skill_call(self) -> None:
+        items, _ = parse_stream_json(_capture_stream(SKILL_RUN), transcript_records=SKILL_RUN["transcript"])
+        trajectory = transcript_to_atif(
+            "What is 2 + 3 * 4? Please use the calculator skill to compute this.\n",
+            [item.model_dump(mode="json") for item in items],
+            session_id="rollout",
+            agent_name="claude_code_agent",
+            agent_version="test",
+        )
+        assert [step.source for step in trajectory.steps] == ["user", "agent", "agent", "agent"]
+        skill_step, bash_step = trajectory.steps[1:3]
+        assert [call.function_name for call in skill_step.tool_calls] == ["Skill"]
+        assert [(result.source_call_id, result.content) for result in skill_step.observation.results] == [
+            (SKILL_CALL_ID, "Launching skill: calculator"),
+            (None, SKILL_TEXT),
+        ]
+        assert skill_step.extra["nemo_gym"]["observation_source"] == "user_turn"
+        assert [result.content for result in bash_step.observation.results] == ["Result: 14"]
+        assert trajectory.extra["nemo_gym"]["conversion"]["status"] == "complete"
+
+    def test_host_run_returns_the_skill_text(self, tmp_path: Path) -> None:
+        agent = _make_agent()
+        agent.server_client.global_config_dict = {}
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(_capture_stream(SKILL_RUN).encode(), b""))
+
+        async def run_claude(*command, env, **kwargs):
+            _write_skill_transcript(Path(env["CLAUDE_CONFIG_DIR"]))
+            return proc
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", new=run_claude),
+        ):
+            response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="2 + 3 * 4")))
+        assert _item_shapes(response.output) == SKILL_RUN_SHAPES
+        assert response.output[2].content == SKILL_TEXT
+
+    def test_sandbox_run_returns_the_skill_text(self, tmp_path: Path, monkeypatch) -> None:
+        _write_skill_transcript(tmp_path)
+        artifacts = adapter.ClaudeCodeArtifacts(_capture_stream(SKILL_RUN), _archive(tmp_path))
+        state = adapter.ClaudeCodeSandboxSession(
+            request=AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id={"rollout_id": "rollout"},
+                task_id={"taskset": "fixture", "task_id": "task"},
+            ),
+            runtime="/runtime",
+            session=SimpleNamespace(
+                session_dir="/tmp/session",
+                workdir="/workspace",
+                artifacts=artifacts,
+                cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
+            ),
+        )
+        monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
+        response = asyncio.run(
+            _make_agent()._sandbox_response(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="2 + 3 * 4"), prompt="2 + 3 * 4", system=None
+            )
+        )
+        assert _item_shapes(response.output) == SKILL_RUN_SHAPES
+        assert response.output[2].content == SKILL_TEXT
+        # The observations read the same transcript and already held the text in the conversation.
+        (root,) = [record for record in state.observations.records if isinstance(record, AgentInvocation)]
+        assert [getattr(item, "content", None) for item in root.conversation].count(SKILL_TEXT) == 1
+
+    @pytest.mark.parametrize("fold_thinking", [True, False])
+    def test_a_subagents_skill_text_stays_with_its_frames(self, fold_thinking: bool) -> None:
+        # The same run inside a subagent: evaluation output keeps subagent frames, capture output leaves them out.
+        task = {"type": "tool_use", "id": "task", "name": "Task", "input": {"prompt": "compute 2 + 3 * 4"}}
+        events = [_event("assistant", message={"id": "resp_parent", "content": [task]})]
+        for event in SKILL_RUN["stream"]:
+            if event["type"] in ("assistant", "user"):
+                events.append(json.dumps({**event, "parent_tool_use_id": "task"}))
+        events.append(
+            _event("user", message={"content": [{"type": "tool_result", "tool_use_id": "task", "content": "14"}]})
+        )
+        items, _ = parse_stream_json(
+            "\n".join(events), fold_thinking=fold_thinking, transcript_records=SKILL_RUN["transcript"]
+        )
+        loaded = [item for item in items if isinstance(item, NeMoGymEasyInputMessage)]
+        if fold_thinking:
+            assert [item.content for item in loaded] == [SKILL_TEXT]
+            launched = next(i for i, item in enumerate(items) if getattr(item, "call_id", None) == SKILL_CALL_ID)
+            assert items[launched + 1].type == "function_call_output" and items[launched + 2] is loaded[0]
+        else:
+            assert loaded == []
+            assert [item.call_id for item in items] == ["task", "task"]
+
+    def test_capture_attributes_the_same_terminal_call(self) -> None:
+        # Under training-token capture the loaded text is not model-authored, so attribution is unchanged.
+        converter = AnthropicConverter()
+        entries: list[TokenEntry] = []
+        request_items: list[dict] = []
+        for index, event in enumerate(event for event in SKILL_RUN["stream"] if event["type"] == "assistant"):
+            served = converter.anthropic_to_responses(
+                {"content": event["message"]["content"]}, NeMoGymResponseCreateParamsNonStreaming(input="q"), "model"
+            )
+            served.id = event["message"]["id"]
+            entry = TokenEntry(
+                capture_key="rollout",
+                model_call_id=f"call-{index}",
+                response_id=served.id,
+                prompt_token_ids=[1],
+                generation_token_ids=[index + 2],
+                generation_log_probs=[-0.1],
+                output_items=[item.model_dump() for item in served.output],
+            )
+            stamp_continuation(entry, request_items)
+            entries.append(entry)
+            request_items.extend(entry.output_items)
+        agent = _make_agent(token_id_capture=True)
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+        body = NeMoGymResponseCreateParamsNonStreaming(input="2 + 3 * 4")
+
+        def attribution(transcript_records):
+            items, metadata = parse_stream_json(
+                _capture_stream(SKILL_RUN), fold_thinking=False, transcript_records=transcript_records
+            )
+            response = agent._response_from_output(body, items, "model", metadata)
+            return response, resolve_terminal(entries, response.model_dump())
+
+        response, with_text = attribution(SKILL_RUN["transcript"])
+        _, without_text = attribution(None)
+        assert response.id == "resp_3" and response.output[2].content == SKILL_TEXT
+        assert with_text.model_call_id == "call-2", with_text.reason
+        # The content witness hashes the transcript's model-authored items and agrees with the served id.
+        assert "corroborated_by=content_cumulative" in with_text.reason
+        assert (with_text.model_call_id, with_text.method, with_text.reason) == (
+            without_text.model_call_id,
+            without_text.method,
+            without_text.reason,
+        )
+
+
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        ("loaded text", "loaded text"),
+        ([{"type": "text", "text": "loaded text"}], "loaded text"),
+        (
+            [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}],
+            [{"type": "input_text", "text": "first"}, {"type": "input_text", "text": "second"}],
+        ),
+        ([{"type": "text", "text": ""}], None),
+        ([{"type": "image", "source": {}}], None),
+    ],
+)
+def test_tool_call_messages_read_the_text_linked_to_a_call(content, expected) -> None:
+    records = [
+        {"type": "user", "sourceToolUseID": "call", "isMeta": True, "message": {"role": "user", "content": content}},
+        # A tool result names its assistant entry, not a call; an attachment is no message.
+        {"type": "user", "sourceToolAssistantUUID": "a", "message": {"role": "user", "content": "Launching skill: x"}},
+        {"type": "attachment", "sourceToolUseID": "call", "attachment": {"type": "command_permissions"}},
+    ]
+    messages = tool_call_messages(records)
+    if expected is None:
+        assert messages == {}
+    else:
+        assert [message.model_dump(mode="json")["content"] for message in messages["call"]] == [expected]
+        assert messages["call"][0].role == "user"
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,7 @@ from typing import Any, NamedTuple, Optional
 from uuid import uuid4
 
 from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
@@ -122,6 +123,45 @@ def transcript_calls(records: Iterable[Any]) -> dict[str, TranscriptCall]:
     return calls
 
 
+def tool_call_messages(records: Iterable[Any]) -> dict[str, list[NeMoGymEasyInputMessage]]:
+    """The user messages Claude Code adds to a tool call's result, by the call's id, in transcript order.
+
+    The Skill tool answers its call with ``Launching skill: <name>`` and then sends the skill's text ("Base
+    directory for this skill: ..." and its SKILL.md) as a user message of its own, which the model reads right
+    after the call's result. The stream carries that message without naming its call; the transcript entry names
+    it in ``sourceToolUseID``.
+    """
+    messages: dict[str, list[NeMoGymEasyInputMessage]] = {}
+    for record in records:
+        if not isinstance(record, Mapping) or record.get("type") != "user":
+            continue
+        call_id = record.get("sourceToolUseID")
+        message = record.get("message")
+        if not isinstance(call_id, str) or not call_id or not isinstance(message, Mapping):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            texts = [content]
+        elif isinstance(content, list):
+            texts = [
+                b["text"]
+                for b in content
+                if isinstance(b, Mapping) and b.get("type") == "text" and isinstance(b.get("text"), str)
+            ]
+        else:
+            texts = []
+        texts = [text for text in texts if text]
+        if not texts:
+            continue
+        messages.setdefault(call_id, []).append(
+            NeMoGymEasyInputMessage(
+                role="user",
+                content=texts[0] if len(texts) == 1 else [{"type": "input_text", "text": text} for text in texts],
+            )
+        )
+    return messages
+
+
 def _extract_thinking(content: list[Any]) -> str:
     parts = []
     for b in content:
@@ -149,6 +189,11 @@ def parse_stream_json(
     transcripts, the stream's per-message usage is all there is, which on servers that send output only at the end
     of a message (vLLM) holds input alone. ``cached_tokens`` is None when no cache count was reported.
 
+    A user message Claude Code adds to a tool call's result, such as the text of a skill the Skill tool loads,
+    follows that call's ``function_call_output`` as a ``user`` input message (:func:`tool_call_messages`). It is
+    input the model read, not model output. The transcript records link it to its call, so without them it is
+    left out.
+
     ``fold_thinking=True`` (eval default) prefixes each assistant message with the model's thinking as
     ``<think>...</think>`` text. Under training-token capture that must be off: Gym attributes the finished
     transcript to a captured model call by hashing the model-authored text, and the captured call's message
@@ -168,6 +213,9 @@ def parse_stream_json(
         except json.JSONDecodeError:
             continue
 
+    if transcript_records is not None:
+        transcript_records = list(transcript_records)
+    result_messages = tool_call_messages(transcript_records or ())
     output_items: list[Any] = []
     pending_calls: dict[str, NeMoGymResponseFunctionToolCall] = {}
     buffered_think: str | None = None
@@ -304,6 +352,8 @@ def parse_stream_json(
                         status="completed",
                     )
                 )
+                # Right after the result, where Claude Code records it.
+                output_items.extend(result_messages.pop(tool_id, ()))
 
         elif etype == "system" and event.get("subtype") == "status":
             session_id = event.get("session_id")
