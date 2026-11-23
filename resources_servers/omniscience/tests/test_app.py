@@ -484,7 +484,7 @@ class TestOmniscienceServer:
         server = OmniscienceServer(config=config, server_client=server_mock)
         self._mock_judge_reply(server_mock, self._make_judge_response("The predicted answer matches the gold target."))
 
-        with pytest.raises(JudgeError):
+        with pytest.raises(JudgeError, match="matches the gold target"):
             await server.verify(self._make_request("1989"))
 
     async def test_chat_completions_judge_strips_think_blocks(self, config: OmniscienceConfig) -> None:
@@ -529,7 +529,14 @@ class TestOmniscienceServer:
 
 
 def test_run_request_fields_agree_with_task_data() -> None:
-    for name in set(OmniscienceRunRequest.model_fields) - set(BaseRunRequest.model_fields):
+    provenance_only = {
+        "aa_omniscience_version",
+        "aa_omniscience_dataset_revision",
+    }
+    wire_fields = set(OmniscienceRunRequest.model_fields) - set(BaseRunRequest.model_fields)
+    assert wire_fields == set(TaskData.model_fields) - provenance_only
+    assert OmniscienceRunRequest.model_config.get("extra") == TaskData.model_config.get("extra") == "allow"
+    for name in wire_fields:
         wire_field = OmniscienceRunRequest.model_fields[name]
         schema_field = TaskData.model_fields[name]
         assert wire_field.annotation == schema_field.annotation, name
@@ -692,6 +699,24 @@ def test_only_explicit_judge_verdict_marks_grading(text: str, expected: str | No
         assert grading.parsed_dependencies == ({0} if parsed else set())
     finally:
         _judge_grading.reset(token)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Grade: B; Verdict: B would be too harsh", None),
+        ("Grade: B; Verdict: B; Grade: B is too harsh", None),
+        ("Grade: B; Verdict: B would be too harsh\nGrade: A", None),
+        ("CORRECT (A) requires a full match.\nGrade: B. The predicted answer differs.", None),
+        ("Grade: B — the year differs.\nCORRECT (gold): 1989", None),
+        ("CORRECT answer would be 1989, but the model said 1990.\nGrade: B", None),
+        ("INCORRECT. The predicted answer names another county.\n\nGrade: B", "B"),
+        ("Grade: A Because the year matches", "A"),
+        ("Grade: A becauseof", None),
+    ],
+)
+def test_verdict_tail_on_later_clauses_and_lines(text: str, expected: str | None) -> None:
+    assert parse_judge_grade(text) == expected
 
 
 class TestChatCompletionsJudge:
