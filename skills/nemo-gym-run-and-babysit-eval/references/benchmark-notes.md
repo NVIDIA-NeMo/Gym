@@ -1,6 +1,6 @@
 # Benchmark notes for run-and-babysit-eval
 
-Facts about single benchmarks that the decision steps of [the Slurm run procedure](slurm.md) rely on. Read the one
+Facts about single benchmarks that the decision steps of [the skill](../SKILL.md) rely on. Read the one
 that matches the cell; none of them changes an action in the decision table.
 
 ## Agent time limit: Terminal-Bench 4.0

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0 AND CC-BY-4.0
+# SPDX-License-Identifier: Apache-2.0
 # Adapted from https://github.com/NVIDIA/skills/blob/f41ce9991ce9b45b19cf4b4fda1d1a066b45dd14/.github/workflows/request-nvskills-ci.yml
-# Source revision: f41ce9991ce9b45b19cf4b4fda1d1a066b45dd14 (Apache-2.0 AND CC-BY-4.0).
+# Source revision: f41ce9991ce9b45b19cf4b4fda1d1a066b45dd14 (source code: Apache-2.0).
 name: Request NVSkills CI
 
 on:

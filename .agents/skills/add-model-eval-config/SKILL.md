@@ -15,8 +15,5 @@ description: >
 
 # Add a Model Config to Gym
 
-Follow the canonical [model-config procedure](../../../skills/nemo-gym-run-and-babysit-eval/references/add-model-eval-config.md).
-For a config-only request, compose and validate the config, read the resolved values, and report any
-checks that were not run. Do not submit or monitor a run unless the user requested an evaluation or
-smoke run. When they did, continue with the bundled
-[Slurm run procedure](../../../skills/nemo-gym-run-and-babysit-eval/references/slurm.md) in this same task.
+Follow the [original model-config workflow](../../../skills/nemo-gym-run-and-babysit-eval/references/add-model-eval-config.md).
+For a configuration-only request, stop after configuration and validation; run a smoke only when requested.

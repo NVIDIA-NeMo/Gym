@@ -1,10 +1,25 @@
+---
+name: add-model-eval-config
+description: >
+  Onboard a model for NeMo Gym evaluations and compose the complete eval config: the vLLM policy
+  service, its wiring as the policy, the reasoning toggle, and each benchmark's own config from
+  Gym's `benchmarks/<name>/`, then validate and smoke it. Use when a new model or checkpoint has to
+  be evaluated in Gym and no eval config exists yet, including a quantized export (NVFP4, FP8) of a
+  model that also runs in BF16. run-and-babysit-eval follows this skill itself when it is asked to
+  run a model that has no config yet, and runs the config this skill writes. Not for adding a
+  benchmark (use add-benchmark). Triggered by: "add a model", "new checkpoint", "serve this model in
+  Gym", "model config", "vllm config", "enable thinking", "reasoning parser", "tool call parser",
+  "compare two models fairly", "eval config", "where does the benchmark config come from", "add an
+  NVFP4 variant", "serve the quantized checkpoint with the BF16 settings".
+---
+
 # Add a Model Config to Gym
 
-The Gym pages are the reference; when they and this procedure disagree, the pages win:
-[Configuration](https://docs.nvidia.com/nemo/gym/latest/orchestration/configuration) (the `services`
+The Gym pages are the reference; when they and this skill disagree, the pages win:
+[Configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/versions/latest/pages/orchestration/configuration.mdx) (the `services`
 and `driver` fields),
-[Multi-node vLLM](https://docs.nvidia.com/nemo/gym/latest/orchestration/how-to/multi-node-vllm) and
-[vLLM model server](https://docs.nvidia.com/nemo/gym/latest/model-server/vllm) (the `vllm_model`
+[Multi-node vLLM](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/versions/latest/pages/orchestration/how-to/multi-node-vllm.mdx) and
+[vLLM model server](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/versions/latest/pages/model-server/vllm.mdx) (the `vllm_model`
 fields, `chat_template_kwargs`, `extra_body`).
 
 A model in a Gym evaluation has two parts:
@@ -33,7 +48,7 @@ owner:
 | Context length | The model's limit (card or `config.json`) and the planned benchmarks' longest prompt plus output budget | `--max-model-len` in `extra_args`: at least what the benchmarks need, at most the model's limit. |
 | Multimodal limits | The planned benchmarks' most images (or other media) per request | vLLM's `--limit-mm-per-prompt` in `extra_args` (check its syntax in the image's vLLM). A text-only model does not run a vision benchmark. |
 | **From whoever deploys the model** | | |
-| Parallelism (tensor, pipeline, expert), `number_of_instances`, `--max-num-seqs`, `--gpu-memory-utilization`, nodes and GPUs per node | Their `services.policy` block or the serving params of the request | Use them as given; ask when none are given. This procedure does not choose them, and they do not change the outputs (section 8). |
+| Parallelism (tensor, pipeline, expert), `number_of_instances`, `--max-num-seqs`, `--gpu-memory-utilization`, nodes and GPUs per node | Their `services.policy` block or the serving params of the request | Use them as given; ask when none are given. This skill does not choose them, and they do not change the outputs (section 8). |
 
 Collect before writing anything: the context length, the recommended sampling settings, whether
 the model reasons (and which vLLM reasoning parser its family uses), its tool-call format (and the
@@ -371,10 +386,6 @@ beside a nested block at the same path) fails the job on the cluster, after the 
 
 ## 6. Smoke it
 
-Run this section when an evaluation or smoke run was requested. For a config-only request, stop after
-validation (section 5), inspect the resolved config (section 7), and hand off the config and any unrun
-checks; creating a config does not by itself request a submission.
-
 Submit the model with one benchmark and a small task count before a full evaluation
 (`gym eval submit --config submit.yaml`; it prints the run's `GYM_JOB_ID`):
 
@@ -394,7 +405,7 @@ variant the benchmark ships) and is reported under that name; with no such subse
 score. Bound the smoke to
 one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`;
 when it completes, it cancels the chain's pending follow-up and sentinel itself (see run-and-babysit-eval, section 2).
-Then follow the bundled [Slurm run procedure](slurm.md): `gym eval resubmit "$GYM_JOB_ID"
+Then follow the [run-and-babysit-eval](../SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
 <benchmark> --recover --inspect` and `gym eval health-check` (run-and-babysit-eval, section 6). Look for answers that end mid-thought (the output token
 budget or `--max-model-len` is too small), reasoning that lands in the answer (the reasoning parser
 or `uses_reasoning_parser` is wrong), and tool calls that arrive as plain text (the tool-call
@@ -491,12 +502,11 @@ The smoke (section 6) of the quantized config reads the same fields as the BF16 
 model's own faults (`evaluation_health.model.kinds`, `failures.response_failures.by_cause`) between the two
 smokes belongs to the export or its serving recipe, and goes to the export's owner.
 
-## What this procedure does not do
+## What this skill does not do
 
-- A config-only request does not submit, watch, resume or recover a run, or judge its health. An
-  evaluation request continues with the bundled [Slurm run procedure](slurm.md), which takes this config.
-- It does not add a benchmark to Gym or change one; follow the
-  [benchmark tutorial](https://docs.nvidia.com/nemo/gym/latest/contribute/environments/adding-a-benchmark) for that. A benchmark that has no
+- It does not submit, watch, resume or recover a run, or judge its health. That is
+  [run-and-babysit-eval](../SKILL.md), which takes the config this skill writes.
+- It does not add a benchmark to Gym or change one; that is add-benchmark. A benchmark that has no
   directory under `benchmarks/` at the pinned commit cannot be composed here.
 
 ## Exit checks
@@ -505,7 +515,7 @@ smokes belongs to the export or its serving recipe, and goes to the export's own
   `--benchmark` resolves at the pinned commit, and `run.split` is its dataset's `type` (`benchmark`).
 - [ ] `--resolve-only` and `gym env validate --server-types` pass, and the `--dry-run` job script
   shows each `run` override once, the partition and `--gpus-per-node`.
-- [ ] When a smoke was requested, it completes and its health and answers look right; otherwise record it as unrun.
+- [ ] The smoke run completes, and its health and answers look right.
 - [ ] The resolved config shows the intended served name, parallelism, parsers and reasoning switch.
 - [ ] Nothing in the "keep identical" column differs from the run you compare against.
 - [ ] A quantized variant's resolved config differs from the BF16 one only where section 9, step 4

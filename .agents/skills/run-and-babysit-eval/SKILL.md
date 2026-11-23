@@ -15,7 +15,4 @@ description: >
 
 # Run a Gym Evaluation to Its Result
 
-Follow the canonical [NeMo Gym evaluation skill](../../../skills/nemo-gym-run-and-babysit-eval/SKILL.md)
-in this same task. It contains the model-config procedure and the Slurm execution, recovery and
-acceptance workflow. The existing `run-and-babysit-eval` invocation remains an entry point to that
-single maintained procedure.
+Follow the [original evaluation workflow](../../../skills/nemo-gym-run-and-babysit-eval/SKILL.md).
