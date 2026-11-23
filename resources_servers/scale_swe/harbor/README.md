@@ -54,10 +54,10 @@ python resources_servers/scale_swe/harbor/adapter.py --rows <rows.jsonl> --outpu
 
 Exit 2, with nothing written, for a non-empty output folder, an `--ids-file` that is not valid UTF-8, a duplicate or
 missing id, a negative `--limit`, a missing folder for `--native-rows-out` or `--id-map-out`, a malformed row (bad
-JSON, an `instance_id` that is not a folder name, an empty or missing `workdir` or `image_url`, an `image_url` with
-whitespace or a control character, a `workdir` that is not an absolute path of letters, digits and `._@+-/`, text that
-is not valid UTF-8, a prompt that is not one user message, a prompt whose first line Gym would drop as a canary
-marker), and every native setting the task folders cannot reproduce: `is_verifying_golden_patch: true`,
+JSON, an `instance_id` that is not a folder name or starts with a dot, an empty or missing `workdir` or `image_url`, an
+`image_url` with whitespace or a control character, a `workdir` that is not an absolute path of letters, digits and
+`._@+-/`, text that is not valid UTF-8, a prompt that is not one user message, a prompt whose first line Gym would drop
+as a canary marker), and every native setting the task folders cannot reproduce: `is_verifying_golden_patch: true`,
 `enforce_agent_no_network: true`, `sandbox_config.provider_options.network_policy`,
 `sandbox_config.derive_cpu_env: false`, `evaluation_timeout: null`, a resource other than `cpu`, `memory_mib` and
 `disk_gib`, a `cpu` that is not a whole number, and an unknown `patch_capture_mode`.

@@ -549,7 +549,8 @@ def select_rows(path: Path, ids: list[str] | None, limit: int = 0) -> list[tuple
                 raise AdapterError(f"instance_id {name!r} is not a usable folder name")
             if wanted is not None and name not in wanted:
                 continue
-            if not _TASK_NAME.fullmatch(name):
+            # A name starting with "." could be "." or "..": the output folder itself or its parent.
+            if not _TASK_NAME.fullmatch(name) or name.startswith("."):
                 raise AdapterError(f"instance_id {name!r} is not a usable folder name")
             if name in offsets:
                 raise AdapterError(f"{name} appears twice in {path.name}")

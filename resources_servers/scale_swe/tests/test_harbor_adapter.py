@@ -229,6 +229,30 @@ def test_malformed_row_is_refused_before_writing(
     assert not (tmp_path / "ds").exists()
 
 
+@pytest.mark.parametrize("name", [".", "..", ".hidden"])
+def test_dot_prefixed_instance_id_is_refused_before_writing(
+    tmp_path: Path, rows: Path, capsys: pytest.CaptureFixture, name: str
+) -> None:
+    # "." is the output folder itself and ".." its parent, where a sibling instruction.md would be overwritten.
+    out = tmp_path / "ds"
+    out.mkdir()
+    (tmp_path / "instruction.md").write_text("sibling\n")
+    with rows.open("a") as handle:
+        handle.write(json.dumps(_row(name)) + "\n")
+    before = _tree(tmp_path)
+    assert _convert(rows, out) == 2
+    assert f"instance_id {name!r} is not a usable folder name" in capsys.readouterr().err
+    assert _tree(tmp_path) == before
+    assert list(out.iterdir()) == []
+
+
+def test_instance_id_with_an_inner_dot_converts(tmp_path: Path, rows: Path) -> None:
+    with rows.open("a") as handle:
+        handle.write(json.dumps(_row("repo.d_pr4")) + "\n")
+    assert _convert(rows, tmp_path / "ds") == 0
+    assert (tmp_path / "ds" / "repo.d_pr4" / "instruction.md").read_text() == "Fix the bug in repo.d_pr4.\n"
+
+
 def test_non_string_instance_id_is_refused_with_ids_file(
     tmp_path: Path, rows: Path, capsys: pytest.CaptureFixture
 ) -> None:
