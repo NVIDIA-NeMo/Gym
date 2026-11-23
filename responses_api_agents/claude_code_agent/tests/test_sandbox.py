@@ -699,7 +699,9 @@ def _task_sandbox(task_context, *, copy_code=0):
             return result(code=copy_code)
         return result()
 
-    remote = SimpleNamespace(exec=AsyncMock(side_effect=run), upload=AsyncMock(), start=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="sandbox-actual", exec=AsyncMock(side_effect=run), upload=AsyncMock(), start=AsyncMock()
+    )
     return remote, commands
 
 
