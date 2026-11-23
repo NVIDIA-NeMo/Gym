@@ -7,13 +7,14 @@ import logging
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal, Optional
 
 from fastapi import FastAPI, Request
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.config import get_global_config_dict
+from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox import SandboxConfig, resolve_provider_config
 from nemo_gym.server_runtime import (
@@ -48,6 +49,11 @@ class GdpPdfSandboxConfig(GdpPdfConfig):
     sandbox_config: SandboxConfig = Field(default_factory=lambda: SandboxConfig(ttl_s=14400))
     documents_base_dir: str = "resources_servers/gdp_pdf/data"
     allow_unisolated_sandbox: bool = False
+    # model_only: each sandbox is created with an egress rule that allows only sandbox_model_server's host, on
+    # providers with network policies (OpenSandbox); the seed is refused where the rule cannot be enforced.
+    # inherit keeps the provider's network, which must then be a Docker internal network.
+    sandbox_network_access: Literal["inherit", "model_only"] = "inherit"
+    sandbox_model_server: Optional[ModelServerRef] = None
 
 
 class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
@@ -61,8 +67,14 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
             raise ValueError("GDP.pdf sandboxes require ttl_s for abandoned episodes")
         # The seed of each session that holds a lent sandbox or is starting one.
         self._seeds: dict[str, ResourcesSeedSessionRequest] = {}
+        model_server = self.config.sandbox_model_server
         self._sandboxes = LentSandboxes(
-            self.config.sandbox_provider, self.config.sandbox_config, image=self.config.sandbox_image, workdir=WORKDIR
+            self.config.sandbox_provider,
+            self.config.sandbox_config,
+            image=self.config.sandbox_image,
+            workdir=WORKDIR,
+            network_access=self.config.sandbox_network_access,
+            model_server=model_server.name if model_server is not None else None,
         )
         self._locks = ResourcesSessionLocks()
         self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
@@ -118,9 +130,15 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
                 "GDP.pdf sandbox isolation explicitly disabled; this opt-out is recorded in verification results"
             )
             return
+        options = self.config.sandbox_config.provider_options
+        if self.config.sandbox_network_access == "model_only":
+            # LentSandboxes adds the deny-by-default egress rule and refuses the seed on a provider without network
+            # policies or a model server on a loopback address. Host mounts would still break the isolation.
+            if options.get("volumes") or options.get("run_args"):
+                raise ResourcesSeedRejectedError("GDP.pdf model_only sandboxes take no extra mounts/run flags")
+            return
         create = provider.get("docker", {}).get("create", {})
         network = create.get("network")
-        options = self.config.sandbox_config.provider_options
         if not network or create.get("extra_run_args") or options.get("volumes") or options.get("run_args"):
             raise ResourcesSeedRejectedError(
                 "GDP.pdf requires a Docker internal network and no extra mounts/run flags"

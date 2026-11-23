@@ -277,6 +277,25 @@ shell requests, while permitting the model proxy at the gateway. Host services
 bound to that gateway are also reachable, so expose only the model proxy there.
 With Docker in a VM, run Gym inside that VM. Before seeding, the resources server
 checks that the Docker network is internal and rejects extra mounts/run flags.
+On a provider with network policies (OpenSandbox), set
+`sandbox_network_access: model_only` and `sandbox_model_server` on the resources
+server instead: each sandbox is then created with an egress rule that denies
+everything except the model server's host, so the Docker network check does not
+apply. The seed is refused when the rule cannot be enforced (a provider without
+network policies, or a model server on a loopback address) and when the sandbox
+config adds mounts or run flags. The model server must listen on an address the
+sandbox can reach.
+
+```yaml
+gdp_pdf_sandbox:
+  resources_servers:
+    gdp_pdf:
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+```
+
 Other deployments require the explicit `allow_unisolated_sandbox: true` opt-out
 on the resources server. It is logged and recorded in each verification result;
 those deployments must provide their own filesystem and network isolation.
