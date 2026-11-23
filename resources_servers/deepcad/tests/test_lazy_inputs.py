@@ -170,6 +170,9 @@ class LazyInputTests(unittest.TestCase):
             for agent_ref in (None, {"name": "deepcad_opencode_agent"}):
                 with self.subTest(failure=type(failure).__name__, agent_ref=agent_ref):
                     example = deepcopy(self.example)
+                    example["deepcad_lazy"]["config"]["cache_root"] = str(
+                        self.root / f"cache-{type(failure).__name__}-{agent_ref is None}"
+                    )
                     if agent_ref is not None:
                         example["agent_ref"] = agent_ref
                     seen = []

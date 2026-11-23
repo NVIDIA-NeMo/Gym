@@ -216,6 +216,41 @@ disabled. Repeat `verify --output ordered --start 0 --count 1024` for a fresh
 check. Later draws render on demand. Use a new cache directory when refreshing
 the catalog or retrying a pinned replacement after repairing the renderer.
 
+The export manifest also records sampler indices, source-code checksums, optional
+catalog and override checksums, and the seed. Warming rejects source changes after
+export. Each completed draw records prompt-cache, replacement and STEP checksums,
+whether its cache was already warm, and preparation time. An immutable
+`draw<start>-ready.json` receipt is published after the first draw passes a separate
+process's cache check, before the rest of the requested range finishes. A full
+0–1,023 warmup also publishes `warm1024-ready.json` for prefix consumers.
+
+### Deployment overrides and staged catalogs
+
+The `resources_servers.deepcad.dataset.training` hook accepts optional
+`lazy_render_overrides` alongside `source_operation_sampling`:
+
+```yaml
+lazy_render_overrides:
+  renderer_python: /opt/cad/bin/python
+  cache_root: /scratch/cad-cache
+  reference_catalog: /scratch/cad-inputs/catalog.sqlite
+  reference_catalog_root: /scratch/cad-inputs
+```
+
+The overrides apply to a copy of each selected lazy descriptor; ordinary rows and
+the caller's descriptors stay unchanged. Supported fields also include
+`reference_sandbox_provider` and `allow_partial_operation_replacements`. With no
+overrides, existing hook behavior is unchanged. An explicit
+`reference_catalog_root` permits a staged catalog outside `dataset_root`, while
+still rejecting paths that escape that explicit root. The default catalog root
+remains `dataset_root`. Missing sandbox fonts propagate as infrastructure errors
+and do not quarantine valid reference programs.
+
+For a finite pool with all rendering completed before consumption, see
+[Offline materialized CAD tasks](dataset/materialized-inputs.md). That utility
+uses the same sampler and renderer to publish ordered JSONL rows and a checked
+STEP archive, with resumable CPU render chunks and atomic release publication.
+
 `prepare_opencode.py` accepts validated lazy rows without rendering. It marks the
 harness in their configuration; materialization then adds the workspace prompt and
 explicit `target_images` used by the resources seed. Standalone consumers can load

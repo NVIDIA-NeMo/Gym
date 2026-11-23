@@ -91,6 +91,16 @@ def test_partial_replacement_warms_once_and_replays_in_fresh_process(tmp_path, m
     receipt = sampled_lazy.warm(tmp_path, 1, 6, 4)
     assert receipt == json.loads((tmp_path / "warm-1-6-ready.json").read_text())
     assert receipt["count"] == 6
+    assert [entry["draw_index"] for entry in receipt["entries"]] == list(range(1, 7))
+    assert receipt["cache_verification"]["fresh_process_cache_hits"]
+    assert all(entry["reference_sha256"] == sampled_lazy.sha256(step) for entry in receipt["entries"])
+    assert all(entry["cache_sha256"] == sampled_lazy.sha256(Path(entry["cache_path"])) for entry in receipt["entries"])
+    first_path = tmp_path / "draw1-ready.json"
+    first = first_path.read_bytes()
+    assert json.loads(first)["entries"][0]["draw_index"] == 1
+    assert json.loads(first)["cache_verification"]["count"] == 1
+    sampled_lazy.warm(tmp_path, 1, 1, 1)
+    assert first_path.read_bytes() == first
     assert calls == ["bad", "near"]
     # Only the pinned choice can satisfy the next requests after the catalog is removed.
     Path(config["reference_catalog"]).unlink()

@@ -325,15 +325,10 @@ def _validate_reference(config: LazyRenderConfig, record: dict[str, Any]) -> Non
             raise ValueError(f"Reference STEP checksum mismatch: {step}")
 
 
-def materialize_one(example: dict[str, Any], *, cache_only: bool = False) -> dict[str, Any]:
-    lazy = example["deepcad_lazy"]
+def resolution_target(lazy: dict[str, Any]) -> Path:
+    """Return the replacement receipt bound to this descriptor's render policy."""
     config = LazyRenderConfig.model_validate(lazy["config"])
-    if not config.warm_start_cache:
-        if cache_only:
-            raise ValueError("Cache verification requires warm_start_cache")
-        return _materialize_replacing(example)
     target = cache_target(lazy)
-    target.parent.mkdir(parents=True, exist_ok=True)
     # A change of replacement policy or budget must allow the original to be retried.
     policy = [
         config.reference_catalog,
@@ -344,7 +339,19 @@ def materialize_one(example: dict[str, Any], *, cache_only: bool = False) -> dic
         config.renderer_python,
     ]
     digest = hashlib.sha256(json.dumps(policy).encode()).hexdigest()
-    choice = target.with_suffix(f".{digest}.resolved.json")
+    return target.with_suffix(f".{digest}.resolved.json")
+
+
+def materialize_one(example: dict[str, Any], *, cache_only: bool = False) -> dict[str, Any]:
+    lazy = example["deepcad_lazy"]
+    config = LazyRenderConfig.model_validate(lazy["config"])
+    if not config.warm_start_cache:
+        if cache_only:
+            raise ValueError("Cache verification requires warm_start_cache")
+        return _materialize_replacing(example)
+    target = cache_target(lazy)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    choice = resolution_target(lazy)
     with choice.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if choice.exists():
@@ -420,9 +427,9 @@ def _materialize_replacing(example: dict[str, Any], choice: Path | None = None) 
             )
             root = Path(config.reference_catalog_root or config.dataset_root).resolve()
             catalog = Path(config.reference_catalog).resolve()
-            if not (catalog.is_relative_to(Path(config.dataset_root).resolve()) and catalog.is_relative_to(root)):
+            if not catalog.is_relative_to(root):
                 raise ValueError(
-                    "Reference replacement catalog must remain inside dataset_root and the configured catalog root"
+                    "Reference replacement catalog must remain inside reference_catalog_root or dataset_root"
                 )
             key = hashlib.sha256((original["record"]["task_id"] + ":" + str(attempt)).encode()).hexdigest()
             # The default retains the source and every required operation.
