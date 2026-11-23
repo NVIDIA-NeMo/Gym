@@ -160,6 +160,56 @@ def test_a_key_found_on_neither_the_row_nor_its_input_names_the_line(tmp_path):
         read_side(side, "verifier_metadata.instance_id", label="n")
 
 
+def _row_keyed_side(root, rewards):
+    """A run whose task key is on the result rows only; its materialized inputs carry just the indices.
+    `rewards` maps instance id -> list of rewards (one per repeat); None writes no row for that repeat."""
+    rows, inputs = [], []
+    for task_index, (instance, repeats) in enumerate(sorted(rewards.items())):
+        for rollout_index, reward in enumerate(repeats):
+            indices = {"_ng_task_index": task_index, "_ng_rollout_index": rollout_index}
+            inputs.append(indices)
+            if reward is not None:
+                rows.append({"reward": reward, "instance_id": instance, **indices})
+    _write_jsonl(root / "rollouts.jsonl", rows)
+    _write_jsonl(root / "rollouts_materialized_inputs.jsonl", inputs)
+    return root
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize(("dropped", "verdict"), [(1, INCONCLUSIVE), (0, PASS)])
+def test_a_key_on_result_rows_only_keeps_the_expected_rollouts(tmp_path, strict, dropped, verdict):
+    native = read_side(_row_keyed_side(tmp_path / "n", _tasks(12, lambda i: [1.0, 1.0])), "instance_id", label="n")
+    harbor_rewards = _tasks(12, lambda i: [1.0, None if i == 0 and dropped else 1.0])
+    harbor = read_side(_row_keyed_side(tmp_path / "h", harbor_rewards), "instance_id", label="h")
+    report = compare(native, harbor, Settings(strict=strict))
+    assert report["verdict"] == verdict
+    assert report["sides"]["harbor"]["rollouts"] == 24
+    assert report["sides"]["harbor"]["missing"] == dropped
+    assert any("harbor run is unfinished: 1 expected" in reason for reason in report["reasons"]) == bool(dropped)
+
+
+@pytest.mark.parametrize(("strict", "verdict"), [(False, PASS), (True, INCONCLUSIVE)])
+def test_a_failure_record_without_the_key_takes_its_task_label_from_a_result_row(tmp_path, strict, verdict):
+    native = read_side(_row_keyed_side(tmp_path / "n", _tasks(12, lambda i: [1.0, 1.0])), "instance_id", label="n")
+    harbor_root = _row_keyed_side(tmp_path / "h", _tasks(12, lambda i: [1.0, None if i == 0 else 1.0]))
+    failure = {"_ng_task_index": 0, "_ng_rollout_index": 1, "_ng_failure_class": "agent_run_error"}
+    _write_jsonl(harbor_root / "rollouts_failures.jsonl", [failure])
+    harbor = read_side(harbor_root, "instance_id", label="h")
+    report = compare(native, harbor, Settings(strict=strict))
+    # 1 failed of 24 rollouts is within the default 0.05 rate gap; strict mode needs every rollout scored.
+    assert report["sides"]["harbor"]["failed"] == 1
+    assert report["sides"]["harbor"]["missing"] == 0
+    assert report["verdict"] == verdict
+
+
+def test_an_expected_task_index_no_record_can_label_is_an_error(tmp_path):
+    side = _row_keyed_side(tmp_path / "n", {"a": [1.0], "b": [None]})
+    with pytest.raises(
+        ParityInputError, match=r"1 task index\(es\) .* no 'instance_id' field .*\(task indices \[1\]\)"
+    ):
+        read_side(side, "instance_id", label="n")
+
+
 def test_a_key_shared_by_several_dataset_rows_is_rejected(tmp_path):
     root = tmp_path / "n"
     _write_jsonl(

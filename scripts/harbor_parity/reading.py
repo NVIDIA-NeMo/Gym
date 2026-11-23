@@ -284,6 +284,13 @@ def read_side(
         else:
             scored[attempt] = reduced
 
+    # Label task indices whose input row lacks the key from the result rows first, so a failure record of the same
+    # task index that also lacks the key takes that label.
+    for row in [*scored.values(), *unindexed]:
+        index = row.get(TASK_INDEX_KEY_NAME)
+        if index in labels and labels[index] is None:
+            labels[index] = row[KEY_FIELD]
+
     failures: list[dict[str, Any]] = []
     if failures_path.is_file():
         attempts = []
@@ -300,6 +307,20 @@ def read_side(
         for record in failures:
             record[KEY_FIELD] = _label_of(record, key, labels, record.pop("_where"))
 
+    # A task index whose input row lacks the key takes the label its result rows carry, so its expected attempts
+    # (and any missing rollout) still count; an index with neither cannot be matched to a task and is an error.
+    for row in [*scored.values(), *unindexed, *failures]:
+        index = row.get(TASK_INDEX_KEY_NAME)
+        if index in labels and labels[index] is None:
+            labels[index] = row[KEY_FIELD]
+    unlabeled = sorted((index for index, task_label in labels.items() if task_label is None), key=str)
+    if unlabeled:
+        raise ParityInputError(
+            f"{label}: {len(unlabeled)} task index(es) in {materialized_path} have no {key!r} field and left no "
+            f"rollout row or failure record that carries it (task indices {unlabeled[:10]}); their expected "
+            "rollouts cannot be matched to a task"
+        )
+
     tasks: dict[str, TaskCounts] = {}
     reward_keys: Counter = Counter()
 
@@ -307,10 +328,9 @@ def read_side(
         return tasks.setdefault((id_map or {}).get(raw_label, raw_label), TaskCounts())
 
     for index, task_label in labels.items():
-        if task_label is not None:
-            counts = counts_for(task_label)
-            counts.task_indices.add(index)
-            counts.expected |= expected.get(index, set())
+        counts = counts_for(task_label)
+        counts.task_indices.add(index)
+        counts.expected |= expected.get(index, set())
 
     def count_attempt(counts: TaskCounts, row: dict[str, Any]) -> Optional[Attempt]:
         attempt = _attempt(row)
