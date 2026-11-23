@@ -140,7 +140,8 @@ question and that path, never the rubric), and the row adds the `video_binding` 
 
 The seed refuses a row whose video is not a regular file under `video_roots` or does not have that SHA-256, and puts
 the video at `/testbed/<sandbox_path>`. Set the sandbox image (`VIDEO_MCQA_SANDBOX_IMAGE`), the OpenSandbox provider
-settings (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`), the judge, and `video_qa_rubric_agentic_video_roots`.
+settings (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`), the judge, and `video_qa_rubric_agentic_video_roots`. To
+train on agentic rows, see [agentic rows with OpenCode](#agentic-rows-with-opencode).
 
 Videos too large to upload for every episode stay in the sandbox image instead: a row with `preloaded_media` names the
 image (through the server's `sandbox_preloaded_images`) and pins the image's catalog of them, and `prepare_agentic(...,
@@ -161,7 +162,7 @@ env:
     - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
     - resources_servers/video_qa_rubric/configs/video_qa_rubric.yaml
     judge_base_url: https://judge.example.com/v1
-    judge_api_key: ${oc.env:JUDGE_API_KEY}
+    judge_api_key: \${oc.env:JUDGE_API_KEY}
     judge_model_name: my-judge-model
     video_qa_rubric:
       resources_servers:
@@ -175,10 +176,84 @@ env:
             max_completion_tokens: 32768
 ```
 
+The judge's key is escaped (`\${...}`). NeMo RL resolves its own config and prints it, so an unescaped
+`${oc.env:JUDGE_API_KEY}` would put the key itself into NeMo RL's log and into the global config it hands to Gym.
+Escaped, the config keeps the variable's name, and each server process reads the key from its own environment, as
+NeMo RL does for the policy's key.
+
 Each training row needs `agent_ref: {type: responses_api_agents, name: video_qa_rubric_single_turn}`, which
 `gym dataset collate` adds for datasets declared in the config. In a mix with other environments, every row's
 `agent_ref` routes it to its own environment. Keep the judge separate from the policy: a policy that grades its own
 answers can learn to please itself.
+
+### Agentic rows with OpenCode
+
+`configs/video_qa_rubric_agentic.yaml` trains on agentic rows with the agent, image and sandbox of the
+[agentic setting](#agentic-setting). Each row names the agent,
+`agent_ref: {type: responses_api_agents, name: video_qa_rubric_agentic_opencode}`, and binds its video with
+`video_binding`. With NeMo RL:
+
+```yaml
+env:
+  should_use_nemo_gym: true
+  should_mask_flagged_samples: true
+  nemo_gym:
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/video_qa_rubric/configs/video_qa_rubric_agentic.yaml
+    video_qa_rubric_agentic_video_roots: [/data/invented_video_qa/references]
+    judge_base_url: https://judge.example.com/v1
+    judge_api_key: \${oc.env:JUDGE_API_KEY}
+    judge_model_name: my-judge-model
+    video_qa_rubric_agentic:
+      resources_servers:
+        video_qa_rubric:
+          empty_answer_reward: -0.5
+          judge_max_attempts: 12
+          judge_chat_completion_create_params:
+            messages: []
+            reasoning_effort: high
+            max_completion_tokens: 32768
+    # Raise both to the episodes the trainer keeps in flight; each holds a sandbox.
+    video_qa_rubric_agentic_opencode:
+      responses_api_agents:
+        opencode_agent:
+          concurrency: 128
+    video_qa_rubric_agentic_environment:
+      environment_servers:
+        single_agent_turn_legacy:
+          max_concurrent_episodes: 128
+    # Each video upload is one request that this bounds (opensandbox.yaml: 300 s); see below.
+    sandbox:
+      opensandbox:
+        connection:
+          request_timeout_s: 900
+```
+
+Set `VIDEO_MCQA_SANDBOX_IMAGE`, or
+`video_qa_rubric_agentic.resources_servers.video_qa_rubric.sandbox_config.image`, to an image built from
+`resources_servers/video_mcqa/sandbox_image` of the same tree, pinned by digest (video_mcqa's README, "Sandbox
+image"), and set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`. The config's limits set the trainer's:
+
+- Each call sends the episode so far and holds, with its output, up to `context_window` (262,144) tokens, and the
+  training sequences come from these calls: the policy's sequence length, the model server's `max_model_len` and any
+  sequence-packing or micro-batch token limit must hold that many.
+- A call asks for up to `max_output_tokens` (32,768) new tokens; the trainer's generation limit must allow them.
+- Every call sends the episode's tool images again, up to the video tools' `max_tool_media_images` (8,192): the model
+  server's image limit per request.
+- Once admitted, an episode ends within `default_episode_timeout_seconds` (6,600 s), grading included, so the
+  trainer's timeout for one rollout must be longer.
+
+Compaction is off, so an episode that fills the context ends with a context-limit error and scores 0.
+
+Our training rows for this config are on NVIDIA's DSS: `postOmni_RL_video-openqa-agentic@v0.1` holds 1,877 training
+rows and 17 validation rows, and `postOmni_RL_video-openqa-agentic_media@v0.1` holds their 1,103 videos. A row's
+`video_binding.source` names its video relative to the media dataset (`references/<sha256>.<ext>`): point the rows at
+your copy, and list its `references/` folder in `video_qa_rubric_agentic_video_roots`. We grade them with GPT-6.1-Sol
+at `reasoning_effort: max`. Each upload is one request that the provider's `connection.request_timeout_s` (300 s in
+`opensandbox.yaml`) bounds (video_mcqa's README, "Seeding"). The largest of these videos, 2.33 GiB, took 239 s to
+upload with no other upload running, and the episodes of a group upload the same video at once, so the example
+above raises the limit to 900 s.
 
 ## Example data and rollouts
 
