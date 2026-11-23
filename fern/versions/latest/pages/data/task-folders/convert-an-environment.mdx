@@ -1,0 +1,142 @@
+---
+title: "Convert an Environment to Task Folders"
+description: "Decide whether a JSONL-and-Resources-Server environment should run as Harbor task folders, and what a conversion must prove before its numbers replace the Resources Server run."
+position: 8
+---
+
+An environment built from JSONL rows, a Resources Server, an agent and a YAML config can also run as task folders on
+the `harbor` Environment Server. No single script converts every environment: the grader, the tools and their state,
+and the images differ too much. Each environment gets a small adapter in its own server folder, and a conversion is
+finished only when the same harness, model and tasks score the same on both paths. The
+[`convert-env-to-harbor`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/convert-env-to-harbor) skill
+holds the procedure; this page says when to use it, what to have ready and what counts as done.
+
+## When to convert
+
+In the Resources Server run, the benchmark logic lives in the server's Python, and either a `legacy_agent` relay
+forwards `/run` to one agent or `single_agent_turn` on the Environment Server orders the episode. On the task-folder
+path, the `harbor` server seeds a sandbox from each folder and the task's own verifier writes the reward
+([Task folders or a Resources Server](/main/agent-interactions/harbor#task-folders-or-a-resources-server)).
+
+| Situation | Decision |
+| --- | --- |
+| A text answer graded from the response; a per-row image with hidden tests; tools with per-session state that the server's own Python can serve per episode | Convert, following the matching family below. |
+| A judge model; a delegated or per-row verifier; a tool replaced by the harness shell; task images without Python 3.10+; a tool that calls a live external service | Convert only with the extra probe or check the skill names for it. A tool replaced by the shell gives a new baseline, not a comparison with the run that has the tool. |
+| No config on main runs the environment with the harness the task folders will use, through a `legacy_agent` relay or the Environment Server | Add that pairing in its own PR first (for a stateful server, usually by moving it to the Environment Server path), then convert. |
+| Simulated users; cohort or group rewards; a judge the verifier sandbox cannot reach; single-turn environments with no agent; tool state held in an external system or too large to rebuild per episode | Stay on the Resources Server path. |
+
+## Three families, three worked examples
+
+Each pilot runs OpenCode (`opencode_agent`) on both paths. `math_with_judge`, `scale_swe` and `workplace_assistant`
+passed full parity, 50 tasks x 2 repeats per path. `workplace_assistant`'s Resources Server run needed
+session-handling and MCP tool-name fixes not yet on main, so its OpenCode configuration ships as
+`harbor/configs/native_pairing.yaml` and is not a supported pairing. Two more adapters were written from the skill
+alone: `reasoning_gym` (partial credit; full parity passed, with the model solving almost every task) and
+`swe_rebench` (seven languages; smoke size only).
+Each adapter's README holds its evidence.
+
+| Family | Example adapter | What the task folders do |
+| --- | --- | --- |
+| Text answer graded from the response | [`math_with_judge/harbor`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_judge/harbor) (DAPO math, the `environments/opencode_math` pairing); [`reasoning_gym/harbor`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/reasoning_gym/harbor) for partial credit | A [parameterized template](/main/data/task-folders/task-folder-patterns#parameterized-tasks) plus `tasks.jsonl`. The system prompt is folded into `instruction.md`; a Python verifier grades the final response with the grading functions copied unchanged from `app.py`. |
+| Per-row image, patch and hidden tests | [`scale_swe/harbor`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/scale_swe/harbor); [`swe_rebench/harbor`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/swe_rebench/harbor) for images of other languages | One folder per row on an overlay of the row's image. A collect hook captures the patch; a [separate verifier](/main/data/task-folders/task-folder-verifiers#shared-and-separate-verification) runs the server's vendored grading code with reduced privileges, so the agent's code cannot write the reward. Where an image has no Python, the task installs a pinned standalone Python for its hooks and grader. |
+| Tools with per-session state | [`workplace_assistant/harbor`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant/harbor) | A [Compose](/main/data/task-folders/compose-tasks) sidecar serves the server's own tools over MCP and journals each call; a separate verifier scores the journal with the server's `is_correct`. |
+
+Start from your family's example. An adapter lives in `resources_servers/<server>/harbor/`, beside its server; its
+README must record the rows' sha256 and the command that regenerates the dataset, naming files by basename so two
+conversions give identical bytes. When the rows are public, ship the parity task ids as `harbor/configs/parity_ids.txt`.
+
+## What to have ready
+
+- **A same-harness pairing on main**: a config that runs the environment with the harness the task folders will use,
+  and scores a known row. Parity compares two paths of one harness.
+- **A sandbox provider** that can pull the task images, gives Compose services a shared network when tools run as a
+  sidecar, reaches the package indexes the images install from (and GitHub release downloads for images without
+  Python), and grants root the capabilities the verifier needs
+  (the SWE family drops privileges, which needs `CAP_CHOWN`, `CAP_SETUID` and `CAP_SETPCAP`). See
+  [OpenSandbox Provider](/main/infrastructure/sandbox/opensandbox).
+- **Images.** A prebuilt image pinned by digest, or an overlay Dockerfile (`FROM` plus `RUN`, nothing pushed). A
+  Dockerfile that must be built needs a registry the provider pulls from.
+- **A judge endpoint**, when grading uses one, reachable from the verifier sandbox, with its key delivered through the
+  server's `secrets` block to the verifier only.
+- **A model endpoint and capacity.** Each task-folder episode uses an agent sandbox, plus one for a separate verifier
+  and one per sidecar; count them against the provider's capacity before a full run.
+
+## Procedure
+
+Point your coding assistant at `.agents/skills/convert-env-to-harbor/SKILL.md`. Each of its steps ends in a "Before
+moving on" checklist: decide, probe the infrastructure, classify the environment from its resolved config, run a
+Resources Server baseline, fix task ids, choose the image, match the instruction, keep hidden data away from the
+agent, make the verifier and the reward safe, write the adapter, pass the gates, then run full parity and hand off.
+
+## Gates
+
+Run the gates in the table's order, each on both paths, and keep its command, run label and result. Run every
+task-folder command with the adapter's `harbor_arm.yaml`: it turns on separate verification wherever the agent could
+otherwise write its reward. Pass the adapter's `harbor_arm_harness.yaml` to every task-folder `gym eval run` too: it
+holds the harness settings that match the Resources Server run, such as `thinking`.
+Convert the smoke tasks as a dataset of their own and run it whole on both paths: `--limit` takes rows in file order
+in the Resources Server run and task ids in sorted order on the task-folder path, so it can pick different tasks.
+
+| Gate | Shows | How |
+| --- | --- | --- |
+| G1a determinism | Regenerating gives identical bytes | `diff -r` of two conversions into two parent folders with the same file names, before any validate (on a folder of task folders, `gym dataset validate` and `gym eval run` write `manifest.toml` into the dataset folder unless git tracks it, and image records such as `compose-images.json` when a task has a Dockerfile or a Compose file; a parameterized template is rendered under `results/harbor/<dataset folder name>/rendered/`, which gets those files, and the template is left unchanged) |
+| G2 oracle | Every folder loads and every reference solution scores 1 | `gym dataset validate <dataset> --sandbox <provider> --config harbor_arm.yaml` on the 3 to 5 smoke tasks; a known answer (golden patch or `fake-model`) in the Resources Server run |
+| G1b content check | Nothing the agent sees holds an answer, a secret or a local path, and `instruction.md` is the Resources Server prompt | `python -m scripts.harbor_conversion_checks check`: for a parameterized template on `results/harbor/<dataset folder name>/rendered` after G2 (it refuses the template with exit 2, and only a validate or eval run renders it); for one folder per task on the second conversion, which no validate touches |
+| G3 negative control | An empty or wrong solution, and an attempt to plant a reward, score 0 without a mask | `python -m scripts.harbor_conversion_checks controls` from a never-validated conversion, under its own dataset folder name, into a folder that must not exist; then `gym dataset validate ... --config harbor_arm.yaml` on the copy |
+| G4 Resources Server smoke | The pairing on main runs 3 to 5 tasks with the model | `gym eval run` with the pairing's config |
+| G5 task-folder smoke | The task folders run the same tasks with the same harness and model flags | `gym eval run <dataset> --agent <harness> --sandbox <provider> --config harbor_arm.yaml --config harbor_arm_harness.yaml` |
+| G6 comparison | Per-task rewards agree, and the model saw the same first request on both paths | `python -m scripts.harbor_conversion_checks first-request`; `python -m scripts.harbor_parity --min-tasks 3` |
+
+`gym dataset validate` exits 1 on a negative control by design and labels its rows `oracle solved` even at reward 0:
+read the rewards from `results/harbor/validation/<dataset folder name>/rollouts_run_summary.json`.
+
+## Parity rule
+
+`python -m scripts.harbor_parity` pairs the two runs task by task and prints a verdict: exit 0 PASS, 1 FAIL,
+2 input error (such as a task on one path only), 3 INCONCLUSIVE. A path that needs code not yet on main, such as a
+fix to the Resources Server's session handling, is labeled as such in the result.
+
+| Run | Mode | Passes when |
+| --- | --- | --- |
+| Reference solutions (G2) | `--strict --expect 1` | Every rollout of every task scores 1 on both paths. |
+| Negative controls (G3) | `--strict --expect 0` | Every rollout scores 0 on both paths, none masked. |
+| Full parity, about 50 tasks x 2 repeats per path | statistical (default) | Every task is scored on both paths and both runs finished; the paired 95% bootstrap interval of the mean difference contains 0; and the masked and failed rates differ by at most 0.05. Fewer than `--min-tasks` (default 10) paired tasks, or tasks left unmatched with `--allow-unmatched`, is INCONCLUSIVE, so G6's `--min-tasks 3` is a smoke-size override. |
+
+Choose full-parity tasks the model solves only some of the time. When the Resources Server run scores at or near 0 or
+1, the interval can move in one direction only: a PASS then shows that the task-folder path loses no more than the
+interval's bound, and nothing about a gain or about harder tasks.
+
+## Commands
+
+The `harbor_conversion_checks` commands exit 0 on pass, 1 when a check fails and 2 on a usage or input error.
+
+| Command | Use it to |
+| --- | --- |
+| `python -m scripts.harbor_conversion_checks check` | Compare `instruction.md` with the row's prompt and scan for hidden values, secrets and local paths |
+| `python -m scripts.harbor_conversion_checks controls` | Copy a dataset with an empty, wrong or reward-planting `solution/` (`--plant-conftest` and `--plant-hooks` plant from files the verifier runs) |
+| `python -m scripts.harbor_conversion_checks fake-model` | Serve fixed replies, for a model-free oracle in the Resources Server run |
+| `python -m scripts.harbor_conversion_checks first-request` | Compare the first captured model request of both paths |
+| `python -m scripts.harbor_conversion_checks subset` | Pick a seeded, reproducible task subset |
+| `python -m scripts.harbor_parity` | Judge two runs of the same tasks across two task id spaces, in strict or statistical mode, with rate gaps |
+| [`gym dataset init --parameterized`](/main/reference/cli-commands#gym-dataset-init), [`gym dataset validate`](/main/reference/cli-commands#gym-dataset-validate) | Scaffold a template; run every reference solution |
+| [`gym dataset publish --harbor`](/main/reference/cli-commands#gym-dataset-publish) | Find out whether the dataset also runs under Harbor itself. It writes the folders, so pass `--output` a scratch folder. A refusal (a verifier that reads the response, or runs separately) means the dataset is NeMo Gym only. |
+| [`gym dev compare`](/main/reference/cli-commands#gym-dev-compare) | List the tasks whose outcome flipped between two rollout files |
+| [`gym eval compare`](/main/evaluation/compare-results) | Compare repeats of one benchmark across models or settings; it does not pair two task id spaces |
+
+## Masking
+
+Infrastructure failures, such as a lost sandbox, leave a rollout out of the score
+([Task Folders](/main/troubleshooting/task-folders) lists which `failure_kind` is masked or retried). A task's
+verifier can add a mask only by a separately run `test.sh` exiting 75 without a reward, on an infrastructure fact such
+as a service that was down, a failed pinned install or a grader that produced no verdict
+(`harbor:verifier_unavailable`). Anything else that leaves no reward is a measured 0. Exit 75 only where the Resources
+Server masks too, on facts the agent cannot write.
+
+## Done when
+
+- G1 to G6 have evidence on both paths, and strict and statistical parity pass (for a tool replaced by the harness
+  shell, between two paths that both run without it, reported as a new baseline).
+- Every difference from the Resources Server run (prompt, including line endings, tools, sampling, timeouts, masking,
+  retries) is listed with its expected effect on reward.
+- Every reward-planting control scores 0, and the dataset runs with the adapter's `harbor_arm.yaml`.
+- Someone outside the team can regenerate and run the dataset from the adapter's README alone.
