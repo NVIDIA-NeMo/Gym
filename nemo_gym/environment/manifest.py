@@ -17,6 +17,7 @@ from pydantic import (
     ConfigDict,
     Field,
     FiniteFloat,
+    StrictBool,
     StringConstraints,
     ValidationError,
     ValidationInfo,
@@ -33,17 +34,24 @@ MANIFEST_SCHEMA_ID = "environment-manifest.schema.json"
 _PRIVATE_LICENSE_VALUES = frozenset({"internal", "proprietary", "unknown"})
 SOURCE_PATTERN = r"^(?:(?:https?|ssh|git|file)://\S+|[^@\s]+@[^:\s]+:\S+)$"
 CALLABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$"
-GITHUB_LOGIN_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$"
-# A yes-or-no answer that an author can also give as "unknown". An absent field means nobody answered;
-# "unknown" means somebody checked and nobody knows.
-BoolOrUnknown = bool | Literal["unknown"]
+# A GitHub login, optionally followed by the underscore and the 3- to 8-character shortcode that GitHub appends to a
+# managed user's login (`mona-cat_octo`). Either way a login is at most 39 characters.
+GITHUB_LOGIN_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:_[A-Za-z0-9]{3,8})?$"
+GITHUB_LOGIN_MAX_LENGTH = 39
+# A yes-or-no answer that an author can also give as "unknown": the value hasn't been established. An absent field
+# means the manifest doesn't state it. Strict, so Gym accepts the same values as the JSON Schema; YAML still reads a
+# bare `yes` or `no` as a boolean.
+BoolOrUnknown = StrictBool | Literal["unknown"]
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 License = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Source = Annotated[str, StringConstraints(strip_whitespace=True, pattern=SOURCE_PATTERN)]
 GitRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, pattern=r"^[^\s]+$")]
 PythonCallable = Annotated[str, StringConstraints(strip_whitespace=True, pattern=CALLABLE_PATTERN)]
-GitHubLogin = Annotated[str, StringConstraints(strip_whitespace=True, pattern=GITHUB_LOGIN_PATTERN)]
+GitHubLogin = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, max_length=GITHUB_LOGIN_MAX_LENGTH, pattern=GITHUB_LOGIN_PATTERN),
+]
 
 CAPABILITIES_AND_DOMAINS_PATH = Path(__file__).with_name("capabilities_and_domains.yaml")
 
@@ -370,7 +378,7 @@ class EnvironmentManifest(_ManifestModel):
         default=None,
         min_length=1,
         json_schema_extra={"uniqueItems": True},
-        description="Whether the environment is meant for evaluation, training or both; unknown when absent.",
+        description="Whether the environment is meant for evaluation, training or both; not stated when absent.",
     )
     capabilities: list[ListedCapability] | Literal["unknown"] | None = Field(
         default=None,
@@ -378,8 +386,9 @@ class EnvironmentManifest(_ManifestModel):
         description=(
             "Skills the environment exercises, from the capability taxonomy, each written <capability> or "
             "<capability>/<specialization>, for example coding/code_generation. The first entry is the main "
-            "capability, and its top level (the part before the slash) is the environment's coarse category, used "
-            "for listings and charts. An empty list when none applies, or unknown."
+            "capability. By convention its top level (the part before the slash) is the environment's coarse "
+            "category, which readers and tools such as catalogs can group by; `gym list` groups by `domain`. An "
+            "empty list when none applies, or unknown."
         ),
     )
     domains: list[ListedDomain] | Literal["unknown"] | None = Field(
@@ -401,7 +410,10 @@ class EnvironmentManifest(_ManifestModel):
     )
     primary_metric: NonEmptyString | None = Field(
         default=None,
-        description="The key metric that is the environment's headline score.",
+        description=(
+            "The headline score: its exact key in the run's aggregate metrics, such as mean/reward or "
+            "pass@1[avg-of-4]/accuracy, not a display label."
+        ),
     )
     requirements: ManifestRequirements | None = None
     reward: Reward

@@ -559,9 +559,12 @@ def test_catalog_fields_round_trip() -> None:
     assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
 
 
-@pytest.mark.parametrize(("written", "stored"), [("true", True), ("no", False), ("unknown", "unknown")])
+@pytest.mark.parametrize(
+    ("written", "stored"),
+    [("true", True), ("false", False), ("yes", True), ("no", False), ("unknown", "unknown")],
+)
 def test_gpu_takes_a_boolean_or_an_explicit_unknown(written: str, stored: object) -> None:
-    # YAML reads a bare `yes` or `no` as a boolean; "unknown" is how an author says that nobody knows.
+    # YAML reads a bare `yes` or `no` as a boolean; "unknown" says the value hasn't been established.
     raw = _manifest() | yaml.safe_load(f"requirements: {{gpu: {written}}}\n")
 
     manifest = EnvironmentManifest.model_validate(raw)
@@ -570,6 +573,44 @@ def test_gpu_takes_a_boolean_or_an_explicit_unknown(written: str, stored: object
     assert manifest.requirements.gpu == stored
     assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
     assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+
+
+@pytest.mark.parametrize("gpu", [1, 0, "false", "true"])
+def test_gpu_takes_no_number_or_string_but_unknown(gpu: object) -> None:
+    # Gym and the JSON Schema accept the same values, so a manifest that loads in Gym passes a schema-based editor.
+    raw = _manifest() | {"requirements": {"gpu": gpu}}
+
+    with pytest.raises(ValidationError, match="gpu"):
+        EnvironmentManifest.model_validate(raw)
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize("login", ["alice-nv", "mona-cat_octo", "octo_admin"])
+def test_maintainers_take_github_logins_including_managed_users(login: str) -> None:
+    # GitHub appends an underscore and the enterprise's 3- to 8-character shortcode to a managed user's login.
+    raw = _manifest() | {"maintainers": [login]}
+
+    assert EnvironmentManifest.model_validate(raw).maintainers == [login]
+    assert not _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    "login",
+    [
+        "_x",
+        "mona-cat_octo_octo",
+        "mona-cat_",
+        "mona-cat_ab",
+        # A managed login is at most 39 characters with its suffix too.
+        "a" * 35 + "_octo",
+    ],
+)
+def test_maintainers_reject_what_is_not_a_github_login(login: str) -> None:
+    raw = _manifest() | {"maintainers": [login]}
+
+    with pytest.raises(ValidationError, match="maintainers"):
+        EnvironmentManifest.model_validate(raw)
+    assert _schema_errors(raw)
 
 
 @pytest.mark.parametrize("level", ["no-network", "allowlist", "public", "unknown"])

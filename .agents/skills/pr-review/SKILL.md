@@ -125,7 +125,11 @@ Apply the checks for the areas the diff touches.
   without requiring unrelated metadata backfilling. A config that only
   changes the harness is a run preset and gets no manifest; one that changes
   the prompt, scoring, task limits or tools gets its own. A `*_legacy_agent`
-  config gets no new manifest.
+  config gets no new manifest. A preset's agent is added to a declared
+  `allowed_agents` only with a representative rollout that shows the pairing
+  works, as the
+  [Terminal Bench 2.1 note](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#swap-the-agent-or-the-benchmark)
+  describes; until then the preset runs with `--allow-unsupported-pairing`.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
   presence and drift coverage against the dataset's owner, which is not
