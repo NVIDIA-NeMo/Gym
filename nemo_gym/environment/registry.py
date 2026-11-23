@@ -154,6 +154,30 @@ def _legacy_entry(name: str, config_path: Path, kind: CatalogKind) -> Environmen
     return EnvironmentCatalogEntry(kind="benchmark", **values)
 
 
+@dataclass(frozen=True)
+class _ConfigWithoutManifest:
+    """A config the catalog lists without a manifest, before its description and domain are read.
+
+    Reading those builds the whole config with every file it includes, which is most of the catalog's cost. Selecting
+    a name needs only the config's path, so discovery finds the names first and reads these details after.
+    """
+
+    kind: CatalogKind
+    name: str
+    config_path: Path
+
+
+# What the first step of discovery lists under a kind and name.
+_ListedItem = EnvironmentCatalogEntry | _ConfigWithoutManifest
+
+
+def _with_details(item: _ListedItem) -> EnvironmentCatalogEntry:
+    """The catalog entry of a listed item, reading the description and domain of a config without a manifest."""
+    if isinstance(item, _ConfigWithoutManifest):
+        return _legacy_entry(item.name, item.config_path, item.kind)
+    return item
+
+
 def _dataset_blocks(server_config: DictConfig | dict) -> List[DictConfig | dict]:
     """The dataset mappings a server block declares; none when ``datasets`` is not a list, as in a malformed config."""
     datasets = server_config.get("datasets")
@@ -253,8 +277,8 @@ def _legacy_config_paths(tree_dir: Path, kind: CatalogKind) -> Iterable[tuple[st
 def _legacy_config_name(tree_dir: Path, config_path: Path, kind: CatalogKind) -> Optional[str]:
     """The name :func:`_legacy_config_paths` lists ``config_path`` under, or None when it does not list it.
 
-    Reads only that one config instead of scanning the tree, so a selector can afford it on every launch. A config
-    outside ``tree_dir``, such as one an absolute ``--benchmark`` folder points to, is not listed.
+    Reads only that one config instead of scanning the tree. A config outside ``tree_dir``, such as one an absolute
+    ``--benchmark`` folder points to, is not listed.
     """
     if not config_path.is_relative_to(tree_dir):
         return None
@@ -314,27 +338,15 @@ def _manifest_config(manifest_path: Path, manifest: EnvironmentManifest) -> Opti
         return None
 
 
-def _discover_registry_tree(
-    tree_dir: Path,
-    kind: CatalogKind,
-    *,
-    claimed: frozenset[tuple[CatalogKind, str]] = frozenset(),
-    declared_by: Optional[Dict[str, Path]] = None,
-) -> Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry]:
-    """Discover one catalog tree without importing or resolving runnable components.
+def _declare_names(tree_dir: Path, declared_by: Dict[str, Path]) -> List[tuple[Path, EnvironmentManifest]]:
+    """The readable manifests of one tree, refusing a name that another manifest of the same search root declares.
 
-    ``declared_by`` maps each manifest name already read in this search root to its file. The catalog passes one
-    mapping for a root's benchmarks/ and environments/ trees, so that a name is unique across both.
+    ``declared_by`` maps each name already read in the search root to its manifest, and gains this tree's names. A
+    name is an ID wherever its folder sits and whatever its kind, so no two manifests in one search root declare the
+    same one.
     """
-    if not tree_dir.is_dir():
-        return {}
-
-    entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
-    manifest_configs: set[Path] = set()
-    declared_by = {} if declared_by is None else declared_by
-    for manifest_path, manifest in declared_manifests(tree_dir):
-        # A name is an ID wherever its folder sits and whatever its kind, so no two manifests in one search root
-        # declare the same one.
+    declared = list(declared_manifests(tree_dir))
+    for manifest_path, manifest in declared:
         if manifest.name in declared_by:
             raise RegistryError(
                 f"Manifests '{declared_by[manifest.name]}' and '{manifest_path}' both declare name '{manifest.name}'. "
@@ -342,6 +354,30 @@ def _discover_registry_tree(
                 f"of '{tree_dir.parent}'."
             )
         declared_by[manifest.name] = manifest_path
+    return declared
+
+
+def _discover_registry_tree(
+    tree_dir: Path,
+    kind: CatalogKind,
+    *,
+    claimed: frozenset[tuple[CatalogKind, str]] = frozenset(),
+    declared_by: Optional[Dict[str, Path]] = None,
+    shadowed: Optional[Dict[tuple[CatalogKind, str], List[Path]]] = None,
+) -> Dict[tuple[CatalogKind, str], _ListedItem]:
+    """List one catalog tree without importing or resolving runnable components.
+
+    A config without a manifest is listed as a :class:`_ConfigWithoutManifest`, whose details are read later.
+    ``declared_by`` maps each manifest name already read in this search root to its file. The catalog passes one
+    mapping for a root's benchmarks/ and environments/ trees, so that a name is unique across both. ``shadowed`` gains
+    the config of each entry that ``claimed``, the names of earlier search roots, shadows.
+    """
+    if not tree_dir.is_dir():
+        return {}
+
+    entries: Dict[tuple[CatalogKind, str], _ListedItem] = {}
+    manifest_configs: set[Path] = set()
+    for manifest_path, manifest in _declare_names(tree_dir, {} if declared_by is None else declared_by):
         key = (kind, manifest.name)
         if key in claimed:
             # An earlier root shadows this entry, but its config is still this manifest's: listing it again under
@@ -349,6 +385,8 @@ def _discover_registry_tree(
             config_path = _manifest_config(manifest_path, manifest)
             if config_path is not None:
                 manifest_configs.add(config_path)
+                if shadowed is not None:
+                    shadowed.setdefault(key, []).append(config_path)
             continue
         try:
             entry = _manifest_entry(tree_dir, manifest_path, manifest, kind)
@@ -359,19 +397,20 @@ def _discover_registry_tree(
 
     for name, config_path in _legacy_config_paths(tree_dir, kind):
         key = (kind, name)
-        if key in claimed or key in entries or config_path.resolve() in manifest_configs:
+        if key in entries or config_path.resolve() in manifest_configs:
             continue
-        entries[key] = _legacy_entry(name, config_path, kind)
+        if key in claimed:
+            if shadowed is not None:
+                shadowed.setdefault(key, []).append(config_path)
+            continue
+        entries[key] = _ConfigWithoutManifest(kind, name, config_path)
     return entries
 
 
 def _discover_environments_in_dir(environments_dir: Path) -> Dict[str, EnvironmentEntry]:
     """Map environment name to its effective manifest or legacy entry under one directory."""
-    return {
-        name: entry
-        for (_kind, name), entry in _discover_registry_tree(environments_dir, "environment").items()
-        if isinstance(entry, EnvironmentEntry)
-    }
+    entries = map(_with_details, _discover_registry_tree(environments_dir, "environment").values())
+    return {entry.name: entry for entry in entries if isinstance(entry, EnvironmentEntry)}
 
 
 def discover_environments() -> Dict[str, EnvironmentEntry]:
@@ -381,23 +420,111 @@ def discover_environments() -> Dict[str, EnvironmentEntry]:
         claimed = frozenset(("environment", name) for name in environments)
         discovered = _discover_registry_tree(root / ENVIRONMENTS_SUBDIR, "environment", claimed=claimed)
         environments.update(
-            (name, entry) for (_kind, name), entry in discovered.items() if isinstance(entry, EnvironmentEntry)
+            (entry.name, entry)
+            for entry in map(_with_details, discovered.values())
+            if isinstance(entry, EnvironmentEntry)
         )
     return environments
 
 
-def discover_environment_catalog() -> tuple[EnvironmentCatalogEntry, ...]:
-    """Discover manifest and legacy runnable units across all workload locations."""
-    entries: Dict[tuple[CatalogKind, str], EnvironmentCatalogEntry] = {}
+@dataclass(frozen=True)
+class _CatalogListing:
+    """The config the catalog lists under each kind and name, before the details of configs without a manifest."""
+
+    entries: Dict[tuple[CatalogKind, str], _ListedItem] = field(default_factory=dict)
+    # The configs of each kind and name that an earlier search root's entry shadows.
+    shadowed: Dict[tuple[CatalogKind, str], List[Path]] = field(default_factory=dict)
+
+
+_CATALOG_TREES: tuple[tuple[CatalogKind, str], ...] = (
+    ("environment", ENVIRONMENTS_SUBDIR),
+    ("benchmark", BENCHMARKS_SUBDIR),
+)
+
+
+def _list_catalog(
+    kinds: Iterable[CatalogKind] = ("environment", "benchmark"), *, resource_workloads: bool = True
+) -> _CatalogListing:
+    """The first step of discovery: the config the catalog lists under each name of ``kinds``, in every search root.
+
+    It applies all of discovery's rules (an earlier root wins, a shadowed manifest still claims its config, no two
+    manifests in a root declare one name) but leaves the description and domain of configs without a manifest to
+    :func:`discover_environment_catalog`. ``--benchmark`` and ``--environment`` use this step alone, so they select
+    what ``gym list`` shows. Every manifest is read, because a name is unique across a root's trees whatever its kind.
+    Configs without a manifest are found only for ``kinds``, and the runnable configs of resources servers, all named
+    ``resources_servers/...``, only with ``resource_workloads``.
+    """
+    kinds = frozenset(kinds)
+    listing = _CatalogListing()
     for root in component_search_roots():
         declared_by: Dict[str, Path] = {}
-        for kind, subdir in (("environment", ENVIRONMENTS_SUBDIR), ("benchmark", BENCHMARKS_SUBDIR)):
-            discovered = _discover_registry_tree(
-                root / subdir, kind, claimed=frozenset(entries), declared_by=declared_by
+        for kind, subdir in _CATALOG_TREES:
+            if kind not in kinds:
+                _declare_names(root / subdir, declared_by)
+                continue
+            listing.entries.update(
+                _discover_registry_tree(
+                    root / subdir,
+                    kind,
+                    claimed=frozenset(listing.entries),
+                    declared_by=declared_by,
+                    shadowed=listing.shadowed,
+                )
             )
-            entries.update(discovered)
-        entries.update(_discover_resource_workloads(root / RESOURCES_SERVERS_SUBDIR, claimed=frozenset(entries)))
-    return tuple(sorted(entries.values(), key=lambda entry: (entry.name.casefold(), entry.name, entry.kind)))
+        if resource_workloads:
+            workloads = _discover_resource_workloads(
+                root / RESOURCES_SERVERS_SUBDIR, claimed=frozenset(listing.entries)
+            )
+            listing.entries.update((key, entry) for key, entry in workloads.items() if key[0] in kinds)
+    return listing
+
+
+def discover_environment_catalog() -> tuple[EnvironmentCatalogEntry, ...]:
+    """Discover manifest and legacy runnable units across all workload locations."""
+    entries = map(_with_details, _list_catalog().entries.values())
+    return tuple(sorted(entries, key=lambda entry: (entry.name.casefold(), entry.name, entry.kind)))
+
+
+# The listing of each set of search roots, kind and scope that --benchmark or --environment selected from, kept for
+# the rest of the process: a command can select several names, and a test selects every benchmark.
+_SELECTION_LISTINGS: Dict[tuple[tuple[Path, ...], CatalogKind, bool], _CatalogListing] = {}
+
+
+def _listing_for_selection(kind: CatalogKind, name: str) -> _CatalogListing:
+    """The listing that ``--benchmark`` or ``--environment`` selects ``name`` from, read once per process.
+
+    A stored listing is used while its answer for ``name`` still holds: the manifest it lists under the name still
+    declares that name for the same config, or the config it lists without a manifest still exists. Otherwise, and
+    whenever it lists no such name, the listing is read again, so a manifest that changes, moves or is added during
+    the process is seen. A stored listing misses one kind of change: a file added during the process that changes an
+    answer the listing still gives, such as a second manifest declaring the name, a manifest that claims a config the
+    listing has without one, or an entry of that name in an earlier search root. Each CLI command is a new process, so
+    this matters only to a process that keeps selecting while files change.
+    """
+    resource_workloads = name.startswith(f"{RESOURCES_SERVERS_SUBDIR}/")
+    scope = (tuple(component_search_roots()), kind, resource_workloads)
+    listing = _SELECTION_LISTINGS.get(scope)
+    if listing is None or not _still_answers(listing.entries.get((kind, name)), name):
+        listing = _SELECTION_LISTINGS[scope] = _list_catalog([kind], resource_workloads=resource_workloads)
+    return listing
+
+
+def _still_answers(item: Optional[_ListedItem], name: str) -> bool:
+    """Whether a stored listing's item for ``name`` is still what the catalog would list; see _listing_for_selection."""
+    if item is None:
+        return False
+    manifest_path = item.manifest_path if isinstance(item, EnvironmentCatalogEntry) else None
+    if manifest_path is None:
+        return item.config_path.is_file()
+    try:
+        manifest = load_manifest(manifest_path)
+    except ManifestError:
+        return False
+    return (
+        manifest.name == name
+        and _manifest_config(manifest_path, manifest) == item.config_path
+        and item.config_path.is_file()
+    )
 
 
 # The outputs of the legacy five-example server contract. A server that has either one stays on that contract.

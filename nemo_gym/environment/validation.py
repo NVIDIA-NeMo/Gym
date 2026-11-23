@@ -49,6 +49,7 @@ from nemo_gym.environment.manifest import (
 from nemo_gym.environment.registry import (
     BENCHMARKS_SUBDIR,
     ENVIRONMENTS_SUBDIR,
+    _legacy_config_name,
     _manifest_config,
     declared_manifests,
 )
@@ -1013,10 +1014,18 @@ def _validate_unique_name(manifest_path: Path, manifest: EnvironmentManifest) ->
             )
     if manifest.name == manifest_path.parent.relative_to(catalog_directory).as_posix():
         return
-    # The paths `asset_config_path` tries for a benchmark or environment name, in its order.
+    # The paths `asset_config_path` falls back to for a benchmark or environment name, in its order, and a loose
+    # benchmark config `benchmarks/<name>.yaml`, which the catalog lists under the name.
     path_configs = [catalog_directory / manifest.name / "config.yaml"]
+    file_config = catalog_directory / f"{manifest.name}.yaml"
     if "/" in manifest.name:
-        path_configs.append(catalog_directory / f"{manifest.name}.yaml")
+        path_configs.append(file_config)
+    elif (
+        catalog_directory.name == BENCHMARKS_SUBDIR
+        and file_config.is_file()
+        and _legacy_config_name(catalog_directory, file_config, "benchmark") == manifest.name
+    ):
+        path_configs.append(file_config)
     for path_config in path_configs:
         if path_config.is_file() and path_config.resolve() != config_path:
             raise EnvironmentValidationError(

@@ -4,7 +4,6 @@
 """Resolve a named asset (a benchmark, environment, resources server, model type or agent type) to its config path."""
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 
 from nemo_gym import component_search_roots
@@ -27,96 +26,24 @@ ASSETS = {
 _CATALOG_FLAGS = frozenset({"benchmark", "environment"})
 
 
-def _path_candidates(tree: Path, value: str) -> list[Path]:
-    """The configs a benchmark or environment name points to as a path under one catalog tree, in lookup order."""
+def _path_configs(trees: list[Path], value: str) -> list[Path]:
+    """The configs at a benchmark or environment name's path, highest-priority root first.
+
+    This is how `--benchmark` and `--environment` found a config before names were IDs: a nested `<name>/config.yaml`
+    in any search root wins over a flavor file `<folder>/<flavor>.yaml`.
+    """
     server_name, _, config_flavor = value.partition("/")
-    nested = [tree / value / "config.yaml"] if "/" in value else []
-    return [*nested, tree / server_name / f"{config_flavor or 'config'}.yaml"]
-
-
-@dataclass(frozen=True)
-class _DeclaredNames:
-    """The names the manifests of one benchmarks/ or environments/ tree declare."""
-
-    tree: Path
-    # Each manifest's name -> (its config, the manifest's path).
-    configs: dict[str, tuple[Path, Path]]
-    # Every config a manifest in the tree declares; the catalog does not list these again under their path.
-    claimed: frozenset[Path]
-
-
-# Each tree's names, read once per process: finding them means walking the whole tree and reading every manifest, so
-# a command that selects several names, or a test that selects every name, would otherwise pay that for each name.
-# A selection checks that the table still answers for its name (see _answers) and reads the tree again when it does
-# not, so a manifest that changes, moves or is added during the process is seen. One case is not: a name that no
-# manifest declares, selected by its config's path, keeps that answer for the rest of the process, even if a manifest
-# added later declares that name. Checking for that would mean reading the whole tree again for every such name.
-_DECLARED_NAMES: dict[Path, _DeclaredNames] = {}
-
-
-def _declared_names(tree: Path, *, refresh: bool = False) -> _DeclaredNames:
-    key = tree.absolute()
-    if not refresh and key in _DECLARED_NAMES:
-        return _DECLARED_NAMES[key]
-    # Imported here so that commands that never select a benchmark or environment, such as --help, stay fast.
-    from nemo_gym.environment.registry import _manifest_config, declared_manifests
-
-    configs: dict[str, tuple[Path, Path]] = {}
-    claimed: set[Path] = set()
-    for manifest_path, manifest in declared_manifests(tree):
-        config_path = _manifest_config(manifest_path, manifest)
-        if config_path is not None:
-            configs.setdefault(manifest.name, (config_path, manifest_path))
-            claimed.add(config_path)
-    _DECLARED_NAMES[key] = names = _DeclaredNames(tree, configs, frozenset(claimed))
-    return names
-
-
-def _path_config(names: _DeclaredNames, value: str, kind: str) -> Path | None:
-    """A config at the name's path that the catalog lists under that name, because no manifest claims it."""
-    from nemo_gym.environment.registry import _legacy_config_name
-
-    for candidate in _path_candidates(names.tree, value):
-        if (
-            candidate.is_file()
-            and candidate.resolve() not in names.claimed
-            and _legacy_config_name(names.tree, candidate, kind) == value
-        ):
-            return candidate.resolve()
-    return None
-
-
-def _answers(names: _DeclaredNames, value: str, kind: str) -> bool:
-    """Whether a tree's stored names still answer for a name.
-
-    They do when the manifest they say declares the name still declares it, which costs reading that one manifest, or
-    when no manifest declared it and a config at its path is listed under it. Otherwise the tree is read again.
-    """
-    from nemo_gym.environment.manifest import ManifestError, load_manifest
-    from nemo_gym.environment.registry import _manifest_config
-
-    if value not in names.configs:
-        return _path_config(names, value, kind) is not None
-    config_path, manifest_path = names.configs[value]
-    try:
-        manifest = load_manifest(manifest_path)
-    except ManifestError:
-        return False
-    return manifest.name == value and _manifest_config(manifest_path, manifest) == config_path
-
-
-def _catalog_config(tree: Path, value: str, kind: str) -> Path | None:
-    """The config the catalog lists under a name from one tree, or None when that tree lists no such entry.
-
-    That is the config of the manifest that declares the name, or else a config at the name's path that the catalog
-    lists under that name and no manifest claims.
-    """
-    names = _declared_names(tree)
-    if not _answers(names, value, kind):
-        names = _declared_names(tree, refresh=True)
-    if value in names.configs:
-        return names.configs[value][0]
-    return _path_config(names, value, kind)
+    paths = [f"{value}/config.yaml"] if config_flavor else []
+    paths.append(f"{server_name}/{config_flavor or 'config'}.yaml")
+    for path in paths:
+        found: list[Path] = []
+        for tree in trees:
+            candidate = tree / path
+            if candidate.is_file() and candidate.resolve() not in found:
+                found.append(candidate.resolve())
+        if found:
+            return found
+    return []
 
 
 def asset_config_path(flag: str, value: str) -> str:
@@ -139,19 +66,22 @@ def asset_config_path(flag: str, value: str) -> str:
     matches: list[Path] = []
 
     if flag in _CATALOG_FLAGS:
-        # The catalog's rule: the highest-priority root whose catalog lists the name wins.
+        # Imported here so that commands that never select a benchmark or environment, such as --help, stay fast.
+        from nemo_gym.environment.registry import _listing_for_selection
+
         trees = [root / parent for root in roots]
-        for tree in trees:
-            config_path = _catalog_config(tree, value, flag)
-            if config_path is not None and config_path not in matches:
-                matches.append(config_path)
-        if not matches:
+        # The catalog's first step, so that this selects what `gym list` shows: the highest-priority root that lists
+        # the name wins, and a name that two manifests in one root declare fails here as it fails there.
+        listing = _listing_for_selection(flag, value)
+        listed = listing.entries.get((flag, value))
+        if listed is not None:
+            for config_path in (listed.config_path, *listing.shadowed.get((flag, value), ())):
+                if config_path.resolve() not in matches:
+                    matches.append(config_path.resolve())
+        else:
             # Any other config at the name's path, such as an environment flavor file, a nested benchmark config or a
             # config that a manifest declares under another name, selects only when no root lists the name.
-            for tree in trees:
-                candidate = next((path for path in _path_candidates(tree, value) if path.is_file()), None)
-                if candidate is not None and candidate.resolve() not in matches:
-                    matches.append(candidate.resolve())
+            matches = _path_configs(trees, value)
     else:
         for root in roots:
             candidate = root / path
@@ -173,12 +103,11 @@ def asset_config_path(flag: str, value: str) -> str:
     if flag in _CATALOG_FLAGS:
         from nemo_gym.environment.registry import _legacy_config_paths
 
-        # Suggest declared IDs as well as the folder/flavor aliases that remain selectable.
-        config_names: set[str] = set()
+        # Suggest the names the catalog lists as well as the folder/flavor aliases that remain selectable.
+        config_names = {name for kind, name in listing.entries if kind == flag}
         for tree in trees:
             if not tree.is_dir():
                 continue
-            config_names.update(_declared_names(tree).configs)
             config_names.update(
                 name for name, _ in _legacy_config_paths(tree, "benchmark" if flag == "benchmark" else "environment")
             )

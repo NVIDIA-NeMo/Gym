@@ -1141,6 +1141,17 @@ def test_a_renamed_manifest_cannot_take_another_configs_path(tmp_path: Path) -> 
         validate_environment(manifest_path)
 
 
+def test_a_renamed_benchmark_cannot_take_the_name_of_a_loose_benchmark_config(tmp_path: Path) -> None:
+    # The catalog lists benchmarks/other.yaml as `other`, so a manifest of that name would hide it.
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    _replace_manifest(manifest_path, name="other")
+    validate_environment(manifest_path)
+    (tmp_path / "benchmarks/other.yaml").write_text("dataset: {type: benchmark}\n", encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match=r"path of another config, \S*benchmarks/other\.yaml"):
+        validate_environment(manifest_path)
+
+
 def test_slash_qualified_name_matches_nested_catalog_path(tmp_path: Path) -> None:
     config_manifest_path = _asset(tmp_path)
     nested_manifest_path = tmp_path / "environments/acme/demo/manifest.yaml"

@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.environment.assets import asset_config_path
-from nemo_gym.environment.registry import RegistryError, resolve_catalog_entry
+from nemo_gym.environment.registry import RegistryError, discover_environment_catalog, resolve_catalog_entry
 from tests.unit_tests.environment.test_registry import _manifest, _write_manifest
 
 
@@ -109,7 +109,7 @@ def test_a_process_reads_each_tree_once_for_several_selections(
     for name in ("alpha", "beta", "gamma", "alpha"):
         assert _selected(name) == (later / "environments" / name / "config.yaml").resolve()
 
-    # The earlier root has no environments/ tree, so it holds no name and is read again for each one.
+    # Later selections reread only the manifest that lists each name.
     assert reads.count(later / "environments") == 1
 
 
@@ -188,6 +188,105 @@ def test_a_name_that_is_another_configs_path_selects_what_the_catalog_lists(root
     selected = Path(asset_config_path("benchmark", "other"))
     assert selected == resolve_catalog_entry("other", "benchmark").config_path.resolve()
     assert selected == manifest.with_name("config.yaml").resolve()
+
+
+@pytest.mark.parametrize("kinds", [("environment", "environment"), ("benchmark", "environment")])
+def test_a_name_two_manifests_in_one_root_declare_fails_to_select_as_it_fails_to_list(
+    roots: tuple[Path, Path], kinds: tuple[str, str]
+) -> None:
+    # A copied folder that keeps its manifest's name, in the same tree or the other one.
+    _, later = roots
+    original_kind, copy_kind = kinds
+    _write_manifest(later, f"{original_kind}s", "demo", _manifest("demo", original_kind))
+    _write_manifest(later, f"{copy_kind}s", "aa_demo_copy", _manifest("demo", copy_kind))
+
+    with pytest.raises(RegistryError, match="both declare name 'demo'"):
+        discover_environment_catalog()
+    for kind in set(kinds):
+        with pytest.raises(RegistryError, match="both declare name 'demo'"):
+            asset_config_path(kind, "demo")
+
+
+@pytest.mark.parametrize(
+    ("kind", "with_config", "error"),
+    [("benchmark", True, "declares kind 'benchmark'"), ("environment", False, "requires a sibling config.yaml")],
+)
+def test_a_manifest_the_catalog_refuses_fails_to_select_as_it_fails_to_list(
+    roots: tuple[Path, Path], kind: str, with_config: bool, error: str
+) -> None:
+    # A benchmark manifest under environments/, or a manifest whose config is missing.
+    _, later = roots
+    _write_manifest(later, "environments", "demo", _manifest("demo", kind), with_config=with_config)
+
+    with pytest.raises(RegistryError, match=error):
+        discover_environment_catalog()
+    with pytest.raises(RegistryError, match=error):
+        _selected("demo")
+
+
+def test_a_loose_benchmark_config_in_an_earlier_root_wins_as_in_the_list(roots: tuple[Path, Path]) -> None:
+    # The catalog lists benchmarks/demo.yaml as `demo`.
+    earlier, later = roots
+    loose = earlier / "benchmarks/demo.yaml"
+    loose.parent.mkdir(parents=True)
+    loose.write_text("dataset: {type: benchmark}\n", encoding="utf-8")
+    _write_manifest(later, "benchmarks", "moved", _manifest("demo", "benchmark"))
+
+    selected = Path(asset_config_path("benchmark", "demo"))
+    assert selected == resolve_catalog_entry("demo", "benchmark").config_path.resolve() == loose.resolve()
+
+
+def test_a_resources_server_workload_in_an_earlier_root_wins_as_in_the_list(roots: tuple[Path, Path]) -> None:
+    # The catalog lists a resources server's runnable config as `resources_servers/<server>`.
+    earlier, later = roots
+    workload = earlier / "resources_servers/demo/configs/demo.yaml"
+    workload.parent.mkdir(parents=True)
+    workload.write_text(
+        "demo_resources:\n  resources_servers:\n    demo: {}\n"
+        "demo_agent:\n  responses_api_agents:\n    simple_agent:\n      datasets:\n      - type: benchmark\n",
+        encoding="utf-8",
+    )
+    _write_manifest(later, "benchmarks", "moved", _manifest("resources_servers/demo", "benchmark"))
+
+    selected = Path(asset_config_path("benchmark", "resources_servers/demo"))
+    listed = resolve_catalog_entry("resources_servers/demo", "benchmark").config_path.resolve()
+    assert selected == listed == workload.resolve()
+
+
+def test_without_a_listed_name_a_nested_config_in_any_root_wins_over_a_flavor_file(roots: tuple[Path, Path]) -> None:
+    # As before names were IDs. Neither root lists `suite/fast`: the catalog lists no environment flavor file, and
+    # lists a nested environment config only one folder deep.
+    earlier, later = roots
+    flavor = earlier / "environments/suite/fast.yaml"
+    nested = later / "environments/suite/fast/config.yaml"
+    for config in (flavor, nested):
+        config.parent.mkdir(parents=True)
+        config.write_text("{}\n", encoding="utf-8")
+
+    assert _selected("suite/fast") == nested.resolve()
+
+
+def test_a_selection_reads_only_the_names_it_can_select(
+    roots: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `gym list` builds each config without a manifest to read its description; a selection needs only paths, and
+    # only those its flag and name can select.
+    import nemo_gym.environment.registry as registry
+
+    earlier, later = roots
+    loose = earlier / "benchmarks/demo.yaml"
+    loose.parent.mkdir(parents=True)
+    loose.write_text("dataset: {type: benchmark}\n", encoding="utf-8")
+    environment = _write_manifest(later, "environments", "moved", _manifest("demo"))
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        raise AssertionError("read more than the selection needs")
+
+    monkeypatch.setattr(registry, "read_config_metadata", unexpected)
+    monkeypatch.setattr(registry, "_discover_resource_workloads", unexpected)
+    assert Path(asset_config_path("benchmark", "demo")) == loose.resolve()
+    monkeypatch.setattr(registry, "_benchmark_config_paths", unexpected)
+    assert _selected("demo") == environment.with_name("config.yaml").resolve()
 
 
 @pytest.mark.parametrize("excluded", ["harbor/dataset/task", ".staging/task"])
