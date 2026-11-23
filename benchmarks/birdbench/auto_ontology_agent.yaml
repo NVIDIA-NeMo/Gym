@@ -5,7 +5,7 @@
 # and tools in a sandbox per episode (responses_api_agents/auto_ontology_agent), and bird_sql grades the query it
 # submits, as it grades simple_agent's. See README.md, "Auto Ontology".
 #
-#   gym eval prepare --config benchmarks/birdbench/auto_ontology_agent.yaml
+#   gym eval prepare --config benchmarks/birdbench/auto_ontology_agent.yaml ++auto_ontology_api_key=<key>
 #   gym eval run --config benchmarks/birdbench/auto_ontology_agent.yaml --model-type vllm_model --split benchmark \
 #     --output results/auto_ontology_agent/rollouts.jsonl ++auto_ontology_api_key=<key>
 
@@ -16,9 +16,10 @@ config_paths:
 prepare_script_args:
   agent_context: true
 
-auto_ontology_agent:
-  responses_api_agents:
-    auto_ontology_agent:
+# bird_sql's instance declares the dataset, so its TaskData checks the rows, as it checks simple_agent's.
+birdbench_bird_sql_resources_server:
+  resources_servers:
+    bird_sql:
       datasets:
         - name: birdbench
           type: benchmark
@@ -28,7 +29,7 @@ auto_ontology_agent:
           num_repeats: 1
           taskset: birdbench
 
-# The dataset moves from simple_agent's instance to the Auto Ontology agent's.
+# simple_agent's instance, which declares BIRD dev's dataset without the agent context, does not run.
 birdbench_bird_sql_simple_agent: null
 bird_sql_simple_agent: null
 

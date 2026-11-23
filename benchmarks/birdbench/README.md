@@ -203,10 +203,12 @@ submitted query in a fenced `sql` block, which `bird_sql` grades as it grades `s
 agent the task in its agent context, with no schema:
 
 ```bash
-gym eval prepare --config benchmarks/birdbench/auto_ontology_agent.yaml   # data/birdbench_sqlite_dev_auto_ontology_agent.jsonl
+gym eval prepare --config benchmarks/birdbench/auto_ontology_agent.yaml ++auto_ontology_api_key=<key>
 gym eval run --config benchmarks/birdbench/auto_ontology_agent.yaml --model-type vllm_model --split benchmark \
   --output results/auto_ontology_agent/rollouts.jsonl ++auto_ontology_api_key=<key>
 ```
 
-`auto_ontology_api_key` is the key of the embedding endpoint the catalog was built with: retrieval embeds each
-search. See the agent's README for its sandbox and network.
+`prepare` writes `data/birdbench_sqlite_dev_auto_ontology_agent.jsonl`. `auto_ontology_api_key` is the key of the
+embedding endpoint the catalog was built with: retrieval embeds each search. The agent's config requires it, so
+`prepare` needs it too, although `prepare` does not call the endpoint. See the agent's README for its sandbox and
+network.
