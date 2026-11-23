@@ -73,8 +73,10 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
     _submission_exports,
 )
 from nemo_gym.orchestration.executors.slurm.script import (
+    SHARED_ALLOCATION_NAME,
     _resolve_env,
     build_sbatch_script,
+    build_shared_allocation_script,
     planned_log_sources,
 )
 from nemo_gym.orchestration.executors.slurm_control import parse_terminate_output, render_terminate_script
@@ -190,11 +192,12 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
                 ref_check.result()
                 conn.copy(staging, remote_run_dir)
                 token_export = [f"export {config.otel.token_env}={shlex.quote(token)}"] if token is not None else []
-                output = conn.run(
-                    submission_env
-                    + token_export
-                    + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
+                scripts = (
+                    [_sbatch_command(SHARED_ALLOCATION_NAME, remote_run_dir / "job.sh")]
+                    if config.driver.shared_allocation
+                    else [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
+                output = conn.run(submission_env + token_export + scripts)
                 record = self._build_record(
                     cluster,
                     compute,
@@ -204,6 +207,7 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
                     benchmark_names,
                     output,
                     planned_log_sources(config, compute),
+                    shared_allocation=config.driver.shared_allocation,
                 )
                 record.environment = self.submission_environment(
                     config,
@@ -351,14 +355,20 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
         benchmark_names: list[str],
         output: str,
         log_sources: list[LogSource],
+        *,
+        shared_allocation: bool = False,
     ) -> SubmissionRecord:
         results = _parse_sbatch_results(output)
         benchmarks = []
         for name in benchmark_names:
             # A benchmark absent from the output produced no marker line at all —
             # the shell died before reaching it, or the transport truncated. That
-            # is a failure, not a success with a missing id.
-            job_id, error = results.get(name, (None, "sbatch produced no result for this benchmark"))
+            # is a failure, not a success with a missing id. In a shared allocation every
+            # benchmark is recorded with the one job that runs them all.
+            job_id, error = results.get(
+                SHARED_ALLOCATION_NAME if shared_allocation else name,
+                (None, "sbatch produced no result for this benchmark"),
+            )
             benchmarks.append(
                 BenchmarkJob(
                     benchmark=name,
@@ -383,6 +393,17 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
 
     def _dry_run(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> None:
         print(f"[dry-run] remote run dir: {remote_run_dir}")
+        if config.driver.shared_allocation:
+            print(f"\n{'=' * 60}")
+            print(f"[dry-run] sbatch script for the shared allocation of: {', '.join(config.driver.benchmarks)}")
+            print(f"{'=' * 60}")
+            print(build_shared_allocation_script(config, compute, remote_run_dir))
+            if otel_active(config):
+                print(f"\n{'=' * 60}")
+                print(f"[dry-run] {COLLECTOR_DIR}/{COLLECTOR_CONFIG_NAME} for the shared allocation")
+                print(f"{'=' * 60}")
+                print(render_collector_config(config, SHARED_ALLOCATION_NAME, remote_run_dir))
+            return
         for name, benchmark in config.driver.benchmarks.items():
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
             print(f"\n{'=' * 60}")
@@ -399,6 +420,8 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
         # rsync -a copies these modes to the cluster. The temp dir is created 0700, which would
         # hide the run from other users; job.sh holds resolved secrets, so it stays owner-only.
         staging.chmod(0o755)
+        if config.driver.shared_allocation:
+            return self._stage_shared_allocation(config, compute, remote_run_dir, staging)
         for name, benchmark in config.driver.benchmarks.items():
             bench_dir = staging / name
             bench_dir.mkdir()
@@ -413,4 +436,23 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
                 (bench_dir / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
                     render_collector_config(config, name, remote_run_dir / name)
                 )
+        return staging
+
+    def _stage_shared_allocation(
+        self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path, staging: Path
+    ) -> Path:
+        """The run directory holds the one job script, the service logs and the collector; each benchmark keeps
+        its own directory for its driver log and artifacts."""
+        (staging / LOGS_DIRNAME).mkdir()
+        for name in config.driver.benchmarks:
+            (staging / name / LOGS_DIRNAME).mkdir(parents=True)
+            (staging / name / ARTIFACTS_DIRNAME).mkdir()
+        job_script = staging / "job.sh"
+        job_script.write_text(build_shared_allocation_script(config, compute, remote_run_dir))
+        job_script.chmod(0o600)
+        if otel_active(config):
+            (staging / COLLECTOR_DIR).mkdir()
+            (staging / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
+                render_collector_config(config, SHARED_ALLOCATION_NAME, remote_run_dir)
+            )
         return staging

@@ -3748,3 +3748,115 @@ def test_a_benchmark_without_a_target_saves_the_config_it_always_did(tmp_path):
         .target
         == "/data/bmb"
     )
+
+
+# ---------------------------------------------------------------------------
+# Shared allocation
+# ---------------------------------------------------------------------------
+
+from nemo_gym.orchestration.executors.slurm import script as slurm_script
+from nemo_gym.orchestration.executors.slurm.script import build_shared_allocation_script
+
+
+def _shared_config(benchmarks, *, services=True, **driver):
+    return SubmitConfig.model_validate(
+        {
+            "services": (
+                {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}} if services else {}
+            ),
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                **({"policy_model": "vllm_model"} if services else {}),
+                "shared_allocation": True,
+                "benchmarks": benchmarks,
+                **driver,
+            },
+            "job": {"output_path": "/remote/jobs"},
+            "otel": {"enabled": False},
+        }
+    )
+
+
+def _shared_script(config, run_dir=Path("/remote/jobs/gym-job-x")):
+    return build_shared_allocation_script(config, config.compute["cluster"], run_dir)
+
+
+def test_shared_allocation_deploys_the_services_once_for_every_benchmark():
+    config = _shared_config({"aime": {}, "gpqa": {}, "hle": {}})
+    script = _shared_script(config)
+
+    assert script.count("--output=logs/vllm_model-$SLURM_JOB_ID.log") == 1
+    assert "#SBATCH --chdir=/remote/jobs/gym-job-x\n" in script
+    assert "#SBATCH --job-name=gym-shared-allocation\n" in script
+    for name in ("aime", "gpqa", "hle"):
+        assert f"(\ncd /remote/jobs/gym-job-x/{name} || exit 1\n" in script
+        assert f"+output_jsonl_fpath=/remote/jobs/gym-job-x/{name}/artifacts/rollouts.jsonl" in script
+    assert script.count("_gym_member_pids+=($!)") == 3
+
+
+def test_shared_allocation_gives_each_benchmark_disjoint_ports_and_its_own_head_server():
+    run = {"port_range_low": 63000, "port_range_high": 63999, "head_server.port": 63000}
+    config = _shared_config({"aime": {"run": dict(run)}, "gpqa": {"run": dict(run)}})
+    script = _shared_script(config)
+
+    lows = [int(v) for v in re.findall(r"\+port_range_low=(\d+)", script)]
+    highs = [int(v) for v in re.findall(r"\+port_range_high=(\d+)", script)]
+    heads = [int(v) for v in re.findall(r"\+head_server\.port=(\d+)", script)]
+    assert list(zip(lows, highs)) == [(63000, 63499), (63500, 63999)]
+    assert heads == lows
+
+
+def test_shared_allocation_refuses_a_port_range_too_small_to_share():
+    config = _shared_config({"a": {"run": {"port_range_low": 100, "port_range_high": 102}}, "b": {}, "c": {}})
+    with pytest.raises(ValueError, match="too small"):
+        _shared_script(config)
+
+
+def test_shared_allocation_runs_each_driver_in_its_own_directory_and_fails_if_any_fails(tmp_path, monkeypatch):
+    """Execute the rendered script with each driver replaced by a probe: every benchmark runs, each in its job
+    directory, and the job's status is 1 exactly when some driver fails."""
+    original = slurm_script._script_parts
+
+    def probing(config, name, benchmark, compute, bench_dir, **kwargs):
+        parts = original(config, name, benchmark, compute, bench_dir, **kwargs)
+        status = 3 if name == "bad" else 0
+        return {**parts, "driver_command": f"pwd > ran; exit {status}"}
+
+    monkeypatch.setattr(slurm_script, "_script_parts", probing)
+    for names, expected in ((("a", "b"), 0), (("a", "bad", "b"), 1)):
+        run_dir = tmp_path / "-".join(names)
+        for name in names:
+            (run_dir / name).mkdir(parents=True)
+        config = _shared_config({name: {} for name in names}, services=False)
+        result = subprocess.run(["bash", "-c", _shared_script(config, run_dir)], capture_output=True, text=True)
+        assert result.returncode == expected, result.stderr
+        for name in names:
+            assert (run_dir / name / "ran").read_text().strip() == str(run_dir / name)
+
+
+@pytest.mark.parametrize(
+    "benchmarks, compute, message",
+    [
+        ({"a": {"resumable": True}, "b": {}}, {}, "resumable"),
+        ({"a": {}, "b": {}}, {"lustre_md_stats": True}, "lustre_md_stats"),
+    ],
+)
+def test_shared_allocation_refuses_what_it_cannot_share_yet(benchmarks, compute, message):
+    with pytest.raises(ValueError, match=message):
+        SubmitConfig.model_validate(
+            {
+                "services": {},
+                "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo", **compute}},
+                "driver": {"container": "python:3.12", "shared_allocation": True, "benchmarks": benchmarks},
+                "job": {"output_path": "/remote/jobs"},
+            }
+        )
+
+
+def test_shared_allocation_service_logs_are_one_level_above_each_job_directory():
+    config = _shared_config({"a": {}, "b": {}})
+    sources = {source.name: source.location for source in planned_log_sources(config, config.compute["cluster"])}
+
+    assert sources["driver"] == "logs/driver-{job_id}.log"
+    assert sources["vllm_model"] == "../logs/vllm_model-{job_id}.log"

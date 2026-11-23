@@ -140,7 +140,7 @@ to the job; an explicit `--export=NONE` prevents that inheritance.
 | `gpus_per_node` | `null` | GPUs per node (`--gpus-per-node`). Also used to size and check vLLM deployments. |
 | `extra_args` | `{}` | Extra `#SBATCH` directives, written without leading dashes. |
 
-A benchmark is **one** Slurm job. Pools do not create separate Slurm requests; they divide the one allocation between services. The job requests the sum of every pool's `nodes`, and pool `i` owns the contiguous node range after all pools before it, in declaration order. Because Slurm takes one value per job, pools must agree on `partition`, `ntasks_per_node`, and `gpus_per_node`, and may not set the same `extra_args` key to different values. Disagreement is an error.
+A benchmark is **one** Slurm job, unless the driver uses a [shared allocation](#shared-allocation). Pools do not create separate Slurm requests; they divide the one allocation between services. The job requests the sum of every pool's `nodes`, and pool `i` owns the contiguous node range after all pools before it, in declaration order. Because Slurm takes one value per job, pools must agree on `partition`, `ntasks_per_node`, and `gpus_per_node`, and may not set the same `extra_args` key to different values. Disagreement is an error.
 
 ## driver
 
@@ -156,6 +156,17 @@ The driver runs the benchmarks against the services.
 | `benchmarks` | required | Mapping from benchmark name to its [run config](#benchmarks). |
 | `env` | `{}` | Environment for the driver. See [env values](#env-values). |
 | `mounts` | `[]` | Extra bind mounts for the driver. The benchmark's own job directory is always mounted at the same path. |
+| `shared_allocation` | `false` | Run every benchmark in one Slurm job that deploys the services once. See [Shared allocation](#shared-allocation). |
+
+### Shared allocation
+
+By default each benchmark is its own Slurm job with its own copy of the services. With `shared_allocation: true`, `gym eval submit` queues one job for the whole of `driver.benchmarks`: it starts and health-checks the services once, then runs every benchmark's driver at the same time against them. Use it for several short benchmarks that would each leave a model deployment mostly idle.
+
+Each benchmark keeps its own `prepare` and `run`, its own job directory, driver log and artifacts, so benchmarks never share a Gym config and their server names, judges and repeat counts cannot collide. All of them use the one `container` and `gym_install`. Each driver gets its own slice of the server port range (`port_range_low` to `port_range_high`, or Gym's default range), with its head server on the slice's first port, and its own `uv`, so drivers on one node do not race for ports or for a shared `uv` binary.
+
+The job ends when the last driver ends. Its status is 1 if any driver failed, else 0, and every benchmark's record names the same Slurm job ID, so cancelling one benchmark cancels the shared job. A service that exits stops every driver. The run directory holds the job's `job.sh`, the service logs and the collector; each benchmark's directory holds its driver log and artifacts.
+
+`resumable` benchmarks and `lustre_md_stats` are not supported in a shared allocation yet, and only the Slurm executor runs one.
 
 ### Policy wiring
 
@@ -276,6 +287,7 @@ Schema validation runs when the config is composed, before anything is rendered 
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
+- **Shared allocation** with a `resumable` benchmark, with `lustre_md_stats`, or with a compute other than Slurm is rejected.
 - **Benchmark `target`** without an `agent`, `agent` or `sandbox` without a `target`, an empty `target` or `agent`, `target` combined with `command`, or `target` with `only_tasks`, `exclude_tasks` or `skip_unloadable` under `run` (`gym eval run` takes those only as command-line flags) is rejected.
 - **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 

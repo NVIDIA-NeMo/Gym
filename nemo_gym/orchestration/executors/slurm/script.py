@@ -20,7 +20,15 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.artifacts.exporters import exporter_extras
-from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
+from nemo_gym.config.global_config import (
+    DEFAULT_PORT_RANGE_HIGH,
+    DEFAULT_PORT_RANGE_LOW,
+    HEAD_SERVER_KEY_NAME,
+    MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    OBSERVABILITY_ENABLED_KEY_NAME,
+    PORT_RANGE_HIGH_KEY_NAME,
+    PORT_RANGE_LOW_KEY_NAME,
+)
 from nemo_gym.data.gitlab_utils import gitlab_storage_extras
 from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
 from nemo_gym.orchestration.api import (
@@ -94,6 +102,9 @@ from nemo_gym.orchestration.jobs import (
     LogSource,
 )
 
+
+# The job name, and the collector's benchmark label, of a job that runs every benchmark of a shared allocation.
+SHARED_ALLOCATION_NAME = "shared-allocation"
 
 _SCRIPT_TEMPLATE = """\
 #!/bin/bash
@@ -1120,6 +1131,29 @@ def _with_resume_flag(run: dict[str, Any], resumable: bool) -> dict[str, Any]:
     return run
 
 
+def _with_port_slice(run: dict[str, Any], index: int, count: int) -> dict[str, Any]:
+    """Give benchmark `index` of `count` in a shared allocation its own slice of the server port range, with its
+    head server on the first port of the slice. Drivers that run side by side on one node then never probe or bind
+    the same port, and Gym keeps each driver's own head port out of the ports it assigns."""
+    low = int(run.get(PORT_RANGE_LOW_KEY_NAME, DEFAULT_PORT_RANGE_LOW))
+    high = int(run.get(PORT_RANGE_HIGH_KEY_NAME, DEFAULT_PORT_RANGE_HIGH))
+    width = (high - low + 1) // count
+    if width < 2:
+        raise ValueError(
+            f"port range {low}-{high} is too small to give each of {count} benchmarks in a shared allocation "
+            "its own ports; widen port_range_low/port_range_high."
+        )
+    slice_low = low + index * width
+    sliced = {key: value for key, value in run.items() if key != f"{HEAD_SERVER_KEY_NAME}.port"}
+    sliced[PORT_RANGE_LOW_KEY_NAME] = slice_low
+    sliced[PORT_RANGE_HIGH_KEY_NAME] = slice_low + width - 1
+    if isinstance(run.get(HEAD_SERVER_KEY_NAME), dict):
+        sliced[HEAD_SERVER_KEY_NAME] = {**run[HEAD_SERVER_KEY_NAME], "port": slice_low}
+    else:
+        sliced[f"{HEAD_SERVER_KEY_NAME}.port"] = slice_low
+    return sliced
+
+
 def planned_log_sources(config: SubmitConfig, compute: SlurmComputeConfig) -> list[LogSource]:
     """The logs `build_sbatch_script` makes a job write: the driver's, then one per service step.
 
@@ -1130,9 +1164,14 @@ def planned_log_sources(config: SubmitConfig, compute: SlurmComputeConfig) -> li
     steps = [COLLECTOR_SERVICE_NAME] if otel_active(config) else []
     for name, service in config.deployed_services.items():
         steps += _ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name]
+    # In a shared allocation the services log once, in the run directory above every benchmark's job directory.
+    service_dir = "../" if config.driver.shared_allocation else ""
     return [
         LogSource(name=DRIVER_STEP, kind="driver", location=log_path(DRIVER_STEP, JOB_ID_PLACEHOLDER)),
-        *(LogSource(name=step, kind="service", location=log_path(step, JOB_ID_PLACEHOLDER)) for step in steps),
+        *(
+            LogSource(name=step, kind="service", location=service_dir + log_path(step, JOB_ID_PLACEHOLDER))
+            for step in steps
+        ),
     ]
 
 
@@ -1143,6 +1182,72 @@ def build_sbatch_script(
     compute: SlurmComputeConfig,
     remote_bench_dir: Path,
 ) -> str:
+    return _SCRIPT_TEMPLATE.format(**_script_parts(config, benchmark_name, benchmark, compute, remote_bench_dir))
+
+
+def build_shared_allocation_script(config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> str:
+    """One job script that deploys the services once and runs every benchmark of `driver.benchmarks` against them.
+
+    Each benchmark runs its own driver block, unchanged, in a subshell that works in its own job directory, so its
+    variables, driver log and artifacts stay its own, and a service that exits ends every driver. Benchmarks get
+    disjoint server port ranges and their own uv. The job's status is 1 when any driver fails, else 0; the services
+    end with the job, after the last driver.
+    """
+    members = list(config.driver.benchmarks.items())
+    parts = [
+        _script_parts(
+            config,
+            name,
+            benchmark,
+            compute,
+            remote_run_dir / name,
+            shared_dir=remote_run_dir,
+            port_slice=(index, len(members)),
+        )
+        for index, (name, benchmark) in enumerate(members)
+    ]
+    shared_keys = ("ray_prelude", "service_commands", "health_checks")
+    for (name, _), part in zip(members[1:], parts[1:]):
+        if any(part[key] != parts[0][key] for key in shared_keys):
+            raise ValueError(f"benchmark {name!r} would deploy different services than {members[0][0]!r}")
+    launches = "\n".join(
+        f"(\ncd {shlex.quote(str(remote_run_dir / name))} || exit 1\n{part['driver_command']}\n) &\n"
+        "_gym_member_pids+=($!)"
+        for (name, _), part in zip(members, parts)
+    )
+    wait_all = (
+        "_gym_status=0\n"
+        'for _gym_member_pid in "${_gym_member_pids[@]}"; do\n'
+        '    wait "$_gym_member_pid" || _gym_status=1\n'
+        "done"
+    )
+    if otel_active(config):
+        driver_node = _driver_node(config, compute) if _node_totals(compute)[0] > 1 else None
+        ending = '(exit "$_gym_status")\n' + _render_collector_shutdown(config, remote_run_dir, driver_node)
+    else:
+        ending = 'exit "$_gym_status"'
+    return _SCRIPT_TEMPLATE.format(
+        directives=_render_directives(compute, remote_run_dir, SHARED_ALLOCATION_NAME),
+        resume_prologue="",
+        **{key: parts[0][key] for key in shared_keys},
+        prepare_command="",
+        driver_command=f"{launches}\n{wait_all}\n{ending}",
+    )
+
+
+def _script_parts(
+    config: SubmitConfig,
+    benchmark_name: str,
+    benchmark: BenchmarkRunConfig,
+    compute: SlurmComputeConfig,
+    remote_bench_dir: Path,
+    *,
+    shared_dir: Path | None = None,
+    port_slice: tuple[int, int] | None = None,
+) -> dict[str, str]:
+    """The sections of one benchmark's job script. With `shared_dir`, the benchmark is one of a shared allocation:
+    the collector lives in `shared_dir` and its shutdown is left to the shared script, the install gets its own
+    uv, and `port_slice` (index, count) selects the benchmark's share of the server port range."""
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     resume = benchmark.resume_config
@@ -1176,7 +1281,7 @@ def build_sbatch_script(
             [
                 _render_collector_service(
                     config,
-                    remote_bench_dir,
+                    shared_dir or remote_bench_dir,
                     is_multi_node=is_multi_node,
                     driver_node=driver_node,
                     account=compute.account,
@@ -1275,6 +1380,8 @@ def build_sbatch_script(
         run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
+        if port_slice is not None:
+            run_args = _with_port_slice(run_args, *port_slice)
         # A task target goes first (`gym eval run` reads its first bare token as TARGET), and its rows live in the
         # job directory, not in the fresh checkout this allocation works in.
         target_args = render_target_args(
@@ -1345,6 +1452,7 @@ def build_sbatch_script(
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
         record_install_failure=resume is not None,
+        private_uv=shared_dir is not None,
         extras=extras,
         export_tail=export_tail,
     )
@@ -1431,7 +1539,7 @@ def build_sbatch_script(
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()
     end_snapshot = f"_gym_md_stats {END}\n" if md_stats else ""
-    if observed:
+    if observed and shared_dir is None:
         driver_command += "\n" + _render_collector_shutdown(
             config, remote_bench_dir, driver_node, before_exit=end_snapshot
         )
@@ -1445,12 +1553,12 @@ def build_sbatch_script(
             if part
         )
 
-    return _SCRIPT_TEMPLATE.format(
-        directives=directives,
-        resume_prologue=resume_prologue,
-        ray_prelude=ray_prelude,
-        service_commands=service_commands,
-        health_checks=health_checks,
-        prepare_command=prepare_command,
-        driver_command=driver_command,
-    )
+    return {
+        "directives": directives,
+        "resume_prologue": resume_prologue,
+        "ray_prelude": ray_prelude,
+        "service_commands": service_commands,
+        "health_checks": health_checks,
+        "prepare_command": prepare_command,
+        "driver_command": driver_command,
+    }

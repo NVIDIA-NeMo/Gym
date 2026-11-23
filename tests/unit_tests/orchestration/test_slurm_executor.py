@@ -575,3 +575,26 @@ def test_the_planned_log_sources_reach_the_manifest_and_the_local_index(tmp_path
     )
     assert [s.name for s in manifest.benchmarks[0].log_sources] == ["driver", "policy"]
     assert [s.name for s in index.benchmarks[0].log_sources] == ["driver", "policy"]
+
+
+def test_a_shared_allocation_submits_one_job_and_records_it_for_every_benchmark(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:shared-allocation:0:555 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    config = _submit_config(tmp_path, ["bench_a", "bench_b"])
+    config.driver.shared_allocation = True
+
+    record = SlurmExecutor().run(config)
+
+    assert record is not None
+    run_dir = Path(record.run_dir)
+    sbatch = [line for line in conn.commands[0] if "sbatch" in line]
+    assert len(sbatch) == 1 and str(run_dir / "job.sh") in sbatch[0]
+    assert [(b.benchmark, b.job_id, b.job_dir) for b in record.benchmarks] == [
+        ("bench_a", "555", str(run_dir / "bench_a")),
+        ("bench_b", "555", str(run_dir / "bench_b")),
+    ]
+    assert (run_dir / "job.sh").is_file() and (run_dir / "logs").is_dir()
+    for name in ("bench_a", "bench_b"):
+        assert (run_dir / name / "logs").is_dir() and (run_dir / name / "artifacts").is_dir()
+        assert not (run_dir / name / "job.sh").exists()

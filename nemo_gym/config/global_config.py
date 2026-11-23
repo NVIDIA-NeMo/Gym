@@ -438,6 +438,8 @@ POLICY_MODEL_NAME_KEY_NAME = "policy_model_name"
 POLICY_MODEL_KEY_NAME = "policy_model"
 
 DEFAULT_HEAD_SERVER_PORT = 11000
+DEFAULT_PORT_RANGE_LOW = 10_001
+DEFAULT_PORT_RANGE_HIGH = 20_000
 
 
 # HuggingFace
@@ -1965,8 +1967,8 @@ Set the keys individually, in a config or as overrides, e.g.:
             initial_disallowed_ports = []
 
         with open_dict(global_config_dict):
-            port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, 10_001)
-            port_range_high = global_config_dict.setdefault(PORT_RANGE_HIGH_KEY_NAME, 20_000)
+            port_range_low = global_config_dict.setdefault(PORT_RANGE_LOW_KEY_NAME, DEFAULT_PORT_RANGE_LOW)
+            port_range_high = global_config_dict.setdefault(PORT_RANGE_HIGH_KEY_NAME, DEFAULT_PORT_RANGE_HIGH)
 
         disallowed_ports = self.validate_and_populate_defaults(
             server_instance_configs=server_instance_configs,

@@ -635,11 +635,29 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+    # Run every benchmark in one Slurm job that deploys the services once. Each benchmark keeps its own prepare,
+    # run, job directory and driver log; the job ends when the last benchmark's driver ends.
+    shared_allocation: bool = False
 
     @field_validator("env")
     @classmethod
     def _resolve_env_prefixes(cls, v: dict[str, str], info: ValidationInfo) -> dict[str, str]:
         return resolve_env_dict(v, saved_config=bool(info.context and info.context.get(SAVED_CONFIG)))
+
+
+def _validate_shared_allocation(driver: DriverConfig, compute: object) -> None:
+    """Refuse what a shared allocation cannot honour yet: the auto-resume chain and Lustre metadata snapshots
+    keep their state per job directory, so they would follow one benchmark and not the others."""
+    if not isinstance(compute, SlurmComputeConfig):
+        raise ValueError("driver.shared_allocation needs a Slurm compute.")
+    resumable = sorted(name for name, benchmark in driver.benchmarks.items() if benchmark.resume_config)
+    if resumable:
+        raise ValueError(
+            f"driver.shared_allocation does not support resumable benchmarks yet ({', '.join(resumable)}); "
+            "set resumable: false or submit them without shared_allocation."
+        )
+    if compute.lustre_md_stats:
+        raise ValueError("driver.shared_allocation does not support lustre_md_stats yet.")
 
 
 class JobConfig(_StrictModel):
@@ -748,6 +766,8 @@ class SubmitConfig(_StrictModel):
 
         sole_compute = next(iter(compute_names))
         compute = self.compute[sole_compute]
+        if self.driver.shared_allocation:
+            _validate_shared_allocation(self.driver, compute)
         if isinstance(compute, SlurmComputeConfig):
             total_nodes = sum(p.nodes for p in compute.node_pools.values())
             pool_names = set(compute.node_pools)
