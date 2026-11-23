@@ -1,0 +1,10 @@
+{
+  "schema_version": "synthetic-source-inventory-v1",
+  "root": "/opt/repos/exampleproject",
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "paths": [
+    "docs/api/openapi.yaml",
+    "libraries/exampleproject/service.py",
+    "frontend/app.ts"
+  ]
+}

@@ -294,6 +294,16 @@ class TestAgenticSandboxSpec:
         spec = agent._build_spec(body, "build rtl", {}, agent._resolve_image())
         assert spec.env["NV_MODEL_URL"] == f"http://model.example/ng-rollout/3-0{segment}"
 
+    def test_sandbox_untrained_model_url_keeps_the_model_servers_sampling(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "nemo_gym.agents.base_responses_api_agent.current_model_sampling_segment", lambda: "temperature-1"
+        )
+        agent = self._agent(deps_provision="archive")
+        agent._model_url = MagicMock(return_value="http://model.example")
+        spec = agent._build_spec(self._run_request(), "build rtl", {}, agent._resolve_image())
+        assert spec.env["NV_MODEL_URL"].endswith("/ng-sampling/temperature-1")
+        assert spec.env["NV_UNTRAINED_MODEL_URL"].endswith("/ng-sampling/null")
+
     def test_local_sif_rejected_for_open_sandbox(self) -> None:
         agent = self._agent(image="/tmp/cvdp.sif")
         with pytest.raises(ValueError, match="Apptainer"):
@@ -733,6 +743,35 @@ class TestAgenticSandboxSpec:
         assert env["ARCH"] == "x86_64-unknown-linux-gnu"
         assert env["NODE_ARCH"] == "linux-x64"
         assert Path(env["TMPDIR"]).is_dir()
+
+    def test_deps_recipe_follows_the_agent_pin(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        """Hermes reads its source pin from its pyproject.toml, so a pin bump must rebuild the cached prefix."""
+        hermes_dir = Path(cvdp_app.__file__).resolve().parents[1] / "hermes_agent"
+        assert hermes_dir / "pyproject.toml" in cvdp_app.agent_pin_files("hermes_agent")
+        pin = tmp_path / "pyproject.toml"
+        pin.write_text("source = 'a'")
+        monkeypatch.setattr(cvdp_app, "agent_pin_files", lambda key: (pin,))
+        agent = self._agent()
+        before = agent._deps_recipe("hermes_agent")[1]
+
+        pin.write_text("source = 'b'")
+        bumped = agent._deps_recipe("hermes_agent")[1]
+        assert bumped != before
+
+        # The deps script also builds from HERMES_SPEC when it is set.
+        monkeypatch.setenv("HERMES_SPEC", "git+https://example.invalid/hermes@experiment")
+        assert agent._deps_recipe("hermes_agent")[1] != bumped
+
+    async def test_hermes_deps_refuse_a_cross_architecture_sandbox_build(self, monkeypatch: MonkeyPatch) -> None:
+        """Hermes builds its runtime on the host with uv and the Gym checkout, which a task sandbox lacks."""
+        monkeypatch.setattr("responses_api_agents.cvdp_agent.app.os.uname", lambda: SimpleNamespace(machine="aarch64"))
+        agent = self._agent(
+            sandbox_provider={"opensandbox": {}}, agent_server_module="responses_api_agents.hermes_agent.app"
+        )
+        assert agent._deps_needs_sandbox_build() is True
+
+        with pytest.raises(RuntimeError, match=r"run CVDP on a host of the sandbox's architecture \(amd64\)"):
+            await agent._provision_deps_in_sandbox("image")
 
     def test_opensandbox_deps_default_to_amd64_even_on_arm_host(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("responses_api_agents.cvdp_agent.app.os.uname", lambda: SimpleNamespace(machine="aarch64"))
@@ -1196,3 +1235,69 @@ class TestSimpleRunAttemptEvidence:
         assert result["response"]["usage"] is None
         assert result["response"]["output"] == verified[-1]["response"]["output"]
         assert result["reward"] == 0.0
+
+
+_RESOLVER_PROBE_AGENT = """
+import json
+from types import SimpleNamespace
+
+
+class ProbeConfig:
+    model_fields = {}
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class ProbeAgent:
+    def __init__(self, config, server_client):
+        self.config = config
+
+    def resolve_model_base_url(self, model_server_name, rollout_id=None, *, trace_context=True, trained=True):
+        raise AssertionError("the entrypoint must replace the resolver")
+
+    async def responses(self, request, body):
+        urls = [
+            self.resolve_model_base_url("policy", "rollout-1"),
+            self.resolve_model_base_url("policy", "rollout-1", trained=False),
+        ]
+        return SimpleNamespace(output=[], model_dump_json=lambda: json.dumps(urls))
+"""
+
+
+@pytest.mark.parametrize("untrained_url", ["http://model/ng-rollout/rollout-1/ng-sampling/null", None])
+def test_sandbox_entrypoint_resolver_routes_the_untrained_role(tmp_path: Path, untrained_url: str | None) -> None:
+    """Hermes resolves its compression URL with ``trained=False``; an older parent sends only the run URL."""
+    import subprocess
+    import sys
+
+    (tmp_path / "resolver_probe_agent.py").write_text(_RESOLVER_PROBE_AGENT)
+    traj_dir = tmp_path / "traj"
+    traj_dir.mkdir()
+    (traj_dir / "instruction.txt").write_text("solve")
+    entrypoint = Path(__file__).resolve().parents[1] / "sandbox_entrypoint.py"
+    repo_root = Path(__file__).resolve().parents[3]
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(tmp_path), str(repo_root), os.environ.get("PYTHONPATH", "")]),
+        "NV_AGENT_HOME": str(tmp_path / "home"),
+        "NV_MODEL_URL": "http://model/ng-rollout/rollout-1",
+        "NV_MODEL_NAME": "policy",
+        "NV_TRAJ_DIR": str(traj_dir),
+        "NV_AGENT_MODULE": "resolver_probe_agent",
+        "NV_AGENT_CLASS": "ProbeAgent",
+        "NV_AGENT_CFG_CLASS": "ProbeConfig",
+    }
+    if untrained_url:
+        env["NV_UNTRAINED_MODEL_URL"] = untrained_url
+
+    # The entrypoint creates the CVDP task directories in its working directory.
+    completed = subprocess.run(
+        [sys.executable, str(entrypoint)], env=env, capture_output=True, text=True, timeout=120, cwd=tmp_path
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((traj_dir / "response.json").read_text()) == [
+        "http://model/ng-rollout/rollout-1/v1",
+        f"{untrained_url or 'http://model/ng-rollout/rollout-1'}/v1",
+    ]

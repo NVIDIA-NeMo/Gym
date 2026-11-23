@@ -1470,6 +1470,31 @@ class FileLineageStore(IncrementalLineageStore):
         with self._locked(rollout_id):
             return list(self._read(rollout_id))
 
+    def delete_calls(self, rollout_id: str, model_call_ids: Sequence[str]) -> int:
+        """Delete every row of these calls from a live ledger and return how many rows were deleted.
+
+        Any row with one of these call IDs goes: intent, failure or committed. A checkpoint uses this for calls
+        that ended while admission was closed, before their response started; they leave an intent row and
+        sometimes a failure row (``UNCOMMITTED_CALL_REASON``). The file is rewritten atomically under the rollout's
+        lock; other rows keep their order.
+        """
+        drop = set(model_call_ids)
+        with self._locked(rollout_id):
+            rows = list(self._read(rollout_id))
+            kept = [row for row in rows if row.get("model_call_id") not in drop]
+            if len(kept) == len(rows):
+                return 0
+            path = self._ledger_path(rollout_id)
+            payload = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n" for row in kept)
+            temporary = path.with_name(f".{path.name}.delete-calls")
+            with temporary.open("wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            self._ledger_cache_pop(rollout_id)
+            return len(rows) - len(kept)
+
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None:
         """Install checkpointed rows as the complete ledger of ``rollout_id``; see ``import_rows_many``."""
         self.import_rows_many({rollout_id: rows})
