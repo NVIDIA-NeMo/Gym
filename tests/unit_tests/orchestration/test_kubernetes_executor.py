@@ -526,6 +526,34 @@ def test_initial_manifest_and_local_record_share_observed_environment(tmp_path, 
     assert "WORKER_LOCAL" not in record.environment.model_dump_json()
 
 
+def test_a_submitted_kubernetes_run_leaves_a_laptop_setting_to_its_run_block(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
+
+    config = _submit_config(tmp_path, ["bench_a"])
+    compute = next(iter(config.compute.values()))
+    benchmark = config.driver.benchmarks["bench_a"].model_copy(
+        update={"target": "/data/tasks", "agent": "opencode_agent", "run": {"forward_configuration_refusals": True}}
+    )
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        benchmark,
+        compute,
+        tmp_path / "run",
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    run = json.dumps(job["spec"]["template"]["spec"]["containers"][0])
+    run = run[run.index("gym eval run") :]
+    assert "+forward_configuration_refusals=True" in run
+    assert "++forward_configuration_refusals=false" not in run
+    assert "++absolute_ip_route_fallback=false" in run
+
+
 def test_a_task_target_reaches_the_kubernetes_run_with_a_run_directory_output_root(tmp_path):
     from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 

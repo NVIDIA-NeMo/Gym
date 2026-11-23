@@ -15,7 +15,7 @@
 
 import re
 import shlex
-from collections.abc import Collection
+from collections.abc import Mapping
 from typing import Any
 
 from nemo_gym.config.global_config import ABSOLUTE_IP_ROUTE_FALLBACK_KEY_NAME, FORWARD_CONFIGURATION_REFUSALS_KEY_NAME
@@ -56,7 +56,7 @@ def render_target_args(
     agent: str | None,
     sandbox: str | None,
     output_root: str,
-    run_keys: Collection[str] = (),
+    run: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """The shell-quoted TARGET, ``--agent``, ``--sandbox`` and output root of a task run, which go ahead of its
     Hydra overrides.
@@ -68,8 +68,8 @@ def render_target_args(
 
     A submitted run turns off what a task-folder run on a laptop turns on (the default route's address for the model
     server, and configuration refusals forwarded to OpenCode and Pi), so it behaves as any other submitted run. A
-    setting the benchmark's own ``run`` block names (``run_keys``, its top-level keys) is left to that block, whose
-    ``+key=value`` would otherwise collide with the default here.
+    setting the benchmark's own ``run`` block gives a value is left to that block: it renders as ``+key=value``,
+    which Hydra refuses after a ``++key=false`` for the same key. A mapping renders no such token, so its default stays.
 
     Empty without a target, so a benchmark that sets none renders exactly as before.
     """
@@ -81,7 +81,8 @@ def render_target_args(
     if sandbox is not None:
         args += ["--sandbox", shlex.quote(sandbox)]
     args.append(shlex.quote(f"+{HARBOR_OUTPUT_ROOT_KEY}={hydra_literal(output_root)}"))
-    args += [shlex.quote(f"++{key}=false") for key in LAPTOP_RUN_KEYS if key not in run_keys]
+    named = {key for key, value in (run or {}).items() if not isinstance(value, Mapping)}
+    args += [shlex.quote(f"++{key}=false") for key in LAPTOP_RUN_KEYS if key not in named]
     return args
 
 

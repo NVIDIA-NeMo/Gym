@@ -3700,20 +3700,42 @@ def test_a_submitted_task_run_keeps_the_laptop_run_settings_off():
     assert f"++{FORWARD_CONFIGURATION_REFUSALS_KEY_NAME}=false" in args
 
 
-def test_a_laptop_run_setting_the_benchmarks_run_block_names_is_left_to_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("value", "forwarded"),
+    [
+        (True, True),
+        # A mapping renders no `+key=...` token, so the default stays and the setting stays off.
+        ({}, False),
+    ],
+)
+def test_a_laptop_run_setting_the_benchmarks_run_block_names_is_left_to_it(tmp_path, monkeypatch, value, forwarded):
     """A `run:` key renders as `+key=value`, which Hydra refuses after a `++key=false` for the same key: the job
     would exit before any rollout. The default is left out for it, and the command parses as `run_target` parses it."""
     from nemo_gym.data.tasks.harbor.build_options import _merged_cli_config
     from nemo_gym.orchestration.executors.utils import flatten_run_args, render_target_args
 
     monkeypatch.chdir(tmp_path)
-    run = {"forward_configuration_refusals": True}
+    run = {"forward_configuration_refusals": value}
     tokens = render_target_args(
-        "/data/t", agent="opencode_agent", sandbox=None, output_root="/jobs", run_keys=run.keys()
+        "/data/t", agent="opencode_agent", sandbox=None, output_root="/jobs", run=run
     ) + flatten_run_args(run)
     config = _merged_cli_config([shlex.split(token)[0] for token in tokens[3:]])
-    assert config.forward_configuration_refusals is True
+    assert bool(config.get("forward_configuration_refusals")) is forwarded
     assert config.absolute_ip_route_fallback is False
+
+
+def test_a_submitted_slurm_run_leaves_a_laptop_setting_to_its_run_block(tmp_path):
+    script = _render_target(
+        tmp_path,
+        target="/data/bmb",
+        agent="opencode_agent",
+        sandbox="opensandbox",
+        run={"forward_configuration_refusals": True},
+    )
+    run = _gym_cmd(script)
+    assert "+forward_configuration_refusals=True" in run
+    assert "++forward_configuration_refusals=false" not in run
+    assert "++absolute_ip_route_fallback=false" in run
 
 
 @pytest.mark.parametrize(
