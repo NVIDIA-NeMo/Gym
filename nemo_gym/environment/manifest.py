@@ -173,11 +173,6 @@ class PromptSource(StrEnum):
     AGENT = "agent"
 
 
-class IntendedUse(StrEnum):
-    EVALUATION = "evaluation"
-    TRAINING = "training"
-
-
 _PROFILE_REQUIRED_FIELDS = {
     IntegrationProfile.CUSTOM_GYM_VERIFIER: ("model_server", "resources_server"),
     IntegrationProfile.CUSTOM_GYM_AGENT_LOOP: ("model_server",),
@@ -374,12 +369,6 @@ class EnvironmentManifest(_ManifestModel):
         json_schema_extra={"uniqueItems": True},
         description="GitHub logins of the people who maintain the environment now.",
     )
-    intended_use: list[IntendedUse] | None = Field(
-        default=None,
-        min_length=1,
-        json_schema_extra={"uniqueItems": True},
-        description="Whether the environment is meant for evaluation, training or both; not stated when absent.",
-    )
     capabilities: list[ListedCapability] | Literal["unknown"] | None = Field(
         default=None,
         json_schema_extra={"uniqueItems": True},
@@ -446,7 +435,7 @@ class EnvironmentManifest(_ManifestModel):
     adopted_from: AdoptedFrom | None = None
     lifecycle: Lifecycle = Lifecycle.ACTIVE
 
-    @field_validator("authors", "maintainers", "intended_use", "capabilities", "domains", "overlaps_with")
+    @field_validator("authors", "maintainers", "capabilities", "domains", "overlaps_with")
     @classmethod
     def validate_unique_items(cls, value: list[str] | str | None, info: ValidationInfo) -> list[str] | str | None:
         if isinstance(value, list) and len(value) != len(set(value)):

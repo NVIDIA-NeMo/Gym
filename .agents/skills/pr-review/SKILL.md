@@ -112,9 +112,8 @@ Apply the checks for the areas the diff touches.
   CONTRIBUTING.md); behavior-changing verifier or agent code there needs the
   representative real smoke-rollout evidence AGENTS.md requires instead.
 - **Manifests (`manifest.yaml`).** A new manifest completes its authored
-  metadata and selection fields (`maintainers`, `intended_use`,
-  `capabilities`, `domains`, `primary_metric` for benchmarks, and
-  `requirements`).
+  metadata and selection fields (`maintainers`, `capabilities`,
+  `domains`, `primary_metric` for benchmarks, and `requirements`).
   Follow the [field reference](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx#field-reference);
   the literal `unknown` is supported by `capabilities`, `domains`,
   `requirements.gpu` and `requirements.network`. Check that `capabilities`

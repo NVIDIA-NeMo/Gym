@@ -355,7 +355,7 @@ The manifest is the place to read this declaration, but not every field is autho
 | Field group | Authority |
 | --- | --- |
 | Identity and catalog metadata: `name`, `version`, `experimental`, `kind`, `integration_profile`, `domain`, `description`, `modality`, `licensing`, and `authors` | Manifest |
-| Selection metadata: optional `maintainers`, `intended_use`, `capabilities`, `domains`, `overlaps_with`, `primary_metric`, and `requirements` | Manifest |
+| Selection metadata: optional `maintainers`, `capabilities`, `domains`, `overlaps_with`, `primary_metric`, and `requirements` | Manifest |
 | Behavioral declarations: `reward`, `determinism`, and optional session, state, sandbox, provenance, and lifecycle fields | Manifest |
 | Composition: `resources_server`, `agent_server`, `model_server`, `datasets`, `rollout_driver`, and `grading_mode` | Gym config; mirrored read-only in the manifest |
 | Configuration selection: `config_path` and optional `dataset_owner` | Manifest |
@@ -412,7 +412,6 @@ For benchmarks and named configs, additional fields apply — in particular `con
 | `licensing` | string | Optional; defaults to `unknown`; SPDX expression, `internal`, `proprietary`, or `unknown` |
 | `authors` | list of strings | Required; non-empty and unique |
 | `maintainers` | list of strings or null | Optional; GitHub logins of the current maintainers, non-empty and unique |
-| `intended_use` | list of strings or null | Optional; `evaluation`, `training`, or both; not stated when absent |
 | `capabilities` | list of strings, `unknown`, or null | Optional; the skills the environment exercises, from the capability taxonomy (`capability_taxonomy_v0_1`). Write each as `<capability>` or `<capability>/<specialization>`, for example `reasoning` or `coding/code_generation`; unique. The first entry is the main capability. By convention, its top level (the part before the slash, such as `coding`) is the environment's coarse category, which readers and tools such as catalogs can group by; `gym list` groups by `domain`. An empty list means none applies, for example a speed benchmark that tests no model skill. `unknown` is the whole value (`capabilities: unknown`), never an item in a list. The values are listed in [`nemo_gym/environment/capabilities_and_domains.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/environment/capabilities_and_domains.yaml) |
 | `domains` | list of strings, `unknown`, or null | Optional; the fields of expertise the tasks need, from the domain list (`enrichment_tags_v0_1`), with the main domain first, for example `[finance, law]`; unique. `general` means no specialist field is needed and `other` a field the list does not have. An empty list means none applies. `unknown` is the whole value (`domains: unknown`), never an item in a list. The values are listed in the same file. This field is separate from `domain`, Gym's single category |
 | `overlaps_with` | list of strings or null | Optional; benchmarks that training on this environment would invalidate, for example because their tasks overlap with its data |

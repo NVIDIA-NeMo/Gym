@@ -26,7 +26,6 @@ from nemo_gym.environment.manifest import (
     EnvironmentKind,
     EnvironmentManifest,
     IntegrationProfile,
-    IntendedUse,
     ManifestDataset,
     ManifestRequirements,
     Reward,
@@ -290,9 +289,6 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
         "authors": [_TODO],
         # Written out so the author sees every selection field; "unknown" stays valid until someone knows.
         "maintainers": [_TODO],
-        "intended_use": [
-            IntendedUse.EVALUATION if composition.kind == EnvironmentKind.BENCHMARK else IntendedUse.TRAINING
-        ],
         "capabilities": "unknown",
         "domains": "unknown",
         "requirements": dict.fromkeys(ManifestRequirements.model_fields, "unknown"),

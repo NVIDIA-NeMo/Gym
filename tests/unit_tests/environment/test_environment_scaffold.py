@@ -22,7 +22,6 @@ from nemo_gym.config.global_config import (
 from nemo_gym.environment.manifest import (
     EnvironmentKind,
     IntegrationProfile,
-    IntendedUse,
     ManifestRequirements,
     load_manifest,
 )
@@ -87,7 +86,6 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     # Every selection field is written out, so the author sees it; "unknown" is valid until someone knows.
     assert manifest.maintainers == ["TODO"]
     benchmark = kind == EnvironmentKind.BENCHMARK
-    assert manifest.intended_use == [IntendedUse.EVALUATION if benchmark else IntendedUse.TRAINING]
     assert manifest.requirements is not None
     # Every requirement is written out, including any added to ManifestRequirements later.
     assert manifest.requirements.model_dump() == dict.fromkeys(ManifestRequirements.model_fields, "unknown")

@@ -12,7 +12,6 @@ from nemo_gym.config.config_types import ConfigError, Domain
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     IntegrationProfile,
-    IntendedUse,
     ManifestError,
     dump_manifest,
     load_manifest,
@@ -520,7 +519,6 @@ def test_an_environment_without_a_target_needs_its_datasets(backend: str) -> Non
 
 CATALOG_FIELDS = (
     "maintainers",
-    "intended_use",
     "capabilities",
     "domains",
     "overlaps_with",
@@ -541,7 +539,6 @@ def test_catalog_fields_round_trip() -> None:
     raw = _manifest(kind="benchmark")
     raw.update(
         maintainers=["alice-nv"],
-        intended_use=["evaluation", "training"],
         capabilities=["coding/code_generation", "reasoning"],
         domains=["finance", "law"],
         overlaps_with=["gpqa"],
@@ -550,7 +547,6 @@ def test_catalog_fields_round_trip() -> None:
     )
     manifest = EnvironmentManifest.model_validate(raw)
 
-    assert manifest.intended_use == [IntendedUse.EVALUATION, IntendedUse.TRAINING]
     assert manifest.capabilities == ["coding/code_generation", "reasoning"]
     # The main domain stays first.
     assert manifest.domains == ["finance", "law"]
@@ -630,8 +626,6 @@ def test_network_takes_a_harbor_network_mode_or_unknown(level: str) -> None:
         ("maintainers", ["alice", "alice"]),
         ("maintainers", ["Alice Smith"]),
         ("maintainers", []),
-        ("intended_use", ["serving"]),
-        ("intended_use", ["training", "training"]),
         ("capabilities", ["reasoning", "reasoning"]),
         # One value is still a list; only `unknown` stands alone.
         ("capabilities", "reasoning"),
