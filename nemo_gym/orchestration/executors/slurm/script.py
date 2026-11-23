@@ -49,6 +49,7 @@ from nemo_gym.orchestration.executors.otel import (
     GYM_TELEMETRY_EXTRA,
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
+    collector_local_dir_prefix,
     driver_telemetry_env,
     gym_telemetry_active,
     otel_active,
@@ -744,11 +745,14 @@ def _with_vllm_traces(
 COLLECTOR_LOCAL_DIR_MARKER = f"export {COLLECTOR_LOCAL_DIR_ENV}="
 
 
-def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
+def _collector_command(
+    config: SubmitConfig, remote_bench_dir: Path, local_dir_prefix: str = COLLECTOR_LOCAL_DIR_PREFIX
+) -> str:
     """Run a node-local copy of the collector binary, then append its node-local jsonl into `<job dir>/otel/`.
 
     The copy-out runs in the collector's own step, the one place that sees its node-local directory: the
-    collector may run on another node than the batch script, or in a container.
+    collector may run on another node than the batch script, or in a container. The directory is
+    `<local_dir_prefix><SLURM_JOB_ID>.XXXXXX`.
     """
     binary = shlex.quote(config.otel.binary)
     name = shlex.quote(Path(config.otel.binary).name)
@@ -756,7 +760,7 @@ def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
     script = "; ".join(
         [
             f'src=$(command -v {binary}) || {{ echo "OTel collector binary not found: "{binary} >&2; exit 127; }}',
-            f'dir=$(mktemp -d "{COLLECTOR_LOCAL_DIR_PREFIX}$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/{name} || exit 1',
+            f'dir=$(mktemp -d "{local_dir_prefix}$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/{name} || exit 1',
             f'{COLLECTOR_LOCAL_DIR_MARKER}"$dir"',
             # Slurm's TERM at the time limit reaches this shell too: pass it on and wait for the flush.
             'trap "kill -TERM \\$pid 2>/dev/null" TERM INT',
@@ -781,6 +785,8 @@ def _render_collector_service(
     is_multi_node: bool,
     driver_node: int | None = None,
     account: str | None = None,
+    node_local_base_dir: str | None = None,
+    launch_guard: tuple[str, str] | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
@@ -789,16 +795,19 @@ def _render_collector_service(
     also where the Ray prelude puts the head of a multi-node vLLM service and where the driver runs,
     so `localhost:<port>` reaches the API server and the OTLP endpoints from the same node. In a
     container the job directory is mounted for the config and the copied `otel/*.jsonl`; on the
-    node it is simply there, so no mounts or workdir are passed.
+    node it is simply there, so no mounts or workdir are passed. With `node_local_base_dir` (the
+    benchmark's `node_local.base_dir`) the collector's node directory goes there instead of `/tmp`,
+    and a container gets that directory mounted too.
     """
     obs = config.otel
-    command = _collector_command(config, remote_bench_dir)
+    command = _collector_command(config, remote_bench_dir, collector_local_dir_prefix(node_local_base_dir))
+    node_mounts = [f"{node_local_base_dir}:{node_local_base_dir}"] if node_local_base_dir is not None else []
     container_kwargs = (
-        {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}"], "workdir": str(remote_bench_dir)}
+        {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}", *node_mounts], "workdir": str(remote_bench_dir)}
         if obs.container is not None
         else {}
     )
-    return _render_service_command(
+    service = _render_service_command(
         COLLECTOR_SERVICE_NAME,
         obs.container,
         command,
@@ -816,6 +825,11 @@ def _render_collector_service(
         account=account,
         **container_kwargs,
     )
+    if launch_guard is None:
+        return service
+    # A stop between the launch and the PID capture would miss the collector: it waits until the PID is known.
+    before, after = launch_guard
+    return f"{before}\n{service}\n{after}"
 
 
 def _render_collector_health_check(config: SubmitConfig, driver_node: int | None = None) -> str:
@@ -829,11 +843,13 @@ def _render_collector_health_check(config: SubmitConfig, driver_node: int | None
     )
 
 
-def _render_collector_shutdown(
-    config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None = None, *, before_exit: str = ""
-) -> str:
-    """Run after the driver: one more scrape interval so the final counters are seen, then a
-    graceful stop, keeping the driver's exit code. `before_exit` runs last, just before the exit.
+def _collector_stop_lines(
+    config: SubmitConfig,
+    remote_bench_dir: Path,
+    driver_node: int | None,
+    local_dir_prefix: str,
+) -> list[str]:
+    """One more scrape interval so the final counters are seen, then a graceful stop of the collector.
 
     The TERM goes to the collector process itself, matched by its unique `--config` path. Sent to
     `srun` instead, TERM makes Slurm kill the step outright and INT is treated as a console
@@ -845,7 +861,7 @@ def _render_collector_shutdown(
     name = re.escape(Path(config.otel.binary).name)
     config_path = re.escape(str(collector_config_path(remote_bench_dir)))
     pattern = (
-        shlex.quote(f"^{re.escape(COLLECTOR_LOCAL_DIR_PREFIX)}")
+        shlex.quote(f"^{re.escape(local_dir_prefix)}")
         + '"$SLURM_JOB_ID"'
         + shlex.quote(f"\\.[^/]+/{name} --config {config_path}")
     )
@@ -853,20 +869,63 @@ def _render_collector_shutdown(
     if driver_node:
         # pkill sees only its own node, and the collector runs beside the driver, here not on the batch host.
         signal = f'srun --overlap --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1 {signal}'
-    return (
-        "DRIVER_RC=$?\n"
-        f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
-        f"{signal} || true\n"
-        f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done\n"
-        f"kill -TERM {pid} 2>/dev/null || true\n"
-        f"{before_exit}"
-        "exit $DRIVER_RC"
+    return [
+        f"sleep {FINAL_SCRAPE_GRACE_SECONDS}",
+        f"{signal} || true",
+        f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done",
+        f"kill -TERM {pid} 2>/dev/null || true",
+    ]
+
+
+# Stops the collector once: node_local's stop before the time limit runs it too, and the tail's call is then a no-op.
+COLLECTOR_STOP_COMMAND = "_gym_collector_stop"
+_COLLECTOR_STOP_FUNCTION = """\
+{pid_var}=""
+_gym_collector_stopped=""
+{command}() {{
+    [[ -z "$_gym_collector_stopped" && -n "${pid_var}" ]] || return 0
+    _gym_collector_stopped=1
+{body}
+}}"""
+
+
+def _render_collector_stop_function(
+    config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None, local_dir_prefix: str
+) -> str:
+    """Defined before anything that can call it: the collector's PID is still empty until its step starts."""
+    lines = _collector_stop_lines(config, remote_bench_dir, driver_node, local_dir_prefix)
+    return _COLLECTOR_STOP_FUNCTION.format(
+        pid_var=f"{bash_var(COLLECTOR_SERVICE_NAME)}_PID",
+        command=COLLECTOR_STOP_COMMAND,
+        body="\n".join(f"    {line}" for line in lines),
     )
+
+
+def _render_collector_shutdown(
+    config: SubmitConfig,
+    remote_bench_dir: Path,
+    driver_node: int | None = None,
+    *,
+    local_dir_prefix: str = COLLECTOR_LOCAL_DIR_PREFIX,
+    once: bool = False,
+    before_exit: str = "",
+) -> str:
+    """Run after the driver: stop the collector, keeping the driver's exit code. `before_exit` runs last, just before
+    the exit.
+
+    With `once`, the script defines the stop as a function (`_render_collector_stop_function`) and this calls it.
+    """
+    stop = (
+        [COLLECTOR_STOP_COMMAND]
+        if once
+        else _collector_stop_lines(config, remote_bench_dir, driver_node, local_dir_prefix)
+    )
+    return "\n".join(["DRIVER_RC=$?", *stop, f"{before_exit}exit $DRIVER_RC"])
 
 
 _WATCHED_DRIVER_TEMPLATE = """\
 {driver} &
-_gym_driver_pid=$!
+_gym_driver_pid=$!{after_launch}
 _gym_service_exited() {{
     # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
     # Once the evaluation has succeeded (a driver with exports writes the marker then), a service that is lost
@@ -899,7 +958,9 @@ _SETTLED_EXTRA_CHECK = """
         done"""
 
 
-def _render_watched_driver(driver: str, services: list[str], extra_check: str = "") -> str:
+def _render_watched_driver(
+    driver: str, services: list[str], extra_check: str = "", *, launch_guard: tuple[str, str] | None = None
+) -> str:
     """The driver step, ended with TERM if a service it depends on exits first.
 
     A dead service would otherwise leave the driver retrying it until the walltime. The job exits
@@ -910,7 +971,7 @@ def _render_watched_driver(driver: str, services: list[str], extra_check: str = 
     longer ends the driver: the exports do not use it, and a requeue would reload the model for nothing.
     The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
     `extra_check` is one more line the loop runs on every poll, also after a service is lost once the evaluation has
-    succeeded.
+    succeeded. `launch_guard` is a pair of lines run right before the driver starts and right after its PID is known.
     """
     if not services and not extra_check:
         return driver
@@ -922,7 +983,13 @@ def _render_watched_driver(driver: str, services: list[str], extra_check: str = 
         + ([f"        {extra_check}"] if extra_check else [])
     )
     settled = _SETTLED_EXTRA_CHECK.format(extra_check=extra_check) if extra_check else ""
-    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks, settled=settled)
+    before, after = launch_guard or ("", "")
+    return _WATCHED_DRIVER_TEMPLATE.format(
+        driver=f"{before}\n{driver}" if before else driver,
+        after_launch=f"\n{after}" if after else "",
+        checks=checks,
+        settled=settled,
+    )
 
 
 def _render_lustre_md_stats_start(compute: SlurmComputeConfig, remote_bench_dir: Path, total_nodes: int) -> str:
@@ -1121,6 +1188,19 @@ def build_sbatch_script(
     remote_bench_dir: Path,
 ) -> str:
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
+    node_local = benchmark.node_local_config
+    signal_directive = node_local_script.signal_directive(node_local) if node_local is not None else None
+    if signal_directive is not None:
+        if "\n#SBATCH --signal=" in f"\n{directives}":
+            raise ValueError(
+                f"Benchmark {benchmark_name!r}: extra_args sets `signal`, but node_local.stop_before_walltime_seconds "
+                "needs its own --signal to stop the driver before the time limit. Drop it, or set "
+                "stop_before_walltime_seconds to 0."
+            )
+        directives += f"\n{signal_directive}"
+    # The stop before the time limit stops the collector too, once, so its node-local jsonl reaches the job dir.
+    stops_early = signal_directive is not None
+    collector_prefix = collector_local_dir_prefix(node_local.base_dir if node_local is not None else None)
 
     resume = benchmark.resume_config
     resume_prologue = render_resume_prologue(resume) if resume else ""
@@ -1157,6 +1237,8 @@ def build_sbatch_script(
                     is_multi_node=is_multi_node,
                     driver_node=driver_node,
                     account=compute.account,
+                    node_local_base_dir=node_local.base_dir if node_local is not None else None,
+                    launch_guard=node_local_script.LAUNCH_GUARD if stops_early else None,
                 )
             ]
             if observed
@@ -1248,7 +1330,6 @@ def build_sbatch_script(
             ),
             **driver_env,
         }
-    node_local = benchmark.node_local_config
     if benchmark.command is None:
         # With a node-local dir, the per-call capture files stay on the driver's disk and reach the job dir archived.
         capture_root = node_local_script.container_dir(remote_bench_dir) if node_local is not None else None
@@ -1398,7 +1479,12 @@ def build_sbatch_script(
         marker_definition
         + (f"{gym_cmd}\n" if gym_cmd else "")
         + (f"_gym_md_stats {SERVICES_READY}\n" if md_stats else "")
-        + _render_watched_driver(driver_srun, watched, node_local_script.WATCH_CHECK if node_local else "")
+        + _render_watched_driver(
+            driver_srun,
+            watched,
+            node_local_script.WATCH_CHECK if node_local else "",
+            launch_guard=node_local_script.LAUNCH_GUARD if stops_early else None,
+        )
         + (f"\n_gym_md_stats {DRIVER_END}" if md_stats else "")
     )
     if node_local:
@@ -1409,8 +1495,14 @@ def build_sbatch_script(
             node_local_flags,
             exports=export_tail is not None,
             failure_file=failure_path,
+            stop_collector=COLLECTOR_STOP_COMMAND if observed and stops_early else "",
         )
-        service_commands = f"{node_local_setup}\n\n{service_commands}"
+        collector_stop = (
+            [_render_collector_stop_function(config, remote_bench_dir, driver_node, collector_prefix)]
+            if observed and stops_early
+            else []
+        )
+        service_commands = "\n\n".join([*collector_stop, node_local_setup, service_commands])
         driver_command += "\n" + node_local_script.render_after_driver(
             remote_bench_dir, node_local_flags, exports=export_tail is not None
         )
@@ -1420,7 +1512,12 @@ def build_sbatch_script(
     end_snapshot = f"_gym_md_stats {END}\n" if md_stats else ""
     if observed:
         driver_command += "\n" + _render_collector_shutdown(
-            config, remote_bench_dir, driver_node, before_exit=end_snapshot
+            config,
+            remote_bench_dir,
+            driver_node,
+            local_dir_prefix=collector_prefix,
+            once=stops_early,
+            before_exit=end_snapshot,
         )
     elif md_stats:
         # The snapshot returns the status before it, so the job's exit status is unchanged.
@@ -1431,10 +1528,11 @@ def build_sbatch_script(
             for part in (resume_prologue, _render_lustre_md_stats_start(compute, remote_bench_dir, total_nodes))
             if part
         )
+    early_trap = node_local_script.render_early_trap(node_local) if node_local is not None else ""
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,
-        resume_prologue=resume_prologue,
+        resume_prologue="\n\n".join(block for block in (early_trap, resume_prologue) if block),
         ray_prelude=ray_prelude,
         service_commands=service_commands,
         health_checks=health_checks,
