@@ -7,7 +7,8 @@ Each folder holds the `*.capture.jsonl` files a run writes with `++observability
 ++model_call_capture_dir=DIR`. A file's first agent request is its earliest request that offers tools (OpenCode's
 title call offers none). Tasks are paired by the first user message, exactly, or with OpenCode's argv quoting undone
 and CRLF or CR read as LF (Gym reads instruction.md in text mode, so a native CRLF prompt arrives with LF); either is
-a note, not a failure.
+a note, not a failure. Every capture is compared: repeats of a prompt (and distinct tasks that share one) pair in
+file-name order, and a capture left over on one side is unpaired.
 Each pair compares the model, the tool names, every other top-level request key but `messages`, `stream` and
 `stream_options` (the sampling settings, `tool_choice` among them) and the message roles. A contamination flag
 (`AGENTS.md`, `CLAUDE.md`, `Instructions from`, `<available_skills>`), counted over every message but the assistant's,
@@ -36,13 +37,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", type=Path, help="write the report as JSON")
 
 
-def first_requests(directory: Path) -> tuple[dict[str, dict], list[str]]:
-    """First agent request per task (keyed by its first user message; the first file per key wins), and the capture
-    files that hold no agent request."""
+def first_requests(directory: Path) -> tuple[dict[str, list[dict]], list[str]]:
+    """The first agent request of each capture file, grouped by its first user message in file-name order, and the
+    capture files that hold no agent request."""
     files = sorted(directory.glob("*.capture.jsonl")) if directory.is_dir() else []
     if not files:
         raise InputError(f"{directory}: no *.capture.jsonl files")
-    found: dict[str, dict] = {}
+    found: dict[str, list[dict]] = {}
     no_agent: list[str] = []
     for path in files:
         best, started = None, None
@@ -56,7 +57,7 @@ def first_requests(directory: Path) -> tuple[dict[str, dict], list[str]]:
             no_agent.append(path.name)
             continue
         users = [message_text(m.get("content")) for m in _messages(best) if m.get("role") == "user"]
-        found.setdefault(users[0] if users else "", {"file": path.name, "request": best})
+        found.setdefault(users[0] if users else "", []).append({"file": path.name, "request": best})
     return found, no_agent
 
 
@@ -133,11 +134,12 @@ def _plain(key: str) -> str:
 
 def run(args: argparse.Namespace) -> int:
     (native, native_none), (harbor, harbor_none) = first_requests(args.native_dir), first_requests(args.harbor_dir)
-    pairs, harbor_left = [], dict(harbor)
+    matched, harbor_left = [], dict(harbor)
     native_left = []
-    for key, entry in native.items():
+    for key in native:
         if key in harbor_left:
-            pairs.append(compare(key, key, entry, harbor_left.pop(key)))
+            harbor_left.pop(key)
+            matched.append((key, key))
         else:
             native_left.append(key)
     plain = {}
@@ -147,7 +149,21 @@ def run(args: argparse.Namespace) -> int:
         native_key = plain.pop(_plain(harbor_key), None)
         if native_key is not None:
             native_left.remove(native_key)
-            pairs.append(compare(native_key, harbor_key, native[native_key], harbor_left.pop(harbor_key)))
+            harbor_left.pop(harbor_key)
+            matched.append((native_key, harbor_key))
+    unpaired = {
+        "native": [entry["file"] for key in native_left for entry in native[key]],
+        "harbor": [entry["file"] for entries in harbor_left.values() for entry in entries],
+    }
+    # Every capture of a prompt is compared: its repeats pair in file-name order, and the extras of one side are
+    # unpaired.
+    pairs = []
+    for native_key, harbor_key in matched:
+        a, b = native[native_key], harbor[harbor_key]
+        pairs += [compare(native_key, harbor_key, x, y) for x, y in zip(a, b)]
+        unpaired["native"] += [entry["file"] for entry in a[len(b) :]]
+        unpaired["harbor"] += [entry["file"] for entry in b[len(a) :]]
+    written: dict[str, int] = {}
     for pair in pairs:
         files = pair["files"]
         status = "DIFFERENT" if pair["problems"] else "same"
@@ -158,15 +174,13 @@ def run(args: argparse.Namespace) -> int:
             print(f"    {line[:200]}")
         texts = pair.pop("_texts")
         if args.out:
-            folder = args.out / pair["key"]
+            written[pair["key"]] = written.get(pair["key"], 0) + 1
+            repeat = written[pair["key"]]
+            folder = args.out / (pair["key"] if repeat == 1 else f"{pair['key']}.{repeat}")
             folder.mkdir(parents=True, exist_ok=True)
             for side, (system, user) in texts.items():
                 (folder / f"{side}.system.txt").write_text(system)
                 (folder / f"{side}.user.txt").write_text(user)
-    unpaired = {
-        "native": [native[key]["file"] for key in native_left],
-        "harbor": [entry["file"] for entry in harbor_left.values()],
-    }
     for side, names in unpaired.items():
         for name in names:
             print(f"unpaired: only on {side}: {name}")

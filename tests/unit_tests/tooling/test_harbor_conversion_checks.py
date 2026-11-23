@@ -4,10 +4,12 @@
 """`python -m scripts.harbor_conversion_checks`: each command on clean and on broken input."""
 
 import base64
+import bz2
 import gzip
 import hashlib
 import io
 import json
+import lzma
 import os
 import shutil
 import signal
@@ -521,6 +523,37 @@ def test_first_request_without_an_agent_request_fails(tmp_path, capsys):
     assert json.loads((tmp_path / "r.json").read_text())["no_agent_request"]["harbor"] == ["0-0.capture.jsonl"]
 
 
+@pytest.mark.parametrize(
+    "later_harbor, problem",
+    [({}, None), ({"model": "other"}, "model differs"), ({"temperature": 1.0}, "sampling differs")],
+)
+def test_first_request_compares_every_repeat_of_a_prompt(tmp_path, capsys, later_harbor, problem):
+    # Two rollouts of one task per side, each with OpenCode's title call; the native prompt is argv-quoted.
+    for name in ("0-0", "0-1"):
+        _capture(tmp_path / "native", name, '"Say \\"hi\\""')
+    _capture(tmp_path / "harbor", "0-0", 'Say "hi"')
+    _capture(tmp_path / "harbor", "0-1", 'Say "hi"', **later_harbor)
+    assert _first_request(tmp_path, "--out", str(tmp_path / "out")) == (1 if problem else 0)
+    out = capsys.readouterr().out
+    assert out.count("argv_prompt_quoting") == 2
+    assert out.splitlines()[-1] == f"first-request: 2 paired, 0 unpaired, {1 if problem else 0} differing"
+    assert "native 0-1.capture.jsonl / harbor 0-1.capture.jsonl: " + ("DIFFERENT" if problem else "same") in out
+    if problem:
+        assert problem in out
+    key = hashlib.sha256(b'Say "hi"').hexdigest()[:12]
+    assert sorted(path.name for path in (tmp_path / "out").iterdir()) == [key, f"{key}.2"]
+
+
+def test_first_request_an_extra_repeat_on_one_side_is_unpaired(tmp_path, capsys):
+    for name in ("0-0", "0-1"):
+        _capture(tmp_path / "native", name, "task")
+    _capture(tmp_path / "harbor", "0-0", "task")
+    assert _first_request(tmp_path) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert "unpaired: only on native: 0-1.capture.jsonl" in lines
+    assert lines[-1] == "first-request: 1 paired, 1 unpaired, 0 differing"
+
+
 def test_first_request_without_captures_is_an_input_error(tmp_path, capsys):
     (tmp_path / "native").mkdir()
     (tmp_path / "harbor").mkdir()
@@ -946,6 +979,73 @@ def test_absent_fields_are_named_once(tmp_path, capsys):
     assert "; absent from every row: optional" in capsys.readouterr().out
 
 
+def _schemas(root, child_base, child_import):
+    """A parent TaskData in a package and a child task_data.py that inherits it, as Resources Servers do."""
+    parent = root / "servers" / "parent_server" / "task_data.py"
+    parent.parent.mkdir(parents=True)
+    parent.write_text(
+        "from pydantic import BaseModel, Field\n\n\nclass TaskData(BaseModel):\n"
+        '    topic: str = Field(json_schema_extra={"consumed_by": ["prompt"]})\n'
+        '    expected: str = Field(json_schema_extra={"consumed_by": ["verify"]})\n'
+    )
+    child = root / "servers" / "child_server" / "task_data.py"
+    child.parent.mkdir(parents=True)
+    child.write_text(
+        f"from pydantic import Field\n\n{child_import}\n\n\nclass TaskData({child_base}):\n"
+        '    repo: str = Field(json_schema_extra={"consumed_by": ["provenance"]})\n'
+    )
+    return child
+
+
+@pytest.mark.parametrize(
+    "child_base, child_import",
+    [
+        ("ParentTaskData", "from servers.parent_server.task_data import TaskData as ParentTaskData"),
+        ("ParentTaskData", "from ..parent_server.task_data import TaskData as ParentTaskData"),
+    ],
+)
+def test_hidden_from_includes_inherited_fields(tmp_path, capsys, child_base, child_import):
+    environment = "FROM python:3.12\nRUN echo 'multiplication tables' 'repository-name'\n"
+    dataset, rows = _dataset(tmp_path, environment=environment)
+    rows_data = [json.loads(line) for line in rows.read_text().splitlines()]
+    for row in rows_data:
+        row["topic"], row["repo"] = "multiplication tables", "repository-name"
+    _write_jsonl(rows, rows_data)
+    child = _schemas(tmp_path, child_base, child_import)
+    # A clean task passes, and the inherited visible field (topic) is not hidden.
+    assert _check(dataset, rows, "--hidden-from", str(child)) == 0
+    assert "PASS hidden-values: none of 2 hidden value(s) of 2 row(s)" in capsys.readouterr().out
+    # The inherited hidden field (expected) is scanned.
+    (dataset / "t1" / "environment" / "answer.txt").write_text(ANSWER)
+    assert _check(dataset, rows, "--hidden-from", str(child)) == 1
+    out = capsys.readouterr().out
+    assert "t1/environment/answer.txt contains expected value 'forty-two exactly'" in out
+    assert "topic value" not in out and "repo value" not in out
+
+
+def test_hidden_from_the_math_with_autograder_schema_hides_its_inherited_answer(tmp_path, capsys):
+    dataset, rows = _dataset(tmp_path)
+    rows_data = [json.loads(line) for line in rows.read_text().splitlines()]
+    for row in rows_data:
+        row["question"], row["expected_answer"], row["problem_id"] = QUESTION, ANSWER, "imo-bench-algebra-001"
+    _write_jsonl(rows, rows_data)
+    schema = Path(__file__).resolve().parents[3] / "resources_servers" / "math_with_autograder" / "task_data.py"
+    (dataset / "t1" / "environment" / "answer.txt").write_text(ANSWER + " imo-bench-algebra-001")
+    assert _check(dataset, rows, "--hidden-from", str(schema)) == 1
+    out = capsys.readouterr().out
+    assert "t1/environment/answer.txt contains expected_answer value" in out and "problem_id value" not in out
+
+
+def test_hidden_from_refuses_a_base_it_cannot_follow(tmp_path, capsys):
+    dataset, rows = _dataset(tmp_path)
+    child = _schemas(tmp_path, "Elsewhere", "from not_in_this_repository.schemas import Elsewhere")
+    assert _check(dataset, rows, "--hidden-from", str(child)) == 2
+    assert "cannot find the module of Elsewhere" in capsys.readouterr().err
+    child.write_text("import other\n\n\nclass TaskData(other.Base):\n    expected: str\n")
+    assert _check(dataset, rows, "--hidden-from", str(child)) == 2
+    assert "cannot follow base other.Base of TaskData" in capsys.readouterr().err
+
+
 def _base64_tar(member, text):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as tar:
@@ -980,6 +1080,104 @@ def test_what_cannot_be_scanned_in_full_fails(tmp_path, capsys, monkeypatch):
     assert "t2/environment/bundle.b64[base64 at 0]: a 1025-character base64 run does not decode" in (
         capsys.readouterr().out
     )
+
+
+def _incompressible(size):
+    return b"".join(hashlib.sha256(str(i).encode()).digest() for i in range(size // 32))
+
+
+def _payload(text):
+    """`text` repeated (so a compressor codes it rather than storing it) and enough noise for a 1024+ base64 run."""
+    return text.encode() * 100 + _incompressible(1024)
+
+
+def _zip(text):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("answer.txt", _payload(text))
+    return buffer.getvalue()
+
+
+ARCHIVES = {
+    "zip": lambda: _zip(ANSWER),
+    "xz": lambda: lzma.compress(_payload(ANSWER)),
+    "bz2": lambda: bz2.compress(_payload(ANSWER)),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(ARCHIVES))
+def test_unsupported_archives_fail_as_not_scanned_raw_in_base64_or_in_a_tar(tmp_path, capsys, kind):
+    data = ARCHIVES[kind]()
+    assert ANSWER.encode() not in data
+    dataset, rows = _dataset(tmp_path)
+    (dataset / "t1" / "environment" / f"answer.{kind}").write_bytes(data)
+    blob = base64.b64encode(data).decode()
+    assert len(blob) >= 1024
+    (dataset / "t2" / "environment" / "Dockerfile").write_text(f"FROM python:3.12\nRUN echo '{blob}' | base64 -d\n")
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    out = capsys.readouterr().out
+    assert f"t1/environment/answer.{kind}: a {kind} archive: not scanned" in out
+    assert f"t2/environment/Dockerfile[base64 at 27]: a {kind} archive: not scanned" in out
+    (dataset / "t1" / "environment" / f"answer.{kind}").unlink()
+    (dataset / "t2" / "environment" / "Dockerfile").write_text("FROM python:3.12\n")
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        info = tarfile.TarInfo(f"data/answer.{kind}")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    (dataset / "t1" / "environment" / "data.tar.gz").write_bytes(buffer.getvalue())
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert f"t1/environment/data.tar.gz:data/answer.{kind}: a {kind} archive: not scanned" in capsys.readouterr().out
+
+
+def _tar(members, mode="w"):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode=mode) as tar:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def test_a_tar_gz_inside_a_tar_is_unpacked(tmp_path, capsys, monkeypatch):
+    dataset, rows = _dataset(tmp_path)
+    inner = _tar({"answer.txt": b"nothing hidden here"}, mode="w:gz")
+    (dataset / "t1" / "environment" / "bundle.tar").write_bytes(_tar({"inner.tar.gz": inner}))
+    blob = base64.b64encode(_tar({"inner.tar.gz": inner + _incompressible(1024)})).decode()
+    (dataset / "t2" / "environment" / "Dockerfile").write_text(f"FROM python:3.12\nRUN echo '{blob}' | base64 -d\n")
+    assert _check(dataset, rows, "--hidden", "expected") == 0
+    capsys.readouterr()
+    inner = _tar({"answer.txt": ANSWER.encode()}, mode="w:gz")
+    assert ANSWER.encode() not in inner
+    (dataset / "t1" / "environment" / "bundle.tar").write_bytes(_tar({"inner.tar.gz": inner}))
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert "t1/environment/bundle.tar:inner.tar.gz:answer.txt contains expected value" in capsys.readouterr().out
+    monkeypatch.setattr(scan, "MAX_NESTING", 1)
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert "bundle.tar:inner.tar.gz:answer.txt: archives nested over 1 deep: not scanned" in capsys.readouterr().out
+
+
+def test_base64_runs_in_a_tar_gz_member_are_decoded(tmp_path, capsys):
+    dataset, rows = _dataset(tmp_path)
+    blob = base64.b64encode(_zip(ANSWER)).decode()
+    dockerfile = f"FROM python:3.12\nRUN echo '{blob}' | base64 -d\n".encode()
+    (dataset / "t1" / "environment" / "ctx.tar.gz").write_bytes(_tar({"Dockerfile": dockerfile}, mode="w:gz"))
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert "t1/environment/ctx.tar.gz:Dockerfile[base64 at 27]: a zip archive: not scanned" in capsys.readouterr().out
+
+
+def test_a_gzip_inside_a_gzip_fails_as_not_scanned_raw_or_in_base64(tmp_path, capsys):
+    data = gzip.compress(gzip.compress(_payload(ANSWER)))
+    dataset, rows = _dataset(tmp_path)
+    (dataset / "t1" / "environment" / "answer.gz").write_bytes(data)
+    blob = base64.b64encode(data).decode()
+    assert len(blob) >= 1024
+    (dataset / "t2" / "environment" / "Dockerfile").write_text(f"FROM python:3.12\nRUN echo '{blob}' | base64 -d\n")
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    out = capsys.readouterr().out
+    assert "t1/environment/answer.gz: a gzip archive: not scanned" in out
+    assert "t2/environment/Dockerfile[base64 at 27]: a gzip archive: not scanned" in out
 
 
 def test_grouped_task_folders_are_found_as_gym_finds_them(tmp_path, capsys):

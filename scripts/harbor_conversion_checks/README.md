@@ -62,8 +62,9 @@ runs after G2. The checks:
 - `hidden-values` (needs `--hidden FIELD` or `--hidden-from task_data.py`): fails when a hidden native value is in
   `instruction.md`, a `steps/<name>/instruction.md`, the `[environment].env` variables of `task.toml` or a file under
   `environment/`. A `.gz` or `.tar` file and base64 runs of 1024+ characters (one line, or wrapped as `base64` wraps)
-  are decoded, gunzipped and untarred; zip, xz and bz2 files are reported as not scanned. JSON-escaped copies of a
-  value are found, but case-changed copies and other encodings are not scanned and must be read by hand
+  are decoded, gunzipped and untarred, and so are the members of a tar and the base64 runs in a gunzipped file or a
+  tar member; a zip, xz or bz2 file, base64 payload or tar member is reported as not scanned. JSON-escaped copies
+  of a value are found, but case-changed copies and other encodings are not scanned and must be read by hand
   (`first-request` is the stronger evidence).
 - `hidden-template` (needs `--template`, `--template-hidden NAME`): fails when a template file Gym renders
   (`<stem>.template<suffix>`) outside `solution/` and `tests/` has the placeholder `{{ NAME }}` or
@@ -77,7 +78,8 @@ runs after G2. The checks:
   yours: read the prompt and the shipped files for such paths by eye.
 
 A check whose inputs are absent prints `SKIP`. What a check cannot scan in full fails it, naming the file: a zip, xz
-or bz2 file, a run laid out as base64 that does not decode, or a gzip or tar member over 256 MiB.
+or bz2 file, base64 payload or tar member, a gzip inside a gzip, a tar member nested more than 8 archives deep, a
+run laid out as base64 that does not decode, or a gzip or tar member over 256 MiB.
 
 `secrets` and `local-paths` scan every file under DATASET, so on a folder that was already validated they also scan
 the records validation wrote there (`compose-images.json`, `compose-images.json.lock`, `manifest.toml`).
@@ -91,7 +93,9 @@ that newline, and the `instruction` check then fails on every task.
 
 `--hidden-from` reads the Resources Server's own `task_data.py` and hides every `TaskData` field whose
 `json_schema_extra["consumed_by"]` lists neither `"prompt"` nor `"provenance"`: what only the verifier reads. Ids and
-repository names (`provenance`) are meant to be visible.
+repository names (`provenance`) are meant to be visible. Inherited fields count: a base class is followed through
+`from MODULE import NAME` to that module's file in the repository, and a base it cannot follow (or a `TaskData` that is
+not a class) exits 2; name the fields with `--hidden` instead.
 
 Hidden values are the string and number leaves of each hidden field: the whole value if it has 8 or more characters,
 each line of 40 or more characters of a multi-line value (shorter lines are boilerplate such as
@@ -227,7 +231,9 @@ prints a unified diff of the system prompts, and counts `AGENTS.md`, `CLAUDE.md`
 `<available_skills>` in every message but the assistant's. `--out` writes each pair's system prompt and user message
 to `DIR/<sha256 of the user message, 12 hex>/{native,harbor}.{system,user}.txt`. A capture file with no request that
 offers tools (a rollout that died before its first agent call) is listed as `no agent request`, not counted as
-unpaired.
+unpaired. Every capture is compared: the repeats of a prompt (and distinct tasks that share one) pair in file-name
+order, a capture left over on one side is unpaired, and `--out` writes the second and later pairs of a prompt to
+`<key>.2`, `<key>.3` and so on.
 
 It exits 1 when there is no pair at all (0 pairs fails), on an unpaired task, a model, tool, sampling or role
 sequence difference, or a flag whose count differs between the sides or that sits on a system-prompt line that

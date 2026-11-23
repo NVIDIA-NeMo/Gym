@@ -54,6 +54,8 @@ TEMPLATE_MARKER = ".template"
 # Template folders the agent never sees: the oracle's solution and the verifier's tests.
 TEMPLATE_HIDDEN_FOLDERS = {"solution", "tests"}
 VISIBLE_CONSUMERS = {"prompt", "provenance"}
+# Bases of a TaskData model that declare no field of the row.
+FIELDLESS_BASES = {"pydantic.BaseModel", "typing.Generic"}
 SHOWN = 20
 
 
@@ -177,22 +179,73 @@ def _native_rows(path: Path, native_id: str, id_map_path: Path | None, task_ids:
 
 
 def _hidden_fields(task_data_py: Path) -> list[str]:
-    """Fields of the `TaskData` model whose `json_schema_extra["consumed_by"]` lists neither "prompt" nor
-    "provenance": what only the verifier (or metrics) reads. Provenance fields (ids, repository names) are meant to
-    be visible."""
+    """Fields of the `TaskData` model, inherited ones included, whose `json_schema_extra["consumed_by"]` lists
+    neither "prompt" nor "provenance": what only the verifier (or metrics) reads. Provenance fields (ids, repository
+    names) are meant to be visible."""
+    fields = _class_fields(task_data_py.resolve(), "TaskData", frozenset())
+    return [name for name, consumers in fields.items() if not VISIBLE_CONSUMERS & set(consumers)]
+
+
+def _class_fields(path: Path, name: str, seen: frozenset) -> dict[str, list[str]]:
+    """The annotated fields of class `name` as module `path` defines or imports it, with their `consumed_by`: those of
+    its bases first (a field a subclass declares again keeps its place, as in pydantic). A base is followed through
+    `from MODULE import NAME` to MODULE's file, found under a folder above `path` (or relative to it); a base that
+    cannot be followed is an input error, not a model without fields."""
+    if (path, name) in seen:
+        raise InputError(f"{path}: class {name} inherits from itself")
+    seen |= {(path, name)}
     try:
-        tree = ast.parse(_read_text(task_data_py))
+        tree = ast.parse(_read_text(path))
     except SyntaxError as exc:
-        raise InputError(f"{task_data_py}: {exc}") from exc
-    model = next((node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TaskData"), None)
+        raise InputError(f"{path}: {exc}") from exc
+    model = next((node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == name), None)
     if model is None:
-        raise InputError(f"{task_data_py}: no class TaskData")
-    hidden = []
+        imported = next(
+            (
+                (node.module or "", node.level, alias.name)
+                for node in tree.body
+                if isinstance(node, ast.ImportFrom)
+                for alias in node.names
+                if (alias.asname or alias.name) == name
+            ),
+            None,
+        )
+        if imported is None:
+            raise InputError(f"{path}: no class {name}, and no import of it")
+        module, level, original = imported
+        if not level and f"{module}.{original}" in FIELDLESS_BASES:
+            return {}
+        source = _module_file(path, module, level)
+        if source is None:
+            raise InputError(f"{path}: cannot find the module of {name}: name its hidden fields with --hidden")
+        return _class_fields(source, original, seen)
+    fields: dict[str, list[str]] = {}
+    for base in reversed(model.bases):
+        base = base.value if isinstance(base, ast.Subscript) else base
+        if isinstance(base, ast.Name):
+            fields.update(_class_fields(path, base.id, seen))
+        elif ast.unparse(base) not in FIELDLESS_BASES:
+            raise InputError(
+                f"{path}: cannot follow base {ast.unparse(base)} of {name}: name its fields with --hidden"
+            )
     for node in model.body:
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            if not VISIBLE_CONSUMERS & set(_consumed_by(node.value)):
-                hidden.append(node.target.id)
-    return hidden
+            fields[node.target.id] = _consumed_by(node.value)
+    return fields
+
+
+def _module_file(path: Path, module: str, level: int) -> Path | None:
+    """The file of `module` as imported from `path`: relative to it, or under the nearest folder above it that has
+    the module (the repository root for `resources_servers.<server>.task_data`)."""
+    parts = module.split(".") if module else []
+    if not parts or level > len(path.parents):
+        return None
+    roots = [path.parents[level - 1]] if level else list(path.parents)
+    for root in roots:
+        for candidate in (root.joinpath(*parts[:-1], f"{parts[-1]}.py"), root.joinpath(*parts, "__init__.py")):
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def _consumed_by(value: ast.expr | None) -> list[str]:
