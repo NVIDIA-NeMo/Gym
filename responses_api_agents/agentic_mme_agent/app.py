@@ -188,6 +188,8 @@ class AgenticMMESessionState(AgentSessionState):
 
     activation_key: tuple[NeMoGymResponseCreateParamsNonStreaming, str] | None = None
     execution: asyncio.Task[tuple[NeMoGymResponse, dict[str, str]]] | None = None
+    # The episode's trajectory observations, returned once by the session close for the health checks.
+    observations: AgentObservationBundle | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,12 +483,19 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                         "Agentic-MME episode did not stop within the session close timeout; close must retry"
                     )
             await asyncio.gather(execution, return_exceptions=True)
-        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id, agent_observations=state.observations
+        )
 
     async def _session_episode(
-        self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict[str, str], model_url_path: str
+        self,
+        state: AgenticMMESessionState,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: dict[str, str],
+        model_url_path: str,
     ) -> tuple[NeMoGymResponse, dict[str, str]]:
-        episode = await self._episode(body, cookies, model_url_path=model_url_path)
+        episode = await self._episode(body, cookies, model_url_path=model_url_path, collect_observations=True)
+        state.observations = episode.observations
         result = episode.response
         if episode.policy_error is not None:
             # Report the cause, so the Environment Server's outcome policy decides between grading and retry.
@@ -521,7 +530,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             raise AgentSessionConflictError("Session already has another activation")
         if state.execution is None:
             state.activation_key = key
-            state.execution = asyncio.create_task(self._session_episode(body, dict(request.cookies), route))
+            state.execution = asyncio.create_task(self._session_episode(state, body, dict(request.cookies), route))
         try:
             result, model_cookies = await asyncio.shield(state.execution)
         except asyncio.CancelledError:

@@ -13,7 +13,8 @@ from fastapi import Request, Response
 from omegaconf import OmegaConf
 from PIL import Image
 
-from nemo_gym.core import FailureHeader, FailureReport, NeMoGymResponseUsage
+from nemo_gym.agents import AgentSeedSessionRequest
+from nemo_gym.core import EpisodeId, FailureHeader, FailureReport, NeMoGymResponseUsage, TaskId
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import RolloutCollectionHelper, run_health_checks
 from nemo_gym.server_runtime.base_server import ServerClient
@@ -25,6 +26,7 @@ from responses_api_agents.agentic_mme_agent.app import (
     AgenticMMEAgent,
     AgenticMMEAgentConfig,
     AgenticMMERunRequest,
+    AgenticMMESessionState,
     PolicyRequestError,
 )
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval
@@ -178,6 +180,34 @@ async def test_multiturn_images_tokens_and_grading() -> None:
     assert len(invocation.conversation) == len(task.responses_create_params.input) + len(result.response.output)
     assert (tool.tool_call_id, tool.tool_name, tool.status) == ("c", "crop", "completed")
     assert tool.started_at <= tool.completed_at and tool.duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_an_agent_session_returns_its_observations_on_close() -> None:
+    # The shipped configs run episodes through agent sessions, never /run, so the session close must carry them.
+    agent, _ = make_agent(
+        [
+            response(output=[call()]).model_copy(update={"id": "policy-crop"}),
+            response("<answer>red</answer>").model_copy(update={"id": "policy-answer"}),
+        ]
+    )
+    seed = AgentSeedSessionRequest(
+        agent_session_id="agent-1",
+        episode_id=EpisodeId(rollout_id="rollout-1"),
+        task_id=TaskId(taskset="agentic_mme", task_id="task"),
+    )
+    state = AgenticMMESessionState(request=seed)
+    result, _ = await agent._session_episode(state, body().responses_create_params, {}, "/v1/responses")
+    closed = await agent._close_agent_session_state(state)
+
+    assert result.output[-1].content[0].text == "<answer>red</answer>"
+    observations = closed.agent_observations
+    assert observations is not None and observations.source == "agentic_mme"
+    [invocation] = [record for record in observations.records if isinstance(record, AgentInvocation)]
+    [tool] = [record for record in observations.records if isinstance(record, ToolCallObservation)]
+    assert invocation.status == "completed"
+    assert [ref.response_id for ref in invocation.model_calls] == ["policy-crop", "policy-answer"]
+    assert (tool.tool_call_id, tool.tool_name, tool.status) == ("c", "crop", "completed")
 
 
 @pytest.mark.asyncio
