@@ -19,6 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,10 +28,12 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import (
+    AsyncSandbox,
     ConnectableProvider,
     LocalProvider,
     SandboxCreateError,
     SandboxExecResult,
+    SandboxHandle,
     SandboxSpec,
 )
 from responses_api_agents.harness_agent.app import (
@@ -102,11 +105,18 @@ def _make_agent(**cfg_kwargs) -> HarnessAgent:
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {}
     provider = MagicMock(spec=ConnectableProvider)
+    provider.name = "opensandbox"
     with (
         patch("responses_api_agents.harness_agent.app.create_provider", return_value=provider),
         patch.object(HarnessAgent, "_build_gym_tar", return_value=None),
     ):
         return HarnessAgent(config=_config(**cfg_kwargs), server_client=server_client)
+
+
+async def _started(provider: Any, provider_name: str = "opensandbox") -> AsyncSandbox:
+    """A sandbox started through ``AsyncSandbox`` on a scripted provider, as the agent starts its own."""
+    provider.create = AsyncMock(return_value=SandboxHandle("box-1", provider_name, None))
+    return await AsyncSandbox(provider, SandboxSpec(), owns_provider=False).start()
 
 
 def test_config_defaults():
@@ -575,17 +585,17 @@ async def test_grading_command_failure_is_not_reward_zero():
     agent._provider.download_file = AsyncMock()
 
     with pytest.raises(RuntimeError, match="eval command failed.*grader crashed"):
-        await stage_and_run_eval(agent._provider, MagicMock(), {}, "false", "/reward", 30)
+        await stage_and_run_eval(await _started(agent._provider), {}, "false", "/reward", 30)
     agent._provider.download_file.assert_not_awaited()
 
 
 async def test_empty_reward_file_is_not_reward_zero():
-    provider = MagicMock()
+    provider = _make_agent()._provider
     provider.exec = AsyncMock(return_value=SandboxExecResult("", "", 0))
     provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(""))
 
     with pytest.raises(RuntimeError, match="reward file.*is empty"):
-        await stage_and_run_eval(provider, MagicMock(), {}, "true", "/reward", 30)
+        await stage_and_run_eval(await _started(provider), {}, "true", "/reward", 30)
 
 
 async def test_setup_failure_closes_sandbox():
@@ -602,6 +612,63 @@ async def test_setup_failure_closes_sandbox():
     agent._provider.close.assert_awaited_once_with(handle)
 
 
+async def test_an_owned_sandbox_is_started_and_stopped_through_async_sandbox(monkeypatch):
+    # AsyncSandbox.start is where Gym labels, counts and traces every sandbox it creates.
+    started: list[AsyncSandbox] = []
+    stopped: list[AsyncSandbox] = []
+    real_start, real_stop = AsyncSandbox.start, AsyncSandbox.stop
+
+    async def start(self, *args, **kwargs):
+        started.append(self)
+        return await real_start(self, *args, **kwargs)
+
+    async def stop(self, *args, **kwargs):
+        stopped.append(self)
+        return await real_stop(self, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSandbox, "start", start)
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    agent = _make_agent(setup_commands=["install deps"], sandbox_spec={"metadata": {"task": "t1"}})
+    handle = SandboxHandle("box-1", "opensandbox", None)
+    agent._provider.create = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[SandboxExecResult("", "", 0), SandboxExecResult("", "install failed", 2)]
+    )
+    agent._provider.close = AsyncMock()
+    agent._provider.aclose = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="setup failed.*install failed"):
+        await agent._provision_box("image", {}, "https://model.example")
+
+    assert len(started) == 1 and stopped == started
+    spec = agent._provider.create.await_args.args[0]
+    assert (spec.image, spec.metadata["task"]) == ("image", "t1")
+    agent._provider.close.assert_awaited_once_with(handle)
+    agent._provider.aclose.assert_not_awaited()
+
+
+@pytest.mark.parametrize("descriptor", [None, {"sandbox_id": "box-1", "user": "nobody"}])
+async def test_commands_run_as_the_providers_default_user(descriptor):
+    # The direct provider calls this agent made named no user, so a configured sandbox user never reached an exec.
+    agent = _make_agent(sandbox_spec={"user": "nobody"})
+    handle = SandboxHandle("box-1", "docker", None)
+    agent._provider.create = AsyncMock(return_value=handle)
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(side_effect=asyncio.CancelledError())
+    agent._provider.close = AsyncMock()
+    token = _RUN_CONTEXT.set({"sandbox_descriptor": descriptor} if descriptor else {})
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await agent._provision_box("image", {}, "https://model.example")
+    finally:
+        _RUN_CONTEXT.reset(token)
+
+    assert agent._provider.exec.await_args.kwargs.get("user") is None
+    if descriptor is None:
+        # The spec still carries the user, for a provider that applies it at create.
+        assert agent._provider.create.await_args.args[0].user == "nobody"
+
+
 async def test_local_provider_provisions_in_its_workspace(tmp_path):
     server = await asyncio.start_server(lambda *_: None, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -609,37 +676,35 @@ async def test_local_provider_provisions_in_its_workspace(tmp_path):
     agent._provider = LocalProvider(workspace_root=str(tmp_path))
     agent._gym_tar = None
     try:
-        handle = await agent._provision_box("", {"/work/request.json": "{}"}, f"http://127.0.0.1:{port}")
-        assert (handle.raw["workspace"] / "work" / "request.json").read_text() == "{}"
-        await agent._close_box(handle)
-        assert not handle.raw["workspace"].exists()
+        sandbox = await agent._provision_box("", {"/work/request.json": "{}"}, f"http://127.0.0.1:{port}")
+        workspace = tmp_path / sandbox.sandbox_id
+        assert (workspace / "work" / "request.json").read_text() == "{}"
+        await agent._close_box(sandbox)
+        assert not workspace.exists()
     finally:
         server.close()
         await server.wait_closed()
 
 
 async def test_local_grading_stays_in_workspace(tmp_path):
-    provider = LocalProvider(workspace_root=str(tmp_path))
-    handle = await provider.create(SandboxSpec(image=""))
+    sandbox = await AsyncSandbox(LocalProvider(workspace_root=str(tmp_path)), SandboxSpec(image="")).start()
     try:
         reward = await stage_and_run_eval(
-            provider,
-            handle,
+            sandbox,
             {"/tests/test.sh": "true"},
             "bash /tests/test.sh && mkdir -p /logs/verifier && echo 1 > /logs/verifier/reward.txt",
             "/logs/verifier/reward.txt",
             30,
         )
         assert reward == 1.0
-        assert (handle.raw["workspace"] / "logs" / "verifier" / "reward.txt").is_file()
+        assert (tmp_path / sandbox.sandbox_id / "logs" / "verifier" / "reward.txt").is_file()
     finally:
-        await provider.close(handle)
+        await sandbox.stop()
 
 
 async def test_agent_runner_failure_reports_its_log():
     agent = _make_agent(agent="opencode")
-    handle = MagicMock(provider_name="opensandbox")
-    agent._provision_box = AsyncMock(return_value=handle)
+    agent._provision_box = AsyncMock(return_value=await _started(agent._provider))
     agent._provider.exec = AsyncMock(
         side_effect=[SandboxExecResult("", "exit status 1", 1), SandboxExecResult("runner traceback", "", 0)]
     )
@@ -742,7 +807,7 @@ async def test_download_json_requires_exactly_one_row():
     agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text("{}\n{}\n"))
 
     with pytest.raises(RuntimeError, match="expected one JSON row.*got 2"):
-        await agent._download_json(MagicMock(), "/work/rollouts.jsonl")
+        await agent._download_json(await _started(agent._provider), "/work/rollouts.jsonl")
 
 
 async def test_download_json_keeps_unicode_line_separators():
@@ -754,7 +819,7 @@ async def test_download_json_keeps_unicode_line_separators():
         side_effect=lambda _, __, path: path.write_text(json.dumps(row, ensure_ascii=False) + "\n")
     )
 
-    assert await agent._download_json(MagicMock(), "/work/response.json") == row
+    assert await agent._download_json(await _started(agent._provider), "/work/response.json") == row
 
 
 def test_gym_source_prebuilt_path_and_url():
@@ -892,7 +957,7 @@ async def test_backend_loss_masks_the_rollout():
 
 async def test_runner_killed_by_a_signal_is_still_a_runner_failure():
     agent = _make_agent(agent="opencode")
-    agent._provision_box = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provision_box = AsyncMock(return_value=await _started(agent._provider))
     agent._provider.exec = AsyncMock(
         side_effect=[SandboxExecResult("", "signal: terminated", -1), SandboxExecResult("", "", 0)]
     )
