@@ -2282,6 +2282,7 @@ class TestBenchmarkLifecycle:
                 side_effect=[
                     SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
                     failure,
+                    SimpleNamespace(stdout="QUIESCED\n", stderr="", return_code=0, error_type=None),
                 ]
             ),
             download=AsyncMock(),
@@ -2305,8 +2306,13 @@ class TestBenchmarkLifecycle:
             assert caught.value.boundary == "harness"
             assert caught.value.failure_kind == "agent_route_failed"
             assert caught.value.operation == "opencode.execute"
-        assert sandbox.exec.await_count == 2
         assert "opencode run" in sandbox.exec.await_args_list[1].kwargs["command"]
+        if isinstance(failure, NgFailureEvent):
+            assert sandbox.exec.await_count == 2
+        else:
+            # An exec that raised may have left the run's session alive: it is stopped before the failure is reported.
+            assert sandbox.exec.await_count == 3
+            assert "kill -s KILL" in sandbox.exec.await_args_list[2].kwargs["command"]
         sandbox.download.assert_not_awaited()
         sandbox.stop.assert_awaited_once()
         assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
@@ -2351,6 +2357,7 @@ class TestBenchmarkLifecycle:
                 side_effect=[
                     SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
                     agent_result,
+                    SimpleNamespace(stdout="QUIESCED", stderr="", return_code=0, error_type=None),
                 ]
             ),
             download=AsyncMock(),
@@ -2370,7 +2377,8 @@ class TestBenchmarkLifecycle:
         assert caught.value.boundary == "harness"
         assert caught.value.failure_kind == "agent_route_failed"
         assert caught.value.operation == "opencode.capture"
-        assert sandbox.exec.await_count == 2
+        # a provider timeout is followed by the quiesce exec, the other results are not
+        assert sandbox.exec.await_count == (3 if agent_result.error_type == "timeout" else 2)
         sandbox.download.assert_not_awaited()
         sandbox.stop.assert_awaited_once()
         assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
@@ -2386,6 +2394,8 @@ class TestBenchmarkLifecycle:
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
 
         async def execute(command: str, **_kwargs: Any) -> Any:
+            if "QUIESCED" in command:  # a provider timeout leaves the run's own session to be stopped
+                return SimpleNamespace(stdout="QUIESCED", stderr="", return_code=0, error_type=None)
             if "session list" in command:
                 return SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None)
             if "opencode export" in command:
@@ -2441,6 +2451,8 @@ class TestBenchmarkLifecycle:
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
 
         async def execute(command: str, **_kwargs: Any) -> Any:
+            if "QUIESCED" in command:  # a provider timeout leaves the run's own session to be stopped
+                return SimpleNamespace(stdout="QUIESCED", stderr="", return_code=0, error_type=None)
             if "session list" in command:
                 return SimpleNamespace(stdout='[{"id":"session"}]', stderr="", return_code=0, error_type=None)
             if "opencode export" in command:
@@ -3007,7 +3019,9 @@ async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(t
         f"[sandbox phase=agent reason={type(error).__name__} command=opencode_run] "
         f"Harness operation opencode.execute failed: {type(error).__name__}"
     )
-    sandbox.exec.assert_awaited_once()
+    # the run, then a best-effort quiesce (which fails the same way and leaves the reported failure alone)
+    assert sandbox.exec.await_count == 2
+    assert "QUIESCED" in sandbox.exec.await_args_list[1].kwargs["command"]
     sandbox.download.assert_not_awaited()
     assert "session" not in server._sandbox_id_to_run_result
     server.server_client.post.assert_not_called()
@@ -3504,6 +3518,35 @@ def test_child_session_ids_and_token_breakdown() -> None:
         }
     )
     assert app_module._child_session_ids(main) == ["ses_a", "ses_b"]
+    # sandbox output is untrusted and an id becomes a host file name: only a plain id is accepted, from every source
+    hostile = [
+        "ses_x/../../../../victim",
+        "ses_a/b",
+        "ses_a.json",
+        "ses_",
+        "ses_a b",
+        "ses_a\n",
+        "ses_\u00e9",
+        "../ses_a",
+    ]
+    main["messages"].append(
+        {
+            "info": {"role": "assistant"},
+            "parts": [
+                {
+                    "type": "tool",
+                    "tool": "task",
+                    "state": {
+                        "status": "completed",
+                        "metadata": {"sessionId": bad},
+                        "input": {"task_id": bad},
+                    },
+                }
+                for bad in hostile
+            ],
+        }
+    )
+    assert app_module._child_session_ids(main) == ["ses_a", "ses_b"]
     out = app_module._token_breakdown(
         main, {"ses_a": _session("ses_a", [5], []), "ses_b": _session("ses_b", [7, 1], [])}
     )
@@ -3595,11 +3638,161 @@ async def test_agent_phase_is_cut_off_at_sandbox_timeout(tmp_path: Path, monkeyp
     )
     row = server._sandbox_id_to_run_result[""]
     assert row["opencode_wall_exceeded"] is True and row["opencode_finished"] is False
+    assert row["opencode_error_type"] == "timeout"  # what every timeout consumer matches; the flag names the enforcer
     quiesce = next(i for i, c in enumerate(commands) if "QUIESCED" in c)
     export = next(i for i, c in enumerate(commands) if "opencode export" in c)
     assert quiesce < export  # nothing is exported until the run and its tool processes are confirmed gone
     assert "pkill -KILL -s" in commands[quiesce] and "pgrep -s" in commands[quiesce]
     assert row["opencode_tokens"]["main"]["input"] == 10  # exported after the cut-off
+
+
+def _run_world(tmp_path: Path, monkeypatch: MonkeyPatch, run_reply: Any, *, stuck_detector: bool = False):
+    """A rollout whose `opencode run` is answered by `run_reply(command)` (an awaitable, a result or an exception);
+    the quiesce, session list, export and download steps work, so a run that is accepted completes."""
+    commands: List[str] = []
+    written: Dict[str, str] = {}
+
+    async def exec_(command: str, **kwargs: Any) -> SimpleNamespace:
+        commands.append(command)
+        ok = lambda out="": SimpleNamespace(stdout=out, stderr="", return_code=0, error_type=None)  # noqa: E731
+        if "QUIESCED" in command:
+            return ok("QUIESCED")
+        if "opencode run" in command:
+            reply = run_reply(command)
+            if asyncio.iscoroutine(reply):
+                reply = await reply
+            if isinstance(reply, BaseException):
+                raise reply
+            return reply
+        if "session list" in command:
+            return ok('[{"id": "ses_main"}]')
+        if "opencode export" in command:
+            written[command.rsplit("> ", 1)[1].strip()] = json.dumps(_session("ses_main", [10], []))
+        return ok()
+
+    async def download(remote: str, local: Path) -> None:
+        Path(local).write_text(written[remote])
+
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_)
+    sandbox.download = AsyncMock(side_effect=download)
+    config = (
+        TestOpenCodeSandboxedAgent()
+        ._create_config()
+        .model_copy(update={"artifacts_dir": str(tmp_path), "sandbox_timeout": 60, "stuck_detector": stuck_detector})
+    )
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+    request = MagicMock(session={SESSION_ID_KEY: "s1"}, cookies={"sandbox_id": ""}, path_params={"rollout_id": "r"})
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}])
+    return server, request, body, commands
+
+
+def _finished_run(extra_stderr: str = "") -> SimpleNamespace:
+    return SimpleNamespace(
+        stdout="Shell: /bin/sh\nOpenCode run finished\n", stderr=extra_stderr, return_code=0, error_type=None
+    )
+
+
+async def test_a_provider_timeout_quiesces_the_run_before_collection(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """The provider's own timeout kills only the exec's process group, and the run lives in a session of its own."""
+    timed_out = SimpleNamespace(stdout="Shell: /bin/sh\n", stderr="", return_code=124, error_type="timeout")
+    server, request, body, commands = _run_world(tmp_path, monkeypatch, lambda command: timed_out)
+
+    await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+
+    quiesce = next(i for i, c in enumerate(commands) if "QUIESCED" in c)
+    export = next(i for i, c in enumerate(commands) if "opencode export" in c)
+    assert quiesce < export
+    assert server._sandbox_id_to_run_result[""]["opencode_error_type"] == "timeout"
+
+
+async def test_a_provider_timeout_that_cannot_be_confirmed_stopped_is_ungraded(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    timed_out = SimpleNamespace(stdout="Shell: /bin/sh\n", stderr="", return_code=124, error_type="timeout")
+    server, request, body, commands = _run_world(tmp_path, monkeypatch, lambda command: timed_out)
+    original = server._sandbox_id_to_sandbox[""].exec.side_effect
+
+    async def unconfirmed(command: str, **kwargs: Any) -> SimpleNamespace:
+        if "QUIESCED" in command:
+            return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+        return await original(command, **kwargs)
+
+    server._sandbox_id_to_sandbox[""].exec.side_effect = unconfirmed
+
+    with raises(NgFailureEvent) as caught:
+        await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+
+    assert caught.value.operation == "opencode.quiesce"
+    assert server._sandbox_id_to_run_result == {}
+
+
+async def test_cancellation_quiesces_the_run_and_still_cancels(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    started = asyncio.Event()
+
+    async def hang(command: str) -> SimpleNamespace:
+        started.set()
+        await asyncio.sleep(3600)
+
+    server, request, body, commands = _run_world(tmp_path, monkeypatch, hang)
+    task = asyncio.create_task(server.responses(request=request, body=body))
+    await asyncio.wait_for(started.wait(), timeout=10)
+
+    task.cancel()
+    with raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=10)
+
+    assert any("QUIESCED" in c for c in commands)
+    assert not any("opencode export" in c for c in commands)
+
+
+async def test_a_run_whose_exec_raised_is_quiesced_and_reports_the_original_failure(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    failure = OSError("connection reset")
+    server, request, body, commands = _run_world(tmp_path, monkeypatch, lambda command: failure)
+
+    with raises(NgFailureEvent) as caught:
+        await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+
+    assert caught.value.__cause__ is failure
+    assert caught.value.operation == "opencode.execute"
+    assert any("QUIESCED" in c for c in commands)
+
+
+async def test_a_clean_run_is_not_quiesced(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, body, commands = _run_world(tmp_path, monkeypatch, lambda command: _finished_run())
+
+    await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+
+    assert not any("QUIESCED" in c for c in commands)
+
+
+@mark.parametrize("receipt", [True, False])
+async def test_an_enabled_stuck_detector_must_show_its_receipt(
+    tmp_path: Path, monkeypatch: MonkeyPatch, receipt: bool
+) -> None:
+    run = _finished_run("[stuck_detector] loaded\n" if receipt else "")
+    server, request, body, _commands = _run_world(tmp_path, monkeypatch, lambda command: run, stuck_detector=True)
+
+    if receipt:
+        await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+        assert server._sandbox_id_to_run_result[""]["opencode_failed"] is False
+    else:
+        with raises(NgFailureEvent) as caught:
+            await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+        assert caught.value.operation == "opencode.plugin"
+        assert server._sandbox_id_to_run_result == {}
+
+
+async def test_a_disabled_stuck_detector_needs_no_receipt(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, body, _commands = _run_world(tmp_path, monkeypatch, lambda command: _finished_run())
+
+    await asyncio.wait_for(server.responses(request=request, body=body), timeout=10)
+
+    assert server._sandbox_id_to_run_result[""]["opencode_failed"] is False
 
 
 async def test_finish_instruction_is_appended_to_the_first_prompt(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -3874,14 +4067,18 @@ async def test_confirmed_cleanup_after_the_wall_deadline_lets_the_run_be_graded(
     assert any("session list" in c for c in commands[quiesce + 1 :])
 
 
+@mark.parametrize("shell", ["bash", "dash"])
 @mark.skipif(not all(shutil.which(tool) for tool in ("setsid", "bash", "sleep", "cat")), reason="needs setsid")
-async def test_the_quiesce_step_works_without_procps_and_never_confirms_unchecked(tmp_path: Path) -> None:
+async def test_the_quiesce_step_works_without_procps_and_never_confirms_unchecked(tmp_path: Path, shell: str) -> None:
     """An image without pkill and pgrep (a slim Python image): the process group is still stopped and checked with the
-    shell builtin kill, so QUIESCED is printed only for a group that is gone."""
+    shell builtin kill, so QUIESCED is printed only for a group that is gone. Debian and Ubuntu images run it through
+    dash, whose builtin kill rejects `kill -KILL -- -ID`."""
+    if not shutil.which(shell):
+        skip(f"no {shell}")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for tool in ("sleep", "cat", "setsid", "bash", "sh"):
-        if shutil.which(tool):
+    for tool in ("sleep", "cat", "setsid", "bash", "sh", shell):
+        if shutil.which(tool) and not (bin_dir / tool).exists():
             (bin_dir / tool).symlink_to(shutil.which(tool))
     env = {"PATH": str(bin_dir)}  # no pkill, no pgrep, no ps
     sessions_file = str(tmp_path / "sessions")
@@ -3899,7 +4096,7 @@ async def test_the_quiesce_step_works_without_procps_and_never_confirms_unchecke
         assert written.stat().st_size, "the tool child never started"
 
         quiesce = await asyncio.create_subprocess_exec(
-            "bash", "-c", app_module._quiesce_command(sessions_file), stdout=asyncio.subprocess.PIPE, env=env
+            shell, "-c", app_module._quiesce_command(sessions_file), stdout=asyncio.subprocess.PIPE, env=env
         )
         stdout, _ = await asyncio.wait_for(quiesce.communicate(), timeout=30)
         assert b"QUIESCED" in stdout
@@ -3911,6 +4108,31 @@ async def test_the_quiesce_step_works_without_procps_and_never_confirms_unchecke
     finally:
         if process.returncode is None:
             process.kill()
+
+
+@mark.parametrize("shell", ["bash", "dash"])
+@mark.skipif(not all(shutil.which(tool) for tool in ("bash", "sleep", "cat")), reason="needs bash")
+async def test_a_group_that_cannot_be_probed_is_never_confirmed(tmp_path: Path, shell: str) -> None:
+    """Without pgrep, only the group probe can show the run is gone; one that errors for any reason other than "No such
+    process" must leave the step unconfirmed instead of reading as an absent group."""
+    if not shutil.which(shell):
+        skip(f"no {shell}")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("sleep", "cat", shell):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    sessions_file = tmp_path / "sessions"
+    sessions_file.write_text("not-a-session-id\n")
+    quiesce = await asyncio.create_subprocess_exec(
+        shell,
+        "-c",
+        app_module._quiesce_command(str(sessions_file)),
+        stdout=asyncio.subprocess.PIPE,
+        env={"PATH": str(bin_dir)},
+    )
+    stdout, _ = await asyncio.wait_for(quiesce.communicate(), timeout=60)
+    assert b"QUIESCED" not in stdout
+    assert quiesce.returncode != 0
 
 
 @mark.skipif(

@@ -43,4 +43,26 @@ assert.equal(run(step(bash("pytest", 1)), step(bash("pytest", 1)), step(bash("py
 // 5: 10 compactions in a row
 assert.equal(stuckScenario(eventsFromParts(Array.from({ length: 10 }, () => ({ type: "compaction" })))), "context_window_error");
 assert.equal(stuckScenario(eventsFromParts([...Array.from({ length: 9 }, () => ({ type: "compaction" })), ...step(bash("a", 0)), { type: "compaction" }])), null);
+
+// The marker is only a diagnostic: when it cannot be written (a full /tmp, an obstruction) the session is still aborted,
+// once. The plugin writes the marker next to itself, so it runs from a copy with a directory where the marker goes.
+const { copyFileSync, mkdirSync, mkdtempSync } = await import("node:fs");
+const { tmpdir } = await import("node:os");
+const { join } = await import("node:path");
+const dir = mkdtempSync(join(tmpdir(), "stuck-plugin-"));
+copyFileSync(new URL("../stuck_detector.mjs", import.meta.url), join(dir, "stuck_detector.mjs"));
+mkdirSync(join(dir, "stuck.json")); // EISDIR on write
+const aborts = [];
+const hooks = await (await import(join(dir, "stuck_detector.mjs"))).StuckDetector({
+  client: { session: { abort: async (args) => { aborts.push(args); } } },
+});
+const sameCall = (i) => ({ id: `h${i}`, sessionID: "ses_h", messageID: "m1", type: "tool", tool: "bash", state: { status: "completed", input: { command: "pytest" }, output: "same", metadata: { exit: 1 } } });
+const send = (part) => hooks.event({ event: { type: "message.part.updated", properties: { part: { sessionID: "ses_h", messageID: "m1", ...part } } } });
+for (let i = 0; i < 6; i++) {
+  await send({ id: `s${i}`, type: "step-start" });
+  await send(sameCall(i));
+  await send({ id: `f${i}`, type: "step-finish" });
+}
+assert.equal(aborts.length, 1, "the loop is aborted once although the marker could not be written");
+assert.equal(aborts[0].path.id, "ses_h");
 console.log("ok");

@@ -767,6 +767,7 @@ def _idle_reason(opencode_export: Dict[str, Any], stop_on_text: Optional[str] = 
 
 
 _SESSION_ID_RE = re.compile(r"\bses_[A-Za-z0-9]+")
+_VALID_SESSION_ID_RE = re.compile(r"ses_[A-Za-z0-9]+")
 MAX_CHILD_SESSIONS = 500
 
 
@@ -784,7 +785,8 @@ def _child_session_ids(opencode_export: Dict[str, Any]) -> List[str]:
             found = [(state.get("metadata") or {}).get("sessionId"), (state.get("input") or {}).get("task_id")]
             found += _SESSION_ID_RE.findall(str(state.get("output") or ""))
             for sid in found:
-                if isinstance(sid, str) and sid.startswith("ses_") and sid != own and sid not in ids:
+                # Sandbox output is untrusted and the id becomes a host file name: accept nothing but a plain id.
+                if isinstance(sid, str) and _VALID_SESSION_ID_RE.fullmatch(sid) and sid != own and sid not in ids:
                     ids.append(sid)
     return ids
 
@@ -873,8 +875,10 @@ def _quiesce_command(sessions_file: str, pattern: str = "[o]pencode run") -> str
     Each recorded session is a process group `setsid` made, so the shell builtin `kill` reaches it and its children
     even in an image without procps; `pkill` and `pgrep` additionally catch leftovers outside the group when the
     image has them. Without them the group check alone decides, so nothing is ever reported stopped unchecked. The
-    bracketed pattern does not match this command's own text. Each pass kills, then checks; a process that survives
-    all passes means no QUIESCED."""
+    group is signalled with `kill -s SIG -- -ID`, the form dash (`sh` on Debian/Ubuntu) and bash both accept; dash
+    rejects `kill -SIG -- -ID`. A group probe that fails for any reason except "No such process" counts as alive, so
+    a probe that cannot run never confirms. The bracketed pattern does not match this command's own text. Each pass
+    kills, then checks; a process that survives all passes means no QUIESCED."""
     have_pgrep = "command -v pgrep >/dev/null 2>&1"
     have_pkill = "command -v pkill >/dev/null 2>&1"
     return (
@@ -882,10 +886,12 @@ def _quiesce_command(sessions_file: str, pattern: str = "[o]pencode run") -> str
         # No recorded session and no pgrep: nothing could show that the run is gone, so never confirm.
         f'if [ ! -s "$files" ] && ! {have_pgrep}; then exit 3; fi; '
         "for i in 1 2 3 4 5; do "
-        'if [ -f "$files" ]; then for sid in $(cat "$files"); do kill -KILL -- "-$sid" 2>/dev/null; '
+        'if [ -f "$files" ]; then for sid in $(cat "$files"); do kill -s KILL -- "-$sid" 2>/dev/null; '
         f'{have_pkill} && pkill -KILL -s "$sid" 2>/dev/null; done; fi; '
         f"{have_pkill} && pkill -KILL -f '{pattern}' 2>/dev/null; sleep 0.2; alive=0; "
-        'if [ -f "$files" ]; then for sid in $(cat "$files"); do kill -0 -- "-$sid" 2>/dev/null && alive=1; '
+        'if [ -f "$files" ]; then for sid in $(cat "$files"); do '
+        'if err=$(LC_ALL=C kill -s 0 -- "-$sid" 2>&1); then alive=1; '
+        'else case "$err" in *"No such process"*) ;; *) alive=1;; esac; fi; '
         f'{have_pgrep} && pgrep -s "$sid" >/dev/null 2>&1 && alive=1; done; fi; '
         f"{have_pgrep} && pgrep -f '{pattern}' >/dev/null 2>&1 && alive=1; "
         '[ "$alive" = 0 ] && break; sleep 1; done; [ "$alive" = 0 ] && echo QUIESCED'
@@ -1417,6 +1423,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             failure_reason=f"OpenCode could not be confirmed stopped after the wall deadline: {reason}",
         )
 
+    @classmethod
+    async def _quiesce_opencode_best_effort(cls, sandbox: Any, sessions_file: str) -> None:
+        """Quiesce on a path that is already failing, shielded from the cancellation that may be ending it. The
+        original failure is the one reported, so a failed or unconfirmed quiesce is only logged."""
+        try:
+            await asyncio.shield(cls._quiesce_opencode(sandbox, sessions_file))
+        except BaseException as error:
+            print(f"OpenCode could not be confirmed stopped: {type(error).__name__}: {error}", file=sys.stderr)
+
     async def _nudge_idle_turns(
         self,
         *,
@@ -1885,7 +1900,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 if not wall.expired():
                     raise
                 wall_exceeded = True
-                run_error_type = "WallTimeExceeded"
+                # The value every timeout consumer already matches; opencode_wall_exceeded says the deadline did it.
+                run_error_type = "timeout"
                 print(
                     f"OpenCode agent phase passed sandbox_timeout ({self.config.sandbox_timeout:g} s); stopping it",
                     file=sys.stderr,
@@ -1893,6 +1909,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 # Nothing is exported or graded until the run and its tool processes are confirmed gone: a child still
                 # writing /workspace would change what is collected, and a model call would go on after the deadline.
                 await self._quiesce_opencode(sandbox, sessions_file)
+            else:
+                # A provider timeout kills only the exec's own process group, and the run's session is a group of
+                # its own, so the run and its tools can still be writing: confirm them gone before collection.
+                if getattr(phase["result"], "error_type", None) == "timeout":
+                    await self._quiesce_opencode(sandbox, sessions_file)
+        except asyncio.CancelledError:
+            await self._quiesce_opencode_best_effort(sandbox, sessions_file)
+            raise
         except NgFailureEvent as exc:
             if not (
                 self.config.report_agent_sandbox_oom
@@ -1954,6 +1978,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         except Exception as error:
             # A foreign exec exception leaves the outcome unknown; report the failed harness operation with
             # the sandbox facts known here, rather than grade a substituted partial run.
+            await self._quiesce_opencode_best_effort(sandbox, sessions_file)
             raise NgFailureEvent(
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
@@ -2323,6 +2348,18 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # makes the check independent of that.
         run_output = (result_stdout or "") + (result_stderr or "")
         plugins_loaded = "[nemo-gym-plugin] loaded" in run_output
+        if self.config.stuck_detector and "[stuck_detector] loaded" not in run_output and run_output.strip():
+            # The stuck detector is registered outside the verified plugin uploads, so the sentinel above does not
+            # attest to it, and OpenCode swallows a plugin load failure: without its own receipt the run would be
+            # accepted with the requested stuck policy silently absent. Same rule as the sentinel: ungraded.
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.plugin",
+                stage="agent",
+                failure_reason="The stuck_detector plugin did not load (no receipt in the run output); "
+                "refusing to score a rollout that ran without it.",
+            )
         if self.config.opencode_plugins and not plugins_loaded and run_output.strip():
             # Hard-fail only when we actually captured a transcript and the marker is still absent
             # — that is a genuine silent plugin failure and must never be scored.

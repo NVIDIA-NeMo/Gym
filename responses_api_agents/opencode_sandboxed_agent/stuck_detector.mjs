@@ -122,7 +122,12 @@ export const StuckDetector = async ({ client }) => {
     const scenario = stuckScenario(eventsFromParts(ordered));
     if (!scenario) return;
     fired = true;
-    await writeFile(MARKER, JSON.stringify({ scenario, session: sessionID, at: new Date().toISOString() }) + "\n");
+    // The marker is only a diagnostic: a failed write (full /tmp, an obstruction) must not leave the loop running.
+    try {
+      await writeFile(MARKER, JSON.stringify({ scenario, session: sessionID, at: new Date().toISOString() }) + "\n");
+    } catch (err) {
+      console.error(`[stuck_detector] could not write the marker: ${err}`);
+    }
     console.error(`[stuck_detector] agent stuck in a loop (${scenario}); ending the run`);
     // Stop the run as OpenHands does (AgentStuckInLoopError ends it). Abort is the clean way out; exit if it is ignored.
     setTimeout(() => process.exit(3), 15000).unref?.();

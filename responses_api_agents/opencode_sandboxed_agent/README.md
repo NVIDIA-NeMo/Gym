@@ -74,6 +74,46 @@ sandbox_row_option_keys: [volumes]
 
 `sandbox_uploads` maps a sandbox path to a file on the agent server host, which must resolve under `sandbox_upload_roots` (empty roots refuse all; relative paths resolve from the agent server's directory). On OpenSandbox each upload must finish within `request_timeout_s`, so raise it for large files. Row `sandbox_provider_options` override `sandbox_config.provider_options` at creation only, only for top-level keys the operator lists in `sandbox_row_option_keys` (default empty: any row option is rejected; `network_policy` is also rejected when `network_access` is restricted), and are rejected for a sandbox supplied by the resources server. A listed key gives every row that provider option as is, for example host mounts through Docker `volumes` or `run_args`. A row value replaces the configured value of the same key; lists are not merged. With `network_access: model_only` or `model_and_tools`, a configured deny-default `network_policy` keeps its egress and gets the model/tool hosts appended; with the default `inherit` it is applied as written, so it must allow the model host itself. `opencode_provider_id` and `opencode_model_id` default to `nemo_gym` and `dummy_model`; `opencode_config` overrides must use `provider.<opencode_provider_id>.models.<opencode_model_id>`.
 
+## Run controls
+
+Options for long, unattended runs (used by [NL2RepoBench](../../benchmarks/nl2repobench/README.md)). All of them are off
+by default, except the two always-on changes listed after the example.
+
+```yaml
+opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_timeout: 21600          # one wall budget, seconds, for the whole agent phase
+      wall_grace_s: 60                # extra seconds before the run is cut off
+      idle_nudge:                     # continue a session that stops without a tool call
+        text: "Continue until the task is complete."
+        max_nudges: 3
+        stop_on_text: "TASK_COMPLETE"   # the model's explicit "done"
+        finish_instruction: "When you are finished, reply TASK_COMPLETE."
+      stuck_detector: true            # end a run that loops
+      opencode_data_home_in_tmp: true # images whose user has no writable home
+      require_opencode_runtime: true  # offline runs: refuse to start without a configured OpenCode runtime
+      preinstalled_opencode: true     # (or remote_opencode_install_script_path + remote_opencode_binary_path)
+```
+
+- **Budgets.** `sandbox_timeout` is one wall budget for the whole agent phase: the first `opencode run` and every nudged
+  resume share it, and `max_nudges` caps the resumes. `sandbox_timeout` plus `wall_grace_s` is the hard deadline.
+- **Stopping policy.** At the deadline, on a provider timeout, when an exec fails, or when the request is cancelled,
+  every recorded OpenCode session and its tool processes are stopped and confirmed gone before anything is exported. If
+  that cannot be confirmed the row fails ungraded (`opencode.quiesce`) and is not sent to `/verify`. A confirmed stop
+  after a deadline or provider timeout is graded on the partial work, with `opencode_error_type == "timeout"`;
+  `opencode_wall_exceeded` says the deadline enforced it. The step needs only a POSIX `sh`: `pkill` and `pgrep` are
+  used when the image has them.
+- **`stuck_detector`.** Ports OpenHands 0.56's `StuckDetector` as an OpenCode plugin and ends a looping run; the row's
+  `opencode_stuck` names the scenario. The run is refused (ungraded `opencode.plugin`) if the plugin's
+  `[stuck_detector] loaded` line is missing from the output, because OpenCode swallows plugin load failures.
+- **`require_opencode_runtime`.** Refuses to start when no OpenCode runtime is configured, instead of failing at the
+  installer's download after the sandbox is seeded.
+
+Two changes apply to every run, whatever the options: OpenCode starts in a session of its own (`setsid`, which the
+stopping policy relies on), and the proxy variables `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lower-case forms
+are unset before it starts, because task images can carry a builder's proxy that OpenCode would honor.
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The plain-named HLE and APEX Shortlist presets (`hle/opencode`, `hle/opencode_search`, `hle/pi`, `hle/pi_search`,
