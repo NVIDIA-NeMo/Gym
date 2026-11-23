@@ -10,7 +10,7 @@ It implements the provider-neutral `SandboxProvider` contract, so any sandbox-ba
 
 ## Setup
 
-Install the optional dependency:
+The provider needs IdeGYM **0.13.1 or later** in three places: the orchestrator, the server images and the client SDK. Install the optional dependency:
 
 ```bash
 uv pip install 'nemo-gym[idegym]'
@@ -26,7 +26,7 @@ export IDEGYM_AUTH_PASSWORD=...
 ```
 
 <Warning>
-`spec.image` must be an **IdeGYM server image**. The pod runs the IdeGYM server, and that server exposes the API this provider talks to. A plain benchmark image such as `swebench/sweb.eval.x86_64.*` has none, so it never becomes ready and `create()` fails. See [Images](#images).
+`spec.image` must be an **IdeGYM server image, 0.13.1 or later**. The pod runs the IdeGYM server, and that server exposes the API this provider talks to. A plain benchmark image such as `swebench/sweb.eval.x86_64.*` has none, so it never becomes ready and `create()` fails. See [Images](#images).
 </Warning>
 
 ```python
@@ -63,7 +63,7 @@ Leaving the `async with` block stops the server and deletes its Kubernetes resou
 
 ## Provider Config
 
-`nemo_gym/sandbox/providers/idegym/configs/idegym.yaml` ships the full block with every knob commented. The essentials:
+`nemo_gym/sandbox/providers/idegym/configs/idegym.yaml` ships the full block with each setting commented, except `attribution.run`, which is auto-detected per launch. The essentials:
 
 ```yaml
 sandbox:
@@ -83,6 +83,9 @@ sandbox:
       run_as_root: true
     exec:
       default_timeout_s: 180
+      max_output_bytes: 1048576
+    verify:
+      check_workdir: true
 ```
 
 Every shipped provider config binds the same instance name `sandbox`, so switching a benchmark to IdeGYM is swapping one config path:
@@ -96,12 +99,21 @@ gym env start \
     --config $MODEL
 ```
 
-The remaining sections are `verify` (the post-start working-directory check), `files` (transfer chunk
-sizes and the download cap), `operations` (status and teardown timeouts and retries), and
-`attribution` (how the client name is derived when it is not pinned).
+The remaining sections are `files` (transfer chunk size and per-chunk timeout),
+`operations` (status and teardown timeouts and retries, and the keepalive ceiling `keepalive_minutes_max`), and `attribution`
+(how the client name is derived when it is not pinned). `connection` also holds the HTTP retry knobs:
+`connect_retries` for requests that never connected, and `poll_retries` / `retry_delay_s` for
+idempotent GETs such as the SDK's operation-status polls.
+
+`connection.max_connections` caps in-flight HTTP on both transport backends, and `null` means no cap.
+`max_keepalive_connections` applies only with `transport_backend: httpx`; the aiohttp backend honors only
+`keepalive_expiry_s`. `create.retries` also covers connect timeouts and 408. `create.ready_timeout_s` defaults to 1200 in code,
+and `create.run_as_root` defaults to `false` in code; the shipped YAML sets it to `true` on purpose.
 
 <Note>
-Tracing is off unless `connection.tracing_endpoint` is set. The IdeGYM SDK otherwise traces to its own default off-box collector, and NeMo Gym does not send telemetry to a third party implicitly. Point `tracing_endpoint` at your own OTLP HTTP collector to opt in.
+Tracing is opt-in. With `connection.tracing_endpoint` null, the provider passes the SDK no tracing config, and the SDK traces only if `IDEGYM_OTEL_TRACING_ENDPOINT` is set. Once you set an endpoint in Gym config, the SDK reads none of its `IDEGYM_OTEL_TRACING_*` variables: the timeout and credentials come only from `tracing_timeout_s`, `tracing_username` and `tracing_password`.
+
+Tracing also needs `opentelemetry-instrumentation-httpx`, which `nemo-gym[idegym]` does not install. Run `uv pip install 'idegym-client[otel]'` to add it. Without it the SDK logs a warning and skips tracing.
 </Note>
 
 ## SandboxSpec Provider Options
@@ -114,10 +126,12 @@ Tracing is off unless `connection.tracing_endpoint` is set. The IdeGYM SDK other
 | `runtime_class_name` | e.g. `gvisor` for a sandboxed runtime. |
 | `run_as_root` | Overrides `create.run_as_root` for this sandbox. |
 | `node_selector` | Node labels for scheduling. |
-| `volumes`, `volume_mounts` | Native Kubernetes shapes. |
+| `volumes`, `volume_mounts` | Kubernetes `V1Volume` / `V1VolumeMount` shapes. |
 | `env_from` | ConfigMap/Secret env import — the only way to put environment on the *pod*. |
 | `service_account_name` | ServiceAccount for the pod. |
 | `pod_overrides` | Partial `V1PodSpec` deep-merged into the generated pod spec (tolerations, affinity, ...). |
+| `labels`, `annotations` | Extra pod labels and annotations, applied over `spec.metadata`. Reserved keys fail `create()`. |
+| `keepalive_minutes` | Holds this sandbox against IdeGYM's inactivity reaper (at most 1440). Overrides `create.keepalive_minutes`. |
 | `reuse_strategy`, `server_kind`, `snapshot`, `max_restarts` | Passed through to IdeGYM. |
 | `server_name` | Pins the server name IdeGYM's reuse lookup matches on. Otherwise it is derived from the name prefix and metadata hints. |
 | `service_port`, `container_port` | Override the configured ports. |
@@ -147,10 +161,10 @@ mini_swe_agent_2:
 
 | Field | Behavior |
 | --- | --- |
-| `workdir` | Not a pod setting. Each command `cd`s into it, and `create()` fails early if it does not exist (`verify.check_workdir`). |
-| `env` | Exported per command. IdeGYM can only put ConfigMap/Secret env on the pod, via `provider_options.env_from`. |
-| `metadata` | Not Kubernetes labels — IdeGYM has no per-server label API. `create.server_name_metadata_keys` folds selected keys (default `instance_id`) into the pod name. |
-| `ttl_s` | Not enforced; warns. IdeGYM servers live until stopped, and its watcher reaps servers whose client stops heartbeating. |
+| `workdir` | Not a pod setting. It is sent as each command's `cwd`, and `create()` fails early if it does not exist (`verify.check_workdir`). |
+| `env` | Sent as each command's `env`. IdeGYM can only put ConfigMap/Secret env on the pod, via `provider_options.env_from`. |
+| `metadata` | Pod labels, values sanitized, next to the attribution labels, so `kubectl get pods -l <key>=<value>` finds a sandbox. Reserved keys (`app`, `app.kubernetes.io/*`, `idegym.jetbrains.com/*`) fail `create()`. `create.server_name_metadata_keys` also folds selected keys (default `instance_id`) into the pod name, for readability only. |
+| `ttl_s` | Not enforced; warns. IdeGYM servers live until stopped, and its watcher reaps servers that sit idle or whose client stops heartbeating. Keepalive extends the idle window; it is not a lifetime cap. |
 | `ports` | Ignored; warns. An IdeGYM pod exposes only its own API port. |
 | `entrypoint` | Fails `create()`. The container entrypoint starts the IdeGYM server. |
 
@@ -179,19 +193,27 @@ sequenceDiagram
     O->>K: schedule + pull image
     K-->>O: readiness probe passes
     O-->>P: server id
-    P->>K: [ -d workdir ]
+    P->>O: command in workdir
+    O->>K: forwarded command
     A->>P: exec / upload / download
-    P->>K: bash script
+    P->>O: command, cwd, env, user
+    O->>K: forwarded command
     A->>P: close()
     P->>O: stop_server
     O->>K: delete pod
 ```
 
-**Create trusts IdeGYM's readiness wait.** The orchestrator reports a server only once its pod passes the Kubernetes readiness probe against the server's health endpoint, so `create()` adds one check of its own: that `spec.workdir` exists. Anything that fails after provisioning stops the server.
+**Create trusts IdeGYM's readiness wait.** The orchestrator reports a server only once its pod passes the Kubernetes readiness probe against the server's health endpoint, so `create()` adds what it cannot see: a command run in `spec.workdir`. It does not check the version of the orchestrator or the server image; 0.13.1 is required on both. Anything that fails after provisioning stops the server.
 
 **One registered client per process.** IdeGYM's unit of ownership is a *client*: a heartbeating entity that owns N server pods, carries the resource quota keyed on its name, and terminates all of its servers when it stops. Every sandbox with an identical `connection` config shares one, reference-counted; the last release unregisters it, which also cleans up any server never closed. `connection.max_connections` bounds in-flight HTTP across all of them — bounding requests rather than whole operations, so provisioning a new sandbox cannot block execs on sandboxes already running.
 
-**`close()` always deletes** the pod and its Kubernetes resources; it is idempotent, and a server the orchestrator no longer has counts as success.
+**Keepalive is opt-in.** Set `create.keepalive_minutes` (or `provider_options.keepalive_minutes` per sandbox, at most 1440) and the server is held against IdeGYM's inactivity reaper right after start, and again before any command whose timeout would outlive the hold.
+
+**Status** reads the orchestrator's per-server status endpoint. A server that is no longer usable, or is gone, reports stopped; any other failure reports `unknown`.
+
+**Errors are typed.** The SDK raises typed exceptions, which the provider classifies as gone, retryable, timed out or invalid request. On `exec`, an orchestrator 408 or 504 and a malformed response are `error_type="sandbox"`, not `timeout` or `invalid_request`. A bad environment variable name or a NUL in a value is `invalid_request`, caught before the request is sent. The one text check left is the bash timeout, a 500 whose message starts with `Command execution timed out after`.
+
+**`close()` always deletes** the pod and its Kubernetes resources; it is idempotent, and a server the orchestrator no longer has counts as success. It retries only retryable failures. `operations.retries` covers stop only, and the SDK makes 3 stop attempts in total, sharing one `close_timeout_s`.
 
 ## Job Attribution
 
@@ -199,7 +221,7 @@ Resource-limit rules are matched by regex against the client name, so set `conne
 
 ## File Transfer
 
-Uploads and downloads ride base64 over the bash tool, chunked in both directions: uploads to stay inside the ~100 KiB a command may occupy, downloads because each chunk's stdout is persisted as an async-operation result. `files.max_download_bytes` (64 MiB by default) caps a download.
+Uploads and downloads use the SDK's binary file endpoints, one orchestrator request per chunk of `files.chunk_bytes` (1 MiB by default, at most 8 MiB), each bounded by `files.timeout_s`. A download is written to a hidden `.<name>.<uuid>.part` file beside the target and renamed over it only when it completes, so a failed transfer leaves no partial file.
 
 This is fine for the config files, patches, and logs a benchmark moves around, but it is not a bulk channel — have the sandbox fetch large inputs itself.
 
@@ -218,14 +240,14 @@ Rewrites are ordered and the first matching prefix wins. The provider does not b
 
 ## User and Runtime Notes
 
-**Commands run as the container's user.** IdeGYM's bash tool has no user field, so `provider_options.run_as_root` decides this at pod level. `exec.user_mode` can wrap commands in `runuser` or `su` for images that ship them; both pin `/bin/bash` rather than inheriting a login shell that may be `/sbin/nologin`.
+**Users.** `exec(user=...)` takes a user name and is sent as the command's `user` field; a numeric uid is rejected as `invalid_request`. With no user, commands run as the container's user. The pod-level default is `create.run_as_root`, and `provider_options.run_as_root` overrides it per sandbox.
 
-**Command and output limits.** A command may not exceed roughly 100 KiB once shaped into a script — IdeGYM passes it to the shell as a single `execve()` argument — and an oversized command comes back as a failed `SandboxExecResult` with `error_type="command_too_long"` rather than raising. The executor also strips leading and trailing whitespace from stdout and stderr.
+**Output limits.** Each output stream keeps at most `exec.max_output_bytes` (1 MiB by default); past it IdeGYM keeps the head and the tail around a truncation marker. Set it to `null` for complete output.
 
 ## Unavailable Capabilities
 
 | Capability | Reason |
 | --- | --- |
 | `sandbox.endpoint(port)` | The orchestrator forwards API requests rather than routing raw TCP to arbitrary container ports. |
-| `sandbox.pty` | IdeGYM has no terminal API. |
+| `sandbox.pty` | IdeGYM has no terminal API. The IdeGYM dashboard's pod shell is not part of the client API. |
 | `sandbox.serialize()` / `AsyncSandbox.connect()` | A server is only reachable through the registered client that owns it. Front this provider with a sandbox server to share a sandbox across processes. |
