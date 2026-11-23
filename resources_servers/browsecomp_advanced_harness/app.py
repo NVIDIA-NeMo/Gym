@@ -2104,8 +2104,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         judge_error = None
         if timed_out:
-            # Wrong by construction: the agent's /run scores it 0 without a verify, and an Environment Server's
-            # verify does the same without calling the judge.
+            # Wrong by construction, so it scores 0 without the judge. Both the agent's /run and an Environment Server
+            # send a timed-out rollout here.
             judge_evaluation = JudgeEvaluation(
                 reasoning="The rollout reached its time limit.", extracted_final_answer="", reward=0.0
             )
