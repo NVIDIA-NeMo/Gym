@@ -10,30 +10,16 @@ The orchestration layer is a Gym-aware orchestrator. It adds no core functionali
 
 ## From config to jobs
 
-```text
- submit.yaml + overrides
-          |  Hydra compose, interpolation, env prefixes
-          v
-     SubmitConfig                    strict schema; unknown keys are errors
-          |  executor chosen by compute.<name>.type
-          v
-   Executor.run()  ------------->  one job per benchmark on the scheduler
-          |                                    |
-          v                                    v
-  SubmissionRecord               run directory: gym-job.json, resolved-config.yaml,
-  (local index + run dir)        logs/, artifacts/ ...
-```
-
 1. **Compose and validate.** Hydra merges the file with your command-line overrides, resolves interpolations, and the result is validated as a `SubmitConfig`. `host:` values are read from your shell here.
 2. **Choose the executor.** The type of the single `compute` entry selects the executor: `slurm` or `kubernetes`. A config the executor cannot run, such as a Kubernetes submit with `otel` left on, stops the submit before anything reaches the cluster.
 3. **Run the executor.** It renders one job per benchmark (a script for Slurm, a manifest for Kubernetes), puts it where the scheduler can see it, and queues it. A failure for one benchmark is recorded for that benchmark and does not stop the others.
-4. **Record.** The executor builds a `SubmissionRecord`. A copy goes to the local index on your machine. The run directory holds the durable copy and the resolved config.
+4. **Record.** The executor builds a `SubmissionRecord`. A copy goes to the local index on your machine. The run directory holds the durable copy and the resolved config: Slurm copies the files there, and on Kubernetes the driver container writes them to the claim mounted there.
 
 [Slurm Executor](/orchestration/slurm-executor) and [Kubernetes Executor](/orchestration/kubernetes-executor) describe step 3 for each scheduler.
 
 ## How a later command finds the scheduler
 
-The record is the link between a submission and its executor. It stores the executor's name, and every `gym job` command starts from it:
+The record is the link between a submission and its executor. It stores the executor's name, and every `gym job` command except `gym job list`, which reads only the local index, starts from it:
 
 1. The command loads the record by its `gym_job_id` from the local index.
 2. It looks up the executor class by `record.executor`.
@@ -45,7 +31,6 @@ Because the lookup uses the stored name, not your current configuration, a comma
 ## How the configurations relate
 
 Several files and argument sets take part in a run. They do not all merge into one: each layer hands a defined piece to the next.
-
 | Layer | You write it | What happens to it |
 | --- | --- | --- |
 | Submit config | `submit.yaml` plus Hydra overrides after the flags | Composed and validated once, at submit. The result is saved as `resolved-config.yaml`. |
