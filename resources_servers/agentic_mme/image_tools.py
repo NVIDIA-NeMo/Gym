@@ -4,6 +4,7 @@
 """Independent implementation of Agentic-MME's public atomic image interface."""
 
 import base64
+import binascii
 import math
 from io import BytesIO
 from typing import Annotated, Any, Literal
@@ -121,18 +122,78 @@ def model_image_url(image: Image.Image) -> str:
     return f"data:image/{mime};base64," + base64.b64encode(stream.getvalue()).decode("ascii")
 
 
+# A safety cap on an input image's encoded size, checked on the base64 text before it is decoded, so a payload's
+# memory stays bounded. It grows with the pixel limit: 4 bytes per pixel (8-bit RGBA) plus 1 MiB for headers,
+# metadata and PNG's per-row filter bytes. That covers an 8-bit PNG, but it is not a bound on every encoding: a
+# JPEG saved at quality 100 without chroma subsampling can take a little more than 4 bytes per pixel. The cap is
+# therefore never below the former fixed allowance of 48,000,000 bytes (64,000,000 base64 characters), so an input
+# accepted before is still accepted at a small pixel limit.
+_MAX_BYTES_PER_PIXEL = 4
+_ENCODING_OVERHEAD_BYTES = 1 << 20
+_MIN_INPUT_BYTES = 48_000_000
+# Pillow's default decompression-bomb limit (PIL.Image.MAX_IMAGE_PIXELS), the downscaling source ceiling when a
+# process has disabled Pillow's own limit.
+_PILLOW_DEFAULT_MAX_IMAGE_PIXELS = 1024 * 1024 * 1024 // 4 // 3
+
+
+class InputImageError(ValueError):
+    """An input image of the task is not one the workspace accepts: not a supported data URL, not decodable,
+    or larger than the configured limits.
+
+    It describes the task, not the server, so retrying the same task fails the same way."""
+
+
+def fit_to_pixels(image: Image.Image, max_pixels: int) -> Image.Image:
+    """Scale ``image`` down, keeping its aspect ratio, to at most ``max_pixels`` pixels."""
+    scale = math.sqrt(max_pixels / (image.width * image.height))
+    width, height = max(1, int(image.width * scale)), max(1, int(image.height * scale))
+    # Clamping a side up to 1 pixel (a very elongated image) can push the product over the budget: shrink the
+    # longer side so it stays within max_pixels.
+    if width * height > max_pixels:
+        if width >= height:
+            width = max(1, max_pixels // height)
+        else:
+            height = max(1, max_pixels // width)
+    size = (width, height)
+    # JPEG decodes directly at a reduced scale (a power of two at least as large as size).
+    image.draft("RGB", size)
+    return image.convert("RGB").resize(size, Image.Resampling.LANCZOS)
+
+
 class ImageWorkspace:
     """Per-episode image indices; no model-controlled filesystem or URL access."""
 
     def __init__(
-        self, *, max_pixels: int = 16_000_000, max_total_pixels: int = 64_000_000, max_images: int | None = None
+        self,
+        *,
+        max_pixels: int = 16_000_000,
+        max_total_pixels: int = 64_000_000,
+        max_images: int | None = None,
+        downscale_inputs: bool = False,
     ) -> None:
         self.images: list[Image.Image] = []
         self.max_pixels = max_pixels
         self.max_total_pixels = max_total_pixels
         # Every image goes into every later model request, so this caps the images per request.
         self.max_images = max_images
+        # Input images over max_pixels: False rejects them, True scales them down to max_pixels.
+        self.downscale_inputs = downscale_inputs
+        self.downscaled_inputs: list[tuple[tuple[int, int], tuple[int, int]]] = []
         self.total_pixels = 0
+
+    @property
+    def max_input_pixels(self) -> int:
+        """The largest input image ``load`` decodes: max_pixels, or with downscaling Pillow's own
+        decompression-bomb limit, since a larger input is scaled down rather than refused. A process that
+        disables Pillow's limit (Image.MAX_IMAGE_PIXELS = None) still gets Pillow's default here."""
+        if self.downscale_inputs:
+            return max(self.max_pixels, int(Image.MAX_IMAGE_PIXELS or _PILLOW_DEFAULT_MAX_IMAGE_PIXELS))
+        return self.max_pixels
+
+    @property
+    def max_input_bytes(self) -> int:
+        """The encoded-size safety cap for an input image (see _MIN_INPUT_BYTES)."""
+        return max(_MIN_INPUT_BYTES, self.max_input_pixels * _MAX_BYTES_PER_PIXEL + _ENCODING_OVERHEAD_BYTES)
 
     def check_size(self, width: int, height: int) -> None:
         if self.max_images is not None and len(self.images) >= self.max_images:
@@ -153,18 +214,43 @@ class ImageWorkspace:
         return len(self.images) - 1
 
     def load(self, data_url: str) -> int:
+        """Add an input image of the task, given as a base64 data URL. Raises InputImageError if it is refused."""
         prefix, separator, encoded = data_url.partition(",")
         if not separator or prefix not in {
             "data:image/png;base64",
             "data:image/jpeg;base64",
             "data:image/webp;base64",
         }:
-            raise ValueError("input images must be PNG/JPEG/WebP base64 data URLs; convert the dataset first")
-        if len(encoded) > 64_000_000:
-            raise ValueError("encoded image exceeds 64 MB")
-        with Image.open(BytesIO(base64.b64decode(encoded, validate=True))) as image:
-            self.check_size(*image.size)
-            return self.add(image)
+            raise InputImageError("input images must be PNG/JPEG/WebP base64 data URLs; convert the dataset first")
+        size = len(encoded) * 3 // 4
+        if size > self.max_input_bytes:
+            raise InputImageError(
+                f"input image is {size / 1e6:.1f} MB encoded, over the {self.max_input_bytes / 1e6:.1f} MB cap "
+                f"for images of at most {self.max_input_pixels:,} pixels; raise max_image_pixels or shrink the image"
+            )
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except binascii.Error as error:
+            raise InputImageError(f"input image is not valid base64: {error}") from error
+        try:
+            with Image.open(BytesIO(data)) as image:
+                original = image.size
+                # Image.open reads only the header: refuse a source over the decode ceiling before any raster
+                # is decoded (Pillow itself only warns up to twice Image.MAX_IMAGE_PIXELS).
+                if image.width * image.height > self.max_input_pixels:
+                    raise InputImageError(
+                        f"input image {original[0]}x{original[1]}: image dimensions exceed the "
+                        f"{self.max_input_pixels:,}-pixel input limit"
+                    )
+                if self.downscale_inputs and image.width * image.height > self.max_pixels:
+                    image = fit_to_pixels(image, self.max_pixels)
+                    self.downscaled_inputs.append((original, image.size))
+                try:
+                    return self.add(image)
+                except ValueError as error:
+                    raise InputImageError(f"input image {original[0]}x{original[1]}: {error}") from error
+        except (OSError, Image.DecompressionBombError) as error:
+            raise InputImageError(f"input image cannot be decoded: {error}") from error
 
     def get(self, index: int) -> Image.Image:
         if not 0 <= index < len(self.images):
@@ -195,7 +281,8 @@ class ImageWorkspace:
         elif isinstance(args, RotateArgs):
             angle = math.radians(args.angle)
             width, height = image.size
-            if args.expand:
+            # Pillow turns right angles by transpose, which keeps the pixel count; bound only other angles.
+            if args.expand and args.angle % 90:
                 # Conservative bound before Pillow allocates the expanded canvas.
                 width = math.ceil(abs(image.width * math.cos(angle)) + abs(image.height * math.sin(angle))) + 2
                 height = math.ceil(abs(image.width * math.sin(angle)) + abs(image.height * math.cos(angle))) + 2
