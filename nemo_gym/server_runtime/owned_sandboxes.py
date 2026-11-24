@@ -153,7 +153,8 @@ class SandboxCheckpointConfig(BaseModel):
         ge=1,
         description="Concurrent snapshot submits and deletes against the sandbox backend. "
         "Readiness waits are not counted: a commit waits for every snapshot at once. "
-        "Starts and stops have their own limits, the provider block's owner_concurrency.",
+        "A server's self.sandboxes takes its start and stop limits from the provider block's owner_concurrency; "
+        "an instance built with OwnedSandboxes.from_config bounds starts and stops by this value too.",
     )
     snapshot_attempts: int = Field(
         default=3,
@@ -395,25 +396,41 @@ def _optional_semaphore(limit: Optional[int]) -> Optional[asyncio.Semaphore]:
     return asyncio.Semaphore(limit) if limit is not None else None
 
 
-async def _start_to_the_end(sandbox: AsyncSandbox) -> None:
-    """Start ``sandbox``; if the caller is cancelled meanwhile, let the start finish before the cancellation goes on.
+def _settle_s(spec: SandboxSpec) -> float:
+    """How long a cancelled caller waits for a start to end: the spec's readiness wait, then a stop's limit."""
+    return (spec.ready_timeout_s or 0) + STOP_TIMEOUT_S
 
-    The wait is shielded and bounded by ``STOP_TIMEOUT_S``, so the caller's rollback has a handle to stop instead of
-    a provider create cut short in the middle. A start still running after that is cancelled.
+
+async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, **start_kwargs: Any) -> None:
+    """Start ``sandbox``; if the caller is cancelled meanwhile, let the start end and stop what it started.
+
+    A provider create cut short can leave a sandbox with no handle to stop, and not every provider applies ``ttl_s``
+    (Enroot does not). So a cancelled caller waits for the start, shielded through any further cancellation and
+    bounded by ``settle_s``, stops the sandbox it started, and only then lets the cancellation go on. A start still
+    running after ``settle_s`` is cancelled, and its ``ttl_s`` is all that reclaims what it made.
     """
-    start = asyncio.ensure_future(sandbox.start())
+    start = asyncio.ensure_future(sandbox.start(**start_kwargs))
     try:
         await asyncio.shield(start)
     except asyncio.CancelledError:
+        deadline = time.monotonic() + settle_s
+        while not start.done() and (remaining := deadline - time.monotonic()) > 0:
+            with contextlib.suppress(asyncio.CancelledError), anyio.CancelScope(shield=True):
+                await asyncio.wait({start}, timeout=remaining)
         with anyio.CancelScope(shield=True):
-            with anyio.move_on_after(STOP_TIMEOUT_S):
-                await asyncio.wait({start})
             if not start.done():
                 start.cancel()
-                await asyncio.wait({start})
-        if not start.cancelled() and start.exception() is not None:
+                with anyio.move_on_after(STOP_TIMEOUT_S):
+                    await asyncio.wait({start})
+            elif not start.cancelled() and start.exception() is None:
+                try:
+                    await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
+                except Exception as error:
+                    # The caller's own rollback stops it again where it still tracks the sandbox.
+                    LOGGER.warning("a sandbox started for a cancelled caller was not stopped: %r", error)
+        if start.done() and not start.cancelled() and start.exception() is not None:
             # Retrieved so it is not reported as never retrieved; the caller's cancellation is what goes on.
-            LOGGER.info("a cancelled create's start failed: %r", start.exception())
+            LOGGER.info("a cancelled caller's start failed: %r", start.exception())
         raise
 
 
@@ -864,7 +881,7 @@ class OwnedSandboxes:
                     async with self._start_slot():
                         # A create queued for a slot when the shutdown began starts nothing.
                         self._require_open()
-                        await _start_to_the_end(sandbox)
+                        await _start_to_the_end(sandbox, settle_s=_settle_s(spec))
                 except BaseException as error:
                     entry.exportable = False
                     try:
@@ -953,18 +970,24 @@ class OwnedSandboxes:
         Snapshots are not touched: the controller may still restore from them, and only its release deletes them.
         """
         self._closed = True
+        # What runs now is stopped first: a create cancelled at shutdown may take its whole start to settle.
+        running = [key for key in self._entries if key not in self._pending]
+        await self._stop_at_shutdown(running)
         await self._none_pending.wait()
-        keys = list(self._entries)
-        outcomes = await asyncio.gather(*(self.stop(key) for key in keys), return_exceptions=True)
-        for key, outcome in zip(keys, outcomes):
-            if isinstance(outcome, BaseException):
-                LOGGER.warning("sandbox of %s was not stopped at shutdown; its lifetime ends it: %r", key, outcome)
+        # Each key is tried once per call; one whose stop failed stays for the next call.
+        await self._stop_at_shutdown([key for key in self._entries if key not in running])
         await self.settle()
         if self._owns_provider and not self._entries and not self._unstopped_forks:
             # Last, and only once nothing is left to stop, so a later call can still retry a failed stop. Closing
             # runs the provider's own cleanup too, such as reaping a create the shutdown abandoned.
             self._owns_provider = False
             await self._provider.aclose()
+
+    async def _stop_at_shutdown(self, keys: list[str]) -> None:
+        outcomes = await asyncio.gather(*(self.stop(key) for key in keys), return_exceptions=True)
+        for key, outcome in zip(keys, outcomes):
+            if isinstance(outcome, BaseException):
+                LOGGER.warning("sandbox of %s was not stopped at shutdown; its lifetime ends it: %r", key, outcome)
 
     # -- commit -------------------------------------------------------------------------------------------------
 
@@ -1199,7 +1222,7 @@ class OwnedSandboxes:
             sandbox = AsyncSandbox(self._provider, fork_spec, owns_provider=False)
             try:
                 async with self._start_slot():
-                    await sandbox.start(snapshot_id=state.snapshot_id)
+                    await _start_to_the_end(sandbox, settle_s=_settle_s(fork_spec), snapshot_id=state.snapshot_id)
                 break
             except SandboxSnapshotNotFoundError as error:
                 if attempt == FORK_NOT_FOUND_RETRIES:
@@ -1253,7 +1276,8 @@ class OwnedSandboxes:
             return
         sandbox_id = state.descriptor.get("sandbox_id")
         try:
-            # Bounded as a whole, the wait for a slot included, like every other stop.
+            # Bounded as a whole, the wait for a slot included: a superseded sandbox's stop is best effort, and its
+            # lifetime ends it if this one gives up.
             async with asyncio.timeout(STOP_TIMEOUT_S), self._stop_slot():
                 old = await AsyncSandbox.connect(state.descriptor, provider=self._provider, owns_provider=False)
                 await old.stop(timeout_s=STOP_TIMEOUT_S)

@@ -499,6 +499,18 @@ def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -
     return [name for name in keywords if name not in parameters]
 
 
+async def _stop_after_failed_start(sandbox: "AsyncSandbox", error: BaseException) -> None:
+    """Stop the sandbox a failed start leaves; if that stop fails too, the start's ``error`` is still raised.
+
+    The stop's error becomes the context of ``error``, so the caller acts on why the start failed and still sees that
+    the sandbox may be running. A function rather than a method, so ``sandbox.stop`` is what runs, as it was.
+    """
+    try:
+        await sandbox.stop()
+    except Exception:
+        raise error
+
+
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider.
 
@@ -693,7 +705,7 @@ class AsyncSandbox:
                             source_path.write_text(contents, encoding="utf-8")
                         await self.upload(source_path, target_path)
         except BaseException as error:
-            await self._stop_after_failure(error)
+            await _stop_after_failed_start(self, error)
             raise
 
         return self
@@ -712,7 +724,7 @@ class AsyncSandbox:
         try:
             await setup(self)
         except BaseException as error:
-            await self._stop_after_failure(error)
+            await _stop_after_failed_start(self, error)
             raise
         return self
 
@@ -823,17 +835,6 @@ class AsyncSandbox:
     def default_workdir(self) -> str | None:
         """The directory an exec runs in when it names none: ``SandboxSpec.workdir``, else the provider's own."""
         return self._spec.workdir if self._spec is not None else None
-
-    async def _stop_after_failure(self, error: BaseException) -> None:
-        """Stop the sandbox a failed start leaves; if that stop fails too, the start's ``error`` is still raised.
-
-        The stop's error becomes the context of ``error``, so the caller acts on why the start failed and still sees
-        that the sandbox may be running.
-        """
-        try:
-            await self.stop()
-        except Exception:
-            raise error
 
     def set_default_user(self, user: str | int | None) -> None:
         """Change the default exec user of a running sandbox.
