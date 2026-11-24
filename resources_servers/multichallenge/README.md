@@ -307,6 +307,10 @@ Given a conversation about travel planning where the user mentioned a seafood al
 
 The LLM judge analyzes the model's response and returns `[[YES]]` or `[[NO]]`.
 
+A judge reply without either label, or a reply cut at the judge's output limit, is no verdict. The server masks that
+row (`mask_sample: true`, `failure_kind: judge_unparseable`). An empty final answer scores 0 without a judge call. If
+the judge server refuses the prompt for its length (a reply cut before any output token), the item fails.
+
 ---
 
 **Note**: The default raw data path is hardcoded in `dataset_preprocess.py`:

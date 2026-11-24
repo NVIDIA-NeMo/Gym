@@ -4,7 +4,10 @@ This is a resources server that trains a policy model to abstain from answering 
 
 - **Correct** (1.0): The model provides a correct answer
 - **Abstain** (configurable, default 0.5): The model outputs `\boxed{[IDK]}` or the LLM judge grades the answer as NOT_ATTEMPTED
-- **Incorrect** (0.0): The model provides an incorrect answer
+- **Incorrect** (0.0): The model provides an incorrect answer, or an empty final answer (scored without a judge call)
+
+A judge reply without a grade, or a reply cut at the judge's output limit, is no grade. The server masks that row
+(`mask_sample: true`, `failure_kind: judge_unparseable`), and recovery can judge it again from the saved answer.
 
 Correctness is verified by an LLM judge using the OMNISCIENCE_GRADER template instead of string matching. The judge grades the model's extracted answer against the gold target as one of CORRECT, INCORRECT, or NOT_ATTEMPTED.
 

@@ -425,7 +425,7 @@ By default an HTTP error aborts collection.
 
 Judge failures (including judge deadlines) use Gym's standard `JudgeError` failsafe instead. Each member
 receives HTTP 200 with its original generated `response`, `_ng_failure_class: judge_failed`, and
-`_ng_failure_judge_error`. The failsafe's `reward: 0.0` is a placeholder, not a valid GenRM score.
+`_ng_failure_judge_error`. The failsafe's `reward` is a placeholder, `default_score` (3.0 by default), not a valid GenRM score.
 The collector automatically saves these rows in the failures sidecar and excludes them from reward
 metrics by default. They are not counted by an `agent_run_error` zero-fill policy. An explicit
 `count_failure_classes_as_zero: [judge_failed]` evaluation policy includes them as zeros in metric

@@ -429,3 +429,49 @@ async def test_empty_answer_scores_zero_without_a_judge_call(monkeypatch):
     assert result.reward == 0.0
     assert result.mask_sample is False
     assert result.generated_response == ""
+
+
+@pytest.mark.asyncio
+async def test_default_verification_masks_a_judge_reply_cut_at_its_output_limit(monkeypatch):
+    cut_reply = NeMoGymResponse.model_validate(
+        _response("Checking the criterion.\nA bare yes would PASS, however the").model_dump()
+        | {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+    )
+
+    async def fake_call_judge(*args, **kwargs):
+        return cut_reply
+
+    monkeypatch.setattr("resources_servers.inverse_if.app.call_judge", fake_call_judge)
+    with pytest.raises(JudgeError, match="cut off") as raised:
+        await _server().verify(_request("Yes, and here is more."))
+    assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_on_unparseable", [True, False])
+async def test_a_prompt_the_judge_refused_for_its_length_fails_the_criterion(monkeypatch, fail_on_unparseable):
+    # vllm_model answers a prompt longer than the judge's window with an empty reply cut before any output token.
+    refused = NeMoGymResponse.model_validate(
+        _response("").model_dump()
+        | {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+    )
+
+    async def fake_call_judge(*args, **kwargs):
+        return refused
+
+    monkeypatch.setattr("resources_servers.inverse_if.app.call_judge", fake_call_judge)
+    result = await _server(fail_on_unparseable_judge_response=fail_on_unparseable).verify(_request("Yes. " * 200))
+
+    assert (result.reward, result.mask_sample) == (0.0, False)
+    [evaluation] = result.rubric_evaluations
+    assert (evaluation.verdict, evaluation.score) == ("FAIL", 0.0)

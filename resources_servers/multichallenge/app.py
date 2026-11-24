@@ -241,6 +241,12 @@ def _extract_verdict(response_text: str, yes_label: str, no_label: str) -> Optio
     return "NO"
 
 
+def _judge_refused_prompt(judge_response: NeMoGymResponse) -> bool:
+    """Whether the judge server refused the prompt for its length: a reply cut before any output token."""
+    usage = judge_response.usage
+    return judge_response.incomplete_details is not None and usage is not None and usage.output_tokens == 0
+
+
 class MultiChallengeServer(SimpleResourcesServer):
     """MultiChallenge evaluation server."""
 
@@ -336,6 +342,20 @@ class MultiChallengeServer(SimpleResourcesServer):
             json=request_params,
             response_model=NeMoGymResponse,
         )
+        if _judge_refused_prompt(judge_response):
+            # The answer, which the policy controls, did not fit the judge's window: the item fails. This check runs
+            # before the cut-reply check, which masks the row.
+            return RubricEvaluation(
+                question=question,
+                pass_criteria=pass_criteria,
+                judge_prompt=judge_prompt,
+                judge_response="",
+                verdict="",
+                score=0.0,
+                weight=weight,
+            )
+        if judge_response.status == "incomplete" or judge_response.incomplete_details is not None:
+            raise JudgeError("judge reply was cut off before its verdict", failure_kind=JUDGE_UNPARSEABLE)
         judge_text = _extract_text_from_response(judge_response, exclude_thinking=True)
 
         # Extract verdict. A reply without one is the judge's failure, not the policy's: defaulting it to NO would

@@ -130,10 +130,10 @@ gym_env_start:
           # judge, and a chat judge grading against app.py's A/B/C prompt needs room for more than
           # a bare letter.
           #
-          # Failure is silent, which is why this is generous rather than tight: parse_judge_grade
-          # (resources_servers/abstention/app.py:218) falls back to "B" (INCORRECT) on anything it
-          # cannot parse, so a judge truncated before its letter scores the rollout wrong rather
-          # than erroring. Upstream's 64 fits a bare letter and nothing else. Too high only costs
+          # This is generous rather than tight: parse_judge_grade (resources_servers/abstention/app.py)
+          # finds no grade in a reply it cannot parse, and the server masks that row (judge_unparseable),
+          # as it masks a judge reply cut at this limit. A tight limit masks many rollouts. Upstream's 64
+          # fits a bare letter and nothing else. Too high only costs
           # latency on a runaway generation, and matching the ultra-3 branch keeps the measured
           # rates in RATES.md comparable.
           max_output_tokens: 8192
