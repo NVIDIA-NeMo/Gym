@@ -32,80 +32,91 @@ Focused validation runs with:
 uv run pytest tests/unit_tests/tooling/test_collect_downstream_junit.py
 ```
 
+## EKS staging runner opt-in
+
+For an internal merge request targeting `nv-internal-main`, add the exact MR
+label `ci::eks-staging` and start a new merge request pipeline. The rule applies
+to any source branch. Removing the label and starting another pipeline restores
+the normal corpnet runner path. Existing pipelines retain their selected route;
+retrying a job does not re-evaluate the MR label.
+
+The label selects `GYM_CI_BACKEND=eks-staging` through the existing
+`main-mirror` NeMo CI bridge. Gym lint, core, and server checks use the isolated
+`nemo-gitlab-ci-stg` runner tag, a dedicated ECR executor image, and 24 CPUs /
+128Gi RAM per job. The experimental fleet accepts up to 256 concurrent jobs,
+subject to AWS quota and available capacity. Canary pipelines have a separate
+resource group. Source preparation, image resolution, and JUnit collection keep
+their existing control-job routing.
+
+Unlabeled MRs keep the existing default refs, runner tags, resources, and image
+selection. Branches created before this rule was introduced must first merge or
+rebase onto the updated `nv-internal-main` so their CI configuration contains it.
+
 ## Advisory review pools
 
-After this configuration merges into GitHub Gym `main`, reaches protected GitLab
-`nv-internal-main`, and the project webhook is enabled, MR events will run
-`gym-review-pools` on that protected branch. The job will reuse the pinned
-FW-CI-templates adapter to attach optional approval rules named
-`github-review-pool: @nvidia-nemo/<team>` with zero required approvals.
+Today MR webhooks run the shared adapter on protected `nv-internal-main` and
+create optional approval rules with zero required approvals. These rules expose
+eligible approvers; they do not assign the MR's Reviewers field.
+
+From deployment of this configuration, a lightweight preparation job will validate
+`TRIGGER_PAYLOAD` and generate a child pipeline. Each child will lock only
+`gym-review-pools-191584-<MR IID>`. Updates to one MR will remain serialized while
+different MRs can run concurrently. Irrelevant events will generate a no-op child
+without credentials or dependency installation.
 
 ```mermaid
 flowchart LR
-  MR[GitLab MR event] --> Hook[Project webhook]
-  Hook --> Trigger[Pipeline trigger on protected nv-internal-main]
-  Trigger --> Adapter[Pinned shared reviewer adapter]
-  Rules[GitHub Gym main suggestion rules] --> Adapter
-  Teams[Live GitHub team membership] --> Adapter
-  SSO[Audited SSO email mapping] --> Adapter
-  Adapter --> Pools[Optional GitLab MR review pools]
+  Event[MR webhook] --> Prepare[Validate event on protected branch]
+  Prepare --> Child[Generate child for numeric MR IID]
+  Child --> Lock[Per-MR resource group]
+  Lock --> Adapter[Pinned shared adapter]
+  Rules[GitHub suggestion rules and team membership] --> Adapter
+  Adapter --> Pools[Optional GitLab approval pools]
 ```
 
-GitHub Gym's `.github/CODEOWNERS` `# suggest:` entries and live GitHub teams remain
-the routing and membership sources. The shared adapter will resolve audited NVIDIA
-email account names to exact GitLab usernames, require active Developer-or-higher
-project membership, and exclude the MR author. Missing identities will block all
-writes. Existing MR-local required approval rules and native CODEOWNERS remain
-intact. The adapter will refuse to create pools if switching from inherited
-project rules would discard a required rule.
+The GitLab adapter pin will move to
+`f73591c0cd73adc86bb9d9bf33970ba0f9c26c0b`
+([FW-CI-templates PR 631](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/631)).
+The adapter will skip mapped users without active Developer-or-higher project
+membership and report them in `warnings`. Missing identity mappings, empty pools,
+and attempts to replace required approval rules will still block writes. The MR
+author is excluded. The adapter will always reconcile the optional approval pools.
+When the MR has no reviewers, the adapter will additionally assign eligible pool
+members as reviewers. If reviewers already exist, their list will stay unchanged.
+The adapter rechecks the reviewer list immediately before assignment and checks
+the current MR state and head before writes. GitLab has no atomic assign-if-empty
+operation, so a manual assignment in the remaining read/write window can race.
+
+The dispatcher accepts only open, reopen, or update events for non-draft MRs in
+project `191584` targeting `nv-internal-main`. Only a positive integer MR IID is
+inserted into the child configuration. The child uses a local trusted job template
+from the protected pipeline commit; webhook content cannot supply job code.
+The preparation job checks out the protected branch, never MR source code. The
+credentialed child uses `GIT_STRATEGY: empty` and fetches only the pinned adapter.
+
+Both credentials are protected, masked, hidden, raw CI variables scoped to the
+`review-pools` environment:
+
+| Variable | Purpose |
+| --- | --- |
+| `GH_SSO_MANAGMENT_PAT` | Read audited SSO identities, GitHub rules, and team membership. |
+| `GITLAB_REVIEW_POOLS_TOKEN` | Read project members and manage optional MR approval rules. |
+
+The protected environment permits dedicated project bot `160783`, which owns
+trigger `3236`. Webhook `283184` sends merge request events to that trigger on
+protected `nv-internal-main`. The child inherits the triggering identity and reads
+the project variables in its own `review-pools` environment; the bridge forwards
+neither pipeline nor YAML variables. CPU CI continues to select MR pipelines only.
+
+Failures remain advisory through `allow_failure: true`; inspect the child job
+status and trace rather than relying on the parent pipeline's success status.
 
 GitLab switches to MR-local approval rules when the first optional pool is
 created. Future project-level regular or any-approver rules will not automatically
-apply to those MRs. This is an accepted limitation of advisory pools. Today Gym
-has no project-level approval rules. Before introducing or changing project
-approval requirements, maintainers must migrate the rules on existing MRs as
-part of that policy change; the event-driven adapter does not perform that migration.
+apply to those MRs. Before introducing or changing project approval requirements,
+maintainers must migrate rules on existing MRs as part of that policy change.
 
-The job reads the webhook from GitLab's `TRIGGER_PAYLOAD` file and accepts only
-open, reopen, or update events for non-draft MRs targeting `nv-internal-main` in
-project `191584`. It re-reads the current MR diff, checks the head before each
-write, and serializes updates through `resource_group: gym-review-pools`. Approval
-events are ignored. Failures are advisory through `allow_failure: true`.
-
-The job does not check out or execute MR source code. Both credentials must be
-protected, masked, hidden, raw CI variables scoped to environment `review-pools`:
-
-| Variable | Source and purpose |
-| --- | --- |
-| `GH_SSO_MANAGMENT_PAT` | Existing `nemo-ci-ops` audited SSO credential; reads the roster, GitHub rules, and GitHub teams. The spelling matches the shared downloader. |
-| `GITLAB_REVIEW_POOLS_TOKEN` | Dedicated project access token with `api` scope and Maintainer role; reads MR/member data and manages optional rules. |
-
-The `review-pools` environment is protected. Its only allowed deployer is the
-dedicated project bot (user `160783`), which also owns pipeline trigger `3236`.
-This protects jobs declaring this environment, including `action: access`, from
-other pipeline users. Variable protection alone would also expose credentials to
-jobs on the protected GitHub mirror branch if they declared this environment.
-Project Maintainers can change environment protection and remain trusted operators.
-
-The webhook uses a pipeline trigger owned by the dedicated project bot. Its URL
-targets `/api/v4/projects/191584/ref/nv-internal-main/trigger/pipeline`; the trigger
-token remains in GitLab webhook settings. Webhook `283184` is staged with every
-event disabled. The existing CPU CI jobs continue to select MR pipelines only.
-
-The GitHub reviewer workflow and GitLab job pin FW-CI-templates commit
-`6433b3b14022abe1a72da8baac638944b36e3099`, the merged revision of PR #627
-on shared `main`.
-
-Activate in this order:
-
-1. Merge this configuration into GitHub Gym `main` after validation and bot review.
-2. Bring the mirrored changes into protected GitLab `nv-internal-main` and verify
-   that `gym-review-pools` is present on that branch.
-3. Verify both variable scopes, environment protection for bot `160783`, and
-   trigger ownership. Enable only merge request events on webhook `283184`.
-   Do not enable pipeline, job, or push events.
-
-Validate the shared adapter with its unit tests, run Gym's pre-commit hooks, and
-submit the expanded YAML to the project CI lint API. Once enabled, verify a
-trigger pipeline runs only `gym-review-pools`, inspect its resolved pool plan,
-and repeat reconciliation to confirm an empty change plan.
+Validate the dispatcher tests, shared adapter tests, pre-commit hooks, and expanded
+parent/child configurations with GitLab CI lint. After deployment, trigger two
+different MRs and verify different resource-group keys, inspect missing-member
+warnings, and repeat reconciliation to confirm an empty change plan.
