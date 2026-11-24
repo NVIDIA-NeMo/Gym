@@ -37,10 +37,13 @@ _OUTER_TIMEOUT_BUFFER_S = 10.0
 _PROGRESS_HANDLER_INTERVAL = 1000
 
 
-def execute_sqlite(db_path: Path, sql: str, timeout_s: Optional[float] = None) -> Optional[ResultSet]:
+def execute_sqlite(
+    db_path: Path, sql: str, timeout_s: Optional[float] = None, *, read_only: bool = False
+) -> Optional[ResultSet]:
     """Execute SQL against a SQLite database file and return all rows.
 
-    Returns ``None`` if execution raises (syntax error, missing table, etc.).
+    Returns ``None`` if execution raises (syntax error, missing table, etc.). With ``read_only`` the file is opened
+    read-only, so a query that writes (``DROP TABLE``) fails instead of changing the database.
 
     When ``timeout_s`` is given, a SQLite progress handler aborts the query from *inside* SQLite once it has
     been running that long, and ``TimeoutError`` is raised (distinct from the ``None`` returned for query errors).
@@ -52,7 +55,10 @@ def execute_sqlite(db_path: Path, sql: str, timeout_s: Optional[float] = None) -
     conn = None
     timed_out = False
     try:
-        conn = sqlite3.connect(str(db_path))
+        if read_only:
+            conn = sqlite3.connect(f"{Path(db_path).resolve().as_uri()}?mode=ro", uri=True)
+        else:
+            conn = sqlite3.connect(str(db_path))
         conn.text_factory = lambda b: b.decode(errors="ignore")
         if timeout_s is not None:
             start = time.monotonic()
@@ -81,6 +87,8 @@ async def execute_sqlite_async(
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
     raise_on_timeout: bool = False,
+    *,
+    read_only: bool = False,
 ) -> Optional[ResultSet]:
     """Execute SQL asynchronously in a worker thread, bounded by semaphore.
 
@@ -94,7 +102,7 @@ async def execute_sqlite_async(
     async with semaphore:
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(execute_sqlite, db_path, sql, timeout_s),
+                asyncio.to_thread(execute_sqlite, db_path, sql, timeout_s, read_only=read_only),
                 timeout=timeout_s + _OUTER_TIMEOUT_BUFFER_S,
             )
         except asyncio.TimeoutError:
@@ -363,11 +371,15 @@ async def execute_and_compare(
     pred_sql: str,
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
+    *,
+    read_only: bool = False,
 ) -> tuple[bool, Optional[ResultSet], Optional[ResultSet], Optional[str]]:
     """Execute both queries on SQLite and compare. Returns (match, gold, pred, error_tag)."""
 
     async def run(sql: str) -> Optional[ResultSet]:
-        return await execute_sqlite_async(db_path, sql, semaphore, timeout_s, raise_on_timeout=True)
+        return await execute_sqlite_async(
+            db_path, sql, semaphore, timeout_s, raise_on_timeout=True, read_only=read_only
+        )
 
     return await _compare(run, run, gold_sql, pred_sql)
 

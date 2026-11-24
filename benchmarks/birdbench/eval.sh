@@ -186,6 +186,11 @@ if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
         DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.spark_warehouse_dir=resources_servers/bird_sql/.bird_sql/spark_warehouse_${SPLIT}")
     fi
 fi
+SANDBOX_ARGS=(--config "${SANDBOX_CONFIG}")
+if [[ "${SANDBOX_CONFIG}" == "nemo_gym/sandbox/providers/docker/configs/docker.yaml" ]]; then
+    # Grading needs no network, and Docker ignores bird_sql's network_policy: cut it in the provider block instead.
+    SANDBOX_ARGS+=("++sandbox.docker.create.network=none")
+fi
 mkdir -p "${OUTPUT_DIR}"
 
 # Reuses ${PREPARED_JSONL} when it exists and prepare.py's is_prepared_data_current() accepts it (a Spark file
@@ -215,7 +220,7 @@ gym eval run \
     --max-output-tokens "${MAX_OUTPUT_TOKENS}" \
     --num-repeats "${NUM_REPEATS}" \
     --concurrency "${CONCURRENCY}" \
-    --config "${SANDBOX_CONFIG}" \
+    "${SANDBOX_ARGS[@]}" \
     "${MODEL_ARGS[@]}" \
     ${DIALECT_ARGS[@]+"${DIALECT_ARGS[@]}"} \
     ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || EVAL_STATUS=$?
@@ -235,7 +240,7 @@ try:
 except (OSError, ValueError) as e:
     sys.exit(f"[summary] no aggregate metrics to summarize: {e}")
 names = ["no_sql", "sql-timeout", "gold-sql-timeout", "pred-sql-timeout",
-         "sql_errors", "gold-sql-error", "pred-sql-error", "unclean"]
+         "sql_errors", "gold-sql-error", "pred-sql-error", "sandbox_error", "unclean"]
 for entry in entries:
     am = entry.get("agent_metrics", {})
     total = am.get("rollouts_count")

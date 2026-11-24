@@ -27,6 +27,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.bird_sql.app import (
     BirdSqlResourcesServer,
     BirdSqlResourcesServerConfig,
@@ -46,7 +47,7 @@ from resources_servers.bird_sql.eval_utils import (
     result_sets_match,
 )
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
-from resources_servers.bird_sql.verifier_sandbox import SandboxGradingError, SqliteGrade
+from resources_servers.bird_sql.verifier_sandbox import SqliteGrade
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +319,7 @@ def _mock_execute_sqlite(monkeypatch, gold_result, pred_result):
     """Patch eval_utils.execute_sqlite to return canned results based on SQL string."""
     calls = []
 
-    def fake_execute(db_path, sql, timeout_s=None):
+    def fake_execute(db_path, sql, timeout_s=None, *, read_only=False):
         calls.append(sql)
         return gold_result if "GOLD_SQL" in sql else pred_result
 
@@ -338,7 +339,7 @@ async def test_execute_sqlite_async_success(monkeypatch):
 async def test_execute_sqlite_async_timeout_backstop(monkeypatch):
     """execute_sqlite is mocked, so the in-SQLite timeout is bypassed and the outer wait_for backstop trips."""
 
-    def slow_execute(db_path, sql, timeout_s=None):
+    def slow_execute(db_path, sql, timeout_s=None, *, read_only=False):
         time.sleep(10)
         return [(1,)]
 
@@ -405,7 +406,7 @@ async def test_execute_and_compare_gold_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_and_compare_pred_timeout(monkeypatch):
-    def slow_execute(db_path, sql, timeout_s=None):
+    def slow_execute(db_path, sql, timeout_s=None, *, read_only=False):
         if "SLOW" in sql:
             time.sleep(10)
         return [(1,)]
@@ -421,7 +422,7 @@ async def test_execute_and_compare_pred_timeout(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_and_compare_gold_timeout(monkeypatch):
-    def slow_execute(db_path, sql, timeout_s=None):
+    def slow_execute(db_path, sql, timeout_s=None, *, read_only=False):
         if "SLOW" in sql:
             time.sleep(10)
         return [(1,)]
@@ -515,6 +516,8 @@ def _assert_verifier_failure(resp, failure_reason: FailureCode, extracted_sql: s
     """The verifier could not measure the answer: masked, typed, and the answer is kept on the row."""
     assert resp.reward == 0.0
     assert resp.mask_sample is True
+    # Never graded, so recovery may grade the kept answer again.
+    assert resp.evaluation_completed is False
     assert resp.failure_kind == VERIFIER_ERROR
     assert resp.failure_reason == failure_reason
     assert resp.execution_match is False
@@ -719,7 +722,7 @@ async def test_verify_sandbox_that_never_grades_is_retried_then_masked_as_incomp
 
     async def down(**kwargs):
         attempts.append(kwargs)
-        raise SandboxGradingError(PROVIDER_UNAVAILABLE, "provider refused the sandbox")
+        raise SandboxVerificationError(PROVIDER_UNAVAILABLE, "provider refused the sandbox")
 
     monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", down)
     _refuse_host_execution(monkeypatch)
@@ -735,13 +738,13 @@ async def test_verify_sandbox_that_never_grades_is_retried_then_masked_as_incomp
     assert resp.failure_reason == FailureCode.SANDBOX_ERROR
     assert resp.extracted_sql == "SELECT 1"
     assert _observed_verifier_failures(log) == [
-        ("resources_server", PROVIDER_UNAVAILABLE, "verify", "verification", "SandboxGradingError")
+        ("resources_server", PROVIDER_UNAVAILABLE, "verify", "verification", "SandboxVerificationError")
     ]
 
 
 @pytest.mark.asyncio
 async def test_verify_scores_the_grade_of_a_retry_after_a_failed_sandbox(server_with_mocked_dbs, monkeypatch):
-    outcomes = [SandboxGradingError(VERIFIER_ERROR, "runner was killed"), SqliteGrade(True, None)]
+    outcomes = [SandboxVerificationError(VERIFIER_ERROR, "runner was killed"), SqliteGrade(True, None)]
 
     async def flaky(**_kwargs):
         outcome = outcomes.pop(0)
@@ -769,7 +772,6 @@ async def test_verify_sends_the_row_database_and_both_queries_to_the_sandbox(
         return SqliteGrade(False, "pred_sql_error")
 
     monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", grade)
-    _refuse_host_execution(monkeypatch)
 
     resp = await server_with_mocked_dbs.verify(
         _make_verify_request("```sql\nSELECT nope FROM t\n```", gt_sql="SELECT x FROM t")
@@ -784,6 +786,24 @@ async def test_verify_sends_the_row_database_and_both_queries_to_the_sandbox(
     )
     assert seen["sql_execution_timeout_s"] == 10.0
     assert seen["metadata"] == {"benchmark": "bird_sql", "db_id": "TestDB"}
+
+
+@pytest.mark.asyncio
+async def test_startup_probe_reports_the_image_versions(server_with_mocked_dbs, caplog):
+    caplog.set_level("INFO", logger="resources_servers.bird_sql.app")
+    await server_with_mocked_dbs._probe_sandbox()
+    [message] = [r.getMessage() for r in caplog.records if "verifier sandbox ready" in r.getMessage()]
+    assert f"SQLite {sqlite3.sqlite_version}" in message
+
+
+@pytest.mark.asyncio
+async def test_startup_fails_when_the_verifier_sandbox_cannot_grade(server_with_mocked_dbs, monkeypatch):
+    async def down(**_kwargs):
+        raise SandboxVerificationError(PROVIDER_UNAVAILABLE, "cannot reach the Docker daemon")
+
+    monkeypatch.setattr("resources_servers.bird_sql.app.probe_sandbox", down)
+    with pytest.raises(RuntimeError, match="cannot grade: cannot reach the Docker daemon"):
+        await server_with_mocked_dbs._probe_sandbox()
 
 
 def test_server_refuses_to_start_without_its_sandbox_block(tmp_path, monkeypatch):
@@ -851,11 +871,12 @@ class TestComputeMetrics:
                 r(0.0, extracted=None, failure_reason="no_sql_extracted"),
                 r(0.0, extracted=None, failure_reason="no_sql_extracted"),
             ],
+            [r(0.0, failure_reason="sandbox_error"), r(0.0)],  # a masked sandbox failure, a wrong result
         ]
         metrics = server_with_mocked_dbs.compute_metrics(tasks)
 
         expected_counts = {
-            "rollouts": 8,
+            "rollouts": 10,
             "no_sql": 2,
             "gold-sql-timeout": 1,
             "pred-sql-timeout": 1,
@@ -863,13 +884,15 @@ class TestComputeMetrics:
             "gold-sql-error": 1,
             "pred-sql-error": 1,
             "sql_errors": 2,
-            "unclean": 6,  # everything except the correct and the wrong-result rollout
+            "sandbox_error": 1,
+            "unclean": 7,  # everything except the correct and the two wrong-result rollouts
         }
         assert {k: metrics[f"{k}_count"] for k in expected_counts} == expected_counts
-        assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(100 * 1 / 8)
-        assert metrics["pass@1[avg-of-2]/no_sql"] == pytest.approx(100 * 2 / 8)
-        assert metrics["pass@1[avg-of-2]/unclean"] == pytest.approx(100 * 6 / 8)
-        assert metrics["pass@1[avg-of-2]/sql-timeout"] == pytest.approx(100 * 2 / 8)
+        assert metrics["pass@1[avg-of-2]/accuracy"] == pytest.approx(100 * 1 / 10)
+        assert metrics["pass@1[avg-of-2]/no_sql"] == pytest.approx(100 * 2 / 10)
+        assert metrics["pass@1[avg-of-2]/unclean"] == pytest.approx(100 * 7 / 10)
+        assert metrics["pass@1[avg-of-2]/sql-timeout"] == pytest.approx(100 * 2 / 10)
+        assert metrics["pass@1[avg-of-2]/sandbox_error"] == pytest.approx(100 * 1 / 10)
 
     def test_unknown_error_is_unclean_but_not_a_named_failure(self, server_with_mocked_dbs):
         scores = server_with_mocked_dbs._score_fn(self._task_result(0.0, failure_reason="unknown_error"))
@@ -1094,7 +1117,7 @@ class TestExecuteSparkAsyncTimeout:
             return [(1,)]
 
         monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_spark", fake_execute_spark)
-        monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", lambda *_a: [(1,)])
+        monkeypatch.setattr("resources_servers.bird_sql.eval_utils.execute_sqlite", lambda *_a, **_k: [(1,)])
         match, gold, pred, err = await execute_and_compare_spark(
             Path("/x.sqlite"), MagicMock(), "SELECT 1", "SELECT SLOW", asyncio.Semaphore(2), timeout_s=0.05
         )

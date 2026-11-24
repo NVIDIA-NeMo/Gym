@@ -73,7 +73,7 @@ def _parse(raw: str) -> int:
     return json.loads(raw)["ok"]
 
 
-async def _run(provider, *, config=None, files=None, metadata=None, work_dir="/tmp/verify"):
+async def _run(provider, *, config=None, files=None, metadata=None, work_dir="/tmp/verify", setup=None):
     return await run_verification_sandbox(
         provider=provider,
         config=config or SandboxVerificationConfig(image="verifier:test", resources={"cpu": 4}),
@@ -83,6 +83,7 @@ async def _run(provider, *, config=None, files=None, metadata=None, work_dir="/t
         parse_result=_parse,
         metadata=metadata or {"benchmark": "toy"},
         work_dir=work_dir,
+        setup=setup,
     )
 
 
@@ -123,6 +124,38 @@ async def test_each_call_gets_its_own_work_dir() -> None:
     await _run(first, work_dir="/tmp/verify/")
     await _run(second)
     assert _call_dir(first) != _call_dir(second)
+
+
+async def test_setup_runs_with_the_call_dir_after_the_files_and_before_the_runner() -> None:
+    provider = _VerificationProvider()
+    seen = []
+
+    async def setup(sandbox, call_dir: str) -> None:
+        seen.append((call_dir, sorted(provider.uploaded), list(provider.exec_calls)))
+        await sandbox.upload(Path(__file__), f"{call_dir}/payload.bin")
+
+    assert await _run(provider, setup=setup) == 42
+
+    call_dir = _call_dir(provider)
+    [(setup_dir, uploaded_before, execs_before)] = seen
+    assert setup_dir == call_dir
+    assert f"{call_dir}/request.json" in uploaded_before and execs_before == []
+    assert f"{call_dir}/payload.bin" in provider.uploaded
+    assert len(provider.exec_calls) == 1
+
+
+async def test_setup_failure_is_provider_unavailable_and_stops_the_sandbox() -> None:
+    provider = _VerificationProvider()
+
+    async def setup(sandbox, call_dir: str) -> None:
+        raise OSError("disk full")
+
+    with pytest.raises(SandboxVerificationError) as info:
+        await _run(provider, setup=setup)
+    assert info.value.failure_kind == PROVIDER_UNAVAILABLE
+    assert "disk full" in str(info.value)
+    assert provider.exec_calls == []
+    assert len(provider.closed) == 1
 
 
 async def test_create_failure_is_provider_unavailable() -> None:

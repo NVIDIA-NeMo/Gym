@@ -15,11 +15,12 @@ import pytest
 from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.sandbox.testing import FakeSandboxProvider
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.bird_sql.verifier_sandbox import (
     BirdSqlSandboxConfig,
-    SandboxGradingError,
     SqliteGrade,
     grade_in_fresh_sandbox,
+    probe_sandbox,
     runner_timeout_s,
 )
 
@@ -40,10 +41,14 @@ def database(tmp_path) -> Path:
     return path
 
 
-def run_runner(tmp_path: Path, database: Path, *, pred_sql: str, gold_sql: str = "SELECT x FROM t", **request):
-    """Run sandbox_runner.py as the sandbox does: in a directory holding it, eval_utils.py and request.json."""
+def run_runner(tmp_path: Path, database: Path | str, *, pred_sql: str, gold_sql: str = "SELECT x FROM t", **request):
+    """Run sandbox_runner.py as the sandbox does: in a directory holding it, eval_utils.py and request.json.
+
+    ``-S -E`` keeps site-packages and the environment out, so an import outside the standard library fails here as it
+    would in a bare image.
+    """
     work = tmp_path / "work"
-    work.mkdir(parents=True)
+    work.mkdir(parents=True, exist_ok=True)
     for name in ("sandbox_runner.py", "eval_utils.py"):
         shutil.copy(SERVER_DIR / name, work / name)
     request = {
@@ -57,7 +62,7 @@ def run_runner(tmp_path: Path, database: Path, *, pred_sql: str, gold_sql: str =
     }
     (work / "request.json").write_text(json.dumps(request))
     process = subprocess.run(
-        [sys.executable, "sandbox_runner.py", "request.json", "result.json"],
+        [sys.executable, "-S", "-E", "sandbox_runner.py", "request.json", "result.json"],
         cwd=work,
         capture_output=True,
         text=True,
@@ -84,9 +89,45 @@ class TestRunner:
         assert process.returncode == 0, process.stderr
         assert result == expected
 
+    def test_a_query_that_writes_fails_and_leaves_the_database_unchanged(self, tmp_path, database):
+        _, result = run_runner(tmp_path, database, pred_sql="DROP TABLE t")
+        assert result == {"match": False, "error": "pred_sql_error"}
+        assert sqlite3.connect(str(database)).execute("SELECT count(*) FROM t").fetchone() == (3,)
+
+    def test_a_relative_database_path_is_read_from_the_runner_directory(self, tmp_path, database):
+        (tmp_path / "work").mkdir()
+        shutil.copy(database, tmp_path / "work" / "copy.sqlite")
+        _, result = run_runner(tmp_path, "copy.sqlite", pred_sql="SELECT x FROM t", delete_database=True)
+        assert result == {"match": True, "error": None}
+        assert not (tmp_path / "work" / "copy.sqlite").exists()
+
+    def test_running_out_of_memory_comparing_results_is_the_model_query_failing(self, monkeypatch, database):
+        monkeypatch.syspath_prepend(str(SERVER_DIR))
+        import sandbox_runner
+
+        async def too_large(**_kwargs):
+            raise MemoryError
+
+        monkeypatch.setattr(sandbox_runner, "execute_and_compare", too_large)
+        request = {"database": str(database), "gold_sql": "SELECT 1", "pred_sql": "SELECT 1", "timeout_s": 1.0}
+        assert asyncio.run(sandbox_runner._grade(request)) == {"match": False, "error": "pred_sql_error"}
+
     def test_gold_query_failure_is_reported_as_such(self, tmp_path, database):
         _, result = run_runner(tmp_path, database, pred_sql="SELECT x FROM t", gold_sql="SELECT missing FROM t")
         assert result == {"match": False, "error": "gold_sql_error"}
+
+    def test_runaway_gold_query_is_reported_as_a_gold_timeout(self, tmp_path, database):
+        _, result = run_runner(tmp_path, database, pred_sql="SELECT 1", gold_sql=RUNAWAY_SQL, timeout_s=0.5)
+        assert result == {"match": False, "error": "gold_sql_timeout"}
+
+    def test_a_truncated_upload_fails_the_runner_and_is_removed(self, tmp_path, database):
+        size = database.stat().st_size
+        process, result = run_runner(
+            tmp_path, database, pred_sql="SELECT x FROM t", delete_database=True, database_bytes=size + 1
+        )
+        assert process.returncode != 0 and f"expected {size + 1}" in process.stderr
+        assert result is None
+        assert not database.exists()
 
     def test_runaway_model_query_is_stopped_at_its_timeout(self, tmp_path, database):
         process, result = run_runner(tmp_path, database, pred_sql=RUNAWAY_SQL, timeout_s=0.5)
@@ -157,18 +198,16 @@ class ScriptedProvider(FakeSandboxProvider):
         target_path.write_text(self.result_text)
 
 
-async def grade(provider: ScriptedProvider, monkeypatch, database: Path, **config) -> SqliteGrade:
-    monkeypatch.setattr("resources_servers.bird_sql.verifier_sandbox.resolve_provider_config", lambda *_a: provider)
+async def grade(provider: ScriptedProvider, database: Path, **config) -> SqliteGrade:
     return await grade_in_fresh_sandbox(
-        sandbox_provider={"scripted": {}, "default_metadata": {"sandbox-api": "scripted"}},
-        global_config_dict={},
+        provider=provider,
         config=BirdSqlSandboxConfig(**config),
         database=database,
         db_id="TestDB",
         gold_sql="SELECT x FROM t",
         pred_sql="SELECT 1",
         sql_execution_timeout_s=30.0,
-        metadata={"db_id": "TestDB"},
+        metadata={"sandbox-api": "scripted", "db_id": "TestDB"},
     )
 
 
@@ -185,10 +224,10 @@ def uploaded_request(provider: ScriptedProvider) -> tuple[str, dict]:
 
 class TestFreshSandbox:
     @pytest.mark.asyncio
-    async def test_delivers_the_runner_request_and_database_then_stops(self, monkeypatch, database):
+    async def test_delivers_the_runner_request_and_database_then_stops(self, database):
         provider = ScriptedProvider()
 
-        result = await grade(provider, monkeypatch, database)
+        result = await grade(provider, database)
 
         assert result == SqliteGrade(match=True, error=None)
         work_dir, request = uploaded_request(provider)
@@ -197,15 +236,16 @@ class TestFreshSandbox:
         assert spec.files[f"{work_dir}/sandbox_runner.py"] == (SERVER_DIR / "sandbox_runner.py").read_text()
         assert spec.files[f"{work_dir}/eval_utils.py"] == (SERVER_DIR / "eval_utils.py").read_text()
         assert request == {
-            "database": f"{work_dir}/TestDB.sqlite",
+            "database": "TestDB.sqlite",
             "gold_sql": "SELECT x FROM t",
             "pred_sql": "SELECT 1",
             "timeout_s": 30.0,
             "memory_limit_mib": 3072,
             "delete_database": True,
+            "database_bytes": database.stat().st_size,
         }
         assert database_uploads(provider) == [(database, f"{work_dir}/TestDB.sqlite")]
-        assert spec.image == "python:3.13-slim"
+        assert spec.image == "python:3.13.14-slim-trixie"
         assert spec.metadata == {"sandbox-api": "scripted", "db_id": "TestDB"}
         assert spec.ttl_s == 600 + runner_timeout_s(30.0) + 300
         [(command, kwargs)] = provider.commands
@@ -214,14 +254,14 @@ class TestFreshSandbox:
         assert provider.closed == ["fake-1"]
 
     @pytest.mark.asyncio
-    async def test_databases_dir_grades_the_image_copy_without_uploading(self, monkeypatch, database):
+    async def test_databases_dir_grades_the_image_copy_without_uploading(self, database):
         provider = ScriptedProvider()
 
-        await grade(provider, monkeypatch, database, databases_dir="/data/bird")
+        await grade(provider, database, databases_dir="/data/bird")
 
         _, request = uploaded_request(provider)
         assert request["database"] == "/data/bird/TestDB/TestDB.sqlite"
-        assert request["delete_database"] is False
+        assert request["delete_database"] is False and request["database_bytes"] is None
         assert database_uploads(provider) == []
 
     @pytest.mark.parametrize(
@@ -233,11 +273,11 @@ class TestFreshSandbox:
         ids=["error_type", "nonzero_exit"],
     )
     @pytest.mark.asyncio
-    async def test_a_runner_that_does_not_finish_is_inconclusive(self, monkeypatch, database, execution):
+    async def test_a_runner_that_does_not_finish_is_inconclusive(self, database, execution):
         provider = ScriptedProvider(execution=execution)
 
-        with pytest.raises(SandboxGradingError) as raised:
-            await grade(provider, monkeypatch, database)
+        with pytest.raises(SandboxVerificationError) as raised:
+            await grade(provider, database)
 
         assert raised.value.failure_kind == VERIFIER_ERROR
         assert provider.closed == ["fake-1"]
@@ -247,40 +287,40 @@ class TestFreshSandbox:
         ["not json", '{"match": "yes", "error": null}', '{"match": false, "error": "made_up"}', "[]"],
     )
     @pytest.mark.asyncio
-    async def test_an_invalid_result_is_inconclusive(self, monkeypatch, database, result_text):
+    async def test_an_invalid_result_is_inconclusive(self, database, result_text):
         provider = ScriptedProvider(result_text=result_text)
 
-        with pytest.raises(SandboxGradingError) as raised:
-            await grade(provider, monkeypatch, database)
+        with pytest.raises(SandboxVerificationError) as raised:
+            await grade(provider, database)
 
         assert raised.value.failure_kind == VERIFIER_ERROR
         assert provider.closed == ["fake-1"]
 
     @pytest.mark.asyncio
-    async def test_a_sandbox_that_cannot_start_is_provider_unavailable(self, monkeypatch, database):
+    async def test_a_sandbox_that_cannot_start_is_provider_unavailable(self, database):
         provider = ScriptedProvider(create_error=RuntimeError("quota exceeded"))
 
-        with pytest.raises(SandboxGradingError) as raised:
-            await grade(provider, monkeypatch, database)
+        with pytest.raises(SandboxVerificationError) as raised:
+            await grade(provider, database)
 
         assert raised.value.failure_kind == PROVIDER_UNAVAILABLE
         assert provider.commands == []
 
     @pytest.mark.asyncio
-    async def test_a_failed_database_upload_stops_the_sandbox_before_any_query(self, monkeypatch, database):
+    async def test_a_failed_database_upload_stops_the_sandbox_before_any_query(self, database):
         provider = ScriptedProvider(upload_error=OSError("disk full"))
 
-        with pytest.raises(SandboxGradingError) as raised:
-            await grade(provider, monkeypatch, database)
+        with pytest.raises(SandboxVerificationError) as raised:
+            await grade(provider, database)
 
         assert raised.value.failure_kind == PROVIDER_UNAVAILABLE
         assert provider.commands == []
         assert provider.closed == ["fake-1"]
 
     @pytest.mark.asyncio
-    async def test_a_cancelled_grade_still_stops_its_sandbox(self, monkeypatch, database):
+    async def test_a_cancelled_grade_still_stops_its_sandbox(self, database):
         provider = ScriptedProvider(hang=asyncio.Event())
-        task = asyncio.create_task(grade(provider, monkeypatch, database))
+        task = asyncio.create_task(grade(provider, database))
         while not provider.commands:
             await asyncio.sleep(0.01)
 
@@ -289,3 +329,27 @@ class TestFreshSandbox:
             await task
 
         assert provider.closed == ["fake-1"]
+
+
+def test_the_memory_cap_must_stay_below_the_sandbox_memory():
+    with pytest.raises(ValueError, match="memory_limit_mib"):
+        BirdSqlSandboxConfig(resources={"memory_mib": 2048}, memory_limit_mib=2048)
+    assert BirdSqlSandboxConfig(resources={"memory_mib": 4096}, memory_limit_mib=3072).memory_limit_mib == 3072
+
+
+class TestProbe:
+    @pytest.mark.asyncio
+    async def test_reports_the_versions_of_the_image(self, tmp_path):
+        config = BirdSqlSandboxConfig(python=sys.executable, work_dir=str(tmp_path / "work"))
+        versions = await probe_sandbox(provider={"local": {}}, config=config, metadata={})
+        assert versions == {"python": sys.version.split()[0], "sqlite": sqlite3.sqlite_version}
+
+    @pytest.mark.asyncio
+    async def test_a_databases_dir_the_image_lacks_fails_the_probe(self, tmp_path):
+        config = BirdSqlSandboxConfig(
+            python=sys.executable, work_dir=str(tmp_path / "work"), databases_dir=str(tmp_path / "absent")
+        )
+        with pytest.raises(SandboxVerificationError) as raised:
+            await probe_sandbox(provider={"local": {}}, config=config, metadata={})
+        assert raised.value.failure_kind == VERIFIER_ERROR
+        assert "is not a directory in the sandbox" in str(raised.value)

@@ -29,7 +29,7 @@ import json
 import logging
 import shlex
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
@@ -87,6 +87,7 @@ async def run_verification_sandbox(
     parse_result: Callable[[str], T],
     metadata: Mapping[str, str],
     work_dir: str,
+    setup: Callable[[AsyncSandbox, str], Awaitable[None]] | None = None,
 ) -> T:
     """Grade one submission in a fresh sandbox and return the parsed result.
 
@@ -104,6 +105,9 @@ async def run_verification_sandbox(
         metadata: Sandbox metadata; ``config.metadata`` entries win on conflicts.
         work_dir: Absolute directory in the sandbox; each call uses its own subdirectory of it for
             the uploaded files and the result.
+        setup: Called with the started sandbox and the call's own subdirectory after ``files`` are
+            uploaded, to deliver what does not fit in text files, such as a large binary uploaded
+            from a host path. A failure counts as a failed start.
 
     Raises:
         SandboxVerificationError: ``provider_unavailable`` if the sandbox could not start,
@@ -130,8 +134,12 @@ async def run_verification_sandbox(
     sandbox = AsyncSandbox(provider)
     try:
         try:
-            # Covers allocation, readiness and the file upload.
-            await sandbox.start(spec)
+            # Covers allocation, readiness, the file upload and the setup; start_with_setup stops the
+            # sandbox itself when the setup fails.
+            if setup is None:
+                await sandbox.start(spec)
+            else:
+                await sandbox.start_with_setup(spec, lambda started: setup(started, work_dir))
         except ImportError:
             # A missing provider SDK is a deployment error, not an outage; masking it would drop every sample.
             raise

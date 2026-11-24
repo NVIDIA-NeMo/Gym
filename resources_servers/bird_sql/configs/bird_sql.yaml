@@ -15,9 +15,10 @@ bird_sql_resources_server:
       # config that defines the `sandbox` block, e.g. nemo_gym/sandbox/providers/docker/configs/docker.yaml.
       sandbox_provider: sandbox
       sandbox_config:
-        image: python:3.13-slim
+        # Pinned: the image's SQLite decides which SQL functions a query can call.
+        image: python:3.13.14-slim-trixie
         # Each sandbox gets the row's database (up to 600 MB in dev) by upload. Set databases_dir to an image (or a
-        # provider mount) that already holds <db_id>/<db_id>.sqlite to skip the upload.
+        # read-only provider mount) that already holds <db_id>/<db_id>.sqlite to skip the upload.
         databases_dir: null
         resources:
           cpu: 1

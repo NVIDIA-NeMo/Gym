@@ -113,23 +113,28 @@ Text-to-SQL verification should compare query semantics, not query text:
 3. Execute the predicted query against the same database.
 4. Normalize and compare the result sets.
 
-[`bird_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bird_sql) runs SQLite work in a bounded worker thread so blocking database calls do not block the event loop:
+The predicted query is model output, so run it in a sandbox, never in the resources server. [`bird_sql`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/bird_sql) starts a fresh sandbox per grade with `run_verification_sandbox`, delivers a runner and the task database, runs both queries there, and reads back only the verdict:
 
 ```python
-async def execute_sqlite_async(db_path, sql, semaphore, timeout_s):
-    async with semaphore:
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(execute_sqlite, db_path, sql),
-                timeout=timeout_s,
-            )
-        except asyncio.TimeoutError:
-            return None
+request = {"database": db_path.name, "gold_sql": gold_sql, "pred_sql": pred_sql, "timeout_s": timeout_s}
 
-gold_rows = await execute_sqlite_async(db_path, gold_sql, semaphore, timeout_s)
-pred_rows = await execute_sqlite_async(db_path, pred_sql, semaphore, timeout_s)
-match = gold_rows is not None and pred_rows is not None and set(gold_rows) == set(pred_rows)
+async def deliver_database(sandbox, call_dir):
+    await sandbox.upload(db_path, f"{call_dir}/{db_path.name}")
+
+grade = await run_verification_sandbox(
+    provider=provider,
+    config=config,
+    files={"sandbox_runner.py": runner_source, "eval_utils.py": eval_utils_source},
+    request=request,
+    exec_timeout_s=runner_timeout_s,
+    parse_result=parse_grade,
+    metadata=metadata,
+    work_dir="/tmp/bird_sql",
+    setup=deliver_database,
+)
 ```
+
+Inside the sandbox, the runner opens the database read-only and stops each query at its timeout. A sandbox that cannot start or report a result raises `SandboxVerificationError`; mask that row (`evaluation_completed=False`) instead of scoring it 0.
 
 Result normalization is benchmark-specific. Decide whether row order, duplicate rows, floating-point tolerance, column order, and `NULL` values are significant. Record execution errors separately from valid but incorrect results so infrastructure failures are diagnosable.
 

@@ -34,15 +34,17 @@ ensure_bird_sql()
 
 With the default SQLite dialect, every grade starts a fresh sandbox from `sandbox_provider`, runs the gold query
 and then the model's query in it, and stops it. The sandbox runs `sandbox_runner.py` with an uploaded copy of
-`eval_utils.py`, so a query is executed, timed out and compared by the same code as before; this server only reads
-the verdict. A model query that writes (`DROP TABLE`, `ATTACH`, `VACUUM INTO`) changes only that sandbox's copy.
+`eval_utils.py` (through `run_verification_sandbox`), so a query is executed, timed out and compared by the same code
+as before; this server only reads the verdict. The database is opened read-only, so a query that writes
+(`DROP TABLE`) fails as the model's error instead of changing the database later grades read.
 
 - **Provider.** `sandbox_provider: sandbox` names a top-level block from a provider config, for example
   `nemo_gym/sandbox/providers/docker/configs/docker.yaml`; pass it with `--config`. The server refuses to start
   without it.
-- **Image and database.** `sandbox_config.image` (default `python:3.13-slim`) needs Python 3.11+ with `sqlite3`.
-  The row's database is uploaded into each sandbox (dev's largest is about 600 MB). To skip the upload, set
-  `sandbox_config.databases_dir` to a directory of an image, or of a provider mount, that holds
+- **Image and database.** `sandbox_config.image` (default `python:3.13.14-slim-trixie`) needs Python 3.11+ with
+  `sqlite3`; its SQLite version decides which SQL functions a query can call, so keep it pinned. The row's database
+  is uploaded into each sandbox (dev's largest is about 600 MB). To skip the upload, set
+  `sandbox_config.databases_dir` to a directory of an image, or of a read-only provider mount, that holds
   `<db_id>/<db_id>.sqlite`.
 - **Limits.** No network: `provider_options.network_policy` denies all egress on OpenSandbox and E2B; on Docker set
   `network: none` in the provider block. Each query keeps `sql_execution_timeout_s`. `sandbox_config.memory_limit_mib`
@@ -51,7 +53,7 @@ the verdict. A model query that writes (`DROP TABLE`, `ATTACH`, `VACUUM INTO`) c
 - **Failures.** A sandbox that cannot start, run the runner or report a result is retried on a fresh sandbox
   `inconclusive_verification_retries` times (default 2). If every attempt fails, the row is masked with
   `failure_reason: sandbox_error`, `evaluation_completed: false` and `failure_kind` `provider_unavailable` or
-  `verifier_error`. Nothing falls back to running the query on the server.
+  `verifier_error`, and counted in the `sandbox_error` metric. Nothing falls back to running the query on the server.
 
 The Spark and PostgreSQL dialects below are not sandboxed yet: the model's query runs on their engines.
 

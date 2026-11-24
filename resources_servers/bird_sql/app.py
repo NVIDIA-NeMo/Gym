@@ -26,10 +26,13 @@ the row keeps the model's answer, is masked and names ``failure_kind``
 import asyncio
 import logging
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Literal, Optional
 
+from fastapi import FastAPI
 from pydantic import ConfigDict, Field
 
 from nemo_gym.core import (
@@ -44,7 +47,7 @@ from nemo_gym.metrics import (
     compute_subset_metrics,
     highest_k_metrics,
 )
-from nemo_gym.sandbox import resolve_provider_config
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -54,6 +57,7 @@ from nemo_gym.server_runtime import (
     observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.bird_sql.eval_utils import (
     PostgresPool,
     SparkUnavailableError,
@@ -63,9 +67,9 @@ from resources_servers.bird_sql.eval_utils import (
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bird_train
 from resources_servers.bird_sql.verifier_sandbox import (
     BirdSqlSandboxConfig,
-    SandboxGradingError,
     SqliteGrade,
     grade_in_fresh_sandbox,
+    probe_sandbox,
 )
 
 
@@ -204,7 +208,7 @@ class BirdSqlVerifyResponse(BaseVerifyResponse):
     had_codeblock: bool = False
     execution_match: bool = False
     failure_reason: Optional[FailureCode] = None
-    # False when the verifier sandbox never produced a grade; the row is then masked.
+    # False when the verifier could not grade the answer; the row is then masked, and recovery may grade it again.
     evaluation_completed: bool = True
 
 
@@ -225,6 +229,7 @@ _FAILURE_SCORE_NAMES = (
     "gold-sql-error",
     "pred-sql-error",
     "sql_errors",
+    "sandbox_error",
     "unclean",
 )
 
@@ -244,8 +249,13 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
         self._verified_count = 0
         self._failure_counts: Dict[str, int] = {label: 0 for label in _EXECUTION_FAILURE_LABELS.values()}
         if self.config.dialect == "sqlite":
-            # Fail at startup, not on every grade, when the sandbox block is missing or malformed.
-            resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
+            # Resolved once, so a missing or malformed sandbox block fails startup instead of every grade.
+            named_configs = self.server_client.global_config_dict
+            self._sandbox_provider = resolve_provider_config(self.config.sandbox_provider, named_configs)
+            self._sandbox_metadata = {
+                **resolve_provider_metadata(self.config.sandbox_provider, named_configs),
+                "benchmark": "bird_sql",
+            }
         elif self.config.dialect == "spark":
             # Imported here so the default SQLite path needs neither pandas nor pyspark/JVM.
             from resources_servers.bird_sql.setup_bird_spark import ensure_bird_spark
@@ -262,6 +272,38 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             else:
                 check_bird_postgres(self._databases_dir, self.config.postgres_dsn)
             self._postgres = PostgresPool(self.config.postgres_dsn, self.config.max_concurrency)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        if self.config.dialect != "sqlite":
+            return app
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI) -> AsyncIterator[Any]:
+            await self._probe_sandbox()
+            async with parent_lifespan(app) as state:
+                yield state
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    async def _probe_sandbox(self) -> None:
+        """Fail startup, instead of masking every row, when the verifier sandbox cannot grade."""
+        try:
+            versions = await probe_sandbox(
+                provider=self._sandbox_provider, config=self.config.sandbox_config, metadata=self._sandbox_metadata
+            )
+        except SandboxVerificationError as e:
+            raise RuntimeError(
+                f"BIRD verifier sandbox from image {self.config.sandbox_config.image!r} cannot grade: {e}"
+            ) from e
+        logger.info(
+            "BIRD verifier sandbox ready: image %s, Python %s, SQLite %s",
+            self.config.sandbox_config.image,
+            versions.get("python"),
+            versions.get("sqlite"),
+        )
 
     @staticmethod
     def _resolve_dir(path: str) -> Path:
@@ -317,7 +359,6 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             cause: Optional[BaseException] = None,
             *,
             failure_kind: str = VERIFIER_ERROR,
-            evaluation_completed: bool = True,
         ) -> BirdSqlVerifyResponse:
             # The verifier failed, not the model: its query was never measured against the gold
             # result. The row keeps the answer and is masked under a typed kind rather than scored
@@ -332,7 +373,7 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 failure_reason=code,
                 extracted_sql=extracted_sql,
                 had_codeblock=True,
-                evaluation_completed=evaluation_completed,
+                evaluation_completed=False,
             )
 
         if not db_path.is_file():
@@ -368,14 +409,16 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 async with self._semaphore:
                     grade = await self._grade_in_sandbox(body, db_path, extracted_sql)
                 match, err = grade.match, grade.error
-        except SandboxGradingError as e:
+        except SandboxVerificationError as e:
             return _verifier_failure(
                 FailureCode.SANDBOX_ERROR,
                 f"BIRD verifier sandbox failed on db_id={body.db_id!r}",
                 cause=e,
                 failure_kind=e.failure_kind,
-                evaluation_completed=False,
             )
+        except ImportError:
+            # A missing provider SDK is a deployment error: masking it would hide it behind every row.
+            raise
         except SparkUnavailableError as e:
             logger.error("BIRD verify on id=%s db_id=%s: %s", body.id, body.db_id, e)
             return _verifier_failure(FailureCode.SPARK_UNAVAILABLE, "BIRD Spark session is unavailable", cause=e)
@@ -418,23 +461,23 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
     async def _grade_in_sandbox(self, body: BirdSqlVerifyRequest, db_path: Path, pred_sql: str) -> SqliteGrade:
         """Grade on a fresh verifier sandbox, retried on another one up to ``inconclusive_verification_retries`` times.
 
-        Raises the last ``SandboxGradingError`` when every attempt failed; the answer never runs on this server.
+        Retrying is safe because each attempt owns a new sandbox. Raises the last ``SandboxVerificationError`` when
+        every attempt failed; the answer never runs on this server.
         """
         attempts = self.config.inconclusive_verification_retries + 1
         for attempt in range(1, attempts + 1):
             try:
                 return await grade_in_fresh_sandbox(
-                    sandbox_provider=self.config.sandbox_provider,
-                    global_config_dict=self.server_client.global_config_dict,
+                    provider=self._sandbox_provider,
                     config=self.config.sandbox_config,
                     database=db_path,
                     db_id=body.db_id,
                     gold_sql=body.gt_sql,
                     pred_sql=pred_sql,
                     sql_execution_timeout_s=self.config.sql_execution_timeout_s,
-                    metadata={"benchmark": "bird_sql", "db_id": body.db_id[:63]},
+                    metadata={**self._sandbox_metadata, "db_id": body.db_id[:63]},
                 )
-            except SandboxGradingError as e:
+            except SandboxVerificationError as e:
                 logger.warning(
                     "BIRD verifier sandbox failed on id=%s db_id=%s (attempt %d of %d, %s): %s",
                     body.id,
@@ -485,6 +528,7 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             "gold-sql-error": gold_error,
             "pred-sql-error": pred_error,
             "sql_errors": gold_error or pred_error,
+            "sandbox_error": reason == FailureCode.SANDBOX_ERROR,
             # Clean = ran to a verdict: correct, or a well-formed query with a wrong answer.
             "unclean": reason not in (FailureCode.NONE, FailureCode.RESULT_MISMATCH),
         }

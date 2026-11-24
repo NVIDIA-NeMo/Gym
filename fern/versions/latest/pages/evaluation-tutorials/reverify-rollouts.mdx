@@ -146,6 +146,7 @@ You don't have to write a resources-server-only config. You can point `--config`
 ```bash
 gym eval reverify \
   --config benchmarks/birdbench/config.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
   --model-type vllm_model \
   "++birdbench_bird_sql_resources_server.resources_servers.bird_sql.sql_execution_timeout_s=60" \
   --inputs results/rollouts_materialized_inputs.jsonl \
