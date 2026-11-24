@@ -72,8 +72,8 @@ def _make_server(**config_overrides) -> CompetitiveCodingChallengesResourcesServ
         config=config,
         server_client=MagicMock(spec=ServerClient),
     )
-    # Skip global-config resolution: the `local` provider exists, so setup_webserver's startup check passes.
-    server._sandbox_target = ({"local": {}}, {"nemo_gym_server": "competitive_coding_challenges"})
+    # Skip global-config resolution: the `docker` provider exists, so setup_webserver's startup check passes.
+    server._sandbox_target = ({"docker": {}}, {"nemo_gym_server": "competitive_coding_challenges"})
     return server
 
 
@@ -684,6 +684,13 @@ class TestSandboxPath:
         server = _make_server(sandbox_provider={"opensandboxx": {}})
         server._sandbox_target = None
         with pytest.raises(ValueError, match="Unknown sandbox provider"):
+            server.setup_webserver()
+
+    def test_setup_refuses_the_local_provider(self) -> None:
+        # The local provider runs commands on the server's host, which is exactly what this server must not do.
+        server = _make_server()
+        server._sandbox_target = ({"local": {}}, {})
+        with pytest.raises(ValueError, match="runs submissions only in a sandbox"):
             server.setup_webserver()
 
     def test_setup_fails_without_a_provider_config(self, monkeypatch) -> None:

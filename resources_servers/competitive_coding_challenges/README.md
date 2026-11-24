@@ -162,9 +162,10 @@ Where each part runs:
    once. Time limits are wall-clock, so `test_batch_size` may not exceed
    `sandbox_config.resources.cpu` (8 by default); Communication tasks run a manager and the
    submission per test, so about half the CPUs keeps them from competing. The default
-   `sandbox_config.provider_options.network_policy` is an OpenSandbox option that denies all
-   egress. Other providers need their own setting (Docker's `network: none`, as above); Docker, Enroot
-   and Apptainer ignore the key, and Daytona, E2B and OpenShell reject it, so remove it for them.
+   `sandbox_config.provider_options.network_policy` denies all egress on OpenSandbox and E2B.
+   Docker, Enroot, Apptainer and ECS ignore the key, so they need their own setting (Docker's
+   `network: none`, as above; Enroot cannot cut the network). Daytona, OpenShell and bwrap reject it,
+   so remove it for them. The `local` provider is refused: it would run submissions on the host.
 
    The sandbox must let `run.sh` raise the stack limit (`ulimit -s unlimited`): its hard
    `RLIMIT_STACK` must be unlimited, or the process needs `CAP_SYS_RESOURCE`. Otherwise

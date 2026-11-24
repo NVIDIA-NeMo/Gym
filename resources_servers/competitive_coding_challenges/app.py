@@ -363,7 +363,13 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         # Fail at startup: a missing or unknown provider would otherwise mask every sample as a verifier error.
         provider, _ = self._resolve_sandbox_target()
-        get_provider_class(next(iter(provider)))
+        provider_name = next(iter(provider))
+        get_provider_class(provider_name)
+        if provider_name == "local":
+            raise ValueError(
+                "competitive_coding_challenges runs submissions only in a sandbox, and the `local` provider runs "
+                "them on the server's host; use a container provider such as opensandbox, docker or enroot"
+            )
 
         print(
             f"Initializing CompetitiveCodingChallenges evaluator with config: {self.config.model_dump_json(indent=2)}"
