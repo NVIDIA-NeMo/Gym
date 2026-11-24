@@ -1,19 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Route complete mixed-harness benchmark episodes to their existing environments."""
+"""partner_if's Environment Server: one dataset and one score over tasks that run on different harnesses.
+
+It runs the text tasks itself, as ``single_agent_turn_legacy`` does, and sends every other task to the Environment
+Server of its task family, which owns that episode's sessions, sandboxes and grading.
+"""
 
 import hashlib
 import json
 import math
 from collections.abc import Iterable, Mapping
+from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import Field, PrivateAttr, model_validator
 
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, EnvironmentServerRef, ResourcesServerRef
-from nemo_gym.core import FailureReportRow, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from environment_servers.single_agent_turn_legacy.app import (
+    SingleAgentTurnLegacyEnvironmentServer,
+    SingleAgentTurnLegacyEnvironmentServerConfig,
+)
+from nemo_gym.config import EnvironmentServerRef
+from nemo_gym.core import FailureReportRow, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
     ToolCallObservation,
@@ -21,6 +29,9 @@ from nemo_gym.trajectory import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
+
+# Environment Servers whose /run takes a flat row, the only kind this server sends.
+_FLAT_ROW_ENVIRONMENT_SERVERS = frozenset({"single_agent_turn_legacy", "legacy_agent"})
 
 # Headers that describe a connection or a body, not the payload, as in the legacy_agent environment relay. Each hop
 # frames its own, and `cookie` is carried separately so aiohttp does not send it twice.
@@ -151,116 +162,134 @@ def _recorded_context_result(body: bytes, payload: dict, *, agent_name: str) -> 
     return json.dumps(result, ensure_ascii=False).encode()
 
 
-class PartnerIFDispatcherConfig(BaseResponsesAPIAgentConfig):
-    """Host-selected task destinations; request payloads cannot override these."""
+def _task_id(payload: Any) -> str:
+    try:
+        task_id = payload["verifier_metadata"]["partner_if"]["task_id"]
+    except (KeyError, TypeError):
+        raise HTTPException(422, "Expected verifier_metadata.partner_if.task_id") from None
+    if not isinstance(task_id, str):
+        raise HTTPException(422, "Expected verifier_metadata.partner_if.task_id") from None
+    return task_id
+
+
+class PartnerIFEnvironmentServerConfig(SingleAgentTurnLegacyEnvironmentServerConfig):
+    """The text tasks' pairing, plus the Environment Server of every task.
+
+    `task_routes` names the Environment Server of each task ID. A task routed to this server runs here, with
+    `agent_server` and `resources_server`; any other runs on the server it names. A task with no route is refused,
+    so a new release cannot run a task on the wrong harness. Request payloads cannot change a route.
+    `resources_server` also aggregates the metrics of every task, so the benchmark has one score.
+    """
 
     task_routes: dict[str, EnvironmentServerRef] = Field(min_length=1)
-    # Gym aggregates this dispatcher's rows here, so the benchmark scorer computes the metrics.
-    resources_server: ResourcesServerRef
 
     @model_validator(mode="after")
-    def validate_routes(self) -> "PartnerIFDispatcherConfig":
+    def validate_routes(self) -> "PartnerIFEnvironmentServerConfig":
         if any(not task.strip() for task in self.task_routes):
             raise ValueError("Task IDs must not be empty")
-        if any(route.name == self.name for route in self.task_routes.values()):
-            raise ValueError("Dispatcher cannot route to itself")
         return self
 
 
-class PartnerIFDispatcher(SimpleResponsesAPIAgent):
-    """Dispatch only; existing environments own sessions, execution and grading."""
+class PartnerIFEnvironmentServer(SingleAgentTurnLegacyEnvironmentServer):
+    """Run the text tasks; send each other task's flat row to its task family's Environment Server."""
 
-    config: PartnerIFDispatcherConfig
+    config: PartnerIFEnvironmentServerConfig
+    # Routed Environment Server name -> the agent it binds, which the routed row must name.
     _execution_agents: dict[str, str] = PrivateAttr(default_factory=dict)
     _recorded_context_routes: set[str] = PrivateAttr(default_factory=set)
 
     @model_validator(mode="after")
-    def validate_destinations(self) -> "PartnerIFDispatcher":
+    def validate_destinations(self) -> "PartnerIFEnvironmentServer":
         for route in self.config.task_routes.values():
+            if route.name == self.config.name:
+                continue
             destination = self.server_client.global_config_dict.get(route.name, {})
             environments = destination.get("environment_servers", {}) if isinstance(destination, Mapping) else {}
             if len(environments) != 1:
                 raise ValueError(f"Missing or ambiguous environment destination: {route.name}")
             implementation, environment = next(iter(environments.items()))
-            agent_name = environment.get("agent_server", {}).get("name")
+            if implementation not in _FLAT_ROW_ENVIRONMENT_SERVERS:
+                # One hop, to a server that takes the flat row as it is: never another partner_if server.
+                raise ValueError(
+                    f"Route {route.name} is a {implementation} Environment Server; a route must name one of "
+                    f"{sorted(_FLAT_ROW_ENVIRONMENT_SERVERS)}"
+                )
+            environment = environment if isinstance(environment, Mapping) else {}
+            agent_name = (environment.get("agent_server") or {}).get("name")
             if not isinstance(agent_name, str) or not agent_name:
                 raise ValueError(f"Environment must bind one execution agent: {route.name}")
-            if agent_name == self.config.name:
-                raise ValueError(f"Dispatcher cannot route back to itself through {route.name}")
             self._execution_agents[route.name] = agent_name
             agent = self.server_client.global_config_dict.get(agent_name, {})
             implementations = agent.get("responses_api_agents", {}) if isinstance(agent, Mapping) else {}
-            gymnasium = implementations.get("gymnasium_agent", {})
+            gymnasium = implementations.get("gymnasium_agent")
             if implementation == "legacy_agent" and isinstance(gymnasium, Mapping):
-                resources_name = gymnasium.get("resources_server", {}).get("name")
+                resources_name = (gymnasium.get("resources_server") or {}).get("name")
                 resources = self.server_client.global_config_dict.get(resources_name, {}) if resources_name else {}
                 block = (
-                    resources.get("resources_servers", {}).get("partner_if", {})
+                    (resources.get("resources_servers") or {}).get("partner_if")
                     if isinstance(resources, Mapping)
-                    else {}
+                    else None
                 )
-                if block.get("entrypoint") == "recorded_context_app.py":
+                if isinstance(block, Mapping) and block.get("entrypoint") == "recorded_context_app.py":
                     self._recorded_context_routes.add(route.name)
         return self
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
-        app.post("/run")(self.run)
+        # As in single_agent_turn_legacy: the episodes run here checkpoint, and their cleanups finish at shutdown.
+        self.setup_environment_checkpoint(app)
+        self.setup_shutdown_sweep(app)
+        app.post("/run")(self.run_task)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
-    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        raise NotImplementedError("Use /run for complete benchmark episodes")
+    async def run_task(self, request: Request) -> Response:
+        """Run a text task here or send its row to the routed server, keeping row fields and that server's failures.
 
-    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Proxy aggregate_metrics to the resources server that owns the benchmark metrics."""
-        response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/aggregate_metrics",
-            json=body,
-        )
-        await raise_for_status(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
-
-    async def run(self, request: Request) -> Response:
-        """Preserve row fields and downstream HTTP failures."""
+        Only flat rows are accepted: the task ID routes them, and the routed servers take flat rows.
+        """
         raw = await request.body()
         try:
             payload = json.loads(raw)
-            task_id = payload["verifier_metadata"]["partner_if"]["task_id"]
-        except (ValueError, KeyError, TypeError):
-            raise HTTPException(422, "Expected verifier_metadata.partner_if.task_id") from None
-        if not isinstance(task_id, str) or task_id not in self.config.task_routes:
+        except ValueError:
+            raise HTTPException(422, "Expected a JSON row") from None
+        task_id = _task_id(payload)
+        route = self.config.task_routes.get(task_id)
+        if route is None:
             raise HTTPException(422, "Unknown benchmark task ID")
-        route = self.config.task_routes[task_id]
-        # The native session environment validates these two host-routing fields.
-        # Only adapt the address; preserve all actor data, native extras and IDs.
-        # Gym's collector restores its own agent_ref/task_source on returned rows.
+        if route.name == self.config.name:
+            return JSONResponse(await self.run_legacy(payload))
+        return await self._relay(route.name, payload, request)
+
+    async def _relay(self, route_name: str, payload: dict, request: Request) -> Response:
+        agent_name = self._execution_agents[route_name]
+        # The routed server validates these two routing fields against its own pairing, so only they are adapted;
+        # actor data, row extras and identity pass unchanged. Collection restores its own values on the result.
         if "agent_ref" in payload:
             agent_ref = payload["agent_ref"]
-            if not isinstance(agent_ref, dict) or agent_ref.get("name") != self.config.name:
-                raise HTTPException(422, "Request must be addressed to this dispatcher")
-            payload["agent_ref"] = {"name": self._execution_agents[route.name]}
+            if not isinstance(agent_ref, dict) or agent_ref.get("name") != self.config.agent_server.name:
+                raise HTTPException(422, "Request must be addressed to this environment's agent")
+            payload["agent_ref"] = {"name": agent_name}
         if "task_source" in payload:
-            if payload["task_source"] != self.config.name:
+            bound = (self.config.resources_server.name, self.config.agent_server.name, self.config.name)
+            if payload["task_source"] not in bound:
                 raise HTTPException(422, "Unexpected collection task_source")
-            payload["task_source"] = self._execution_agents[route.name]
-        if route.name in self._recorded_context_routes:
+            payload["task_source"] = agent_name
+        if route_name in self._recorded_context_routes:
             # The stock agent excludes some collector fields when serializing /reset and /step.
             # Keep a host-owned reporting binding in ordinary extras, outside the actor parameters.
             payload["recorded_context_run_binding"] = _recorded_context_run_binding(payload)
-        raw = json.dumps(payload, ensure_ascii=False).encode()
         upstream = await self.server_client.post(
-            server_name=route.name,
+            server_name=route_name,
             url_path="/run",
-            data=raw,
+            data=json.dumps(payload, ensure_ascii=False).encode(),
             headers=dict(_relayed_headers(request.headers.items())),
             cookies=request.cookies,
         )
         body = await upstream.read()
         if upstream.status == 200:
-            if route.name in self._recorded_context_routes:
-                body = _recorded_context_result(body, payload, agent_name=self._execution_agents[route.name])
+            if route_name in self._recorded_context_routes:
+                body = _recorded_context_result(body, payload, agent_name=agent_name)
             else:
                 body = _with_reply_tool_observations(body)
         response = Response(content=body, status_code=upstream.status)
@@ -273,6 +302,6 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
 
 
 if __name__ == "__main__":
-    PartnerIFDispatcher.run_webserver()
+    PartnerIFEnvironmentServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    app = PartnerIFDispatcher.run_webserver()
+    app = PartnerIFEnvironmentServer.run_webserver()  # noqa: F401

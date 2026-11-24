@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [project]
-name = "gym-responses-api-agents-partner-if-dispatcher"
+name = "gym-environment-servers-partner-if"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [

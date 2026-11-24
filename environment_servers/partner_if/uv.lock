@@ -1046,7 +1046,7 @@ wheels = [
 ]
 
 [[package]]
-name = "gym-responses-api-agents-partner-if-dispatcher"
+name = "gym-environment-servers-partner-if"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [

@@ -67,7 +67,7 @@ def test_prime_uses_phase_limits_without_an_outer_episode_deadline():
 
 def test_prime_admission_and_agent_capacity_cover_all_dataset_repeats():
     config = yaml.safe_load((Path(__file__).resolve().parents[3] / "benchmarks/partner_if/config.yaml").read_text())
-    datasets = config["partner_if_dispatcher"]["responses_api_agents"]["partner_if_dispatcher"]["datasets"]
+    datasets = config["partner_if_simple_agent"]["responses_api_agents"]["simple_agent"]["datasets"]
     repeats = max(dataset["num_repeats"] for dataset in datasets)
     environment = config["partner_if_prime_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
     agent = config["partner_if_prime_agent"]["responses_api_agents"]["prime_agent"]

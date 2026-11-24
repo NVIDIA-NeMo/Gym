@@ -4,7 +4,7 @@ name: partner_if
 version: 0.4.0
 experimental: true
 kind: benchmark
-integration_profile: external-agent-loop
+integration_profile: custom-gym-verifier
 domain: instruction_following
 description: Internal instruction-following tasks as text, tool, SWE and bounded recorded-context
   Gymnasium episodes. Stock gymnasium_agent with PartnerIF Resources simulation and shared
@@ -20,7 +20,8 @@ reward:
   higher_is_better: true
 determinism: stochastic
 resources_server: partner_if
-agent_server: partner_if_dispatcher
+agent_server: simple_agent
+model_server: partner_if_policy_model
 sandbox: opensandbox
 datasets:
 - name: partner_if

@@ -37,9 +37,10 @@ The full-release route-coverage test stays enabled as a readiness gate.
   runs the SWE tasks; Prime Agent 0.7.0's depth-one child session runs the repository/report task; and
   Gym's stock `gymnasium_agent` runs the recorded-context ordering task. The SWE scores depend on
   OpenCode 1.17.11: the harness and its version are part of what they measure.
-- **Routing:** `partner_if_dispatcher` routes each task to its environment, so supported tasks share one
-  dataset and one score. Gym aggregates metrics per environment server, so without it the six task
-  families would have separate scores.
+- **Routing:** the [partner_if Environment Server](../../environment_servers/partner_if/README.md)
+  (`partner_if_environment_server`) runs the text tasks and sends every other task to its own Environment Server,
+  by task ID (`task_routes`), so all tasks share one dataset and one score. Gym aggregates metrics per
+  Environment Server, so with a server per task family they would have separate scores.
 - **Text tasks:** one reply from the policy model. Some rows include recorded tool calls and results, or ask
   for the next tool call. No tools run, and the grader sees any tool call only as part of the reply.
 - **Search-tool tasks:** up to 30 steps with the row's simulated search and document tools.
@@ -182,7 +183,7 @@ judge's calls read them there.
 
 ## Recorded-context ordering profile: pif_029
 
-`config.yaml` includes `config_recorded_context.yaml` and routes `pif_029` through
+`config.yaml` includes `config_recorded_context.yaml` and routes `pif_029` to
 Gym's stock `legacy_agent` relay and `gymnasium_agent`. The existing PartnerIF
 Resources component implements Gymnasium `/reset`, `/step` and optional `/close`;
 it owns the frozen tool simulator, Explore, shared semantic grading and the total
@@ -196,7 +197,7 @@ response cannot establish correct ordering.
 
 Limits remain six parent turns and eight total policy calls including Explore,
 with temperature 0.7, top_p 0.95 and 8,192 tokens per call. The other task routes
-and their sampling are unchanged. The dispatcher lifts Resources' terminal report
+and their sampling are unchanged. The partner_if Environment Server lifts Resources' terminal report
 into the collector row, retaining terminal tool outputs, all fresh usage and grades.
 
 `prepare.py` pins the published private **2.1.8** registry release. It identifies

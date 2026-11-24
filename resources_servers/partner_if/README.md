@@ -187,12 +187,12 @@ Running the sandboxed mode outside `gym` needs Gym's `sandbox` extra (`uv sync -
   optional `/close` handles cancellation. This implementation owns simulator state,
   Explore, shared semantic judging, six parent turns and an eight-call policy budget.
   It stops at the first decisive ordering result and masks technical exclusions.
-  The dispatcher retains its canonical terminal report, including terminal tool outputs,
+  The partner_if Environment Server retains its canonical terminal report, including terminal tool outputs,
   full fresh usage and verifier history. There is no private review endpoint or disk
   receipt protocol. Sessions are in memory and interrupted process-level runs restart.
   See `benchmarks/partner_if/recorded-context.md` for inputs, scoring and release status.
-- `responses_api_agents/partner_if_dispatcher` routes each task of a mixed benchmark to
-  its environment; its config runs both examples below under one score.
+- `environment_servers/partner_if` runs the text tasks of a mixed benchmark and sends each
+  other task to its environment; its config runs both examples below under one score.
 
 Relative paths in these configs resolve under `--search-dir` / `NEMO_GYM_EXTRA_ROOTS`
 first, then the working directory, then the Gym root.

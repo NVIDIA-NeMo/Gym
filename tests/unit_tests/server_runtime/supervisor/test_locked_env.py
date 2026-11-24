@@ -462,7 +462,7 @@ def test_environment_servers_retain_locked_local_gym_dependencies() -> None:
     [
         ("resources_servers/genrm_eval", "dev", "json-repair==0.30.3", "0.30.3"),
         ("resources_servers/partner_if", "sandbox", "markdown-it-py>=3,<4", "3"),
-        ("responses_api_agents/partner_if_dispatcher", "dev", None, None),
+        ("environment_servers/partner_if", "dev", None, None),
     ],
 )
 def test_imported_components_retain_managed_dependency_contracts(component, extra, dependency, version):

@@ -39,7 +39,7 @@ Stock Gymnasium omits terminal tool output from its own response and counts only
 parent usage. Resources therefore supplies a canonical flat report under terminal
 `info.partner_if_recorded_context_result`, including terminal results, parent and
 Explore usage, original task/actor binding, grading fields and verifier history.
-The existing dispatcher normalizes only a host-configured recorded-context route,
+The partner_if Environment Server normalizes only a host-configured recorded-context route,
 validates that report and retains transport failures/cleanup warnings. Collector
 IDs and attempts travel in host-owned reporting metadata outside the actor input,
 so an older report cannot be rebound to another capture or attempt. It does

@@ -24,6 +24,7 @@ from pydantic import PrivateAttr
 
 from benchmarks.partner_if.tests.fixture_data import BUNDLE, PROBE, SOURCE, TASK
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
+from environment_servers.partner_if.app import PartnerIFEnvironmentServer, PartnerIFEnvironmentServerConfig
 from nemo_gym.client import ServerClient, get_response_json, raise_boundary_failure
 from nemo_gym.config import BaseServerConfig
 from resources_servers.gymnasium import GymnasiumServer
@@ -36,7 +37,6 @@ from resources_servers.partner_if.recorded_context_app import (
     RecordedContextResourcesServerConfig,
 )
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig
-from responses_api_agents.partner_if_dispatcher.app import PartnerIFDispatcher, PartnerIFDispatcherConfig
 
 
 RESULT_KEY = "partner_if_recorded_context_result"
@@ -418,11 +418,11 @@ async def test_stock_agent_stops_at_the_resources_decision_and_preserves_the_fro
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("passed", [False, True])
-async def test_dispatcher_lifts_only_the_host_selected_resources_grade_and_canonical_response(passed):
+async def test_environment_server_lifts_only_the_host_selected_resources_grade_and_canonical_response(passed):
     pair = RecordedContextPair([response(probe() if passed else prescription())], fixture_passed=passed)
     row = copy.deepcopy(TASK) | {
-        "agent_ref": {"name": "dispatcher"},
-        "task_source": "dispatcher",
+        "agent_ref": {"name": "text-agent"},
+        "task_source": "text-agent",
         "_ng_task_index": 27,
         "_ng_rollout_index": 3,
         "_ng_rollout_id": "explicit-public-rollout",
@@ -430,19 +430,21 @@ async def test_dispatcher_lifts_only_the_host_selected_resources_grade_and_canon
         "_ng_skip_token_capture": True,
     }
     async with pair.running():
-        dispatcher = PartnerIFDispatcher(
-            config=PartnerIFDispatcherConfig(
-                name="dispatcher",
+        router = PartnerIFEnvironmentServer(
+            config=PartnerIFEnvironmentServerConfig(
+                name="partner_if_environment",
                 host="127.0.0.1",
                 port=1,
                 entrypoint="app.py",
                 task_routes={"pif_029": {"type": "environment_servers", "name": "environment"}},
                 resources_server={"type": "resources_servers", "name": RESOURCE_NAME},
+                agent_server={"type": "responses_api_agents", "name": "text-agent"},
+                tool_servers=[],
             ),
             server_client=pair.client,
         )
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=dispatcher.setup_webserver()), base_url="http://dispatcher"
+            transport=httpx.ASGITransport(app=router.setup_webserver()), base_url="http://partner-if"
         ) as client:
             response_row = await client.post("/run", json=row)
     assert response_row.status_code == 200, response_row.text
