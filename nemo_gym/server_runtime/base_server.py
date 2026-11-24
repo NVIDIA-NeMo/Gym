@@ -498,6 +498,7 @@ class SimpleServer(BaseServer):
         for outcome in outcomes:
             if isinstance(outcome, BaseException):
                 logger.error("Sandboxes of %s were not all stopped at shutdown: %r", self.config.name, outcome)
+
     # Sign session cookies and MCP session tokens with a secret made for the run (run_session_secret), not with the
     # public key get_session_middleware_key() derives from the server's class and name: for a server whose routes code
     # it does not trust can call, such as code in a sandbox it lends. mcp_bearer_token turns it on as well.
