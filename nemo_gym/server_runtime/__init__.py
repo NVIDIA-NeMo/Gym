@@ -133,6 +133,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
+    from nemo_gym.server_runtime.sandbox_borrow import BorrowedSandbox, BorrowedSandboxError, borrow
     from nemo_gym.server_runtime.sandbox_lending import SHUTDOWN_STOP_CONCURRENCY, STOP_TIMEOUT_S, LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnAgentContext,
@@ -204,6 +205,9 @@ _PUBLIC_API = {
     "LentSandboxes": "sandbox_lending",
     "MCPToolAccess": "tool_access",
     "OwnedSandboxes": "owned_sandboxes",
+    "BorrowedSandbox": "sandbox_borrow",
+    "BorrowedSandboxError": "sandbox_borrow",
+    "borrow": "sandbox_borrow",
     "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",

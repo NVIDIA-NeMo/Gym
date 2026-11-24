@@ -4,15 +4,20 @@
 
 import dataclasses
 from collections.abc import Mapping
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import Field
 
-from nemo_gym.sandbox import SandboxConfig, SandboxSpec, cpu_cap_env
+from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.providers.base import SandboxSpec
+from nemo_gym.sandbox.utils import cpu_cap_env
 
 
 class AgentSandboxConfig(SandboxConfig):
     """``SandboxConfig`` for the sandbox an agent starts when its environment lends none.
+
+    A lent sandbox is borrowed instead, with ``borrow()`` from ``nemo_gym.server_runtime``; an agent starts its own only
+    when nothing is lent, and owns and stops it then.
 
     A server takes the image, working directory and files of a task sandbox from its task. An agent's own sandbox has
     no task to take them from, so they are configured here, with the keys agent recipes set today.
@@ -25,17 +30,18 @@ class AgentSandboxConfig(SandboxConfig):
         user: The user commands run as, when not the image's default.
         ports: The ports the sandbox exposes.
         derive_cpu_env: Cap tool parallelism to ``resources.cpu`` in the sandbox's environment. Off by default, as
-            in most agents today; the two that cap it set it.
+            in most agents today. The OpenCode and Pi sandboxed agents turn the caps on in their code rather than in
+            a recipe, so a subclass of this config for either defaults it to ``True``.
 
     A recipe's other ``SandboxSpec`` keys, such as ``sidecars``, are refused here; an agent that moves onto this
     config with recipes that set them warns about them for one release first.
     """
 
-    image: Optional[str] = None
-    workdir: Optional[str] = None
+    image: str | None = None
+    workdir: str | None = None
     files: dict[str, str] = Field(default_factory=dict)
-    entrypoint: Optional[list[str]] = None
-    user: Optional[str | int] = None
+    entrypoint: list[str] | None = None
+    user: str | int | None = None
     ports: list[int] = Field(default_factory=list)
     derive_cpu_env: bool = False
 
@@ -43,12 +49,12 @@ class AgentSandboxConfig(SandboxConfig):
         self,
         sandbox_provider: str | Mapping[str, Any],
         *,
-        image: Optional[str] = None,
-        workdir: Optional[str] = None,
-        metadata: Optional[Mapping[str, str]] = None,
-        files: Optional[Mapping[str, str | bytes]] = None,
-        named_configs: Optional[Mapping[str, Any]] = None,
-        network_options: Optional[Mapping[str, Any]] = None,
+        image: str | None = None,
+        workdir: str | None = None,
+        metadata: Mapping[str, str] | None = None,
+        files: Mapping[str, str | bytes] | None = None,
+        named_configs: Mapping[str, Any] | None = None,
+        network_options: Mapping[str, Any] | None = None,
     ) -> SandboxSpec:
         """The spec of the agent's own sandbox, with this config's image, workdir, files, entrypoint, user and ports.
 

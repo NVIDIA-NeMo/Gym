@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""An agent borrows a lent sandbox: it works in it as the access says, cannot stop it, and releases its client."""
+"""A borrower uses a lent sandbox: it works in it as the access says, cannot stop it, and releases its client."""
 
 from typing import Any
 from unittest.mock import MagicMock
@@ -8,10 +8,13 @@ from unittest.mock import MagicMock
 import anyio
 import pytest
 
-from nemo_gym.agents.utils import AgentSandboxConfig, BorrowedSandbox, BorrowedSandboxError, borrow
-from nemo_gym.agents.utils import sandbox_borrow as borrow_module
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxSpec
-from nemo_gym.server_runtime import OwnedSandboxes
+from nemo_gym.agents.utils.sandbox_session import SandboxSession
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox.api import SandboxPty
+from nemo_gym.sandbox.providers.base import SandboxSpec
+from nemo_gym.server_runtime import sandbox_borrow as borrow_module
+from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
+from nemo_gym.server_runtime.sandbox_borrow import BorrowedSandbox, BorrowedSandboxError, borrow
 from tests.unit_tests.server_runtime.test_checkpoint_sandbox import FakeSnapshotProvider
 
 
@@ -26,6 +29,10 @@ class _RecordingProvider(FakeSnapshotProvider):
     async def exec(self, handle: Any, command: str, **kwargs: Any) -> Any:
         self.commands.append({"command": command, **kwargs})
         return await super().exec(handle, command, **kwargs)
+
+    async def exec_with_background_services(self, handle: Any, command: str, **kwargs: Any) -> Any:
+        # A provider's service-preserving exec, which reads no sandbox default: only what the call passes.
+        return await self.exec(handle, command, **kwargs)
 
     async def aclose(self) -> None:
         self.client_closed = True
@@ -69,11 +76,12 @@ async def test_a_borrower_runs_commands_as_the_access_says(provider) -> None:
     assert command["env"] == {"TOKEN": "lent", "MODE": "command"}
 
 
-async def test_a_borrower_cannot_stop_the_sandbox() -> None:
+@pytest.mark.parametrize("stop", [lambda sandbox: sandbox.stop(), lambda sandbox: sandbox.stop(timeout_s=5)])
+async def test_a_borrower_cannot_stop_the_sandbox(stop) -> None:
     sandbox = BorrowedSandbox(FakeSnapshotProvider(), SandboxSpec(), owns_provider=False)
 
     with pytest.raises(BorrowedSandboxError, match="only the server that lent it may stop it"):
-        await sandbox.stop()
+        await stop(sandbox)
 
 
 async def test_leaving_the_block_releases_the_client_and_keeps_the_sandbox_running(provider) -> None:
@@ -106,61 +114,6 @@ async def test_a_failed_connect_releases_the_client(provider) -> None:
 
     (client,) = provider.borrower_clients
     assert client.client_closed
-
-
-class TestAgentSandboxConfig:
-    def test_the_keys_agent_recipes_set_today_load(self) -> None:
-        config = AgentSandboxConfig.model_validate(
-            {
-                "image": "harness:1",
-                "workdir": "/app",
-                "files": {"/app/AGENTS.md": "be brief"},
-                "entrypoint": ["sleep", "infinity"],
-                "derive_cpu_env": False,
-                "ttl_s": 3600,
-                "ready_timeout_s": 300,
-                "resources": {"cpu": 2},
-                "env": {"A": "1"},
-                "metadata": {"team": "gym"},
-                "provider_options": {"volumes": []},
-                "network": "inherit",
-            }
-        )
-
-        assert (config.image, config.workdir, config.entrypoint) == ("harness:1", "/app", ["sleep", "infinity"])
-
-    def test_an_unknown_key_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="extra"):
-            AgentSandboxConfig.model_validate({"imagee": "harness:1"})
-
-    def test_the_spec_carries_the_agents_own_image_files_and_entrypoint(self) -> None:
-        config = AgentSandboxConfig(
-            image="harness:1",
-            workdir="/app",
-            files={"/app/a": "a"},
-            entrypoint=["sleep", "infinity"],
-            resources={"cpu": 2},
-            env={"OMP_NUM_THREADS": "8"},
-            derive_cpu_env=True,
-        )
-
-        spec = config.spec({"fake": {}}, files={"/app/b": "b"})
-
-        assert (spec.image, spec.workdir, spec.entrypoint) == ("harness:1", "/app", ["sleep", "infinity"])
-        assert spec.files == {"/app/a": "a", "/app/b": "b"}
-        assert spec.env["OMP_NUM_THREADS"] == "8", "the recipe's own value wins over the CPU caps"
-        assert spec.env["GOMAXPROCS"] == "2"
-
-    def test_the_cpu_caps_are_off_unless_asked_for(self) -> None:
-        # Most agents set no CPU caps today, so moving onto this config must not add them.
-        spec = AgentSandboxConfig(resources={"cpu": 2}).spec({"fake": {}})
-
-        assert spec.env == {}
-
-    def test_the_user_and_ports_reach_the_spec(self) -> None:
-        spec = AgentSandboxConfig(user="agent", ports=[8080]).spec({"fake": {}})
-
-        assert (spec.user, list(spec.ports)) == ("agent", [8080])
 
 
 class _SlowClient(_RecordingProvider):
@@ -220,6 +173,7 @@ class TestReleaseUnderCancellation:
 @pytest.mark.parametrize(
     ("operation", "verb"),
     [
+        (lambda sandbox: sandbox.stop(timeout_s=5), "stop"),
         (lambda sandbox: sandbox.start(), "start"),
         (lambda sandbox: sandbox.start_with_setup(None, lambda _: None), "start"),
         (lambda sandbox: sandbox.pause(), "pause"),
@@ -279,8 +233,6 @@ async def test_a_borrower_passes_its_access_on_to_borrow_again(provider) -> None
 
 
 async def test_a_one_shot_terminal_command_gets_the_access_env_under_its_own(provider, monkeypatch) -> None:
-    from nemo_gym.sandbox import SandboxPty
-
     sandbox = await borrow(await _lend(provider, env={"TOKEN": "lent", "MODE": "lent"}), named_configs={})
     opened: list[dict[str, Any]] = []
 
@@ -293,3 +245,35 @@ async def test_a_one_shot_terminal_command_gets_the_access_env_under_its_own(pro
         await sandbox.pty.exec("make test", env={"MODE": "command"})
 
     assert opened[0]["env"] == {"TOKEN": "lent", "MODE": "command"}
+
+
+async def test_a_release_with_a_limit_releases_the_client_and_keeps_the_sandbox_running(provider) -> None:
+    # AsyncSandbox.disconnect takes timeout_s, and so does every caller that releases a sandbox it does not own.
+    sandbox = await borrow(await _lend(provider), named_configs={})
+
+    await sandbox.disconnect(timeout_s=5)
+
+    (client,) = provider.borrower_clients
+    assert client.client_closed
+    assert [box["state"] for box in provider.boxes.values()] == ["running"]
+
+
+async def test_a_sandbox_session_releases_a_borrowed_sandbox(provider) -> None:
+    # The harness wrapper every sandboxed agent closes through releases a sandbox it does not own with
+    # disconnect(timeout_s=...).
+    sandbox = await borrow(await _lend(provider), named_configs={})
+    session = SandboxSession(sandbox=sandbox, session_dir="/repo/.session", workdir="/repo", harness="test")
+
+    await session.close(timeout=5)
+
+    (client,) = provider.borrower_clients
+    assert client.client_closed
+    assert [box["state"] for box in provider.boxes.values()] == ["running"]
+
+
+async def test_a_background_service_command_runs_as_the_lent_user(provider) -> None:
+    sandbox = await borrow(await _lend(provider, user="agent"), named_configs={})
+
+    await sandbox.exec("serve", preserve_background_services=True)
+
+    assert provider.commands[-1]["user"] == "agent"

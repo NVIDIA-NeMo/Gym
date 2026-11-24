@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.testing.checkpoint_conformance import HarnessFixture, check_harness_checkpointing
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
     from nemo_gym.agents.utils.agent_context import resolve_agent_context_artifact
+    from nemo_gym.agents.utils.agent_sandbox_config import AgentSandboxConfig
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.run_with_checkpoint_pauses import (
         LaunchFinished,
@@ -109,6 +110,7 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "ActivationConflictError": "utils.ordered_operations",
+    "AgentSandboxConfig": "utils.agent_sandbox_config",
     "AGENT_ACTIVATION_HEADER": "base_responses_api_agent",
     "AGENT_OUTCOME_METADATA_KEY": "agent_outcome",
     "AGENT_SESSION_COOKIE_KEY": "base_responses_api_agent",
