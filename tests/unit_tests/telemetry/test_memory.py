@@ -551,6 +551,19 @@ def test_a_process_whose_main_thread_exited_while_others_run_is_still_counted(mo
     assert proc.sample(100) == pytest.approx(3.0)
 
 
+def test_a_child_reaped_between_two_stat_reads_of_one_walk_is_counted_once(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1, own=1.0)
+    proc.spawn(101, ppid=100, own=2.0)
+    proc.sample(100)
+
+    proc.processes[101].own = 2.5
+    proc.after_next_read.append(lambda: proc.reap(101))
+    proc.sample(100)
+
+    assert proc.sample(100) == pytest.approx(3.5)
+
+
 @pytest.mark.parametrize(
     ("read_error", "exited"),
     [(FileNotFoundError(), True), (PermissionError(), False), (OSError("I/O"), False)],
