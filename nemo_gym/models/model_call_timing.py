@@ -26,6 +26,7 @@ from typing import Any, Optional
 from nemo_gym.core.correlation import CorrelationPathError, resolve
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
+from nemo_gym.server_runtime.request_handling.disconnect import CLIENT_DISCONNECTED_STATE_KEY
 from nemo_gym.telemetry.gym_metrics import record_model_call_duration, record_model_time_to_first_byte
 
 
@@ -71,6 +72,11 @@ class ModelCallTimingMiddleware:
                 (time.perf_counter() - start) * 1000, dialect=dialect, server_name=self._server_name, outcome=outcome
             )
 
+        def _client_left() -> bool:
+            # The cancellation middleware, outside this one, keeps the disconnect from the app and drops later sends.
+            client_disconnected = (scope.get("state") or {}).get(CLIENT_DISCONNECTED_STATE_KEY)
+            return disconnected or (client_disconnected is not None and client_disconnected.is_set())
+
         async def _receive() -> dict[str, Any]:
             nonlocal disconnected
             message = await receive()
@@ -85,6 +91,11 @@ class ModelCallTimingMiddleware:
                 status = message.get("status")
             await send(message)
             if message_type != "http.response.body":
+                return
+            if _client_left():
+                # Nothing more reaches the client, such as the failure reply to the cancellation its leaving caused.
+                if not message.get("more_body", False):
+                    _finish("cancelled")
                 return
             chunk = message.get("body", b"") or b""
             # After the send returned, so the time includes waiting on the client.
@@ -104,8 +115,9 @@ class ModelCallTimingMiddleware:
         try:
             await self._app(scope, _receive, _send)
         except asyncio.CancelledError:
+            # Without a client disconnect, the server cancelled the call: a checkpoint retired it, or shutdown.
             if not finished:
-                _finish("cancelled")
+                _finish("cancelled" if _client_left() else "error")
             raise
         except Exception:
             if not finished:
@@ -113,4 +125,4 @@ class ModelCallTimingMiddleware:
             raise
         if not finished:
             # The app returned without a final body: the client went away, or the response was abandoned.
-            _finish("cancelled" if disconnected else "error")
+            _finish("cancelled" if _client_left() else "error")

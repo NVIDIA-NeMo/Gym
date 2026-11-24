@@ -29,6 +29,10 @@ from nemo_gym.server_runtime.request_handling.rollout_context import ROUTED_PATH
 from nemo_gym.telemetry.observer import request_counts
 
 
+# Set once the client left before its response completed; from then on every send is dropped.
+CLIENT_DISCONNECTED_STATE_KEY = "nemo_gym.client_disconnected"
+
+
 def _cancelled_request_route(scope: Scope) -> str:
     """Return a registered route template, never a path containing request or rollout IDs."""
     route = scope.get("route")
@@ -77,6 +81,7 @@ class ClientDisconnectCancellationMiddleware:
     async def _handle(self, scope: Scope, receive: Receive, send: Send, counts: Any) -> None:
         received_messages: asyncio.Queue[Message] = asyncio.Queue()
         client_disconnected = asyncio.Event()
+        scope.setdefault("state", {})[CLIENT_DISCONNECTED_STATE_KEY] = client_disconnected
         response_complete = asyncio.Event()
         debug = is_global_aiohttp_client_request_debug_enabled()
         started_at = time.monotonic() if debug else None
