@@ -8,10 +8,14 @@ Binary reward, no LLM judge. The grader runs the gold query and the model's quer
 official evaluator ([`eval/utils/ex_acc.py`](https://github.com/beaverbench/beaver/blob/81a2a88a1a2e236281c5d09b3171edd7580f8ec9/eval/utils/ex_acc.py))
 does (`ex_acc.py` here):
 
-- Each query gets its own connection and 10 seconds, from connecting to the last row read. A slower query is a
-  timeout; it is then stopped on the server with `KILL QUERY`.
+- Each query gets its own connection, with no session settings, and 10 seconds, from connecting to the last row read.
+  A slower query is a timeout; it is then stopped on the server with `KILL QUERY`, and its rows stop being read.
 - A query that fails or times out is an **empty result**, as is a missing prediction (no ```` ```sql ```` block in the
-  answer). This holds for the gold query too, so every task stays in the score.
+  answer). A gold query that times out is an empty result too, so its task stays in the score. A gold query that
+  *errors* masks the row instead: every gold query runs on a correctly set-up server (see the benchmark's gold check),
+  so that means the setup is wrong. (The official evaluator would score it as an empty result.)
+- A result over 5,000,000 rows or about 1 GiB isn't compared and scores as the query's failure. The largest BEAVER gold
+  result has 622,224 rows.
 - Two results match when both are empty, or when their rows, built into a `pandas.DataFrame` and converted with
   `astype(str)` and stripped, are equal sets with the same number of columns. Row order, duplicate rows and column
   names don't matter. `150.250` and `150.25` differ; `1` and `'1'` don't.
@@ -27,8 +31,11 @@ empty gold result is matched by any query that returns nothing, so BEAVER publis
 
 **Grading path:** the resources server grades (path A, `observe_programmatic_grading`). **Failures:** when the grader
 can't reach the data (it can't connect within the 10 seconds, the connection is lost during a query, or the password is
-wrong) the row is masked with `failure_kind` `verifier_error` and `failure_reason` `database_unavailable`; a crash in
-the grader is masked as `unknown_error`. A stateless reverify grades the saved answer once the cause is fixed. **Time
+wrong), when the server runs out of memory, threads, disk or temporary space (MySQL errors 1021, 1030, 1037, 1038,
+1041, 1114, 1135), when the grader runs out of memory, or when a gold query errors, the row is masked with
+`failure_kind` `verifier_error` and `failure_reason` `database_unavailable`; a crash in the grader is masked as
+`unknown_error`. Any other error in the model's query, access denied included, is the query's and scores as an empty
+result. A request cancelled while its query runs stops the query first. A stateless reverify grades the saved answer once the cause is fixed. **Time
 contract:** 10 seconds per query (`query_timeout_s`), enforced by `MySqlRunner.run` on the event loop's monotonic
 clock; an expired query is an empty result. There is no episode deadline in the server; the agent's token cap applies.
 
@@ -66,7 +73,11 @@ itself. Without `mysql_admin_dsn`, startup only checks that every database is lo
 grader's user sees all its tables.
 
 The grader's user can only read: a query that writes, creates a temporary table or reads a server file fails, and is
-scored as an empty result. (The official evaluator connects as root.)
+scored as an empty result. (The official evaluator connects as root.) Startup reads every table as the grader, and
+refuses a grader user that holds anything beyond `SELECT` on the BEAVER databases and `_beaver_meta`: another
+privilege, a role, or `SELECT` elsewhere. The loader creates that user if it doesn't exist and never changes an
+existing user's password; it refuses a grader DSN that names its own (admin) user, runs one loader at a time per server
+(`GET_LOCK`), and creates a database only if no one else has, even between its check and its load.
 
 ## Configuration
 
