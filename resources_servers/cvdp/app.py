@@ -111,6 +111,9 @@ DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/
 # file changed while it was read (the archive is complete) and 2 on a fatal error (a full disk), after which the
 # archive may be missing files, so this must differ from both.
 _NOTHING_TO_HARVEST_EXIT = 3
+# The harvest command's exit code when the workspace itself is gone (the sandbox lost its mount): the environment
+# failed, not the model, so the sample is masked instead of graded on the response text.
+_WORKSPACE_MISSING_EXIT = 4
 _CATEGORY_RE = re.compile(r"cid\d+")
 
 
@@ -297,6 +300,8 @@ def _harvest_roots(globs: List[str], target_files: List[str]) -> List[str]:
 def _harvest_command(workdir: str, roots: List[str], archive: str) -> str:
     """Archive whichever roots exist; exit ``_NOTHING_TO_HARVEST_EXIT`` when none do.
 
+    A workspace that cannot be entered exits ``_WORKSPACE_MISSING_EXIT``.
+
     The agent decides which files are readable, so an unreadable file must not fail the archive: tar exit 2 masks
     the sample. The command first makes the agent's files readable again (it runs as their owner, or as root), and
     GNU tar then leaves out whatever still is not with a warning. A target left out is graded as missing, a failure
@@ -304,7 +309,7 @@ def _harvest_command(workdir: str, roots: List[str], archive: str) -> str:
     """
     candidates = " ".join(shlex.quote(root) for root in roots)
     return (
-        f"cd {shlex.quote(workdir)} || exit {_NOTHING_TO_HARVEST_EXIT}; set --; "
+        f"cd {shlex.quote(workdir)} || exit {_WORKSPACE_MISSING_EXIT}; set --; "
         f'for p in {candidates}; do if [ -e "$p" ]; then set -- "$@" "$p"; fi; done; '
         f'if [ "$#" -eq 0 ]; then exit {_NOTHING_TO_HARVEST_EXIT}; fi; '
         'chmod -R u+rX -- "$@" 2>/dev/null; '
@@ -338,10 +343,20 @@ def _collect_harvest(
         except (OSError, UnicodeDecodeError):
             return None
 
+    def utf8_name(rel: str) -> bool:
+        # tarfile decodes a non-UTF-8 member name with surrogate escapes, which the JSON response cannot encode.
+        try:
+            rel.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+
     produced: Dict[str, str] = {}
     for pattern in globs:
         for path in sorted(dest.glob(pattern)):
             rel = path.relative_to(dest).as_posix()
+            if not utf8_name(rel):
+                continue
             content = read(path)
             if rel in produced or content is None or seeded.get(rel) == content:
                 continue
@@ -600,13 +615,18 @@ class CVDPResourcesServer(SimpleResourcesServer):
             session.sandbox = None
 
     async def shutdown(self) -> None:
-        for session_id, session in list(self._sessions.items()):
+        # Concurrently: the server supervisor allows a stopping server about a second before it kills it, and
+        # Apptainer has no TTL that would reclaim an instance left running.
+        async def release(session_id: str, session: _AgentSession) -> None:
             try:
                 await self._release_sandbox(session)
             except Exception:
                 logging.exception("Failed to stop the task sandbox of CVDP session %s", session_id)
             else:
-                del self._sessions[session_id]
+                if self._sessions.get(session_id) is session:
+                    del self._sessions[session_id]
+
+        await asyncio.gather(*(release(session_id, session) for session_id, session in list(self._sessions.items())))
         self._fences.clear()
 
     async def _harvest(self, session: _AgentSession) -> Dict[str, str]:
@@ -662,6 +682,10 @@ class CVDPResourcesServer(SimpleResourcesServer):
             elif result.return_code == _NOTHING_TO_HARVEST_EXIT:
                 logging.warning("The agent left none of the harvested paths: %s", output)
                 files = {}
+            elif result.return_code == _WORKSPACE_MISSING_EXIT:
+                raise _HarvestUnavailable(
+                    VERIFIER_ERROR, f"The task sandbox has no workspace at {workdir}: {output[:2000]}"
+                )
             elif result.return_code == 2:
                 # Not an unreadable file (the command tolerates those) but a failed write. Python's tarfile reads an
                 # archive cut short at a header as complete, so grading it could silently drop files. Mask instead.
@@ -686,7 +710,8 @@ class CVDPResourcesServer(SimpleResourcesServer):
         meta = body.verifier_metadata
         categories = meta.get("categories") or []
         return CVDPVerifyResponse(
-            **(body.model_dump() | masked),
+            # Not graded, so not an evaluation: rollout recovery and reverification read this with mask_sample.
+            **(body.model_dump() | masked | {"evaluation_completed": False}),
             task_id=meta.get("task_id"),
             category=categories[0] if categories else None,
             difficulty=categories[1] if len(categories) > 1 else None,

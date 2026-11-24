@@ -53,6 +53,11 @@ def test_each_harness_borrows_the_task_sandbox_of_the_cvdp_server(harness):
     assert sandbox["apptainer"]["create"]["mount_point"] == resources["agent_workdir"] == "/code"
     # The agent installs its runtime under /tmp, which needs no --fakeroot.
     assert sandbox["apptainer"]["exec"]["fakeroot_for_root"] is False
+    # The lent sandbox sees none of the host's /tmp, home or working directory: no other episode's workspace and no
+    # grader workspace with the hidden tests. The same containment as the grader's sandboxes.
+    start_args = sandbox["apptainer"]["create"]["extra_start_args"]
+    assert "--containall" in start_args
+    assert start_args[start_args.index("--no-mount") + 1] == "hostfs,bind-paths,cwd"
     # A provider that expires sandboxes keeps the task sandbox for the whole episode.
     assert resources["agent_sandbox_config"]["ttl_s"] >= environment["default_episode_timeout_seconds"]
     # Episodes are admitted at cvdp_agent's rate, no faster than the agent runs them (OpenCode's default is 8).

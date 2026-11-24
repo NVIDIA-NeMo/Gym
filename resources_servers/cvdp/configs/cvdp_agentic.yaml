@@ -18,11 +18,15 @@ cvdp_agentic_sandbox:
     create:
       mount_point: /code
       # The image is read-only; the agent writes outside /code too (its runtime, caches, simulator output).
-      extra_start_args: [--writable-tmpfs]
+      # Hide the host's /tmp, home, working directory and site-wide binds, as cvdp_agent_generic_*.yaml and the
+      # grader do: they hold other episodes' workspaces (each /code is a host temporary directory), the grader's
+      # hidden test files and the servers' data. With containment the provider gives each sandbox a private /tmp
+      # and home on disk (its --workdir), owned by the user that started it.
+      extra_start_args: [--writable-tmpfs, --containall, --no-mount, "hostfs,bind-paths,cwd"]
     exec:
       # Harness agents install their runtime under /tmp, outside /code. The provider copies such uploads in as "root"
       # through --fakeroot, which fails where the user has no /etc/subuid entry ("Failed to enter in user namespace").
-      # Apptainer binds the host's /tmp, so the user that started the sandbox can write there without it.
+      # The sandbox's private /tmp belongs to the user that started it, so that user can write there without it.
       fakeroot_for_root: false
 
 cvdp_agentic_resources_server:

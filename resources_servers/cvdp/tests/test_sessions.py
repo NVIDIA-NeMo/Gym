@@ -5,7 +5,9 @@
 import asyncio
 import dataclasses
 import io
+import os
 import shutil
+import sys
 import tarfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -268,6 +270,7 @@ def test_a_failed_download_is_masked_and_a_resent_verify_harvests_again(server, 
     verified = _verify(client)
 
     assert (verified["reward"], verified["mask_sample"]) == (0.0, True)
+    assert verified["evaluation_completed"] is False, "a masked harvest is not an evaluation"
     assert verified["failure_kind"] == PROVIDER_REQUEST_FAILED
     assert "download failed" in verified["failure_reason"]
     assert verified["task_id"] == "cvdp_agentic_codec_0001"
@@ -314,6 +317,35 @@ def test_a_harvest_command_that_is_not_tar_s_outcome_is_masked(server, root, sto
     assert (verified["mask_sample"], verified["failure_kind"]) == (True, VERIFIER_ERROR)
     assert "command not found" in verified["failure_reason"]
     assert stopped == []
+
+
+def test_a_workspace_that_is_gone_is_masked_not_graded_on_the_response_text(server, root, stopped, graded):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    # The sandbox lost its workspace mount: the environment failed, whatever the response text says.
+    shutil.rmtree(root)
+
+    verified = _verify(client, _verify_body(f"```systemverilog\n{TOP}```"))
+
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, VERIFIER_ERROR)
+    assert verified["evaluation_completed"] is False
+    assert "no workspace" in verified["failure_reason"]
+    assert graded == []
+    assert stopped == [], "the sandbox is kept for close to stop"
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="APFS refuses file names that are not UTF-8")
+def test_a_file_name_that_is_not_utf8_is_left_out_instead_of_failing_the_verify(server, root, stopped, graded):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    _solve(root)
+    with open(os.path.join(os.fsencode(root / "rtl"), b"r\xe9sum\xe9.sv"), "w") as handle:
+        handle.write("module resume; endmodule\n")
+
+    verified = _verify(client)
+
+    assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+    assert graded == [{"rtl/top.sv": TOP}]
 
 
 def test_files_that_changed_while_tar_read_them_still_grade(server, root, stopped, graded, monkeypatch):
@@ -455,6 +487,7 @@ def test_a_verify_after_close_is_masked_as_a_lost_session(server, root, stopped,
     verified = _verify(client)
 
     assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
+    assert verified["evaluation_completed"] is False
     assert graded == []
     assert "session_lost" in caplog.text
 
@@ -645,6 +678,29 @@ def test_shutdown_stops_the_sandboxes_of_open_sessions(server, root, stopped):
         _post_seed(client, _seed())
 
     assert len(stopped) == 1
+    assert server._sessions == {}
+
+
+def test_shutdown_stops_the_sandboxes_concurrently(server, root, monkeypatch):
+    # A stopping server is killed about a second after it is asked to stop, so it must not stop them one by one.
+    running, overlap = 0, 0
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        nonlocal running, overlap
+        running += 1
+        overlap = max(overlap, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+        await real_stop(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    with TestClient(server.setup_webserver()) as client:
+        _post_seed(client, _seed(session_id="first", rollout_id="0-0"))
+        _post_seed(client, _seed(session_id="second", rollout_id="0-1"))
+        assert len(server._sessions) == 2
+
+    assert overlap == 2
     assert server._sessions == {}
 
 
