@@ -118,7 +118,9 @@ class BorrowedSandbox(AsyncSandbox):
             raise RuntimeError("only a sandbox borrow() built has an access to pass on")
         return self._lent.model_copy(deep=True)
 
-    async def exec(self, command: str | Sequence[str], *, env: dict[str, str] | None = None, **kwargs: Any) -> SandboxExecResult:
+    async def exec(
+        self, command: str | Sequence[str], *, env: dict[str, str] | None = None, **kwargs: Any
+    ) -> SandboxExecResult:
         """Run ``command`` as :meth:`AsyncSandbox.exec` does, with the access's ``env`` under ``env``.
 
         The access's ``user`` is passed explicitly when the call names none, since a command that keeps background
