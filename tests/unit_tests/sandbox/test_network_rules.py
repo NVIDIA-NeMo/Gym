@@ -111,7 +111,9 @@ class TestDockerNetworkOptions:
 
 
 class TestARuleNeverReachesASpecWithoutItsPolicy:
-    @pytest.mark.parametrize("block", [{"network_access": "no_network"}, {"network_access": "hosts_only", "allowed_hosts": ["h"]}])
+    @pytest.mark.parametrize(
+        "block", [{"network_access": "no_network"}, {"network_access": "hosts_only", "allowed_hosts": ["h"]}]
+    )
     def test_spec_alone_refuses_a_restricted_rule(self, block: dict) -> None:
         with pytest.raises(ValueError, match="OwnedSandboxes.spec"):
             SandboxConfig.model_validate(block).spec({"docker": {}}, image="image", workdir=None)

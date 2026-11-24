@@ -162,11 +162,14 @@ async def test_a_non_exporting_owner_needs_no_checkpoint_state_dir(providers, mo
     assert providers["opensandbox"].client_closed
 
 
-def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency", "resolve_provider_metadata"]
+)
+def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch, resolver: str) -> None:
     def refuse(*args: Any) -> None:
         raise ValueError("unknown provider block")
 
-    monkeypatch.setattr(owned_sandboxes_module, "resolve_provider_config", refuse)
+    monkeypatch.setattr(owned_sandboxes_module, resolver, refuse)
     with pytest.raises(ValueError, match="unknown provider block"):
         _server(sandbox_provider="missing").sandboxes
     assert providers == {}
@@ -1159,7 +1162,9 @@ class TestCheckProvider:
 
         owned.check_provider(configs=[SandboxConfig(network_access="inherit"), SandboxConfig()])
         with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
-            owned.check_provider(configs=[SandboxConfig(network_access="inherit"), SandboxConfig(network_access="no_network")])
+            owned.check_provider(
+                configs=[SandboxConfig(network_access="inherit"), SandboxConfig(network_access="no_network")]
+            )
 
     def test_lending_is_refused_on_a_provider_that_never_reconnects(self) -> None:
         owned = OwnedSandboxes(_NeverReconnects(), state_dir=None, server_name="server")
@@ -1277,7 +1282,9 @@ class TestStartupCheckResolvesWhatItCan:
         )
 
     def test_a_model_server_a_sandbox_cannot_reach_fails_the_startup(self) -> None:
-        server = self._typed(SandboxConfig(network_access="model_only", model_server="policy"), sandbox_provider="rules")
+        server = self._typed(
+            SandboxConfig(network_access="model_only", model_server="policy"), sandbox_provider="rules"
+        )
 
         with pytest.raises(ValueError, match="sandbox-reachable host"):
             server.check_sandbox_provider()
@@ -1308,8 +1315,14 @@ class TestStartupCheckResolvesWhatItCan:
             sandbox_config_providers = {"sandbox_config": "backend"}
 
         server = Server(
-            config=Config(name="server", host="", port=0, entrypoint="", sandbox_provider="plain",
-                          sandbox_config=SandboxConfig(network_access="no_network")),
+            config=Config(
+                name="server",
+                host="",
+                port=0,
+                entrypoint="",
+                sandbox_provider="plain",
+                sandbox_config=SandboxConfig(network_access="no_network"),
+            ),
             server_client=MagicMock(spec=ServerClient),
         )
         server.check_sandbox_provider()
