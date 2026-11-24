@@ -54,6 +54,7 @@ CONNECTION_TIMEOUT_S = 10
 _CONNECTION_LOST_ERRNOS = frozenset({2006, 2013, 2055})
 # The query was stopped: by our KILL QUERY (1317) or by the server's max_execution_time (3024).
 _INTERRUPTED_ERRNOS = frozenset({1317, 3024})
+_FETCH_CHUNK_ROWS = 10_000
 
 
 class MySqlUnavailableError(RuntimeError):
@@ -191,14 +192,19 @@ class MySqlRunner:
             attempt.connection_id = conn.connection_id
             try:
                 cur.execute(sql)
-                if cur.description is None:
-                    columns, rows = [], []
-                else:
+                columns, rows = [], []
+                if cur.description is not None:
                     columns = [d[0] for d in cur.description]
-                    rows = cur.fetchall()
+                    # In chunks, so a timed-out query stops reading a large result (KILL QUERY can't stop the client
+                    # reading rows the server has already sent) and memory stays bounded by the time limit.
+                    while chunk := cur.fetchmany(_FETCH_CHUNK_ROWS):
+                        rows.extend(chunk)
+                        if attempt.cancelled.is_set():
+                            attempt.outcome = QueryOutcome(status="timeout", error="timeout")
+                            return
                 attempt.outcome = QueryOutcome(status="ok", frame=pd.DataFrame(rows, columns=columns))
             except mysql.connector.Error as e:
-                if e.errno in _INTERRUPTED_ERRNOS:
+                if attempt.cancelled.is_set() or e.errno in _INTERRUPTED_ERRNOS:
                     attempt.outcome = QueryOutcome(status="timeout", error="timeout")
                 elif e.errno in _CONNECTION_LOST_ERRNOS:
                     attempt.unavailable = e

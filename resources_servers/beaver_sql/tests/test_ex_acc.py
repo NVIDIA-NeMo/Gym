@@ -113,6 +113,7 @@ class _FakeServer:
         self.script = script
         self.connect_delay = connect_delay
         self.connect_error = connect_error
+        self.fetch_delay = 0.0
         self.killed: List[int] = []
         self.connects: List[Dict[str, Any]] = []
         self.next_id = 100
@@ -170,8 +171,11 @@ class _FakeCursor:
         columns, self._rows = answer
         self.description = [(c,) for c in columns]
 
-    def fetchall(self) -> List[tuple]:
-        return self._rows
+    def fetchmany(self, size: int) -> List[tuple]:
+        chunk, self._rows = self._rows[:size], self._rows[size:]
+        if chunk and self.conn.server.fetch_delay:
+            time.sleep(self.conn.server.fetch_delay)
+        return chunk
 
 
 @pytest.fixture
@@ -251,6 +255,23 @@ def test_runner_releases_a_query_the_server_will_not_stop(fake) -> None:
     start = time.monotonic()
     assert _run(runner, "STUCK").status == "timeout"
     assert time.monotonic() - start < 2.0 and server.killed
+
+
+def test_runner_stops_reading_a_large_result_after_the_limit(fake, monkeypatch) -> None:
+    # The server has sent every row; only the client is still reading when the limit passes.
+    monkeypatch.setattr("resources_servers.beaver_sql.ex_acc._FETCH_CHUNK_ROWS", 10)
+    server = fake({"BIG": (["x"], [(i,) for i in range(1000)])})
+    server.fetch_delay = 0.05
+    runner = MySqlRunner("mysql://r:p@h", timeout_s=0.2)
+    start = time.monotonic()
+    assert _run(runner, "BIG").status == "timeout"
+    assert time.monotonic() - start < 2.0
+
+
+def test_runner_reads_a_result_in_chunks(fake, monkeypatch) -> None:
+    monkeypatch.setattr("resources_servers.beaver_sql.ex_acc._FETCH_CHUNK_ROWS", 3)
+    fake({"Q": (["x"], [(i,) for i in range(10)])})
+    assert _run(MySqlRunner("mysql://r:p@h"), "Q").frame.shape == (10, 1)
 
 
 def test_runner_slow_connect_is_unavailable(fake) -> None:
