@@ -43,6 +43,15 @@ class DirectHTTPToolAccess(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+def _transport_required_in_json(schema: dict[str, Any]) -> None:
+    # Python callers may leave `transport` to its default, but a JSON connection without one is a streamable HTTP
+    # one (`_mcp_transport`), so the exported schema requires the tag of every other transport. Otherwise an untagged
+    # HTTP connection would match two branches of the connection's `oneOf`, and an untagged stdio one would pass the
+    # schema while parsing rejects it.
+    schema["properties"]["transport"].pop("default")
+    schema["required"] = ["transport", *schema["required"]]
+
+
 class MCPStreamableHTTPConnection(BaseModel):
     """Connect to an MCP server over an absolute HTTP endpoint."""
 
@@ -57,7 +66,7 @@ class MCPSSEConnection(BaseModel):
     """Connect to an MCP server over the HTTP+SSE transport: an event stream at ``url`` that names the endpoint the
     client posts its messages to."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_transport_required_in_json)
 
     transport: Literal["sse"] = "sse"
     url: AnyHttpUrl
@@ -72,7 +81,7 @@ class MCPStdioConnection(BaseModel):
     its servers, and stops it with the harness.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_transport_required_in_json)
 
     transport: Literal["stdio"] = "stdio"
     command: str = Field(min_length=1)
