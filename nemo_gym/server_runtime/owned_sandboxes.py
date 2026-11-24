@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """The sandboxes a server owns: their start, lending, stop and partial-rollout checkpoints.
 
-Every sandbox has one owner, the server that starts it. Each resources, environment and agent server holds an
-:class:`OwnedSandboxes` as ``SimpleServer.sandboxes`` to start, lend and stop the sandboxes it owns; servers move onto
-it one family at a time. It knows sandboxes by an opaque key, the owner's session ID or a name within it such as ``session/grader``, and nothing
-about the owner's protocol. Anyone else only borrows a sandbox, through the operate-scope access ``access`` gives.
+Every sandbox has one owner, the server that starts it. The sandbox an attempt runs in belongs to its Environment
+Server, which lends it to the agent and to the Resources Server: they only borrow it, through the operate-scope access
+``access`` gives, and never start, lend or stop it. A Resources Server owns a sandbox of its own only for a grader that
+runs code in an attempt that runs without one. Every server holds an :class:`OwnedSandboxes` as
+``SimpleServer.sandboxes`` to start, lend and stop the sandboxes it owns. Servers move onto it one family at a time,
+and onto borrowing the Environment Server's sandbox: until then, a Resources Server that lends a sandbox from its seed,
+or an agent that starts its own because nothing was lent, owns that sandbox. It knows sandboxes by an opaque key, the
+owner's session ID or a name within it such as ``session/grader``, and nothing about the owner's protocol.
 
 A sandbox is also session state outside Gym's process. An owner that checkpoints implements its participant's
 checkpoint hooks (``export_session_states`` and friends from ``nemo_gym.server_runtime._checkpoint``) by delegating
@@ -34,10 +38,10 @@ controller's release decides, through :meth:`~OwnedSandboxes.delete_snapshots`:
   service returns a snapshot's id, its file is written, before the snapshot is awaited; then the export waits until
   each snapshot is ready. A snapshot that fails or does not become ready in time is taken again, up to
   ``snapshot_attempts`` times, and every attempt is indexed. The sandbox keeps running; the episode continues in it
-  after the resume. The owner calls ``export`` only while no command uses the sandbox. A participant's prepare
-  guarantees that for a resources server whose ``checkpoint_verify`` is ``"wait"``, the default. With ``"replay"``
-  its ``/verify`` is admitted while a checkpoint is open, so an owner whose ``/verify`` runs commands in the
-  sandbox, or stops it, must keep ``checkpoint_verify`` at ``"wait"``.
+  after the resume. The owner calls ``export`` only while no command uses the sandbox, a borrower's included. A
+  participant's prepare guarantees that for a resources server whose ``checkpoint_verify`` is ``"wait"``, the
+  default. With ``"replay"`` its ``/verify`` is admitted while a checkpoint is open, so an owner whose ``/verify``
+  runs commands in the sandbox, or stops it, must keep ``checkpoint_verify`` at ``"wait"``.
 - :meth:`~OwnedSandboxes.delete_snapshots` receives every checkpoint the controller may still restore
   and deletes the snapshots indexed under any other checkpoint, removing each file once the service confirms the
   snapshot is gone. It returns only once it has tried every delete, so the participant that awaits it admits no
