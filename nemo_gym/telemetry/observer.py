@@ -252,9 +252,16 @@ def _cpu_times(state: "_ProcessObserver") -> list:
 
 
 class _Instruments:
-    """The observer's instruments for one meter, created once so a restarted observer never registers them twice."""
+    """The observer's instruments for one meter and the totals they read, created once.
+
+    A restarted observer never registers the instruments twice, and its cumulative counters continue from the values
+    the meter already exported instead of starting again at zero.
+    """
 
     def __init__(self, meter: Any) -> None:
+        self.gc = _GcRecorder()
+        self.requests = RequestCounts()
+        self.driver = DriverCounts()
         self.lag = meter.create_histogram(
             EVENT_LOOP_LAG_INSTRUMENT,
             unit="ms",
@@ -473,7 +480,7 @@ DRIVER_WRITE_BYTES_BOUNDARIES: tuple[float, ...] = (1_000, 10_000, 100_000, 1_00
 
 
 class _ProcessObserver:
-    """The per-process state of the observer: the GC recorder, the request totals, and this process's handle."""
+    """The running observer: this process's handle, and the meter's GC recorder and request and driver totals."""
 
     def __init__(self, meter: Any) -> None:
         import psutil
@@ -482,9 +489,9 @@ class _ProcessObserver:
         if instruments is None:
             instruments = _INSTRUMENTS[meter] = _Instruments(meter)
         self.process = psutil.Process()
-        self.gc = _GcRecorder()
-        self.requests = RequestCounts()
-        self.driver = DriverCounts()
+        self.gc = instruments.gc
+        self.requests = instruments.requests
+        self.driver = instruments.driver
         self.admission = instruments.admission
         self.write_duration = instruments.write_duration
         self.write_bytes = instruments.write_bytes

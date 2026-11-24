@@ -3037,36 +3037,49 @@ class TestRolloutReverificationRunFromConfig:
         )
         config = self._make_config(tmp_path, disable_aggregation=True, num_samples_in_parallel=1)
 
-        async def reverify_then_shut_down() -> None:
+        async def collect_then_reverify_then_shut_down() -> None:
+            async with observer.observe_event_loop("driver"):  # the collection's own observer, on the same meter
+                gc.collect()
+                gc.collect()
             await RolloutReverificationHelper().run_from_config(config)
             gc.collect()
             provider.shutdown()  # the process's final export, as shutdown_telemetry runs it
 
         if head_server_observed:
             async with observer.observe_event_loop("head_server"):
-                await reverify_then_shut_down()
+                await collect_then_reverify_then_shut_down()
         else:
-            await reverify_then_shut_down()
+            await collect_then_reverify_then_shut_down()
 
         attributes = {
             concurrency.COMPONENT_ATTRIBUTE: "rollout_driver",
             concurrency.LIMIT_NAME_ATTRIBUTE: "reverifications",
         }
 
-        def points(name: str) -> list:
+        def points(name: str, batches: list = exporter.batches) -> list:
             return [
                 point
-                for data in exporter.batches
+                for data in batches
                 for resource_metrics in data.resource_metrics
                 for scope_metrics in resource_metrics.scope_metrics
                 for metric in scope_metrics.metrics
                 if metric.name == name
                 for point in metric.data.data_points
-                if dict(point.attributes) == attributes
             ]
 
-        assert {point.value for point in points(concurrency.LIMIT_INSTRUMENT)} == {1}
-        assert points(gym_metrics.CONCURRENCY_QUEUE_WAIT_INSTRUMENT)[-1].count == 1, "the second call queued once"
+        def for_the_limit(found: list) -> list:
+            return [point for point in found if dict(point.attributes) == attributes]
+
+        assert {point.value for point in for_the_limit(points(concurrency.LIMIT_INSTRUMENT))} == {1}
+        assert for_the_limit(points(gym_metrics.CONCURRENCY_QUEUE_WAIT_INSTRUMENT))[-1].count == 1, "one call queued"
+        gc_totals = [
+            {dict(point.attributes)[observer.GC_GENERATION_ATTRIBUTE]: point.value for point in found}
+            for found in (points(observer.GC_COLLECTIONS_INSTRUMENT, [data]) for data in exporter.batches)
+            if found
+        ]
+        assert len(gc_totals) >= 2
+        for earlier, later in zip(gc_totals, gc_totals[1:]):
+            assert all(later[generation] >= total for generation, total in earlier.items()), gc_totals
         assert observer._PROCESS_OBSERVER is None
         concurrency._reset_for_testing()
         gym_metrics._reset_for_testing()
