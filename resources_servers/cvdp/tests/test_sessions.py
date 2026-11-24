@@ -350,10 +350,19 @@ def test_a_failed_archive_write_is_masked_and_keeps_the_sandbox(server, root, st
     assert stopped == [], "a resent verify can harvest again"
 
 
-def test_files_the_agent_made_unreadable_neither_fail_nor_mask_the_harvest(server, root, stopped, graded):
+@pytest.mark.parametrize(("top", "reward"), [(TOP, 1.0), ("module top; endmodule\n", 0.0)])
+def test_files_the_agent_made_unreadable_neither_fail_nor_mask_the_harvest(
+    server, root, stopped, graded, monkeypatch, top, reward
+):
+    async def run(self, *, rtl_files, harness_files, task_id, context_files=None):
+        graded.append(dict(rtl_files))
+        return (0 if rtl_files.get("rtl/top.sv") == TOP else 1), "", []
+
+    monkeypatch.setattr(app_module.TestbenchRunner, "run", run)
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed())
     _solve(root)
+    (root / "rtl" / "top.sv").write_text(top)
     (root / "rtl" / "scratch.bin").write_bytes(b"\0")
     (root / "rtl" / "sub").mkdir()
     (root / "rtl" / "sub" / "extra.sv").write_text("module extra; endmodule\n")
@@ -362,12 +371,13 @@ def test_files_the_agent_made_unreadable_neither_fail_nor_mask_the_harvest(serve
 
     verified = _verify(client)
 
-    assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+    # A failed attempt stays a measured 0: leaving files unreadable cannot opt it out of scoring.
+    assert (verified["reward"], verified["mask_sample"]) == (reward, False)
     # The harvest makes them readable again, so even the unreadable target is graded.
     assert graded == [
         {
             "rtl/sub/extra.sv": "module extra; endmodule\n",
-            "rtl/top.sv": TOP,
+            "rtl/top.sv": top,
             "verif/tb.sv": TESTBENCH + "// more checks\n",
         }
     ]
@@ -507,6 +517,22 @@ def test_ownership_outlives_a_verify_only_while_the_sandbox_is_unreleased(server
     assert _verify(client)["mask_sample"] is False
     assert not server.session_release_pending("session"), "a stopped sandbox leaves nothing to release"
     assert not server.session_release_pending("unknown")
+
+
+def test_retirement_stops_a_sandbox_that_a_failed_harvest_kept(server, root, stopped, monkeypatch):
+    """A masked verify keeps the sandbox; with the close lost, retirement still stops it."""
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    _solve(root)
+    _exec_result(monkeypatch, 2, "tar: /code/.cvdp-harvest-0.tar: Wrote only 4096 of 10240 bytes", run=False)
+    assert _verify(client)["mask_sample"] is True
+    assert stopped == [] and server.session_release_pending("session")
+
+    asyncio.run(server.retire_session_state("session"))
+
+    assert len(stopped) == 1
+    assert server._sessions == {}
+    assert not server.session_release_pending("session")
 
 
 def test_retirement_stops_a_sandbox_whose_stop_failed_at_verify(server, root, graded, monkeypatch):

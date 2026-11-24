@@ -31,3 +31,9 @@ cvdp_agentic_hermes:
         name: cvdp_agentic_hermes_agent
       # Sandbox start (an image conversion on first use), the agent's 900 s, then the harness's container_timeout.
       default_episode_timeout_seconds: 3600
+      # Admit episodes at cvdp_agent's rate (its concurrency: 4). An admitted episode seeds its task sandbox at once,
+      # and the episode clock is running, so admitting more than the agent runs would leave episodes holding a
+      # sandbox and spending their budget in the agent's queue. Raise it to run faster, up to the agent's own
+      # concurrency (32).
+      max_concurrent_episodes: 4
+      queue_timeout_seconds: 604800

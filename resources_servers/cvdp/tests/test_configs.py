@@ -55,6 +55,9 @@ def test_each_harness_borrows_the_task_sandbox_of_the_cvdp_server(harness):
     assert sandbox["apptainer"]["exec"]["fakeroot_for_root"] is False
     # A provider that expires sandboxes keeps the task sandbox for the whole episode.
     assert resources["agent_sandbox_config"]["ttl_s"] >= environment["default_episode_timeout_seconds"]
+    # Episodes are admitted at cvdp_agent's rate, no faster than the agent runs them (OpenCode's default is 8).
+    assert environment["max_concurrent_episodes"] == 4 <= agent.get("concurrency", 8)
+    assert environment["queue_timeout_seconds"] >= environment["default_episode_timeout_seconds"]
     assert [dataset["jsonl_fpath"] for dataset in resources["datasets"]] == [
         "resources_servers/cvdp/data/example_agentic.jsonl"
     ]

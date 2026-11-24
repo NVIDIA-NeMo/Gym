@@ -141,7 +141,9 @@ gym eval run --no-serve \
   `anthropic_api_key` and `anthropic_base_url`.
 - Settings that lived on `cvdp_agent` move. `agent_kwargs` become fields of the harness agent's block in the session
   config. `timeout` becomes that agent's own budget (Hermes: `sandbox_runner_timeout_seconds`) under the Environment
-  Server's `default_episode_timeout_seconds`. `concurrency` is `gym eval run --concurrency`. `image` is
+  Server's `default_episode_timeout_seconds`. `concurrency` is the Environment Server's
+  `max_concurrent_episodes` (4, as before; raise it up to the agent's own `concurrency`) with a matching
+  `gym eval run --concurrency`. `image` is
   `cvdp_sim_image`, and `sandbox_provider` is the `cvdp_agentic_sandbox` block in `configs/cvdp_agentic.yaml`.
 - Heavy-agentic repository tasks (`cvdp_agent_heavy_claude.yaml`) have no session config yet; keep running them through
   `cvdp_agent`.
