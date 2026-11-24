@@ -441,9 +441,9 @@ def test_reads_own_and_waited_for_children_times_and_the_parent_from_proc_stat(m
     monkeypatch.setattr(memory_telemetry, "_stat_fields", stat_fields)
 
     assert collect_process_tree_cpu(100) == {
-        (100, 7): ProcessCpuTimes(40 / clock_ticks, 60 / clock_ticks, parent=None),
-        (101, 8): ProcessCpuTimes(4 / clock_ticks, 6 / clock_ticks, parent=(100, 7)),
-        (102, 9): ProcessCpuTimes(0.0, 0.0, parent=None),
+        (100, 7): ProcessCpuTimes(40 / clock_ticks, 60 / clock_ticks, parent=None, parent_pid=1),
+        (101, 8): ProcessCpuTimes(4 / clock_ticks, 6 / clock_ticks, parent=(100, 7), parent_pid=100),
+        (102, 9): ProcessCpuTimes(0.0, 0.0, parent=None, parent_pid=999),
     }
 
 
@@ -549,6 +549,22 @@ def test_a_process_whose_main_thread_exited_while_others_run_is_still_counted(mo
     proc.processes[101].state, proc.processes[101].threads, proc.processes[101].own = "Z", 2, 3.0
 
     assert proc.sample(100) == pytest.approx(3.0)
+
+
+def test_a_parent_that_could_not_be_read_once_keeps_its_child_link(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)
+    proc.spawn(101, ppid=100, own=1.0)
+    proc.spawn(102, ppid=101, own=2.0)
+    proc.sample(100)
+
+    proc.processes[101].unreadable = True
+    proc.sample(100)
+    proc.processes[101].unreadable = False
+    proc.processes[102].own = 2.5
+    proc.reap(102)
+
+    assert proc.sample(100) == pytest.approx(3.5)
 
 
 def test_a_child_reaped_between_two_stat_reads_of_one_walk_is_counted_once(monkeypatch):

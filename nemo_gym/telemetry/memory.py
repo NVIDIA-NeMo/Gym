@@ -66,12 +66,14 @@ ProcessKey = tuple[int, int]
 class ProcessCpuTimes:
     """CPU time one process and the children it waited for have used since it started.
 
-    ``parent`` is the process that was its parent when it was read, or ``None`` when that parent is outside the tree.
+    ``parent_pid`` is the parent pid the process reported when it was read. ``parent`` is that parent's identity, or
+    ``None`` when the parent is not a known process of the tree.
     """
 
     user_seconds: float
     system_seconds: float
     parent: ProcessKey | None = None
+    parent_pid: int | None = None
 
 
 _CLOCK_TICKS = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
@@ -133,8 +135,8 @@ def _has_ended(fields: list[str]) -> bool:
     return fields[0] in ("Z", "X") and int(fields[17]) <= 1
 
 
-def _read_process_cpu(pid: int) -> tuple[ProcessKey, int, ProcessCpuTimes] | None:
-    """One process's identity, parent pid and CPU times from one ``/proc/<pid>/stat`` read.
+def _read_process_cpu(pid: int) -> tuple[ProcessKey, ProcessCpuTimes] | None:
+    """One process's identity, CPU times and parent pid from one ``/proc/<pid>/stat`` read.
 
     ``None`` if it cannot be read or has exited. The times include ``cutime``/``cstime``: the kernel adds a child's own
     and children times to its parent's when the parent waits for it, so a child that starts and exits between two
@@ -149,7 +151,8 @@ def _read_process_cpu(pid: int) -> tuple[ProcessKey, int, ProcessCpuTimes] | Non
         system_ticks = int(fields[12]) + int(fields[14])
     except (OSError, ValueError, IndexError):
         return None
-    return (pid, start_ticks), parent_pid, ProcessCpuTimes(user_ticks / _CLOCK_TICKS, system_ticks / _CLOCK_TICKS)
+    times = ProcessCpuTimes(user_ticks / _CLOCK_TICKS, system_ticks / _CLOCK_TICKS, parent_pid=parent_pid)
+    return (pid, start_ticks), times
 
 
 def collect_process_tree_cpu(root_pid: int) -> dict[ProcessKey, ProcessCpuTimes]:
@@ -157,8 +160,8 @@ def collect_process_tree_cpu(root_pid: int) -> dict[ProcessKey, ProcessCpuTimes]
     # Parents are read before their children, so a child reaped during the walk is never in both its own times and
     # its parent's.
     processes = [process for pid in _descendant_pids(root_pid) if (process := _read_process_cpu(pid)) is not None]
-    keys = {key[0]: key for key, _parent_pid, _times in processes}
-    return {key: replace(times, parent=keys.get(parent_pid)) for key, parent_pid, times in processes}
+    keys = {key[0]: key for key, _times in processes}
+    return {key: replace(times, parent=keys.get(times.parent_pid)) for key, times in processes}
 
 
 def process_has_exited(key: ProcessKey) -> bool:
@@ -229,10 +232,16 @@ def advance_cpu_baseline(
 
     A baseline never goes down, so time moved onto a parent before the parent's own times show it (the parent was
     read just before it waited) is held back until they do, and the total never goes down either.
+
+    A parent that could not be read in this walk but still runs keeps its baseline, so a child naming it is linked to
+    it: a running process's reported parent pid always names its live parent.
     """
     baseline = fold_exited_processes(previous, current, has_exited)
     used = cpu_time_since(baseline, current)
+    running = {key[0]: key for key in [*baseline, *current]}
     for key, times in current.items():
+        if times.parent is None and times.parent_pid in running:
+            times = replace(times, parent=running[times.parent_pid])
         before = baseline.get(key)
         if before is not None:
             times = replace(
