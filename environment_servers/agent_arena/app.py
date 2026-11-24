@@ -121,9 +121,8 @@ from resources_servers.agentic_turn_simulation.schemas import (
     AgenticTurnSimulationRunRequest,
     AgenticTurnSimulationSettings,
     AgenticTurnSimulationVerifyRequest,
-    TurnHarnessContext,
 )
-from resources_servers.agentic_turn_simulation.turns import OUTCOME_STAGE, TurnSession, TurnSimulation
+from resources_servers.agentic_turn_simulation.turns import OUTCOME_STAGE, TurnSession, TurnSimulation, harness_context
 
 
 # Where a masked turn's outcome decision saves its originating stage (`applied_outcome_fields`).
@@ -214,14 +213,22 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
 
     async def run(self, request: SingleAgentTurnRequest, cleanup: CleanupContext) -> SingleAgentTurnResponse:
         task_input = request.task.task_input
-        row = AgenticTurnSimulationRunRequest.model_validate(
-            task_input.task_data | {"responses_create_params": task_input.responses_create_params}
-        )
-        session = self._turns.new_session(row)
-        agent_context = _agent_context(request, session)
-        toolset = TurnToolset(self._turns, session, row, call_context=self._caller_sampling)
-        # Registered first, so it runs last: the agent session closes before its tools go away.
-        served = await self.serve_tools(request, toolset, cleanup)
+        try:
+            row = AgenticTurnSimulationRunRequest.model_validate(
+                task_input.task_data | {"responses_create_params": task_input.responses_create_params}
+            )
+            session = self._turns.new_session(row)
+            agent_context = _agent_context(request, session)
+            # A row tool that no grant can carry fails here (ToolSpec).
+            toolset = TurnToolset(self._turns, session, row, call_context=self._caller_sampling)
+        except ValueError as error:
+            raise _row_setup_failure(error) from error
+        try:
+            # Registered first, so it runs last: the agent session closes before its tools go away.
+            served = await self.serve_tools(request, toolset, cleanup)
+        except ValueError as error:
+            # A row tool named like one of this server's routes.
+            raise _row_setup_failure(error) from error
         toolset.bind(served.calls)
 
         agent = _AgentSession()
@@ -538,11 +545,7 @@ def _agent_context(request: SingleAgentTurnRequest, session: TurnSession) -> Age
     A task context that sets one of the harness's keys is refused rather than overridden: the episode never runs
     without context it was given.
     """
-    harness = TurnHarnessContext(
-        stop_tools=list(session.harness.stop_tools),
-        protocol=session.harness.protocol,
-        tool_names=sorted(session.tool_names, key=str),
-    ).model_dump(mode="json")
+    harness = harness_context(session.harness, session.tool_names).model_dump(mode="json")
     task = request.task.task_input.agent_seed_context or AgentContext()
     taken = sorted(task.fields().keys() & harness.keys())
     if taken:
@@ -553,6 +556,18 @@ def _agent_context(request: SingleAgentTurnRequest, session: TurnSession) -> Age
             terminal=True,
         )
     return AgentContext(values={**task.values, **harness}, artifacts=task.artifacts)
+
+
+def _row_setup_failure(error: ValueError) -> NgFailureEvent:
+    """A row this server cannot set an episode up for (its tools, its harness context): terminal, since every attempt
+    fails alike, and named, so the failure row says which row field is wrong. (A handled failure, such as
+    `_agent_context`'s, is no ValueError and passes through.)"""
+    return handled_episode_failure(
+        stage="seed",
+        operation="episode.setup",
+        failure_reason=f"The row cannot be set up as an episode: {error}"[:2000],
+        terminal=True,
+    )
 
 
 def _agent_failure_kind(response: NeMoGymResponse) -> str | None:

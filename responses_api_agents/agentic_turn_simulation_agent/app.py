@@ -18,7 +18,9 @@ environment server's episode) the environment server serves the row's tools behi
   (`TurnHarnessContext`); a seed without them is refused (422);
 * each tool call goes to ``POST /<tool name>`` through the grant (its URL, its headers and the session's cookies), with
   its arguments as the body and its call id in ``X-NeMo-Gym-Tool-Call-Id``; error replies are retried as above, and a
-  reply that refuses the call itself (401, 403, 404, 410, 422) fails the turn: the grant does not serve the row's tools;
+  reply that refuses the call itself (401, 403, 404, 410, 422) ends the turn as a failed response classified
+  ``environment_protocol_violation``, which the environment server fails terminally: the grant does not serve the
+  row's tools, so another attempt would fail the same way;
 * a call no tool of the row can take is answered here, without a request: arguments that are not a JSON object, or a
   name outside the row's tools. Scoring gives such a turn 0 whatever it gets (``malformed_arguments``,
   ``nonexistent_tool``).
@@ -28,7 +30,8 @@ these strings; README "What ends the turn" describes each): ``final_message`` (a
 ``empty_output`` when it has no message either), the stop tool's name (the call is kept, not run; the reply's
 other calls run first), ``max_steps``, ``time_cap`` (``max_time_seconds``), ``context_overflow``,
 ``max_output_tokens`` (cut off once the budget cannot grow, with a tool call or nothing visible; a cut-off reply
-that shows only text is kept) or, for Cline rows, ``mistake_limit`` (too many replies in a row without a tool call).
+that shows only text is kept), for Cline rows ``mistake_limit`` (too many replies in a row without a tool call), or
+``grant_refused`` (the failed response above).
 ``response.usage`` sums the kept replies' tokens (the ones the trajectory references);
 ``response.metadata.model_calls`` lists every reply, discarded ones too (README "Token usage").
 """
@@ -42,10 +45,13 @@ from functools import cache
 from time import monotonic, perf_counter, time
 from typing import Any, NamedTuple, TypedDict
 
+from openai.types.responses import ResponseError
 from pydantic import Field, ValidationError
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
@@ -60,6 +66,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
     accumulate_response_usage,
+    failure_kinds,
 )
 from nemo_gym.server_runtime import TOOL_CALL_ID_HEADER, Activation, DirectHTTPToolAccess
 from nemo_gym.trajectory import (
@@ -113,8 +120,9 @@ _CONTEXT_WINDOW = re.compile(r"maximum context length is (\d+)")
 # episode or a path outside its tools (403), no such tool (404), an episode that is not running there (410), arguments
 # it does not take (422). The agent sends only the row's tools with object arguments, so each is a setup or protocol
 # fault (the grant does not serve the row's tools), not a failure to simulate: no retry would pass, and answered to the
-# policy or masked it would score the setup, so the turn fails.
+# policy or masked it would score the setup, so the turn fails (`_GrantRefused`).
 _GRANT_REFUSED_STATUSES = (401, 403, 404, 410, 422)
+GRANT_REFUSED = "grant_refused"
 _PROMPT_TOKENS = (
     re.compile(r"\((\d+) in the messages"),
     re.compile(r"prompt contains (\d+) input tokens"),
@@ -143,7 +151,8 @@ class AgenticTurnSimulationAgentConfig(SimpleAgentConfig):
     # Attempts per tool call (/simulate_tool_call, or the tool's route through a grant). An error reply (not 2xx or 3xx)
     # is retried after 1, 2, 4, ... s; once every attempt has failed, the call's output is the resources server's
     # simulator-failure output, so scoring masks the turn (simulator_failed) rather than judging a turn that got an
-    # error body as a tool result. A grant's refusal of the call (401, 403, 404, 410, 422) fails the turn unretried.
+    # error body as a tool result. A grant's refusal of the call (401, 403, 404, 410, 422) ends the turn unretried, as a
+    # failed response (`grant_refused`).
     simulate_max_attempts: int = Field(default=3, ge=1)
 
 
@@ -233,9 +242,23 @@ def _before_environment_details(result: str) -> str:
     return result[: result.index(cline_xml.ENVIRONMENT_DETAILS)].rstrip("\n")
 
 
+class _GrantRefused(Exception):
+    """The grant refused a call the agent sent: the turn ends as a failed response (`_create_episode`)."""
+
+
 def _refused_call(call: _Call, reason: str) -> str:
     """The result of a call the environment server does not run, which the turn's scoring gates."""
     return f"Error: {reason}. The {call.name} call was not run."
+
+
+def _unsendable(call: _Call, tool_names: frozenset[str]) -> tuple[str, str] | None:
+    """(the result, the trajectory's error type) of a call no tool of the row can take, answered without a request,
+    or None to send it. The error types are the scoring gates' names."""
+    if json_object(call.arguments or "{}") is None:
+        return _refused_call(call, "its arguments are not a JSON object"), "malformed_arguments"
+    if call.name not in tool_names:
+        return _refused_call(call, f"there is no tool named {call.name!r}"), "nonexistent_tool"
+    return None
 
 
 @dataclass(kw_only=True)
@@ -288,12 +311,13 @@ class _Trajectory:
             )
         )
 
-    def tool_call(self, call: _Call, started: tuple[float, float], output: str, status: int) -> None:
-        """`started` is (time(), perf_counter()) when the call was sent."""
+    def tool_call(self, call: _Call, started: tuple[float, float], output: str, error_type: str | None) -> None:
+        """`started` is (time(), perf_counter()) when the call was sent; `error_type` is None for a call that
+        completed."""
         if not self.collecting:
             return
         started_at, started_perf = started
-        ok = 200 <= status < 400
+        ok = error_type is None
         self.tool_calls.append(
             TrajectoryToolCall(
                 invocation_id=self.invocation_id,
@@ -304,7 +328,7 @@ class _Trajectory:
                 duration_ms=(perf_counter() - started_perf) * 1000,
                 timing_source="executor",
                 status="completed" if ok else "failed",
-                error_type=None if ok else f"http_{status}",
+                error_type=error_type,
                 output=output,
             )
         )
@@ -449,6 +473,7 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         step = 0
         mistakes = 0  # cline_xml: consecutive replies without a tool call
         started = monotonic()
+        refused: _GrantRefused | None = None
 
         while True:
             if cfg.max_steps and step >= cfg.max_steps:
@@ -495,7 +520,11 @@ class AgenticTurnSimulationAgent(SimpleAgent):
                     calls = calls[: calls.index(stop_call)]
                 else:
                     calls = [call for call in calls if call.name not in stop_tools]
-            results = await self._simulate_calls(ep, calls, protocol)
+            try:
+                results = await self._simulate_calls(ep, calls, protocol)
+            except _GrantRefused as error:
+                stop_reason, refused = GRANT_REFUSED, error
+                break
             ep.outputs.extend(_result_items(protocol, calls, results))
             if stop_call is not None:
                 stop_reason = stop_call.name
@@ -523,6 +552,14 @@ class AgenticTurnSimulationAgent(SimpleAgent):
             "elapsed_seconds": str(round(monotonic() - started)),
             "model_calls": json.dumps(ep.model_calls),
         }
+        if refused is not None:
+            # Classified, so the environment server's outcome policy fails the episode terminally instead of
+            # retrying a setup that refuses every attempt alike (an unclassified 500 would be retried).
+            response.status = "failed"
+            response.error = ResponseError(code="server_error", message=str(refused)[:2000])
+            response.metadata[AGENT_OUTCOME_METADATA_KEY] = AgentOutcome(
+                failure_kind=failure_kinds.ENVIRONMENT_PROTOCOL_VIOLATION
+            ).model_dump_json()
         record = ep.trajectory.record(
             completed=stop_reason in ("final_message", *stop_tools), conversation=[*body.input, *ep.outputs]
         )
@@ -641,10 +678,16 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         tool of the row can take is answered by `_refused_call`, without a request."""
         started = (time(), perf_counter())
         if ep.tool_access is not None:
+            unsendable = _unsendable(call, ep.tool_names)
+            if unsendable is not None:
+                # No request was made: the trajectory names the gate, not an HTTP status.
+                output, error_type = unsendable
+                ep.trajectory.tool_call(call, started, output, error_type)
+                return output
             output, status = await self._call_granted_tool(ep, call)
         else:
             output, status = await self._call_resources_server(ep, call, turn)
-        ep.trajectory.tool_call(call, started, output, status)
+        ep.trajectory.tool_call(call, started, output, None if 200 <= status < 400 else f"http_{status}")
         return output
 
     async def _call_resources_server(self, ep: _Episode, call: _Call, turn: list[dict[str, Any]]) -> tuple[str, int]:
@@ -669,13 +712,9 @@ class AgenticTurnSimulationAgent(SimpleAgent):
 
     async def _call_granted_tool(self, ep: _Episode, call: _Call) -> tuple[str, int]:
         """An agent session's call: ``POST /<tool name>`` through the grant, the arguments as the body. A call no tool
-        of the row can take (the scoring gates it: malformed_arguments, nonexistent_tool) is answered here: sent, a name
-        such as ``run`` would reach one of the server's own routes instead of a tool."""
+        of the row can take (the scoring gates it: malformed_arguments, nonexistent_tool) never gets here
+        (`_unsendable`): sent, a name such as ``run`` would reach one of the server's own routes instead of a tool."""
         arguments = json_object(call.arguments or "{}")
-        if arguments is None:
-            return _refused_call(call, "its arguments are not a JSON object"), 422
-        if call.name not in ep.tool_names:
-            return _refused_call(call, f"there is no tool named {call.name!r}"), 404
         url = f"{_tools_base_url(ep.tool_access, ep.resources_prefix)}/{call.name}"
         attempts = self.config.simulate_max_attempts
         for attempt in range(1, attempts + 1):
@@ -693,7 +732,9 @@ class AgenticTurnSimulationAgent(SimpleAgent):
                 return (output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)), http.status
             detail = (await http.content.read()).decode(errors="replace")
             if http.status in _GRANT_REFUSED_STATUSES:
-                raise RuntimeError(f"The tool grant was refused for {call.name!r}: HTTP {http.status}: {detail[:300]}")
+                raise _GrantRefused(
+                    f"The tool grant was refused for {call.name!r}: HTTP {http.status}: {detail[:300]}"
+                )
             self._log_failed_attempt(f"/{call.name}", call, attempt, http.status, detail)
             if attempt < attempts:
                 await sleep(2 ** (attempt - 1))

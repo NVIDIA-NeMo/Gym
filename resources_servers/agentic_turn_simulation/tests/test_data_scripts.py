@@ -33,6 +33,7 @@ from resources_servers.agentic_turn_simulation.scripts.clean_rows import (
     session_cap,
     typed_text,
 )
+from resources_servers.agentic_turn_simulation.scripts.validate_rows import validate_file
 
 
 VOCABULARY = {"tags": ["EMAIL", "URL"], "numbered_tags": ["NAME"]}
@@ -351,3 +352,32 @@ def test_rows_with_the_fallback_id_key_still_work(tmp_path: Path, capsys: pytest
     clash.write_bytes(_line(_row("a", "s", ("user", ASK))))
     with pytest.raises(SystemExit, match="1 row ids repeat"):
         mix_rows.main([str(tmp_path / "clash_mix.jsonl"), str(out), str(clash)])
+
+
+TOOL = {"type": "function", "name": "bash", "description": "Run", "parameters": {"type": "object"}, "strict": False}
+
+
+def test_validate_rows_passes_a_row_the_environment_can_serve(tmp_path: Path) -> None:
+    path = tmp_path / "rows.jsonl"
+    path.write_bytes(_line(_row("r1", "s1", ("user", "ls"), tools=[TOOL])))
+    assert validate_file(path, agent="")["rows"] == 1
+
+
+@pytest.mark.parametrize(
+    ("tool", "message"),
+    [
+        # What the agent_arena Environment Server refuses when it sets the episode up.
+        ({"name": "files/read"}, "the episode cannot be set up"),
+        ({"parameters": {"type": "array"}}, "the episode cannot be set up"),
+        ({"name": "run"}, "tools named like the agent_arena server's routes: ['run']"),
+    ],
+)
+def test_validate_rows_refuses_a_row_tool_no_episode_can_serve(
+    tmp_path: Path, tool: dict[str, Any], message: str
+) -> None:
+    path = tmp_path / "rows.jsonl"
+    path.write_bytes(
+        _line(_row("r1", "s1", ("user", "ls"))) + _line(_row("r2", "s1", ("user", "ls"), tools=[TOOL | tool]))
+    )
+    with pytest.raises(SystemExit, match=f"rows.jsonl:2: .*{message[:20]}"):
+        validate_file(path, agent="")

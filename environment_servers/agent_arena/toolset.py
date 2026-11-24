@@ -17,7 +17,7 @@ from typing import Any
 
 from nemo_gym.server_runtime import ToolCallRecord, ToolResult, ToolSpec
 from resources_servers.agentic_turn_simulation.schemas import AgenticTurnSimulationRunRequest, SimulateToolCallRequest
-from resources_servers.agentic_turn_simulation.turns import TurnSession, TurnSimulation, _row_tools
+from resources_servers.agentic_turn_simulation.turns import TurnSession, TurnSimulation, _row_tools, tool_specs
 
 
 # The id of the call being answered in the rebuilt turn; earlier calls keep the ids the agent sent with them.
@@ -41,10 +41,8 @@ class TurnToolset:
         self._call_context = call_context
         self._session = session
         self._calls: list[ToolCallRecord] = []
-        harness = session.harness
-        described = {tool.get("name"): tool for tool in harness.described_tools(_row_tools(row), session.prefix)}
         # A name a tool grant refuses, or parameters that are not an object schema, fail here (ToolSpec).
-        self._specs = [_spec(name, described.get(name, {})) for name in sorted(session.tool_names, key=str)]
+        self._specs = tool_specs(session.harness, _row_tools(row), session.prefix, session.tool_names)
 
     def bind(self, calls: list[ToolCallRecord]) -> None:
         self._calls = calls
@@ -105,15 +103,3 @@ def _resent(record: ToolCallRecord, following: ToolCallRecord) -> bool:
 def _server_failure(record: ToolCallRecord) -> bool:
     """A record the server wrote for a call it refused or that failed; a simulated answer is always text."""
     return record.is_error and isinstance(record.output, dict) and set(record.output) == {"detail"}
-
-
-def _spec(name: Any, tool: dict[str, Any]) -> ToolSpec:
-    """The spec of one tool a call may name. The row declares its tools to the policy itself, so a spec only names a
-    tool the server answers: one the row (or, for Cline, its history) does not describe gets an open object schema."""
-    parameters = tool.get("parameters")
-    description = tool.get("description")
-    return ToolSpec(
-        name=name,
-        description=description if isinstance(description, str) and description.strip() else name,
-        parameters=parameters if parameters is not None else {"type": "object"},
-    )

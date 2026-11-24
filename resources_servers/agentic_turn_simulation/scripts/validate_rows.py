@@ -17,8 +17,10 @@
 
 Per row, the steps the env runs before the first policy call: the agent_ref name (unless --agent ''), the run-request
 model, the harness the row selects (a row that names a harness must not fall back to generic), the harness's
-conversion of the history into tool items, its tool list, and the replay of recorded file edits into the session
-workspace. Then a dry draw of which rows obstacle injection would arm at --obstacle-row-rate (counts only; the draw
+conversion of the history into tool items, its tool list, the replay of recorded file edits into the session
+workspace, and what the agent_arena Environment Server checks when it sets the episode up: each tool a call may name as
+a ``ToolSpec`` (a name a tool grant can carry, object parameters), no tool named like one of the server's routes
+(``SERVER_ROUTE_NAMES``), and the harness the seed carries within the ``agent_context`` size limit. Then a dry draw of which rows obstacle injection would arm at --obstacle-row-rate (counts only; the draw
 hashes row content, so a content change moves it). The first failing row stops the run with
 its line number. Prints, and with --report writes, counts per file: rows, harness, rows whose tools have obstacle
 texts, obstacle draw (keys are "sandbox:<kind>" for sandbox rows, "other:<kind>" otherwise).
@@ -34,13 +36,19 @@ import os
 from collections import Counter
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from nemo_gym.server_runtime import AgentContext
 from resources_servers.agentic_turn_simulation.harnesses import select_harness
 from resources_servers.agentic_turn_simulation.obstacles import ObstacleInjectionConfig, arm
 from resources_servers.agentic_turn_simulation.schemas import AgenticTurnSimulationRunRequest
-from resources_servers.agentic_turn_simulation.turns import _input_items, _row_tools
+from resources_servers.agentic_turn_simulation.turns import _input_items, _row_tools, harness_context, tool_specs
 
 
 AGENT = "agentic_turn_simulation_agent"
+# The first path segment of each route of the agent_arena Environment Server ("mcp" with the MCP transport): a tool
+# cannot take one of these names. environment_servers/agent_arena/tests pins this to the server's routes.
+SERVER_ROUTE_NAMES = frozenset({"aggregate_metrics", "docs", "mcp", "openapi.json", "redoc", "run"})
 
 
 def validate_file(path: Path, *, agent: str = AGENT, row_rate: float = 0.3) -> dict[str, object]:
@@ -59,10 +67,18 @@ def validate_file(path: Path, *, agent: str = AGENT, row_rate: float = 0.3) -> d
                 raise SystemExit(f"{path}:{n}: row names harness {metadata['harness']!r} but selects generic")
             items = _input_items(body)
             prefix = harness.to_tool_items(items)
-            tool_names = harness.tool_names(_row_tools(body))
+            tools = _row_tools(body)
+            tool_names = harness.tool_names(tools)
             workspace = harness.new_workspace(body.verifier_metadata or {})
             if workspace is not None:
                 workspace.replay(prefix)
+            try:
+                specs = tool_specs(harness, tools, prefix, tool_names)
+                AgentContext(values=harness_context(harness, tool_names).model_dump(mode="json"))
+            except ValidationError as error:
+                raise SystemExit(f"{path}:{n}: the episode cannot be set up: {error}") from None
+            if taken := sorted({spec.name for spec in specs} & SERVER_ROUTE_NAMES):
+                raise SystemExit(f"{path}:{n}: tools named like the agent_arena server's routes: {taken}")
             if any(name in tool_names for name in harness.obstacle_texts):
                 obstacle_tools[harness.name] += 1
             obstacle = arm(

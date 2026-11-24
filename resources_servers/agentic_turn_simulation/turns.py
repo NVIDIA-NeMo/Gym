@@ -22,7 +22,7 @@ from typing import Any, Callable
 from nemo_gym.client import ServerClient, get_response_json
 from nemo_gym.core import NeMoGymChatCompletion, NgFailureEvent, applied_outcome_fields, failure_kinds
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
-from nemo_gym.server_runtime import observe_llm_judge_grading
+from nemo_gym.server_runtime import ToolSpec, observe_llm_judge_grading
 from nemo_gym.verification import call_judge, is_judge_failure, record_parsed_judge_verdict
 from nemo_gym.verification.judge import _is_retryable_judge_error
 from resources_servers.agentic_turn_simulation.foreign_script import foreign_script_letters
@@ -65,6 +65,7 @@ from resources_servers.agentic_turn_simulation.schemas import (
     JudgeSpec,
     SimulateToolCallRequest,
     SimulateToolCallResponse,
+    TurnHarnessContext,
 )
 from resources_servers.agentic_turn_simulation.simulator import (
     holds_simulator_failure,
@@ -131,6 +132,36 @@ def _input_items(body: AgenticTurnSimulationRunRequest) -> list[dict[str, Any]]:
 
 def _row_tools(body: AgenticTurnSimulationRunRequest) -> list[dict[str, Any]]:
     return [as_dict(t) for t in body.responses_create_params.tools or []]
+
+
+def tool_specs(
+    harness: Harness, tools: list[dict[str, Any]], prefix: list[dict[str, Any]], tool_names: frozenset[str]
+) -> list[ToolSpec]:
+    """The tools the agent_arena Environment Server serves for a row: one spec per name a call may name (`tool_names`,
+    the set the scoring's nonexistent_tool gate checks). The row declares its tools to the policy itself, so a spec
+    only names a tool the server answers: one the row (or, for Cline, its history) does not describe gets an open
+    object schema. A name a tool grant cannot carry, or parameters that are not an object schema, raise
+    ``ValidationError`` (``ToolSpec``). ``scripts/validate_rows.py`` runs the same check."""
+    described = {tool.get("name"): tool for tool in harness.described_tools(tools, prefix)}
+    specs = []
+    for name in sorted(tool_names, key=str):
+        tool = described.get(name, {})
+        parameters, description = tool.get("parameters"), tool.get("description")
+        specs.append(
+            ToolSpec(
+                name=name,
+                description=description if isinstance(description, str) and description.strip() else name,
+                parameters=parameters if parameters is not None else {"type": "object"},
+            )
+        )
+    return specs
+
+
+def harness_context(harness: Harness, tool_names: frozenset[str]) -> TurnHarnessContext:
+    """The row's harness as the agent_arena Environment Server sends it in the agent session's seed."""
+    return TurnHarnessContext(
+        stop_tools=list(harness.stop_tools), protocol=harness.protocol, tool_names=sorted(tool_names, key=str)
+    )
 
 
 def _response_metadata(body: AgenticTurnSimulationVerifyRequest) -> dict[str, Any]:

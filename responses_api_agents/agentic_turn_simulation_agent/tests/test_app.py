@@ -14,9 +14,17 @@ from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
-from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionRequest,
+    AgentOutcome,
+    AgentSeedSessionRequest,
+    OutcomeAction,
+    agent_outcome_policy,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.core.failure_kinds import ENVIRONMENT_PROTOCOL_VIOLATION
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.server_runtime import TOOL_CALL_ID_HEADER, AgentContext, DirectHTTPToolAccess
 from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationVerifyRequest
@@ -1048,6 +1056,20 @@ class TestAgentSessions:
         assert grant.calls == [] and len(script.model_calls) == 2
         assert reason in response.output[1].output and not response.output[1].output.startswith("[tool simulator")
 
+    @pytest.mark.parametrize(
+        ("call", "error_type"),
+        [
+            (_fc("browse", "c1", '{"url": "x"}'), "nonexistent_tool"),
+            (_fc("bash", "c1", "{not json"), "malformed_arguments"),
+        ],
+    )
+    async def test_a_call_answered_here_is_recorded_by_its_gate(self, call, error_type) -> None:
+        # No request was made, so no HTTP status: the trajectory names the gate the scoring applies.
+        agent, _ = _agent(_model(call), _model(_msg("done")))
+        _, trajectory, *_ = await _granted_episode(agent, GrantScript(), collect_trajectory=True)
+        (tool,) = trajectory.tool_calls
+        assert (tool.status, tool.error_type) == ("failed", error_type)
+
     async def test_a_failing_tool_route_is_retried_then_masked(self, sleep: AsyncMock) -> None:
         agent, _ = _agent(_model(_fc("bash", "c1")), _model(_msg("done")), simulate_max_attempts=2)
         grant = GrantScript(_http(status=503, body="busy"), _http(status=503, body="busy"))
@@ -1058,12 +1080,20 @@ class TestAgentSessions:
     async def test_a_refused_grant_fails_the_turn_unretried(self, status: int, sleep: AsyncMock) -> None:
         # A bad token, an ended episode, or a grant that does not serve the row's tools (404 for one of them) is the
         # setup's fault: not a simulator failure the scoring would mask, nor a missing tool it would score 0.
+        # The turn ends as a failed response classified environment_protocol_violation, which the environment
+        # server's outcome policy fails terminally: another attempt would meet the same refusal.
         agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("done")))
         grant = GrantScript(_http({"detail": "refused"}, status=status))
-        with pytest.raises(RuntimeError, match=f"tool grant was refused for 'bash': HTTP {status}"):
-            await _granted_episode(agent, grant)
+        response, trajectory, *_ = await _granted_episode(agent, grant, collect_trajectory=True)
         assert len(grant.calls) == 1 and len(script.model_calls) == 1
         sleep.assert_not_awaited()
+        assert (response.status, response.metadata["stop_reason"]) == ("failed", "grant_refused")
+        assert f"tool grant was refused for 'bash': HTTP {status}" in response.error.message
+        outcome = AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY])
+        assert outcome.failure_kind == ENVIRONMENT_PROTOCOL_VIOLATION
+        assert agent_outcome_policy(response) == OutcomeAction.FAIL
+        (invocation,) = trajectory.invocations
+        assert invocation.status == "incomplete"
 
     async def test_a_session_without_a_grant_is_refused_before_any_call(self) -> None:
         agent, _ = _agent()

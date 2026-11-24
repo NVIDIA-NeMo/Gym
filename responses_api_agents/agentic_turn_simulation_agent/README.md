@@ -33,8 +33,11 @@ on the relay logs a deprecation warning once per process; see
     the simulator's view of the turn from the episode's earlier calls. A call no tool of the row can take is answered
     by the agent without a request: arguments that are not a JSON object, or a name outside `tool_names` (a name such
     as `run` would otherwise reach one of the server's own routes). Scoring gives such a turn 0
-    (`malformed_arguments`, `nonexistent_tool`) whatever the call returned. A reply that refuses a call the agent sent
-    (401, 403, 404, 410, 422) means the grant does not serve the row's tools: the turn fails, unretried.
+    (`malformed_arguments`, `nonexistent_tool`) whatever the call returned; the trajectory records such a call as
+    failed with that name as its `error_type`, since no request was made. A reply that refuses a call the agent sent
+    (401, 403, 404, 410, 422) means the grant does not serve the row's tools: the turn ends unretried, as a failed
+    response classified `environment_protocol_violation` (`AgentOutcome`), which the environment server fails
+    terminally.
   - On the relay, a call goes to `/simulate_tool_call` with its `call_id`, `name`, raw `arguments` (parseable or not)
     and the turn so far without reasoning.
 - **What ends the turn** (`response.metadata.stop_reason`, with `steps`, `elapsed_seconds` and the per-call
@@ -50,6 +53,7 @@ on the relay logs a deprecation warning once per process; see
   | `time_cap` | The wall-clock cap, checked before each model call | masked |
   | `context_overflow` | The history no longer fits the policy's context | masked at `steps` 0 (the row does not fit), else 0 |
   | `max_output_tokens` | A cut-off reply with a tool call or nothing visible, once the budget cannot grow | 0 (`unfinished_turn`) |
+  | `grant_refused` | In an agent session: the grant refused a call the agent sent | not scored: the response is failed (`environment_protocol_violation`) |
 
 - **Output budget.** A reply cut off by its output budget (the request's `max_output_tokens`) is discarded and retried
   with double the budget, up to `max_output_tokens_cap`: its arguments may be cut, and running them would score the
@@ -61,7 +65,8 @@ on the relay logs a deprecation warning once per process; see
   visible, ends the turn as `max_output_tokens`, its calls unrun. When the prompt fits but prompt plus budget does
   not, the budget shrinks to what fits (and never grows again). Retries are not steps. Shrinking needs the overflow
   error from the model server (`propagate_context_overflow_errors: true` on a `vllm_model` policy; with Gym's default,
-  false, an overflow comes back as an empty cut-off reply). Any other model-server error fails the rollout.
+  false, an overflow comes back as an empty cut-off reply). Any other model-server error fails the rollout: the agent
+  raises, its reply is an HTTP 500, and the episode is retried as a dependency failure.
 - **Trajectory.** An agent session's close returns the turn's trajectory as the agent recorded it, as `/run` returns
   it, with each tool call's output. Gym would otherwise take a call's output from the conversation's
   `function_call_output` items, which a Cline turn does not have (its results are in a user message).

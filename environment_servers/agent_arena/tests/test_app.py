@@ -31,6 +31,7 @@ from nemo_gym.core import (
     TaskId,
     current_model_sampling_segment,
 )
+from nemo_gym.core.failure_kinds import ENVIRONMENT_PROTOCOL_VIOLATION
 from nemo_gym.server_runtime import (
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
@@ -46,6 +47,7 @@ from resources_servers.agentic_turn_simulation.schemas import (
     AgenticTurnSimulationVerifyRequest,
     SimulateToolCallRequest,
 )
+from resources_servers.agentic_turn_simulation.scripts.validate_rows import SERVER_ROUTE_NAMES
 from resources_servers.agentic_turn_simulation.tests.support import VERDICT, chat, http, judge_reply, make_server, req
 
 
@@ -371,6 +373,51 @@ class TestEpisode:
         assert (response.failure.stage, response.failure.terminal) == ("agent", False)
         assert response.failure.failure_kind == MODEL_TRANSPORT_ERROR
         assert ("judge_0", "/v1/chat/completions") not in _paths(world) and server._open_episodes == {}
+
+    async def test_a_refused_grant_fails_the_episode_terminally(self) -> None:
+        # The agent classifies a grant that refuses the row's tools; every attempt would meet the same refusal.
+        server = _server()
+        outcome = json.dumps({"failure_kind": ENVIRONMENT_PROTOCOL_VIOLATION})
+        reply = _agent_reply({"p1": "", "p2": ""}, status="failed", metadata={AGENT_OUTCOME_METADATA_KEY: outcome})
+        _world(server, reply=reply)
+
+        response = await server.run_request(_request())
+
+        assert (response.failure.stage, response.failure.terminal) == ("agent", True)
+        assert response.failure.failure_kind == ENVIRONMENT_PROTOCOL_VIOLATION
+
+    @pytest.mark.parametrize(
+        ("tool", "reason"),
+        [
+            # No grant can carry the name, or the parameters are no object schema (ToolSpec).
+            ({"name": "files/read"}, "cannot be set up as an episode"),
+            ({"parameters": {"type": "array"}}, "cannot be set up as an episode"),
+            # Named like one of this server's routes (serve_tools).
+            ({"name": "run"}, "cannot take the names of the server's routes: run"),
+        ],
+    )
+    async def test_a_row_tool_no_episode_can_serve_is_a_terminal_seed_failure(
+        self, tool: dict[str, Any], reason: str
+    ) -> None:
+        server = _server()
+        world = _world(server)
+        row = ROW | {"responses_create_params": {"input": HISTORY, "tools": [TOOLS[0] | tool]}}
+
+        response = await server.run_request(_request(row))
+
+        assert response.result is None
+        assert (response.failure.stage, response.failure.terminal) == ("seed", True)
+        assert reason in response.failure.failure_reason
+        assert world.calls == [] and server._open_episodes == {}
+
+    def test_validate_rows_refuses_the_servers_route_names(self) -> None:
+        # scripts/validate_rows.py checks a row's tools against these names before any episode runs.
+        names = set()
+        for transports in (["direct_http"], ["direct_http", "mcp"]):
+            server = _server(config={"tool_transports": transports})
+            server.setup_webserver()
+            names |= server._reserved_tool_names
+        assert names == SERVER_ROUTE_NAMES
 
     @pytest.mark.parametrize(
         "judge_error",
