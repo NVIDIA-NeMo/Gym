@@ -344,6 +344,22 @@ _NAME_OPERATOR_JOB = (
 )
 
 
+def _refuse_nonresumable(nonresumable: bool, benchmark: str, decision: RecoveryDecision) -> RecoveryDecision:
+    """A run without a resume_config cannot be continued: a stop says so, and a decision that would dispatch work
+    becomes that stop."""
+    if not nonresumable or decision.action in (RecoveryAction.NOOP, RecoveryAction.UNKNOWN):
+        return decision
+    note = f"{benchmark} was submitted with resumable: false, so no recovery can continue it"
+    if decision.action == RecoveryAction.STOP:
+        return decision.model_copy(update={"reason": f"{decision.reason}; {note}"})
+    return decision.model_copy(
+        update={
+            "action": RecoveryAction.STOP,
+            "reason": f"{note} (recovery would {decision.action.value}: {decision.reason})",
+        }
+    )
+
+
 class ChainRecovery:
     """The recovery half of ``SlurmExecutor``: read a run's saved evidence, decide, and continue its chain.
 
@@ -383,20 +399,18 @@ class ChainRecovery:
         with get_connection(record.hostname) as conn:
             config = self._saved_config(conn, Path(record.run_dir))
             resume = config.driver.benchmarks[benchmark].resume_config
-            if resume is None:
-                stop = RecoveryDecision(
-                    action=RecoveryAction.STOP,
-                    reason=f"{benchmark} stores no resume_config, so its infra-retry budget is unknown",
-                    expected=0,
-                    counts={},
-                    identities={},
-                    evidence=[],
-                )
-                return stop, None
+            # A run submitted with `resumable: false` saved no chain budget: its infra-retry budget and walltime cap
+            # stay unknown. Its saved evidence still decides the gate, and no recovery may continue it
+            # (``_refuse_nonresumable``).
+            nonresumable = resume is None
+            max_infra_retries = resume.max_retries if resume is not None else None
+            saved_max_walltime = resume.max_walltime if resume is not None else None
             # The policy is read from the run's saved config, so every recovery and resubmit applies the one the run
             # was started with. An explicit Python argument wins over that section, which wins over the defaults.
-            outcome_policy, policy_source = effective_outcome_policy(outcome_policy, resume.recovery_outcome_policy)
-            cap_s = _walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None
+            outcome_policy, policy_source = effective_outcome_policy(
+                outcome_policy, resume.recovery_outcome_policy if resume is not None else None
+            )
+            cap_s = _walltime_to_seconds(saved_max_walltime) if saved_max_walltime is not None else None
             raised_cap = None
             if max_walltime is not None:
                 try:
@@ -454,16 +468,20 @@ class ChainRecovery:
                         )
                     # A reader that could not run decides nothing, so the scheduler is asked whether the run is live.
                     if collected.managed_selection is None and not collected.managed_reader_unavailable:
-                        return decide_from_collected(
-                            collected,
-                            max_infra_retries=resume.max_retries,
-                            max_walltime_s=cap_s,
-                            live_job=None,
-                            outcome_policy=outcome_policy,
-                            outcome_policy_source=policy_source,
-                            extend_retries=extend_retries,
-                            extend_attempts=extend_attempts,
-                            rerun_masked_without_artifact=rerun_masked_without_artifact,
+                        return _refuse_nonresumable(
+                            nonresumable,
+                            benchmark,
+                            decide_from_collected(
+                                collected,
+                                max_infra_retries=max_infra_retries,
+                                max_walltime_s=cap_s,
+                                live_job=None,
+                                outcome_policy=outcome_policy,
+                                outcome_policy_source=policy_source,
+                                extend_retries=extend_retries,
+                                extend_attempts=extend_attempts,
+                                rerun_masked_without_artifact=rerun_masked_without_artifact,
+                            ),
                         ), collected
             try:
                 workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
@@ -498,7 +516,7 @@ class ChainRecovery:
                 if rows is not None:
                     allocation_cut = store_writer_cut_from_accounting(rows, collected)
                     collected = reconcile_requeued_chain(collected, rows)
-                if resume.max_walltime is not None and not collected.accounting_reconciled:
+                if saved_max_walltime is not None and not collected.accounting_reconciled:
                     # Unavailable accounting cannot grant fresh walltime; a requeued id has two rows and stays unknown.
                     collected.accounted_walltime_s = (
                         _epoch_walltime(collected, rows)
@@ -525,15 +543,15 @@ class ChainRecovery:
                         )
                     except (RuntimeError, OSError):
                         stopped = None
-        collected = collected.model_copy(update={"infra_retries_configured": resume.max_retries})
+        collected = collected.model_copy(update={"infra_retries_configured": max_infra_retries})
         if collected.accounting_snapshot is not None:
             collected.accounting_snapshot = {
                 **collected.accounting_snapshot,
-                "resume_config": resume.model_dump_json(),
+                "resume_config": resume.model_dump_json() if resume is not None else None,
             }
         decision = decide_from_collected(
             collected,
-            max_infra_retries=resume.max_retries,
+            max_infra_retries=max_infra_retries,
             max_walltime_s=cap_s,
             live_job=True if live_job_name is not None else None if workdirs is None else str(job_dir) in workdirs,
             outcome_policy=outcome_policy,
@@ -555,8 +573,8 @@ class ChainRecovery:
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {requeued}"})
         if raised_cap is not None:
             raised = (
-                f"walltime cap raised from {resume.max_walltime} to {raised_cap} for this plan"
-                if resume.max_walltime is not None
+                f"walltime cap raised from {saved_max_walltime} to {raised_cap} for this plan"
+                if saved_max_walltime is not None
                 else f"walltime cap set to {raised_cap} for this plan (the run had none)"
             )
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {raised}"})
@@ -564,7 +582,7 @@ class ChainRecovery:
             recorded = _recorded_spinup_timeout_seconds(config, benchmark)
             raised = _spinup_timeout_raise_text(recorded, server_spinup_timeout_seconds, spinup_timeout_reason)
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {raised}"})
-        return decision, collected
+        return _refuse_nonresumable(nonresumable, benchmark, decision), collected
 
     def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
         """The decision of ``recovery_evidence`` without a score key."""

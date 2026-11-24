@@ -1398,3 +1398,60 @@ def test_recover_revalidates_the_collected_accounting_inside_the_resubmit_lock(
     assert not (job_dir / ".gym_resubmit.lock").exists()
     assert (job_dir / ".gym_chain_incomplete").exists() == (change == "incomplete")
     assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
+
+
+def _nonresumable_run(tmp_path: Path, *, scored: int) -> Path:
+    """A finished run submitted with `resumable: false`: two inventoried rows, `scored` of them saved."""
+    config = _config(tmp_path)
+    assert config.driver.benchmarks["gsm8k"].resume_config is None
+    job_dir = _staged_run(tmp_path, config=config)
+    artifacts = job_dir / "artifacts"
+    artifacts.mkdir()
+    rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(2)]
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (artifacts / "rollouts.jsonl").write_text("".join(json.dumps(r | {"reward": 1.0}) + "\n" for r in rows[:scored]))
+    return job_dir
+
+
+def test_inspect_reads_the_saved_evidence_of_a_nonresumable_run(tmp_path: Path, slurm_bin: Path) -> None:
+    job_dir = _nonresumable_run(tmp_path, scored=2)
+
+    out = inspect_recovery(*_handle(job_dir))
+
+    assert out.decision.action.value == "noop", out.decision.reason
+    assert out.decision.counts == {"scored": 2}
+    assert out.dispatched is None
+    assert out.gate_task["expected_samples"] == 2
+    assert out.gate_task["scored_samples"] == 2
+    assert "no evidence collected" not in json.dumps(out.gate_task)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"extend_retries": 1},
+        {"extend_attempts": 1},
+        {"max_walltime": "01:00:00", "walltime_reason": "Explicit recovery budget", "extend_retries": 1},
+    ],
+    ids=["unchanged", "retry-extension", "attempt-extension", "operator-budget"],
+)
+def test_recover_refuses_to_continue_a_nonresumable_run(tmp_path: Path, slurm_bin: Path, options: dict) -> None:
+    job_dir = _nonresumable_run(tmp_path, scored=1)
+
+    inspected = inspect_recovery(*_handle(job_dir))
+    # Explicit extensions and an operator budget do not enable recovery for a nonresumable run.
+    out = recover(*_handle(job_dir), **options)
+
+    for outcome in (inspected, out):
+        assert outcome.decision.action.value == "stop", outcome.decision.reason
+        assert "submitted with resumable: false" in outcome.decision.reason
+        assert outcome.decision.counts == {"scored": 1, "missing": 1}
+        assert outcome.gate_task["expected_samples"] == 2
+        assert outcome.gate_task["scored_samples"] == 1
+        assert "no evidence collected" not in json.dumps(outcome.gate_task)
+        # No saved resume_config is an unknown budget, not a spent zero one.
+        assert "0 of 0" not in outcome.decision.reason
+        assert outcome.gate_task["retry_budget"]["infra"]["configured"] is None
+    assert out.dispatched is None and not (slurm_bin / "env").exists()
+    assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
