@@ -1487,6 +1487,8 @@ class TestRunWebserverProxyKwargs:
 
         captured: dict = {}
         self.uvicorn_kwargs = captured
+        middleware_hooks: list[str] = []
+        self.middleware_hooks = middleware_hooks
 
         def run(**kwargs) -> None:
             captured.update(kwargs)
@@ -1533,8 +1535,15 @@ class TestRunWebserverProxyKwargs:
             def setup_telemetry(self) -> None: ...
             def set_ulimit(self) -> None: ...
             def prefix_server_logs(self) -> None: ...
-            def setup_exception_middleware(self, app) -> None: ...
-            def setup_cancellation_middleware(self, app) -> None: ...
+            def setup_exception_middleware(self, app) -> None:
+                middleware_hooks.append("exception")
+
+            def setup_request_timing(self, app) -> None:
+                middleware_hooks.append("request_timing")
+
+            def setup_cancellation_middleware(self, app) -> None:
+                middleware_hooks.append("cancellation")
+
             def instrument_app_for_telemetry(self, app) -> None: ...
 
         TestSimpleServer.run_webserver()
@@ -1558,6 +1567,22 @@ class TestRunWebserverProxyKwargs:
             assert self.session_secret_at_run != "TestSimpleServer___my_server"
         else:
             assert self.session_secret_at_run is None
+
+    @mark.parametrize("routes_sessions", [False, True])
+    def test_request_timing_wraps_exception_handling_inside_session_routing_and_cancellation(
+        self, monkeypatch: MonkeyPatch, routes_sessions: bool
+    ) -> None:
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server,
+            "install_session_routing",
+            lambda app, **kwargs: self.middleware_hooks.append("session_routing"),
+        )
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1, routes_sessions=routes_sessions)
+
+        # Each hook wraps the middleware installed before it.
+        session_routing = ["session_routing"] if routes_sessions else []
+        assert self.middleware_hooks == ["exception", "request_timing", *session_routing, "cancellation"]
 
     @mark.parametrize(
         ("config_dict", "num_workers", "uses_reuse_port"),

@@ -268,43 +268,37 @@ async def test_a_client_that_leaves_mid_stream_is_a_cancelled_call_with_its_firs
     _only(metrics[gym_metrics.MODEL_TIME_TO_FIRST_BYTE_INSTRUMENT])
 
 
-def test_model_servers_install_the_timing_through_the_request_timing_hook() -> None:
-    from types import SimpleNamespace
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/responses",
+        "/ng-sampling/null/v1/responses",
+        f"/ng-rollout/r1/ng-agent-instance/judge/ng-sampling/null/ng-trace/00-{'a' * 32}-{'b' * 16}-01/v1/responses",
+    ],
+)
+async def test_a_model_server_times_a_call_under_any_correlation_prefix(collected_metrics, path) -> None:
+    async def answered() -> dict[str, str]:
+        return {"id": "resp_1"}
 
-    from fastapi import FastAPI
+    sent = await _serve(_model_server_app(answered), path)
 
-    from nemo_gym.models.base_responses_api_model import SimpleResponsesAPIModel
+    assert sent[0]["status"] == 200
+    metrics = collected_metrics()
+    attributes, _ = _only(metrics[gym_metrics.MODEL_CALL_DURATION_INSTRUMENT])
+    assert attributes == {
+        "nemo.gym.model.dialect": "responses",
+        "nemo.gym.server.name": "policy_model",
+        "nemo.gym.model.call_outcome": "2xx",
+    }
+    _only(metrics[gym_metrics.MODEL_TIME_TO_FIRST_BYTE_INSTRUMENT])
 
-    app = FastAPI()
-    SimpleResponsesAPIModel.setup_request_timing(SimpleNamespace(config=SimpleNamespace(name="policy_model")), app)
 
-    (middleware,) = app.user_middleware
-    assert middleware.cls is ModelCallTimingMiddleware
-    assert middleware.kwargs == {"server_name": "policy_model"}
-
-
-def test_a_call_the_exception_middleware_answers_is_timed_with_the_status_the_client_gets(collected_metrics) -> None:
-    from fastapi import FastAPI, Request
-    from fastapi.responses import JSONResponse
-    from fastapi.testclient import TestClient
-
-    app = FastAPI()
-
-    @app.post("/v1/responses")
-    async def responses() -> None:
+async def test_a_model_server_times_a_failed_call_with_the_status_the_client_gets(collected_metrics) -> None:
+    async def failing() -> None:
         raise RuntimeError("upstream broke")
 
-    @app.middleware("http")
-    async def exception_handling(request: Request, call_next):
-        try:
-            return await call_next(request)
-        except RuntimeError:
-            return JSONResponse("failed", status_code=500)
+    sent = await _serve(_model_server_app(failing), "/v1/responses")
 
-    # Added after the exception middleware, as the request-timing hook is, so it wraps it.
-    app.add_middleware(ModelCallTimingMiddleware, server_name="policy_model")
-
-    assert TestClient(app).post("/v1/responses", json={}).status_code == 500
-
+    assert sent[0]["status"] == 500
     attributes, _ = _only(collected_metrics()[gym_metrics.MODEL_CALL_DURATION_INSTRUMENT])
     assert attributes["nemo.gym.model.call_outcome"] == "5xx"
