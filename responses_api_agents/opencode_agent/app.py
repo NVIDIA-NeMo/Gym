@@ -184,11 +184,12 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
 # Error classification of OpenCode 2 (its errors translated by opencode2.store) is validated on this release.
 _TESTED_OPENCODE2_OUTCOME_VERSION = OPENCODE_V2_VERSION
-# Restore outcomes that are expected rather than faults: the checkpoint was taken before the launch's relay started.
-# They are logged at INFO; every other reason a launch cannot resume in place, a launch without a relay included, at
-# WARNING: the relay runs on OpenCode's own binary, so every image can run it. ``relay_gone`` is also what the check
-# answers for a relay that died or was restarting when the snapshot was taken, which it cannot tell apart.
-_EXPECTED_RESTORE_FALLBACKS = frozenset({"relay_gone"})
+# Restore outcomes that are expected rather than faults: the checkpoint was taken before the launch's relay started,
+# or the launch holds episode MCP tool grants, which only a relaunch renders for the replacement attempt. They are
+# logged at INFO; every other reason a launch cannot resume in place, a launch without a relay included, at WARNING:
+# the relay runs on OpenCode's own binary, so every image can run it. ``relay_gone`` is also what the check answers
+# for a relay that died or was restarting when the snapshot was taken, which it cannot tell apart.
+_EXPECTED_RESTORE_FALLBACKS = frozenset({"relay_gone", "mcp_tool_grants"})
 _API_ERROR = "APIError"
 # Runs of the read-only check of a restored session's files when the provider could not run it, and the wait
 # before the second (doubled for the third).
@@ -1676,18 +1677,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     f"{verdict.detail}"
                 ),
             )
-        if isinstance(verdict, RestoredLaunch) or verdict.reason == "launch_finished":
+        # The running OpenCode keeps the MCP servers, with their URLs and credentials, of the attempt that launched
+        # it (``state.request`` until the re-bind ends). A relaunch renders the replacement attempt's grants.
+        reason, detail = (verdict.reason, verdict.detail) if isinstance(verdict, NotResumable) else (None, None)
+        if reason is None and any(access.kind == "mcp" for access in state.request.tool_accesses):
+            reason, detail = "mcp_tool_grants", "the launch holds the previous attempt's MCP tool grants"
+        if reason is None or reason == "launch_finished":
             state.adoption = RestoredLaunch(pause_seq=pause_seq, identity=identity)
-            state.adoption_ended = isinstance(verdict, NotResumable)
+            state.adoption_ended = reason == "launch_finished"
             return
         LOG.log(
-            logging.INFO if verdict.reason in _EXPECTED_RESTORE_FALLBACKS else logging.WARNING,
+            logging.INFO if reason in _EXPECTED_RESTORE_FALLBACKS else logging.WARNING,
             "OpenCode cannot resume in place: session %s, reason %s, detail %s; relaunching",
             state.request.agent_session_id,
-            verdict.reason,
-            verdict.detail,
+            reason,
+            detail,
         )
-        await self._abandon_restored_launch(state, identity, reason=verdict.reason)
+        await self._abandon_restored_launch(state, identity, reason=reason)
 
     async def _stop_unheld_launch(self, state: OpenCodeSandboxSession) -> None:
         """Stop what a process-keeping restore may have brought back of a launch that recorded no held pause.
@@ -1713,8 +1719,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     async def _abandon_restored_launch(self, state: OpenCodeSandboxSession, identity: str, *, reason: str) -> None:
         """End a restored launch that will not be taken over, so nothing of it runs beside its relaunch.
 
-        The abandon kills and is safe to repeat, so a failed one is tried once more. One that still fails is
-        logged and the caller goes on: whatever of the launch survived then runs beside its relaunch.
+        The abandon kills and is safe to repeat, so a failed one is tried once more. One that still fails raises:
+        whatever of the launch survived could run beside a relaunch, so the re-bind, the activation or the close
+        that asked fails instead, and its retry ends the launch again.
         """
         session = state.require_session()
         for attempt in (1, 2):
@@ -1734,7 +1741,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         state.request.agent_session_id,
                         reason,
                     )
-                    return
+                    raise
                 LOG.warning(
                     "OpenCode abandon of the restored launch of session %s failed (%r); trying once more",
                     state.request.agent_session_id,
@@ -2313,11 +2320,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if state.is_continuation or self.config.return_session_trajectory
                 else None,
             )
-        adoption, state.adoption = state.adoption, None
-        state.adoption_ended = False
-        if adoption is not None:
-            # Never taken over: end it, so nothing of it runs on in the sandbox handed back to its owner.
-            await self._abandon_restored_launch(state, adoption.identity, reason="closed")
+        if state.adoption is not None:
+            # Never taken over: end it, so nothing of it runs on in the sandbox handed back to its owner. It is
+            # forgotten only once ended, so a close cancelled or failed here ends it on its retry.
+            await self._abandon_restored_launch(state, state.adoption.identity, reason="closed")
+        state.adoption, state.adoption_ended = None, False
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
             schema_version="2.0", source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
@@ -2784,6 +2791,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         timeout=timeout,
                         close_timeout=close_timeout,
                     )
+                except asyncio.CancelledError:
+                    if not state.require_session().launch_started:
+                        # Cancelled before the take-over started the launch (a close or retire while the relay was
+                        # re-pointed): it is still the restored launch's to end, so the close finds it pending.
+                        state.adoption, state.adoption_ended = adoption, launch_had_ended
+                    raise
                 except Exception as error:
                     receipt = state.require_session().cleanup
                     ended = receipt is not None and receipt["cleanup_confirmed"]

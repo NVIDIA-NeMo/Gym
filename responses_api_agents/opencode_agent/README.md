@@ -718,7 +718,9 @@ relaunched when it need not be:
   checkpoint cut, byte for byte, and OpenCode sees only a slow call. A launch that had already ended is only collected,
   and its relay is left alone; one that a stop ended, or whose held pause expired before the take-over, is relaunched.
   If the check cannot run twice, the re-bind fails and its retry checks again. Otherwise the launch is killed, nothing
-  of it continuing, and relaunched as above.
+  of it continuing, and relaunched as above; so is a launch that holds episode MCP tool grants, since its process
+  keeps the previous attempt's. A kill that cannot be confirmed fails the re-bind, activation or close that asked, so
+  nothing is relaunched beside the launch.
 - **If the relay does not come up** OpenCode calls the model server directly, and a restore relaunches it; this is logged
   as a warning (`relay_unavailable`), since every image can run the relay.
 - **The wall clock** is the provider's to keep: OpenCode orders a conversation by message IDs it makes from the clock,
@@ -727,7 +729,7 @@ relaunched when it need not be:
 
 The agent logs `OpenCode resumed in place:` once a take-over has continued the launch, and `OpenCode cannot resume
 in place:` and `OpenCode abandoned a restored launch:`, all at WARNING, except that for a checkpoint taken before the
-launch's relay started (`relay_gone`) the last two are at INFO.
+launch's relay started (`relay_gone`) or a launch with MCP tool grants (`mcp_tool_grants`) the last two are at INFO.
 
 These sessions are restart-only, so their episodes start over after a crash: sandboxes the agent owns, multi-turn
 continuation sessions, sessions that continue an imported conversation (`session_import_path`), and OpenCode 2
