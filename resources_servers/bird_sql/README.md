@@ -64,6 +64,9 @@ a query also matched a question whose gold result is empty.
   `inconclusive_verification_retries` times (default 2). If every attempt fails, the row is masked with
   `failure_reason: sandbox_error`, `evaluation_completed: false` and `failure_kind` `provider_unavailable` or
   `verifier_error`, and counted in the `sandbox_error` metric. Nothing falls back to running the query on the server.
+- **Attempt sandbox.** A BIRD attempt is answer-only and runs in no sandbox, so the grader starts its own. If an
+  Environment Server lends `/verify` the sandbox the attempt ran in, the grader still starts its own: grading in the
+  lent sandbox is not supported yet.
 
 The Spark and PostgreSQL dialects below are not sandboxed yet: the model's query runs on their engines.
 
