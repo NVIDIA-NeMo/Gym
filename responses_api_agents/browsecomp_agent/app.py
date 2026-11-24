@@ -27,7 +27,7 @@ from uuid import uuid4
 
 import aiohttp
 from fastapi import HTTPException, Request, Response
-from pydantic import ConfigDict, Field, JsonValue, ValidationError
+from pydantic import ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -187,6 +187,17 @@ _ANSWER_COMMIT_RE = re.compile(
 )
 
 
+# The failure kind of a row masked by ``mask_stop_reasons``: the rollout's own budget (steps, wall clock, context)
+# ended it, which a training framework can tell apart from an infrastructure failure by kind.
+STOP_REASON_FAILURE_KINDS = {
+    "max_steps": AGENT_LIMIT,
+    "timeout": AGENT_TIMEOUT,
+    "context_full": MODEL_CONTEXT_LIMIT,
+    "max_output_tokens": "browsecomp_agent:max_output_tokens",
+    "answered": "browsecomp_agent:answered",
+}
+
+
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
@@ -207,11 +218,9 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # cut by max_steps, rollout_timeout_s or a full context window, whose 0 says little about the answer. The row
     # carries the stop's failure kind (STOP_REASON_FAILURE_KINDS) unless the resources server set one. Empty masks
     # none.
-    mask_stop_reasons: list[Literal["answered", "max_steps", "timeout", "max_output_tokens", "context_full"]] = Field(
-        default_factory=list
-    )
-    # Legacy /run only. When true, a rollout that ended in an agent error (scored 0 with `agent_error`, such as a
-    # judge or resources server that never answered) comes back with mask_sample true instead of an unmasked 0.
+    mask_stop_reasons: list[Literal[*STOP_REASON_FAILURE_KINDS]] = Field(default_factory=list)
+    # Legacy /run only. When true, a rollout that ended in an agent error (scored 0 with `agent_error`, for example
+    # after /verify answered 5xx) comes back with mask_sample true instead of an unmasked 0.
     mask_agent_errors: bool = False
     keep_rounds: int = 9999
     nudge_steps: bool = True
@@ -242,6 +251,17 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # immediately as before. (ported from the reference harness)
     progress: bool = False
 
+    @model_validator(mode="after")
+    def _masks_need_the_run_path(self) -> "BrowsecompAgentConfig":
+        if (self.mask_stop_reasons or self.mask_agent_errors) and not (
+            self.allow_host_execution and self.resources_server is not None
+        ):
+            raise ValueError(
+                "mask_stop_reasons and mask_agent_errors apply only to the legacy /run path, "
+                "which needs allow_host_execution: true and a resources_server"
+            )
+        return self
+
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -249,17 +269,6 @@ class BrowsecompAgentRunRequest(BaseRunRequest):
 
 class BrowsecompAgentVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
-
-
-# The failure kind of a row masked by ``mask_stop_reasons``: the rollout's own budget (steps, wall clock, context)
-# ended it, which a training framework can tell apart from an infrastructure failure by kind.
-STOP_REASON_FAILURE_KINDS = {
-    "max_steps": AGENT_LIMIT,
-    "timeout": AGENT_TIMEOUT,
-    "context_full": MODEL_CONTEXT_LIMIT,
-    "max_output_tokens": "browsecomp_agent:max_output_tokens",
-    "answered": "browsecomp_agent:answered",
-}
 
 
 class BrowsecompAgentVerifyResponse(BaseVerifyResponse):
@@ -1255,7 +1264,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         model_response.num_tool_calls = num_tool_calls
         model_response.pre_reset_warning_steps = pre_reset_warning_steps
         model_response.timed_out = timed_out
-        # For training-side filters; nothing in Gym reads it.
+        # For training-side filters and for `mask_stop_reasons` on `/run`.
         model_response.stop_reason = "timeout" if timed_out else stop_reason
         if timed_out:
             model_response.status = "incomplete"
@@ -1418,7 +1427,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     "response": last_response_json,
                     "reward": 0.0,
                     "agent_error": f"{type(e).__name__}: {str(e)[:300]}",
-                    "timed_out": 0,
+                    "timed_out": int(bool(last_response_json.get("timed_out"))),
                 }
                 | masked
                 | routing

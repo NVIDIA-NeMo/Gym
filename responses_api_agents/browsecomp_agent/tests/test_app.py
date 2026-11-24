@@ -722,6 +722,14 @@ class TestRolloutTimeout:
         with pytest.raises(ValueError):
             _make_config(mask_stop_reasons=["max_step"])
 
+    @pytest.mark.parametrize("mask", [{"mask_stop_reasons": ["max_steps"]}, {"mask_agent_errors": True}])
+    @pytest.mark.parametrize("run_off", [{"allow_host_execution": False}, {"resources_server": None}])
+    def test_masks_are_refused_where_run_is_off(self, mask, run_off) -> None:
+        """Only /run reads the masks, and /run answers 422 without host execution and a resources server."""
+        with pytest.raises(ValueError, match="legacy /run path"):
+            _make_config(**mask, **run_off)
+        assert _make_config(**run_off).mask_stop_reasons == []
+
     def test_default_has_no_timeout(self) -> None:
         assert _make_config().rollout_timeout_s is None
 

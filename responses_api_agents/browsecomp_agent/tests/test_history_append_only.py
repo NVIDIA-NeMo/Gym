@@ -9,7 +9,11 @@ threshold on every call) and checks the prefix property call by call, then shows
 """
 
 import json
+from unittest.mock import AsyncMock
 
+import pytest
+
+from responses_api_agents.browsecomp_agent.app import BrowsecompAgent
 from responses_api_agents.browsecomp_agent.tests.test_progress_tracking import (
     SYSTEM,
     USER,
@@ -49,7 +53,8 @@ def _prefix_breaks(bodies: list) -> list[int]:
     return [i for i in range(len(bodies) - 1) if _items(bodies[i + 1])[: len(_items(bodies[i]))] != _items(bodies[i])]
 
 
-async def test_history_only_grows_with_resets_off() -> None:
+@pytest.mark.parametrize("tokenize", [False, True])
+async def test_history_only_grows_with_resets_off(tokenize, monkeypatch) -> None:
     # The training settings: board on, step nudges on (max_steps 8 puts the quarter / half / near-end notes at steps
     # 2, 4 and 7), every prompt far over the reset threshold, resets capped at 0.
     agent, fake = _make_agent(
@@ -60,7 +65,9 @@ async def test_history_only_grows_with_resets_off() -> None:
         max_context_tokens=131_072,
         context_reset_tokens=0,
         max_reset_count=0,
+        save_model_call_using_vllm_tokenize_endpoint=tokenize,
     )
+    monkeypatch.setattr(BrowsecompAgent, "_count_prompt_tokens", AsyncMock(return_value=120_000))
     result = await _run(agent, [SYSTEM, USER])
 
     assert len(fake.model_bodies) == 7

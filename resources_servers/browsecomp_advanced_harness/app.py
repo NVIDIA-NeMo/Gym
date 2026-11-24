@@ -1235,8 +1235,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._validate_shell_config()
         if not isinstance(body, ResourcesSeedSessionRequest):
             # An agent's /run seeds with its row; /verify owns its eventual cleanup. Such an agent can end a run
-            # without /verify (after a timeout, for example), so its sandbox starts with the first bash_command: only
-            # a run that used the shell can leave one behind, and a failed start cannot strand this seed's workspace.
+            # without /verify (after an agent error, for example), so its sandbox starts with the first bash_command:
+            # only a run that used the shell can leave one behind, and a failed start cannot strand this seed's
+            # workspace.
             sid = request.session[SESSION_ID_KEY]
             async with self._locks.locked(sid):
                 if self.config.workspace == "per_session":

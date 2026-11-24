@@ -257,8 +257,7 @@ class TestApp:
     async def test_verify_of_a_timed_out_rollout_scores_zero_without_the_judge(
         self, config: TavilySearchResourcesServerConfig
     ) -> None:
-        """An Environment Server verifies every rollout, including one the agent stopped at rollout_timeout_s,
-        which the agent's /run scored 0 without a verify."""
+        """Both an Environment Server and the agent's /run verify a rollout the agent stopped at rollout_timeout_s."""
         server_client = MagicMock(spec=ServerClient)
         server_client.post = AsyncMock()
         server = TavilySearchResourcesServer(config=config, server_client=server_client)
