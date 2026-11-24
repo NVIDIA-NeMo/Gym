@@ -8,8 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.verification import JudgeError
-from nemo_gym.verification.judge import is_judge_failure
+from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.apex_agents.artifacts import ArtifactChange
 from resources_servers.apex_agents.judge import (
     _artifact_xml,
