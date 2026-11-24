@@ -12,15 +12,19 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
+    EpisodeId,
     FailureBoundary,
     FailureHeader,
     NeMoGymResponse,
     NgFailureEvent,
+    TaskId,
     failure_report_for,
 )
 from nemo_gym.server_runtime import SimpleServer
@@ -236,6 +240,24 @@ async def test_output_cap_applies_to_every_policy_call(harness, cap, task_cap, e
     assert len(calls) == num_passes
     assert [call.max_output_tokens for call in calls] == [expected] * num_passes
     assert body.model_dump() == original
+
+
+@pytest.mark.parametrize("task_cap,expected", [(None, 16), (1000, 16), (8, 8)])
+async def test_output_cap_applies_on_every_route(harness, task_cap, expected):
+    agent, request, body, calls, verified = harness(max_output_tokens=16, task_max_output_tokens=task_cap)
+    params = body.responses_create_params
+    await agent.run(request, body)
+    await agent.responses(Request({"type": "http", "headers": [], "path": "/v1/responses"}), Response(), params)
+    client = TestClient(agent.setup_webserver())
+    seed = AgentSeedSessionRequest(
+        agent_session_id="session",
+        episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        task_id=TaskId(taskset="example", task_id="0"),
+    )
+    assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+    assert client.post("/v1/responses", json=params.model_dump(mode="json", exclude_unset=True)).status_code == 200
+    assert [call.max_output_tokens for call in calls] == [expected] * 3
+    assert body.responses_create_params.max_output_tokens == task_cap
 
 
 @pytest.mark.parametrize("rewards,expected", [([1.0], 1), ([0.5, 1.0], 2), ([0.9, 0.4, 0.999999], 3)])

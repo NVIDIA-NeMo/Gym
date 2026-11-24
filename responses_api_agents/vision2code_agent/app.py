@@ -3,13 +3,18 @@
 """Optional verifier-guided code revision for vision2code."""
 
 import json
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, model_validator
 
-from nemo_gym.core import NeMoGymEasyInputMessage, accumulate_response_usage
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    accumulate_response_usage,
+)
 from nemo_gym.trajectory import TrajectoryRecord
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.simple_agent.app import (
@@ -29,8 +34,7 @@ class Vision2CodeAgentConfig(SimpleAgentConfig):
         default=None,
         gt=0,
         strict=True,
-        description="Cap on the output tokens of each policy call that /run makes, reasoning included. "
-        "A task's smaller cap is kept.",
+        description="Cap on each policy call's output tokens, reasoning included. A task's smaller cap is kept.",
     )
 
     include_rendered_image: bool = True
@@ -114,19 +118,17 @@ class Vision2CodeAgent(SimpleAgent):
 
     config: Vision2CodeAgentConfig
 
-    def _capped(self, body: SimpleAgentRunRequest) -> SimpleAgentRunRequest:
-        """Return the request with the configured output cap, unless the task's own cap is smaller."""
+    async def _create_episode(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        """Run the turn loop with the configured output cap, unless the request's own cap is smaller."""
         cap = self.config.max_output_tokens
-        params = body.responses_create_params
-        if cap is None or (params.max_output_tokens is not None and params.max_output_tokens <= cap):
-            return body
-        return body.model_copy(
-            update={"responses_create_params": params.model_copy(update={"max_output_tokens": cap})}
-        )
+        if cap is not None and (body.max_output_tokens is None or body.max_output_tokens > cap):
+            body = body.model_copy(update={"max_output_tokens": cap})
+        return await super()._create_episode(body, **kwargs)
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         """Revise until the configured success criterion or pass budget is reached."""
-        body = self._capped(body)
         if self.config.num_passes == 1:
             return await super().run(request, body)
 
