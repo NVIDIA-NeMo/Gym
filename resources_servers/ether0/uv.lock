@@ -2582,8 +2582,10 @@ requires-dist = [
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", marker = "extra == 'wandb'", specifier = ">=3.1.61" },
     { name = "httptools" },
+    { name = "httpx-aiohttp", marker = "extra == 'idegym'", specifier = ">=0.2.0" },
     { name = "huggingface-hub", marker = "extra == 'dev'", specifier = "<2" },
     { name = "hydra-core" },
+    { name = "idegym-client", marker = "extra == 'idegym'", specifier = ">=0.13.1" },
     { name = "itsdangerous" },
     { name = "jinja2", marker = "extra == 'ray'", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.18,<5" },
@@ -2632,7 +2634,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.30.0" },
     { name = "yappi", specifier = ">=1.7.6" },
 ]
-provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "dev"]
+provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "idegym", "dev"]
 
 [package.metadata.requires-dev]
 codec = [
@@ -2785,9 +2787,6 @@ wheels = [
 name = "nvidia-cufft-cu12"
 version = "11.2.1.3"
 source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "nvidia-nvjitlink-cu12" },
-]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/27/94/3266821f65b92b3138631e9c8e7fe1fb513804ac934485a8d05776e1dd43/nvidia_cufft_cu12-11.2.1.3-py3-none-manylinux2014_x86_64.whl", hash = "sha256:f083fc24912aa410be21fa16d157fed2055dab1cc4b6934a0e03cba69eb242b9", size = 211459117, upload-time = "2024-04-03T20:57:40.402Z" },
 ]

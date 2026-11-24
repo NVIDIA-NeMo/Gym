@@ -1867,8 +1867,10 @@ requires-dist = [
     { name = "fonttools", specifier = ">=4.60.2" },
     { name = "gitpython", marker = "extra == 'wandb'", specifier = ">=3.1.61" },
     { name = "httptools" },
+    { name = "httpx-aiohttp", marker = "extra == 'idegym'", specifier = ">=0.2.0" },
     { name = "huggingface-hub", marker = "extra == 'dev'", specifier = "<2" },
     { name = "hydra-core" },
+    { name = "idegym-client", marker = "extra == 'idegym'", specifier = ">=0.13.1" },
     { name = "itsdangerous" },
     { name = "jinja2", marker = "extra == 'ray'", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.18,<5" },
@@ -1917,7 +1919,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.30.0" },
     { name = "yappi", specifier = ">=1.7.6" },
 ]
-provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "dev"]
+provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "idegym", "dev"]
 
 [package.metadata.requires-dev]
 codec = [
