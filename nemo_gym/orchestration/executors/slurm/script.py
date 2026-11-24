@@ -1308,8 +1308,14 @@ def build_sbatch_script(
         driver_env |= _command_env(benchmark, remote_bench_dir)
     # Host PWD can resolve to an alias that is absent from the container bind mounts.
     driver_env["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
-    # Where every step's `srun --output` writes, so the run can record where its service (vLLM) logs are.
-    driver_env[SERVICE_LOG_DIR_ENV] = str(remote_bench_dir / LOG_DIR)
+    # Where every step's `srun --output` writes, so the run can record where its service (vLLM) logs are. A
+    # `chdir` in extra_args comes after the job's own `#SBATCH --chdir` and moves those relative logs, so then
+    # the folder is not named at all.
+    driver_env.pop(SERVICE_LOG_DIR_ENV, None)
+    if not any(
+        "chdir" in extra for extra in (compute.extra_args, *(p.extra_args for p in compute.node_pools.values()))
+    ):
+        driver_env[SERVICE_LOG_DIR_ENV] = str(remote_bench_dir / LOG_DIR)
     exports = effective_exports(config, benchmark_name)
     export_tail = (
         render_export_tail(
