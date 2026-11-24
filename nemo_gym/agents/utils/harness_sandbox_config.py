@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The typed ``sandbox_config`` of a sandbox an agent server starts for its own harness."""
+"""The typed ``sandbox_config`` of a harness sandbox: the sandbox an agent's harness runs in."""
 
 import dataclasses
 from collections.abc import Mapping
@@ -8,19 +8,23 @@ from typing import Any
 
 from pydantic import Field
 
-from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.config import NetworkRuleOptions, SandboxConfig
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.sandbox.utils import cpu_cap_env
 
 
-class AgentSandboxConfig(SandboxConfig):
-    """``SandboxConfig`` for the sandbox an agent starts when its environment lends none.
+class HarnessSandboxConfig(SandboxConfig):
+    """``SandboxConfig`` for a harness sandbox, whichever server owns it.
 
-    A lent sandbox is borrowed instead, with ``borrow()`` from ``nemo_gym.server_runtime``; an agent starts its own only
-    when nothing is lent, and owns and stops it then.
+    The owner is the server that starts it and stops it: an Environment Server that starts one for an attempt and
+    lends it, or an agent that starts its own because nothing was lent. A lent sandbox is borrowed instead, with
+    ``borrow()`` from ``nemo_gym.server_runtime``.
 
-    A server takes the image, working directory and files of a task sandbox from its task. An agent's own sandbox has
-    no task to take them from, so they are configured here, with the keys agent recipes set today.
+    A server takes the image, working directory and files of a task sandbox from its task. A harness sandbox has no
+    task to take them from, so they are configured here, with the keys agent recipes set today.
+
+    Its ``network`` rule replaces an agent's own ``network_access``: an agent that adopts this config refuses the two
+    set together, so a sandbox never has two egress settings.
 
     Attributes:
         image: The sandbox image.
@@ -54,9 +58,9 @@ class AgentSandboxConfig(SandboxConfig):
         metadata: Mapping[str, str] | None = None,
         files: Mapping[str, str | bytes] | None = None,
         named_configs: Mapping[str, Any] | None = None,
-        network_options: Mapping[str, Any] | None = None,
+        network_options: NetworkRuleOptions | None = None,
     ) -> SandboxSpec:
-        """The spec of the agent's own sandbox, with this config's image, workdir, files, entrypoint, user and ports.
+        """The spec of the harness sandbox, with this config's image, workdir, files, entrypoint, user and ports.
 
         ``image`` and ``workdir`` override the config's, and ``files`` add to its files. The CPU caps go under the
         config's ``env``, so a recipe's own value wins.
