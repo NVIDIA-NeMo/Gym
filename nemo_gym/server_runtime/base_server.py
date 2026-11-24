@@ -337,7 +337,8 @@ class SimpleServer(BaseServer):
     # so that with several uvicorn workers a session's requests must reach the worker that created it.
     # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
-    # Whether this server lends sandboxes it owns to agents, so startup refuses a provider that never reconnects.
+    # Whether this server lends sandboxes it owns, as an Environment Server lends an attempt's sandbox to the agent and
+    # to the Resources Server, so startup refuses a provider that never reconnects.
     lends_sandboxes: ClassVar[bool] = False
     # The sandbox blocks whose sandboxes this server starts through its own sandboxes, as
     # self.sandboxes.on(<provider field>).spec(<block>): each config field holding a SandboxConfig (a dotted path for
