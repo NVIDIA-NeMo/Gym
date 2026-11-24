@@ -1645,8 +1645,14 @@ def test_a_launch_whose_provider_cannot_lend_fails_at_startup(monkeypatch) -> No
         _run_webserver(monkeypatch, _LendingLaunchedServer, config)
 
 
-@pytest.mark.parametrize("resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency", "resolve_provider_metadata"])
+@pytest.mark.parametrize(
+    "resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency", "resolve_provider_metadata"]
+)
 def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch, resolver: str) -> None:
     def refuse(*args: Any) -> None:
         raise ValueError("unknown provider block")
 
+    monkeypatch.setattr(owned_sandboxes_module, resolver, refuse)
+    with pytest.raises(ValueError, match="unknown provider block"):
+        _server(sandbox_provider="missing").sandboxes
+    assert providers == {}
