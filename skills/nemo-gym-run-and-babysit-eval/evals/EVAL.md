@@ -73,7 +73,8 @@ skillevaluator tier3 validate skills/nemo-gym-run-and-babysit-eval --strict
 
 Run the entire dataset on both supported agents, retaining each agent's paired baseline. Keep provider/agent selection
 in the operator's CLI invocation rather than baking a model or credentials into this portable dataset. The committed
-policy uses one attempt per case, four concurrent trials, and a 0.3 timeout multiplier. CI CPU and memory
+policy uses one attempt per case and four concurrent trials per agent/arm. Keep `timeout_multiplier: 1.0` explicit
+to use unscaled generated task budgets; omitting it enables concurrency-based scaling. CI CPU and memory
 allocations come from the selected sandbox template.
 The target is under one hour for the small offline cases; measure actual elapsed time rather than claiming this target
 was met in advance. Do not cap the case count or skip the baseline for publication evidence.
