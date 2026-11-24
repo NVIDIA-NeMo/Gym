@@ -395,8 +395,9 @@ class SimpleServer(BaseServer):
         reference = getattr(self.config, "sandbox_provider", None)
         if reference is None:
             return
-        from nemo_gym.sandbox import SandboxConfig, get_provider_class, resolve_provider_config
+        from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
         from nemo_gym.sandbox.providers.base import NETWORK_RULES
+        from nemo_gym.sandbox.providers.registry import get_provider_class
         from nemo_gym.server_runtime.owned_sandboxes import check_provider, rule_hosts
 
         provider_fields = [
@@ -672,6 +673,7 @@ repr(e): {repr(e)}"""
         startup.mark("init_server")
         # Before the dry-run return, so a dry run reports the misconfiguration too.
         refuse_unsupported_num_workers(server)
+        server.check_sandbox_provider()
         reuse_port = server.config.uvicorn_reuse_port
         if reuse_port is None:
             reuse_port = UvicornReusePortConfig.model_validate(global_config_dict).uvicorn_reuse_port
@@ -697,7 +699,6 @@ repr(e): {repr(e)}"""
         observe_app_event_loop(app, "server")
         server.setup_checkpoint_participant(app)
         server.setup_owned_sandboxes(app)
-        server.check_sandbox_provider()
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         mcp_token_routing = {}

@@ -382,14 +382,11 @@ class SandboxCapabilities:
         reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
             ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
             ``never``.
-        close_by_label: Whether the provider can close every sandbox that carries a label, so a live worker can stop
-            the sandboxes of one that died.
     """
 
     snapshot_keeps: frozenset[SnapshotContent] = frozenset()
     network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
     reconnect: Reconnect = "always"
-    close_by_label: bool = False
 
 
 def provider_capabilities(provider: object) -> SandboxCapabilities:

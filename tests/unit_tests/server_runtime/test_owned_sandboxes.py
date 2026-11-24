@@ -1078,6 +1078,16 @@ class TestCheckProvider:
         with pytest.raises(ValueError, match="cannot lend a sandbox"):
             owned.check_provider(lends=True)
 
+    def test_lending_is_refused_on_a_provider_that_declares_nothing_and_cannot_reconnect(self) -> None:
+        # A provider outside Gym that declares no capabilities reads reconnect="always"; only its methods tell.
+        class _NoReconnect:
+            name = "no_reconnect"
+
+        owned = OwnedSandboxes(_NoReconnect(), state_dir=None, server_name="server")  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="cannot lend a sandbox"):
+            owned.check_provider(lends=True)
+
     async def test_the_first_access_refuses_too(self) -> None:
         owned = OwnedSandboxes(_NeverReconnects(), state_dir=None, server_name="server", provider_config_ref="p")
         await owned.create("session", _spec())
@@ -1105,9 +1115,9 @@ class TestStartupCheck:
     def provider_classes(self, monkeypatch) -> None:
         classes = {"rules": _RuleProvider, "plain": FakeSnapshotProvider, "never": _NeverReconnects}
         monkeypatch.setattr(
-            "nemo_gym.sandbox.resolve_provider_config", lambda reference, named: {reference: {}}, raising=True
+            "nemo_gym.sandbox.config.resolve_provider_config", lambda reference, named: {reference: {}}, raising=True
         )
-        monkeypatch.setattr("nemo_gym.sandbox.get_provider_class", classes.__getitem__)
+        monkeypatch.setattr("nemo_gym.sandbox.providers.registry.get_provider_class", classes.__getitem__)
         monkeypatch.setattr("nemo_gym.server_runtime.base_server.get_global_config_dict", lambda: {})
 
     def _typed(self, provider: str, rule: str) -> _TypedServer:
@@ -1161,8 +1171,10 @@ class TestStartupCheckResolvesWhatItCan:
     @pytest.fixture(autouse=True)
     def provider_classes(self, monkeypatch) -> None:
         classes = {"rules": _RuleProvider, "plain": FakeSnapshotProvider}
-        monkeypatch.setattr("nemo_gym.sandbox.resolve_provider_config", lambda reference, named: {reference: {}})
-        monkeypatch.setattr("nemo_gym.sandbox.get_provider_class", classes.__getitem__)
+        monkeypatch.setattr(
+            "nemo_gym.sandbox.config.resolve_provider_config", lambda reference, named: {reference: {}}
+        )
+        monkeypatch.setattr("nemo_gym.sandbox.providers.registry.get_provider_class", classes.__getitem__)
         monkeypatch.setattr("nemo_gym.server_runtime.base_server.get_global_config_dict", lambda: {})
 
     def _typed(self, block: SandboxConfig, **fields: Any) -> _TypedServer:
@@ -1236,8 +1248,10 @@ class _LendingLaunchedServer(_LaunchedServer):
 
 
 def test_a_launch_whose_provider_cannot_lend_fails_at_startup(monkeypatch) -> None:
-    monkeypatch.setattr("nemo_gym.sandbox.resolve_provider_config", lambda reference, named: {reference: {}})
-    monkeypatch.setattr("nemo_gym.sandbox.get_provider_class", {"never": _NeverReconnects}.__getitem__)
+    monkeypatch.setattr("nemo_gym.sandbox.config.resolve_provider_config", lambda reference, named: {reference: {}})
+    monkeypatch.setattr(
+        "nemo_gym.sandbox.providers.registry.get_provider_class", {"never": _NeverReconnects}.__getitem__
+    )
     config = _Config(name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", sandbox_provider="never")
 
     with pytest.raises(ValueError, match="cannot lend a sandbox"):

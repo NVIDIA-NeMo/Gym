@@ -439,9 +439,10 @@ def check_lending(provider: object) -> None:
     connect.
 
     Raises:
-        ValueError: If the provider never reconnects.
+        ValueError: If the provider never reconnects, or has no ``serialize_handle`` and ``connect`` to do it with.
     """
-    if provider_capabilities(provider).reconnect == "never":
+    connects = hasattr(provider, "serialize_handle") and hasattr(provider, "connect")
+    if provider_capabilities(provider).reconnect == "never" or not connects:
         raise ValueError(
             f"sandbox provider {_name_of(provider)!r} cannot lend a sandbox: no other process can connect to one"
         )
@@ -732,8 +733,7 @@ class OwnedSandboxes:
         provider = self._provider
         assert isinstance(provider, SupportsSandboxNetworkRules)  # check_network_rule refuses a provider without
         # The rule reaches the provider through its options: provider_options["network_policy"] on OpenSandbox, run_args
-        # on Docker. SandboxConfig.spec's network_options replaces Gym#6179's network_policy parameter, which is in no
-        # release: whichever lands second drops network_policy.
+        # on Docker.
         global_config = self._global_config if self._global_config is not None else get_global_config_dict()
         options = provider.network_options(rule, rule_hosts(config, global_config), config.provider_options)
         return config.spec(
