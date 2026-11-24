@@ -410,14 +410,9 @@ For task images of both libc variants, add `sandbox_musl_executable_path` and
 sandbox's libc and, on a musl image, verifies and installs the musl pin in place of the
 primary one. A glibc image always gets the primary pin. A musl pin requires the primary pin.
 
-`remote_opencode_install_script_path` and `remote_opencode_binary_path` (plus
-`remote_opencode_musl_binary_path` for musl images) keep `opencode_sandboxed_agent`'s
-mounted installer: the script runs with `--binary <path>`, or `--glibc-binary <path>
---musl-binary <path>`, and must leave OpenCode at `$HOME/.opencode/bin/opencode`, where
-`HOME` is the runtime's private home directory. The installed binary is checked by version
-only, not by digest, so prefer the pins above. The paths must be absolute sandbox paths,
-and the installer cannot be combined with `sandbox_executable_path`. It runs again at every
-seed, and at a re-bind only when the restored sandbox lacks the runtime.
+`opencode_sandboxed_agent`'s mounted installer (`remote_opencode_install_script_path`,
+`remote_opencode_binary_path` and `remote_opencode_musl_binary_path`) is not supported here,
+and the agent ignores those keys. Use the verified pins above instead.
 
 `sandbox_model_id` selects the native OpenCode model ID. It defaults to the existing
 `dummy_model` compatibility alias. Benchmarks can set the native ID to retain

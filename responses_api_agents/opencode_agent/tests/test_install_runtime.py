@@ -186,50 +186,6 @@ def test_verified_binary_uses_the_task_libc_and_checks_its_digest(sandbox, libc,
     assert not (root / "download.log").exists()
 
 
-@pytest.mark.parametrize("musl", [False, True])
-@pytest.mark.parametrize(
-    ("requested", "reported", "valid"),
-    [("1.17.11", "1.17.11", True), ("2.2.7", "opencode v2.2.7", True), ("1.17.11", "1.17.10", False)],
-)
-def test_mounted_installer_keeps_its_binary_contract(sandbox, musl, requested, reported, valid):
-    root, env = sandbox
-    binary = root / "mounted opencode"
-    binary.write_text(f"#!/bin/bash\necho {reported}\n")
-    binary.chmod(0o755)
-    installer = root / "mounted installer.sh"
-    installer.write_text(
-        '#!/bin/bash\nset -eu\nprintf "%s\\n" "$@" > "$TEST_ROOT/installer-arguments"\n'
-        'mkdir -p "$HOME/.opencode/bin"\ncp "$2" "$HOME/.opencode/bin/opencode"\n'
-    )
-    command = [
-        str(root / "bin/bash"),
-        str(root / "install.sh"),
-        str(root / "runtime"),
-        requested,
-        "",
-        "",
-        "",
-        "",
-        str(installer),
-        str(binary),
-        str(root / "musl binary") if musl else "",
-    ]
-    result = subprocess.run(command, env=env, capture_output=True, text=True, errors="replace", timeout=10)
-    assert (root / "installer-arguments").read_text().splitlines() == (
-        ["--glibc-binary", str(binary), "--musl-binary", str(root / "musl binary")]
-        if musl
-        else ["--binary", str(binary)]
-    )
-    assert not (root / "download.log").exists()
-    assert not (root / "packages.log").exists()
-    if valid:
-        assert result.returncode == 0, result.stderr
-        assert (root / "runtime/opencode").read_bytes() == binary.read_bytes()
-    else:
-        assert result.returncode != 0
-        assert not (root / "runtime/opencode").exists()
-
-
 # A cached binary that prints the right version and then fails is unhealthy.
 @pytest.mark.parametrize("probe", ["echo 1.17.10", "echo 1.17.11; exit 7"])
 def test_wrong_or_unhealthy_cached_version_is_not_reused(sandbox, probe):

@@ -663,34 +663,11 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, tmp_path, ou
 @pytest.mark.parametrize(
     ("settings", "reason"),
     [
-        ({"sandbox_musl_executable_path": "/mounted/musl"}, "requires sandbox_musl_executable_sha256"),
+        ({"sandbox_musl_executable_path": "/pins/musl"}, "requires sandbox_musl_executable_sha256"),
         ({"sandbox_musl_executable_sha256": "a" * 64}, "set sandbox_musl_executable_path"),
         (
-            {"sandbox_musl_executable_path": "/mounted/musl", "sandbox_musl_executable_sha256": "a" * 64},
+            {"sandbox_musl_executable_path": "/pins/musl", "sandbox_musl_executable_sha256": "a" * 64},
             "musl OpenCode pin requires a verified primary",
-        ),
-        ({"remote_opencode_binary_path": "/mounted/opencode"}, "script and binary paths together"),
-        ({"remote_opencode_install_script_path": "/mounted/install.sh"}, "script and binary paths together"),
-        ({"remote_opencode_musl_binary_path": "/mounted/opencode-musl"}, "script and binary paths together"),
-        (
-            {"remote_opencode_install_script_path": "install.sh", "remote_opencode_binary_path": "/mounted/opencode"},
-            "absolute, normalized sandbox paths",
-        ),
-        (
-            {
-                "remote_opencode_install_script_path": "/mounted/install.sh",
-                "remote_opencode_binary_path": "/mounted/opencode",
-                "remote_opencode_musl_binary_path": "/mounted/../opencode-musl",
-            },
-            "absolute, normalized sandbox paths",
-        ),
-        (
-            {
-                "remote_opencode_install_script_path": "/mounted/install.sh",
-                "remote_opencode_binary_path": "/mounted/opencode",
-                "sandbox_executable_path": "/verified/opencode",
-            },
-            "not both",
         ),
     ],
 )
@@ -705,20 +682,17 @@ def test_invalid_runtime_source_is_rejected_before_connecting(setup, settings, r
     sandbox.exec.assert_not_awaited()
 
 
-@pytest.mark.parametrize("mounted", [False, True])
-def test_session_setup_passes_the_runtime_source_in_the_installer_argument_order(setup, mounted):
+@pytest.mark.parametrize("musl", [False, True])
+def test_session_setup_passes_the_runtime_pins_in_the_installer_argument_order(setup, musl):
     agent, sandbox = setup
-    if mounted:
-        agent.config.remote_opencode_install_script_path = "/mounted/install.sh"
-        agent.config.remote_opencode_binary_path = "/mounted/opencode"
-        expected = ["", "", "", "", "/mounted/install.sh", "/mounted/opencode", ""]
-    else:
-        agent.config.sandbox_executable_path = "/pins/opencode"
-        agent.config.sandbox_executable_sha256 = "B" * 64
+    agent.config.sandbox_executable_path = "/pins/opencode"
+    agent.config.sandbox_executable_sha256 = "B" * 64
+    # The installer compares lowercase digests.
+    expected = ["/pins/opencode", "b" * 64, ""]
+    if musl:
         agent.config.sandbox_musl_executable_path = "/pins/opencode-musl"
         agent.config.sandbox_musl_executable_sha256 = "C" * 64
-        # The installer compares lowercase digests.
-        expected = ["/pins/opencode", "b" * 64, "", "", "--musl-executable", "/pins/opencode-musl", "c" * 64]
+        expected += ["", "--musl-executable", "/pins/opencode-musl", "c" * 64]
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert response.status_code == 200, response.text
@@ -726,29 +700,9 @@ def test_session_setup_passes_the_runtime_source_in_the_installer_argument_order
             next(call.args[0] for call in sandbox.exec.call_args_list if "install_opencode_runtime.sh" in call.args[0])
         )
         script = next(i for i, arg in enumerate(install) if arg.endswith("install_opencode_runtime.sh"))
-        # $1 runtime and $2 version, then $3 executable, $4 digest, $5 PATH prefix, $6 release digests (empty for
-        # OpenCode 1), and $7 onward the musl pin or the mounted installer.
+        # $1 runtime and $2 version, then $3 executable, $4 digest, $5 PATH prefix and, with a musl pin, $6 release
+        # digests (empty for OpenCode 1) before the musl pin.
         assert install[script + 3 :] == expected
-        closed = client.post("/v1/agent_sessions/close", json=close_body(response.json()["agent_session_id"]))
-        assert closed.status_code == 200, closed.text
-
-
-def test_session_setup_forwards_mounted_installer_paths(setup):
-    agent, sandbox = setup
-    agent.config.remote_opencode_install_script_path = "/mounted runtime/install.sh"
-    agent.config.remote_opencode_binary_path = "/mounted runtime/opencode"
-    agent.config.remote_opencode_musl_binary_path = "/mounted runtime/opencode-musl"
-    with TestClient(agent.setup_webserver()) as client:
-        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
-        assert response.status_code == 200, response.text
-        install = next(
-            call.args[0] for call in sandbox.exec.call_args_list if "install_opencode_runtime.sh" in call.args[0]
-        )
-        assert shlex.split(install)[-3:] == [
-            agent.config.remote_opencode_install_script_path,
-            agent.config.remote_opencode_binary_path,
-            agent.config.remote_opencode_musl_binary_path,
-        ]
         closed = client.post("/v1/agent_sessions/close", json=close_body(response.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text
 

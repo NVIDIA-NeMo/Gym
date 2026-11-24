@@ -748,11 +748,6 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # On musl task images an optional second verified pin replaces the primary executable.
     sandbox_musl_executable_path: str | None = None
     sandbox_musl_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
-    # Sandbox sessions only. opencode_sandboxed_agent's mounted installer: the script receives the binary paths and
-    # leaves OpenCode at $HOME/.opencode/bin/opencode. Its result is checked by version only, not by digest.
-    remote_opencode_install_script_path: str | None = None
-    remote_opencode_binary_path: str | None = None
-    remote_opencode_musl_binary_path: str | None = None
     # The native model ID affects OpenCode's model-family prompts and tools.
     # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
     sandbox_model_id: str = "dummy_model"
@@ -1681,17 +1676,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, f"OpenCode sandbox config: compaction.{key} must be below context_window")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
-        mounted_installer = self.config.remote_opencode_install_script_path
-        mounted_binary = self.config.remote_opencode_binary_path
-        mounted_musl_binary = self.config.remote_opencode_musl_binary_path
-        if bool(mounted_installer) != bool(mounted_binary) or (mounted_musl_binary and not mounted_installer):
-            raise AgentSeedRejectedError("A mounted OpenCode installer requires its script and binary paths together")
-        if not all(
-            _is_sandbox_path(path) for path in (mounted_installer, mounted_binary, mounted_musl_binary) if path
-        ):
-            raise AgentSeedRejectedError("Mounted OpenCode installer paths must be absolute, normalized sandbox paths")
-        if mounted_installer and self.config.sandbox_executable_path:
-            raise AgentSeedRejectedError("Choose a mounted OpenCode installer or a verified executable, not both")
         musl_executable = self._pinned_file("musl_executable")
         if musl_executable and not self._pinned_file("executable"):
             raise AgentSeedRejectedError("A musl OpenCode pin requires a verified primary sandbox_executable_path")
@@ -2055,24 +2039,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             (self.config.sandbox_executable_sha256 or "").lower(),
             ":".join(self.config.sandbox_path_prefix),
         ]
-        if self._opencode2 or self.config.remote_opencode_install_script_path or musl_executable:
+        if self._opencode2 or musl_executable:
             # The sixth script argument is reserved for OpenCode 2 release digests.
             digests = OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {}) if self._opencode2 else {}
             install_args.append(" ".join(f"{arch}={digest}" for arch, digest in digests.items()))
-        if self.config.remote_opencode_install_script_path:
-            install_args.extend(
-                [
-                    self.config.remote_opencode_install_script_path,
-                    self.config.remote_opencode_binary_path or "",
-                    self.config.remote_opencode_musl_binary_path or "",
-                ]
-            )
-        elif musl_executable:
+        if musl_executable:
             install_args.extend(["--musl-executable", musl_executable.sandbox_path, musl_executable.digest])
         command += "bash " + shlex.join(install_args)
-        # The installer serializes concurrent runs, checks a pinned binary or reruns the mounted installer, publishes
-        # the result as a new file, and skips the download when a runtime is already in place, so running it again is
-        # safe.
+        # The installer serializes concurrent runs, checks a pinned binary, publishes it as a new file, and skips the
+        # download when a runtime is already in place, so running it again is safe.
         result = await exec_idempotent(
             sandbox,
             command,
