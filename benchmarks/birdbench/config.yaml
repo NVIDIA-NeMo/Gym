@@ -16,6 +16,10 @@ prepare_script_args:
   dscp: name_or_col_dscp
   dialect: sqlite  # the default; other dialects are selected by `eval.sh --dialect` (see README.md, "SQL dialects")
   split: dev  # the default; the train split is selected by `eval.sh --split train` (see README.md, "Splits")
+  # BIRD dev release, dated: dev_20240627 (the default), dev_20251106, minidev_20250704 or minidev_20261028 (see
+  # README.md, "Versions"); selected by `eval.sh --version`.
+  version: dev_20240627
+  prompt_format: default  # or schema_only (SQLite): `eval.sh --prompt-format schema_only`
 
 # Inherit-from directives isolate this benchmark config from the generic server config.
 birdbench_bird_sql_resources_server:

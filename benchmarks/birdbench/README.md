@@ -6,6 +6,8 @@ Execution-based text-to-SQL on BIRD, bound to the `bird_sql` resource server. Tw
 |---|---|---|
 | **dialect** | `sqlite` (default), `spark`, `postgres` | the SQL the model writes, the prompt, and the engine that runs it |
 | **split** | `dev` (default), `train` | the questions and databases: `dev` is the 1534-task benchmark, `train` is BIRD's train split (not an evaluation set) |
+| **version** | `dev_20240627` (default), `dev_20251106`, `minidev_20250704`, `minidev_20261028` | which release of the dev questions (see "Versions") |
+| **prompt format** | `default`, `schema_only` (SQLite) | the prompt: `default_<dialect>.yaml`, or auto-ontology-eval's schema-only prompt (see "Schema-only prompt") |
 
 Reward is binary: unordered result-set equality between the model's query and BIRD's gold query. Metrics are overall
 plus per-difficulty (simple / moderate / challenging; `train` has no difficulty labels).
@@ -98,6 +100,54 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
   gold relies on SQLite behavior (bare `GROUP BY` columns, integer division, case-insensitive `LIKE`, loose
   text/number comparison). `spark_gold_check.py` estimates about 8% of dev (121 of 1534) are affected.
 
+## Versions
+
+BIRD's authors have revised the dev questions since the release Gym has used. `--version` (eval.sh) or
+`prepare_script_args.version` picks one; all of them run on the same 11 SQLite databases from `dev.zip`, and every
+other option combines with them.
+
+| Version | Released | Tasks | Questions from | What it is |
+|---|---|---|---|---|
+| `dev_20240627` (default) | 2024-06-27 | 1,534 | `dev.json` in `dev.zip` | BIRD dev as Gym has always used it |
+| `dev_20251106` | 2025-11-06 | 1,534 | [`birdsql/bird_sql_dev_20251106`](https://huggingface.co/datasets/birdsql/bird_sql_dev_20251106) | The authors' review of every dev question (the current dev) |
+| `minidev_20250704` | 2025-07-04 | 500 | [`birdsql/bird_mini_dev`](https://huggingface.co/datasets/birdsql/bird_mini_dev), `archive/` | Mini-Dev, the 500-question subset, as corrected in July 2025 |
+| `minidev_20261028` | 2026-10-28 | 500 | [`birdsql/bird_mini_dev`](https://huggingface.co/datasets/birdsql/bird_mini_dev), `data/` | Mini-Dev's 2026 update ("Mini-Dev 1024"), the current Mini-Dev |
+
+The Hugging Face files are pinned to a revision and checked against their SHA-256 (`prepare.VERSIONS`), and cached
+under `data/versions/`. All are CC BY-SA 4.0. A non-default version writes its own file,
+`data/birdbench_<dialect>_<version>.jsonl`, whose rows also carry BIRD's `question_id` and `bird_version`; the default
+file is unchanged.
+
+**What changed from `dev_20240627`** (counts only):
+
+- `dev_20251106`: the same 1,534 question ids and databases; 614 changed: question text 182, evidence 378, gold SQL
+  450, difficulty 86 (challenging 145 → 231, moderate 464 → 443, simple 925 → 860).
+- `minidev_20250704`: 500 questions with dev's ids; 496 have a question identical to `dev_20240627`'s.
+- `minidev_20261028`: 500 questions renumbered 0-499; 13 of 500 question texts are unchanged from `minidev_20250704`,
+  and 11 match a `dev_20251106` question. Aligned ids across SQLite, MySQL and PostgreSQL in the source; this benchmark
+  uses the SQLite gold, as for every version.
+
+**Gold check** (each version's gold SQL on `dev.zip`'s databases, one query at a time, on a laptop):
+
+| Version | Gold queries | Errors | Empty result | Over 30 s (masked by `bird_sql`) | Tasks scored |
+|---|---|---|---|---|---|
+| `dev_20240627` | 1,534 | 0 | 0 | 2: q701 (183 s), q518 (39 s) | 1,532 |
+| `dev_20251106` | 1,534 | 0 | 0 | 3: q701 (185 s), q1131 (123 s), q518 (39 s) | 1,531 |
+| `minidev_20250704` | 500 | 0 | 0 | 2: q701, q518 | 498 |
+| `minidev_20261028` | 500 | 0 | 3 | 0 (slowest 8.9 s) | 500 |
+
+`bird_sql` gives each query 30 s and masks a task whose gold query doesn't finish, so it leaves the score rather than
+counting as wrong; BIRD's official `evaluation_ex.py` counts such a task as a miss. On a faster or slower machine q518
+may land on the other side of 30 s.
+
+## Schema-only prompt
+
+`--prompt-format schema_only` (SQLite) shows the model the database's `CREATE TABLE` statements followed by BIRD's
+column descriptions, with the question and its evidence apart (`prompts/schema_only_sqlite.yaml`). It is the prompt
+of auto-ontology-eval's schema-only control arm, byte for byte, so the same model scores the same here as there; on
+BIRD dev all 1,534 rendered prompts match the prompts a saved auto-ontology-eval run sent. It needs no BM25 index, so
+it prepares in seconds.
+
 ## Preparing data
 
 `prepare` writes `data/birdbench_<dialect>_<split>.jsonl` (e.g. `birdbench_sqlite_dev.jsonl`), downloading the
@@ -112,7 +162,12 @@ uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --s
 ```
 
 Other flags: `--train-dir <dir>` to use an already-extracted BIRD `train/` (with `train.json` and `train_databases/`)
-instead of downloading, `--no-evidence`, and `--dscp`.
+instead of downloading, `--no-evidence`, `--dscp`, `--version` (see "Versions") and `--prompt-format` (see
+"Schema-only prompt"). For example, the current Mini-Dev with the schema-only prompt:
+
+```bash
+uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --version minidev_20261028 --prompt-format schema_only
+```
 
 Each row has `question`, `gt_sql`, `sql_context`, `difficulty`, `db_id` and `id`. `sql_context` is a per-table,
 per-column schema (type, description, example values) plus a `#### Foreign key` section. Example values combine a
@@ -154,11 +209,14 @@ model, `--model-url` its base URL (e.g. `http://localhost:8000/v1`) and `--model
 ./benchmarks/birdbench/eval.sh --model <name> --dialect postgres              # dev,   postgres
 ./benchmarks/birdbench/eval.sh --model <name> --split train                   # train, sqlite
 ./benchmarks/birdbench/eval.sh --model <name> --split train --dialect spark   # train, spark
+./benchmarks/birdbench/eval.sh --model <name> --version dev_20251106          # the 2025-11-06 dev
+./benchmarks/birdbench/eval.sh --model <name> --version minidev_20261028 --prompt-format schema_only   # Mini-Dev 2026, AO's prompt
 ```
 
 `--limit 5` gives a smoke test and `--num-repeats N` N rollouts per task. Results go to
-`benchmarks/birdbench/results/<split>_<dialect>/<model>/` (override with `--output_dir`). The script header documents every option;
-other flags pass through to `gym eval run`.
+`benchmarks/birdbench/results/<split>_<dialect>/<model>/` (override with `--output_dir`), or
+`results/<version>_<dialect>_<prompt format>/<model>/` for another version or prompt. The script header documents
+every option; other flags pass through to `gym eval run`.
 
 `rollouts.jsonl` has one row per rollout (prompt, response, reward, verifier fields like `extracted_sql` and
 `failure_reason`).

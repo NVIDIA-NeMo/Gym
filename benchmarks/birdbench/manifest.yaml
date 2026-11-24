@@ -5,9 +5,10 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: coding
 description: Text-to-SQL with execution-based evaluation on BIRD dev (1534 SQLite
-  tasks). Binary reward from unordered result-set equality.
+  tasks, release 2024-06-27; the 2025-11-06 release and Mini-Dev are options). Binary reward from unordered
+  result-set equality.
 modality: text
-licensing: unknown
+licensing: CC-BY-SA-4.0
 authors:
 - gwarmstrong
 reward:
