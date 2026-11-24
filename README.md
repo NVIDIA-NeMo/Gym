@@ -497,6 +497,7 @@ benchmark that declares another resources server (for example [Asr With Pc](reso
 
 | Benchmark | Evaluates | Metric | License |
 | --- | --- | --- | --- |
+| [`halas`](benchmarks/halas/README.md) | Hallucination in transcribing earnings-call segments (745) | WER, insertion-based hallucination | CC-BY-SA-4.0, CC-BY-4.0 |
 
 ## 📖 Documentation & Resources
 
