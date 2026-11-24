@@ -121,6 +121,12 @@ path, dimensions, and checksum in verifier metadata so it can check the referenc
 the output. Keep those source files accessible to the resource server. Prepared
 [example tasks](data/example.jsonl) and [real rollouts](data/example_rollouts.jsonl) are included.
 
+Preparation writes each reference as an absolute path, and the resources server reads an absolute
+path as is. For rows whose `image_path` is relative, set the resources server's `reference_root`
+to the absolute directory those paths start from. If `reference_root` is unset, relative paths
+resolve against the Gym checkout root. The committed example rows use repository-relative paths,
+so they need `reference_root` unset or set to a Gym checkout.
+
 ### Single-pass example
 
 Kimi K3 recreation with GPT-6.1-Sol judging; pixel-weighted reward **0.67684**.
@@ -165,8 +171,10 @@ Configure these on the policy and judge adapters independently.
 
 Where no run-level `--max-output-tokens` applies, as in training, set the agent's `max_output_tokens`
 to cap each policy call, reasoning included; a task's smaller `responses_create_params.max_output_tokens`
-is kept. A response cut by the cap is scored as written: a program cut off before it is complete, or
-no answer at all, fails to render and receives an unmasked zero.
+is kept. A response cut by the cap is scored as written. If its answer text holds no complete program,
+it fails to render and receives an unmasked zero. If the engine returns reasoning inside the reply
+text, cut reasoning counts as answer text. The last complete draft program written there is run and
+scored.
 
 ## Multi-pass revisions
 

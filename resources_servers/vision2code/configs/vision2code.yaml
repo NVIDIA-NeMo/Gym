@@ -39,6 +39,7 @@ vision2code:
       blended_reward_apply_judge_caps: false
       spatial_uncapped_judge_squared: false
       artifact_dir: ${oc.env:VISION2CODE_ARTIFACTS,artifacts/vision2code}
+      reference_root: null
       datasets:
         - name: example
           type: example
