@@ -46,6 +46,10 @@ RUNTIME_REQUIREMENTS = (
     "rich",
     "uvicorn",
     "yappi",
+    # OmegaConf pins antlr4-python3-runtime 4.9.*, which PyPI ships only as source. A direct URL is the one kind of
+    # requirement the runtime builds from source on this host; it is pure Python, so the build fits every sandbox.
+    "antlr4-python3-runtime @ https://files.pythonhosted.org/packages/3e/38/7859ff46355f76f8d19459005ca000b6e7012f2f1ca597746cbcd1fbfe5e/"
+    "antlr4-python3-runtime-4.9.3.tar.gz#sha256=f224469b4168294902bb1efa80a8bf7855f24c99aef99cbefc1bcd3cce77881b",
 )
 RUNTIME = SandboxPythonRuntime(
     harness="simple_agent",

@@ -306,7 +306,7 @@ def test_the_runtime_holds_every_distribution_the_loop_imports() -> None:
 
     assert not imported & {"numpy", "pandas", "scipy", "pyarrow"}
     covered: set[str] = set()
-    pending = [name.lower() for name in sandbox_module.RUNTIME_REQUIREMENTS]
+    pending = [Requirement(line).name.lower() for line in sandbox_module.RUNTIME_REQUIREMENTS]
     while pending:
         name = pending.pop()
         if name in covered:
