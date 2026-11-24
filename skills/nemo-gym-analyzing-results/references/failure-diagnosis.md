@@ -35,29 +35,38 @@ def rows(p):
             if isinstance(row, dict):
                 result.append(row)
     return result
-key = lambda r: (r.get("_ng_task_index"), r.get("_ng_rollout_index"))
-# Several agents can run the same task (fan-out), so group by agent as well as by task.
-agent = lambda r: (r.get("agent_ref") or {}).get("name") or r.get("_ng_environment_server") or "-"
-plan = {key(r): agent(r) for r in rows(out.with_name(out.stem + "_materialized_inputs.jsonl"))}
-planned = collections.Counter((a, k[0]) for k, a in plan.items())
-measured = collections.defaultdict(dict)
+ident = lambda r: r.get("_ng_rollout_id") or f"{r.get('_ng_task_index')}-{r.get('_ng_rollout_index')}"
+# A run is its Environment Server, or its agent for rows without one, as Gym groups runs.
+run = lambda r: r.get("_ng_environment_server") or (r.get("agent_ref") or {}).get("name") or "-"
+manifest = out.with_name(out.stem + "_manifest.json")
+latest = None
+if manifest.exists():  # A managed run counts each rollout's newest reserved attempt, as Gym selects it.
+    latest = {i: n - 1 for i, n in json.loads(manifest.read_text()).get("next_attempt", {}).items() if n > 0}
+picked = {}
 for r in rows(out):
+    i, a = ident(r), r.get("_ng_attempt_index", 0)
+    if (a == latest.get(i)) if latest is not None else (i not in picked or a >= picked[i].get("_ng_attempt_index", 0)):
+        picked[i] = r
+plan = {ident(r): r for r in rows(out.with_name(out.stem + "_materialized_inputs.jsonl"))}
+planned = collections.Counter((run(r), r.get("_ng_task_index")) for r in plan.values())
+measured = collections.defaultdict(dict)
+for i, r in picked.items():
     if isinstance(r.get("reward"), (int, float)) and not r.get("mask_sample"):
-        measured[(plan.get(key(r), agent(r)), r.get("_ng_task_index"))][r.get("_ng_rollout_index")] = r["reward"]
+        measured[(run(plan.get(i, r)), r.get("_ng_task_index"))][r.get("_ng_rollout_index")] = r["reward"]
 groups = collections.defaultdict(list)
-for a, task in sorted(planned.keys() | measured.keys(), key=lambda k: (str(k[0]), k[1] is None, k[1])):
-    got = measured.get((a, task), {})
+for name, task in sorted(planned.keys() | measured.keys(), key=lambda k: (str(k[0]), k[1] is None, k[1])):
+    got = measured.get((name, task), {})
     rewards = list(got.values())
-    label = f"{task}{'*' if len(got) < planned.get((a, task), 0) else ''}"
+    label = f"{task}{'*' if len(got) < planned.get((name, task), 0) else ''}"
     if not rewards:
-        groups[(a, "not measured")].append(label)
+        groups[(name, "not measured")].append(label)
     elif min(rewards) == max(rewards):
-        groups[(a, f"same reward {rewards[0]} on every measured repeat")].append(label)
+        groups[(name, f"same reward {rewards[0]} on every measured repeat")].append(label)
     else:
-        groups[(a, "reward varies")].append(label)
-        print(f"{a} task {task}: " + ", ".join(f"r{k}={v}" for k, v in sorted(got.items(), key=lambda kv: (kv[0] is None, kv[0]))))
-for (a, name), tasks in groups.items():
-    print(f"{a}: {name} ({len(tasks)}): {', '.join(tasks)}")
+        groups[(name, "reward varies")].append(label)
+        print(f"{name} task {task}: " + ", ".join(f"r{k}={v}" for k, v in sorted(got.items(), key=lambda kv: (kv[0] is None, kv[0]))))
+for (name, kind), tasks in groups.items():
+    print(f"{name}: {kind} ({len(tasks)}): {', '.join(tasks)}")
 print("* = fewer measured repeats than planned")
 EOF
 ```
@@ -101,7 +110,7 @@ Fields to read in a rollout row of `<stem>.jsonl`:
 | The same wrong answer on every repeat | A knowledge gap, or a wrong label | Check the expected answer before calling it a model problem |
 | Different wrong answers across repeats, with occasional passes | Unreliable knowledge | Passing and failing repeats differ in the answer, not in format or tooling |
 | Identical outputs with different rewards | A nondeterministic verifier or environment | Compare rewards of repeated outputs |
-| Zeros marked `harbor:verifier_timeout`, `harbor:missing_reward` or `harbor:invalid_reward`, or `evaluation_completed: false` | Verification that did not finish, settled by the benchmark as 0 | The verifier's logs and timing; a resume does not redo these |
+| Unmasked zeros marked `harbor:verifier_timeout`, `harbor:missing_reward` or `harbor:invalid_reward`, or with `evaluation_completed: false` and no `mask_sample` | Verification that did not finish, settled by the benchmark as 0 | The verifier's logs and timing; a resume does not redo these. A masked or `judge_failed` row is excluded from the score instead |
 | Failure rows with HTTP 429 or 5xx, sandbox errors, timeouts | Infrastructure | `_ng_failure_class` and `_ng_failure_message` (or `failure_reason`) in `<stem>_failures.jsonl`; `run.stats` in `<run_dir>/quality_summary.json` counts errors of saved rollouts only |
 | Tool errors, loops, giving up early, ignoring feedback | Agent behavior | Tool calls and their outputs, in order |
 
@@ -140,19 +149,27 @@ Recommend how to measure each fix before rerunning everything; running and resum
   import json, sys
   from pathlib import Path
   def scores(path):
-      """Valid, unmasked rewards by (task, rollout); exits when the file is missing."""
+      """Valid, unmasked rewards of each rollout's selected attempt; exits when the file is missing."""
       p = Path(path)
       if not p.exists():
           sys.exit(f"missing {p}")
-      result = {}
+      manifest = p.with_name(p.stem + "_manifest.json")
+      latest = None
+      if manifest.exists():  # A managed run counts each rollout's newest reserved attempt, as Gym selects it.
+          latest = {i: n - 1 for i, n in json.loads(manifest.read_text()).get("next_attempt", {}).items() if n > 0}
+      picked = {}
       for line in p.open("rb"):
           try:
               r = json.loads(line)
           except (json.JSONDecodeError, UnicodeDecodeError):
               continue  # Blank lines, and a cut-off last line.
-          if isinstance(r, dict) and isinstance(r.get("reward"), (int, float)) and not r.get("mask_sample"):
-              result[(r.get("_ng_task_index"), r.get("_ng_rollout_index"))] = r["reward"]
-      return result
+          if not isinstance(r, dict):
+              continue
+          i, a = r.get("_ng_rollout_id") or f"{r.get('_ng_task_index')}-{r.get('_ng_rollout_index')}", r.get("_ng_attempt_index", 0)
+          if (a == latest.get(i)) if latest is not None else (i not in picked or a >= picked[i].get("_ng_attempt_index", 0)):
+              picked[i] = r
+      return {(r.get("_ng_task_index"), r.get("_ng_rollout_index")): r["reward"] for r in picked.values()
+              if isinstance(r.get("reward"), (int, float)) and not r.get("mask_sample")}
   old, new = scores(sys.argv[1]), scores(sys.argv[2])
   both = old.keys() & new.keys()
   changed = sorted(k for k in both if old[k] != new[k])
