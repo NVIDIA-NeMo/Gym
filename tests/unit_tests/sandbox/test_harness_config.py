@@ -22,7 +22,7 @@ class TestHarnessSandboxConfig:
                 "env": {"A": "1"},
                 "metadata": {"team": "gym"},
                 "provider_options": {"volumes": []},
-                "network_access": "inherit",
+                "network": "inherit",
             }
         )
 

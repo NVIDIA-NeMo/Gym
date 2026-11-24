@@ -1211,6 +1211,14 @@ for _module, _renamed in _RENAMED_CONVERTER_NAMES.items():
     assert not set(_listed) & set(_renamed), f"{_module} lists a renamed converter name twice"
     _listed.update(_renamed)
 
+# SandboxSessionCheckpointer renamed OwnedSandboxes: besides checkpointing the sandboxes a server owns, it starts,
+# lends and stops them. Its constructor takes the same arguments.
+_listed = MOVED_NAMES.setdefault("nemo_gym.server_runtime", {})
+assert "SandboxSessionCheckpointer" not in _listed
+_listed["SandboxSessionCheckpointer"] = MovedPath(
+    new="nemo_gym.server_runtime.owned_sandboxes:OwnedSandboxes", since="0.8.0"
+)
+
 
 def _running_version() -> str:
     from nemo_gym.package_info import __version__

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The typed ``sandbox_config`` of a sandbox that runs an agent harness, independent of its owner."""
+"""The typed ``sandbox_config`` of a harness sandbox: the sandbox an agent's harness runs in."""
 
 import dataclasses
 from collections.abc import Mapping
@@ -8,19 +8,23 @@ from typing import Any
 
 from pydantic import Field
 
-from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.config import NetworkRuleOptions, SandboxConfig
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.sandbox.utils import cpu_cap_env
 
 
 class HarnessSandboxConfig(SandboxConfig):
-    """``SandboxConfig`` for a harness sandbox owned by an environment server or an agent.
+    """``SandboxConfig`` for a harness sandbox, whichever server owns it.
 
-    The owning server creates it through ``OwnedSandboxes`` and lends it through ``borrow()``. These settings also
-    support an environment server that supplies the harness sandbox when Resources lends none.
+    The owner is the server that starts it and stops it: an Environment Server that starts one for an attempt and
+    lends it, or an agent that starts its own because nothing was lent. A lent sandbox is borrowed instead, with
+    ``borrow()`` from ``nemo_gym.server_runtime``.
 
-    An adopting agent must refuse setting both its legacy ``network_access`` and this config's ``network_access``;
-    a recipe must have one source for its egress rule.
+    A server takes the image, working directory and files of a task sandbox from its task. A harness sandbox has no
+    task to take them from, so they are configured here, with the keys agent recipes set today.
+
+    Its ``network`` rule replaces an agent's own ``network_access``: an agent that adopts this config refuses the two
+    set together, so a sandbox never has two egress settings.
 
     Attributes:
         image: The sandbox image.
@@ -54,7 +58,7 @@ class HarnessSandboxConfig(SandboxConfig):
         metadata: Mapping[str, str] | None = None,
         files: Mapping[str, str | bytes] | None = None,
         named_configs: Mapping[str, Any] | None = None,
-        _network_options: Mapping[str, Any] | None = None,
+        network_options: NetworkRuleOptions | None = None,
     ) -> SandboxSpec:
         """The spec of the harness sandbox, with this config's image, workdir, files, entrypoint, user and ports.
 
@@ -68,7 +72,7 @@ class HarnessSandboxConfig(SandboxConfig):
             metadata=metadata,
             files={**self.files, **(files or {})},
             named_configs=named_configs,
-            _network_options=_network_options,
+            network_options=network_options,
         )
         cpu_env = cpu_cap_env(spec.resources.cpu) if self.derive_cpu_env else {}
         return dataclasses.replace(

@@ -14,17 +14,19 @@
 # limitations under the License.
 import asyncio
 import atexit
+import hashlib
 import json
 import logging
 import resource
+import secrets
 import signal
 import socket
 import sys
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from functools import partial
+from functools import cached_property, partial
 from ipaddress import ip_network
 from os import environ, getenv
 from traceback import format_exception, print_exception
@@ -289,6 +291,26 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
+# The variables that carry each server's run secret (run_session_secret) to its workers, by a hash of its name.
+RUN_SESSION_SECRET_ENV_PREFIX = "NEMO_GYM_RUN_SESSION_SECRET_"
+
+
+def run_session_secret(server_name: str) -> str:
+    """The random secret that signs one server's sessions for this run.
+
+    The first call in a process without it makes one and sets it in the environment, under a variable named after the
+    server, so servers that share a process keep one secret each. A multi-worker server reads it in its main process
+    (``setup_webserver``) before uvicorn starts the workers, so every worker inherits it and reads the cookies and
+    tokens another worker signed, as Environment Servers do with ``episode_token_secret``. A server that starts
+    again makes a new one, which ends the sessions signed with the old.
+    """
+    variable = RUN_SESSION_SECRET_ENV_PREFIX + hashlib.sha256(server_name.encode()).hexdigest()[:16].upper()
+    secret = environ.get(variable)
+    if not secret:
+        secret = environ[variable] = secrets.token_urlsafe(32)
+    return secret
+
+
 def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
     """Raise when the server asks for several workers but cannot run with them."""
     if not server.config.num_workers or server.config.num_workers <= 1:
@@ -317,9 +339,11 @@ class SimpleServer(BaseServer):
     routes_sessions_to_owner: ClassVar[bool] = False
     # Whether this server lends sandboxes it owns to agents, so startup refuses a provider that never reconnects.
     lends_sandboxes: ClassVar[bool] = False
-    # Config field -> provider field for blocks this server builds through OwnedSandboxes.spec().
-    # This explicit adoption declaration also makes startup validation independent of provider-field names.
-    sandbox_config_providers: ClassVar[dict[str, str]] = {}
+    # The sandbox blocks whose sandboxes this server starts through its own sandboxes, as
+    # self.sandboxes.on(<provider field>).spec(<block>): each config field holding a SandboxConfig (a dotted path for
+    # a nested one), mapped to the config field that names its provider. Startup checks each block against that
+    # provider, and refuses a restricted network rule in any block not listed, since nothing would apply it.
+    owned_sandbox_blocks: ClassVar[Mapping[str, str]] = {}
     # The sandboxes this server owns, one OwnedSandboxes per provider field, created on first use.
     _owned_sandboxes: dict[str, "OwnedSandboxes"] = PrivateAttr(default_factory=dict)
     # Set when the shutdown sweep begins: no instance is built after it, so none is left that nothing closes.
@@ -384,45 +408,75 @@ class SimpleServer(BaseServer):
         app.router.lifespan_context = lifespan
 
     def check_sandbox_provider(self) -> None:
-        """Validate declared owner blocks and refuse restricted rules on servers that have not adopted them.
+        """Refuse at startup what the server's sandbox providers cannot do for the sandboxes its config declares.
 
-        ``sandbox_config_providers`` maps each config block built through ``OwnedSandboxes.spec`` to its provider
-        field. Provider classes are checked without creating clients. Restricted blocks absent from the mapping
-        fail here, including during dry runs, instead of at a seed request.
+        Each block in ``owned_sandbox_blocks`` is checked against the provider its provider field names: the block is
+        resolved, the provider class checked for the block's network rule, and the model and tool servers the rule
+        allows resolved to hosts a sandbox reaches. A server that sets ``lends_sandboxes`` is checked for lending on
+        ``sandbox_provider``. A ``SandboxConfig`` anywhere else in the config may not set a restricted rule. A rule
+        that allows a host other servers also listen on is logged. No provider is created.
+
+        Raises:
+            ValueError: Naming the first need a provider cannot meet, a server the rule cannot reach, or a restricted
+                rule in a block the server does not start through ``self.sandboxes``.
         """
         from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
+        from nemo_gym.sandbox.providers.base import NETWORK_RULES
         from nemo_gym.sandbox.providers.registry import get_provider_class
-        from nemo_gym.server_runtime.owned_sandboxes import check_provider, rule_hosts
+        from nemo_gym.server_runtime.owned_sandboxes import (
+            check_provider,
+            rule_hosts,
+            sandbox_blocks,
+            servers_sharing_hosts,
+        )
 
-        blocks = {
-            name: value
-            for name in type(self.config).model_fields
-            if isinstance(value := getattr(self.config, name), SandboxConfig)
-        }
-        for name, block in blocks.items():
-            if block.network_access not in (None, "inherit") and name not in self.sandbox_config_providers:
+        blocks_by_field: dict[str, list[SandboxConfig]] = {}
+        declared: set[int] = set()
+        for path, provider_field in self.owned_sandbox_blocks.items():
+            block: Any = self.config
+            for name in path.split("."):
+                block = getattr(block, name, None)
+            if block is None:
+                continue
+            if not isinstance(block, SandboxConfig):
                 raise ValueError(
-                    f"{self.config.name}.{name} sets restricted network_access but this server has not declared "
-                    "that it builds the block through OwnedSandboxes.spec() in sandbox_config_providers"
+                    f"{type(self).__name__}.owned_sandbox_blocks names {path!r}, which is no SandboxConfig"
                 )
-        if not self.sandbox_config_providers and not self.lends_sandboxes:
+            declared.add(id(block))
+            blocks_by_field.setdefault(provider_field, []).append(block)
+        for path, block in sandbox_blocks(self.config):
+            if id(block) not in declared and block.network in NETWORK_RULES and block.network != "inherit":
+                raise ValueError(
+                    f"{self.config.name} sets network {block.network!r} in {path}, but {type(self).__name__} does not "
+                    "start that block's sandboxes through self.sandboxes (owned_sandbox_blocks), the only place a "
+                    "network rule is applied"
+                )
+        if self.lends_sandboxes:
+            blocks_by_field.setdefault("sandbox_provider", [])
+        if not blocks_by_field:
             return
         global_config = self._global_config()
-        for name, provider_field in self.sandbox_config_providers.items():
-            if name not in blocks:
-                raise ValueError(f"sandbox_config_providers names unknown SandboxConfig field {name!r}")
+        for provider_field, blocks in blocks_by_field.items():
             reference = getattr(self.config, provider_field, None)
             if reference is None:
-                raise ValueError(f"sandbox_config_providers needs provider field {provider_field!r}")
+                if any(block.network in NETWORK_RULES for block in blocks):
+                    raise ValueError(f"{self.config.name} sets a network rule but no {provider_field} to apply it")
+                continue
             (provider_name,) = resolve_provider_config(reference, global_config)
-            check_provider(get_provider_class(provider_name), configs=[blocks[name]])
-            rule_hosts(blocks[name], global_config)
-        if self.lends_sandboxes:
-            reference = getattr(self.config, "sandbox_provider", None)
-            if reference is None:
-                raise ValueError("lends_sandboxes needs sandbox_provider")
-            (provider_name,) = resolve_provider_config(reference, global_config)
-            check_provider(get_provider_class(provider_name), lends=True)
+            lends = self.lends_sandboxes and provider_field == "sandbox_provider"
+            check_provider(get_provider_class(provider_name), configs=blocks, lends=lends)
+            for block in blocks:
+                if block.network not in NETWORK_RULES:
+                    continue
+                rule_hosts(block, global_config)
+                for host, servers in servers_sharing_hosts(block, global_config).items():
+                    logger.warning(
+                        "network %r of %s allows host %s, where %s also listen; its sandboxes reach them too",
+                        block.network,
+                        self.config.name,
+                        host,
+                        ", ".join(servers),
+                    )
 
     async def aclose_sandboxes(self) -> None:
         """Stop every sandbox of every ``OwnedSandboxes`` this server created; see ``OwnedSandboxes.aclose``.
@@ -444,6 +498,10 @@ class SimpleServer(BaseServer):
         for outcome in outcomes:
             if isinstance(outcome, BaseException):
                 logger.error("Sandboxes of %s were not all stopped at shutdown: %r", self.config.name, outcome)
+    # Sign session cookies and MCP session tokens with a secret made for the run (run_session_secret), not with the
+    # public key get_session_middleware_key() derives from the server's class and name: for a server whose routes code
+    # it does not trust can call, such as code in a sandbox it lends. mcp_bearer_token turns it on as well.
+    signs_sessions_with_run_secret: ClassVar[bool] = False
 
     def owned_session_routing(self) -> dict[str, Any]:
         """Arguments to ``install_session_routing``: where requests name their session, and how long ownership lasts.
@@ -515,9 +573,47 @@ class SimpleServer(BaseServer):
         instrument_fastapi_app(app)
 
     def get_session_middleware_key(self) -> str:
-        # This method is here to override in case we want to ever use an actual session middleware secret key.
-        # e.g. for an actual product.
+        # Names this server in logs and error text, and by default its session cookie, so it is public.
+        # To sign sessions with a secret, set signs_sessions_with_run_secret (or override get_session_secret).
         return f"{self.__class__.__name__}___{self.config.name}"
+
+    def get_session_secret(self) -> str:
+        """The key that signs this server's session cookies and MCP session tokens; callers read it once, through
+        ``session_secret``.
+
+        With ``signs_sessions_with_run_secret``, or with ``mcp_bearer_token`` in the config, it is a secret made for
+        the run (``run_session_secret``), so callers that can reach the server's routes, such as code in a sandbox
+        the server lends, cannot forge another session's cookie or token. Otherwise it is
+        ``get_session_middleware_key()``, which anyone who knows the server's class and name can compute.
+        Only the signing changes: the cookie keeps its name (``get_session_cookie_name()``).
+
+        An override must return the same secret in every worker of the server, because a cookie or token signed by
+        one worker is read by another (session routing reads it to find the session's worker). And every cookie and
+        token signed with a secret is invalid once the secret changes: a secret made when the process starts ends
+        every open session at a restart, so it suits a server whose sessions cannot outlive its process anyway.
+        """
+        if (
+            getattr(type(self), "signs_sessions_with_run_secret", False) is True
+            or getattr(self.config, "mcp_bearer_token", False) is True
+        ):
+            return run_session_secret(self.config.name)
+        return self.get_session_middleware_key()
+
+    @cached_property
+    def session_secret(self) -> str:
+        """``get_session_secret()``, resolved once per server: the session middleware, session routing and the MCP
+        endpoint of a process all sign and read with one key, even under an override that answers differently from
+        call to call. The instance's ``__dict__`` keeps it, so it holds however the server was built."""
+        return self.get_session_secret()
+
+    def get_session_cookie_name(self) -> str:
+        """The name of this server's session cookie, for SessionMiddleware and the session router that reads it.
+
+        The default is ``get_session_middleware_key()``. Callers see the name in every answer that sets the cookie,
+        so a server whose routes code in a sandbox can reach may return one that says nothing of the server.
+        It must stay unique per server: a client keeps one cookie per name and host, and servers share hosts.
+        """
+        return self.get_session_middleware_key()
 
     def setup_session_middleware(self, app: FastAPI) -> None:
         if getattr(app.state, "nemo_gym_session_middleware_installed", False):
@@ -531,8 +627,9 @@ class SimpleServer(BaseServer):
         # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
         app.add_middleware(SessionIDMiddleware)
 
-        session_middleware_key = self.get_session_middleware_key()
-        app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
+        app.add_middleware(
+            SessionMiddleware, secret_key=self.session_secret, session_cookie=self.get_session_cookie_name()
+        )
 
     def setup_exception_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ExceptionHandlingMiddleware, failure_reply=partial(SimpleServer._failure_reply, self))
@@ -708,15 +805,15 @@ repr(e): {repr(e)}"""
         mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.server_runtime.mcp_auto_exposure import (
-                TOKEN_HEADER,
                 maybe_auto_expose,
+                session_token_header,
                 session_token_serializer,
             )
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")
             mcp_token_routing = dict(
-                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+                mcp_token_header=session_token_header(server), mcp_token_serializer=session_token_serializer(server)
             )
         server.setup_liveness(app)
         server.set_ulimit()
@@ -737,12 +834,12 @@ repr(e): {repr(e)}"""
         if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
             # Outside SessionMiddleware and the exception middleware:
             # a forwarded request is handled only by the worker that owns its session.
-            session_cookie = server.get_session_middleware_key()
             install_session_routing(
                 app,
                 socket_dir=session_socket_dir,
-                session_cookie=session_cookie,
-                secret_key=session_cookie,
+                session_cookie=server.get_session_cookie_name(),
+                # Reads the cookie as SessionMiddleware does, so with the same key.
+                secret_key=server.session_secret,
                 backlog=backlog,
                 **mcp_token_routing,
                 **server.owned_session_routing(),
