@@ -303,10 +303,11 @@ Read [reward-safety.md](references/reward-safety.md) before writing the verifier
   `pip install -e .`, `mvn compile`), a separate sandbox is not a trust boundary: protect the reward path and every
   file the grader has mapped by ownership, drop capabilities around the whole eval script, and fail closed on any
   import or file open after the tests start, as `scale_swe` does (reward-safety.md rule 2). Some routes stay open
-  until the harbor server reads the reward outside the verifier sandbox; list them in the adapter README.
+  (provider-level, forged test output); list them in the adapter README, as `scale_swe` does.
 - Prove it with controls that must score 0 unmasked ([gates.md](references/gates.md#g3-negative-controls)):
   `controls --plant-reward`, plus `--plant-conftest` (pytest) or `--plant-hooks` (npm, Go, pytest) when the verifier
-  runs agent output; for other languages write your own `--solution-dir` probe.
+  runs agent output; for other languages write your own `--solution-dir` probe. Add `--plant-collection` (pytest):
+  it tests the Gym that collects the reward, so a 1 there is a property of the Gym version, not of the dataset.
 
 Before moving on:
 - [ ] Every exit 75 in `test.sh` maps to a case where the native server masks, on a fact the agent cannot write.

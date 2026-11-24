@@ -194,8 +194,13 @@ gym dataset validate <data>/swe_rebench_smoke_empty --sandbox <provider> --confi
 `gym dataset validate` exits 1 on a control by design, and its table labels every row "oracle solved" even at
 reward 0. So read `results/harbor/validation/swe_rebench_smoke_empty/rollouts_run_summary.json`: a pass is every
 `reward` 0.0, every `mask_sample` false, `counts.masked` 0 and `counts.failed` 0 (208 s for these 5 tasks). Build
-the reward-forgery probes (`--plant-reward`, `--plant-conftest`, `--plant-hooks`) the same way: each must also score
-0 unmasked. A probe's row can show `failure_kind` `harbor:missing_reward`: the grader left no reward, which scores 0.
+the reward-forgery probes (`--plant-reward`, `--plant-conftest`, `--plant-hooks`, `--plant-collection`) the same way:
+each must also score 0 unmasked. A probe's row can show `failure_kind` `harbor:missing_reward`: the grader left no
+reward, which scores 0. `--plant-collection` plants through a `conftest.py`, so it reaches only the pytest tasks. It
+checks the Gym that collects the reward, not the dataset: every reward 0 and nothing masked means that Gym was not
+fooled, and a reward of 1 means the reward was rewritten after the grader finished, a property of the Gym version
+(see the Scale-SWE README's
+[Reward safety](../../scale_swe/harbor/README.md#reward-safety)).
 
 ## Run both arms
 
@@ -243,8 +248,21 @@ capture reader, differences 14 to 16), datasets regenerated from this revision w
   unmasked, on the 5 smoke tasks. On the 4 tasks where a hook ran (no hook covers the Java task's Maven build),
   every write to a mapped file was refused.
 
-The model smoke and the `--plant-reward` and `--plant-conftest` probes below were not re-run with the hardened
-grader. The rest of this section is the evidence from before the hardening:
+The harbor server has since changed to read the reward through the provider's file download, and the grader to
+protect the files mapped by the processes above it and to write no exit record. With both, datasets regenerated
+from this revision were run again on OpenSandbox:
+
+- Reference solutions: 7 of 7 scored 1.0 (the same seven languages), none masked. Each `grading.json` lists
+  `timeout` and `bash` as protected and the provider's service (pid 1) as a process whose mappings the grader may
+  not read.
+- `--plant-collection` scored 0 on the 5 smoke tasks, none masked. It reaches only the Python task there. On that
+  task the replaced `tar` ran while the logs were collected, and the reward it wrote was not used.
+
+The empty control, `--plant-hooks` and the mutation control were not re-run with these two changes. A control that
+scored 1.0 with the harbor server from before the change was run on the Scale-SWE smoke tasks only (see that
+README's [After the grader hardening](../../scale_swe/harbor/README.md#after-the-grader-hardening)). The model smoke
+and the `--plant-reward` and `--plant-conftest` probes below were not re-run with the hardened grader. The rest of
+this section is the evidence from before the hardening:
 
 - Reference solutions: 7 tasks, one per language, each scored 1.0 with `gym dataset validate`, none masked:
   `vuejs__eslint-plugin-vue-2334` (JavaScript), `raml-org__raml-java-parser-155` (Java), `mgechev__revive-477` (Go),
@@ -324,37 +342,23 @@ Each with its expected effect on reward:
 As in the Scale-SWE tasks (that README's "Reward safety" has the full argument; the protection code in `grade.py` is
 the same, and a test keeps the two copies identical): every task verifies in a separate sandbox; the eval script
 runs the agent's patched code as uid 0 without the capabilities that reach the reward folder, which `grade.py` first
-hands to another uid (47311), creating the wrapper's exit record there with exit 1; the files `grade.py` has mapped
-are handed to that uid without write bits, so the tests cannot rewrite in place code the grader runs; once the eval
-script starts, an audit hook refuses every import, library load, `exec`, fork, further subprocess and every open but
-of the outputs, and after the tests the mappings are checked again; anything that goes wrong after the tests started
-exits 1 without a reward (a measured 0, never a mask); and `grade.py` writes the reward as bytes, as that uid. The
-capture files are read only as regular files within their size bound, and every capture outcome but a readable
-patch is a completed 0, never a mask. The dataset needs no server option for this; `configs/harbor_arm.yaml` carries
-the native scheduling settings.
+hands to another uid (47311), writing no exit record; the files mapped by `grade.py` and by every process above it
+that relays its exit status (`timeout`, the harbor server's shell, the provider's service where it runs in the
+sandbox) are handed to that uid without write bits, so the tests cannot rewrite in place code those processes run,
+and a process above it whose mappings `grade.py` is not permitted to read (the provider's own service or the
+sandbox's init) is skipped and listed in `grading.json`, under the open route through the provider's service in the
+sandbox; once the eval script starts, an audit hook refuses every import, library load, `exec`, fork, further
+subprocess and every open but of the outputs, and after the tests the mappings are checked again; anything that
+goes wrong after the tests started exits 1 without a reward (a measured 0, never a mask); and `grade.py` writes the
+reward as bytes, as that uid. The capture files are read only as regular files within their size bound, and every
+capture outcome but a readable patch is a completed 0, never a mask. The dataset needs no server option for this;
+`configs/harbor_arm.yaml` carries the native scheduling settings.
 
-What the agent's code can still do:
-
-- **Kill the grader.** Killing `grade.py` leaves no reward (scored 0); killing the wrapper around `test.sh` before it
-  writes its exit record leaves the record `grade.py` created (exit 1), also a 0.
-- **Mask through the wrapper's exit record (open).** A test process can lower the wrapper's file size limit, so the
-  wrapper's own write empties the record and fails; the harbor server masks a run whose record is empty.
-- **Rewrite the reward after `grade.py` exits (open).** The harbor server then runs `date`, `tar` and `gzip` in this
-  sandbox as root with every capability, found through `PATH`, and the tests own those programs and folders: a test
-  that replaces one with a script rewriting `reward.json` forges the score.
-- **Hold the grader with a detached process.** A test process that starts its own session (`setsid`) and keeps the
-  output pipe open holds `grade.py` until `[verifier].timeout_sec` (3600 + 900 s), which leaves no reward and scores
-  a measured 0.
-- **Forge the test output.** The verdict is read from the eval script's output, as at the server: a test hook that
-  reports failing tests as passed scores 1 on both arms.
-- **Mask through the sandbox provider (open).** Test code can end the verifier without an exit status, which the
-  harbor server masks. The Scale-SWE README gives the two routes measured on real sandboxes: rewriting a shared
-  library the server's later `bash` loads, and `kill -9 -1`.
-- **Reach `grade.py` below Python.** Library loads from C (name service, `iconv`, unwinding) are not audited; the path
-  after the tests makes none, and one would show as a new mapping in the check.
-
-The Scale-SWE README says how the two open routes were shown. Closing them and the provider mask needs the reward
-read and the exit status recorded outside the verifier sandbox (a harbor server change).
+What the agent's code can still do is the Scale-SWE README's list
+([Reward safety](../../scale_swe/harbor/README.md#reward-safety)), which applies here unchanged, with one value of
+these tasks: a test process that holds `grade.py` with a detached process (`setsid`) holds it until
+`[verifier].timeout_sec` (3600 + 900 s), which leaves no reward and scores a measured 0. The measurements in that list
+were made on Scale-SWE tasks; none was repeated on these tasks with the current harbor server.
 
 ## Requirements and known limits
 

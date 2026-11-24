@@ -14,6 +14,7 @@ whatever its exit code. Every route below was found in a pilot, and every fix wa
 | **Collect-hook output.** The hook runs in the agent's sandbox; the agent rewrote `capture.py` to report an infrastructure error | scale_swe: a mask instead of a 0 | Every hook outcome but a readable patch is a completed 0, never a mask. Probes `force_mask`, `capture_delete`: 0.0 unmasked |
 | **Records the seed leaves in the agent's sandbox** (base commit, untracked list) | scale_swe | A missing or changed record scores 0, never a mask; no hidden data there |
 | **Forged state files.** A forged journal and reward written in `main` | workplace_assistant probe: 0.0 on both of its 2 tasks | The journal lives in a sidecar the agent has no shell in, reaches the verifier as an artifact from that service, and only real tool calls append to it |
+| **Collection after grading.** The harbor server ran `date`, `tar` and `gzip` from the verifier sandbox after `test.sh`, to time the run and collect the reward; agent code in the tests replaced them with scripts that rewrote the reward | scale_swe on OpenSandbox: 1.0 on 5 of 5 tasks whose grader had scored 0 | A harbor server change, not an adapter change: Gym reads the reward through the provider's file download before it runs anything else in that sandbox ([Reward files](../../../../fern/versions/latest/pages/data/task-folders/task-folder-verifiers.mdx#reward-files)). Same control: 0.0 on 5 of 5, unmasked. Probe: `--plant-collection` |
 
 ## Rules
 
@@ -23,10 +24,15 @@ whatever its exit code. Every route below was found in a pilot, and every fix wa
    graders (`scale_swe/harbor/.../grade.py`; swe_rebench copies the same code) do this, in order:
    - Ownership. Make uid 0 the owner of every root-filesystem entry another uid owns, then hand `/`, `/logs` and
      `/logs/verifier` to an unused uid (all three: with only the last protected, root renames a parent away), and
-     create the wrapper's exit record `.ng-exit` there saying 1, so a wrapper killed before its write reads as a 0.
+     remove any reward file already there. Write no other file there: the harbor server reads only the reward.
    - Mapped files. Import everything the verdict needs and make `asyncio.to_thread` inline, then hand every file in
      `/proc/self/maps` to that uid without write bits. Otherwise the tests, as root, rewrite an already-mapped
-     library such as `_json` in place and the grader writes their reward.
+     library such as `_json` in place and the grader writes their reward. Do the same for the maps of every process
+     above the grader (follow the parent links in `/proc/<pid>/stat`, assume no shape): `timeout` and the server's
+     shell relay the exit status, and a library of theirs rewritten in place could turn a 0 into a mask. Skip a
+     parent whose maps the grader is not permitted to read (`PermissionError`: the provider's own service or the
+     sandbox's init, such as pid 1 on OpenSandbox) and list it in `grading.json`; it falls under the open route
+     through the provider's in-sandbox service. Mask before the tests on any other error reading a parent.
    - Privilege drop. Run the tests as uid 0 with the bounding set cut to `CAP_FSETID`, `CAP_KILL`,
      `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW`, `CAP_AUDIT_WRITE`, inheritable and ambient cleared and `no_new_privs`.
    - Fail closed. From the tests' start an audit hook refuses every import, library load, `exec`, fork, further
@@ -39,8 +45,7 @@ whatever its exit code. Every route below was found in a pilot, and every fix wa
    back to the unsafe mode. Without `CAP_SETUID` the grader cannot write any output, so every episode (the oracle
    included) scores 0, which G2 shows at once. Test it without root (the scale_swe and swe_rebench adapter tests),
    and on real sandboxes with a `--solution-dir` control whose tests try to rewrite every mapped file: it must score
-   0 unmasked. What this cannot close (see "What stays open") needs the reward read and the exit status recorded
-   outside the verifier sandbox, a harbor server change. Details and measurements: the scale_swe README's
+   0 unmasked. Details and measurements: the scale_swe README's
    [Reward safety](../../../../resources_servers/scale_swe/harbor/README.md#reward-safety).
 3. **Collect-hook output is agent-controlled.** Delete stale outputs first, make "could not run" distinguishable from
    "cut short", and score any outcome you cannot trust as a completed 0. A sha256 check inside the hook does not
@@ -87,21 +92,20 @@ run's probe it is taken from scored 0 on JS, TS, Go and Python tasks), and for o
 sandbox, set `PROBE_KILL_PREFIX` to a folder of your own (or `PROBE_KILL=0`); the default kills every process of your
 user with an argument under `/tests/`.
 
+`--plant-collection` (pytest images: it plants through a `conftest.py`) replaces `tar`, `gzip` and `date` during the
+tests, so that they rewrite the reward to 1 if anything runs them after the grader finished. It tests the Gym that
+collects the reward, not the dataset: every reward 0 and nothing masked means that Gym was not fooled; a reward of 1
+means the reward was rewritten after the grader finished, a property of the Gym version. Outside a sandbox, point
+`PROBE_COLLECT_TOOLS`, `PROBE_COLLECT_BIN` and `PROBE_COLLECT_KEEP` at scratch paths
+([checks README](../../../../scripts/harbor_conversion_checks/README.md)); the defaults replace real programs.
+
 ## What stays open
 
-- An agent's test code can kill the grader or the wrapper around `test.sh` (both a 0 with the pre-created exit
-  record), and can forge its own test output, which scores 1 on both arms as natively.
-- **Forgery after the grader exits.** After the grader has written the reward, the harbor server still runs `date`,
-  `tar` and `gzip` in the verifier sandbox as root with every capability, to record the exit status and collect the
-  reward, found through `PATH`. Test code running as uid 0 owns those files and folders, so it can replace one with
-  a script that rewrites `reward.json` to 1 during collection. Shown with the real collection code against a local
-  stand-in for the sandbox, not on a live run. No in-sandbox grader can prevent this.
-- **Mask through the exit record.** Test code can lower the wrapper's file size limit, so the wrapper's own write
-  empties `.ng-exit`; the server masks a run with an empty record.
-- **Mask through the provider.** Test code can end the verifier without an exit status, which the server masks.
-  Measured on real sandboxes with the hardened grader: tests that rewrote a shared library the grader does not map
-  but the server's later `bash` loads (5 of 5 masked, `provider_unavailable`), and `kill -9 -1` (masked).
-- Library loads from C are not audited (none happens after the tests in the SWE graders).
-
-Closing the first three needs the reward read and the exit status recorded outside the verifier sandbox, a harbor
-server change; the adapters cannot do it.
+The full list, with what was measured and what was not, is in the scale_swe README's
+[Reward safety](../../../../resources_servers/scale_swe/harbor/README.md#reward-safety); copy it into an adapter
+README that executes agent code. In short: test code can kill the grader (a 0, or a mask on a provider that reports
+no exit status), forge its own test output (1 on both arms, as natively), and kill or impersonate a sandbox
+provider's in-sandbox file service (OpenSandbox, E2B, Daytona, ECS Fargate), which masks or could forge. Providers
+whose file download runs a sandbox program get no collection-stage guarantee, nor does shared verification. A
+dataset run on a Gym from before the reward was read through the provider's file download keeps the collection
+route and the exit-record masks: `--plant-collection` tells which Gym you have.

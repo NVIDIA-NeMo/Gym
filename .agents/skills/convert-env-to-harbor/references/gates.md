@@ -122,6 +122,7 @@ python -m scripts.harbor_conversion_checks controls $B <data>/<dataset>_plant --
 # only when the verifier runs agent code (pytest; --plant-hooks for npm, Go and pytest repositories):
 python -m scripts.harbor_conversion_checks controls $B <data>/<dataset>_conftest --plant-conftest
 python -m scripts.harbor_conversion_checks controls $B <data>/<dataset>_hooks --plant-hooks
+python -m scripts.harbor_conversion_checks controls $B <data>/<dataset>_collection --plant-collection   # pytest
 gym dataset validate <data>/<dataset>_wrong --sandbox <provider> --config harbor_arm.yaml   # one run per control
 ```
 
@@ -134,7 +135,10 @@ can be right (empty ground truth), and one the scorer gives no partial credit (r
 names; to compare partial credit itself, run the
 [partial-credit probe](../../../../scripts/harbor_conversion_checks/README.md#a-partial-credit-probe-a-parity-check-not-a-control),
 which is not a control). Pass: every control scores 0 unmasked, `failure_kind` null for `--empty` and
-`--solution-dir` (a plant probe may show `harbor:missing_reward`). Native side: the same wrong and empty answers
+`--solution-dir` (a plant probe may show `harbor:missing_reward`). `--plant-collection` tests the Gym that collects
+the reward, not the dataset: 0 unmasked means that Gym was not fooled, and a 1 means the reward was rewritten after
+the grader finished, a property of the Gym version
+([reward-safety.md](reward-safety.md#probes-g3)). Native side: the same wrong and empty answers
 through the fake model or the native control of the family, then `harbor_parity --strict --expect 0` on each pair.
 
 ## G4 native smoke and G5 Harbor smoke

@@ -197,8 +197,12 @@ gym dataset validate <data>/smoke_empty --sandbox <provider> --config $C/harbor_
 
 `gym dataset validate` exits 1 on a control by design, and its table labels every row "oracle solved" even at
 reward 0. So read `results/harbor/validation/smoke_empty/rollouts_run_summary.json`: a pass is every `reward` 0.0,
-every `mask_sample` false, `counts.masked` 0 and `counts.failed` 0. Build and read the reward-forgery probe
-(`--plant-conftest`, into `<data>/smoke_conftest`) the same way: it must also score 0. For the native negative
+every `mask_sample` false, `counts.masked` 0 and `counts.failed` 0. Build and read the reward-forgery probes
+(`--plant-conftest` into `<data>/smoke_conftest`, `--plant-collection` into `<data>/smoke_collection`) the same way:
+each must also score 0. `--plant-collection` replaces `tar`, `gzip` and `date` during the tests, so that they rewrite
+the reward if anything runs them after the grader finished. Every reward 0 and nothing masked means the Gym that
+collected the reward was not fooled. A reward of 1 means the reward was rewritten after the grader finished: that is
+a property of the Gym version, not of the dataset (see [Reward safety](#reward-safety)). For the native negative
 control, set `patch` to `""` in a copy of the rows and run the golden check above.
 
 **G4/G5 smoke and G6 comparison**: 3 to 5 tasks on each arm with the commands in [Run both arms](#run-both-arms),
@@ -252,6 +256,28 @@ real sandboxes, every task verified in a separate sandbox:
   to a mapped file was refused. Against the previous grader the same mutation control's writes landed.
 - Model smoke: 5 tasks with `opencode_agent` gave the same per-task rewards (1, 1, 1, 0, 1) as both parity repeats
   on both arms, none masked.
+- A collection-forgery control, whose tests replace `tar`, `gzip` and `date` as `--plant-collection` does, on the 5
+  smoke tasks on OpenSandbox. With the harbor server from before it read the reward through the provider's file
+  download, every task scored 1.0 although `grade.py` had scored it 0. With the current harbor server the same
+  control scored 0 on all 5, none masked. The reference solutions, the empty control, `--plant-reward`,
+  `--plant-hooks` and the model smoke were re-run with the current harbor server and gave the same rewards as
+  before, none masked.
+
+The grader has since had two more changes: it also protects the files mapped by the processes above it, and it no
+longer writes the harbor wrapper's exit record (see [Reward safety](#reward-safety)). With that grader and the
+current harbor server, datasets regenerated from this revision were run again on OpenSandbox, every task verified
+in a separate sandbox, none masked:
+
+- Reference solutions: 5 of 5 on the smoke set and 50 of 50 on the parity set scored 1.0.
+- Empty patch: 0 on the 5 smoke tasks and on 49 of the 50 parity tasks (`omni-us_jsonargparse_pr215` again 1.0).
+- `--plant-hooks`: 0 on the 5 smoke tasks, exit 137 with `harbor:missing_reward`.
+- `--plant-collection`: 0 on the 5 smoke tasks. On every task the replaced `tar` ran while the logs were collected,
+  and the reward it wrote was not used.
+- Model smoke: 5 tasks with `opencode_agent` again gave the per-task rewards 1, 1, 1, 0, 1.
+- Every `grading.json` lists `timeout` and `bash` as protected and the provider's service (pid 1) as a process
+  whose mappings the grader may not read.
+
+`--plant-reward`, `--plant-conftest` and the mutation control were not re-run with the last two grader changes.
 
 The parity result still stands. The tests run with the same identity and capabilities as before, no reference run
 log shows a new permission error, and the new decision rules only change outcomes that used to be masks (a run
@@ -308,11 +334,18 @@ patched code (its tests, a `conftest.py` it adds) as root, and Harbor reads `/lo
 
 - before the tests, it moves ownership of every root-filesystem entry another uid owns to root (group and mode kept;
   counted in `grading.json` as `ownership_moved_to_root`), then hands `/`, `/logs` and `/logs/verifier` to an
-  otherwise unused uid (47311), and creates the harbor wrapper's exit record there saying exit 1;
+  otherwise unused uid (47311), and removes any reward file already there. It writes no exit record;
 - it imports everything the verdict needs, runs `asyncio.to_thread` inline (no thread is ever started), and hands
   every file it has mapped (its interpreter, libpython, the extension modules it loaded, libc, ld.so, locale data) to
-  that uid without write bits, keeping read and execute access as they were (counted in `grading.json` as
-  `protected_mappings`, with the time it took);
+  that uid without write bits, keeping read and execute access as they were. It does the same for the files mapped by
+  every process above it, which all wait for it and outlive the tests: `timeout`, the harbor server's shell, `su`
+  when a verifier user is named, and the provider's service where it runs in the sandbox's process namespace. The
+  walk follows the parent links and assumes no shape; a process that is gone, or a mapped path that does not exist
+  in the sandbox, is skipped. A parent whose mappings `grade.py` is not permitted to read is skipped too and listed
+  in `protected_mappings.unreadable_ancestors`: it is the provider's own service or the sandbox's init, started with
+  more privilege than the exec that runs `grade.py`, and falls under the open route through the provider's service
+  in the sandbox (below). `grading.json` counts the files in `protected_mappings`, names the processes above it
+  (nearest first) in `protected_mappings.ancestors` and records the time it took;
 - the eval script runs as uid 0, as at the server, but drops privileges: only `CAP_FSETID`, `CAP_KILL`,
   `CAP_NET_BIND_SERVICE`, `CAP_NET_RAW` and `CAP_AUDIT_WRITE` stay in its bounding set, with `no_new_privs`. It
   cannot override file permissions, change owners or switch uid, so it cannot create, rename or rewrite anything on
@@ -329,28 +362,44 @@ The capture files (`capture.json`, `model_patch.diff`) come from the agent's san
 regular files within their size bound (1 MiB, 64 MiB), without following a symlink or blocking on a FIFO, and parsed
 so that nothing nested reaches `grading.json`; any other shape is a completed 0 (difference 13), never a mask.
 
-The reference solutions, the negative and plant controls, a mapped-file mutation control and a model smoke were
-re-run with this grader on real sandboxes (see [After the grader hardening](#after-the-grader-hardening)). For other
-languages, run `gym dataset validate` on every task first, since the dropped capabilities and the protected files
-may break builds.
+What was re-run on real sandboxes with this grader, and what was not, is in
+[After the grader hardening](#after-the-grader-hardening). A provider's service or init above `grade.py` whose
+mappings it may not read (pid 1 on OpenSandbox) is skipped and listed in `grading.json`, not masked; it falls under
+the open route through the provider's service in the sandbox. For other languages, run `gym dataset validate` on
+every task first, since the dropped capabilities and the protected files may break builds.
 
-What the agent's code can still do:
+After `test.sh` returns, the harbor server reads the reward through the sandbox provider's file download before it
+runs anything else in this sandbox, and takes the exit status from its run exec, not from a file. What that
+guarantees on each provider is in
+[Reward files](../../../fern/versions/latest/pages/data/task-folders/task-folder-verifiers.mdx#reward-files).
 
-- **Kill the grader.** Killing `grade.py` leaves no reward (scored 0). Killing the wrapper around `test.sh` before
-  it writes its exit record leaves the record `grade.py` created (exit 1), so that scores 0 too; the wrapper
-  overwrites the record with the real exit code when it finishes, and the tests cannot rewrite it.
-- **Mask through the wrapper's exit record (open).** A test process can lower the wrapper's file size limit
-  (`prlimit` on a process of the same uid needs no capability). The wrapper's own write then empties the record and
-  fails, and the harbor server masks a run whose record is empty. Shown with the real `verifier_command` and
-  `parse_exit_record` on a local filesystem, not in a sandbox.
-- **Rewrite the reward after `grade.py` exits (open).** After `test.sh` returns, the harbor server still runs
-  programs in this sandbox as root with every capability: the wrapper's `date`, and `tar` and `gzip` collecting
-  `/logs/verifier`, all found through `PATH`. The tests own those programs and the folders on `PATH` (uid 0 owns
-  root's files), so they can replace one, for example `/usr/local/bin/tar`, with a script that rewrites
-  `reward.json` to 1 before running the real program. This forges the score. Shown with the real collection code
-  (`verifier_command`, `download_dir`) against a local stand-in for the sandbox, not on a live run. `grade.py`
-  cannot close it: it has exited by then, and taking those files and folders away from uid 0 would break the eval
-  script's own installs.
+What the agent's code can still do. This is the one full list for both SWE adapters; the swe_rebench README and the
+skill's `reward-safety.md` point here.
+
+- **Kill the grader.** Killing `grade.py` leaves no reward, a measured 0. On OpenSandbox with the current harbor
+  server, `--plant-hooks` (which kills every process with an argument under `/tests/`) scored 0 on the 5 smoke tasks
+  with exit 137 and `harbor:missing_reward`, none masked. Killing the harbor server's shell leaves no reward either:
+  a measured 0 where the provider reports the run's exit status, a mask where it reports none (possible on
+  OpenSandbox). That case was not measured on its own.
+- **Rewrite the reward after `grade.py` exits.** A harbor server from before the current one ran `date`, `tar` and
+  `gzip` in this sandbox as root after `test.sh`, found through `PATH`; tests that replaced them rewrote
+  `reward.json` to 1. Measured on OpenSandbox: a control doing this scored 1.0 on the 5 smoke tasks, whose grader had
+  scored 0. With the current harbor server the same control scored 0 on all 5, none masked (`--plant-collection`
+  probes this). What remains depends on the provider:
+  - Docker serves the download from outside the container, so the route is closed there by design (not measured).
+  - On OpenSandbox, E2B, Daytona and ECS Fargate a service inside the sandbox serves the download. Root test code
+    that kills that service gets the run masked, and code that impersonates it could forge the reward. Neither was
+    tried on a live sandbox. Closing it needs the provider to serve the read from outside the sandbox.
+  - On OpenShell, and on Apptainer and Enroot outside their bind mount, the download itself runs a program in the
+    sandbox, so there is no guarantee; the harbor server logs a warning.
+  - A test process left running can rewrite a reward file it can write, on every provider. `grade.py` writes the
+    reward as another uid, so the tests cannot.
+- **Stall the log collection.** After it has read the reward, the harbor server collects the verifier's logs with
+  `tar` from this sandbox. A replaced `tar` that never returns holds the rollout until the collection's time limit
+  (600 seconds), and the logs are lost. The score is the one already read. Seen on one smoke task on OpenSandbox:
+  reward 0, not masked, 787 seconds where the other runs took about 150, and no `grading.json` on the host.
+- **Mask through the harbor wrapper's exit record.** Closed with the current harbor server: it writes and reads no
+  exit record.
 - **Hold the grader with a detached process.** `local_sandbox.py` waits until the eval script's output pipes close.
   A test process that starts its own session (`setsid`) and keeps the pipe open holds `grade.py` until the
   verifier time limit (`[verifier].timeout_sec`, the evaluation timeout plus a margin), which leaves no reward and
@@ -359,17 +408,28 @@ What the agent's code can still do:
 - **Forge the test output.** The verdict is read from the eval script's output, as at the server: a `conftest.py`
   that reports failing tests as passed scores 1 on both arms. This is a property of the server's grading, not of
   the conversion.
-- **Mask through the sandbox provider (open).** Test code can end the verifier without an exit status, which the
-  harbor server masks. Two routes were measured on real sandboxes with this grader: tests that rewrote a shared
-  library the grader does not map but the server's later `bash` loads (5 of 5 masked, `provider_unavailable`), and
-  a test that ran `kill -9 -1` (masked). Killing the provider's exec daemon or stopping the sandbox through the
-  network was not tried.
+- **Mask through the sandbox provider (open).** Test code can end the verifier without an exit status, or stop the
+  provider's service inside the sandbox, or the sandbox itself, and the harbor server masks the run: it cannot tell
+  this from an outage. Two routes were measured on OpenSandbox with the harbor server from before the current one:
+  tests that rewrote a shared library the grader does not map but that server's `bash` loaded after `test.sh` (5 of
+  5 masked, `provider_unavailable`), and a test that ran `kill -9 -1` (masked). The current harbor server runs no
+  program from this sandbox after `test.sh`, and `grade.py` now protects the libraries of `timeout` and the shell,
+  so the first route is closed by design; it was not re-measured. `kill -9 -1` still reaches the provider's service
+  where one runs in the sandbox (not re-measured). Killing that service directly, or stopping the sandbox, was not
+  tried.
+- **Shared verification.** These tasks verify in a separate sandbox. A copy run in shared mode keeps none of these
+  guarantees: the agent had the sandbox before `test.sh` ran.
 - **Reach `grade.py` below Python.** The audit hook sees Python-level imports, loads and opens; a library load from
   C (name service, `iconv`, unwinding) is not audited. The path after the tests makes none, and one would show as a
   new mapping in the check. A kernel or provider escape is out of reach of any in-sandbox grader.
+- **Run the dataset on an older Gym.** A harbor server from before the current one keeps the collection-stage
+  forgery above and masks a run whose exit record is missing, empty or unreadable. Tests can cause that mask by
+  killing the wrapper shell before it writes the record, or by lowering its file size limit. `grade.py` no longer
+  writes a record that turned the first case into a 0. On such a Gym the collection-forgery control above scored 1.
 
-Closing the two open routes and the provider mask needs the reward read and the exit status recorded outside the
-verifier sandbox (a harbor server change).
+The collection-stage route and the exit-record masks are closed by the harbor server of the Gym version that ships
+these task folders. The forged test output and the provider-level routes are not something a harbor server change
+closes.
 
 The capture hook runs in the agent's sandbox, where the agent is root and owns the hook's files and outputs, so no
 capture outcome is ever a mask (differences 7 and 13). Tamper safety comes from the tasks themselves
@@ -382,10 +442,11 @@ settings both arms were compared with.
   for the seed, and a sandbox that grants `CAP_CHOWN`, `CAP_SETUID` and `CAP_SETPCAP` to root (Docker's default set
   does).
 - Without `CAP_CHOWN` or `CAP_SETPCAP`, `grade.py` cannot protect the reward and masks the sample before any test
-  runs; the same holds when it cannot hand a file it has mapped to the reward uid (a read-only filesystem counts as
-  protected). A privilege drop that fails in the eval script's own process, after it started, scores 0. Without a
-  root that can change its effective uid (`CAP_SETUID`, and uid 47311 usable), `grade.py` cannot write any output:
-  every episode, the oracle included, ends with no reward and scores 0, so gate G2 shows it at once.
+  runs; the same holds when it cannot read the mappings of a process above it, or hand a file mapped by it or by
+  such a process to the reward uid (a read-only filesystem counts as protected). A privilege drop that fails in the
+  eval script's own process, after it started, scores 0. Without a root that can change its effective uid
+  (`CAP_SETUID`, and uid 47311 usable), `grade.py` cannot write any output: every episode, the oracle included, ends
+  with no reward and scores 0, so gate G2 shows it at once.
 - `capture.py` writes the patch and its JSON file, and `grade.py` writes the eval script and the patch into the
   verifier sandbox, with Python's default encoding, which follows the image's locale (UTF-8 under a UTF-8 or C
   locale). Under another locale a patch with non-ASCII text can be altered, which can change its reward. `grade.py`
