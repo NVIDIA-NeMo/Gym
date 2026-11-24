@@ -350,6 +350,51 @@ class SandboxSnapshotInUseError(SandboxSnapshotError):
     """Raised when a provider refuses to delete a snapshot because something still uses it."""
 
 
+NetworkRule = Literal["inherit", "no_network", "model_only", "model_and_tools", "hosts_only"]
+"""The egress rule a sandbox starts with.
+
+``inherit`` keeps the provider's default. ``no_network`` allows no egress. ``model_only`` allows the model server,
+``model_and_tools`` the model server and the tool servers, and ``hosts_only`` only the hosts listed for the sandbox.
+Every restricted rule also allows the listed hosts.
+"""
+NETWORK_RULES: frozenset[str] = frozenset(get_args(NetworkRule))
+
+# What a snapshot of a sandbox can keep.
+SnapshotContent = Literal["files", "processes"]
+Reconnect = Literal["always", "same_host", "never"]
+
+
+@dataclass(frozen=True)
+class SandboxCapabilities:
+    """What a provider class can do beyond start, commands, file transfer and stop, declared as its ``capabilities``
+    class attribute.
+
+    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none. Every owner,
+    typed config, ``OwnedSandboxes``, ``borrow()``, stop and shutdown sweep works on every provider. These capabilities
+    are needed only by servers that use them, which are refused as early as they can be known.
+
+    Attributes:
+        snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots. With
+            ``"processes"``, a snapshot saves memory and running processes, and a sandbox created from it
+            continues them.
+        network_rules: The egress rules the provider can apply at creation (see :data:`NetworkRule`). A provider
+            that lists any rule besides ``inherit`` implements :class:`SupportsSandboxNetworkRules`.
+        reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
+            ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
+            ``never``.
+    """
+
+    snapshot_keeps: frozenset[SnapshotContent] = frozenset()
+    network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
+    reconnect: Reconnect = "always"
+
+
+def provider_capabilities(provider: object) -> SandboxCapabilities:
+    """The capabilities ``provider`` declares; the defaults for a provider that declares none."""
+    capabilities = getattr(provider, "capabilities", None)
+    return capabilities if isinstance(capabilities, SandboxCapabilities) else SandboxCapabilities()
+
+
 @dataclass(frozen=True)
 class SandboxSnapshotInfo:
     """One snapshot in a provider's listing.
@@ -415,43 +460,6 @@ class SandboxProvider(Protocol):
         ...
 
 
-NetworkRule = Literal["inherit", "no_network", "model_only", "model_and_tools", "hosts_only"]
-"""The egress rule a sandbox starts with.
-
-``inherit`` keeps the provider's default. ``no_network`` allows no egress. ``model_only`` allows the model server,
-``model_and_tools`` the model server and the tool servers, and ``hosts_only`` only the hosts listed for the sandbox.
-Every restricted rule also allows the listed hosts.
-"""
-NETWORK_RULES: frozenset[str] = frozenset(get_args(NetworkRule))
-
-SnapshotContent = Literal["files", "processes"]
-Reconnect = Literal["always", "same_host", "never"]
-
-
-@dataclass(frozen=True)
-class SandboxCapabilities:
-    """What a provider can do beyond start, commands, file transfer and stop.
-
-    Every owner, typed config, ``OwnedSandboxes``, ``borrow()``, stop and shutdown sweep works on every provider. These
-    capabilities are needed only by servers that use them, which are refused as early as they can be known.
-
-    Attributes:
-        snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots.
-        network_rules: The egress rules the provider can apply at creation (see :data:`NetworkRule`). A provider
-            that lists any rule besides ``inherit`` implements :class:`SupportsSandboxNetworkRules`.
-        reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
-            ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
-            ``never``.
-        close_by_label: Whether the provider can close every sandbox that carries a label, so a live worker can stop
-            the sandboxes of one that died.
-    """
-
-    snapshot_keeps: frozenset[SnapshotContent] = frozenset()
-    network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
-    reconnect: Reconnect = "always"
-    close_by_label: bool = False
-
-
 @runtime_checkable
 class SupportsSandboxNetworkRules(Protocol):
     """A provider that applies egress rules besides ``inherit`` when it creates a sandbox."""
@@ -480,6 +488,20 @@ class SupportsSandboxBackgroundServices(Protocol):
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
+class SupportsSandboxExecScopedProcesses(Protocol):
+    """Optional: processes cannot outlive the exec that started them, and the provider can prove it.
+
+    ``exec_processes_terminated`` returns True only when no process started by any
+    exec of the sandbox can still run: every exec has returned, none is queued or
+    starting, and every process tree an exec started is gone. A caller that lost
+    track of a command it started can then confirm from the provider side that
+    nothing of it is left.
+    """
+
+    async def exec_processes_terminated(self, handle: SandboxHandle) -> bool: ...
 
 
 @runtime_checkable
@@ -647,6 +669,11 @@ class SupportsSandboxSnapshot(Protocol):
     A provider must keep the name a snapshot is taken with and return it from ``list_snapshots``. A caller finds
     its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
     other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
+
+    What a snapshot keeps depends on the provider, which declares it as ``capabilities.snapshot_keeps``
+    (:class:`SandboxCapabilities`); read it with ``provider_capabilities(provider).snapshot_keeps``. A provider whose
+    snapshots save memory and running processes, so that a sandbox created from one continues them, declares
+    ``"processes"`` beside ``"files"``.
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:

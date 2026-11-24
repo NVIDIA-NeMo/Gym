@@ -54,6 +54,12 @@ Run sandboxes as local Apptainer instances on a host or HPC node.
 <Badge minimal outlined>provider</Badge> <Badge minimal outlined>apptainer</Badge>
 </Card>
 
+<Card title="Bubblewrap Provider" href="/infrastructure/sandbox/bwrap">
+Run each command in fresh bubblewrap namespaces over a per-sandbox directory; no daemon or image unpack.
+
+<Badge minimal outlined>provider</Badge> <Badge minimal outlined>bwrap</Badge>
+</Card>
+
 <Card title="Docker Provider" href="/infrastructure/sandbox/docker">
 Run sandboxes as containers on the local Docker daemon for local and CI runs.
 
@@ -216,9 +222,11 @@ sandbox_config:
 | `network` | `inherit`, `no_network`, `model_only`, `model_and_tools`, `hosts_only` | The egress rule the sandbox starts with. `inherit` keeps the provider's default. |
 | `model_server` | a server name | The model server `model_only` and `model_and_tools` allow. Required exactly for those two rules. |
 | `tool_servers` | server names | The servers `model_and_tools` also allows. Required exactly for that rule. |
-| `allowed_hosts` | host names | Further hosts any restricted rule allows, such as a dependency proxy. `hosts_only` allows only these. |
+| `allowed_hosts` | host names | Further hosts `model_only`, `model_and_tools` and `hosts_only` allow, such as a dependency proxy. `hosts_only` allows only these; `no_network` takes none. |
 
-A provider that cannot apply a rule refuses it at server startup, so no sandbox starts with open egress in place of the rule: OpenSandbox applies all five, Docker `inherit` and `no_network`, and the other providers `inherit`. A block that sets `network` and also `provider_options.network_policy` is refused. `SandboxConfig.spec()` on its own refuses a restricted rule, since only the owner's `spec()` applies it.
+A provider that cannot apply a rule refuses it, so no sandbox starts with open egress in place of the rule: OpenSandbox applies all five, Docker `inherit` and `no_network`, and the other providers `inherit`. A server whose only provider field is `sandbox_provider` is checked at startup, a dry run included; a server with several provider fields, or a provider block whose own settings conflict with the rule (such as Docker's `create.network`), is refused at its first `spec()`.
+
+A rule allows a server's whole host, every port on it, since providers allow egress by host. With `default_host` set, every Gym server listens on that one address, so `model_only` also reaches the other servers there; give the model server its own address when that matters. The model and tool servers must listen on an address a sandbox can reach: a loopback address is refused. A block that sets `network` and also `provider_options.network_policy` is refused. `SandboxConfig.spec()` on its own refuses a restricted rule, since only the owner's `spec()` applies it.
 
 A block without `network` keeps today's behavior, the provider's default or its `provider_options.network_policy`, and the server logs a deprecation warning naming the rule to switch to. A later release requires `network`.
 
@@ -379,6 +387,24 @@ finally:
     await sandbox.stop()
 ```
 
+`stop()` finishes even when the request that calls it is cancelled, for example when a client disconnects: it is shielded from anyio cancellation. It is bounded in time by `timeout_s`, `STOP_TIMEOUT_S` (120 seconds) by default:
+
+- A stop that does not finish in time raises `TimeoutError`, and one whose provider call fails raises that error. Either way a later `stop()` tries again:
+  - If the provider had not yet torn the sandbox down, the later `stop()` tears it down.
+  - If it had, the sandbox stays stopped, and the later `stop()` retries only the release of the provider's client.
+- Pass your own limit as `stop(timeout_s=...)`, or `None` for no limit. Do not wrap `stop()` in `asyncio.timeout` or `asyncio.wait_for`: that cancels the stop natively, and the stop's own default still applies inside it.
+- `disconnect()`, which releases a client without ending the sandbox, is shielded and bounded the same way.
+- `AsyncSandboxCompose.stop()` stops each member with its own limit and has no limit for the group unless you pass one.
+
+To test code that starts, stops or borrows sandboxes, run a real `AsyncSandbox` over `FakeSandboxProvider` from `nemo_gym.sandbox.testing`, and script the provider rather than the sandbox. `fake_sandbox()` builds a started sandbox on one:
+
+```python
+from nemo_gym.sandbox.testing import fake_sandbox
+
+sandbox = fake_sandbox()
+sandbox.provider.on_close.side_effect = RuntimeError("provider unreachable")
+```
+
 ## Image Rewrites
 
 Use `rewrite_image()` when a benchmark's upstream image needs to run through an internal registry mirror.
@@ -430,6 +456,7 @@ in follow-up changes:
 | Provider | Config key |
 | --- | --- |
 | Apptainer | `apptainer` |
+| bwrap | `bwrap` |
 | Daytona | `daytona` |
 | Docker | `docker` |
 | E2B | `e2b` |

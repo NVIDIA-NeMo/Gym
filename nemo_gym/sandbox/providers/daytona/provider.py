@@ -647,7 +647,8 @@ class DaytonaBatchConfig(DaytonaConfigBase):
 class DaytonaProvider:
     """Provider backed by the Daytona Python SDK."""
 
-    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities()
+    # connect() takes a bare sandbox id, not a serialized descriptor, so no other process can borrow a sandbox.
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="never")
 
     name = "daytona"
 

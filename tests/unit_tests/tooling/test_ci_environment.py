@@ -38,6 +38,7 @@ BEHAVIOR_CHANGING_ENV = {
     "SKIP": "ruff",
     "NEMO_GYM_EXTRA_ROOTS": "/tmp/external-gym",
     "NEMO_GYM_CONFIG_DICT": '{"search_dir": "/tmp/external-gym"}',
+    "NEMO_GYM_CONFIG_DICT_FILE": "/tmp/external-gym/config.yaml",
     "NEMO_GYM_ALLOW_PRERELEASE": "true",
     "PYTHONPATH": "/tmp/python",
     "PYTHONSAFEPATH": "1",
@@ -70,7 +71,13 @@ def _environment_after_sanitizing(stage: str) -> dict[str, str]:
         ("lint", {"SKIP"}),
         (
             "core",
-            {"GYM_CI_DEV_VENV_DIR", "NEMO_GYM_EXTRA_ROOTS", "NEMO_GYM_CONFIG_DICT", "PYTHONPATH"},
+            {
+                "GYM_CI_DEV_VENV_DIR",
+                "NEMO_GYM_EXTRA_ROOTS",
+                "NEMO_GYM_CONFIG_DICT",
+                "NEMO_GYM_CONFIG_DICT_FILE",
+                "PYTHONPATH",
+            },
         ),
         (
             "server",
@@ -78,6 +85,7 @@ def _environment_after_sanitizing(stage: str) -> dict[str, str]:
                 "GYM_CI_DEV_VENV_DIR",
                 "NEMO_GYM_EXTRA_ROOTS",
                 "NEMO_GYM_CONFIG_DICT",
+                "NEMO_GYM_CONFIG_DICT_FILE",
                 "NEMO_GYM_ALLOW_PRERELEASE",
                 "PYTHONPATH",
                 "PYTHONSAFEPATH",
@@ -94,6 +102,21 @@ def test_ci_stage_removes_only_its_behavior_changing_environment(stage: str, rem
     for name, value in BEHAVIOR_CHANGING_ENV.items():
         if name not in removed:
             assert sanitized[name] == value
+
+
+@pytest.mark.parametrize("stage", ["core", "server"])
+def test_ci_stage_leaves_no_inherited_config(stage: str, tmp_path: Path) -> None:
+    env = os.environ | {
+        "NEMO_GYM_CONFIG_DICT": "sentinel: inherited",
+        # A file that does not exist: reading it would raise.
+        "NEMO_GYM_CONFIG_DICT_FILE": str(tmp_path / "inherited.yaml"),
+    }
+    read_config = "from nemo_gym.config.global_config import maybe_get_global_config_dict as read; print(read())"
+    command = f'source "{SANITIZER}"; gym_ci_sanitize_environment "{stage}"; "{sys.executable}" -c "{read_config}"'
+
+    result = subprocess.run(["bash", "-c", command], check=True, capture_output=True, text=True, env=env)
+
+    assert result.stdout.strip() == "None"
 
 
 def test_ci_environment_sanitizer_rejects_unknown_stage() -> None:
@@ -1027,6 +1050,7 @@ printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
         GITHUB_ENV=str(tmp_path / "github-env"),
         INSTALL_TEST_STATE=str(tmp_path),
         INSTALL_TEST_FAILURE=failure,
+        GYM_CI_APT_ETC=str(tmp_path / "no-apt-etc"),
     )
 
     result = subprocess.run(
@@ -1053,6 +1077,65 @@ printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
     )
     assert calls.read_text().splitlines().count("update") == (2 if failure == "index_failure" else 1)
     assert (tmp_path / "github-env").read_text() == f"UV_PYTHON_INSTALL_DIR={tmp_path}/runner/uv-python\n"
+
+
+@pytest.mark.parametrize("mirror_works", [True, False])
+def test_system_dependency_install_tries_the_aws_mirror_before_the_runner_sources(
+    tmp_path: Path, mirror_works: bool
+) -> None:
+    apt_etc = tmp_path / "apt-etc"
+    (apt_etc / "sources.list.d").mkdir(parents=True)
+    runner_sources = "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates\n"
+    (apt_etc / "sources.list.d" / "ubuntu.sources").write_text(runner_sources)
+    ppa = "deb https://ppa.launchpadcontent.net/git-core/ppa/ubuntu noble main\n"
+    (apt_etc / "sources.list.d" / "git-core.list").write_text(ppa)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "sudo", '#!/bin/sh\nexec "$@"\n')
+    _write_executable(bin_dir / "timeout", '#!/bin/sh\nshift\nexec "$@"\n')
+    _write_executable(bin_dir / "dpkg", "#!/bin/sh\nexit 0\n")
+    _write_executable(
+        bin_dir / "apt-get",
+        """#!/bin/sh
+set -eu
+sources=runner
+if test -n "${APT_CONFIG:-}"; then
+    parts=$(sed -n 's/^Dir::Etc::SourceParts "\\(.*\\)";$/\\1/p' "$APT_CONFIG")
+    grep -q 'URIs: http://mirror.test/ubuntu/' "$parts/ubuntu.sources"
+    grep -q 'ppa.launchpadcontent.net' "$parts/git-core.list"
+    sources=mirror
+fi
+echo "$1 $sources" >> "$INSTALL_TEST_STATE/calls"
+if test "$sources" = mirror && test "$INSTALL_TEST_MIRROR_WORKS" = 0; then exit 100; fi
+""",
+    )
+    env = os.environ.copy()
+    env.update(
+        PATH=f"{bin_dir}:{env['PATH']}",
+        RUNNER_TEMP=str(tmp_path / "runner"),
+        GITHUB_ENV=str(tmp_path / "github-env"),
+        INSTALL_TEST_STATE=str(tmp_path),
+        INSTALL_TEST_MIRROR_WORKS="1" if mirror_works else "0",
+        GYM_CI_APT_ETC=str(apt_etc),
+        GYM_CI_APT_MIRROR="http://mirror.test/ubuntu",
+    )
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "ci" / "install_test_dependencies.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls").read_text().splitlines()
+    if mirror_works:
+        assert calls == ["update mirror", "install mirror", "install mirror"]
+    else:
+        assert calls == ["update mirror", "update runner", "install runner", "install runner"]
+        assert "Falling back to the runner's APT sources" in result.stdout
+    assert (apt_etc / "sources.list.d" / "ubuntu.sources").read_text() == runner_sources
 
 
 def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -> None:
