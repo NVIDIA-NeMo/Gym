@@ -32,6 +32,10 @@ A task's `memory_limit_mb` also caps address space (`RLIMIT_AS`) at the grading 
 (harness, NumPy and test inputs) plus `memory_limit_mb`. The harness's per-test stdin copies, about 11 times the
 input, count against it. `metadata.memory` records the baseline and cap; without Linux's `/proc` the sample is masked.
 
+Confirmed timeouts return `-3`. `metadata.stage` identifies `compilation` (including module initialization),
+`test`, `preparation`, or the overall `grading` deadline. A worker that exits early without a result returns
+`-1` with stage `worker` and its `exit_code`; it is not reported as a timeout.
+
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)
 and a runtime image before starting the server. Both `sandbox_provider` and `sandbox_config.image`

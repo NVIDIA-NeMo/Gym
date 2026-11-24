@@ -341,7 +341,15 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
     # call-based clean up logic
     # need to wrap in try-catch logic after to catch the correct errors, but for now this is fine.
     code = import_string + "\n\n" + code
-    compiled_sol = compile_code(code, timeout)
+    try:
+        compiled_sol = compile_code(code, timeout)
+    except TimeoutException as e:
+        return [-3], {
+            "error": repr(e),
+            "error_code": -3,
+            "error_message": "Time Limit Exceeded",
+            "stage": "compilation",
+        }
 
     if compiled_sol is None:
         return
@@ -402,12 +410,13 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
                 }
         except Exception as e:
             _cancel_timer()
-            if "timeoutexception" in repr(e).lower():
+            if isinstance(e, TimeoutException):
                 all_results.append(-3)
                 return all_results, {
                     "error": repr(e),
                     "error_code": -3,
                     "error_message": "Time Limit Exceeded",
+                    "stage": "test",
                     "inputs": truncatefn(gt_inp),
                     "expected": truncatefn(gt_out),
                 }
@@ -441,7 +450,15 @@ def grade_stdio(
     ## we wrap the given code inside another function
     code = make_function(code)
 
-    compiled_sol = compile_code(code, timeout)
+    try:
+        compiled_sol = compile_code(code, timeout)
+    except TimeoutException as e:
+        return [-3], {
+            "error": repr(e),
+            "error_code": -3,
+            "error_message": "Time Limit Exceeded",
+            "stage": "compilation",
+        }
     if compiled_sol is None:
         return
 
@@ -466,12 +483,13 @@ def grade_stdio(
                 _cancel_timer()
             except Exception as e:
                 _cancel_timer()
-                if "timeoutexception" in repr(e).lower():
+                if isinstance(e, TimeoutException):
                     all_results.append(-3)
                     return all_results, {
                         "error": repr(e),
                         "error_code": -3,
                         "error_message": "Time Limit Exceeded",
+                        "stage": "test",
                         "inputs": truncatefn(gt_inp),
                         "expected": truncatefn(gt_out),
                     }
@@ -606,6 +624,13 @@ def run_test(in_outs, test=None, debug=False, timeout=6):
                     timeout=timeout,
                 )
                 return results, metadata
+            except TimeoutException as e:
+                return [-3], {
+                    "error": repr(e),
+                    "error_code": -3,
+                    "error_message": "Time Limit Exceeded",
+                    "stage": "preparation",
+                }
             except Exception as e:
                 return [-4], {
                     "error_code": -4,
@@ -626,6 +651,13 @@ def run_test(in_outs, test=None, debug=False, timeout=6):
                     timeout=timeout,
                 )
                 return results, metadata
+            except TimeoutException as e:
+                return [-3], {
+                    "error": repr(e),
+                    "error_code": -3,
+                    "error_message": "Time Limit Exceeded",
+                    "stage": "preparation",
+                }
             except Exception as e:
                 return [-4], {
                     "error_code": -4,

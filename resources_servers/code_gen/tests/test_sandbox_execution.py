@@ -174,7 +174,7 @@ class TestLocalProvider:
         "deadline_s, expected",
         # The task deadline leaves 8 s beyond the 2 s of work; a 1 s deadline stops it, where check_correctness's
         # own (2 + 1) * 1 + 5 = 8 s would not.
-        [(task_deadline_s(2, 1), [True]), (1.0, [-1])],
+        [(task_deadline_s(2, 1), [True]), (1.0, [-3])],
     )
     async def test_a_task_deadline_covers_compilation_and_every_test(
         self, tmp_path: Path, deadline_s: float, expected: list
