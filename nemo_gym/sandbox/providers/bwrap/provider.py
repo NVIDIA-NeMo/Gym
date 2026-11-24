@@ -25,6 +25,7 @@ file I/O with containment checks. See README.md for the design and its limits.
 """
 
 import asyncio
+import collections.abc
 import contextlib
 import errno
 import glob
@@ -39,7 +40,7 @@ import socket
 import stat
 import tempfile
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -936,7 +937,7 @@ class BwrapProvider:
 
     @classmethod
     @contextlib.contextmanager
-    def _bind_sources(cls, argv: list[str]) -> Iterator[tuple[list[str], tuple[int, ...]]]:
+    def _bind_sources(cls, argv: list[str]) -> collections.abc.Iterator[tuple[list[str], tuple[int, ...]]]:
         """Pin sources until bwrap inherits them; no pathname is reopened during mount setup."""
         with contextlib.ExitStack() as stack:
             pinned, descriptors = [], []
