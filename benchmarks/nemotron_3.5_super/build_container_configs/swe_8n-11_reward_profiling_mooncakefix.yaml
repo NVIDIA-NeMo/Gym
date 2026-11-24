@@ -1,0 +1,24 @@
+config_paths:
+  - benchmarks/nemotron_3.5_super/build_container_configs/swe_8n-11_reward_profiling.yaml
+
+slurm:
+  qos: normal
+
+shared_run_warmup_env_vars:
+  NUM_PREFILL_NODES: 6
+  NUM_DECODE_NODES: 6
+
+run:
+  env:
+    EXPERIMENT_NAME: swe_8n-11/super_3.5_GA-BF16-p6d6-rewardprofiling
+    SBATCH_TIMELIMIT: "04:00:00"
+  args: |
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --config resources_servers/swe_rebench/configs/swe_rebench_opencode.yaml \
+    --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml \
+    --config resources_servers/swemer_v1/configs/swemer_v1_opencode.yaml \
+    --config resources_servers/swemer_v2/configs/swemer_v2_opencode.yaml \
+    --config resources_servers/swe_next/configs/swe_next_opencode.yaml \
+    ++input_jsonl_fpath=data/swe_8n-11.jsonl \
+    ++num_repeats=8 \
+    ++num_samples_in_parallel=6144
