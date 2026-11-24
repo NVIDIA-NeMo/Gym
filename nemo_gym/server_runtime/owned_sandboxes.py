@@ -93,6 +93,7 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
@@ -111,6 +112,7 @@ from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 
 
 LOGGER = logging.getLogger(__name__)
+__getattr__ = moved_names_getattr(__name__)
 
 # A fork that the backend answers with "snapshot not found" is retried this many times, this far apart: a snapshot
 # store that is not fully shared across the service's replicas can answer from one that has not seen it yet.
