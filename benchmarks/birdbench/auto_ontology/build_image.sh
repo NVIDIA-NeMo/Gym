@@ -27,8 +27,22 @@ MODELS_ENV="${1:?usage: build_image.sh MODELS_ENV [TAG]}"
 TAG="${2:-nemo-gym/bird-catalog:dev}"
 [[ -f "$MODELS_ENV" ]] || { echo "build_image.sh: no $MODELS_ENV" >&2; exit 1; }
 
-DATABASES="$(cd "$ROOT" && python -c 'from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql; print(ensure_bird_sql())')"
-DATABASES="$(realpath "$DATABASES")"
+# BIRD dev's databases, each one the split names: an interrupted extraction can leave only some of them, and the
+# catalog would build without the others.
+DATABASES="$(cd "$ROOT" && python - <<'EOF'
+from benchmarks.birdbench.auto_ontology.build_catalog import missing_databases
+from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
+
+databases = ensure_bird_sql().resolve()
+missing = missing_databases(databases, databases.parent / "dev.json")
+if missing:
+    raise SystemExit(f"build_image.sh: {databases} has no {', '.join(missing)}; extract BIRD dev again")
+print(databases)
+EOF
+)"
+
+# BuildKit leaves a secret's contents out of the cache key: the catalog stage also takes this digest of the models.
+SETTINGS_DIGEST="$(bash "$HERE/models_settings_digest.sh" "$MODELS_ENV")"
 
 DOCKER_BUILDKIT=1 docker build \
   --file "$HERE/Dockerfile" \
@@ -36,5 +50,6 @@ DOCKER_BUILDKIT=1 docker build \
   --build-arg AUTO_ONTOLOGY_REPOSITORY="$AUTO_ONTOLOGY_REPOSITORY" \
   --build-arg AUTO_ONTOLOGY_COMMIT="$AUTO_ONTOLOGY_COMMIT" \
   --secret "id=models,src=$MODELS_ENV" \
+  --build-arg MODELS_SETTINGS_DIGEST="$SETTINGS_DIGEST" \
   --tag "$TAG" \
   "$ROOT"

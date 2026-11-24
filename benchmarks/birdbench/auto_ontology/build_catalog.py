@@ -22,6 +22,7 @@ databases, and the embedding and reranking endpoints and models the catalog was 
 
 import csv
 import io
+import json
 import logging
 import os
 import subprocess
@@ -45,6 +46,16 @@ def read_env_file(path: Path) -> dict[str, str]:
             key, value = line.split("=", 1)
             values[key.strip()] = value.strip()
     return values
+
+
+def missing_databases(databases_dir: Path, split_file: Path) -> list[str]:
+    """The databases that the split file's rows name and ``databases_dir`` has no SQLite file for.
+
+    ``build_image.sh`` runs this on the host before the build.
+    """
+    expected = {row["db_id"] for row in json.loads(split_file.read_text())}
+    found = {path.parent.name for path in databases_dir.glob("*/[!.]*.sqlite")}
+    return sorted(expected - found)
 
 
 def _cell(text: Optional[str]) -> str:

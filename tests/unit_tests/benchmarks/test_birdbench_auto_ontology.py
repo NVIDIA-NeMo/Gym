@@ -1,14 +1,71 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The BIRD catalog image's inputs: Gym's pin of Auto Ontology and BIRD's descriptions."""
+"""The BIRD catalog image's inputs: Gym's pin of Auto Ontology, BIRD's databases and descriptions, and the model
+settings that key the catalog build's cache."""
 
+import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
-from benchmarks.birdbench.auto_ontology.build_catalog import column_descriptions
+import pytest
+
+from benchmarks.birdbench.auto_ontology.build_catalog import column_descriptions, missing_databases
 
 
 AUTO_ONTOLOGY_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "birdbench" / "auto_ontology"
+
+
+def test_missing_databases_names_each_split_database_with_no_sqlite_file(tmp_path):
+    split_file = tmp_path / "dev.json"
+    split_file.write_text(json.dumps([{"db_id": db_id} for db_id in ("financial", "superhero", "toxicology")]))
+    databases = tmp_path / "dev_databases"
+    (databases / "financial").mkdir(parents=True)
+    (databases / "financial" / "financial.sqlite").write_bytes(b"")
+    # An interrupted extraction: a directory with no database, or only a hidden file.
+    (databases / "superhero").mkdir()
+    (databases / "toxicology").mkdir()
+    (databases / "toxicology" / "._toxicology.sqlite").write_bytes(b"")
+
+    assert missing_databases(databases, split_file) == ["superhero", "toxicology"]
+    (databases / "superhero" / "superhero.sqlite").write_bytes(b"")
+    (databases / "toxicology" / "toxicology.sqlite").write_bytes(b"")
+    assert missing_databases(databases, split_file) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="build_image.sh is a bash script")
+def test_the_catalog_build_is_keyed_by_the_model_settings_but_not_the_keys(tmp_path):
+    """BuildKit leaves the secret's contents out of the cache key, so build_image.sh passes a digest of them."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "docker_calls"
+    # python stands in for the databases check; docker records its arguments, one per line.
+    (bin_dir / "python").write_text(f"#!/bin/sh\ncat >/dev/null\necho {tmp_path}\n")
+    (bin_dir / "docker").write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {calls}\n')
+    for stub in bin_dir.iterdir():
+        stub.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+
+    def digest(models_env: str) -> str:
+        (tmp_path / "models.env").write_text(models_env)
+        subprocess.run(
+            ["bash", str(AUTO_ONTOLOGY_DIR / "build_image.sh"), str(tmp_path / "models.env")], env=env, check=True
+        )
+        arguments = calls.read_text()
+        assert "sk-first" not in arguments and "sk-second" not in arguments and "nvapi-first" not in arguments
+        (value,) = re.findall(r"^MODELS_SETTINGS_DIGEST=([0-9a-f]{64})$", arguments, re.MULTILINE)
+        return value
+
+    built = digest("DEFAULT_MODELS_API_KEY=sk-first\nEMBED_MODEL=embed-a\n")
+    assert digest("# a comment\nEMBED_MODEL=embed-a\n\nDEFAULT_MODELS_API_KEY=sk-second\n") == built
+    assert digest("DEFAULT_MODELS_API_KEY=sk-first\nEMBED_MODEL=embed-b\n") != built
+    assert (
+        digest("DEFAULT_MODELS_API_KEY=sk-first\nEMBED_MODEL=embed-a\nEMBED_ENDPOINT=https://e.invalid/v1\n") != built
+    )
+    # A key's type picks Auto Ontology's default models.
+    assert digest("DEFAULT_MODELS_API_KEY=nvapi-first\nEMBED_MODEL=embed-a\n") != built
 
 
 def test_auto_ontology_is_pinned_to_a_full_commit():

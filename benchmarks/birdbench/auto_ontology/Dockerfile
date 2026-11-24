@@ -41,6 +41,8 @@ COPY benchmarks/birdbench/auto_ontology/build_catalog.py /opt/bird-catalog/
 
 # The catalog, in its own stage: `--target runtime` builds the rest without the model keys.
 FROM runtime AS catalog
+# build_image.sh's digest of the secret's settings: BuildKit leaves the secret's contents out of the cache key.
+ARG MODELS_SETTINGS_DIGEST
 RUN --mount=type=secret,id=models,required=true \
     /opt/auto-ontology/.venv/bin/python /opt/bird-catalog/build_catalog.py /run/secrets/models
 

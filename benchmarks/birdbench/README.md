@@ -188,5 +188,8 @@ the BIRD dev databases and their catalog. The build (`auto_ontology/build_catalo
 Ontology's Alembic migrations, then for each database ingests the schema, writes BIRD's column descriptions (from its
 `database_description` CSVs, which a SQLite database does not carry), embeds the described catalog and compiles the
 semantic layer. `<models.env>` holds the model keys (`DEFAULT_MODELS_API_KEY`, and `*_MODEL` settings where they differ
-from Auto Ontology's defaults); it reaches the build as a BuildKit secret, never a layer. The build fails when a model
-call failed after Auto Ontology's retries or a database has no vectors, since Auto Ontology logs both and goes on.
+from Auto Ontology's defaults); it reaches the build as a BuildKit secret, never a layer. BuildKit's cache ignores a
+secret's contents, so the catalog stage also takes a digest of the file's settings, with each key cut to its type
+(`sk-`, `nvapi-`): another model or endpoint rebuilds the catalog, and a new key alone does not. The build stops before
+Docker when the BIRD dev extraction lacks a database that `dev.json` names, and fails when a model call failed after
+Auto Ontology's retries or a database has no vectors, since Auto Ontology logs both and goes on.
