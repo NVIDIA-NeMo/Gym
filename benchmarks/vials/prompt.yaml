@@ -1,7 +1,3 @@
-# Direct-evaluation prompts from VIALS vials/pipeline.py at
-# 002a0d25031f02a760da5d14f2c29bbd26eb06e4 (MIT; see UPSTREAM_LICENSE).
-# https://github.com/Handshake-AI-Research/VIALS/blob/002a0d25031f02a760da5d14f2c29bbd26eb06e4/vials/pipeline.py
-# Applied by prepare.py; do not also configure this as a runtime prompt template.
 system: >-
   You are an expert scientist. You will be shown a scientific image and a
   question. Study the image carefully, then respond with your reasoning
