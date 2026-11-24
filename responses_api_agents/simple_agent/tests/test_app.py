@@ -719,7 +719,7 @@ class TestApp:
                         workdir="/work",
                     )
                 },
-                "Simple Agent does not support sandbox access",
+                "Simple Agent does not support sandbox access unless it is configured with sandboxed: true",
             ),
             (
                 {

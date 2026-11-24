@@ -24,15 +24,15 @@ from numbers import Real
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import orjson
-from pandas import DataFrame, Series, notna
-from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
-from scipy import stats
 
 
+# numpy, pandas and scipy are imported where profiling uses them, so that importing this module, as every agent
+# server does for AggregateMetricsMixin, does not load them.
 if TYPE_CHECKING:
+    from pandas import DataFrame, Series
+    from pandas.core.groupby.generic import DataFrameGroupBy
     from wandb import Histogram
 
 from nemo_gym.config.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
@@ -186,6 +186,8 @@ class RewardProfiler:
         return rollout_info
 
     def histogram(self, data: Series) -> Optional["Histogram"]:
+        import numpy as np
+
         # W&B doesn't accept empty histograms
         data = data.dropna()
         if data.empty:
@@ -226,6 +228,8 @@ class RewardProfiler:
             return Histogram(np_histogram=np.histogram(data, bins=1))
 
     def describe_dataframe(self, df: DataFrame) -> DataFrame:
+        from pandas import DataFrame
+
         stat_index = [
             Stat.MEAN,
             Stat.MAX,
@@ -255,6 +259,8 @@ class RewardProfiler:
         return DataFrame(d, index=stat_index).stack(future_stack=True)
 
     def calculate_metrics_single_df(self, grouped_df: DataFrameGroupBy) -> List[Dict[str, Any]]:
+        from pandas import notna
+
         grouped_metrics_df: DataFrame = grouped_df.apply(self.describe_dataframe, include_groups=False)
         grouped_metrics_df.columns = grouped_metrics_df.columns.map("/".join)
         grouped_metrics_df: DataFrame = grouped_metrics_df.reset_index()
@@ -269,6 +275,8 @@ class RewardProfiler:
         self, mean: float, sem: float, n: int, confidence: float = 0.95
     ) -> Optional[Tuple[float, float]]:
         """Return (ci_low, ci_high) t-interval at the given confidence level, or None when n <= 1."""
+        from scipy import stats
+
         if n <= 1:
             return None
         if sem == 0:
@@ -360,6 +368,8 @@ class RewardProfiler:
         repeats. Existing summaries and uncertainty estimates are retained in the input
         rows but excluded here to avoid calculating statistics over statistics.
         """
+        from pandas import DataFrame
+
         if not repeat_level_metrics:
             return []
 
@@ -412,6 +422,8 @@ class RewardProfiler:
         results: List[Dict[str, Any]],
         allow_partial_rollouts: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        from pandas import DataFrame
+
         aligned_rows_and_results = self.align_rows_and_results(
             rows, results, allow_partial_rollouts=allow_partial_rollouts
         )
@@ -1024,6 +1036,8 @@ def _group_by_task(verify_responses: List[Dict[str, Any]]) -> List[List[Dict[str
 
 
 def _stat(values: List[float], stat: str) -> float:
+    from pandas import Series
+
     if stat == Stat.MEAN:
         return statistics.fmean(values)
     if stat == Stat.MEDIAN:

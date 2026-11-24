@@ -37,7 +37,6 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Optional
 
-import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
@@ -482,6 +481,9 @@ def _share(busy_times: list[Optional[float]], rollouts: list[RolloutTiming]) -> 
 
 
 def _percentiles(values: list[float], **percentiles: int) -> dict[str, Optional[float]]:
+    # Imported here, so that agents, which import this module for TimeoutEvent, do not load numpy.
+    import numpy as np
+
     if not values:
         return dict.fromkeys(percentiles)
     return {name: round(float(np.percentile(values, q)), 4) for name, q in percentiles.items()}
