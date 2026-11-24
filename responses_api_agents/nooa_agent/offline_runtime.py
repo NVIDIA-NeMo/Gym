@@ -7,9 +7,11 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,7 +24,44 @@ from responses_api_agents.nooa_agent.sandbox_runtime import (
 )
 
 
-_TARGETS = {"x86_64/gnu": "amd64", "aarch64/gnu": "arm64"}
+# Target -> Docker platform. Wheels are collected on the PyPA image for the target's C library.
+_TARGETS = {"x86_64/gnu": "amd64", "aarch64/gnu": "arm64", "x86_64/musl": "amd64", "aarch64/musl": "arm64"}
+_BUILDER_IMAGES = {
+    "x86_64/gnu": "quay.io/pypa/manylinux2014_x86_64:latest",
+    "aarch64/gnu": "quay.io/pypa/manylinux2014_aarch64:latest",
+    "x86_64/musl": "quay.io/pypa/musllinux_1_2_x86_64:latest",
+    "aarch64/musl": "quay.io/pypa/musllinux_1_2_aarch64:latest",
+}
+_LIBC_KIND = {"gnu": "glibc", "musl": "musl"}
+# The oldest C library the portable interpreter itself runs on: Astral's builds link glibc 2.17 (manylinux2014) and
+# musl 1.2.3 (verified on Alpine 3.17 task images; the x86_64 musl build is dynamically linked against libc.so).
+_INTERPRETER_LIBC_FLOOR = {"gnu": "2.17", "musl": "1.2.3"}
+_LEGACY_MANYLINUX = {"manylinux1": "2.5", "manylinux2010": "2.12", "manylinux2014": "2.17"}
+_PLATFORM_TAG = re.compile(r"^(manylinux|musllinux)_(\d+)_(\d+)_")
+
+
+def libc_floor(wheels: Iterable[str], *, libc: str, builder_version: str) -> str:
+    """The oldest C library version a bundle's wheels and interpreter run on.
+
+    PyPI wheels declare it in their platform tag (``musllinux_1_2``, ``manylinux_2_28``); a wheel compiled in the
+    builder (a plain ``linux_<arch>`` tag) links the builder's own C library. The builder's version alone would
+    exclude every task image older than the builder, which for musl is most Alpine releases.
+    """
+    kind = "manylinux" if libc == "gnu" else "musllinux"
+    floors = [_INTERPRETER_LIBC_FLOOR[libc]]
+    for wheel in wheels:
+        for platform in Path(wheel).name.removesuffix(".whl").split("-")[-1].split("."):
+            if platform == "any":
+                continue
+            tag = _PLATFORM_TAG.match(platform)
+            legacy = next((v for k, v in _LEGACY_MANYLINUX.items() if platform.startswith(f"{k}_")), None)
+            if tag is not None and tag.group(1) == kind:
+                floors.append(f"{tag.group(2)}.{tag.group(3)}")
+            elif legacy is not None and libc == "gnu":
+                floors.append(legacy)
+            elif tag is None and legacy is None:
+                floors.append(builder_version)
+    return max(floors, key=lambda version: tuple(int(part) for part in version.split(".")))
 
 
 def file_sha256(path: Path) -> str:
@@ -53,9 +92,19 @@ def load_runtime_wheelhouse(output: Path, *, target: str, source_fingerprint: st
         raise ValueError(
             f"NOOA wheelhouse is incompatible with this source/platform; prepare a fresh directory: {output}"
         )
-    glibc = manifest.get("glibc")
-    if not isinstance(glibc, str) or len(glibc.split(".")) != 2 or not all(p.isdigit() for p in glibc.split(".")):
-        raise ValueError("NOOA wheelhouse manifest requires its builder glibc version")
+    kind = _LIBC_KIND[target.split("/")[1]]
+    manifest_kind = manifest.get("libc") or ("glibc" if "glibc" in manifest else None)
+    version = manifest.get("libc_version") or manifest.get("glibc")
+    if manifest_kind != kind:
+        raise ValueError(
+            f"NOOA wheelhouse was built for {manifest_kind or 'an unknown C library'}, target {target} needs {kind}"
+        )
+    if (
+        not isinstance(version, str)
+        or not all(p.isdigit() for p in version.split("."))
+        or len(version.split(".")) not in (2, 3)
+    ):
+        raise ValueError(f"NOOA wheelhouse manifest requires its builder {kind} version")
     for name, field in (("python.tar.gz", "python_sha256"), ("wheels.tar.gz", "wheels_sha256")):
         try:
             actual = file_sha256(output / name)
@@ -134,8 +183,8 @@ async def prepare_runtime_wheelhouse(
         set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
     python_archive = await cached_download(_python_download_url(target), sha256=_PYTHON_SHA256[target])
     output.parent.mkdir(parents=True, exist_ok=True)
-    arch = target.split("/")[0]
-    builder_image = builder_image or f"quay.io/pypa/manylinux2014_{arch}:latest"
+    arch, libc = target.split("/")
+    builder_image = builder_image or _BUILDER_IMAGES[target]
     await _command("docker", "pull", "--platform", f"linux/{_TARGETS[target]}", builder_image)
     image_id = (await _command("docker", "image", "inspect", "--format", "{{.Id}}", builder_image)).strip()
     with tempfile.TemporaryDirectory(prefix=".nooa-wheelhouse-", dir=output.parent) as temporary:
@@ -152,7 +201,11 @@ async def prepare_runtime_wheelhouse(
 umask 022
 mkdir -p /build/python /build/source/cache /build/wheels
 uname -m > /build/architecture.txt
-getconf GNU_LIBC_VERSION > /build/libc.txt
+if getconf GNU_LIBC_VERSION > /build/libc.txt 2>/dev/null; then :; else
+  # musl reports its version on stderr: "musl libc (x86_64)" then "Version 1.2.5".
+  # ldd exits non-zero on musl; the pipeline must not abort under pipefail before awk prints.
+  (ldd --version 2>&1 || true) | awk '/^musl libc/ { kind = "musl" } /^Version / && kind { print kind, $2; exit }' > /build/libc.txt
+fi
 tar -xzf /build/bundle/python.tar.gz -C /build/python --strip-components=1
 tar -xzf /build/source.tar.gz -C /build/source
 /build/python/bin/python3 -I -B -m pip --isolated wheel --no-cache-dir --wheel-dir /build/wheels /build/source -r /build/source/runtime-requirements.txt
@@ -190,19 +243,24 @@ tar -xzf /build/source.tar.gz -C /build/source
                 if "No such container" not in str(error):
                     raise
         built_arch = (work / "architecture.txt").read_text().strip()
-        libc = (work / "libc.txt").read_text().strip().split()
-        if built_arch != arch or len(libc) != 2 or libc[0] != "glibc":
-            raise RuntimeError(f"Builder does not match {target}: architecture={built_arch}, libc={libc}")
+        built_libc = (work / "libc.txt").read_text().strip().split()
+        if built_arch != arch or len(built_libc) != 2 or built_libc[0] != _LIBC_KIND[libc]:
+            raise RuntimeError(f"Builder does not match {target}: architecture={built_arch}, libc={built_libc}")
         wheels = sorted((work / "wheels").glob("*.whl"))
         if not wheels:
             raise RuntimeError("NOOA preparation produced no wheels")
         with tarfile.open(bundle / "wheels.tar.gz", "w:gz") as archive:
             for wheel in wheels:
                 archive.add(wheel, arcname=wheel.name)
+        floor = libc_floor((wheel.name for wheel in wheels), libc=libc, builder_version=built_libc[1])
         manifest = {
             "version": 1,
             "target": target,
-            "glibc": libc[1],
+            "libc": built_libc[0],
+            "libc_version": floor,
+            # Older loaders read the glibc floor from this key; musl bundles never had one.
+            **({"glibc": floor} if libc == "gnu" else {}),
+            "builder_libc_version": built_libc[1],
             "builder_image": image_id,
             "source_fingerprint": fingerprint,
             "python_version": _PYTHON_VERSION,
