@@ -691,6 +691,8 @@ class OwnedSandboxes:
                 self._entries[key] = entry
                 try:
                     async with self._start_slot():
+                        # A create queued for a slot when the shutdown began starts nothing.
+                        self._require_open()
                         await _start_to_the_end(sandbox)
                 except BaseException as error:
                     entry.exportable = False
@@ -1191,23 +1193,25 @@ class OwnedSandboxes:
         """Stop and forget ``key``'s sandbox; a no-op for a key without one, so a retire may repeat it.
 
         It first waits for a create, an export or a restore of the same key to finish, and stops the fork a restore
-        installed. The whole stop, those waits and the wait for a stop slot included, is shielded from the caller's
-        cancellation, so a client that disconnects cannot leave the sandbox running, and bounded by
-        ``STOP_TIMEOUT_S``. If the stop fails, or times out and raises ``TimeoutError``, the key stays tracked, so a
-        retried retire stops it again. The sandbox's snapshots stay: a checkpoint the controller may still restore
-        can name them, and only a release knows which.
+        installed. The whole stop is shielded from the caller's cancellation, so a client that disconnects cannot
+        leave the sandbox running. The wait for the key's lock is bounded by ``STOP_TIMEOUT_S``, and so is the
+        provider's stop once it has a stop slot; the wait for a slot has no limit of its own, since every stop ahead
+        holds its slot for at most ``STOP_TIMEOUT_S``. If the stop fails, or times out and raises ``TimeoutError``,
+        the key stays tracked, so a retried retire stops it again. The sandbox's snapshots stay: a checkpoint the
+        controller may still restore can name them, and only a release knows which.
         """
-        deadline = anyio.current_time() + STOP_TIMEOUT_S
-        with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
-            async with self._key_locks.locked(key):
-                await self._stop_key(key, deadline=deadline)
+        with anyio.CancelScope(shield=True):
+            async with contextlib.AsyncExitStack() as held:
+                with anyio.fail_after(STOP_TIMEOUT_S):
+                    await held.enter_async_context(self._key_locks.locked(key))
+                await self._stop_key(key)
 
-    async def _stop_key(self, key: str, *, deadline: float | None = None) -> None:
+    async def _stop_key(self, key: str) -> None:
         entry = self._entries.get(key)
         if entry is None:
             return
         if entry.sandbox.started:
-            await self._stop_sandbox(entry.sandbox, deadline=deadline)
+            await self._stop_sandbox(entry.sandbox)
         # Without a wait for a sandbox its owner already stopped: a caller cancelled there would leave the key
         # tracked with nothing left to stop.
         self._entries.pop(key, None)
@@ -1224,15 +1228,13 @@ class OwnedSandboxes:
                 self._unstopped_forks.append(entry.sandbox)
         await self._stop_forks()
 
-    async def _stop_sandbox(self, sandbox: AsyncSandbox, *, deadline: float | None = None) -> None:
-        # Shielded and bounded as a whole by one deadline, the wait for a stop slot included: a cancelled request
-        # cannot leave the sandbox running, and a stop that cannot get a slot in time fails like a stop that hangs.
-        # AsyncSandbox.stop shields itself from enclosing deadlines too, so it is given only the time that is left.
-        if deadline is None:
-            deadline = anyio.current_time() + STOP_TIMEOUT_S
-        with anyio.CancelScope(shield=True), anyio.fail_after(max(0.0, deadline - anyio.current_time())):
+    async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
+        # Shielded, so a cancelled request cannot leave the sandbox running. The provider's stop is bounded once it has
+        # its slot (AsyncSandbox.stop shields and bounds itself); the wait for the slot is not, so a stop queued behind
+        # others under load is not cut short and left to ttl_s.
+        with anyio.CancelScope(shield=True):
             async with self._stop_slot():
-                await sandbox.stop(timeout_s=max(0.0, deadline - anyio.current_time()))
+                await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
 
     def _provider_name(self) -> str:
         return getattr(self._provider, "name", type(self._provider).__name__)

@@ -708,23 +708,34 @@ class TestEveryStopIsShieldedAndBoundedFromItsCall:
 
         assert provider.max_in_flight == 1
 
-    async def test_the_slot_wait_and_the_providers_stop_share_one_limit(self, monkeypatch) -> None:
-        # AsyncSandbox.stop shields itself from an enclosing deadline, so each wait taking its own full limit would
-        # add up: here 0.8 s for a slot, then another full limit for a close that hangs.
-        monkeypatch.setattr(owned_sandboxes_module, "STOP_TIMEOUT_S", 1.0)
+    async def test_a_stop_queued_for_a_slot_longer_than_the_limit_still_stops(self, monkeypatch) -> None:
+        # Each stop ahead holds its slot for at most the limit, so a queued stop is not cut short by the queue: under
+        # load that would leave sandboxes running until their ttl_s.
+        monkeypatch.setattr(owned_sandboxes_module, "STOP_TIMEOUT_S", 0.2)
+        provider = _GatedProvider()
+        owned = _owned(provider, max_concurrent_stops=1)
+        await owned.create("session", _spec())
+        assert owned._stop_limit is not None
+        await owned._stop_limit.acquire()
+        asyncio.get_running_loop().call_later(0.5, owned._stop_limit.release)
+
+        await asyncio.wait_for(owned.stop("session"), timeout=5)
+
+        assert owned.keys == []
+        assert _states(provider) == ["stopped"]
+
+    async def test_the_providers_stop_is_bounded_once_it_has_its_slot(self, monkeypatch) -> None:
+        monkeypatch.setattr(owned_sandboxes_module, "STOP_TIMEOUT_S", 0.2)
         provider = _GatedProvider()
         owned = _owned(provider, max_concurrent_stops=1)
         await owned.create("session", _spec())
         provider.close_gate.clear()
-        assert owned._stop_limit is not None
-        await owned._stop_limit.acquire()
-        asyncio.get_running_loop().call_later(0.8, owned._stop_limit.release)
 
         started = time.monotonic()
         with pytest.raises(TimeoutError):
-            await asyncio.wait_for(owned.stop("session"), timeout=10)
+            await asyncio.wait_for(owned.stop("session"), timeout=5)
 
-        assert time.monotonic() - started < 1.5, "the whole stop ends at its one limit"
+        assert time.monotonic() - started < 2
         assert owned.keys == ["session"], "a stop that timed out keeps its key"
         provider.close_gate.set()
         await owned.stop("session")
@@ -740,6 +751,27 @@ class TestTheOwnersOwnChecks:
             await owned.create("session", SandboxSpec(image="image"))
 
         assert provider.boxes == {}
+        assert owned.keys == []
+
+    async def test_a_create_queued_for_a_slot_when_the_shutdown_began_starts_nothing(self) -> None:
+        provider = _GatedProvider()
+        owned = _owned(provider, max_concurrent_starts=1)
+        provider.create_gate.clear()
+        first = asyncio.create_task(owned.create("first", _spec()))
+        await _until(lambda: provider.in_flight == 1)
+        queued = asyncio.create_task(owned.create("queued", _spec()))
+        await asyncio.sleep(0.01)
+
+        closing = asyncio.create_task(owned.aclose())
+        await asyncio.sleep(0.01)
+        provider.create_gate.set()
+        await first
+        with pytest.raises(RuntimeError, match="closed"):
+            await queued
+        await closing
+
+        assert len(provider.boxes) == 1, "only the create that had its slot started a sandbox"
+        assert _states(provider) == ["stopped"]
         assert owned.keys == []
 
     async def test_a_sandbox_still_starting_is_not_lent(self) -> None:
