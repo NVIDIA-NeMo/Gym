@@ -46,6 +46,7 @@ from nemo_gym.environment.manifest import (
     load_manifest,
     resolve_manifest_config_path,
 )
+from nemo_gym.environment.registry import folder_in_other_catalog_tree
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
@@ -973,6 +974,12 @@ def _validate_manifest_location(manifest_path: Path, manifest: EnvironmentManife
     if manifest.name != catalog_name:
         raise EnvironmentValidationError(
             f"Manifest identity name '{manifest.name}' does not match its catalog path '{catalog_name}'."
+        )
+    other_folder = folder_in_other_catalog_tree(catalog_directory, catalog_name) if catalog_directory else None
+    if other_folder is not None:
+        raise EnvironmentValidationError(
+            f"Name '{catalog_name}' is also used by {other_folder}. A top-level folder name is used in only one of "
+            "benchmarks/ and environments/, so rename one of the two folders."
         )
 
     catalog_kind = catalog_directory.name if catalog_directory is not None else None

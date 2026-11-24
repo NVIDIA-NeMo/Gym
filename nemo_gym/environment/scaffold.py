@@ -31,6 +31,7 @@ from nemo_gym.environment.manifest import (
     Reward,
     dump_manifest,
 )
+from nemo_gym.environment.registry import folder_in_other_catalog_tree
 
 
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -148,6 +149,12 @@ def scaffold_environment(
         reused=reused,
         reward=reward,
     )
+    other_folder = folder_in_other_catalog_tree(composition.asset_dir.parent, name)
+    if other_folder is not None:
+        raise ScaffoldError(
+            f"{other_folder} already exists. A top-level folder name is used in only one of benchmarks/ and "
+            "environments/, so choose another name."
+        )
     files = _render_manifest_composition(scaffold_root, composition)
     return _write_files(scaffold_root, composition.asset_dir, files)
 

@@ -318,6 +318,21 @@ def test_rejects_unsafe_or_unknown_requests_without_writes(tmp_path: Path, kwarg
     assert not (tmp_path / "benchmarks").exists()
 
 
+@pytest.mark.parametrize(("kind", "other_tree"), [("environment", "benchmarks"), ("benchmark", "environments")])
+def test_refuses_a_name_the_other_catalog_tree_has(tmp_path: Path, kind: str, other_tree: str) -> None:
+    # The other tree's folder has no manifest: a config alone makes the folder path a catalog name.
+    other_config = tmp_path / other_tree / "sample" / "config.yaml"
+    other_config.parent.mkdir(parents=True)
+    other_config.write_text("{}\n", encoding="utf-8")
+    tree = "benchmarks" if kind == "benchmark" else "environments"
+
+    with pytest.raises(ScaffoldError, match=f"{other_tree}/sample already exists.*only one of benchmarks/ and"):
+        scaffold_environment(root=tmp_path, kind=kind, name="sample")
+
+    assert not (tmp_path / tree).exists()
+    assert other_config.read_text(encoding="utf-8") == "{}\n"
+
+
 def test_rejects_unsafe_root_paths(tmp_path: Path) -> None:
     root_file = tmp_path / "root-file"
     root_file.write_text("occupied\n", encoding="utf-8")

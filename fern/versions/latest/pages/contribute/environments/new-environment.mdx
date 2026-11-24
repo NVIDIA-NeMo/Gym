@@ -401,7 +401,7 @@ For benchmarks and named configs, additional fields apply — in particular `con
 
 | Field | Type | Requirement and allowed values |
 | --- | --- | --- |
-| `name` | string | Required; non-empty and must match the catalog path |
+| `name` | string | Required; non-empty and must match the catalog path. Its top-level folder name is used in only one of `benchmarks/` and `environments/`, with or without a manifest; `gym env init` and `gym env validate` refuse a name the other tree has |
 | `version` | string | Required; non-empty, with Semantic Versioning recommended |
 | `experimental` | boolean | Optional; defaults to `true` |
 | `kind` | string | Required; `environment` or `benchmark` |
