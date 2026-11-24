@@ -32,7 +32,6 @@ def create_fixture_server() -> PdfAnalystQaResourcesServer:
         port=9000,
         name="pdf_analyst_qa_fixture",
         entrypoint="app.py",
-        dataset_root=".",
         document_image="fixture",
         model_server={"type": "responses_api_models", "name": "policy_model"},
         mounted_documents=MountedDocumentsConfig(prefix="example"),

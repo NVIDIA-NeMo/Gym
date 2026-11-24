@@ -92,6 +92,7 @@ from typing import Any, Callable, Literal, Optional
 import anyio
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.config.global_config import get_first_server_config_dict, get_global_config_dict
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
@@ -121,6 +122,7 @@ from nemo_gym.utils.network_policy import reachable_host
 
 
 LOGGER = logging.getLogger(__name__)
+__getattr__ = moved_names_getattr(__name__)
 
 # A fork that the backend answers with "snapshot not found" is retried this many times, this far apart: a snapshot
 # store that is not fully shared across the service's replicas can answer from one that has not seen it yet.
@@ -470,8 +472,8 @@ def check_provider(provider: object, *, configs: Iterable[SandboxConfig] = (), l
     that a server checks its provider without creating it."""
     for config in configs:
         # A subclass's own network setting is not a typed rule (see SandboxConfig): its server checks it.
-        if config.network in NETWORK_RULES:
-            check_network_rule(provider, config.network)
+        if config.network_access in NETWORK_RULES:
+            check_network_rule(provider, config.network_access)
     if lends:
         check_lending(provider)
 
@@ -501,12 +503,12 @@ def _suggested_rule(config: SandboxConfig) -> str:
     """The typed rule that keeps what a block without one does today, for the deprecation warning."""
     policy = config.provider_options.get("network_policy")
     if not isinstance(policy, Mapping):
-        return "network: inherit"
+        return "network_access: inherit"
     targets = [rule.get("target") for rule in policy.get("egress") or [] if isinstance(rule, Mapping)]
     if policy.get("defaultAction") == "deny" and not targets:
-        return "network: no_network"
+        return "network_access: no_network"
     if policy.get("defaultAction") == "deny":
-        return f"network: hosts_only with allowed_hosts {targets}, or model_only for a model server"
+        return f"network_access: hosts_only with allowed_hosts {targets}, or model_only for a model server"
     return "the rule closest to its network_policy (no typed rule allows by default and denies some hosts)"
 
 
@@ -612,11 +614,9 @@ class OwnedSandboxes:
         self._entries: dict[str, _Entry] = {}
         self._index: Optional[_SnapshotIndex] = None
         self._state_dir_id: Optional[str] = None
+        self._checkpoint_global_config: Mapping[str, Any] | None = None
         if state_dir is not None:
-            # Fails at server start, not at the first commit, if the directory cannot be created.
-            self._state_dir_id = read_state_dir_id(Path(state_dir))
-            self._index = _SnapshotIndex(Path(state_dir) / self._server_name / "snapshots")
-            self._index.root.mkdir(parents=True, exist_ok=True)
+            self._initialize_index(Path(state_dir))
         # Keys whose sandbox is being created or restored: no other create, add or restore may take them meanwhile.
         self._pending: set[str] = set()
         # Set while no key is pending, which is what ``aclose`` waits for before it stops the sandboxes.
@@ -669,14 +669,14 @@ class OwnedSandboxes:
         """The instance a server holds for the provider its config names in ``provider_field``.
 
         ``config`` is the server's config and ``global_config`` the merged global config, which resolves a named
-        provider and ``checkpoint.state_dir``. An instance for a field other than ``sandbox_provider`` gets its own
+        provider. ``checkpoint.state_dir`` is resolved on the first export, restore or release, so servers that only
+        restart their episodes need no snapshot index. An instance for a field other than ``sandbox_provider`` gets its own
         server name, ``<server>.<field>``, so its snapshot index and snapshot names stay apart. The instance owns the
         provider it creates and closes it in :meth:`aclose`. ``on`` gives the server's instance for another field,
         which :meth:`on` calls.
 
         Raises:
-            ValueError: If the config has no field ``provider_field`` or leaves it unset, or checkpointing is on
-                without a valid ``checkpoint.state_dir``.
+            ValueError: If the config has no field ``provider_field`` or leaves it unset.
         """
         if provider_field not in type(config).model_fields:
             raise ValueError(f"{config.name} has no config field {provider_field!r} naming a sandbox provider")
@@ -686,7 +686,8 @@ class OwnedSandboxes:
         # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
         provider_config = resolve_provider_config(reference, global_config)
         concurrency = resolve_provider_owner_concurrency(reference, global_config)
-        state_dir = checkpoint_state_dir(global_config)
+        suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
+        server_name = _path_component(f"{config.name}{suffix}", "server name")
         if "local" in provider_config:
             LOGGER.warning(
                 "%s owns sandboxes on the local provider, which runs their commands as processes on this host; "
@@ -694,11 +695,10 @@ class OwnedSandboxes:
                 config.name,
             )
         provider = create_provider(provider_config)
-        suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
         owned = cls(
             provider,
-            state_dir=state_dir,
-            server_name=f"{config.name}{suffix}",
+            state_dir=None,
+            server_name=server_name,
             provider_config_ref=reference if isinstance(reference, str) else None,
             owns_provider=True,
             max_concurrent_starts=concurrency.starts,
@@ -706,8 +706,23 @@ class OwnedSandboxes:
             default_metadata=resolve_provider_metadata(reference, global_config),
             global_config=global_config,
         )
+        owned._checkpoint_global_config = global_config
         owned._on = on
         return owned
+
+    def _initialize_index(self, state_dir: Path) -> None:
+        state_dir_id = read_state_dir_id(state_dir)
+        index = _SnapshotIndex(state_dir / self._server_name / "snapshots")
+        index.root.mkdir(parents=True, exist_ok=True)
+        # Publish only after initialization succeeds, so a failed attempt can be retried.
+        self._state_dir_id = state_dir_id
+        self._index = index
+
+    def _ensure_checkpoint_index(self) -> None:
+        if self._index is None and self._checkpoint_global_config is not None:
+            state_dir = checkpoint_state_dir(self._checkpoint_global_config)
+            if state_dir is not None:
+                self._initialize_index(state_dir)
 
     def on(self, provider_field: str) -> "OwnedSandboxes":
         """The same server's instance for the provider its config names in ``provider_field``, created on first use.
@@ -739,7 +754,7 @@ class OwnedSandboxes:
         Raises:
             ValueError: If the provider cannot apply the rule, or a server's URL is one a sandbox cannot reach.
         """
-        rule = config.network
+        rule = config.network_access
         # An inline provider block with the default metadata beside the provider, all SandboxConfig.spec reads of it.
         provider_block = {self._provider_name(): {}, "default_metadata": self._default_metadata}
         if rule is None:
@@ -759,7 +774,7 @@ class OwnedSandboxes:
             workdir=workdir,
             metadata=metadata,
             files=files,
-            network_options=options,
+            _network_options=options,
         )
 
     def check_provider(self, *, configs: Iterable[SandboxConfig] = (), lends: bool = False) -> None:
@@ -819,13 +834,17 @@ class OwnedSandboxes:
         return f"{prefix}{name_hash(checkpoint_id)}-{name_hash(key)}-{attempt}"
 
     def __contains__(self, key: object) -> bool:
-        """Whether ``key`` currently has a sandbox."""
-        return key in self._entries
+        """Whether ``key`` has a running sandbox whose start completed successfully."""
+        entry = self._entries.get(key)
+        return entry is not None and entry.exportable and entry.sandbox.started
 
     def get(self, key: str) -> Optional[AsyncSandbox]:
-        """``key``'s current sandbox, or ``None``; after a restore it is the fork, under a new id."""
+        """``key``'s running sandbox, or ``None`` while starting or after a failed start.
+
+        After a restore it is the fork, under a new id. ``keys`` includes entries kept only for cleanup.
+        """
         entry = self._entries.get(key)
-        return entry.sandbox if entry is not None else None
+        return entry.sandbox if entry is not None and entry.exportable and entry.sandbox.started else None
 
     def add(self, key: str, sandbox: AsyncSandbox, spec: SandboxSpec) -> None:
         """Track a sandbox the owner started itself; ``spec`` is what a restore re-creates its fork from.
@@ -1005,6 +1024,7 @@ class OwnedSandboxes:
         ``snapshot_attempts`` attempts, or a snapshot cannot be indexed, which fails the commit. Every sandbox keeps
         running, and the snapshots already taken are deleted by a release that does not keep ``checkpoint_id``.
         """
+        self._ensure_checkpoint_index()
         keys = list(keys)
         outcomes = await asyncio.gather(
             *(self._export_locked(key, checkpoint_id) for key in keys), return_exceptions=True
@@ -1150,6 +1170,7 @@ class OwnedSandboxes:
         the crashed process's sandboxes are stopped in the background, best effort; a failure there is logged and
         the sandbox runs out its lifetime.
         """
+        self._ensure_checkpoint_index()
         self._require_open()
         await self._stop_forks()
         # Again, since ``aclose`` may have run during the stops: nothing awaits from here until the keys are taken.
@@ -1310,6 +1331,7 @@ class OwnedSandboxes:
         ``RuntimeError`` if the index cannot be locked; the provider's error if the listing fails. Whatever a
         failed or cancelled call left is still indexed, and the next release deletes it.
         """
+        self._ensure_checkpoint_index()
         if self._index is None:
             return
         kept = frozenset(kept)
@@ -1418,10 +1440,15 @@ class OwnedSandboxes:
         Unlike :meth:`stop`, every key can be restored again at once, whether or not the stops succeed. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the
         forks that :meth:`settle`, the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped.
         """
-        for key in keys:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self._unstopped_forks.append(entry.sandbox)
+        # Wait for starts and restores before detaching their entries. Stopping a not-yet-started AsyncSandbox
+        # marks it closed; a later provider reply would then leave a running sandbox that stop cannot reach.
+        with anyio.CancelScope(shield=True):
+            async with contextlib.AsyncExitStack() as held:
+                for key in sorted(set(keys)):
+                    await held.enter_async_context(self._key_locks.locked(key))
+                    entry = self._entries.pop(key, None)
+                    if entry is not None:
+                        self._unstopped_forks.append(entry.sandbox)
         await self._stop_forks()
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:

@@ -56,7 +56,7 @@ import os
 import re
 import shlex
 import uuid
-from collections.abc import Coroutine, Mapping
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from time import monotonic
@@ -64,6 +64,8 @@ from typing import Any, Awaitable, Callable, ClassVar, TypeVar
 
 from nemo_gym.sandbox.attribution import AttributionConfig
 from nemo_gym.sandbox.providers.base import (
+    NETWORK_RULES,
+    NetworkRule,
     SandboxCapabilities,
     SandboxCreateError,
     SandboxEndpoint,
@@ -76,6 +78,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.e2b._sdk import E2B_SDK_CONSTRAINT, require_e2b_sdk
+from nemo_gym.sandbox.providers.utils import require_shell_text
+from nemo_gym.utils.network_policy import allowlist_policy
 
 
 LOGGER = logging.getLogger(__name__)
@@ -567,7 +571,17 @@ class E2BProvider:
 
     name = "e2b"
     # A snapshot saves memory and processes, and a sandbox created from it continues them.
-    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(snapshot_keeps=frozenset({"files", "processes"}))
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(
+        snapshot_keeps=frozenset({"files", "processes"}), network_rules=NETWORK_RULES
+    )
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Apply a portable egress rule through E2B's existing network_policy adapter."""
+        if rule == "inherit":
+            return dict(provider_options)
+        return {**provider_options, "network_policy": allowlist_policy(hosts)}
 
     def __init__(
         self,
@@ -1558,13 +1572,14 @@ class E2BProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
+        command = require_shell_text(command, provider=self.name)
         e2b = _require_e2b_sdk()
         sandbox = self._sandbox(handle)
 

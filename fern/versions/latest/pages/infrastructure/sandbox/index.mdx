@@ -142,6 +142,12 @@ python first_sandbox.py
 
 `exec()` returns a `SandboxExecResult`. Nonzero process exits are reported in `return_code`; providers should reserve exceptions for sandbox runtime failures such as allocation, transport, or lifecycle errors.
 
+`exec()` also takes a list of strings instead of shell text, such as `await sandbox.exec(["python", "/sandbox/hello.py"])`. The list runs as the program's argv without a shell, so its arguments need no quoting and no shell program of the sandbox takes part. Docker, Apptainer, Local and OpenSandbox (with `opensandbox>=1.1.0`) run it; other providers, and a `user` a provider can switch to only through `su`, raise `SandboxExecArgvUnsupportedError` before anything runs, and `preserve_background_services=True` takes shell text only.
+
+An argument list is not a trust boundary on its own. No shell runs, but the program, its dynamic loader and libraries, and files such as `/etc/ld.so.preload` still come from the sandbox's file system. To run a program you trust in a sandbox that an agent has modified, upload a statically linked binary or mount the program read-only.
+
+On Docker, Apptainer and Local, a program in an argument list that cannot be started is a command failure, as with shell text: `error_type` is `None` and `return_code` is `127` when the program is not found or `126` when it is not executable.
+
 ## Provider Config Blocks
 
 Agents can refer to a named provider block instead of embedding provider credentials or backend settings in the agent config. The `sandbox_provider` field names a top-level config block, and that block contains exactly one provider key plus optional reserved keys:
@@ -190,6 +196,8 @@ sandbox:
       domain: ${oc.env:OPENSANDBOX_DOMAIN}
 ```
 
+Servers using `OwnedSandboxes.from_config`, including SWE-bench checkpoint sessions, retain `parallelism` as each of their start, stop and snapshot limits. These limits are independent: the maximum concurrent backend calls can be three times the previous shared limit.
+
 The helpers used by agents are public:
 
 ```python
@@ -213,22 +221,22 @@ A server that owns its sandboxes through `self.sandboxes` declares each sandbox'
 ```yaml
 sandbox_config:
   ttl_s: 7200
-  network: model_only
+  network_access: model_only
   model_server: policy_model
 ```
 
 | Field | Values | Meaning |
 | --- | --- | --- |
-| `network` | `inherit`, `no_network`, `model_only`, `model_and_tools`, `hosts_only` | The egress rule the sandbox starts with. `inherit` keeps the provider's default. |
+| `network_access` | `inherit`, `no_network`, `model_only`, `model_and_tools`, `hosts_only` | The egress rule the sandbox starts with. `inherit` keeps the provider's default. |
 | `model_server` | a server name | The model server `model_only` and `model_and_tools` allow. Required exactly for those two rules. |
 | `tool_servers` | server names | The servers `model_and_tools` also allows. Required exactly for that rule. |
-| `allowed_hosts` | host names | Further hosts `model_only`, `model_and_tools` and `hosts_only` allow, such as a dependency proxy. `hosts_only` allows only these; `no_network` takes none. |
+| `allowed_hosts` | bare hosts, `*.domain`, IPs or CIDRs | Further hosts `model_only`, `model_and_tools` and `hosts_only` allow, such as a dependency proxy. `hosts_only` allows only these; `no_network` takes none. |
 
-A provider that cannot apply a rule refuses it, so no sandbox starts with open egress in place of the rule: OpenSandbox applies all five, Docker `inherit` and `no_network`, and the other providers `inherit`. A server whose only provider field is `sandbox_provider` is checked at startup, a dry run included; a server with several provider fields, or a provider block whose own settings conflict with the rule (such as Docker's `create.network`), is refused at its first `spec()`.
+A provider that cannot apply a rule refuses it, so no sandbox starts with open egress in place of the rule: OpenSandbox and E2B apply all five, Docker `inherit` and `no_network`, and the other providers `inherit`. A server declares which blocks it builds through `OwnedSandboxes.spec()` in `sandbox_config_providers`, mapping each block field to its provider field. Startup, including a dry run, checks that mapping and refuses restricted blocks on servers that have not adopted the owner. Provider settings that conflict with the rule (such as Docker's `create.network`) are refused at the first `spec()`.
 
-A rule allows a server's whole host, every port on it, since providers allow egress by host. With `default_host` set, every Gym server listens on that one address, so `model_only` also reaches the other servers there; give the model server its own address when that matters. The model and tool servers must listen on an address a sandbox can reach: a loopback address is refused. A block that sets `network` and also `provider_options.network_policy` is refused. `SandboxConfig.spec()` on its own refuses a restricted rule, since only the owner's `spec()` applies it.
+A rule allows a server's whole host, every port on it, since providers allow egress by host. With `default_host` set, every Gym server listens on that one address, so `model_only` also reaches the other servers there; give the model server its own address when that matters. The model and tool servers must listen on an address a sandbox can reach: a loopback address is refused. A block that sets `network_access` and also `provider_options.network_policy` is refused. `SandboxConfig.spec()` on its own refuses a restricted rule, since only the owner's `spec()` applies it.
 
-A block without `network` keeps today's behavior, the provider's default or its `provider_options.network_policy`, and the server logs a deprecation warning naming the rule to switch to. A later release requires `network`.
+A block without `network_access` keeps today's behavior, the provider's default or its `provider_options.network_policy`, and the server logs a deprecation warning naming the rule to switch to. A later release requires `network_access`.
 
 ## Lifecycle
 
