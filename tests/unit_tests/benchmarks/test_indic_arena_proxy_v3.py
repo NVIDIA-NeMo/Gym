@@ -316,7 +316,7 @@ def test_manifest_and_config_keep_prepared_messages_and_shared_gym_components() 
     assert manifest.prompt_source == "prepared"
     assert manifest.resources_server == "arena_judge"
     assert manifest.agent_server == "simple_agent"
-    assert manifest.licensing == "unknown"
+    assert manifest.licensing == "internal"
     config = yaml.safe_load((module.DIRECTORY / "config.yaml").read_text())
     agent = config["indic_arena_proxy_v3_agent"]["responses_api_agents"]["simple_agent"]
     assert agent["max_steps"] == 1
