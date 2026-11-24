@@ -1604,7 +1604,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         if binding["admitted"][identity].operation_id in done:
             continue  # this pass settled or withdrew it before an error
         if _ungraded_reverification(result) and (
-            identity in saved_results or result.get(NG_FAILURE_CLASS_KEY) != "judge_failed"
+            identity in saved_results or not matches_failure_class(result, {JUDGE_FAILED_FAILURE_CLASS})
         ):
             # The verifier answered without a grade or a judge failure: the bound row stays as it was, and nothing
             # is saved. A judge failure that failed to judge again is saved below as its re-judgment's outcome.

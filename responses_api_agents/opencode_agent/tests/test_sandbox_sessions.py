@@ -180,6 +180,9 @@ class Sandbox:
             return await self.launch(command=command, **kwargs)
         if "opencode.db-wal" in command:
             return SimpleNamespace(return_code=0, stdout="opencode.db\n", stderr="", error_type=None)
+        if "supervisor.pid" in command and "launch.claim" in command:
+            # The check after a launch command raised: this fake never starts a supervisor of its own.
+            return SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None)
         if "stop.request" in command:
             await self.request_stop()
         if command.startswith("{ [ ! -d /tmp/nemo-gym-media/"):
@@ -1083,7 +1086,7 @@ def test_cleanup_receipt_is_required():
 def test_instructions_and_text_parts_reach_opencode(setup, mode):
     agent, sandbox = setup
     agent.config.system_prompt_mode = mode
-    agent.config.opencode_config = {"tools": {"*": False}, "permission": {"bash": "deny"}}
+    agent.config.opencode_config = {"tools": {"*": False}, "permission": {"bash": "deny"}, "snapshot": False}
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         result = client.post(
@@ -1101,6 +1104,7 @@ def test_instructions_and_text_parts_reach_opencode(setup, mode):
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["tools"] == {"*": False}
         assert config["permission"] == {"bash": "deny"}
+        assert config["snapshot"] is False
         if mode == "replace":
             assert payload["command"][payload["command"].index("--agent") + 1] == "build"
             assert config["agent"]["build"]["prompt"] == "outer\n\nsystem"
@@ -1728,6 +1732,17 @@ def test_invalid_seed_never_connects(setup, option):
         agent.config.opencode_config = {"provider": {"other": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
         assert client.post("/v1/agent_sessions", json=body).status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("value", ["false", 0, None, {}])
+def test_invalid_snapshot_setting_is_rejected_before_connecting(setup, value):
+    agent, sandbox = setup
+    agent.config.opencode_config = {"snapshot": value}
+    with TestClient(agent.setup_webserver()) as client:
+        reply = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert reply.status_code == 422
+        assert "snapshot must be a boolean" in reply.json()["detail"]
     sandbox.exec.assert_not_awaited()
 
 

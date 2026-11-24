@@ -106,6 +106,10 @@ the agent raises an error naming the exact command to run.
 | `judge_endpoint_max_concurrency` | 64 | Caps concurrent judge calls; a single task fans out to up to 30 |
 | `reward_mode` | `mean_criteria` | Training reward: `mean_criteria`, `strict_pass` or `mixed` (see Training rewards) |
 | `mixed_reward_alpha` | 0.5 | All-pass weight in the `mixed` reward; range [0, 1] |
+| `reasoning_penalty_start_tokens` | `null` (off) | Training only: reasoning tokens before the reasoning-length penalty starts (see Training rewards) |
+| `reasoning_penalty_end_tokens` | `null` | Reasoning tokens at which the penalty reaches its maximum; must be greater than the start |
+| `reasoning_penalty_max` | 0.1 | Maximum penalty subtracted from `reward`; range [0, 1] |
+| `reasoning_chars_per_token` | 4.0 | Characters per token when the policy server reports no reasoning-token count |
 
 ## Grading
 
@@ -172,6 +176,18 @@ mixed_reward_alpha`. All three report `all_pass` and `mean_criterion_pass` uncha
 response records the mode in `reward_mode`. In NeMo RL, set it through the environment config, e.g.
 `env.nemo_gym.gdp_pdf.resources_servers.gdp_pdf.reward_mode=mixed`. Keep benchmark evaluation on the
 default.
+
+An optional reasoning-length penalty shapes the training reward against runaway chains of thought. It is
+off until `reasoning_penalty_start_tokens` is set. Up to that many reasoning tokens there is no penalty;
+from there it grows linearly to `reasoning_penalty_max` at `reasoning_penalty_end_tokens` and stays
+there. It is subtracted from `reward` for every attempt, passed or not, so a long failed attempt still
+ranks below a short one, and it never touches the answer the judge grades. The count comes from
+`usage.output_tokens_details.reasoning_tokens` when the policy server reports it, including zero. Otherwise
+the estimate uses each reasoning item's full text, or its summary when the full text is unavailable,
+and divides the total character count by `reasoning_chars_per_token`. The response records
+`reasoning_tokens`, `reasoning_tokens_source`, `reasoning_penalty` and `reward_before_reasoning_penalty`.
+NeMo RL's `grpo.length_penalty` handles binary rewards only, so it does not apply to the `mixed` or
+`mean_criteria` rewards. Keep benchmark evaluation with the penalty off.
 
 The agent's `mask_failed_attempts` (off by default) leaves attempts that end without a gradable
 answer out of the training loss; see `responses_api_agents/gdp_pdf_agent/README.md`.

@@ -113,7 +113,10 @@ it. `sandbox.py` implements the lending for the `videomme_v2` and `video_mcqa`
 servers, and for `video_qa_rubric`, whose agentic config grades open-ended
 answers against a rubric with the same agent, image and sandbox. Like the
 single-turn configs, the three benchmarks' configs are for evaluation only: the
-dataset terms below still apply.
+dataset terms below still apply. `configs/video_mcqa_agentic.yaml` runs the same
+agent, image and sandbox on this package's own server for a
+[question set](#question-sets), for example a training set; see
+[training with OpenCode](#training-with-opencode).
 
 ### Sandbox image
 
@@ -215,13 +218,16 @@ episode again. OpenCode works in `sandbox_workdir` (`/testbed/work`), and with
 `sandbox_network_access: model_only` the sandbox reaches only the policy model
 server. Grading never reads the sandbox.
 
-The upload sends each video in one request. Gym's OpenSandbox provider reads
-the whole file and sends it in one write, which failed for files of about
-1.6–2.0 GB in our runs (for example, 6 LVBench videos, 90 of its 1,549
-questions, are larger than 1.5 GiB). Such videos need OpenSandbox uploads
-streamed from disk
-([NVIDIA-NeMo/Gym#5904](https://github.com/NVIDIA-NeMo/Gym/pull/5904)); until then
-their seeds fail, and the cohort counts those questions as missing.
+The upload sends each video in one request, which Gym's OpenSandbox provider
+streams from disk
+([NVIDIA-NeMo/Gym#5904](https://github.com/NVIDIA-NeMo/Gym/pull/5904)), so
+videos of several GiB upload too. The provider's `connection.request_timeout_s`
+(300 s in `opensandbox.yaml`) bounds that request, and an upload that exceeds it
+fails the seed. In one of our training runs, 16 episodes uploaded the same
+3.5 GiB video at the same time, each in at most 251 s including the extraction.
+When more large videos upload at once, raise the limit, for example
+`++sandbox.opensandbox.connection.request_timeout_s=900`; it bounds every
+request of that provider.
 
 ### Media preloaded in the image
 
@@ -283,6 +289,63 @@ calls a tool a third time in a row with identical input ends the run without an
 answer: the configs keep OpenCode's `doom_loop` permission at `ask`, and
 `opencode run` rejects every request that would ask. The same call repeated
 across separate responses does not end the run.
+
+### Training with OpenCode
+
+`configs/video_mcqa_agentic.yaml` serves the agentic rows of a question set
+with the agent, image and sandbox above. Its cohort is a question set with
+`setting: agentic` and a rule-based answer policy (`boxed_only_v1`, the
+default): the config names no judge model. Each row names the agent,
+`agent_ref: {type: responses_api_agents, name: video_mcqa_agentic_opencode}`,
+and binds its video with `video_binding`. With NeMo RL:
+
+```yaml
+env:
+  should_use_nemo_gym: true
+  nemo_gym:
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/video_mcqa/configs/video_mcqa_agentic.yaml
+    video_mcqa_agentic_cohort_manifest: /data/invented_video_mcq/cohort.json
+    video_mcqa_agentic_video_roots: [/data/invented_video_mcq/videos]
+    # Raise both to the episodes the trainer keeps in flight; each holds a sandbox.
+    video_mcqa_agentic_opencode:
+      responses_api_agents:
+        opencode_agent:
+          concurrency: 128
+    video_mcqa_agentic_environment:
+      environment_servers:
+        single_agent_turn_legacy:
+          max_concurrent_episodes: 128
+```
+
+Set `VIDEO_MCQA_SANDBOX_IMAGE`, or
+`video_mcqa_agentic.resources_servers.video_mcqa.sandbox_config.image`, to an
+image built from this tree's `sandbox_image`, pinned by digest (see
+[sandbox image](#sandbox-image)), and set `OPENSANDBOX_DOMAIN` and
+`OPENSANDBOX_API_KEY`. The config's limits set the trainer's:
+
+- Each call sends the episode so far and holds, with its output, up to
+  `context_window` (262,144) tokens, and the training sequences come from these
+  calls: the policy's sequence length, the model server's `max_model_len` and
+  any sequence-packing or micro-batch token limit must hold that many.
+- A call asks for up to `max_output_tokens` (32,768) new tokens; the trainer's
+  generation limit must allow them.
+- Every call sends the episode's tool images again, up to the video tools'
+  `max_tool_media_images` (8,192): the model server's image limit per request.
+- Once admitted, an episode ends within `default_episode_timeout_seconds`
+  (6,600 s), so the trainer's timeout for one rollout must be longer.
+
+Compaction is off, so an episode that fills the context ends with a
+context-limit error and scores 0.
+
+Our training rows for this config are on NVIDIA's DSS:
+`postOmni_RL_video-mcqa-agentic_profiled@v0.1+super35-sftblendv2-step150` holds
+1,439 training rows, 15 validation rows and their question-set cohort
+(`cohorts/mcqa.json`), and `postOmni_RL_video-mcqa-agentic_media@v0.3` holds
+their 1,161 videos (up to 3.5 GiB). A row's `video_binding.source` names its
+video relative to the media dataset (`videos/<sha256>.<ext>`): point the rows
+at your copy, and list its `videos/` folder in `video_mcqa_agentic_video_roots`.
 
 ## Verification and metrics
 
