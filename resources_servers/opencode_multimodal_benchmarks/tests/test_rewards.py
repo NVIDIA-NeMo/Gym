@@ -176,7 +176,7 @@ def test_invalid_penalty_schedule_is_rejected(penalties):
         OpenCodeToolRewardConfig(correct_bash_call_penalties=penalties)
 
 
-def trajectory(status="completed", *, child=False):
+def trajectory(status="completed", *, child=False, root=None):
     from nemo_gym.trajectory import TrajectoryRecord
 
     return TrajectoryRecord.model_validate(
@@ -185,7 +185,7 @@ def trajectory(status="completed", *, child=False):
             "task_id": "task",
             "capture_key": "rollout",
             "invocations": [
-                {"invocation_id": "root"},
+                {"invocation_id": "root", **(root or {})},
                 *([{"invocation_id": "child", "parent_invocation_id": "root"}] if child else []),
             ],
             "tool_calls": [
@@ -270,6 +270,75 @@ def test_shared_tool_failure_is_not_inferred_from_model_visible_output(status):
     assert reward.auxiliary_reward == -0.05 and reward.bash_success_count == 0
 
 
+_ROLLOUT_TIMEOUT = {"status": "incomplete", "error_type": "timeout"}
+
+
+def test_tool_cut_by_rollout_timeout_is_a_rollout_timeout():
+    """The rollout's wall-clock timeout is the model's budget: not missing evidence, but not scored either."""
+    from resources_servers.opencode_multimodal_benchmarks.rewards import (
+        RolloutTimeoutToolEvidence,
+        trajectory_tool_reward,
+    )
+
+    with pytest.raises(RolloutTimeoutToolEvidence, match="rollout timeout"):
+        trajectory_tool_reward(tool_response(), trajectory("incomplete", root=_ROLLOUT_TIMEOUT), 0, bonus_config())
+
+
+@pytest.mark.parametrize(
+    "status,root",
+    [
+        ("incomplete", None),  # no recorded deadline: the evidence is just missing
+        ("incomplete", {"status": "incomplete", "error_type": "cancelled"}),
+        ("incomplete", {"status": "failed", "error_type": "server_error"}),
+        ("unknown", _ROLLOUT_TIMEOUT),  # an unknown outcome is not established by the deadline
+    ],
+)
+def test_unfinished_tool_without_a_rollout_timeout_stays_unusable(status, root):
+    from resources_servers.opencode_multimodal_benchmarks.rewards import (
+        RolloutTimeoutToolEvidence,
+        ToolEvidenceError,
+        trajectory_tool_reward,
+    )
+
+    with pytest.raises(ToolEvidenceError, match="Unfinished") as raised:
+        trajectory_tool_reward(tool_response(), trajectory(status, root=root), 0, bonus_config())
+    assert not isinstance(raised.value, RolloutTimeoutToolEvidence)
+
+
+def test_unusable_tool_evidence_wins_over_a_tool_cut_by_the_rollout_timeout():
+    from nemo_gym.trajectory import TrajectoryRecord
+    from resources_servers.opencode_multimodal_benchmarks.rewards import (
+        RolloutTimeoutToolEvidence,
+        ToolEvidenceError,
+        trajectory_tool_reward,
+    )
+
+    response = tool_response()
+    output = response.model_dump()["output"]
+    response = type(response).model_validate(
+        response.model_dump()
+        | {"output": [call("bash-0"), {"type": "function_call_output", "call_id": "bash-0", "output": "cut"}, *output]}
+    )
+    tool_calls = [
+        {
+            "invocation_id": "root",
+            "tool_call_id": call_id,
+            "native_tool_call_id": call_id,
+            "span_id": f"span-{call_id}",
+            "tool_name": "bash",
+            "status": status,
+        }
+        for call_id, status in (("bash-0", "incomplete"), ("bash-1", "unknown"))
+    ]
+    record = TrajectoryRecord.model_validate(
+        trajectory(root=_ROLLOUT_TIMEOUT).model_dump(mode="json") | {"tool_calls": tool_calls}
+    )
+
+    with pytest.raises(ToolEvidenceError, match="Unfinished") as raised:
+        trajectory_tool_reward(response, record, 0, bonus_config())
+    assert not isinstance(raised.value, RolloutTimeoutToolEvidence)
+
+
 def test_child_tool_cannot_supply_missing_parent_evidence():
     from resources_servers.opencode_multimodal_benchmarks.rewards import trajectory_tool_reward
 
@@ -314,6 +383,37 @@ async def test_training_verifier_preserves_full_response_and_shapes_from_traject
     assert saved["opencode_tool_reward"]["bash_success_count"] == 1
     assert "ng_grading_transform" not in saved
     assert server.setup_webserver() is not None
+
+
+@pytest.mark.asyncio
+async def test_training_verifier_masks_a_rollout_cut_mid_tool_by_its_timeout_as_an_agent_timeout():
+    from unittest.mock import MagicMock
+
+    from nemo_gym.client import ServerClient
+    from resources_servers.string_match_tool_rewards.app import (
+        ToolRewardConfig,
+        ToolRewardServer,
+        ToolRewardVerifyRequest,
+    )
+
+    server = ToolRewardServer(
+        config=ToolRewardConfig(
+            name="test", host="127.0.0.1", port=1, entrypoint="app.py", tool_rewards=bonus_config()
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = ToolRewardVerifyRequest(
+        responses_create_params={"input": []},
+        response=tool_response(),
+        expected_answer="B",
+        extraction_mode="full_response",
+        ng_trajectory=trajectory("incomplete", root=_ROLLOUT_TIMEOUT),
+    )
+    saved = (await server.verify(body)).model_dump(mode="json")
+    assert saved["mask_sample"] is True
+    assert saved["reward"] == 0.0
+    # The model's own budget, unlike a verifier error, so a trainer can keep it in group statistics.
+    assert saved["failure_kind"] == "agent_timeout"
 
 
 @pytest.mark.parametrize("status,bonus", [("completed", 0.1), ("failed", -0.05)])

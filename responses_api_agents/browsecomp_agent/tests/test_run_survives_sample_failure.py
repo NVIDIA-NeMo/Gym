@@ -97,10 +97,13 @@ def _answer_msg(text: str = "Exact Answer: X") -> NeMoGymResponseOutputMessage:
 class _RunServerClient:
     """Drives /run: seed_session -> /v1/responses -> /verify, with injectable failures."""
 
-    def __init__(self, responses_status: int = 200, verify_status: int = 200, reward: float = 1.0):
+    def __init__(
+        self, responses_status: int = 200, verify_status: int = 200, reward: float = 1.0, response_extra=None
+    ):
         self.responses_status = responses_status
         self.verify_status = verify_status
         self.reward = reward
+        self.response_extra = response_extra or {}
 
     async def post(self, server_name=None, url_path=None, json=None, cookies=None):
         http = MagicMock()
@@ -113,7 +116,7 @@ class _RunServerClient:
         elif url_path == "/v1/responses":
             http.status = self.responses_status
             http.ok = self.responses_status < 400
-            payload = _model_response([_answer_msg()])
+            payload = _model_response([_answer_msg()]) | self.response_extra
             http.read = AsyncMock(return_value=jsonlib.dumps(payload).encode())
             http.content.read = AsyncMock(return_value=jsonlib.dumps(payload).encode())
         elif url_path == "/verify":
@@ -205,6 +208,42 @@ class TestHappyPathUnaffected:
         result = await _run(agent)
         assert result.reward == 0.0
         assert not getattr(result, "agent_error", None)
+
+
+class TestAgentErrorMask:
+    """mask_agent_errors: an agent error (for example /verify answering 5xx) is masked, so a training run does not
+    learn from a 0 the model did not earn. Off by default."""
+
+    @pytest.mark.parametrize("client_kwargs", [{"verify_status": 500}, {"responses_status": 500}])
+    async def test_masked_when_on(self, client_kwargs) -> None:
+        result = await _run(_make_agent(_RunServerClient(**client_kwargs), mask_agent_errors=True))
+        assert (result.reward, result.mask_sample) == (0.0, True)
+        assert result.agent_error
+
+    async def test_unmasked_by_default(self) -> None:
+        result = await _run(_make_agent(_RunServerClient(verify_status=500)))
+        assert (result.reward, result.mask_sample) == (0.0, False)
+
+    async def test_a_clean_run_is_not_masked(self) -> None:
+        result = await _run(_make_agent(_RunServerClient(reward=0.0), mask_agent_errors=True))
+        assert (result.reward, result.mask_sample) == (0.0, False)
+        assert not getattr(result, "agent_error", None)
+
+
+class TestTimedOutRolloutWhoseVerifyFails:
+    """A timed-out rollout goes to /verify. If that call fails, the row still carries timed_out, so run health counts
+    it as a timeout and not as a failure without a signal."""
+
+    async def test_keeps_timed_out(self) -> None:
+        client = _RunServerClient(verify_status=500, response_extra={"timed_out": True, "stop_reason": "timeout"})
+        result = await _run(_make_agent(client))
+        assert (result.reward, result.timed_out) == (0.0, 1)
+        assert result.agent_error
+
+    async def test_other_errors_stay_untimed(self) -> None:
+        result = await _run(_make_agent(_RunServerClient(verify_status=500)))
+        assert result.timed_out == 0
+        assert result.agent_error
 
 
 @pytest.mark.parametrize("status", [500, 502, 503])

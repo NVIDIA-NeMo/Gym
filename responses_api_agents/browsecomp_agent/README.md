@@ -40,7 +40,20 @@ Each completed response carries `stop_reason`, the reason the loop ended:
 | `context_full` | The model response was cut with reason `max_output_tokens` before using that budget, or no budget was set. The model server reports a context overflow this way. |
 
 A training filter can mask `context_full` and still score `max_output_tokens`. A response built from a failed model
-request carries no `stop_reason`. Nothing in Gym reads the field.
+request carries no `stop_reason`.
+
+On the legacy `/run` path, two options mask rows in the agent itself. `mask_stop_reasons` (default empty) names the
+`stop_reason` values whose rows come back with `mask_sample: true` and their reward kept. Unless the resources server
+already set a `failure_kind`, such a row also carries the stop's kind, so a trainer can tell a budget stop from an
+infrastructure mask: `agent_limit` for `max_steps`, `agent_timeout` for `timeout`, `model_context_limit` for
+`context_full`, and `browsecomp_agent:<stop_reason>` for the others. `mask_agent_errors: true` masks a row that ended
+in an agent error (scored 0 with `agent_error`, for example after `/verify` answered 5xx). These masks are for
+training: `gym eval` leaves masked rows out of the score, which can raise the mean. `/run` also verifies a timed-out
+rollout: the resources server scores it 0 without the judge and releases the session's tool sandbox and workspace.
+
+Under NeMo RL's `grpo.masked_reward_policy: exclude_infra`, a masked row stays in its group baseline only when its kind
+is in `grpo.policy_failure_kinds`. A recipe that masks `max_output_tokens` must add `browsecomp_agent:max_output_tokens`
+to that list. The list replaces the default list, so the recipe must also list the default kinds.
 
 Host `/v1/responses` and `/run` are disabled by default. Development-only compatibility requires `allow_host_execution: true`; `/run` also requires an explicit `resources_server`. The resources server independently requires its own host-execution opt-in if its tool sandbox is disabled. These options do not provide isolation.
 

@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.core import AGENT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.server_runtime import BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
@@ -32,6 +32,10 @@ def final_assistant_text(output: list[dict[str, Any]], *, block_separator: str =
 
 class ToolEvidenceError(ValueError):
     """Tool shaping cannot be measured from the supplied execution evidence."""
+
+
+class RolloutTimeoutToolEvidence(ToolEvidenceError):
+    """A tool was cut by the rollout's wall-clock deadline: the model's budget, not missing evidence."""
 
 
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
@@ -270,7 +274,14 @@ def final_answer(output: list[dict], *, strip_reasoning: bool = False, block_sep
 def trajectory_tool_reward(
     response, trajectory, base_reward: float, config: OpenCodeToolRewardConfig, observations=None
 ):
-    """Use the shared harness's canonical execution outcomes, including shell exit failures."""
+    """Use the shared harness's canonical execution outcomes, including shell exit failures.
+
+    A tool left unfinished under a root invocation the harness stopped at its wall-clock deadline
+    (``status="incomplete"``, ``error_type="timeout"``) was cut by the rollout timeout, which is the
+    model's budget: the row is not scored and RolloutTimeoutToolEvidence lets the caller mask it as an
+    agent timeout. Any other unfinished or unknown record is missing evidence and raises
+    ToolEvidenceError, which takes precedence, so the caller masks the row as a verifier error.
+    """
     output = [item.model_dump(mode="json") for item in response.output]
     wanted = {item["call_id"] for item in output if item.get("type") == "function_call"}
     if not wanted:
@@ -283,19 +294,30 @@ def trajectory_tool_reward(
         invocations = [item for item in observations.records if isinstance(item, AgentInvocation)]
         tools = [item for item in observations.records if isinstance(item, ToolCallObservation)]
     roots = {inv.invocation_id for inv in invocations if inv.parent_invocation_id is None}
+    timed_out_roots = {
+        inv.invocation_id
+        for inv in invocations
+        if inv.parent_invocation_id is None and inv.status == "incomplete" and inv.error_type == "timeout"
+    }
     records = {}
+    cut_by_deadline = []
     for tool in tools:
         if tool.invocation_id not in roots:
             continue
         call_id = tool.tool_call_id if tool.tool_call_id in wanted else tool.native_tool_call_id
         if call_id not in wanted:
             continue
-        if call_id in records:
+        if call_id in records or call_id in cut_by_deadline:
             raise ToolEvidenceError(f"Ambiguous tool evidence for {call_id}")
-        if tool.status in {"incomplete", "unknown"}:
+        if tool.status == "unknown" or (tool.status == "incomplete" and tool.invocation_id not in timed_out_roots):
             raise ToolEvidenceError(f"Unfinished tool evidence for {call_id}")
+        if tool.status == "incomplete":
+            cut_by_deadline.append(call_id)
+            continue
         success = tool.status == "completed"
         records[call_id] = (tool.tool_name, "completed" if success else "error", 0 if success else None)
+    if cut_by_deadline:
+        raise RolloutTimeoutToolEvidence(f"Tool cut by the rollout timeout: {', '.join(cut_by_deadline)}")
     return score_opencode_tools(records, output, base_reward, config)
 
 
@@ -365,12 +387,13 @@ class ToolRewardVerifier:
                 else None
             )
         except ToolEvidenceError as error:
-            # An unusable tool trace is a verifier failure, not a wrong answer or judge outage.
+            # A rollout cut by its own deadline is the model's budget (agent_timeout); any other unusable tool trace
+            # is a verifier failure, not a wrong answer or judge outage. Both rows are masked.
             masked = result.model_dump(mode="json") | {
                 "response": original,
                 "reward": 0.0,
                 "mask_sample": True,
-                "failure_kind": VERIFIER_ERROR,
+                "failure_kind": AGENT_TIMEOUT if isinstance(error, RolloutTimeoutToolEvidence) else VERIFIER_ERROR,
                 "failure_reason": str(error),
             }
             if "evaluation_completed" in masked:

@@ -1154,11 +1154,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
         if self._search_cache.enabled:
             LOG.info(
-                "Search cache enabled at %s (fuzzy=%s, read_only=%s, index norms=%s)",
+                "Search cache enabled at %s (fuzzy=%s, read_only=%s, index norms=%s, pack=%s)",
                 cache_dir,
                 self.config.search_cache_fuzzy_threshold or "off",
                 self._search_cache.read_only,
                 self._search_cache.index_size,
+                self._search_cache.pack_generation or "off",
             )
 
         print(f"Excluded domains: {self._exclude_domains}")
@@ -1234,8 +1235,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._validate_shell_config()
         if not isinstance(body, ResourcesSeedSessionRequest):
             # An agent's /run seeds with its row; /verify owns its eventual cleanup. Such an agent can end a run
-            # without /verify (after a timeout, for example), so its sandbox starts with the first bash_command: only
-            # a run that used the shell can leave one behind, and a failed start cannot strand this seed's workspace.
+            # without /verify (after an agent error, for example), so its sandbox starts with the first bash_command:
+            # only a run that used the shell can leave one behind, and a failed start cannot strand this seed's
+            # workspace.
             sid = request.session[SESSION_ID_KEY]
             async with self._locks.locked(sid):
                 if self.config.workspace == "per_session":
@@ -2103,8 +2105,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         judge_error = None
         if timed_out:
-            # Wrong by construction: the agent's /run scores it 0 without a verify, and an Environment Server's
-            # verify does the same without calling the judge.
+            # Wrong by construction, so it scores 0 without the judge. Both the agent's /run and an Environment Server
+            # send a timed-out rollout here.
             judge_evaluation = JudgeEvaluation(
                 reasoning="The rollout reached its time limit.", extracted_final_answer="", reward=0.0
             )
