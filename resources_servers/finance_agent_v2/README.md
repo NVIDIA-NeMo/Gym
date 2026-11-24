@@ -49,6 +49,13 @@ copy whose inode, size, modification time and change time match the source is
 reused, so only the first server on a node copies it. A later start removes the
 versions that no running server reads.
 
+Put the stage folder on a node-local disk. On NFS or Lustre, file locks can cover
+only one node, so a start on one node can remove the copy that another node
+reads. A start removes old versions of the same index path only. Copies for
+other index paths, and files that earlier versions of this code left directly in
+the stage folder or in a source subfolder, stay until you delete them. Delete
+the stage folder only when no server on the node is running.
+
 The benchmark config sets `live`. Asking for `local` without an index fails at
 startup. The
 mode in use, and in local mode the date range the index covers, is logged at

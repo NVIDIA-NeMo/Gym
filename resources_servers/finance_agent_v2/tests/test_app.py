@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import time
 from collections import Counter
@@ -627,6 +628,22 @@ class TestLocalEdgarStaging:
 
         monkeypatch.setattr("shutil.copy2", fail_copy)
         with pytest.raises(OSError, match="No space left on device"):
+            stage_local_edgar_files(str(index), None, str(stage))
+
+        assert sorted(p.name for p in _per_source(stage, index).iterdir()) == [".stage.lock"]
+
+    def test_a_source_that_changes_during_the_copy_fails_the_start(self, tmp_path, monkeypatch) -> None:
+        """A copy of a source rewritten mid-copy can mix two versions, so it is never renamed into place."""
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        copy2 = shutil.copy2
+
+        def copy_then_rebuild(source, target) -> None:
+            copy2(source, target)
+            _rewrite_header(index, user_version=7)
+
+        monkeypatch.setattr("shutil.copy2", copy_then_rebuild)
+        with pytest.raises(RuntimeError, match="changed while it was copied"):
             stage_local_edgar_files(str(index), None, str(stage))
 
         assert sorted(p.name for p in _per_source(stage, index).iterdir()) == [".stage.lock"]
