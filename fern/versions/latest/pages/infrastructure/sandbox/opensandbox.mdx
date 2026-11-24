@@ -450,9 +450,10 @@ options, and the default keep-alive entrypoint. Closing the main sandbox deletes
 
   With `networking.enabled: true`, the main sandbox's policy also gets a leading allow rule for each sidecar's IP, so a
   deny-by-default main sandbox still reaches its sidecars. That rule opens every port of the sidecar, including its
-  exec daemon (44772) and egress API (18080): code in the main sandbox can run commands in a sidecar and read the
-  environment it was given. Do not give a sidecar a secret that the main sandbox's code must not read. A sidecar under
-  a deny-by-default policy cannot open a connection to the main sandbox.
+  exec daemon (44772) and egress API (18080): code in the main sandbox can run commands in a sidecar, read the
+  environment it was given and change its egress policy. Do not give a sidecar a secret that the main sandbox's code
+  must not read, and do not rely on a sidecar's own policy against code in the main sandbox. A sidecar under a
+  deny-by-default policy cannot open a connection to the main sandbox.
 - A sidecar that does not start, or that the main sandbox cannot reach by IP, fails the create as a provider failure
   (`provider_setup_failed` when its address is not peer-reachable) and deletes every member already started.
 - `sandbox.sidecar(name).exec(*argv)` quotes the argv into one shell command, so the sidecar image needs a POSIX

@@ -2029,30 +2029,36 @@ class OpenSandboxProvider:
             if isinstance(error, Exception) and not isinstance(error, NgFailureEvent):
                 raise opensandbox_failure(operation="connect", sandbox_id=sandbox_id, cause=error) from error
             raise
+        sidecars: dict[str, SandboxHandle] = {}
+        if sandbox_id not in self._sidecars:
+            try:
+                for name, sidecar_id in (descriptor.get("sidecar_ids") or {}).items():
+                    sidecars[name] = await self.connect({"sandbox_id": sidecar_id})
+            except BaseException:
+                # A sandbox whose sidecar is gone is not reattached. Release the local handles connected so far.
+                await self._close_local_handles([handle, *sidecars.values()], operation="close_after_connect_failure")
+                raise
         if sandbox_id in self._sidecars:
-            # This provider created the sandbox, or connected it before: the connects share its sidecar handles.
+            # This provider created the sandbox, or another connect holds its sidecars (also one that finished while
+            # this one connected its own): the connects share those handles.
+            await self._close_local_handles(list(sidecars.values()), operation="close")
             if sandbox_id in self._connected_sidecars:
                 self._connected_sidecars[sandbox_id] += 1
-            return handle
-        sidecars: dict[str, SandboxHandle] = {}
-        try:
-            for name, sidecar_id in (descriptor.get("sidecar_ids") or {}).items():
-                sidecars[name] = await self.connect({"sandbox_id": sidecar_id})
-        except BaseException:
-            # A sandbox whose sidecar is gone is not reattached. Release the local handles connected so far.
-            for connected in (handle, *sidecars.values()):
-                with suppress(Exception):
-                    await self._await_sdk_call(
-                        connected.raw.close(),
-                        operation="close_after_connect_failure",
-                        sandbox_id=connected.sandbox_id,
-                        timeout_s=self._operations.close_timeout_s,
-                    )
-            raise
-        if sidecars:
+        elif sidecars:
             self._sidecars[sandbox_id] = sidecars
             self._connected_sidecars[sandbox_id] = 1
         return handle
+
+    async def _close_local_handles(self, handles: list[SandboxHandle], *, operation: str) -> None:
+        """Close the local SDK resources of these handles; the sandboxes keep running."""
+        for handle in handles:
+            with suppress(Exception):
+                await self._await_sdk_call(
+                    handle.raw.close(),
+                    operation=operation,
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=self._operations.close_timeout_s,
+                )
 
     async def disconnect_handle(self, handle: SandboxHandle) -> None:
         """Release the sidecar handles ``connect`` made for a borrowed sandbox once no other connect shares them.
@@ -2066,14 +2072,7 @@ class OpenSandboxProvider:
             self._connected_sidecars[handle.sandbox_id] = shared_by - 1
             return
         del self._connected_sidecars[handle.sandbox_id]
-        for sidecar in self._sidecars.pop(handle.sandbox_id, {}).values():
-            with suppress(Exception):
-                await self._await_sdk_call(
-                    sidecar.raw.close(),
-                    operation="close",
-                    sandbox_id=sidecar.sandbox_id,
-                    timeout_s=self._operations.close_timeout_s,
-                )
+        await self._close_local_handles(list(self._sidecars.pop(handle.sandbox_id, {}).values()), operation="close")
 
     async def pause(self, handle: SandboxHandle) -> None:
         """Pause a sandbox and wait until it reports paused.
@@ -3006,7 +3005,7 @@ class OpenSandboxProvider:
         group = spec.metadata.get(PLACEMENT_GROUP_KEY) or f"sidecars-{uuid.uuid4().hex}"
         spec = replace(spec, metadata={**spec.metadata, PLACEMENT_GROUP_KEY: group})
         policy = spec.provider_options.get("network_policy")
-        # Checked before anything starts, so a misspelled option or name of the last sidecar leaves no sandbox behind.
+        # A sidecar's misspelled option or name stops the create before any sandbox starts.
         for sidecar in spec.sidecars:
             OpenSandboxProviderOptions.from_mapping(sidecar.provider_options)
             if self._networking.enabled:
@@ -3016,9 +3015,10 @@ class OpenSandboxProvider:
         try:
             for sidecar in spec.sidecars:
                 options = dict(sidecar.provider_options)
-                if policy is not None:
-                    # An empty policy still denies by default, so it is passed on like any other.
-                    options.setdefault("network_policy", policy)
+                if options.get("network_policy") is None:
+                    # An empty policy still denies by default, so it is passed on like any other; a sidecar never
+                    # gets less restricted egress than the main sandbox unless it names its own policy.
+                    options["network_policy"] = policy
                 sidecar_spec = SandboxSpec(
                     image=sidecar.image,
                     env=sidecar.env,
@@ -3702,6 +3702,9 @@ class OpenSandboxProvider:
             logs = None
             output_deleted = True
         stdout = getattr(logs, "content", None) or None
+        # The rest is sliced from the full read by the characters forwarded so far. Where a poll ended inside a
+        # multi-byte character, the streamed text shows two replacement characters for it and this slice is one
+        # character short; `result.stdout` is exact.
         if on_stdout is not None and stdout and (rest := stdout[forwarded:]):
             on_stdout(rest)
         status_error = getattr(status, "error", None)

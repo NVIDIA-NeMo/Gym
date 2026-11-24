@@ -15,6 +15,7 @@
 
 """Sidecars on OpenSandbox: each one is a sandbox of its own, in the main sandbox's placement group."""
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -66,6 +67,8 @@ class FakeSandbox:
 
     @classmethod
     async def connect(cls, sandbox_id: str, **_kwargs: Any) -> "FakeSandbox":
+        # A real connect waits on the network, so concurrent connects interleave here.
+        await asyncio.sleep(0)
         if sandbox_id == cls.fail_connect:
             raise ValueError("no such sandbox")
         return cls(sandbox_id)
@@ -395,13 +398,14 @@ async def test_a_sidecar_with_its_own_egress_policy_reaches_only_its_own_hosts(
     spec = SandboxSpec(
         image="task:1",
         provider_options={"network_policy": _only("models.example.com")},
-        sidecars=[tools, {"name": "judge", "image": "judge:3"}],
+        sidecars=[tools, {"name": "judge", "image": "judge:3", "provider_options": {"network_policy": None}}],
     )
 
     await provider.create(spec)
 
     tools_created, judge_created, main = FakeSandbox.created
-    # Its own policy and options replace what it would get from the main sandbox; a sidecar without one inherits.
+    # Its own policy and options replace what it would get from the main sandbox; a sidecar without one (or with
+    # `None`) inherits, so it is never less restricted than the main sandbox by accident.
     assert tools_created["network_policy"] == _only("api.example.com")
     assert tools_created["extensions"]["pool"] == "t"
     assert judge_created["network_policy"] == _only("models.example.com")
@@ -496,3 +500,22 @@ async def test_an_owner_that_connected_the_sandbox_still_deletes_the_sidecars_af
     await owner.stop()
 
     assert sorted(FakeSandbox.killed) == ["sandbox-1", "sandbox-2"]
+
+
+async def test_concurrent_connects_on_one_provider_share_one_set_of_sidecar_handles(provider) -> None:
+    owner = await AsyncSandbox(provider, _SPEC).start()
+    descriptor = await owner.serialize()
+    shared = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    first, second = await asyncio.gather(
+        AsyncSandbox.connect(descriptor, provider=shared, owns_provider=False),
+        AsyncSandbox.connect(descriptor, provider=shared, owns_provider=False),
+    )
+    # Both connected the sidecar; the one that finished second released its own handle and shares the other.
+    assert FakeSandbox.closed == ["sandbox-1"]
+    await first.disconnect()
+
+    assert (await second.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: status"
+    await second.disconnect()
+    assert shared._sidecars == {} and shared._connected_sidecars == {}
+    assert FakeSandbox.closed == ["sandbox-1", "sandbox-1"]
