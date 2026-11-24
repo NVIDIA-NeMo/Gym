@@ -60,22 +60,24 @@ def server_log_locations(
             and name not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
             and maybe_get_server_instance_config(name=name, server_type_config_dict=value)[0] is not None
         ]
-        root = Path(log_dir).expanduser().resolve()
+        root, listed = None, []
+        # `glob()` would hide a folder it cannot read, and an unknown `~user` raises while expanding.
+        try:
+            root = Path(log_dir).expanduser().resolve()
+            listed = [path for path in root.iterdir() if path.suffix == ".log"]
+        except FileNotFoundError:
+            pass
+        except (OSError, RuntimeError) as error:
+            locations["log_dir_error"] = f"{log_dir} cannot be listed: {getattr(error, 'strerror', None) or error}"
         # The servers this config starts; their files may not exist yet.
-        configured = {name.replace("/", "_"): str(root / f"{name.replace('/', '_')}.log") for name in names}
+        configured = (
+            {name.replace("/", "_"): str(root / f"{name.replace('/', '_')}.log") for name in names} if root else {}
+        )
         if configured:
             locations["gym_servers"] = dict(sorted(configured.items()))
         # Other logs already in the folder: a `--no-serve` run starts no servers, while the `gym env start`
         # serving it may log there. A shared folder also holds earlier runs' logs, so these are only candidates.
-        try:
-            others = (
-                {path.stem: str(path) for path in root.glob("*.log") if path.stem not in configured}
-                if root.is_dir()
-                else {}
-            )
-        except OSError as error:
-            others = {}
-            locations["log_dir_error"] = f"{root} cannot be listed: {error.strerror or error}"
+        others = {path.stem: str(path) for path in listed if path.stem not in configured}
         if others:
             locations["unverified_log_dir_files"] = dict(sorted(others.items()))
     service_dir = environ.get(SERVICE_LOG_DIR_ENV, "").strip()

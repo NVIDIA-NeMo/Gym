@@ -12,9 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import errno
 import json
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.artifacts.server_logs import NO_LOG_LOCATION_REASON, server_log_locations, write_server_log_locations
@@ -120,17 +122,47 @@ def test_a_collector_that_starts_no_servers_does_not_claim_its_configs_servers(t
     assert locations["unverified_log_dir_files"] == {"policy_model": str(logs / "policy_model.log")}
 
 
-def test_a_log_folder_that_cannot_be_listed_is_recorded_not_raised(tmp_path: Path) -> None:
-    locked = tmp_path / "locked"
-    (locked / "logs").mkdir(parents=True)
-    locked.chmod(0)
-    try:
-        locations = server_log_locations(OmegaConf.create({"nemo_gym_log_dir": str(locked / "logs")}), environ={})
-    finally:
-        locked.chmod(0o755)
+def _refused_on_open(self):
+    raise PermissionError(errno.EACCES, "Permission denied", str(self))
+
+
+def _refused_on_read(self):
+    raise PermissionError(errno.EACCES, "Permission denied", str(self))
+    yield
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        pytest.param(_refused_on_open, id="a parent it cannot traverse"),
+        pytest.param(_refused_on_read, id="a folder it cannot read"),
+    ],
+)
+def test_a_log_folder_that_cannot_be_listed_is_recorded_not_raised(tmp_path: Path, monkeypatch, listing) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "policy_model.log").write_text("")
+    monkeypatch.setattr(Path, "iterdir", listing)
+
+    locations = server_log_locations(OmegaConf.create({"nemo_gym_log_dir": str(logs)}), environ={})
 
     assert locations["status"] == "unavailable" and "unverified_log_dir_files" not in locations
-    assert locations["log_dir_error"].startswith(f"{locked / 'logs'} cannot be listed: ")
+    assert locations["log_dir_error"] == f"{logs} cannot be listed: Permission denied"
+
+
+def test_a_log_folder_whose_path_cannot_be_expanded_is_recorded_not_raised() -> None:
+    config = _config(nemo_gym_log_dir="~no-such-gym-user/logs")
+
+    locations = server_log_locations(config, environ={})
+
+    assert locations["status"] == "unavailable" and "gym_servers" not in locations
+    assert locations["log_dir_error"].startswith("~no-such-gym-user/logs cannot be listed: ")
+
+
+def test_a_log_folder_not_created_yet_is_no_error(tmp_path: Path) -> None:
+    locations = server_log_locations(_config(nemo_gym_log_dir=str(tmp_path / "logs")), environ={})
+
+    assert locations["status"] == "available" and "log_dir_error" not in locations
 
 
 def test_no_serve_collection_records_this_attempts_log_locations_before_collecting(
