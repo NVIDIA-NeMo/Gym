@@ -16565,6 +16565,31 @@ class TestEnrichRunResult:
         captured = result[NG_CAPTURED_CALLS_KEY]
         assert (captured["calls"], captured["capture_complete"]) == (1, False)
 
+    async def test_a_write_claimed_after_the_read_started_leaves_the_counts_incomplete(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import nemo_gym.rollouts.model_calls as model_calls
+        from nemo_gym.models.model_call_capture import CaptureStore
+        from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        read = model_calls._read_capture_records
+
+        def read_then_a_whole_late_write(store: CaptureStore, rollout_id: str):
+            records = read(store, rollout_id)
+            store.mark_pending(rollout_id, "c2")
+            self._store_call(tmp_path, rollout_id, "c2", "late")
+            store.clear_pending(rollout_id, "c2")
+            return records
+
+        monkeypatch.setattr(model_calls, "_read_capture_records", read_then_a_whole_late_write)
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        captured = result[NG_CAPTURED_CALLS_KEY]
+        assert (captured["calls"], captured["capture_complete"]) == (1, False)
+
     async def test_the_capture_is_kept_when_a_record_could_not_be_read(self, tmp_path: Path) -> None:
         from nemo_gym.models.model_call_capture import CaptureStore
         from nemo_gym.rollouts.rollout_collection import enrich_run_result

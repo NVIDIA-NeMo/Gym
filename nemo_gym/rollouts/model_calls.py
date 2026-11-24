@@ -66,6 +66,13 @@ def _read_capture_records(
     return calls, verifier_invocations, invalid_count
 
 
+def _capture_size(store: CaptureStore, rollout_id: str) -> Optional[int]:
+    try:
+        return store.path_for(rollout_id).stat().st_size
+    except FileNotFoundError:
+        return None
+
+
 def aggregate_model_call_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
     """Aggregate model-call metrics for one rollout id."""
     return aggregate_model_call_records(read_model_call_records(store, rollout_id))
@@ -181,9 +188,9 @@ def merge_model_call_capture_into_record(
         gaps.append(ObservationGap(code="model_call_capture_no_records"))
     else:
         try:
-            # Checked before the read as well: a write that appends and clears its claim while the read runs
-            # leaves no claim afterwards, and the snapshot would read as complete without its row.
-            pending = store.has_pending(rollout_id)
+            # A write that appends and clears its claim around the read leaves no claim for the check below, so the
+            # file's size is compared across the read as well. Only a write claimed after both checks is missed.
+            size_before = _capture_size(store, rollout_id)
             calls, verifier_invocations, invalid_count = _read_capture_records(store, rollout_id)
             if invalid_count:
                 gaps.append(
@@ -192,7 +199,7 @@ def merge_model_call_capture_into_record(
                         detail=f"count={invalid_count}",
                     )
                 )
-            if pending or store.has_pending(rollout_id):
+            if store.has_pending(rollout_id) or _capture_size(store, rollout_id) != size_before:
                 gaps.append(ObservationGap(code="model_call_capture_pending"))
             if store.is_incomplete(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_incomplete"))
