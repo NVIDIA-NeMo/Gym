@@ -9037,7 +9037,9 @@ class TestRolloutCollection:
         input_fpath, output_fpath = tmp_path / "input.jsonl", tmp_path / "rollouts.jsonl"
         input_fpath.write_bytes(
             b"".join(
-                orjson.dumps({"responses_create_params": {"input": [], "task": task}, AGENT_REF_KEY_NAME: {"name": "agent"}})
+                orjson.dumps(
+                    {"responses_create_params": {"input": [], "task": task}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+                )
                 + b"\n"
                 for task in ("complete", "incomplete")
             )
@@ -16560,7 +16562,8 @@ class TestEnrichRunResult:
         )
 
         assert {"code": "model_call_capture_pending"} in result["ng_model_call_capture"]["gaps"]
-        assert (result[NG_CAPTURED_CALLS_KEY]["calls"], result[NG_CAPTURED_CALLS_KEY]["capture_complete"]) == (1, False)
+        captured = result[NG_CAPTURED_CALLS_KEY]
+        assert (captured["calls"], captured["capture_complete"]) == (1, False)
 
     async def test_the_capture_is_kept_when_a_record_could_not_be_read(self, tmp_path: Path) -> None:
         from nemo_gym.models.model_call_capture import CaptureStore
