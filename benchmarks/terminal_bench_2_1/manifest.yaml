@@ -1,0 +1,65 @@
+name: terminal_bench_2_1
+version: 0.2.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: The 89 pinned Terminal-Bench 2.1 task folders in their Harbor format, run through
+  the Harbor environment server and graded by each task's own tests.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- bxyu-nvidia
+- iguehring-nvidia
+- yaoyu-33
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/env_feedback_interpretation
+- tool_and_computer_use/multi_step_tool_use
+- coding
+- coding/code_generation
+- coding/debugging_and_testing
+- coding/repository_coding
+- coding/systems_coding
+- coding/code_understanding
+- coding/ml_engineering
+- coding/scientific_coding
+- planning_and_autonomy
+- planning_and_autonomy/error_recovery
+- planning_and_autonomy/self_verification
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- data_analysis
+domains:
+- computer_science
+- artificial_intelligence
+- cybersecurity
+- data_science
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: terminus_2.yaml
+harbor_target: terminal_bench_2_1
+resources_server: null
+agent_server: terminus_2_agent
+datasets: []
+model_server: policy_model
+canonical_split: full
+prompt_source: prepared
+lifecycle: active

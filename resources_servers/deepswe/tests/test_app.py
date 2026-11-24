@@ -1833,7 +1833,7 @@ async def test_a_failed_ripgrep_staging_cannot_start_a_session(
 def test_a_missing_ripgrep_refuses_to_start_the_server(task_assets: Path, tmp_path: Path) -> None:
     config = _config(task_assets, golden=False)
     config.agent_ripgrep_path = tmp_path / "rg"
-    with pytest.raises(ValueError, match=re.escape("run `gym eval prepare --benchmark deepswe/opencode`")):
+    with pytest.raises(ValueError, match=re.escape("run `gym eval prepare --benchmark deepswe`")):
         DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 

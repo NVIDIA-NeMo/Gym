@@ -4,14 +4,14 @@ The 70 Terminal-Bench-Science v0.1 tasks run as plain Harbor task folders throug
 server. The dataset comes from Harbor's package store, pinned by the same digest
 `benchmarks/terminal_bench_science/manifest.json` records for the resources server's presets, so both paths run the
 same packages; the pull records each task's content hash in `manifest.toml` and refuses a task folder that no longer
-matches it. Run it through the `terminal_bench_science/miniswe` benchmark, which carries the server settings a
+matches it. Run it through the `terminal_bench_science` benchmark, which carries the server settings a
 full run needs (see `benchmarks/terminal_bench_science/README.md`, "Run"):
 
 ```sh
 gym dataset pull terminal_bench_science
 gym dataset validate terminal_bench_science --sandbox opensandbox \
   --exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning
-gym eval run --benchmark terminal_bench_science/miniswe --sandbox opensandbox \
+gym eval run --benchmark terminal_bench_science --sandbox opensandbox \
   --exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning \
   --model-type vllm_model --model <model> --model-url <url>
 ```
@@ -63,5 +63,5 @@ recorded is skipped with the loader's message. The sandbox deployment must be ab
 - **Untested Compose tasks.** `longitudinal-clinical-agent` and `tamp-skill-planning` have no known Compose field
   rejection after image preparation, but neither has been run on this route. Their sidecars run as separate sandboxes.
 - **Disk.** Without the benchmark's settings, a sandbox's disk limit is the package's `storage_mb` (at most 20 GiB);
-  OpenSandbox evicts a sandbox that writes past its limit. The `terminal_bench_science/miniswe` benchmark raises it to
+  OpenSandbox evicts a sandbox that writes past its limit. The `terminal_bench_science` benchmark raises it to
   100 GiB, as the resources server does.

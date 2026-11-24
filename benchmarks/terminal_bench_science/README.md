@@ -9,7 +9,7 @@ Every task is a Harbor package. Its agent works in a container with public netwo
 for up to 8 hours. A separate verifier container with no network then grades the declared
 artifacts.
 
-`terminal_bench_science/miniswe` runs the tasks on the generic
+`terminal_bench_science` (`miniswe.yaml`) runs the tasks on the generic
 [`environment_servers/harbor`](../../environment_servers/harbor/README.md) environment server,
 through the committed entry
 [`environments/harbor/terminal_bench_science`](../../environments/harbor/terminal_bench_science/README.md),
@@ -22,7 +22,7 @@ runtime; [Profile](#profile) says which of its settings the Harbor preset carrie
 
 ## Measurement contract
 
-`terminal_bench_science/miniswe` protocol `0.2.0` selects the 70 pinned tasks through the Harbor
+`terminal_bench_science` protocol `0.2.0` selects the 70 pinned tasks through the Harbor
 environment server, with incomplete coverage. Preparation skips `inverse-lithography`,
 `noisy-blackbox-optimization` and `protein-active-learning` because their Compose settings are
 unsupported on this route (see the entry's [Known limits](../../environments/harbor/terminal_bench_science/README.md#known-limits)).
@@ -515,7 +515,7 @@ the cell reaches the model server only through a proxy, also set
 
 ```sh
 gym dataset pull terminal_bench_science
-gym eval run --benchmark terminal_bench_science/miniswe --sandbox opensandbox \
+gym eval run --benchmark terminal_bench_science --sandbox opensandbox \
   --exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning \
   --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
   --model MODEL_NAME --output results/tbsci/rollouts.jsonl --concurrency 8 \

@@ -3,8 +3,8 @@
 The 66 Terminal Bench 4 tasks also run as plain Harbor task folders through the generic `harbor` environment
 server, without the `terminal_bench_4` benchmark's own server. The dataset comes from Harbor's package store,
 pinned by tag (`@4.1.0`); the pull records each task's content hash in `manifest.toml` and refuses a task
-folder that no longer matches it. The `terminal_bench_4/miniswe` benchmark runs this entry with mini-SWE at the Artificial
-Analysis settings (`gym eval run --benchmark terminal_bench_4/miniswe`; see `benchmarks/terminal_bench_4/README.md`).
+folder that no longer matches it. The `terminal_bench_4` benchmark runs this entry with mini-SWE at the Artificial
+Analysis settings (`gym eval run --benchmark terminal_bench_4`; see `benchmarks/terminal_bench_4/README.md`).
 
 ```sh
 gym dataset pull terminal_bench_4

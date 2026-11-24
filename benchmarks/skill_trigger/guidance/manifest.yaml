@@ -1,0 +1,40 @@
+name: skill_trigger/guidance
+version: 0.2.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: Whether a model opens a skill's instructions when a task calls for it, with the
+  harness's skill-usage guidance turned on, scored from the tool results in Harbor's recorded
+  trajectory.
+modality: text
+licensing: unknown
+authors:
+- Daniel Burkhardt
+maintainers:
+- dburkhardt
+capabilities: unknown
+domains: unknown
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: ../configs/codex_guidance/config.yaml
+resources_server: null
+agent_server: harbor_agent_general
+datasets:
+- name: skill_trigger
+  type: benchmark
+  jsonl_fpath: benchmarks/skill_trigger/data/tasks/gym.jsonl
+  prepare_script: benchmarks/skill_trigger/package.py
+  num_repeats: 1
+model_server: null
+canonical_split: full
+prompt_source: agent
+lifecycle: active

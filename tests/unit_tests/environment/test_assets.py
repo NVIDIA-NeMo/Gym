@@ -145,3 +145,42 @@ def test_every_listed_catalog_name_selects_its_own_config() -> None:
             continue  # resources-server workloads are selected with `--resources-server`
         resolved = Path(asset_config_path(entry.kind, entry.name))
         assert resolved == entry.config_path.resolve(), f"`--{entry.kind} {entry.name}` does not select its config"
+
+
+class TestRenamedCatalogNames:
+    @pytest.fixture
+    def suite(self, roots: list[Path], monkeypatch: pytest.MonkeyPatch) -> Path:
+        """`suite/verified` with its default config `opencode.yaml` and a `hermes.yaml` run preset."""
+        from nemo_gym.environment.catalog_renames import RENAMED_CATALOG_NAMES
+
+        high, _low = roots
+        data = _manifest("suite/verified", "benchmark", config_path="opencode.yaml")
+        manifest_path = _write_manifest(high, "benchmarks", "suite/verified", data, with_config=False)
+        for config in ("opencode.yaml", "hermes.yaml"):
+            _write_config(manifest_path.with_name(config))
+        for old in ("suite/verified/opencode", "suite/verified/hermes", "suite/verified/gone"):
+            monkeypatch.setitem(RENAMED_CATALOG_NAMES, old, "suite/verified")
+        return manifest_path.parent
+
+    def test_an_old_name_for_the_same_config_is_deprecated(
+        self, suite: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            assert asset_config_path("benchmark", "suite/verified/opencode") == str(
+                (suite / "opencode.yaml").resolve()
+            )
+        assert "Catalog name `suite/verified/opencode` is deprecated" in caplog.text
+
+    def test_an_old_name_that_selects_a_run_preset_keeps_selecting_it(
+        self, suite: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            assert asset_config_path("benchmark", "suite/verified/hermes") == str((suite / "hermes.yaml").resolve())
+        assert "deprecated" not in caplog.text
+
+    def test_an_old_name_without_a_config_selects_its_replacement(
+        self, suite: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level(logging.WARNING):
+            assert asset_config_path("benchmark", "suite/verified/gone") == str((suite / "opencode.yaml").resolve())
+        assert "Catalog name `suite/verified/gone` is deprecated" in caplog.text
