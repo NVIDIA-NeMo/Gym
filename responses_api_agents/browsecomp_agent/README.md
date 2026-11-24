@@ -44,6 +44,20 @@ request carries no `stop_reason`. Nothing in Gym reads the field.
 
 Host `/v1/responses` and `/run` are disabled by default. Development-only compatibility requires `allow_host_execution: true`; `/run` also requires an explicit `resources_server`. The resources server independently requires its own host-execution opt-in if its tool sandbox is disabled. These options do not provide isolation.
 
+## OpenSandbox tools sidecar
+
+The [sidecar configuration](../../resources_servers/browsecomp_advanced_harness/configs/browsecomp_opensandbox_tool_sidecar.yaml) runs the agent and tools in separate sandboxes in one OpenSandbox placement group. It requires provider support for named sidecars, direct peer IPs, and a main image where the provider can set the `tools` hostname. The agent calls `http://tools:8080` with a per-rollout bearer grant. The tools sandbox holds the search credential. The supervisor reads its metrics before teardown, and the outside verifier checks the exclusion-list digest before grading.
+
+Build the tools image from the same Gym revision as the agent. Supply the same exclusion list to the build and the outside resources server.
+
+```bash
+docker build -f resources_servers/browsecomp_advanced_harness/Dockerfile.tools \
+  --build-arg BROWSECOMP_EXCLUDE_DOMAINS=nemotron_recipes/lightning-3.5/instruct/gym/browsecomp/exclude_domains.json \
+  -t browsecomp-tools:local .
+```
+
+Set `GYM_BROWSECOMP_TOOLS_IMAGE` to an image the provider can pull and `BROWSECOMP_POLICY_MODEL_HOST` to a sandbox-reachable address on the machine running the Gym policy adapter (port 8000 in the example). Keep the head, agent, verifier and judge on loopback. Supply the upstream policy, search and judge settings named in the configuration. For an external Responses service with a deployment prefix, set `tool_sidecar.model_base_url` to its full API base URL and disable Gym token capture. The provider allows egress to the selected search API and policy host, and adds the tools peer to the main sandbox's policy.
+
 ## License
 
 Apache-2.0. Dependencies: NeMo Gym (Apache-2.0).

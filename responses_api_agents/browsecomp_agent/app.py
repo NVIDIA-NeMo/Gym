@@ -22,12 +22,15 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
+from secrets import token_urlsafe
 from typing import Any, ClassVar, List, Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import aiohttp
 from fastapi import HTTPException, Request, Response
-from pydantic import ConfigDict, Field, JsonValue, ValidationError
+from omegaconf import DictConfig
+from pydantic import ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -88,6 +91,12 @@ from responses_api_agents.browsecomp_agent.sandbox import (
     _ERROR_DETAIL_CHARS,
     BrowsecompSandboxSession,
     SandboxIsolationError,
+)
+from responses_api_agents.browsecomp_agent.tool_sidecar import (
+    BrowsecompToolSidecar,
+    BrowsecompToolSidecarConfig,
+    ToolSidecarImageError,
+    sidecar_spec,
 )
 
 
@@ -189,6 +198,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     allow_host_execution: bool = False
     sandbox_provider: str | None = None
+    tool_sidecar: BrowsecompToolSidecarConfig | None = None
     sandbox_config: dict[str, JsonValue] = Field(
         default_factory=lambda: {"image": "python:3.13-slim", "workdir": "/sandbox"}
     )
@@ -227,6 +237,17 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # result) before the reset fires; without progress the reset fires
     # immediately as before. (ported from the reference harness)
     progress: bool = False
+
+    @model_validator(mode="after")
+    def _sidecar_has_no_host_callbacks(self) -> "BrowsecompAgentConfig":
+        if self.tool_sidecar is not None:
+            if self.allow_host_execution:
+                raise ValueError("tool_sidecar requires sandbox execution")
+            if self.save_model_call_using_vllm_tokenize_endpoint:
+                raise ValueError(
+                    "tool_sidecar uses inference response token counts; disable the Agent Server token-count callback"
+                )
+        return self
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -385,6 +406,53 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             traceback.print_exc()
             raise
 
+    def _grant_tool_sidecar(
+        self,
+        spec: SandboxSpec,
+        sidecar_config: BrowsecompToolSidecarConfig,
+        tool_access: DirectHTTPToolAccess,
+        rollout_id: str,
+    ) -> tuple[SandboxSpec, DirectHTTPToolAccess]:
+        """Replace the outside grant with a credential scoped to this tools sandbox."""
+        global_config = self.server_client.global_config_dict
+        source_url = urlsplit(self.server_client._resolve_base_url(sidecar_config.resources_server.name))
+        granted_url = urlsplit(str(tool_access.base_url))
+        if (source_url.scheme, source_url.netloc) != (granted_url.scheme, granted_url.netloc):
+            raise ValueError("tool_sidecar.resources_server must match the Environment Server's tool grant")
+        resource_config = get_first_server_config_dict(global_config, sidecar_config.resources_server.name)
+        if resource_config.get("workspace", "none") != "none":
+            raise ValueError("The outside Resources Server must use workspace: none; pages live in the tool sidecar")
+        if not resource_config.get("use_tool_sidecar_metrics"):
+            raise ValueError("The outside Resources Server must enable use_tool_sidecar_metrics")
+        sidecar_settings = sidecar_config.tool_settings(resource_config)
+        tool_token = token_urlsafe(32)
+        head = self.server_client.head_server_config
+        # The head server also serves the global configuration.
+        outside_urls = [
+            self.server_client._build_server_base_url(head),
+            *(
+                self.server_client._resolve_base_url(name)
+                for name, instance in global_config.items()
+                if isinstance(instance, (dict, DictConfig))
+                and {"resources_servers", "responses_api_agents", "environment_servers"}.intersection(instance)
+            ),
+        ]
+        owned_spec = sidecar_spec(
+            spec,
+            config=sidecar_config,
+            model_url=self._sandbox_model_url(rollout_id),
+            outside_urls=outside_urls,
+            settings=sidecar_settings,
+            tool_token=tool_token,
+        )
+        tool_access = DirectHTTPToolAccess(
+            name=tool_access.name,
+            required=tool_access.required,
+            base_url=f"http://tools:{sidecar_config.port}",
+            headers={"Authorization": f"Bearer {tool_token}"},
+        )
+        return owned_spec, tool_access
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> BrowsecompSandboxSession:
         if self.config.snap_dir:
             raise AgentSeedRejectedError("snap_dir is supported only by the explicit host compatibility path")
@@ -419,8 +487,6 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError("BrowseComp requires an absolute sandbox workdir")
         try:
             provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
-            if owns_sandbox:
-                SandboxSpec(**self.config.sandbox_config)
         except (TypeError, ValueError) as error:
             # Every seed would fail the same way, so a retryable 500 would only repeat it for each episode.
             raise AgentSeedRejectedError(f"BrowseComp sandbox provider is not usable: {error}") from error
@@ -429,11 +495,42 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(
                 "BrowseComp sessions require an isolated sandbox provider; local is not isolated"
             )
+        sidecar_config = self.config.tool_sidecar
+        owned_spec = None
+        original_resources_cookies = dict(tool_access.cookies) if tool_access else {}
+        if sidecar_config is not None and (not owns_sandbox or provider_name != "opensandbox" or tool_access is None):
+            raise AgentSeedRejectedError(
+                "tool_sidecar requires an agent-owned OpenSandbox sandbox and one direct HTTP resources grant"
+            )
+        if (
+            sidecar_config is not None
+            and provider_config["opensandbox"].get("networking", {}).get("enabled") is not True
+        ):
+            raise AgentSeedRejectedError("tool_sidecar requires OpenSandbox networking.enabled=true")
+        if owns_sandbox:
+            try:
+                spec = dict(self.config.sandbox_config)
+                spec["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, get_global_config_dict()),
+                    **(spec.get("metadata") or {}),
+                    "agent_session_id": body.agent_session_id[:63],
+                }
+                spec.setdefault(
+                    "ttl_s",
+                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
+                )
+                owned_spec = SandboxSpec(**spec)
+                if sidecar_config is not None:
+                    owned_spec, tool_access = self._grant_tool_sidecar(
+                        owned_spec, sidecar_config, tool_access, body.episode_id.capture_key
+                    )
+            except (TypeError, ValueError) as error:
+                raise AgentSeedRejectedError(f"BrowseComp sandbox provider is not usable: {error}") from error
         try:
-            # Every URL the sandboxed loop calls: the model, the tool grant and this agent's token counting.
+            # A tool sidecar is addressed by its placement-group name; only external endpoints need this reachability check.
             sandbox_urls = [
-                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-                str(tool_access.base_url) if tool_access is not None else None,
+                self._sandbox_model_url(body.episode_id.capture_key),
+                str(tool_access.base_url) if tool_access is not None and sidecar_config is None else None,
                 self._token_count_url(),
             ]
             for url in filter(None, sandbox_urls):
@@ -462,23 +559,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 harness="BrowseComp",
             ),
             tool_access=tool_access,
-            resources_cookies=dict(tool_access.cookies) if tool_access else {},
+            resources_cookies=original_resources_cookies,
         )
         try:
             if owns_sandbox:
-                spec = dict(self.config.sandbox_config)
-                spec["metadata"] = {
-                    **resolve_provider_metadata(provider_ref, get_global_config_dict()),
-                    **(spec.get("metadata") or {}),
-                    "agent_session_id": body.agent_session_id[:63],
-                }
-                spec.setdefault(
-                    "ttl_s",
-                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
-                )
                 # Retain ownership before start: failed file delivery can also fail its automatic stop.
                 started = time.monotonic()
-                await sandbox.start(SandboxSpec(**spec))
+                await sandbox.start(owned_spec)
                 state.started_at = time.monotonic()
                 LOG.info(
                     "[browsecomp][sandbox_start] role=agent session=%s provider=%s id=%s start_s=%.3f",
@@ -487,13 +574,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     sandbox.sandbox_id,
                     state.started_at - started,
                 )
+            if sidecar_config is not None:
+                state.tools = BrowsecompToolSidecar(sandbox, sidecar_config)
+                await state.tools.start(lifetime_seconds=owned_spec.ttl_s)
             await state.install_runtime(timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
                 await state.close(timeout=self.config.session_close_timeout_seconds)
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
-            if isinstance(error, SandboxIsolationError):
+            if isinstance(error, (SandboxIsolationError, ToolSidecarImageError)):
                 # Every retry would get a sandbox from the same provider.
                 raise AgentSeedRejectedError(str(error)) from error
             raise
@@ -504,7 +594,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             raise TypeError("Expected BrowseComp agent session state")
         await state.close(timeout=self.config.session_close_timeout_seconds)
         artifacts = state.session.artifacts
-        if artifacts is not None and isinstance(artifacts.get("resources_cookies"), dict):
+        if state.tools is None and artifacts is not None and isinstance(artifacts.get("resources_cookies"), dict):
             state.resources_cookies = _cookie_values(artifacts["resources_cookies"])
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -532,6 +622,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "vLLM token counting is disabled")
         return {"count": await self._count_prompt_tokens(body)}
 
+    def _sandbox_model_url(self, rollout_id: str) -> str:
+        sidecar = self.config.tool_sidecar
+        if sidecar is not None and sidecar.model_base_url is not None:
+            if self._token_id_capture_enabled():
+                raise ValueError("tool_sidecar.model_base_url bypasses Gym model token capture; disable token capture")
+            return sidecar.model_base_url
+        return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+
     def _token_count_url(self) -> str | None:
         """This agent's token-count endpoint, which a sandboxed loop calls instead of the upstream model."""
         if not self.config.save_model_call_using_vllm_tokenize_endpoint:
@@ -547,7 +645,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         if state.request.agent_timeout_sec is not None:
             timeout = min(timeout, state.request.agent_timeout_sec)
         # Keep the native timeout response/zero-reward semantics; the supervisor has a small receipt grace.
-        config = self.config.model_dump(mode="json", exclude={"tool_accesses", "sandbox_config", "sandbox_provider"})
+        config = self.config.model_dump(
+            mode="json", exclude={"tool_accesses", "sandbox_config", "sandbox_provider", "tool_sidecar"}
+        )
         config["rollout_timeout_s"] = min(
             self.config.rollout_timeout_s if self.config.rollout_timeout_s is not None else timeout, timeout
         )
@@ -558,11 +658,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
             "body": body.model_dump(mode="json", exclude_unset=True),
             "config": config,
-            "model_url": self.resolve_model_base_url(
-                self.config.model_server.name, state.request.episode_id.capture_key
-            ),
+            "model_url": self._sandbox_model_url(state.request.episode_id.capture_key),
             "token_count_url": self._token_count_url(),
-            "agent_cookies": dict(request.cookies),
+            "agent_cookies": {} if state.tools is not None else dict(request.cookies),
         }
         output = await state.session.execute(
             stage_activation=lambda: state.stage_activation(payload),
@@ -577,8 +675,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     flush=True,
                 )
             raise RuntimeError(f"BrowseComp sandbox failed: {output['error']}")
-        state.resources_cookies = _cookie_values(output.get("resources_cookies"))
-        return NeMoGymResponse.model_validate(output["response"])
+        result = NeMoGymResponse.model_validate(output["response"])
+        if state.tools is None:
+            state.resources_cookies = _cookie_values(output.get("resources_cookies"))
+        else:
+            result = result.model_copy(update={"browsecomp_tool_metrics": await state.tools.metrics()})
+        return result
 
     async def _run_session_loop(
         self,

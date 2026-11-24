@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build from the repository root. Deploy a digest from the same revision as the Agent Server.
+FROM ghcr.io/astral-sh/uv:0.13.4 AS uv
+FROM python:3.13-slim
+COPY --from=uv /uv /usr/local/bin/uv
+WORKDIR /opt/gym
+COPY pyproject.toml setup.py README.md LICENSE ./
+COPY nemo_gym ./nemo_gym
+# Copy runtime code explicitly: datasets, reference answers, host configs and tests stay outside the image.
+COPY resources_servers/browsecomp_advanced_harness/*.py ./resources_servers/browsecomp_advanced_harness/
+COPY resources_servers/browsecomp_advanced_harness/pocketshell/pyproject.toml resources_servers/browsecomp_advanced_harness/pocketshell/README.md ./resources_servers/browsecomp_advanced_harness/pocketshell/
+COPY resources_servers/browsecomp_advanced_harness/pocketshell/src ./resources_servers/browsecomp_advanced_harness/pocketshell/src
+COPY resources_servers/tavily_search/*.py ./resources_servers/tavily_search/
+RUN mkdir -p cache && uv venv /opt/gym/.venv && uv pip install --python /opt/gym/.venv/bin/python \
+    '.' tavily-python==0.7.21 rapidfuzz==3.14.1 './resources_servers/browsecomp_advanced_harness/pocketshell[pcre]'
+# OpenSandbox starts the tools module through its named sidecar exec API.
+# Supply the benchmark's actual exclusion file; the test fixture is only for development smoke builds.
+ARG BROWSECOMP_EXCLUDE_DOMAINS
+COPY ${BROWSECOMP_EXCLUDE_DOMAINS} /opt/gym/exclude-domains.json
