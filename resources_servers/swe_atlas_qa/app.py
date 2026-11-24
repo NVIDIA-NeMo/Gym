@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run SWE Atlas Q&A with any harness that attaches to a resource-owned sandbox."""
+"""Serve SWE Atlas Q&A tasks in a resource-owned sandbox and grade answers with the upstream rubric evaluator."""
 
 import asyncio
 import json
