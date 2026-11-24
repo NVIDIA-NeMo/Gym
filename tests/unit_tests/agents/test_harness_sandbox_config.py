@@ -68,4 +68,3 @@ class TestHarnessSandboxConfig:
         spec = config.spec({"fake": {}}, network_options=NetworkRuleOptions("no_network", {"run_args": ["--x"]}))
 
         assert spec.provider_options == {"run_args": ["--x"]} and spec.image == "harness:1"
-
