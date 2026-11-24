@@ -36,20 +36,29 @@ With the default SQLite dialect, every grade starts a fresh sandbox from `sandbo
 and then the model's query in it, and stops it. The sandbox runs `sandbox_runner.py` with an uploaded copy of
 `eval_utils.py` (through `run_verification_sandbox`), so a query is executed, timed out and compared by the same code
 as before; this server only reads the verdict. The database is opened read-only, so a query that writes
-(`DROP TABLE`) fails as the model's error instead of changing the database later grades read.
+(`DROP TABLE`, `DELETE`) fails as the model's error instead of changing the database later grades read; before, such
+a query also matched a question whose gold result is empty.
 
 - **Provider.** `sandbox_provider: sandbox` names a top-level block from a provider config, for example
   `nemo_gym/sandbox/providers/docker/configs/docker.yaml`; pass it with `--config`. The server refuses to start
   without it.
-- **Image and database.** `sandbox_config.image` (default `python:3.13.14-slim-trixie`) needs Python 3.11+ with
-  `sqlite3`; its SQLite version decides which SQL functions a query can call, so keep it pinned. The row's database
+- **Image and database.** `sandbox_config.image` (default `python:3.13.14-alpine3.24`: CPython 3.13.14, SQLite
+  3.53.2) needs Python 3.11+ with `sqlite3`. Its SQLite version decides which SQL functions a query can call, so keep
+  it pinned; Debian `-slim` images ship SQLite 3.46, which lacks `IF()`. The row's database
   is uploaded into each sandbox (dev's largest is about 600 MB). To skip the upload, set
   `sandbox_config.databases_dir` to a directory of an image, or of a read-only provider mount, that holds
   `<db_id>/<db_id>.sqlite`.
 - **Limits.** No network: `provider_options.network_policy` denies all egress on OpenSandbox and E2B; on Docker set
-  `network: none` in the provider block. Each query keeps `sql_execution_timeout_s`. `sandbox_config.memory_limit_mib`
-  caps the runner's address space, so a query that needs more memory fails as the model's error instead of killing
-  the sandbox. `max_concurrency` bounds the sandboxes running at once.
+  `network: none` in the provider block (`benchmarks/birdbench/eval.sh` does); Enroot cannot cut it. The runner
+  needs none, and a query cannot open a connection: Python's `sqlite3` loads no extensions and runs one statement
+  per call. Each query keeps `sql_execution_timeout_s`, now on the sandbox's CPU (`resources.cpu: 1`), so a gold
+  query near the limit can time out (masked) where a larger host did not. `sandbox_config.memory_limit_mib` caps
+  the runner's address space, so a query that needs more memory fails as the model's error instead of killing the
+  sandbox. `max_concurrency` bounds the sandboxes running at once.
+- **Startup.** The server grades one known answer (`SELECT sqlite_version()`) on its smallest database in a sandbox
+  before it serves, exactly as it grades a row. A provider or image that cannot grade, or an image whose SQLite is
+  older than `sandbox_config.min_sqlite_version` (3.48, which added `IF()`), stops startup instead of masking or
+  shifting every row; the log names the SQLite version that grades.
 - **Failures.** A sandbox that cannot start, run the runner or report a result is retried on a fresh sandbox
   `inconclusive_verification_retries` times (default 2). If every attempt fails, the row is masked with
   `failure_reason: sandbox_error`, `evaluation_completed: false` and `failure_kind` `provider_unavailable` or

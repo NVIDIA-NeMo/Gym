@@ -15,11 +15,14 @@ bird_sql_resources_server:
       # config that defines the `sandbox` block, e.g. nemo_gym/sandbox/providers/docker/configs/docker.yaml.
       sandbox_provider: sandbox
       sandbox_config:
-        # Pinned: the image's SQLite decides which SQL functions a query can call.
-        image: python:3.13.14-slim-trixie
+        # Pinned: the image's SQLite decides which SQL functions a query can call. This one has CPython 3.13.14 and
+        # SQLite 3.53.2; Debian trixie images have SQLite 3.46, which lacks IF() and fails the startup probe.
+        image: python:3.13.14-alpine3.24
         # Each sandbox gets the row's database (up to 600 MB in dev) by upload. Set databases_dir to an image (or a
         # read-only provider mount) that already holds <db_id>/<db_id>.sqlite to skip the upload.
         databases_dir: null
+        # Remote providers (OpenSandbox) give up on a sandbox not ready by then; the image is small.
+        ready_timeout_s: 180
         resources:
           cpu: 1
           memory_mib: 4096

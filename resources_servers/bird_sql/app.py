@@ -208,7 +208,8 @@ class BirdSqlVerifyResponse(BaseVerifyResponse):
     had_codeblock: bool = False
     execution_match: bool = False
     failure_reason: Optional[FailureCode] = None
-    # False when the verifier could not grade the answer; the row is then masked, and recovery may grade it again.
+    # False when the verifier could not grade the answer: the row is masked, and `gym eval reverify` can grade the kept
+    # answer again.
     evaluation_completed: bool = True
 
 
@@ -289,20 +290,30 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
         return app
 
     async def _probe_sandbox(self) -> None:
-        """Fail startup, instead of masking every row, when the verifier sandbox cannot grade."""
+        """Fail startup, instead of masking every row, when the verifier sandbox cannot grade.
+
+        The probe grades a known answer on the smallest database, delivered the way every row's is.
+        """
+        database = min(self._databases_dir.glob("*/*.sqlite"), key=lambda path: path.stat().st_size, default=None)
+        if database is None:
+            raise RuntimeError(f"no BIRD database under {self._databases_dir} to probe the verifier sandbox with")
         try:
-            versions = await probe_sandbox(
-                provider=self._sandbox_provider, config=self.config.sandbox_config, metadata=self._sandbox_metadata
+            sqlite_version = await probe_sandbox(
+                provider=self._sandbox_provider,
+                config=self.config.sandbox_config,
+                database=database,
+                db_id=database.parent.name,
+                sql_execution_timeout_s=self.config.sql_execution_timeout_s,
+                metadata={**self._sandbox_metadata, "db_id": database.parent.name[:63]},
             )
-        except SandboxVerificationError as e:
+        except (SandboxVerificationError, RuntimeError) as e:
             raise RuntimeError(
                 f"BIRD verifier sandbox from image {self.config.sandbox_config.image!r} cannot grade: {e}"
             ) from e
-        logger.info(
-            "BIRD verifier sandbox ready: image %s, Python %s, SQLite %s",
+        logger.warning(
+            "BIRD verifier sandbox ready: image %s grades with SQLite %s",
             self.config.sandbox_config.image,
-            versions.get("python"),
-            versions.get("sqlite"),
+            sqlite_version,
         )
 
     @staticmethod

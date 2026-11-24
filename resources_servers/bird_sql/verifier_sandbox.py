@@ -29,23 +29,16 @@ _HERE = Path(__file__).parent
 _RUNNER_SOURCES = {name: (_HERE / name).read_text() for name in ("sandbox_runner.py", "eval_utils.py")}
 # Interpreter start-up and writing the result, on top of the two queries.
 _RUNNER_OVERHEAD_S = 30.0
-_PROBE_TIMEOUT_S = 120.0
-# Checks once, at startup, that the image can grade; the real runner then needs no version guard.
-_PROBE_RUNNER = """import json, os, sqlite3, sys
-request = json.load(open(sys.argv[1]))
-if sys.version_info < (3, 11):
-    sys.exit(f"the BIRD verifier image needs Python 3.11+ (asyncio.TimeoutError is TimeoutError), got {sys.version}")
-if request["databases_dir"] and not os.path.isdir(request["databases_dir"]):
-    sys.exit(f"databases_dir {request['databases_dir']} is not a directory in the sandbox")
-json.dump({"python": sys.version.split()[0], "sqlite": sqlite3.sqlite_version}, open(sys.argv[2], "w"))
-"""
+# The startup probe grades this as both the gold and the model's query: it must match, and returns the version.
+PROBE_SQL = "SELECT sqlite_version()"
 _ERROR_TAGS = frozenset({"gold_sql_error", "gold_sql_timeout", "pred_sql_error", "pred_sql_timeout"})
 
 
 class BirdSqlSandboxConfig(SandboxVerificationConfig):
     """The verifier sandbox: one per grade. The image's SQLite decides which SQL functions a query can call."""
 
-    image: str | None = "python:3.13.14-slim-trixie"
+    # Same CPython as the server, with SQLite 3.53 (Debian trixie's 3.46 lacks IF(), which model answers use).
+    image: str | None = "python:3.13.14-alpine3.24"
     # Absolute directory in the sandbox; each grade uses its own subdirectory for the runner, request and database.
     work_dir: str = "/tmp/bird_sql"
     # Directory in the image, or a read-only provider mount, that holds ``<db_id>/<db_id>.sqlite``. Unset, the row's
@@ -54,6 +47,9 @@ class BirdSqlSandboxConfig(SandboxVerificationConfig):
     # Address-space cap for the runner, below the sandbox's memory: a query that needs more fails as a query instead
     # of the sandbox being killed and the grade lost.
     memory_limit_mib: int | None = Field(default=3072, ge=256)
+    # The startup probe refuses an image whose SQLite is older: 3.48 added IF() and IIF() with more than three
+    # arguments, which model answers use and the resources server's own Python already had. Null accepts any version.
+    min_sqlite_version: str | None = "3.48.0"
 
     @model_validator(mode="after")
     def _cap_below_sandbox_memory(self) -> "BirdSqlSandboxConfig":
@@ -72,6 +68,7 @@ class SqliteGrade:
 
     match: bool
     error: str | None
+    sqlite_version: str | None = None
 
 
 def runner_timeout_s(sql_execution_timeout_s: float) -> float:
@@ -87,7 +84,16 @@ def parse_grade(text: str) -> SqliteGrade:
     error = data.get("error")
     if error is not None and error not in _ERROR_TAGS:
         raise ValueError(f"invalid runner error tag: {error!r}")
-    return SqliteGrade(match=data["match"] and error is None, error=error)
+    version = data.get("sqlite_version")
+    return SqliteGrade(
+        match=data["match"] and error is None,
+        error=error,
+        sqlite_version=version if isinstance(version, str) else None,
+    )
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
 
 
 async def grade_in_fresh_sandbox(
@@ -140,23 +146,39 @@ async def grade_in_fresh_sandbox(
 
 
 async def probe_sandbox(
-    *, provider: Mapping[str, Any], config: BirdSqlSandboxConfig, metadata: Mapping[str, str]
-) -> dict[str, str]:
-    """Start one sandbox from the configured image and return its Python and SQLite versions.
+    *,
+    provider: Mapping[str, Any],
+    config: BirdSqlSandboxConfig,
+    database: Path,
+    db_id: str,
+    sql_execution_timeout_s: float,
+    metadata: Mapping[str, str],
+) -> str:
+    """Grade one known answer the way every row is graded, and return the image's SQLite version.
 
-    Run once at startup, so a provider that cannot start sandboxes, an image without Python 3.11+ or a
-    ``databases_dir`` the image lacks fails the server instead of masking every row.
+    Run once at startup with a small database, so a provider that cannot start sandboxes or deliver the database, an
+    image without Python 3.11+, a ``databases_dir`` the image lacks or an image whose SQLite is older than
+    ``min_sqlite_version`` fails the server instead of masking or shifting every row.
 
     Raises:
-        SandboxVerificationError: The sandbox could not start or failed the check.
+        SandboxVerificationError: The sandbox could not grade.
+        RuntimeError: It graded, but not as expected, or its SQLite is too old.
     """
-    return await run_verification_sandbox(
+    grade = await grade_in_fresh_sandbox(
         provider=provider,
         config=config,
-        files={"sandbox_runner.py": _PROBE_RUNNER},
-        request={"databases_dir": config.databases_dir},
-        exec_timeout_s=_PROBE_TIMEOUT_S,
-        parse_result=json.loads,
+        database=database,
+        db_id=db_id,
+        gold_sql=PROBE_SQL,
+        pred_sql=PROBE_SQL,
+        sql_execution_timeout_s=sql_execution_timeout_s,
         metadata=metadata,
-        work_dir=config.work_dir,
     )
+    if not grade.match or grade.sqlite_version is None:
+        raise RuntimeError(f"the probe answer did not match in the verifier sandbox: {grade}")
+    minimum = config.min_sqlite_version
+    if minimum is not None and _version_tuple(grade.sqlite_version) < _version_tuple(minimum):
+        raise RuntimeError(
+            f"the verifier image has SQLite {grade.sqlite_version}, below sandbox_config.min_sqlite_version {minimum}"
+        )
+    return grade.sqlite_version

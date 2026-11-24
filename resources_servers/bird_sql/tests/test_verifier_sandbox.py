@@ -69,6 +69,8 @@ def run_runner(tmp_path: Path, database: Path | str, *, pred_sql: str, gold_sql:
         timeout=120,
     )
     result = json.loads((work / "result.json").read_text()) if (work / "result.json").exists() else None
+    if result is not None:
+        assert result.pop("sqlite_version") == sqlite3.sqlite_version
     return process, result
 
 
@@ -245,7 +247,7 @@ class TestFreshSandbox:
             "database_bytes": database.stat().st_size,
         }
         assert database_uploads(provider) == [(database, f"{work_dir}/TestDB.sqlite")]
-        assert spec.image == "python:3.13.14-slim-trixie"
+        assert spec.image == "python:3.13.14-alpine3.24"
         assert spec.metadata == {"sandbox-api": "scripted", "db_id": "TestDB"}
         assert spec.ttl_s == 600 + runner_timeout_s(30.0) + 300
         [(command, kwargs)] = provider.commands
@@ -338,18 +340,35 @@ def test_the_memory_cap_must_stay_below_the_sandbox_memory():
 
 
 class TestProbe:
-    @pytest.mark.asyncio
-    async def test_reports_the_versions_of_the_image(self, tmp_path):
-        config = BirdSqlSandboxConfig(python=sys.executable, work_dir=str(tmp_path / "work"))
-        versions = await probe_sandbox(provider={"local": {}}, config=config, metadata={})
-        assert versions == {"python": sys.version.split()[0], "sqlite": sqlite3.sqlite_version}
+    """The startup probe grades a known answer through the real runner on the local provider (tests only)."""
+
+    @staticmethod
+    async def probe(tmp_path: Path, database: Path, **config) -> str:
+        config = BirdSqlSandboxConfig(
+            python=sys.executable, work_dir=str(tmp_path / "work"), memory_limit_mib=None, **config
+        )
+        return await probe_sandbox(
+            provider={"local": {}},
+            config=config,
+            database=database,
+            db_id="TestDB",
+            sql_execution_timeout_s=10.0,
+            metadata={},
+        )
 
     @pytest.mark.asyncio
-    async def test_a_databases_dir_the_image_lacks_fails_the_probe(self, tmp_path):
-        config = BirdSqlSandboxConfig(
-            python=sys.executable, work_dir=str(tmp_path / "work"), databases_dir=str(tmp_path / "absent")
-        )
+    async def test_returns_the_sqlite_version_the_image_grades_with(self, tmp_path, database):
+        assert await self.probe(tmp_path, database) == sqlite3.sqlite_version
+        assert database.exists(), "only the uploaded copy is deleted"
+
+    @pytest.mark.asyncio
+    async def test_an_image_below_the_minimum_sqlite_fails(self, tmp_path, database):
+        with pytest.raises(RuntimeError, match="below sandbox_config.min_sqlite_version 99.0"):
+            await self.probe(tmp_path, database, min_sqlite_version="99.0")
+
+    @pytest.mark.asyncio
+    async def test_a_databases_dir_without_the_database_fails(self, tmp_path, database):
         with pytest.raises(SandboxVerificationError) as raised:
-            await probe_sandbox(provider={"local": {}}, config=config, metadata={})
+            await self.probe(tmp_path, database, databases_dir=str(tmp_path / "absent"))
         assert raised.value.failure_kind == VERIFIER_ERROR
-        assert "is not a directory in the sandbox" in str(raised.value)
+        assert "is missing in the sandbox" in str(raised.value)

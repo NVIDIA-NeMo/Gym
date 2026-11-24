@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
@@ -25,7 +26,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     RequestFailureLog,
 )
-from nemo_gym.server_runtime import verifier_observability
+from nemo_gym.server_runtime import SimpleResourcesServer, verifier_observability
 from nemo_gym.trajectory import VerifierInvocation
 from nemo_gym.verification import SandboxVerificationError
 from resources_servers.bird_sql.app import (
@@ -789,11 +790,48 @@ async def test_verify_sends_the_row_database_and_both_queries_to_the_sandbox(
 
 
 @pytest.mark.asyncio
-async def test_startup_probe_reports_the_image_versions(server_with_mocked_dbs, caplog):
-    caplog.set_level("INFO", logger="resources_servers.bird_sql.app")
+async def test_startup_probe_grades_on_the_smallest_database_and_reports_its_sqlite(
+    server_with_mocked_dbs, tmp_path, caplog
+):
+    """The probe grades a known answer through the real runner (local provider here) on the smallest database."""
+    big = tmp_path / "BigDB" / "BigDB.sqlite"
+    big.parent.mkdir()
+    big.write_bytes(b"x" * 4096)  # not a database: probing it would fail
     await server_with_mocked_dbs._probe_sandbox()
     [message] = [r.getMessage() for r in caplog.records if "verifier sandbox ready" in r.getMessage()]
-    assert f"SQLite {sqlite3.sqlite_version}" in message
+    assert f"grades with SQLite {sqlite3.sqlite_version}" in message
+
+
+@pytest.mark.asyncio
+async def test_server_startup_runs_the_probe_and_a_failed_probe_aborts_it(server_with_mocked_dbs, monkeypatch):
+    monkeypatch.setattr(SimpleResourcesServer, "setup_webserver", lambda self: FastAPI())
+    probes = []
+
+    async def probe(self):
+        probes.append(self)
+        raise RuntimeError("cannot grade")
+
+    monkeypatch.setattr(BirdSqlResourcesServer, "_probe_sandbox", probe)
+    app = server_with_mocked_dbs.setup_webserver()
+
+    with pytest.raises(RuntimeError, match="cannot grade"):
+        async with app.router.lifespan_context(app):
+            pass
+    assert probes == [server_with_mocked_dbs]
+
+
+def test_other_dialects_start_without_a_sandbox_probe(tmp_path, monkeypatch):
+    monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
+    monkeypatch.setattr("resources_servers.bird_sql.setup_bird_spark.ensure_bird_spark", lambda *_a: {})
+    base = FastAPI()
+    parent_lifespan = base.router.lifespan_context
+    monkeypatch.setattr(SimpleResourcesServer, "setup_webserver", lambda self: base)
+    config = BirdSqlResourcesServerConfig(
+        host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), dialect="spark"
+    )
+    server = BirdSqlResourcesServer(config=config, server_client=server_client())
+
+    assert server.setup_webserver().router.lifespan_context is parent_lifespan
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,9 @@ them with before, so a query is executed, timed out and compared exactly as it w
 ``request.json`` holds ``database`` (path of the SQLite file, relative to this directory or absolute), ``gold_sql``,
 ``pred_sql``, ``timeout_s`` (per query), ``memory_limit_mib`` (address-space cap, or null), ``delete_database``
 (remove the file afterwards, for a copy uploaded for this grade) and ``database_bytes`` (the uploaded copy's expected
-size, or null). The database is opened read-only, so a query that writes fails as a query. ``result.json`` gets ``{"match": bool, "error": tag or null}``, with the tags of
+size, or null). The database is opened read-only, so a query that writes fails as a query.
+
+``result.json`` gets ``{"match": bool, "error": tag or null, "sqlite_version": str}``, with the tags of
 ``execute_and_compare``. A nonzero exit means the sandbox could not grade.
 """
 
@@ -17,10 +19,17 @@ import asyncio
 import json
 import os
 import resource
+import sqlite3
 import sys
 from pathlib import Path
 
-from eval_utils import execute_and_compare
+
+if sys.version_info < (3, 11):
+    # eval_utils' timeouts rely on asyncio.TimeoutError being TimeoutError; on an older Python every slow query
+    # would crash the runner instead of scoring as a timeout.
+    sys.exit(f"the BIRD verifier image needs Python 3.11+, got {sys.version}")
+
+from eval_utils import execute_and_compare  # noqa: E402
 
 
 async def _grade(request: dict) -> dict:
@@ -44,7 +53,7 @@ async def _grade(request: dict) -> dict:
             # A query that runs out of memory returns None from execute_sqlite; this is the comparison of two result
             # sets after both queries ran, and only the model's can be too large: the gold one is a benchmark answer.
             match, error = False, "pred_sql_error"
-        return {"match": match, "error": error}
+        return {"match": match, "error": error, "sqlite_version": sqlite3.sqlite_version}
     finally:
         # Providers that share /tmp with the host (local, Apptainer without --contain) would keep each copy.
         if request.get("delete_database"):

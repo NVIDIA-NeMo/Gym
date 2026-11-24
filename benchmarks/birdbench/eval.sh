@@ -187,10 +187,12 @@ if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
     fi
 fi
 SANDBOX_ARGS=(--config "${SANDBOX_CONFIG}")
-if [[ "${SANDBOX_CONFIG}" == "nemo_gym/sandbox/providers/docker/configs/docker.yaml" ]]; then
-    # Grading needs no network, and Docker ignores bird_sql's network_policy: cut it in the provider block instead.
-    SANDBOX_ARGS+=("++sandbox.docker.create.network=none")
-fi
+case "${SANDBOX_CONFIG}" in
+    *nemo_gym/sandbox/providers/docker/configs/docker.yaml)
+        # Grading needs no network, and Docker ignores bird_sql's network_policy: cut it in the provider block.
+        SANDBOX_ARGS+=("++sandbox.docker.create.network=none")
+        ;;
+esac
 mkdir -p "${OUTPUT_DIR}"
 
 # Reuses ${PREPARED_JSONL} when it exists and prepare.py's is_prepared_data_current() accepts it (a Spark file
