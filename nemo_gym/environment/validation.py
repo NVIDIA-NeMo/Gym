@@ -18,13 +18,20 @@ from typing import Any
 
 import orjson
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import InterpolationResolutionError
+from omegaconf.errors import InterpolationResolutionError, MissingMandatoryValue
 from pydantic import BaseModel, ConfigDict, ValidationError
 from yaml import YAMLError
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
-from nemo_gym.config.config_types import AlmostServerError, ConfigError
+from nemo_gym.config.config_types import (
+    AlmostServerError,
+    BaseRunServerTypeConfig,
+    ConfigError,
+    ServerRefTypeAdapter,
+)
 from nemo_gym.config.global_config import (
+    ENVIRONMENT_ROUTING_MODE_KEY_NAME,
+    ENVIRONMENT_SERVER_NAME_KEY_NAME,
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -46,7 +53,7 @@ from nemo_gym.environment.manifest import (
     load_manifest,
     resolve_manifest_config_path,
 )
-from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig, BaseRunRequest
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
@@ -260,6 +267,94 @@ class _StaticWiringParser(GlobalConfigDictParser):
         super()._recursively_swap_keys(global_config_dict)
 
 
+class _VerifierWiringParser(_StaticWiringParser):
+    """Resolve fixture wiring without supplying a workload's unbound data and verifier parameters."""
+
+    def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
+        raw = OmegaConf.to_container(global_config_dict, resolve=False)
+        deferred: list[str] = []
+        component_types = {"resources_servers", "responses_api_agents", "responses_api_models", "environment_servers"}
+        routing_keys = {
+            ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
+            ENVIRONMENT_ROUTING_MODE_KEY_NAME,
+            ENVIRONMENT_SERVER_NAME_KEY_NAME,
+        }
+
+        def require_bound(path: str) -> None:
+            try:
+                value = OmegaConf.select(global_config_dict, path, throw_on_missing=True)
+                if OmegaConf.is_config(value):
+                    OmegaConf.to_container(value, resolve=True, throw_on_missing=True)
+            except (InterpolationResolutionError, MissingMandatoryValue):
+                _StaticWiringParser.raise_on_missing_values(self, global_config_dict)
+                raise
+
+        def check_references(node: object, path: str) -> None:
+            if isinstance(node, dict):
+                if path and "type" in node and "name" in node:
+                    require_bound(f"{path}.type")
+                    discriminator = OmegaConf.select(global_config_dict, f"{path}.type", throw_on_missing=True)
+                    try:
+                        ServerRefTypeAdapter.validate_python({**node, "type": discriminator})
+                    except ValidationError:
+                        pass
+                    else:
+                        require_bound(path)
+                for key, value in node.items():
+                    child = f"{path}.{key}" if path else str(key)
+                    if key in routing_keys or (
+                        path
+                        and isinstance(key, str)
+                        and key.endswith(("_server", "_servers"))
+                        and key not in component_types
+                    ):
+                        require_bound(child)
+                    check_references(value, child)
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    check_references(value, f"{path}.{index}")
+
+        if isinstance(raw, dict):
+            check_references(raw, "")
+            preparation = raw.get("prepare_script_args")
+            if isinstance(preparation, dict):
+                deferred.extend(
+                    f"prepare_script_args.{key}"
+                    for key, value in preparation.items()
+                    if isinstance(key, str) and value == "???"
+                )
+            for name, instance in raw.items():
+                if not isinstance(instance, dict):
+                    continue
+                for server_type, components in instance.items():
+                    if server_type not in component_types or not isinstance(components, dict):
+                        continue
+                    protected = set(BaseRunServerTypeConfig.model_fields)
+                    if server_type == "resources_servers":
+                        protected.update(BaseResourcesServerConfig.model_fields)
+                        protected.add("grading_mode")
+                    for implementation, parameters in components.items():
+                        if not isinstance(parameters, dict):
+                            continue
+                        prefix = f"{name}.{server_type}.{implementation}"
+                        for key in parameters.keys() & protected:
+                            require_bound(f"{prefix}.{key}")
+                        if server_type == "resources_servers":
+                            deferred.extend(
+                                f"{prefix}.{key}"
+                                for key, value in parameters.items()
+                                if isinstance(key, str)
+                                and value == "???"
+                                and key not in protected
+                                and not key.endswith(("_server", "_servers"))
+                            )
+        # This composition is never started: the fixture constructs its own server. Keep nested routing references,
+        # dataset declarations and all other missing values strict; do not mutate any source configuration.
+        for path in deferred:
+            OmegaConf.update(global_config_dict, path, None)
+        super().raise_on_missing_values(global_config_dict)
+
+
 class _ServerLookupParser(_StaticWiringParser):
     """Reject partially valid server configs before the parser prints its almost-server banner.
 
@@ -399,9 +494,13 @@ def _resolve_config_wiring(
     )
 
 
-def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | None = None) -> ResolvedComposition:
+def _resolve_manifest_composition(
+    config_path: Path, *, dataset_owner: str | None = None, fixture_only: bool = False
+) -> ResolvedComposition:
     """Resolve manifest wiring, with datasets in manifest form, without probing or materializing runtime services."""
-    wiring = _resolve_config_wiring(config_path, dataset_owner=dataset_owner)
+    wiring = _resolve_config_wiring(
+        config_path, dataset_owner=dataset_owner, parser=_VerifierWiringParser() if fixture_only else None
+    )
     selected_agent, resources_instance = wiring.selected_agent, wiring.resources_instance
     by_instance, model_server = wiring.by_instance, wiring.model_server
     agent_server = _implementation_name(selected_agent)
@@ -1009,7 +1108,9 @@ def validate_environment(
     if not resolved_config_path.is_file():
         raise EnvironmentValidationError(f"Gym config was not found: {resolved_config_path}")
 
-    composition = _resolve_manifest_composition(resolved_config_path, dataset_owner=manifest.dataset_owner)
+    composition = _resolve_manifest_composition(
+        resolved_config_path, dataset_owner=manifest.dataset_owner, fixture_only=not validate_datasets
+    )
     differences = _mirror_differences(manifest, composition)
     synchronized: tuple[str, ...] = ()
     if differences:

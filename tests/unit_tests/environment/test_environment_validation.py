@@ -11,7 +11,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from nemo_gym.config.config_types import AlmostServerError, ConfigInterpolationError
+from nemo_gym.config.config_types import AlmostServerError, ConfigInterpolationError, ConfigMissingValuesError
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
@@ -1290,6 +1290,105 @@ def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: P
     # Dataset-free validation must still catch a stale manifest composition.
     _replace_manifest(manifest_path, resources_server="wrong_server")
     with pytest.raises(EnvironmentValidationError, match="composition is stale"):
+        validate_environment(manifest_path, validate_datasets=False)
+
+
+def test_fixture_validation_defers_unbound_preparation_and_resource_parameters(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    config_path = manifest_path.with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    config["prepare_script_args"] = {"approved_input": "???"}
+    config["demo_resources"]["resources_servers"]["demo"]["approved_input"] = "???"
+    config["demo_resources"]["resources_servers"]["demo"]["display_input"] = (
+        "${demo_resources.resources_servers.demo.approved_input}"
+    )
+    config["demo_resources"]["resources_servers"]["demo"]["document"] = {
+        "type": "document",
+        "name": "${demo_resources.resources_servers.demo.approved_input}",
+    }
+    config_path.write_text(yaml.safe_dump(config))
+    before = config_path.read_bytes()
+
+    report = validate_environment(manifest_path, validate_datasets=False)
+
+    assert report.datasets == ()
+    assert [component.implementation for component in report.components if component.role == "resources_server"] == [
+        "demo"
+    ]
+    assert report.grading_mode == "exact"
+    assert config_path.read_bytes() == before
+    with pytest.raises(ConfigMissingValuesError, match="approved_input"):
+        validate_environment(manifest_path)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "global",
+        "entrypoint",
+        "grading_mode",
+        "server_ref",
+        "nested_server_ref",
+        "server_ref_alias",
+        "nested_server_ref_alias",
+        "chained_server_ref_alias",
+        "agent_server_ref_alias",
+        "environment_routes_alias",
+        "environment_mode_alias",
+        "environment_name_alias",
+        "agent_entrypoint_alias",
+        "agent_dataset_alias",
+        "typed_discriminator_alias",
+        "dataset",
+    ],
+)
+def test_fixture_validation_keeps_missing_wiring_and_metadata_strict(tmp_path: Path, missing: str) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    config_path = manifest_path.with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    if missing == "global":
+        config["unrelated_setting"] = "???"
+    elif missing in {"entrypoint", "grading_mode"}:
+        config["demo_resources"]["resources_servers"]["demo"][missing] = "???"
+    elif missing == "server_ref":
+        config["demo_resources"]["resources_servers"]["demo"]["judge_model_server"] = "???"
+    elif missing == "nested_server_ref":
+        config["demo_resources"]["resources_servers"]["demo"]["grader"] = {
+            "model_server": {"type": "responses_api_models", "name": "???"}
+        }
+    elif missing.endswith("_alias"):
+        resources = config["demo_resources"]["resources_servers"]["demo"]
+        resources["approved_input"] = "???"
+        reference = "${demo_resources.resources_servers.demo.approved_input}"
+        if missing == "server_ref_alias":
+            resources["judge_model_server"] = reference
+        elif missing == "agent_server_ref_alias":
+            config["demo_agent"]["responses_api_agents"]["simple_agent"]["resources_server"]["name"] = reference
+        elif missing == "environment_routes_alias":
+            config["environment_server_routes"] = {"demo": reference}
+        elif missing == "environment_mode_alias":
+            config["environment_routing_mode"] = reference
+        elif missing == "environment_name_alias":
+            config["environment_server_name"] = reference
+        elif missing == "agent_entrypoint_alias":
+            config["demo_agent"]["responses_api_agents"]["simple_agent"]["entrypoint"] = reference
+        elif missing == "agent_dataset_alias":
+            config["demo_agent"]["responses_api_agents"]["simple_agent"]["datasets"][0]["jsonl_fpath"] = reference
+        elif missing == "typed_discriminator_alias":
+            resources["ref_type"] = "responses_api_models"
+            resources["grader"] = {
+                "target": {"type": "${demo_resources.resources_servers.demo.ref_type}", "name": reference}
+            }
+        else:
+            if missing == "chained_server_ref_alias":
+                resources["custom_alias"] = reference
+                reference = "${demo_resources.resources_servers.demo.custom_alias}"
+            resources["grader"] = {"model_server": {"type": "responses_api_models", "name": reference}}
+    else:
+        config["demo_agent"]["responses_api_agents"]["simple_agent"]["datasets"][0]["jsonl_fpath"] = "???"
+    config_path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(ConfigMissingValuesError):
         validate_environment(manifest_path, validate_datasets=False)
 
 
