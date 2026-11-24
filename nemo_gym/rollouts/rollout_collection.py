@@ -3070,10 +3070,10 @@ def refresh_run_status(output_fpath: Path) -> None:
         status = orjson.loads(status_fpath.read_bytes())
         if status.get("tracking") != "enabled":
             return
-        with materialized_path_for(output_fpath).open("rb") as handle:
-            rows = [orjson.loads(line) for line in handle if line.strip()]
         agent_refs: Dict[Tuple[int, int], Dict] = {}
-        tracker = RunStatusTracker(status_fpath, _run_status_rows(rows, agent_refs))
+        with materialized_path_for(output_fpath).open("rb") as handle:
+            rows = (orjson.loads(line) for line in handle if line.strip())
+            tracker = RunStatusTracker(status_fpath, _run_status_rows(rows, agent_refs))
         store = RolloutStore.read(output_fpath, import_legacy=False)
         if store is None:
             raise RuntimeError(f"{output_fpath} has no Store to recount its status from.")
