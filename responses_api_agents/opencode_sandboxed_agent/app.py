@@ -1598,10 +1598,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             and monotonic() - exec_started >= self.config.sandbox_timeout
         ):
             # A provider that lets its own backstop timer end the command reports the kill only as a signal death,
-            # with no error type. A signal death that arrives only after the whole time limit has passed is the
-            # agent reaching that limit, so it takes the deadline path below instead of the provider kind that
-            # reruns the trial. The clock starts before the command is submitted, so a real deadline never
-            # reads as shorter than the limit.
+            # with no error type. A signal death that arrives at or after sandbox_timeout since the command was
+            # submitted is the agent reaching that limit, so it takes the deadline path below instead of the
+            # provider kind that reruns the trial. A signal death before that point is unchanged. The clock starts
+            # before the command is submitted, so a real deadline never reads as shorter than the limit. For the
+            # same reason a genuine signal death (an out-of-memory kill, say) that lands within the submit delay
+            # before the limit is also counted as the deadline.
             result = SandboxExecResult(
                 stdout=result.stdout,
                 stderr=result.stderr,

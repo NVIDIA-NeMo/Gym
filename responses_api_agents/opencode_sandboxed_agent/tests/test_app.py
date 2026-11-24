@@ -2488,6 +2488,7 @@ class TestBenchmarkLifecycle:
         sandbox.download.assert_not_awaited()
         assert "session" not in server._sandbox_id_to_run_result
 
+    @mark.skipif(not Path("/proc/self/stat").exists(), reason="the stop script reads /proc")
     def test_terminate_command_stops_the_marked_process_tree_and_nothing_else(self, tmp_path: Path) -> None:
         # The real pattern would match any "opencode run" process on this machine, so the test swaps in a token
         # no other process has. The matching, tree walk, kill and confirmation logic are the shipped script's.
@@ -2497,21 +2498,31 @@ class TestBenchmarkLifecycle:
         marker = tmp_path / "pids"
         # A shell whose command line carries the token, its child, and a bystander without the token.
         agent = subprocess.Popen(
-            ["sh", "-c", f"sleep 300 & echo $! > {marker}; sleep 301 # {token}"], start_new_session=True
+            ["sh", "-c", f"sleep 300 & echo $! > {marker}; sleep 301; exit 0 # {token}"], start_new_session=True
         )
         bystander = subprocess.Popen(["sleep", "302"], start_new_session=True)
         try:
             deadline = time.monotonic() + 10
-            while not marker.exists() and time.monotonic() < deadline:
+            while not (marker.exists() and marker.read_text().strip()) and time.monotonic() < deadline:
                 time.sleep(0.05)
             child_pid = int(marker.read_text().strip())
             done = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
             assert done.returncode == 0, done.stderr
             agent.wait(timeout=10)
+
+            # A killed child is reparented and may stay a zombie until the container's init reaps it, which is
+            # dead for the script too, so only a live process counts as left over.
+            def alive(pid: int) -> bool:
+                try:
+                    state = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+                except (FileNotFoundError, ProcessLookupError):
+                    return False
+                return state != "Z"
+
             deadline = time.monotonic() + 10
-            while Path(f"/proc/{child_pid}").exists() and time.monotonic() < deadline:
+            while alive(child_pid) and time.monotonic() < deadline:
                 time.sleep(0.05)
-            assert not Path(f"/proc/{child_pid}").exists()
+            assert not alive(child_pid)
             assert bystander.poll() is None
         finally:
             for proc in (agent, bystander):
