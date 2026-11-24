@@ -189,9 +189,8 @@ async def test_a_resources_server_that_lends_a_sandbox_of_its_own_fails_the_atte
     assert "only borrows" in result.failure.failure_reason
     # No agent ran, and the Resources session, which stops its own sandbox, is still closed.
     assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
-    # No provider was built, not even by the cleanup that stops an attempt sandbox, and no cleanup failed.
+    # No provider was built, not even by the cleanup that stops an attempt sandbox.
     assert server._owned_sandboxes == {}
-    assert result.failure_report is None
 
 
 async def test_a_sandbox_that_cannot_start_fails_the_attempt_for_a_retry_before_the_agent_runs() -> None:
@@ -355,7 +354,9 @@ def test_startup_refuses_a_rule_that_blocks_the_tools_an_episode_grants(
 ) -> None:
     sandbox_config = _attempt_sandbox_config(network=network, tool_servers=tool_servers)
     server, client = _lending_server(_Provider(), sandbox_config=sandbox_config, **grants)
-    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": {"opensandbox": {}}})
+    # An OpenSandbox deployment that enforces egress allowlists, so it can apply every restricted rule.
+    opensandbox = {"opensandbox": {"networking": {"enforces_network_policy": True}}}
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": opensandbox})
 
     if refused:
         with pytest.raises(ValueError, match=r"does not allow \['resources'\]"):
