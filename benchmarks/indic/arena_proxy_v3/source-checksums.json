@@ -1,5 +1,6 @@
 {
-  "repo_id": "anushakamathofficial/indic-arena-proxy-v3",
+  "dataset_name": "lmarena_v3_indic",
+  "dataset_version": "0.0.1",
   "files": {
     "lmarena_v3_chat400_en.jsonl": {
       "sha256": "0de45ec444e439eaf2b3160d77dfe89b262931a9cd3ec17f859912dabceeb67e",

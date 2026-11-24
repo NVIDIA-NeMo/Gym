@@ -18,8 +18,8 @@ set_run_paths
 [[ -r "$MODEL_PATH/config.json" ]] || die "Checkpoint config.json is missing or unreadable."
 [[ -r "$IMAGE" ]] || die "The local vLLM image is unreadable: $IMAGE"
 check_generation_budget
-# Generation never needs judge or Hub credentials.
-unset ARENA_JUDGE_API_KEY HF_TOKEN HUGGING_FACE_HUB_TOKEN
+# Generation consumes the prepared inputs and needs no registry or judge credentials.
+unset ARENA_JUDGE_API_KEY MLFLOW_TRACKING_TOKEN HF_TOKEN HUGGING_FACE_HUB_TOKEN
 
 VLLM_PORT="${VLLM_PORT:-8000}"
 HEAD_PORT="${HEAD_PORT:-$((20000 + ${SLURM_JOB_ID:-0} % 30000))}"

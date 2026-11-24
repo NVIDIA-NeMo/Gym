@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
@@ -166,7 +167,9 @@ def test_prepare_reports_full_validation_before_limiting_and_hashes(tmp_path: Pa
     assert [row["uid"] for row in rows] == ["en:question-1", "hi:question-1"]
     assert json.loads((output_dir / "arena_proxy_v3_hi.jsonl").read_text()) == rows[1]
     report = json.loads((output_dir / "preparation_report.json").read_text())
-    assert report["source_revision"] == module.SOURCE_REVISION
+    assert report["dataset_name"] == "lmarena_v3_indic"
+    assert report["dataset_version"] == "0.0.1"
+    assert report["source_mode"] == "local"
     assert report["coverage"]["hi"] == {
         "source_rows": 2,
         "eligible_rows": 2,
@@ -212,29 +215,80 @@ def test_source_content_change_rejected_before_replacing_prepared_output(tmp_pat
     assert output.read_bytes() == before
 
 
-def test_downloads_use_frozen_hub_revision_and_original_filenames(monkeypatch, tmp_path: Path) -> None:
-    import huggingface_hub
-
+def test_registry_preparation_matches_local_inputs_and_preserves_separate_sources(monkeypatch, tmp_path: Path) -> None:
+    source = _write_source(tmp_path, monkeypatch, languages=module.INDIC_LANGUAGES)
     calls = []
 
-    def download(**kwargs):
-        calls.append(kwargs)
-        return str(tmp_path / kwargs["filename"])
+    def download(config):
+        calls.append(config)
+        shutil.copyfile(source / config.artifact_fpath, config.output_fpath)
 
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
-    paths = module._source_paths(source_dir=None, language="hi", revision=module.SOURCE_REVISION)
-    assert len(module.SOURCE_REVISION) == 40
-    assert calls == [
-        {
-            "repo_id": module.SOURCE_ID,
-            "repo_type": "dataset",
-            "revision": module.SOURCE_REVISION,
-            "filename": filename,
-            "token": True,
-        }
-        for filename in ("lmarena_v3_chat400_hi.jsonl", "references/gpt-5.4-mini/hi.jsonl")
-    ]
-    assert paths == tuple(tmp_path / call["filename"] for call in calls)
+    monkeypatch.setattr(module, "download_jsonl_dataset", download)
+    output_dir = tmp_path / "registry"
+    registry = module.prepare(output_dir=str(output_dir))
+    local = module.prepare(source_dir=str(source), output_dir=str(tmp_path / "local"))
+    assert registry.read_bytes() == local.read_bytes()
+    assert {json.loads(line)["language"] for line in registry.read_text().splitlines()} == set(module.INDIC_LANGUAGES)
+    assert len(calls) == 24
+    assert {config.dataset_name for config in calls} == {"lmarena_v3_indic"}
+    assert {config.version for config in calls} == {"0.0.1"}
+    assert {config.artifact_fpath for config in calls} == set(module.SOURCE_CHECKSUMS)
+    for config in calls:
+        cached = output_dir / "source" / config.artifact_fpath
+        assert cached.read_bytes() == (source / config.artifact_fpath).read_bytes()
+    report = json.loads((output_dir / "preparation_report.json").read_text())
+    assert report["source_mode"] == "gitlab"
+    assert len(report["files_sha256"]) == 24
+    module.prepare(output_dir=output_dir)
+    assert len(calls) == 24
+
+
+@pytest.mark.parametrize("downloaded", [b'{"message":"401 Unauthorized"}', b"{}\n"])
+def test_registry_error_or_changed_artifact_cannot_replace_prepared_data(
+    monkeypatch, tmp_path: Path, downloaded
+) -> None:
+    source = _write_source(tmp_path, monkeypatch, languages=("hi",))
+    output_dir = tmp_path / "prepared"
+    output = module.prepare(source_dir=source, languages=["hi"], output_dir=output_dir)
+    before = output.read_bytes()
+
+    def download(config):
+        Path(config.output_fpath).write_bytes(downloaded)
+
+    monkeypatch.setattr(module, "download_jsonl_dataset", download)
+    with pytest.raises(ValueError, match="SHA-256 does not match.*check access"):
+        module.prepare(languages=["hi"], output_dir=output_dir)
+    assert output.read_bytes() == before
+    assert not (output_dir / "source/lmarena_v3_chat400_hi.jsonl").exists()
+
+
+def test_registry_redownloads_corrupt_cached_source(monkeypatch, tmp_path: Path) -> None:
+    source = _write_source(tmp_path, monkeypatch, languages=("hi",))
+    output_dir = tmp_path / "prepared"
+    cache = output_dir / "source"
+    shutil.copytree(source, cache)
+    corrupt = cache / "references/gpt-5.4-mini/hi.jsonl"
+    corrupt.write_text("corrupt cached data")
+    calls = []
+
+    def download(config):
+        calls.append(config.artifact_fpath)
+        shutil.copyfile(source / config.artifact_fpath, config.output_fpath)
+
+    monkeypatch.setattr(module, "download_jsonl_dataset", download)
+    module.prepare(languages=["hi"], output_dir=output_dir)
+    assert calls == ["references/gpt-5.4-mini/hi.jsonl"]
+    assert corrupt.read_bytes() == (source / calls[0]).read_bytes()
+
+
+def test_english_registry_selection_fails_before_downloading(monkeypatch, tmp_path: Path) -> None:
+    def unexpected_download(config):
+        pytest.fail("English is not published in the Indic registry dataset")
+
+    monkeypatch.setattr(module, "download_jsonl_dataset", unexpected_download)
+    with pytest.raises(ValueError, match="use --source-dir for English"):
+        module.prepare(languages=["en", "hi"], output_dir=tmp_path)
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("languages", [[], ["hi", "hi"], ["as"], ["en,hi"]])

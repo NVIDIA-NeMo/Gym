@@ -6,7 +6,7 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: other
-description: English and 12 Indic chat-400 conversation sets judged against frozen GPT-5.4-mini answers.
+description: Twelve Indic chat-400 conversation sets from the dataset registry judged against frozen GPT-5.4-mini answers.
 modality: text
 licensing: unknown
 authors: [NVIDIA NeMo Gym contributors]

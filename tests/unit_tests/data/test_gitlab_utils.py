@@ -17,6 +17,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
+import requests
 from pytest import MonkeyPatch
 
 from nemo_gym.config.config_types import ConfigError, DownloadJsonlDatasetGitlabConfig, MLFlowConfig
@@ -43,7 +44,10 @@ class TestGitlabUtils:
         with pytest.raises(ConfigError, match=r"pip install nemo-gym\[mlflow\]"):
             create_mlflow_client()
 
-    def test_download_creates_the_output_directory(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("status_code", [200, 401, 404, 500])
+    def test_download_creates_output_or_preserves_existing_file_on_http_error(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, status_code: int
+    ) -> None:
         # README commands download to a relative `data/...` path, which exists only in the Gym root.
         # Fake the registry lookup and the HTTP fetch; mlflow itself is an optional extra.
         client = SimpleNamespace(
@@ -63,18 +67,30 @@ class TestGitlabUtils:
         )
         requested = []
 
-        def fake_get(url: str, headers: dict) -> SimpleNamespace:
-            requested.append(url)
-            return SimpleNamespace(content=b'{"question": "q"}\n')
+        def fake_get(url: str, headers: dict, timeout: tuple[int, int]) -> requests.Response:
+            requested.append((url, timeout))
+            response = requests.Response()
+            response.status_code = status_code
+            response._content = b'{"question": "q"}\n' if status_code == 200 else b'{"message": "error"}'
+            return response
 
         monkeypatch.setattr("nemo_gym.data.gitlab_utils.requests.get", fake_get)
         output = tmp_path / "data" / "nested" / "rows.jsonl"
 
-        download_jsonl_dataset(
-            DownloadJsonlDatasetGitlabConfig(
-                dataset_name="dataset", version="0.0.1", artifact_fpath="rows.jsonl", output_fpath=str(output)
-            )
+        config = DownloadJsonlDatasetGitlabConfig(
+            dataset_name="dataset",
+            version="0.0.1",
+            artifact_fpath="references/rows.jsonl",
+            output_fpath=str(output),
         )
+        if status_code == 200:
+            download_jsonl_dataset(config)
+            assert output.read_text() == '{"question": "q"}\n'
+        else:
+            output.parent.mkdir(parents=True)
+            output.write_text("previous valid data")
+            with pytest.raises(requests.HTTPError):
+                download_jsonl_dataset(config)
+            assert output.read_text() == "previous valid data"
 
-        assert requested == ["https://gitlab.invalid/artifacts/rows.jsonl"]
-        assert output.read_text() == '{"question": "q"}\n'
+        assert requested == [("https://gitlab.invalid/artifacts/references/rows.jsonl", (10, 120))]

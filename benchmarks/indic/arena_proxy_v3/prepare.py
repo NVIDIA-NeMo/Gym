@@ -15,11 +15,15 @@ import json
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from nemo_gym.config import DownloadJsonlDatasetGitlabConfig, GlobalConfigDictParserConfig, get_global_config_dict
+from nemo_gym.data import download_jsonl_dataset
 
 
 DIRECTORY = Path(__file__).resolve().parent
-SOURCE_ID = "anushakamathofficial/indic-arena-proxy-v3"
-SOURCE_REVISION = "da63b1db1770bc219962b196f4f93b066fa2e400"  # pragma: allowlist secret
+DATASET_NAME = "lmarena_v3_indic"
+DATASET_VERSION = "0.0.1"
 SOURCE_CHECKSUMS = json.loads((DIRECTORY / "source-checksums.json").read_text(encoding="utf-8"))["files"]
 BASELINE = "gpt-5.4-mini"
 LANGUAGES = ("en", "bn", "gu", "hi", "kn", "ml", "mr", "ne", "or", "pa", "ta", "te", "ur")
@@ -177,16 +181,36 @@ def convert_language(
     return prepared, excluded
 
 
-def _source_paths(*, source_dir: Path | None, language: str, revision: str) -> tuple[Path, Path]:
+def _source_paths(*, source_dir: Path | None, download_dir: Path, language: str) -> tuple[Path, Path]:
     filenames = (f"lmarena_v3_chat400_{language}.jsonl", f"references/{BASELINE}/{language}.jsonl")
     if source_dir is not None:
         return tuple(source_dir / filename for filename in filenames)
-    from huggingface_hub import hf_hub_download
-
-    return tuple(
-        Path(hf_hub_download(repo_id=SOURCE_ID, repo_type="dataset", revision=revision, filename=filename, token=True))
-        for filename in filenames
-    )
+    paths = []
+    for filename in filenames:
+        path = download_dir / filename
+        expected = SOURCE_CHECKSUMS[filename]["sha256"]
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Keep the published files separate and never cache an HTTP error body
+            # or a changed artifact as a valid source file.
+            with TemporaryDirectory(prefix=".download-", dir=path.parent) as temporary:
+                pending = Path(temporary) / path.name
+                download_jsonl_dataset(
+                    DownloadJsonlDatasetGitlabConfig(
+                        dataset_name=DATASET_NAME,
+                        version=DATASET_VERSION,
+                        artifact_fpath=filename,
+                        output_fpath=str(pending),
+                    )
+                )
+                if hashlib.sha256(pending.read_bytes()).hexdigest() != expected:
+                    raise ValueError(
+                        f"{filename}: SHA-256 does not match the frozen benchmark source; "
+                        f"check access to registry dataset {DATASET_NAME} version {DATASET_VERSION}"
+                    )
+                pending.replace(path)
+        paths.append(path)
+    return paths[0], paths[1]
 
 
 def _write_rows(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
@@ -197,27 +221,32 @@ def _write_rows(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
 
 def prepare(
     *,
-    source_dir: Path | None = None,
-    languages: Sequence[str] = LANGUAGES,
-    output_dir: Path = DIRECTORY / "data",
-    revision: str = SOURCE_REVISION,
+    source_dir: Path | str | None = None,
+    languages: Sequence[str] = INDIC_LANGUAGES,
+    output_dir: Path | str = DIRECTORY / "data",
     limit: int | None = None,
 ) -> Path:
     """Prepare validated combined/per-language JSONL and an auditable exclusion report.
 
-    Without ``source_dir``, use the Hugging Face dataset and its configured revision.
-    Hub downloads require authentication from its normal token cache or HF_TOKEN;
-    no credentials are written to the benchmark directory or preparation report.
+    Download separate prompts and references from the GitLab registry using Gym's
+    configured registry access, just like ``lmarena_v3``. The default population
+    contains the 12 Indic languages. English requires an explicit local source.
+    Only the generated Gym input joins conversations and frozen reference answers;
+    the downloaded source files retain their original contents and directory layout.
     """
     selected = list(languages)
     if not selected or len(set(selected)) != len(selected) or set(selected) - set(LANGUAGES):
         raise ValueError(f"languages must be unique nonempty selections from {LANGUAGES}")
     if limit is not None and limit <= 0:
         raise ValueError("limit must be a positive number of source rows per language")
+    if source_dir is None and "en" in selected:
+        raise ValueError("The registry contains only the 12 Indic languages; use --source-dir for English")
+    source_dir = Path(source_dir) if source_dir is not None else None
+    output_dir = Path(output_dir)
     report: dict[str, object] = {
-        "source_repo": SOURCE_ID,
-        "source_revision": revision if source_dir is None else SOURCE_REVISION,
-        "source_mode": "huggingface" if source_dir is None else "local",
+        "dataset_name": DATASET_NAME,
+        "dataset_version": DATASET_VERSION,
+        "source_mode": "gitlab" if source_dir is None else "local",
         "baseline": BASELINE,
         "languages": selected,
         "limit_per_language": limit,
@@ -227,7 +256,9 @@ def prepare(
     by_language = {}
     expected_ids = None
     for language in selected:
-        source_path, reference_path = _source_paths(source_dir=source_dir, language=language, revision=revision)
+        source_path, reference_path = _source_paths(
+            source_dir=source_dir, download_dir=output_dir / "source", language=language
+        )
         for filename, path in (
             (f"lmarena_v3_chat400_{language}.jsonl", source_path),
             (f"references/{BASELINE}/{language}.jsonl", reference_path),
@@ -270,21 +301,29 @@ def prepare(
 
 
 def main() -> None:
-    """Prepare from a local source directory or the pinned Hugging Face dataset."""
+    """Prepare from the GitLab registry or a checksum-verified local source directory."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--source-dir", type=Path, help="Directory containing lmarena_v3_chat400_*.jsonl and references/"
     )
-    parser.add_argument("--languages", nargs="+", choices=LANGUAGES, default=LANGUAGES)
+    parser.add_argument("--languages", nargs="+", choices=LANGUAGES, default=INDIC_LANGUAGES)
     parser.add_argument("--output-dir", type=Path, default=DIRECTORY / "data")
-    parser.add_argument("--revision", default=SOURCE_REVISION)
     parser.add_argument("--limit", type=int, help="First N source rows per language, then exclude failed translations")
     args = parser.parse_args()
+    if args.source_dir is None:
+        # argparse owns this command's arguments; Gym still owns registry settings
+        # and env.yaml loading. `gym eval prepare` already initializes this config.
+        get_global_config_dict(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                skip_load_from_cli=True,
+                offline=True,
+            )
+        )
     prepare(
         source_dir=args.source_dir,
         languages=args.languages,
         output_dir=args.output_dir,
-        revision=args.revision,
         limit=args.limit,
     )
 

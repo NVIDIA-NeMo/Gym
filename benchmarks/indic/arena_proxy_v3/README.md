@@ -7,32 +7,56 @@ NeMo Gym's existing `simple_agent`, `single_agent_turn_legacy` environment serve
 
 ## Dataset
 
-Dataset: [anushakamathofficial/indic-arena-proxy-v3](https://huggingface.co/datasets/anushakamathofficial/indic-arena-proxy-v3)
+Dataset registry: **`lmarena_v3_indic`, version `0.0.1`**. Preparation uses the same
+Gym GitLab downloader as [`lmarena_v3`](../../lmarena_v3/prepare.py).
 
-Pinned revision: `da63b1db1770bc219962b196f4f93b066fa2e400`.
+The 24 source JSONL files contain 4,800 prompts and 4,800 frozen reference answers
+across Bengali, Gujarati, Hindi, Kannada, Malayalam, Marathi, Nepali, Odia,
+Punjabi, Tamil, Telugu, and Urdu. One failed Tamil translation is excluded during
+preparation, leaving **4,799 eligible Indic tasks**. English is not in this registry
+dataset.
 
-The 26 source JSONL files contain 5,200 prompts and 5,200 reference answers across
-English and 12 Indic languages. One failed Tamil translation is excluded, leaving
-**5,199 eligible tasks: 4,799 Indic and 400 English**.
+Source files remain separate, both in the registry and in the local download cache:
+
+```text
+data/source/
+  lmarena_v3_chat400_<lang>.jsonl
+  references/
+    gpt-5.4-mini/
+      <lang>.jsonl
+```
 
 Preparation verifies source checksums, conversation identities, reference answers,
 language metadata, and turn counts. It preserves every conversation message and
-writes combined and per-language Gym inputs with a preparation report.
+writes combined and per-language Gym inputs with a preparation report. Registry
+downloads use only the 24 original files; the combined evaluation input is created
+locally. Every source file is checked against `source-checksums.json`, including
+cached downloads.
 
 ## Preparation
 
 Install the repository and component dependencies using the standard NeMo Gym
-setup. Run commands from the repository root in the appropriate Python environment.
-Dataset access is required for preparation.
+setup, including the `mlflow` extra for registry access. Configure Gym's registry
+settings using your deployment's standard `env.yaml`, as for `lmarena_v3`. Keep
+credentials outside tracked files and command-line arguments. Run commands from
+the repository root in the appropriate Python environment.
 
 ```bash
-python benchmarks/indic/arena_proxy_v3/prepare.py
+gym eval prepare --config benchmarks/indic/arena_proxy_v3/config.yaml
 gym env validate indic/arena_proxy_v3
 ```
 
-Use `--languages en hi ta --limit 3` for a small smoke dataset. The full source
-files are validated first; the limit selects the source prefix before failed
-translations are excluded. Prepared datasets are excluded from Git.
+This produces `data/arena_proxy_v3_benchmark.jsonl` with 4,799 rows. For a small
+selection, the preparation script also accepts `--languages hi bn ta --limit 3`
+and `--output-dir`. The full source files are validated first; the limit selects
+the source prefix before failed translations are excluded. Downloaded and prepared
+datasets are excluded from Git.
+
+For an English comparison, explicitly provide the original, checksum-matching
+files with `--source-dir` and `--languages en`. English is scored separately.
+The former Hugging Face download and `--revision` option have been replaced by the
+pinned registry version. Dataset licensing remains unspecified; registry access
+does not establish redistribution permission.
 
 ## Generation and judging
 
@@ -42,7 +66,7 @@ node, followed by CPU judging after generation succeeds.
 
 ```bash
 export MODEL_KEY=my-model
-export LANGUAGES="en bn gu hi kn ml mr ne or pa ta te ur"
+export LANGUAGES="bn gu hi kn ml mr ne or pa ta te ur"
 export TEMPERATURE=1.0 TOP_P=0.95
 bash benchmarks/indic/arena_proxy_v3/slurm/submit.sh
 ```
@@ -94,7 +118,7 @@ With deployment settings configured for `google/gemma-4-31B-it`, use:
 
 ```bash
 export MODEL_KEY=gemma4-31b-it-smoke
-export LANGUAGES="en hi bn ta te" LIMIT=1
+export LANGUAGES="hi bn ta te ur" LIMIT=1
 export CONTEXT=131072 MAX_OUTPUT_TOKENS=120000
 export TEMPERATURE=1.0 TOP_P=0.95 TOP_K=64
 export PARSER=gemma4 TOOL_PARSER=gemma4
@@ -120,6 +144,10 @@ rounds with seed 42. Each language has overall, single-turn, multi-turn, and sev
 group scores. **The headline is the arithmetic mean of the 12 Indic overall
 scores. English is reported separately.** Mean per-row reward is not the headline.
 
+The official headline is `metrics.json`'s `_avg.all` from the summary command below.
+The shared resources server's `arena_elo/score` is a pooled score across tasks;
+use the language average when comparing with the reference setup.
+
 Run scoring commands in an environment with the Arena judge dependencies installed:
 
 ```bash
@@ -136,7 +164,7 @@ saved-answer identity matches the historical failure.
 ## Comparing setups
 
 Use the same checkpoint, vLLM version and image, parallelism, context, sampling,
-parsers, dataset revision, baseline, and judge configuration in both runs.
+parsers, dataset version and checksums, baseline, and judge configuration in both runs.
 Separate runs can still differ because of stochastic generation or hosted judging.
 
 Compare saved reference judgments with Gym judgments using:
@@ -144,11 +172,12 @@ Compare saved reference judgments with Gym judgments using:
 ```bash
 python -m benchmarks.indic.arena_proxy_v3.summarize "$RUN_DIR/judgments/rollouts.jsonl" \
   --inputs "$RUN_DIR/inputs/arena_proxy_v3_benchmark.jsonl" \
-  --reference-verdicts "$REFERENCE_INDIC_DIR"/*.jsonl "$REFERENCE_EN_DIR/en.jsonl" \
+  --reference-verdicts "$REFERENCE_INDIC_DIR"/*.jsonl \
   --output "$RUN_DIR/comparison.json"
 ```
 
-Supply reference judgment files for exactly the selected languages. The comparison
+Supply reference judgment files for exactly the selected languages. Include the
+English reference judgments only when you explicitly prepared English inputs. The comparison
 validates task coverage and metadata, records artifact hashes, and reports verdict
 differences and the Indic average difference. Both sets are scored in the same
 prepared-input order, so asynchronous completion order cannot change their
@@ -160,9 +189,9 @@ generations. Gym retains its transport retries, cancellation handling, and respo
 validation; unresolved failures do not produce an official headline.
 
 The existing English `benchmarks/lmarena_v3` integration is unchanged and uses
-the separate `arena` resources server. The English slice here belongs to the
-Indic Arena Proxy v3 dataset and comparison protocol; report its results separately
-from that existing benchmark.
+the separate `arena` resources server. An explicitly prepared chat-400 English
+slice uses the Indic Arena Proxy v3 comparison protocol; report its results
+separately from that existing benchmark.
 
 ## Validation
 
@@ -175,7 +204,8 @@ On November 20, 2026, a live smoke run with `google/gemma-4-31B-it` at revision
 `842da3794eaa0b77d5f08bae87a17459d91ff475` and vLLM 0.26.0 completed both stages:
 
 - Five of five samples generated and judged across English, Hindi, Bengali,
-  Tamil, and Telugu using the settings above.
+  Tamil, and Telugu. That historical run used the original data source; the
+  registry-only example above selects Urdu instead of English.
 - Ten valid verdicts from the default judge, covering both answer positions for
   every sample, with zero current failures or invalid verdicts.
 - Conversation inputs, frozen baselines, and saved policy responses preserved

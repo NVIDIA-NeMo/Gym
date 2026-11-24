@@ -11,7 +11,7 @@ source "$GYM_REPO/benchmarks/indic/arena_proxy_v3/slurm/common.sh"
 check_judge_key_file
 MODEL_PATH=$(realpath "$MODEL_PATH")
 JUDGE_KEY_FILE=$(realpath "$JUDGE_KEY_FILE")
-IMAGE="${IMAGE:-/lustre/fsw/portfolios/llmservice/users/kanishks/images/vllm-openai-v0.26.0.sqsh}"
+: "${IMAGE:?Set IMAGE to a readable local vLLM .sqsh file}"
 [[ -r "$MODEL_PATH/config.json" ]] || die "Checkpoint config.json is missing or unreadable."
 [[ -r "$IMAGE" ]] || die "Set IMAGE to a readable local vLLM .sqsh file."
 check_generation_budget
@@ -25,8 +25,8 @@ prepare_args=(--output-dir "$RUN_DIR/inputs" --languages "${languages[@]}")
 "$PYTHON_BIN" "$BENCHMARK_DIR/prepare.py" "${prepare_args[@]}"
 set_run_paths
 export MODEL_PATH JUDGE_KEY_FILE IMAGE RUN_DIR
-# Do not include Hub or inference tokens in SLURM's exported submission environment.
-unset ARENA_JUDGE_API_KEY HF_TOKEN HUGGING_FACE_HUB_TOKEN
+# Preparation is complete; workers do not need registry or dataset Hub tokens.
+unset ARENA_JUDGE_API_KEY MLFLOW_TRACKING_TOKEN HF_TOKEN HUGGING_FACE_HUB_TOKEN
 generation_job=$(sbatch --parsable --account="$SLURM_ACCOUNT" --partition="${GPU_PARTITION:-interactive}" \
     --job-name="arena-gen-$MODEL_KEY" --chdir="$GYM_REPO" --output="$RUN_DIR/logs/generate-%j.log" \
     --export=ALL "$BENCHMARK_DIR/slurm/generate.sbatch")

@@ -1,182 +1,94 @@
-# Integration validation — 2026-11-18
+# Registry migration validation — 2026-11-24
 
-## Dataset publication
+## Dataset and preparation parity
 
-- Uploaded to `anushakamathofficial/indic-arena-proxy-v3`, commit
-  `da63b1db1770bc219962b196f4f93b066fa2e400`.
-- Verified remote size and SHA-256 for all 26 source JSONL files (153,976,021 bytes).
-- 5,200 prompt records and 5,200 matching frozen reference records; 400 each per
-  language. The existing target repository was public and remains public.
-- The upload contains only the 26 data files, dataset card, checksums, and the
-  repository's existing `.gitattributes`. Logs, partial files, local keys, and
-  candidate generations were excluded.
-- Existing HF authentication was verified as `anushakamathofficial`; cached
-  active and stored-token files had permissions `0600`. No token was printed or
-  added to this checkout.
+The benchmark now uses Gym's GitLab dataset downloader, following `lmarena_v3`,
+with dataset `lmarena_v3_indic` pinned to version `0.0.1`.
 
-## Preparation and protocol
+A live `gym eval prepare` run downloaded and validated all 24 original JSONL files:
+12 prompt files and 12 frozen GPT-5.4-mini reference-answer files. Their bytes and
+SHA-256 hashes match the original reference source. The reference files retain
+`references/gpt-5.4-mini/<lang>.jsonl`; only locally prepared Gym inputs join the
+conversations and reference answers.
 
-Full preparation from the supplied local source passed pinned file checksums,
-question/reference ID joins, exact conversation/message-digest equality, reference
-status/model checks, language checks, and cross-language question-ID checks.
-Output contains 5,199 rows: 400 per language except Tamil, which has 399.
-The Tamil failed translation `019c83f8-0d3e-7703-9603-03d6478253e1` remains in the
-source dataset and is listed in the preparation report's exclusions.
+The resulting 4,799 tasks are byte-for-byte identical to the previous preparer
+at commit `406deea245b27a7a5612dab2ea98c4c6ee7f26ec`, run against the original source
+with the same 12-language selection. The combined prepared-input SHA-256 is:
 
-A direct Hub preparation smoke downloaded the pinned English and Tamil source
-and reference files, verified their hashes, validated all 400 rows per language,
-and produced three eligible rows per language. This was a data preparation
-smoke, not model inference.
+```text
+12963471e78a41cf3fc3357f80ec6a4d8e6dda46ba9002d1308671b54ec421f1
+```
 
-Both parsed judge prompt templates match the supplied `chat400_arena*.yaml`
-templates exactly. They were composed from the existing in-repository Arena
-templates with the conversation-aware wording. The shared judge's thinking
-filter is opt-in; existing benchmarks retain their previous default.
+Each language has 400 eligible tasks except Tamil, which has 399. The failed Tamil
+translation remains in the raw source and appears in the preparation report's
+exclusions. English requires an explicit local source and is scored separately.
+
+An initial download stalled while opening an artifact connection in the shared
+registry helper. The helper now uses connect/read timeouts of 10/120 seconds and
+checks HTTP status before opening the output file. Preparation completed after
+this correction, reusing the already validated source cache.
+
+## Reference protocol
+
+The registry migration does not alter policy generation, judge prompts, verdict
+parsing, or score aggregation. A direct comparison with the supplied reference
+verified both parsed judge prompt templates and the ASTs of these seven methods:
+
+- `_parse_verdict`
+- `_aggregate_arena_elo`
+- `_get_battles_from_judgment`
+- `_compute_mle_elo`
+- `_bootstrap`
+- `_predict_win_rate`
+- `_get_win_rate_column`
+
+Generation request tests cover full conversation history, temperature 1.0 and 0.6,
+top-p/top-k, seed 42, the 120,000-token cap, the measured context budget with a
+64-token reserve, and final-answer extraction. Summary tests cover swapped
+positions, strong-verdict weight 3, deterministic bootstrap, complete population
+checks, English separation, and the mean across 12 Indic languages.
+
+The official reference-comparable headline remains the summary's `_avg.all`.
+The shared resources server also emits a pooled `arena_elo/score`; promoting the
+Indic language average into Gym's server metrics remains a separate review item.
+The existing reference-specific model adapter also remains unchanged.
 
 ## Automated checks
 
-119 tests passed across:
+195 tests passed with Python 3.13.14 and the repository's locked dependencies:
 
-```text
-tests/unit_tests/benchmarks/test_indic_arena_proxy_v3.py          38
-tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_metrics.py  28
-tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_publish.py   5
-resources_servers/arena_judge/tests/test_app.py                  48
+```bash
+RAY_TMPDIR=/tmp .venv/bin/python -m pytest -o addopts= --no-cov -q \
+  tests/unit_tests/data/test_gitlab_utils.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_generation.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_metrics.py \
+  resources_servers/arena_judge/tests/test_app.py \
+  benchmarks/lmarena_v3/tests/test_lmarena_v3_subsets.py
 ```
 
-Coverage includes full conversation preservation, failed translations, stale
-references, ID collisions, checksum mismatches, pinned Hub downloads, CPU-only
-configuration, swapped verdicts, strong-win weighting, deterministic bootstrap,
-missing/failed rows, stale scoring metadata, task envelopes, English separation,
-smoke-headline suppression, credential signature rejection, and upload allowlists.
-The existing scikit-learn scorer emits its upstream `penalty` deprecation warning;
-this does not affect these test outcomes.
+The registry tests cover all 12 languages, separate reference paths, pinned
+versions, cache reuse, corrupt-cache replacement, HTTP error bodies, changed
+artifacts, and preservation of existing prepared data. The shared downloader's
+tests verify bounded timeouts and preservation of existing files on HTTP
+401/404/500 responses. The existing English benchmark's subset tests pass.
 
-Checks used Python 3.13.14 from the existing GPQA environment with this checkout
-on `PYTHONPATH`. Current `openai==2.45.0`, `aiohttp==3.14.4`, and this checkout's
-package metadata were isolated under `/tmp/indic-arena-proxy-v3-deps` where
-needed. No shared environment was modified.
+The live preparation used the benchmark config plus an ignored registry settings
+file and an isolated output directory. No registry endpoint, credential value, or
+source dataset was added to Git. Shell syntax checks passed for all four Slurm
+scripts. Scikit-learn emits its existing `penalty` deprecation warnings.
 
-Ruff lint and formatting checks and `git diff --check` passed for the changed
-files. Shell syntax checks passed for all four workflow scripts. A mocked
-submission/generation/judging flow checked `afterok`, failure exit propagation,
-language validation, credential ownership/permissions, removal of token values
-from submission exports, output paths, summary interpreter selection, and
-context/output-budget validation. This mock did not submit Slurm jobs.
+## Model rollout evidence and limits
 
-Pre-commit checks passed on all 24 staged integration files before committing.
-The private guardword hook skipped its scan because its private catalog was
-unavailable. A separate staged-file scan found no HF tokens, NVIDIA API tokens,
-or private-key signatures, and confirmed that generated datasets were excluded.
+The earlier November 20 smoke used `google/gemma-4-31B-it` at revision
+`842da3794eaa0b77d5f08bae87a17459d91ff475` with vLLM 0.26.0. Five samples across
+English, Hindi, Bengali, Tamil, and Telugu produced five answers and ten valid
+swapped-position judgments. They were translations of one multi-turn conversation,
+not five independent conversations. The selected subset completed with zero current
+failures and no official Indic headline.
 
-The Gym parser validated generation and reverification configurations; the CPU
-configuration contains only a judge model server and resources server. The
-benchmark scanner identifies exactly one benchmark configuration. The runtime
-dataset overlay uses `.yml` so it is not discovered as another benchmark.
-`gym env validate indic/arena_proxy_v3` passed manifest, component, and dataset
-validation, reporting all 5,199 prepared rows. Catalog discovery also printed an
-existing unrelated `opencode_sandboxed_search_agent` migration warning.
-
-## External validation status at initial integration
-
-At this stage, no GPU generation or live NVIDIA judge request was performed. A representative
-real smoke still needs a checkpoint, an authorized Slurm account, and the user's
-NVIDIA judge-key file. Endpoint/model availability and score agreement with a
-reference run remain unverified. The benchmark stays experimental and
-`verified: false`. No PR or full repository test run was made.
-
-## Score comparison follow-up (November 20, 2026)
-
-The benchmark now extends the existing Gym vLLM model server through its request
-and converter hooks. It uses the reference chat endpoint, plain-text messages,
-sampling parameters, server-side token count, and per-prompt output budget
-`min(120000, context_length - prompt_tokens - 64)`. It also preserves the reference
-final-answer extraction before Gym conversion, including prefixes and repeated
-or unfinished thinking blocks, and has no total policy-request timeout. The
-reference thinking preflight runs before collection. Gym core, the agent,
-environment server, judge prompts, and scoring implementation were not changed.
-
-The preparer now applies smoke limits to the source prefix before translation
-exclusions. The summary counts a successfully reverified saved answer despite its
-historical failure sidecar, while retaining Gym's authoritative managed-outcome
-selection and rejecting inconsistent saved-answer identities. Optional
-`--reference-verdicts` compares complete saved judgment populations using the
-same prepared-input order for both bootstraps, with artifact hashes, verdict
-differences, and a guarded 12-language Indic average/delta. English remains separate.
-
-181 focused tests passed, with clean exits:
-
-```text
-tests/unit_tests/benchmarks/test_indic_arena_proxy_v3.py             39
-tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_generation.py  31
-tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_metrics.py     58
-tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_publish.py      5
-resources_servers/arena_judge/tests/test_app.py                     48
-```
-
-These checks used Python 3.13.14 with `-S` and explicit dependency paths to avoid
-the adjacent GPQA environment's editable-package imports. Module-path assertions
-confirmed the tests loaded this checkout's code. The generation tests exercise
-the full Gym Responses-to-chat model path, not just the budgeting helper.
-
-Offline differential harnesses executed the supplied source functions directly:
-42 generation cases matched tokenize/chat payloads, budgets, final answers, and
-length status across conversation types, context sizes, and thinking-tag cases;
-14 judge cases matched request bodies and accepted text/verdicts across both
-templates, including empty, invalid, and truncated replies. Six additional
-sanitization/thinking cases matched. These harnesses did not make model calls.
-
-Ruff, formatting, shell syntax, diff checks, and scoped pre-commit hooks passed.
-The private guardword catalog remained unavailable, so that hook skipped its
-content scan; a separate scan of the staged files checked credential signatures
-and confirmed that downloaded data was not staged.
-
-Existing Gym transport retry, cancellation, and schema-validation policies remain.
-Use completed, valid-response reference runs for comparison; the standalone
-generator can persist HTTP 200 responses with `finish_reason=abort`, which Gym
-treats as an infrastructure failure. Historical reference CIs may differ solely
-because they used asynchronous completion order. Matching the offline contract
-does not establish identical stochastic generations or live hosted-judge results.
-
-The existing cached Hugging Face login was verified as `anushakamathofficial`;
-its credential directory is `0700`, and token files are `0600`, owned by the user.
-The dataset is now private. An authenticated full Hub preparation verified all
-26 pinned source files and produced 5,199 rows with SHA-256
-`9d8d4544f4d2770b7f22fcfe73d2227321133062848a1c9b3d8318951b90dbcb`.
-The downloaded cache and prepared data are owner-only. The code requests cached
-authentication with `token=True`; no token value is embedded or printed.
-
-No GPU job or live judge request was submitted during this score-comparison
-follow-up. The subsequent live smoke is recorded below; a full paired evaluation
-remains pending.
-
-## Live Gemma smoke (November 20, 2026)
-
-The GPU generation and CPU judging workflow completed successfully with
-`google/gemma-4-31B-it` at revision
-`842da3794eaa0b77d5f08bae87a17459d91ff475`, vLLM 0.26.0, and the pinned dataset
-revision `da63b1db1770bc219962b196f4f93b066fa2e400`.
-
-The selection used `--languages en hi bn ta te --limit 1`: five translated
-versions of one source conversation, with three user turns per sample. Settings
-were context 131,072, maximum output 120,000, temperature 1.0, top-p 0.95, top-k 64,
-seed 42, tensor parallelism 8, data parallelism 1, expert parallelism disabled,
-and the `gemma4` reasoning and tool parsers. Generation and judge concurrency
-were both 5. Judging used the default Gemini 3.8 Flash configuration and frozen
-GPT-5.4-mini baselines.
-
-- Both jobs completed with exit code 0:0; generation produced all five answers.
-- Judging produced all ten valid swapped-position verdicts, with no current
-  failures, masked samples, or invalid verdicts.
-- Original conversation messages, baseline answers, generated responses, and
-  source-answer identities were preserved exactly.
-- Ten historical authentication-failure records reconciled with the five
-  successful retries. The saved generation file's SHA-256 remained unchanged.
-- Each selected language has one judged row and complete coverage. The summary
-  identifies a subset, reports English separately, and suppresses every official
-  Indic average and the headline score.
-
-This establishes a working live pipeline and successful retry recovery for the
-selected samples. It does not establish full-benchmark performance or live score
-parity with the standalone reference setup. The benchmark remains experimental
-and `verified: false`.
+No new GPU rollout was needed for this data-access migration: the prepared input
+bytes and generation/judging code are unchanged for the selected population.
+A full model run compared with separately generated reference judgments is still
+pending. Licensing metadata remains `unknown`; this change does not assert a
+license clearance or measured end-to-end score equivalence.
