@@ -291,10 +291,17 @@ The same profiler reports CPU, with the same switch and the same process trees:
 
 | Metric | Type | Attributes | Meaning |
 | --- | --- | --- | --- |
-| `gym.server.cpu.time` | Counter | server name and type, `cpu.mode` (`user`, `system`) | CPU seconds a server and its descendants used, such as the sandbox, unpacking and harness children that do the real work. Use `rate()` for cores in use. Each process is tracked by its pid and start time, and one that drops out of a single walk is not counted twice. A process that exits between samples loses the time it used after the last one, so this is a lower bound. |
+| `gym.server.cpu.time` | Counter | server name and type, `cpu.mode` (`user`, `system`) | CPU seconds a server and its descendants used, such as the sandbox, unpacking and harness children that do the real work. Use `rate()` for cores in use. See below for how processes that exit between samples are counted. |
 | `gym.host.cpu.logical` | Gauge | | Logical CPUs on the host. |
 | `gym.host.cpu.physical` | Gauge | | Physical CPU cores on the host. |
 | `gym.host.cpu.allowed` | Gauge | | CPUs the supervisor's main thread may run on (its CPU affinity). Under Slurm or a container cpuset that is usually the allocation; compare summed `rate(gym.server.cpu.time)` with it. |
+
+Each process's CPU time includes the children it waited for (`cutime` and `cstime` in `/proc/<pid>/stat`), so a short command that starts and exits between two samples is counted once its parent waits for it. Processes are tracked by pid and start time, and time a child already reported, or a process that drops out of a single walk, is not counted again. The counter is a lower bound where an exited process's time cannot reach a process still in the tree:
+
+- A process whose parent does not wait for it, because the parent ignores `SIGCHLD` or exits first, can be undercounted by up to its whole CPU time. Once reparented outside the tree, it is no longer counted.
+- The time the server's root process uses after the last sample before it exits is lost.
+
+The exception is a child subreaper inside the server's tree (`PR_SET_CHILD_SUBREAPER`, such as an init process like `tini` started as a descendant). A process orphaned to it that exits in the same sample interval as its old parent can be counted twice, by up to the time it had already reported.
 
 The rollout driver of a `--no-serve` run is not a supervisor-managed server and is not included; its own `process.cpu.time` covers it.
 

@@ -20,7 +20,7 @@ import sys
 import threading
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import psutil
@@ -57,17 +57,23 @@ class HostMemory:
     total_bytes: int
 
 
-@dataclass(frozen=True)
-class ProcessCpuTimes:
-    """CPU time one process has used since it started."""
-
-    user_seconds: float
-    system_seconds: float
-
-
 # A process is identified by its pid and start time (kernel clock ticks since boot, unaffected by wall-clock changes),
 # so a reused pid does not inherit an exited process's CPU time.
 ProcessKey = tuple[int, int]
+
+
+@dataclass(frozen=True)
+class ProcessCpuTimes:
+    """CPU time one process and the children it waited for have used since it started.
+
+    ``parent`` is the process that was its parent when it was read, or ``None`` when that parent is outside the tree.
+    """
+
+    user_seconds: float
+    system_seconds: float
+    parent: ProcessKey | None = None
+
+
 _CLOCK_TICKS = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 
 
@@ -118,24 +124,29 @@ def _stat_fields(pid: int) -> list[str]:
     return stat[stat.rindex(")") + 2 :].split()
 
 
-def _read_process_cpu(pid: int) -> tuple[ProcessKey, ProcessCpuTimes] | None:
-    """One process's identity and CPU times from a single ``/proc/<pid>/stat`` read, or ``None`` if unreadable."""
+def _read_process_cpu(pid: int) -> tuple[ProcessKey, int, ProcessCpuTimes] | None:
+    """One process's identity, parent pid and CPU times from one ``/proc/<pid>/stat`` read, or ``None`` if unreadable.
+
+    The times include ``cutime``/``cstime``: the kernel adds a child's own and children times to its parent's when the
+    parent waits for it, so a child that starts and exits between two samples is still counted.
+    """
     try:
         fields = _stat_fields(pid)
-        user_ticks, system_ticks, start_ticks = int(fields[11]), int(fields[12]), int(fields[19])
+        parent_pid, start_ticks = int(fields[1]), int(fields[19])
+        user_ticks = int(fields[11]) + int(fields[13])
+        system_ticks = int(fields[12]) + int(fields[14])
     except (OSError, ValueError, IndexError):
         return None
-    return (pid, start_ticks), ProcessCpuTimes(user_ticks / _CLOCK_TICKS, system_ticks / _CLOCK_TICKS)
+    return (pid, start_ticks), parent_pid, ProcessCpuTimes(user_ticks / _CLOCK_TICKS, system_ticks / _CLOCK_TICKS)
 
 
 def collect_process_tree_cpu(root_pid: int) -> dict[ProcessKey, ProcessCpuTimes]:
     """CPU time used so far by a root process and each of its live descendants (Linux procfs)."""
-    times: dict[ProcessKey, ProcessCpuTimes] = {}
-    for pid in _descendant_pids(root_pid):
-        process = _read_process_cpu(pid)
-        if process is not None:
-            times[process[0]] = process[1]
-    return times
+    # Parents are read before their children, so a child reaped during the walk is never in both its own times and
+    # its parent's.
+    processes = [process for pid in _descendant_pids(root_pid) if (process := _read_process_cpu(pid)) is not None]
+    keys = {key[0]: key for key, _parent_pid, _times in processes}
+    return {key: replace(times, parent=keys.get(parent_pid)) for key, parent_pid, times in processes}
 
 
 def process_has_exited(key: ProcessKey) -> bool:
@@ -152,34 +163,73 @@ def process_has_exited(key: ProcessKey) -> bool:
     return start_ticks != key[1]
 
 
-def next_cpu_baseline(
+def fold_exited_processes(
     previous: dict[ProcessKey, ProcessCpuTimes],
     current: dict[ProcessKey, ProcessCpuTimes],
     has_exited: Callable[[ProcessKey], bool] = process_has_exited,
 ) -> dict[ProcessKey, ProcessCpuTimes]:
-    """The baseline for the next sample: this sample's processes, plus earlier ones missing from it that still run.
+    """``previous`` without the processes that have exited, each one's counted time moved onto an ancestor's baseline.
 
     A process can drop out of one walk (an unreadable ``children`` file, a race with a fork); keeping its baseline
     means it is not counted again from zero when it reappears. Only a process that has exited is forgotten.
+
+    When a parent waits for an exited child, the kernel adds the child's whole total to the parent's children times.
+    The part already counted is added to the baseline of the child's nearest ancestor that has not exited (its parent,
+    or further up when the parent exited in the same interval after waiting for it), so it is not counted twice. An
+    ancestor that never received it (one that ignores ``SIGCHLD``, or a child orphaned and reaped outside the tree)
+    then counts less than the tree used. A process whose ancestors all left the tree is not moved.
     """
-    kept = {key: times for key, times in previous.items() if key not in current and not has_exited(key)}
-    return {**kept, **current}
+    exited = {key for key in previous if key not in current and has_exited(key)}
+    folded = {key: times for key, times in previous.items() if key not in exited}
+    for key in exited:
+        ancestor, seen = previous[key].parent, {key}
+        while ancestor in exited and ancestor not in seen:
+            seen.add(ancestor)
+            ancestor = previous[ancestor].parent
+        if ancestor in folded:
+            base = folded[ancestor]
+            folded[ancestor] = replace(
+                base,
+                user_seconds=base.user_seconds + previous[key].user_seconds,
+                system_seconds=base.system_seconds + previous[key].system_seconds,
+            )
+    return folded
 
 
 def cpu_time_since(
     previous: dict[ProcessKey, ProcessCpuTimes], current: dict[ProcessKey, ProcessCpuTimes]
 ) -> ProcessCpuTimes:
-    """CPU time the tree used between two samples: each live process's increase, all of it for a new process.
-
-    A process that exited since the previous sample loses the time it used after that sample, so the total is a
-    lower bound by at most one interval per exited process; it never goes down.
-    """
+    """CPU time the tree used between two samples: each live process's increase, all of it for a new process."""
     user = system = 0.0
     for key, times in current.items():
         before = previous.get(key, ProcessCpuTimes(0.0, 0.0))
         user += max(0.0, times.user_seconds - before.user_seconds)
         system += max(0.0, times.system_seconds - before.system_seconds)
     return ProcessCpuTimes(user_seconds=user, system_seconds=system)
+
+
+def advance_cpu_baseline(
+    previous: dict[ProcessKey, ProcessCpuTimes],
+    current: dict[ProcessKey, ProcessCpuTimes],
+    has_exited: Callable[[ProcessKey], bool] = process_has_exited,
+) -> tuple[ProcessCpuTimes, dict[ProcessKey, ProcessCpuTimes]]:
+    """The CPU time a tree used since ``previous``, and the baseline for the next sample.
+
+    A baseline never goes down, so time moved onto a parent before the parent's own times show it (the parent was
+    read just before it waited) is held back until they do, and the total never goes down either.
+    """
+    baseline = fold_exited_processes(previous, current, has_exited)
+    used = cpu_time_since(baseline, current)
+    for key, times in current.items():
+        before = baseline.get(key)
+        if before is not None:
+            times = replace(
+                times,
+                user_seconds=max(times.user_seconds, before.user_seconds),
+                system_seconds=max(times.system_seconds, before.system_seconds),
+            )
+        baseline[key] = times
+    return used, baseline
 
 
 def record_server_cpu(target: ServerMemoryTarget, used: ProcessCpuTimes) -> None:
@@ -309,9 +359,8 @@ class MemoryProfiler:
                 logger.debug(f"Failed to sample memory for {target.name}", exc_info=True)
             try:
                 current = self._cpu_collector(target.pid)
-                previous = self._cpu_seen.get(target.name, {})
-                record_server_cpu(target, cpu_time_since(previous, current))
-                self._cpu_seen[target.name] = next_cpu_baseline(previous, current)
+                used, self._cpu_seen[target.name] = advance_cpu_baseline(self._cpu_seen.get(target.name, {}), current)
+                record_server_cpu(target, used)
             except Exception:
                 logger.debug(f"Failed to sample CPU time for {target.name}", exc_info=True)
 
@@ -341,15 +390,15 @@ class MemoryProfiler:
             self.sample_once()
 
 
-def _descendant_pids(root_pid: int) -> set[int]:
-    """Return a snapshot of a Linux process tree, including its root."""
-    pids: set[int] = set()
+def _descendant_pids(root_pid: int) -> list[int]:
+    """Return a snapshot of a Linux process tree, including its root, each process before its children."""
+    pids: dict[int, None] = {}
     to_visit = [root_pid]
     while to_visit:
         pid = to_visit.pop()
         if pid in pids:
             continue
-        pids.add(pid)
+        pids[pid] = None
         try:
             with os.scandir(f"/proc/{pid}/task") as task_dirs:
                 for task_dir in task_dirs:
@@ -361,7 +410,7 @@ def _descendant_pids(root_pid: int) -> set[int]:
                     to_visit.extend(int(child) for child in children if child.isdigit())
         except (OSError, PermissionError):
             continue
-    return pids
+    return list(pids)
 
 
 def _read_process_memory(pid: int) -> tuple[int, int | None] | None:
