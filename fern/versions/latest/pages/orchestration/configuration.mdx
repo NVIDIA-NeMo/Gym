@@ -57,6 +57,7 @@ A vLLM server, started with `vllm serve`.
 | `number_of_instances` | `1` | Data-parallel replicas. Must be at least 1. |
 | `trust_remote_code` | `false` | Adds `--trust-remote-code`. |
 | `use_ray_serve` | `false` | Force the [Ray Serve gateway](/orchestration/how-to/multi-node-vllm#ray-serve-gateway) to manage instances and routing. |
+| `ray_serve_startup_timeout_seconds` | `900` | Seconds each Ray Serve gateway instance may take to answer `/health` before its replica fails. The job script waits only `health_check.timeout_seconds` (default 60) for the whole gateway, so set that longer than this plus startup overhead. |
 | `extra_args` | `""` | Raw flags appended verbatim to `vllm serve`, for example `--max-model-len 8192`. |
 | `data_parallel_rpc_port` | `13345` | Port the data-parallel ranks of a multi-node service coordinate on. |
 

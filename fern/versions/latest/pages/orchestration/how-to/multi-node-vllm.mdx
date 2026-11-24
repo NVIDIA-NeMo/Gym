@@ -104,6 +104,8 @@ services:
 
 The gateway defines one Ray Serve deployment with `number_of_instances` replicas. Each replica launches its own `vllm serve` with the Ray executor and proxies requests to it, and the gateway listens on the service's `port`, so the driver sees one endpoint. Replicas per node are capped using `gpus_per_node`. Requests are not limited by Ray Serve's default concurrency or timeout: the gateway adds neither limit and leaves queueing and request bounds to vLLM.
 
+Each replica waits up to `ray_serve_startup_timeout_seconds` (default 900 s) for its instance to answer `/health`; past that it fails with `did not become healthy within N s`. Raise it for instances that load or compile slowly. The job script's own wait for the gateway is `health_check.timeout_seconds` (default 60 s), and it also covers installing and starting the gateway, so set it longer than `ray_serve_startup_timeout_seconds` with a margin.
+
 The gateway's source is embedded in the job script, so you do not need `gym_install` for it. The job installs `aiohttp`, and `ray` if missing, with `pip`. With `use_ray_serve: true` on a single node, the gateway starts its own local Ray.
 
 For the Ray Serve gateway, GPU validation compares the total footprint (TP x PP x `number_of_instances`) against the GPUs across all nodes, and the divisibility rule for `number_of_instances` does not apply.

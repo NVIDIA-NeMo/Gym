@@ -169,7 +169,7 @@ Look in `<run dir>/<benchmark>/logs/` first. There is one log per service and on
 
 **Error (in the job output):** `<service> did not become healthy after N attempts` or `<service> died during startup`
 
-The service did not answer its health endpoint in time (`timeout_seconds / 5` attempts, 5 seconds apart), or its process exited. Read that service's log. Model download and weight load are the usual cause of the first; raise `health_check.timeout_seconds` (the default is only 60 seconds). Container pull failures and out-of-memory errors show in the same log.
+The service did not answer its health endpoint in time (`timeout_seconds / 5` attempts, 5 seconds apart), or its process exited. Read that service's log. Model download and weight load are the usual cause of the first; raise `health_check.timeout_seconds` (the default is only 60 seconds). For a Ray Serve gateway service whose log shows `did not become healthy within N s`, raise `ray_serve_startup_timeout_seconds` as well. Container pull failures and out-of-memory errors show in the same log.
 
 ### A service exits while the driver runs
 

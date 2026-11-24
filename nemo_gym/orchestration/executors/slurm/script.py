@@ -415,6 +415,7 @@ def _build_vllm_ray_serve_command(
         f" --tensor-parallel-size {service.tensor_parallel_size}"
         f" --pipeline-parallel-size {service.pipeline_parallel_size}"
         f" --number-of-instances {service.number_of_instances}"
+        f" --startup-timeout-s {service.ray_serve_startup_timeout_seconds:g}"
     )
     if gpus_per_node_values:
         gateway_args += f" --gpus-per-node {max(gpus_per_node_values)}"
