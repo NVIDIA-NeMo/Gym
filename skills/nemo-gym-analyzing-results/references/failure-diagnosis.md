@@ -15,7 +15,7 @@ Use this reference to explain which tasks fail, why, and what to change, for one
 
 ## Outcome Groups
 
-This sorts every planned task by its measured rewards, separately for each agent when several agents ran the same tasks, and lists the repeats of tasks whose reward varies, so passing and failing repeats can be read side by side. It assumes the run wrote `results/rollouts.jsonl`:
+This sorts every planned task by its measured rewards, separately for each agent when several agents ran the same tasks, and lists the repeats of tasks whose reward varies, so passing and failing repeats can be read side by side. It counts the attempt that Gym selected for each rollout: a managed run (one with `<stem>_manifest.json`, after 0.7.0) can save superseded attempts and results that Gym counts as failures, so for such a run the snippet asks nemo-gym for the selection and must run with the Python where nemo-gym is installed. For a run without a manifest, it takes each rollout's newest saved attempt. It assumes the run wrote `results/rollouts.jsonl`:
 
 ```bash
 python3 - results/rollouts.jsonl <<'EOF'
@@ -35,24 +35,29 @@ def rows(p):
             if isinstance(row, dict):
                 result.append(row)
     return result
-ident = lambda r: r.get("_ng_rollout_id") or f"{r.get('_ng_task_index')}-{r.get('_ng_rollout_index')}"
+def selected(path):
+    """Each rollout's counted result: Gym's own selection for a managed run, else the newest saved attempt."""
+    if path.with_name(path.stem + "_manifest.json").exists():
+        try:
+            from nemo_gym.rollouts import RolloutStore  # nemo-gym after 0.7.0, the version that wrote the manifest
+            return RolloutStore.read(path, import_legacy=False).selected("success")
+        except Exception as error:
+            sys.exit(f"cannot read the selected attempts of this managed run ({error}); run this with the Python that has nemo-gym installed")
+    newest = {}
+    for r in rows(path):
+        i = r.get("_ng_rollout_id") or (r.get("_ng_task_index"), r.get("_ng_rollout_index"))
+        if i not in newest or r.get("_ng_attempt_index", 0) >= newest[i].get("_ng_attempt_index", 0):
+            newest[i] = r
+    return list(newest.values())
+ident = lambda r: r.get("_ng_rollout_id") or (r.get("_ng_task_index"), r.get("_ng_rollout_index"))
 # A run is its Environment Server, or its agent for rows without one, as Gym groups runs.
 run = lambda r: r.get("_ng_environment_server") or (r.get("agent_ref") or {}).get("name") or "-"
-manifest = out.with_name(out.stem + "_manifest.json")
-latest = None
-if manifest.exists():  # A managed run counts each rollout's newest reserved attempt, as Gym selects it.
-    latest = {i: n - 1 for i, n in json.loads(manifest.read_text()).get("next_attempt", {}).items() if n > 0}
-picked = {}
-for r in rows(out):
-    i, a = ident(r), r.get("_ng_attempt_index", 0)
-    if (a == latest.get(i)) if latest is not None else (i not in picked or a >= picked[i].get("_ng_attempt_index", 0)):
-        picked[i] = r
 plan = {ident(r): r for r in rows(out.with_name(out.stem + "_materialized_inputs.jsonl"))}
 planned = collections.Counter((run(r), r.get("_ng_task_index")) for r in plan.values())
 measured = collections.defaultdict(dict)
-for i, r in picked.items():
+for r in selected(out):
     if isinstance(r.get("reward"), (int, float)) and not r.get("mask_sample"):
-        measured[(run(plan.get(i, r)), r.get("_ng_task_index"))][r.get("_ng_rollout_index")] = r["reward"]
+        measured[(run(plan.get(ident(r), r)), r.get("_ng_task_index"))][r.get("_ng_rollout_index")] = r["reward"]
 groups = collections.defaultdict(list)
 for name, task in sorted(planned.keys() | measured.keys(), key=lambda k: (str(k[0]), k[1] is None, k[1])):
     got = measured.get((name, task), {})
@@ -71,7 +76,21 @@ print("* = fewer measured repeats than planned")
 EOF
 ```
 
-For rewards of 0 or 1, "same reward 1" is always pass, "same reward 0" is never pass and "reward varies" is sometimes pass. For fractional rewards, a task with the same middle reward every time is not a task that sometimes passes. `gym eval profile --inputs <stem>_materialized_inputs.jsonl --rollouts <stem>.jsonl` writes the same per-task statistics to `<stem>_reward_profiling.jsonl` in the run folder; add `++allow_partial_rollouts=True` when rollouts failed or are missing, or it stops with `Missing rollout results`.
+For rewards of 0 or 1, "same reward 1" is always pass, "same reward 0" is never pass and "reward varies" is sometimes pass. For fractional rewards, a task with the same middle reward every time is not a task that sometimes passes.
+
+`gym eval profile --inputs <stem>_materialized_inputs.jsonl --rollouts <stem>.jsonl` writes the same per-task statistics to `<stem>_reward_profiling.jsonl` next to the rollouts file; add `++allow_partial_rollouts=True` when rollouts failed or are missing, or it stops with `Missing rollout results`. It reads every row of the file instead of Gym's selection. That is the same thing for a run without `<stem>_manifest.json`, such as a 0.7.0 run, which saves one row per rollout. A managed run's file can hold superseded attempts, which stop the profile with `Duplicate result row` or count an attempt that Gym no longer counts, so profile its selected rows instead:
+
+```bash
+python3 - results/rollouts.jsonl > results/selected.jsonl <<'EOF'
+import json, sys
+from pathlib import Path
+from nemo_gym.rollouts import RolloutStore  # nemo-gym after 0.7.0, the version that wrote the manifest
+for row in RolloutStore.read(Path(sys.argv[1]), import_legacy=False).selected("success"):
+    print(json.dumps(row))
+EOF
+gym eval profile --inputs results/rollouts_materialized_inputs.jsonl --rollouts results/selected.jsonl \
+    ++allow_partial_rollouts=True
+```
 
 Tasks that sometimes pass are the most useful: the same task succeeded under some conditions and failed under others, so the difference between its repeats points at the cause.
 
@@ -142,33 +161,36 @@ Recommend how to measure each fix before rerunning everything; running and resum
       --output results/rescored/rollouts.jsonl
   ```
 
-  It starts every server in the config, so pass one with just the resources server, plus the judge's model server on judged benchmarks, and it refuses servers that do not support re-scoring unless forced. Re-scores that fail go to the failures file next to the new output, not into it, so check that every measured rollout was re-scored before reporting the effect; the counter below says so. On the same rollouts the difference is exact: count the rollouts and tasks whose reward changed rather than reading an interval from `gym eval compare`, which assumes two independent runs.
+  It starts every server in the config, so pass one with just the resources server, plus the judge's model server on judged benchmarks, and it refuses servers that do not support re-scoring unless forced. It re-scores through a resources server only: benchmarks that verify inside their Environment Server, such as SWE-Together, stop with `reverify: no resources server found in the config` and need a rerun instead. Re-scores that fail go to the failures file next to the new output, not into it, so check that every measured rollout was re-scored before reporting the effect; the counter below says so. On the same rollouts the difference is exact: count the rollouts and tasks whose reward changed rather than reading an interval from `gym eval compare`, which assumes two independent runs.
 
   ```bash
   python3 - results/rollouts.jsonl results/rescored/rollouts.jsonl <<'EOF'
   import json, sys
   from pathlib import Path
   def scores(path):
-      """Valid, unmasked rewards of each rollout's selected attempt; exits when the file is missing."""
+      """Valid, unmasked rewards of each rollout's counted attempt; exits when the file is missing."""
       p = Path(path)
       if not p.exists():
           sys.exit(f"missing {p}")
-      manifest = p.with_name(p.stem + "_manifest.json")
-      latest = None
-      if manifest.exists():  # A managed run counts each rollout's newest reserved attempt, as Gym selects it.
-          latest = {i: n - 1 for i, n in json.loads(manifest.read_text()).get("next_attempt", {}).items() if n > 0}
-      picked = {}
-      for line in p.open("rb"):
+      if p.with_name(p.stem + "_manifest.json").exists():
           try:
-              r = json.loads(line)
-          except (json.JSONDecodeError, UnicodeDecodeError):
-              continue  # Blank lines, and a cut-off last line.
-          if not isinstance(r, dict):
-              continue
-          i, a = r.get("_ng_rollout_id") or f"{r.get('_ng_task_index')}-{r.get('_ng_rollout_index')}", r.get("_ng_attempt_index", 0)
-          if (a == latest.get(i)) if latest is not None else (i not in picked or a >= picked[i].get("_ng_attempt_index", 0)):
-              picked[i] = r
-      return {(r.get("_ng_task_index"), r.get("_ng_rollout_index")): r["reward"] for r in picked.values()
+              from nemo_gym.rollouts import RolloutStore  # A managed run: use Gym's own selection of attempts.
+              picked = RolloutStore.read(p, import_legacy=False).selected("success")
+          except Exception as error:
+              sys.exit(f"cannot read the selected attempts of {p} ({error}); run this with the Python that has nemo-gym installed")
+      else:
+          newest = {}
+          for line in p.open("rb"):
+              try:
+                  r = json.loads(line)
+              except (json.JSONDecodeError, UnicodeDecodeError):
+                  continue  # Blank lines, and a cut-off last line.
+              if isinstance(r, dict):
+                  i = r.get("_ng_rollout_id") or (r.get("_ng_task_index"), r.get("_ng_rollout_index"))
+                  if i not in newest or r.get("_ng_attempt_index", 0) >= newest[i].get("_ng_attempt_index", 0):
+                      newest[i] = r
+          picked = list(newest.values())
+      return {(r.get("_ng_task_index"), r.get("_ng_rollout_index")): r["reward"] for r in picked
               if isinstance(r.get("reward"), (int, float)) and not r.get("mask_sample")}
   old, new = scores(sys.argv[1]), scores(sys.argv[2])
   both = old.keys() & new.keys()
