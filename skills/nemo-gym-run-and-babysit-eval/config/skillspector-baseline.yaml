@@ -19,7 +19,8 @@ rules:
       identities are marked unverified. These audit requirements describe the
       CLI path; directly enabling the configuration option does not require its
       reason or journal. This grants no OS or sandbox permissions; malformed or
-      unsupported manifests and unreadable inputs still fail. This exception
+      unsupported saved manifests and unreadable saved materialized inputs still
+      fail. Unreadable current inputs can fall back to saved inputs. This exception
       covers TM1 findings in root SKILL.md with matched text exactly
       --allow-unsafe. Currently only the --allow-unsafe-resume recovery
       instruction matches. Other flags sharing this prefix would also be
