@@ -1291,10 +1291,10 @@ async def test_the_oracle_gets_each_steps_own_solution_before_its_turn(tmp_path,
 
 
 @pytest.mark.parametrize("mode", ["shared", "separate"])
-async def test_no_turn_of_the_oracle_puts_a_transcript_where_its_verifier_reads(tmp_path, monkeypatch, mode):
-    """Harbor's oracle writes no trajectory.json in any step (``SUPPORTS_ATIF`` is false), so no step's verifier, in
-    the agent's sandbox or in one of its own, finds one under /logs/agent; Gym still keeps each turn's transcript
-    with that turn's verifier logs."""
+async def test_each_turn_of_the_oracle_puts_its_transcript_where_its_verifier_reads(tmp_path, monkeypatch, mode):
+    """Harbor's oracle writes no trajectory.json, but Gym writes each step's transcript to /logs/agent for the oracle as
+    for any other harness, in the agent's sandbox or in the step's own verifier sandbox, and keeps the same bytes with
+    that turn's verifier logs."""
     steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
     if mode == "separate":
         steps += (
@@ -1311,9 +1311,11 @@ async def test_no_turn_of_the_oracle_puts_a_transcript_where_its_verifier_reads(
     assert result is not None, response.failure
     assert [turn.verifier_mode for turn in result.turns] == ["shared", mode]
     assert len(verifiers) == (mode == "separate")
-    assert [uploaded_files(box, "trajectory.json") for box in (sandbox, *verifiers)] == [[]] * (1 + len(verifiers))
-    transcripts = [json.loads((Path(turn.verifier_logs_dir) / "trajectory.json").read_text()) for turn in result.turns]
-    assert [transcript["steps"][0]["message"] for transcript in transcripts] == ["P", "B"]
+    host_copies = [(Path(turn.verifier_logs_dir) / "trajectory.json").read_bytes() for turn in result.turns]
+    assert [json.loads(copy)["steps"][0]["message"] for copy in host_copies] == ["P", "B"]
+    # Step 1 is verified in the agent's sandbox; step 2 there too in shared mode, else in its own verifier sandbox.
+    uploads = [uploaded_files(box, "trajectory.json") for box in (sandbox, *verifiers)]
+    assert uploads == ([host_copies] if mode == "shared" else [host_copies[:1], host_copies[1:]])
 
 
 async def test_other_harnesses_never_get_a_steps_solution(tmp_path, monkeypatch):

@@ -8,11 +8,11 @@ environment server seeded, where that server placed the task's ``solution/`` at 
 because the agent it serves is this oracle, and runs ``bash /solution/solve.sh`` as the task
 user within the ``[agent].timeout_sec`` the seed request carries. ``/logs/agent`` then holds what Harbor's
 oracle leaves there: the script's output in ``oracle.txt`` and, when it exits non-zero, the exit code in
-``exit-code.txt``, with no ``trajectory.json`` (the environment server writes none for this harness). Each turn
-first removes the two files an earlier turn left (:meth:`OracleAgent._clear_turn_logs`). Verification then scores the
-result the same way it scores a model's work, so ``gym dataset validate`` is an ordinary run
-with this agent selected. The oracle never reads a task folder itself: the task, its digest and
-its solution are the environment server's.
+``exit-code.txt``. The environment server also writes its ``trajectory.json`` there, as for every harness, which
+Harbor's oracle does not. Each turn first removes the two files an earlier turn left
+(:meth:`OracleAgent._clear_turn_logs`). Verification then scores the result the same way it scores a model's
+work, so ``gym dataset validate`` is an ordinary run with this agent selected. The oracle never reads a task
+folder itself: the task, its digest and its solution are the environment server's.
 
 A task with ``solution/answer.md`` instead of ``solve.sh`` (one verified by its answer rather than by a
 script) gets that file copied to ``answer.md`` in the working directory (``ANSWER_WRITE_COMMAND``: the file the
@@ -87,8 +87,7 @@ ANSWER_WRITE_COMMAND = f"cat {ANSWER_FILE} > answer.md"
 SOLVE_LOG_DIR = "/logs/agent"
 # Harbor's oracle writes its output under this name, so tools written for Harbor find the log.
 SOLVE_LOG = f"{SOLVE_LOG_DIR}/oracle.txt"
-# Where Harbor's oracle records a non-zero solve.sh exit code, as the bare number. It writes no trajectory.json
-# (neither does the environment server for this harness), so a verifier reading /logs/agent finds these two files.
+# Where Harbor's oracle records a non-zero solve.sh exit code, as the bare number.
 EXIT_CODE_LOG = f"{SOLVE_LOG_DIR}/exit-code.txt"
 # Extra time the exec may wait after the in-container `timeout` should have fired.
 SOLVE_GRACE_S = 60.0

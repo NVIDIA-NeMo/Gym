@@ -102,8 +102,7 @@ class HarborSession:
     # restored when a later turn switches back to the image's default user (``_apply_turn_user``).
     workdir_owner: str | None = None
     # The harness is the Harbor oracle: the reference solution is placed at /solution for it, once at seed for a
-    # single-turn task and before each turn of a multi-step task (``_seed_solution``, ``_place_turn_solution``),
-    # and its verifier gets no /logs/agent/trajectory.json, as Harbor's oracle writes none (``_upload_trajectory``).
+    # single-turn task and before each turn of a multi-step task (``_seed_solution``, ``_place_turn_solution``).
     solution_for_oracle: bool = False
 
     def service(self, name: str | None) -> AsyncSandbox:

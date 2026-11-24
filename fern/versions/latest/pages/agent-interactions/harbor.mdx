@@ -22,10 +22,10 @@ row, the server runs one episode:
    the instruction. The harness works in the sandbox until it finishes or runs out of time.
 3. **Close.** Close the agent session and keep what the agent observed. The agent leaves the sandbox to the server.
 4. **Verify.** Write the agent's transcript to `/logs/agent/trajectory.json` (from the conversation the model
-   received, for a harness that reports it, such as `codex_agent`; not for the oracle, which, as under Harbor, leaves
-   only `oracle.txt` and, after a failed `solve.sh`, `exit-code.txt` there), upload the verifier to `/tests` and run
-   it in the same sandbox, or in a fresh one when the task or the server asks for separate verification. A separate
-   verifier image that ships `/tests/test.sh` gets no upload, unless a Python verifier grades the task.
+   received, for a harness that reports it, such as `codex_agent`; the oracle's too, though Harbor's oracle writes
+   none), upload the verifier to `/tests` and run it in the same sandbox, or in a fresh one when the task or the
+   server asks for separate verification. A separate verifier image that ships `/tests/test.sh` gets no upload,
+   unless a Python verifier grades the task.
    Read the reward from `/logs/verifier/reward.json`, or from `reward.txt` when there is no `reward.json`.
 5. **Clean up.** Stop every sandbox of the episode, whatever happened before.
 

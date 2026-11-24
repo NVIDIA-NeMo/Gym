@@ -145,8 +145,9 @@ reward or, without one, the sum of all its values. To grade in Python instead, r
 
 The reference solution. The oracle runs `solution/solve.sh` in the task's sandbox in place of an agent, then runs
 the verifier. No other harness receives `solution/`. As under Harbor, the verifier of an oracle run finds the
-output of `solve.sh` in `/logs/agent/oracle.txt`, its exit code in `/logs/agent/exit-code.txt` when it is not 0,
-and no `/logs/agent/trajectory.json`. A task graded on a
+output of `solve.sh` in `/logs/agent/oracle.txt` and, when `solve.sh` exits non-zero, the exit code in
+`/logs/agent/exit-code.txt`. Unlike Harbor's oracle, Gym also writes `/logs/agent/trajectory.json` for the oracle,
+so a verifier that reads the agent's transcript works under the oracle too. A task graded on a
 written answer can ship `solution/answer.md` instead (see
 [Reference answers](/main/data/task-folders/task-folder-verifiers#reference-answers)).
 
