@@ -378,19 +378,30 @@ dataset identifiers, a SHA-256 of the exact materialized-input bytes, prompt/tem
 explicit sampling settings and seeds (an explicit `null`, such as `max_tokens: null` for no cap,
 is kept, so it reads differently from a setting left out), the `judge_sampling_seed` that seeds the
 judge draw in GDPval and AA Briefcase Lite, rollout and server concurrency limits by config path,
-configured judge models and judge-prompt versions, and the running Gym version and commit. Unknown values are null or absent from the corresponding settings map. Prompt text and
-request metadata from the input rows are fingerprinted, not copied.
+configured judge models and judge-prompt versions, and the running Gym version and commit.
+Settings are the configured values; the record does not check that a server enforces them. Unknown
+values are null or absent from the corresponding settings map. Prompt text and request metadata
+from the input rows are fingerprinted, not copied.
 
-`concurrency_limits` holds integer or `null` values of the rollout limits (`num_samples_in_parallel`,
+`concurrency_limits` holds the configured integer or `null` values of the rollout limits (`num_samples_in_parallel`,
 `max_resident_rollout_tasks`), each server's `num_workers`, and the server, judge, verifier and
 sandbox limits Gym's configs name, such as `max_concurrent_requests`, `num_concurrent_requests`,
 `max_concurrent_episodes`, `judge_concurrency`, `concurrency` (including a sandbox's
 `exec.concurrency`) and `exec_concurrency`, plus any key named `max_concurrent_*`,
 `*_max_concurrency` or `*_max_concurrent`, such as `judge_endpoint_max_concurrency`. The full list of
 names is `_CONCURRENCY_KEYS` in `nemo_gym/rollouts/provenance.py`.
-Server limits such as `max_concurrent_requests` and `max_concurrent_episodes` apply per worker
-process, so the server's effective limit is that value times its `num_workers` (`null` runs one
-worker).
+
+A limit a server enforces in each of its worker processes, such as a model server's
+`max_concurrent_requests` or an environment server's `max_concurrent_episodes`, bounds the server
+at that value times its `num_workers` (`null` runs one worker). Not every recorded value works this
+way: the `legacy_agent` relay accepts `max_concurrent_episodes` but enforces no episode limit, and
+`global_aiohttp_connector_limit` is a total that Gym divides across worker processes (`0` is
+unlimited).
+
+With `--no-serve` and the default agent routing, the collector reads its own config, so the model,
+sampling and concurrency settings of servers it did not start are the collector's configured
+values, not necessarily what the running servers use; only `served_models` is asked of the running
+servers.
 
 A concurrency limit, or a sampling setting among a server's own config fields, given as text, such
 as `${oc.env:MAX_REQUESTS,2}`, is recorded as the server's config reads it: Pydantic's integer or
