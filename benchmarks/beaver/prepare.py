@@ -13,8 +13,9 @@ Sources, both gated on Hugging Face (MIT; accept the terms on each dataset page,
   shared with the grader's download cache.
 
 Sampling follows BEAVER's own download script (``data/download_hf.py``): ``random.Random(77).sample(rows, n)`` over
-a domain's rows in file order. For dw (5,787 questions) the samples nest: the first 100 of a 300-question sample are
-the 100-question sample, and so on. ``sample=0`` keeps every question.
+a domain's rows in file order. For dw (5,787 questions) samples of up to 1,365 nest: the first 100 of a 300-question
+sample are the 100-question sample, and the first 300 of a 400-question sample are the 300 (Python's sampler changes
+method above 1,365). ``sample=0`` keeps every question.
 
 Evidence is each question's ``domain_knowledge`` items, one per line, as auto-ontology-eval builds it. BEAVER's
 leaderboard (Setting 0) gives no hints: prepare with ``include_evidence=False`` for numbers comparable with it.
@@ -103,7 +104,8 @@ def build_rows(
                     "gt_sql": q["sql"],
                     "db_id": db_id,
                     "domain": domain,
-                    "category": q.get("category") or "",
+                    # Metric names: "complex query" -> "complex_query".
+                    "category": (q.get("category") or "").replace(" ", "_"),
                     "detailed_category": q.get("detailed_category") or "",
                     "evidence": evidence,
                     "evidence_section": f"\n\n### Evidence\n{evidence}" if evidence else "",

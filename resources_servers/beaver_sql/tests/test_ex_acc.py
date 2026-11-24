@@ -107,7 +107,8 @@ def test_canned_runner() -> None:
 
 class _FakeServer:
     """Scripted answers per SQL text: (columns, rows), None (no result set), an Exception, or a float (sleep then
-    rows). Records KILL QUERY targets."""
+    rows). Records KILL QUERY and KILL CONNECTION targets; ``more_results`` is what a connection reports as still
+    pending after its first result (a string with several statements)."""
 
     def __init__(self, script: Dict[str, Any], connect_delay: float = 0.0, connect_error: Exception = None) -> None:
         self.script = script
@@ -116,6 +117,8 @@ class _FakeServer:
         self.fetch_delay = 0.0
         self.executed: List[str] = []
         self.killed: List[int] = []
+        self.killed_connections: List[int] = []
+        self.more_results = False
         self.connects: List[Dict[str, Any]] = []
         self.next_id = 100
         self.lock = threading.Lock()
@@ -132,9 +135,18 @@ class _FakeServer:
             return _FakeConnection(self, self.next_id)
 
 
+class _FakeCMySql:
+    def __init__(self, server: _FakeServer) -> None:
+        self.server = server
+
+    def more_results(self) -> bool:
+        return self.server.more_results
+
+
 class _FakeConnection:
     def __init__(self, server: _FakeServer, connection_id: int) -> None:
         self.server, self.connection_id = server, connection_id
+        self._cmysql = _FakeCMySql(server)
 
     def cursor(self) -> "_FakeCursor":
         return _FakeCursor(self)
@@ -152,6 +164,9 @@ class _FakeCursor:
     def execute(self, sql: str) -> None:
         server = self.conn.server
         server.executed.append(sql)
+        if sql.startswith("KILL CONNECTION"):
+            server.killed_connections.append(int(sql.split()[-1]))
+            return
         if sql.startswith("KILL QUERY"):
             server.killed.append(int(sql.split()[-1]))
             server.interrupt.set()
@@ -227,7 +242,14 @@ def test_runner_query_failures(fake, error, status) -> None:
     assert _run(MySqlRunner("mysql://r:p@h"), "Q").status == status
 
 
-@pytest.mark.parametrize("errno", [2013, 2006, 1037, 1038, 1114, 1135])
+@pytest.mark.parametrize("errno", [1038, 1114, 1037])
+def test_runner_server_resource_errors_are_the_query_failure(fake, errno) -> None:
+    # A runaway sort or GROUP BY causes these itself; officially they're errors, scored as an empty result.
+    fake({"Q": mysql.connector.errors.DatabaseError("out of sort memory", errno=errno)})
+    assert _run(MySqlRunner("mysql://r:p@h"), "Q").status == "error"
+
+
+@pytest.mark.parametrize("errno", [2013, 2006])
 def test_runner_unavailable_during_query(fake, errno) -> None:
     fake({"Q": mysql.connector.errors.OperationalError("gone", errno=errno)})
     with pytest.raises(MySqlUnavailableError):
@@ -297,7 +319,9 @@ def test_kill_query_failure_is_ignored(fake, monkeypatch) -> None:
         raise mysql.connector.errors.InterfaceError("refused", errno=2003)
 
     monkeypatch.setattr(mysql.connector, "connect", refuse)
-    MySqlRunner("mysql://r:p@h")._kill_query(7)
+    runner = MySqlRunner("mysql://r:p@h")
+    runner._kill(7, "QUERY")
+    assert runner.kill_failures == 1
 
 
 def test_runner_grader_out_of_memory_is_unavailable(fake) -> None:
@@ -306,12 +330,14 @@ def test_runner_grader_out_of_memory_is_unavailable(fake) -> None:
         _run(MySqlRunner("mysql://r:p@h"), "Q")
 
 
-def test_runner_result_too_large_is_the_query_failure(fake, monkeypatch) -> None:
+def test_runner_result_too_large_never_matches(fake, monkeypatch) -> None:
     monkeypatch.setattr("resources_servers.beaver_sql.ex_acc._FETCH_CHUNK_ROWS", 10)
     monkeypatch.setattr("resources_servers.beaver_sql.ex_acc.MAX_RESULT_ROWS", 25)
     fake({"BIG": (["x"], [(i,) for i in range(100)]), "WIDE": (["x"], [("y" * 100,) for _ in range(5)])})
     big = _run(MySqlRunner("mysql://r:p@h"), "BIG")
-    assert (big.status, big.error, big.empty) == ("error", "result too large", True)
+    assert (big.status, big.error, big.empty, big.oversized) == ("error", "result too large", False, True)
+    # Officially a huge result is non-empty, so it doesn't match an empty gold result either.
+    assert not results_match(QueryOutcome(status="ok", frame=pd.DataFrame([], columns=["x"])), big)
     monkeypatch.setattr("resources_servers.beaver_sql.ex_acc.MAX_RESULT_BYTES", 300)
     assert _run(MySqlRunner("mysql://r:p@h"), "WIDE").error == "result too large"
 
@@ -344,5 +370,42 @@ def test_kill_connection_is_bounded(fake, monkeypatch) -> None:
         raise mysql.connector.errors.InterfaceError("refused", errno=2003)
 
     monkeypatch.setattr(mysql.connector, "connect", connect)
-    MySqlRunner("mysql://r:p@h")._kill_query(7)
+    MySqlRunner("mysql://r:p@h")._kill(7, "QUERY")
     assert seen["read_timeout"] == seen["write_timeout"] == seen["connection_timeout"] == 2
+
+
+def test_a_busy_event_loop_does_not_time_out_a_fast_query(fake) -> None:
+    # The query is timed on its own thread: blocking the loop past the limit doesn't turn a 0.05 s query into a timeout.
+    fake({"FAST": 0.05})
+    runner = MySqlRunner("mysql://r:p@h", timeout_s=1.0)
+
+    async def scenario():
+        task = asyncio.create_task(runner.run("dw", "FAST"))
+        await asyncio.sleep(0.01)
+        time.sleep(1.5)  # the loop is stuck, as during a large comparison
+        return await task
+
+    outcome = asyncio.run(scenario())
+    assert outcome.status == "ok" and outcome.seconds < 1.0
+
+
+def test_several_statements_kill_the_connection_after_the_first_result(fake) -> None:
+    server = fake({"SELECT 1; DO SLEEP(60)": (["1"], [(1,)])})
+    server.more_results = True
+    outcome = _run(MySqlRunner("mysql://r:p@h"), "SELECT 1; DO SLEEP(60)")
+    assert outcome.status == "ok" and outcome.frame.iloc[0, 0] == 1
+    # The query's own connection (the first one opened), from a second connection.
+    assert server.killed_connections == [101]
+
+
+def test_one_statement_kills_nothing(fake) -> None:
+    server = fake({"Q": (["x"], [(1,)])})
+    _run(MySqlRunner("mysql://r:p@h"), "Q")
+    assert server.killed_connections == [] and server.killed == []
+
+
+@pytest.mark.parametrize("errno", [1049, 1045])
+def test_runner_connect_errors_are_unavailable(fake, errno) -> None:
+    fake({}, connect_error=mysql.connector.errors.ProgrammingError("not loaded", errno=errno))
+    with pytest.raises(MySqlUnavailableError):
+        _run(MySqlRunner("mysql://r:p@h"), "Q")

@@ -40,8 +40,8 @@ evidence is BEAVER's annotated domain knowledge (222 of the first 400 `dw` quest
 - `nonempty_gold/pass@1[avg-of-k]/accuracy` over tasks whose gold query returns rows. Any query that returns nothing
   (or fails) matches an empty gold result, so this is the stricter number.
 
-Per-category scores (`category`: `real`, `complex query`, `domain-specific query`, `domain-specific complex query`)
-are reported too. **Run conditions:** single-turn, no judge; 10 seconds per query; token budget and sampling are the
+Per-category scores (BEAVER's `category`, with spaces as underscores: `real`, `complex_query`, `domain-specific_query`,
+`domain-specific_complex_query`) are reported too. **Run conditions:** single-turn, no judge; 10 seconds per query; token budget and sampling are the
 model's (eval command).
 
 ## Gold check
@@ -51,7 +51,7 @@ model's (eval command).
 
 | Split | Rows | Empty | Error | Timeout |
 |---|---|---|---|---|
-| `dw` | 5,771 | 10 | 0 | 6 at 8 at a time, 0 one at a time |
+| `dw` | 5,777 | 10 | 0 | 0 one at a time; 6 at 8 at a time (then 5,771 rows) |
 | `dw_real` | 102 | 19 | 0 | 0 |
 | `neutron` | 1,017 | 0 | 0 | 0 |
 

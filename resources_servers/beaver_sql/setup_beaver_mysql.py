@@ -55,6 +55,8 @@ DUMPS: Dict[str, BeaverDump] = {
 }
 
 META_DB = "_beaver_meta"
+# The dump hash recorded while a database is being loaded.
+_LOADING = "loading"
 
 CASE_INSENSITIVE_NAMES_HELP = (
     "BEAVER needs MySQL with case-insensitive table names: start it with --lower-case-table-names=1 (it can only be "
@@ -216,7 +218,9 @@ def load_dump(conn, db_id: str, dump_path: Path, owned: bool) -> int:
     created, which fails if someone else created a database of that name since the caller checked.
     """
     cur = conn.cursor()
-    cur.execute(f"DELETE FROM `{META_DB}`.loaded WHERE db_id = %s", (db_id,))
+    # Mark the database as this loader's, mid-load, before touching it: if the load stops part-way, the next start
+    # finds the mark (not the pinned hash), owns the database and loads it again.
+    cur.execute(f"REPLACE INTO `{META_DB}`.loaded (db_id, dump_sha256, tables) VALUES (%s, %s, 0)", (db_id, _LOADING))
     conn.commit()
     if owned:
         cur.execute(f"DROP DATABASE IF EXISTS `{db_id}`")
@@ -228,9 +232,12 @@ def load_dump(conn, db_id: str, dump_path: Path, owned: bool) -> int:
         if statement.lstrip().upper().startswith("CREATE TABLE"):
             tables += 1
         conn.commit()
+    if tables != _dump(db_id).tables:
+        # Left marked as loading, so the next start loads it again.
+        raise RuntimeError(f"BEAVER {db_id}: loaded {tables} tables, expected {_dump(db_id).tables}")
     cur.execute(
-        f"INSERT INTO `{META_DB}`.loaded (db_id, dump_sha256, tables) VALUES (%s, %s, %s)",
-        (db_id, _dump(db_id).sha256, tables),
+        f"UPDATE `{META_DB}`.loaded SET dump_sha256 = %s, tables = %s WHERE db_id = %s",
+        (_dump(db_id).sha256, tables, db_id),
     )
     conn.commit()
     cur.close()
@@ -282,9 +289,7 @@ def ensure_beaver_mysql(cache_dir: Path, db_ids: List[str], admin_dsn: str, read
             dumps = ensure_beaver_dumps(cache_dir, stale)
             for db_id in stale:
                 logger.info("Loading BEAVER %s into MySQL ...", db_id)
-                tables = load_dump(conn, db_id, dumps[db_id], owned=db_id in recorded)
-                if tables != _dump(db_id).tables:
-                    raise RuntimeError(f"BEAVER {db_id}: loaded {tables} tables, expected {_dump(db_id).tables}")
+                load_dump(conn, db_id, dumps[db_id], owned=db_id in recorded)
         cur.execute("SELECT CURRENT_USER()")
         admin_user = str(cur.fetchone()[0]).split("@")[0]
         _ensure_reader(cur, admin_user, reader_dsn, db_ids)
@@ -329,6 +334,13 @@ def check_beaver_mysql(reader_dsn: str, db_ids: List[str], connection_timeout: O
         require_case_insensitive_names(cur)
         cur.execute("SHOW GRANTS")
         extra = grader_privilege_problems([g for (g,) in cur.fetchall()])
+        # Privileges can also come through roles: an active one, or a mandatory one the user could activate.
+        cur.execute("SELECT CURRENT_ROLE(), @@GLOBAL.mandatory_roles")
+        current_role, mandatory = cur.fetchone()
+        if current_role not in (None, "", "NONE"):
+            extra.append(f"active role {current_role}")
+        if mandatory:
+            extra.append(f"mandatory roles {mandatory}")
         if extra:
             raise RuntimeError(
                 "the grader's MySQL user must hold only SELECT (and USAGE); it also has: " + "; ".join(extra)
@@ -347,8 +359,11 @@ def check_beaver_mysql(reader_dsn: str, db_ids: List[str], connection_timeout: O
                 continue
             sha, tables = loaded[db_id]
             if sha != _dump(db_id).sha256:
-                problems.append(f"{db_id}: loaded from another dump")
+                problems.append(
+                    f"{db_id}: " + ("its load didn't finish" if sha == _LOADING else "loaded from another dump")
+                )
                 continue
+            tables = _dump(db_id).tables
             cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = %s", (db_id,))
             visible = [name for (name,) in cur.fetchall()]
             if len(visible) != tables:

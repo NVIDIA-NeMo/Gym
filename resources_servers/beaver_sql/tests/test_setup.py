@@ -120,6 +120,7 @@ class _FakeMySql:
         self.show_grants: Optional[List[str]] = None
         self.unreadable: set = set()
         self.lock_free = True
+        self.current_role, self.mandatory_roles = "NONE", ""
 
     def connect(self, **params: Any) -> "_FakeConn":
         return _FakeConn(self, params)
@@ -174,8 +175,14 @@ class _FakeCur:
             self.result = [(k, sha) for k, (sha, _) in s.loaded.items()]
         elif sql.startswith("DELETE FROM `_beaver_meta`.loaded"):
             s.loaded.pop(params[0], None)
-        elif sql.startswith("INSERT INTO `_beaver_meta`.loaded"):
-            s.loaded[params[0]] = (params[1], params[2])
+        elif sql.startswith("INSERT INTO `_beaver_meta`.loaded") or sql.startswith(
+            "REPLACE INTO `_beaver_meta`.loaded"
+        ):
+            s.loaded[params[0]] = (params[1], 0)
+        elif sql.startswith("UPDATE `_beaver_meta`.loaded"):
+            s.loaded[params[2]] = (params[0], params[1])
+        elif sql.startswith("SELECT CURRENT_ROLE()"):
+            self.result = [(s.current_role, s.mandatory_roles)]
         elif sql.startswith("SELECT schema_name"):
             self.result = [(d,) for d in sorted(s.databases)]
         elif sql == "SELECT CURRENT_USER()":
@@ -399,6 +406,16 @@ def test_live_load_check_and_read_only(tmp_path, tiny) -> None:
             assert outcome.status == "error" or outcome.frame.iloc[0, 0] == 1, statement
         slow = asyncio.run(runner.run("tiny", "SELECT SLEEP(5)"))
         assert slow.status == "timeout"
+        # A second statement doesn't run on after the first result: its connection is killed.
+        two = asyncio.run(runner.run("tiny", "SELECT 1; DO SLEEP(5)"))
+        assert two.status == "ok" and two.frame.iloc[0, 0] == 1
+        admin = setup._connect(_LIVE_ADMIN)
+        try:
+            cur = admin.cursor()
+            cur.execute("SELECT COUNT(*) FROM information_schema.processlist WHERE state = 'User sleep'")
+            assert cur.fetchone()[0] == 0
+        finally:
+            admin.close()
     finally:
         # Leave the server as found: the test database, its record and the grader's grant on it go.
         conn = setup._connect(_LIVE_ADMIN)
@@ -413,3 +430,35 @@ def test_live_load_check_and_read_only(tmp_path, tiny) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def test_an_interrupted_load_is_loaded_again(tmp_path, tiny, fake_mysql) -> None:
+    # A previous run marked tiny as loading, created it, and stopped part-way.
+    server = fake_mysql(databases=["_beaver_meta", "tiny"])
+    server.loaded["tiny"] = ("loading", 0)
+    with pytest.raises(RuntimeError, match="its load didn't finish"):
+        check_beaver_mysql(READER, ["tiny"])
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert "DROP DATABASE IF EXISTS `tiny`" in server.statements
+    assert server.loaded["tiny"] == (setup.DUMPS["tiny"].sha256, 1)
+
+
+def test_a_short_load_stays_marked_and_fails_the_check(tmp_path, tiny, fake_mysql, monkeypatch) -> None:
+    server = fake_mysql()
+    monkeypatch.setitem(setup.DUMPS, "tiny", BeaverDump("beaver_db/tiny.sql", setup.DUMPS["tiny"].sha256, 2))
+    with pytest.raises(RuntimeError, match="loaded 1 tables, expected 2"):
+        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert server.loaded["tiny"][0] == "loading"
+    with pytest.raises(RuntimeError, match="its load didn't finish"):
+        check_beaver_mysql(READER, ["tiny"])
+
+
+@pytest.mark.parametrize(
+    "role,mandatory,message", [("`admin`@`%`", "", "active role"), ("NONE", "`dba`@`%`", "mandatory")]
+)
+def test_check_refuses_privileges_through_roles(tmp_path, tiny, fake_mysql, role, mandatory, message) -> None:
+    server = fake_mysql()
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    server.current_role, server.mandatory_roles = role, mandatory
+    with pytest.raises(RuntimeError, match=message):
+        check_beaver_mysql(READER, ["tiny"])

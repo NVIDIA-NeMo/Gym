@@ -72,8 +72,9 @@ from `mysql_dsn` with `SELECT` on those databases only. The loader never drops o
 itself. Without `mysql_admin_dsn`, startup only checks that every database is loaded from the pinned dump and that the
 grader's user sees all its tables.
 
-The grader's user can only read: a query that writes, creates a temporary table or reads a server file fails, and is
-scored as an empty result. (The official evaluator connects as root.) Startup reads every table as the grader, and
+The grader's user can only read: a query that writes or creates a temporary table fails, and is scored as an empty
+result; `LOAD_FILE()` returns NULL. (The official evaluator connects as `MYSQL_USER`, which BEAVER's README example sets
+to root.) Startup reads every table as the grader, and
 refuses a grader user that holds anything beyond `SELECT` on the BEAVER databases and `_beaver_meta`: another
 privilege, a role, or `SELECT` elsewhere. The loader creates that user if it doesn't exist and never changes an
 existing user's password; it refuses a grader DSN that names its own (admin) user, runs one loader at a time per server
@@ -109,7 +110,20 @@ one query at a time; lower `max_concurrency` on a slower server, or when you sco
 
 **Driver.** `mysql-connector-python` 26.10.0 with its C extension, as the official evaluator's default. It runs a
 string with several statements and returns the first statement's result (`SELECT 1; SELECT 2` gives `1`), so an
-answer whose first statement is a `SET` returns no rows. The official `ex_acc.py` and this grader agree on these cases.
+answer whose first statement is a `SET` returns no rows. Statements after the first would run on after the result is
+read, so when the driver reports more results pending, the grader kills that connection (`KILL CONNECTION`). On 12
+such probes (`SELECT 1; SELECT 2`, a trailing comment, `SET @x = 3; SELECT @x`, ...) the official `ex_acc.py` and this
+grader returned the same result.
+
+**Known limits.** All grader connections share one MySQL user, so a model answer can `KILL QUERY` another rollout's
+query, which then scores as a timeout; nothing stops that short of a user per connection. A gold query runs again for
+every rollout, so with `--num-repeats` above 1 a gold near the time limit can time out on some rollouts and not others
+(and its task's `gold_result` subset follows the first rollout); report `gold-sql-timeout_count` with the headline.
+
+**Where this departs from the official evaluator,** on purpose: a gold query that *errors* masks the row instead of
+counting as an empty result (none of the 6,925 `dw`, `dw_real` and `neutron` golds errors on a correctly set-up
+server; `nova` isn't checked); a failure to connect or a lost connection masks the row; a result over the size limit
+never matches; and statements after the first are stopped rather than left running.
 
 ## Tests
 
