@@ -114,14 +114,16 @@ other option combines with them.
 | `minidev_20261028` | 2026-10-28 | 500 | [`birdsql/bird_mini_dev`](https://huggingface.co/datasets/birdsql/bird_mini_dev), `data/` | Mini-Dev's 2026 update ("Mini-Dev 1024"), the current Mini-Dev |
 
 The Hugging Face files are pinned to a revision and checked against their SHA-256 (`prepare.VERSIONS`), and cached
-under `data/versions/`. All are CC BY-SA 4.0. A non-default version writes its own file,
+under `data/versions/` (git-ignored). All are CC BY-SA 4.0. The default's `dev.json` comes from `dev.zip` as before and
+isn't checked; the one these numbers come from has SHA-256 `630272f2b1c44d8cef2c3b246f623355cf0bbc1e832c81061df895530dfc2f06`. A non-default version writes its own file,
 `data/birdbench_<dialect>_<version>.jsonl`, whose rows also carry BIRD's `question_id` and `bird_version`; the default
 file is unchanged.
 
 **What changed from `dev_20240627`** (counts only):
 
-- `dev_20251106`: the same 1,534 question ids and databases; 614 changed: question text 182, evidence 378, gold SQL
-  450, difficulty 86 (challenging 145 → 231, moderate 464 → 443, simple 925 → 860).
+- `dev_20251106`: the same 1,534 question ids and databases; 614 changed, ignoring changes in whitespace only:
+  question text 182, evidence 378, gold SQL 450, difficulty 86 (challenging 145 → 231, moderate 464 → 443, simple 925 →
+  860). Counting whitespace too: 619 (evidence 381, gold SQL 452).
 - `minidev_20250704`: 500 questions with dev's ids; 496 have a question identical to `dev_20240627`'s.
 - `minidev_20261028`: 500 questions renumbered 0-499; 13 of 500 question texts are unchanged from `minidev_20250704`,
   and 11 match a `dev_20251106` question. Aligned ids across SQLite, MySQL and PostgreSQL in the source; this benchmark
