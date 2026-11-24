@@ -475,6 +475,9 @@ class RolloutStore:
                 ]
                 settled["ng_trajectory"] = TrajectoryRecord.model_validate(selected).model_dump(mode="json")
                 settled["_ng_rejudge_verifier_invocation_ids"] = ids
+                # The predecessor's totals count the judge calls dropped above, and the new judge calls are not
+                # captured here; its totals stay in the nested observations.
+                settled.pop("ng_captured_calls", None)
             except (TypeError, ValueError) as error:
                 raise ConfigError("Canonical rejudge requires fresh observed verifier invocation evidence.") from error
         saved = current.record.read()
