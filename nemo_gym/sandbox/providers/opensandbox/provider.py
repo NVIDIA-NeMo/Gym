@@ -699,6 +699,14 @@ def _to_network_policy(network_policy: Mapping[str, Any]) -> Any:
     return NetworkPolicy.model_validate(network_policy)
 
 
+def _check_hostname(name: str) -> None:
+    """Refuse a name that cannot go into a hosts file as a peer alias."""
+    if len(name) > 253 or not all(
+        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?", label) for label in name.split(".")
+    ):
+        raise ValueError(f"Invalid sandbox hostname: {name!r}")
+
+
 def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     _, _, _, _, Volume = _require_opensandbox_sdk()
     return [Volume(**dict(volume)) for volume in volumes]
@@ -1232,8 +1240,9 @@ class OpenSandboxProvider:
         self._parked_poll_scopes: dict[str, int] = {}
         # Each sidecar is a sandbox of its own; their handles by the main sandbox's id, then by sidecar name.
         self._sidecars: dict[str, dict[str, SandboxHandle]] = {}
-        # Main sandboxes whose sidecar handles `connect` made, which `disconnect_handle` releases.
-        self._connected_sidecars: set[str] = set()
+        # Main sandboxes whose sidecar handles `connect` made, with how many connects share them; the last
+        # `disconnect_handle` releases them. Handles of a sandbox this provider created are never counted here.
+        self._connected_sidecars: dict[str, int] = {}
         # Main sandboxes already deleted by a close that left a sidecar behind; a repeated close skips them.
         self._deleted_with_sidecars_left: set[str] = set()
 
@@ -1385,10 +1394,7 @@ class OpenSandboxProvider:
         self.validate_networking()
         entries = []
         for name, address in hosts.items():
-            if len(name) > 253 or not all(
-                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?", label) for label in name.split(".")
-            ):
-                raise ValueError(f"Invalid sandbox hostname: {name!r}")
+            _check_hostname(name)
             entries.append(shlex.quote(f"{ipaddress.ip_address(address)} {name}\n"))
         if entries:
             result = await self.exec(handle, "printf '%s' " + " ".join(entries) + " >> /etc/hosts", user="root")
@@ -2023,11 +2029,14 @@ class OpenSandboxProvider:
             if isinstance(error, Exception) and not isinstance(error, NgFailureEvent):
                 raise opensandbox_failure(operation="connect", sandbox_id=sandbox_id, cause=error) from error
             raise
+        if sandbox_id in self._sidecars:
+            # This provider created the sandbox, or connected it before: the connects share its sidecar handles.
+            if sandbox_id in self._connected_sidecars:
+                self._connected_sidecars[sandbox_id] += 1
+            return handle
         sidecars: dict[str, SandboxHandle] = {}
-        # A sandbox this provider already holds the sidecars of (it created it, or connected it before) keeps them.
-        sidecar_ids = {} if sandbox_id in self._sidecars else descriptor.get("sidecar_ids") or {}
         try:
-            for name, sidecar_id in sidecar_ids.items():
+            for name, sidecar_id in (descriptor.get("sidecar_ids") or {}).items():
                 sidecars[name] = await self.connect({"sandbox_id": sidecar_id})
         except BaseException:
             # A sandbox whose sidecar is gone is not reattached. Release the local handles connected so far.
@@ -2042,14 +2051,21 @@ class OpenSandboxProvider:
             raise
         if sidecars:
             self._sidecars[sandbox_id] = sidecars
-            self._connected_sidecars.add(sandbox_id)
+            self._connected_sidecars[sandbox_id] = 1
         return handle
 
     async def disconnect_handle(self, handle: SandboxHandle) -> None:
-        """Release the sidecar handles ``connect`` made for a borrowed sandbox; the sandboxes keep running."""
-        if handle.sandbox_id not in self._connected_sidecars:
+        """Release the sidecar handles ``connect`` made for a borrowed sandbox once no other connect shares them.
+
+        The sandboxes keep running.
+        """
+        shared_by = self._connected_sidecars.get(handle.sandbox_id)
+        if shared_by is None:
             return
-        self._connected_sidecars.discard(handle.sandbox_id)
+        if shared_by > 1:
+            self._connected_sidecars[handle.sandbox_id] = shared_by - 1
+            return
+        del self._connected_sidecars[handle.sandbox_id]
         for sidecar in self._sidecars.pop(handle.sandbox_id, {}).values():
             with suppress(Exception):
                 await self._await_sdk_call(
@@ -2985,15 +3001,24 @@ class OpenSandboxProvider:
         if not spec.sidecars:
             return await self._create_with_retries(_normalize_spec(spec))
         # A sidecar is a sandbox of its own, from its own image. One placement group keeps it on the main sandbox's
-        # cell, where the two reach each other by IP. It gets the main sandbox's egress policy and none of its
-        # other provider options (mounts, a snapshot).
+        # cell, where the two reach each other by IP. It gets its own provider options, none of the main sandbox's
+        # (mounts, a snapshot), and the main sandbox's egress policy unless it names its own.
         group = spec.metadata.get(PLACEMENT_GROUP_KEY) or f"sidecars-{uuid.uuid4().hex}"
         spec = replace(spec, metadata={**spec.metadata, PLACEMENT_GROUP_KEY: group})
         policy = spec.provider_options.get("network_policy")
+        # Checked before anything starts, so a misspelled option or name of the last sidecar leaves no sandbox behind.
+        for sidecar in spec.sidecars:
+            OpenSandboxProviderOptions.from_mapping(sidecar.provider_options)
+            if self._networking.enabled:
+                _check_hostname(sidecar.name)
         sidecars: dict[str, SandboxHandle] = {}
         handle: SandboxHandle | None = None
         try:
             for sidecar in spec.sidecars:
+                options = dict(sidecar.provider_options)
+                if policy is not None:
+                    # An empty policy still denies by default, so it is passed on like any other.
+                    options.setdefault("network_policy", policy)
                 sidecar_spec = SandboxSpec(
                     image=sidecar.image,
                     env=sidecar.env,
@@ -3001,16 +3026,27 @@ class OpenSandboxProvider:
                     ttl_s=spec.ttl_s,
                     ready_timeout_s=spec.ready_timeout_s,
                     metadata=spec.metadata,
-                    # An empty policy still denies by default, so it is passed on like any other.
-                    provider_options={"network_policy": policy} if policy is not None else {},
+                    provider_options=options,
                 )
                 sidecars[sidecar.name] = await self._create_with_retries(_normalize_spec(sidecar_spec))
             addresses: dict[str, str] = {}
             if self._networking.enabled:
-                addresses = {name: await self.network_address(sidecar) for name, sidecar in sidecars.items()}
+                for name, sidecar_handle in sidecars.items():
+                    try:
+                        addresses[name] = await self.network_address(sidecar_handle)
+                    except ValueError as error:
+                        # A sidecar the main sandbox cannot reach is not ready: the attempt fails on the
+                        # infrastructure, like a sidecar that does not start.
+                        raise opensandbox_failure(
+                            operation="sidecar network address",
+                            failure_kind=PROVIDER_SETUP_FAILED,
+                            sandbox_id=sidecar_handle.sandbox_id,
+                            cause=error,
+                            reason=f"Sidecar {name!r} has no address its sandbox can reach: {error}",
+                        ) from error
             if policy is not None and addresses:
-                # The sidecars start first: the main sandbox's policy must allow their addresses, and a policy
-                # is fixed at create. These rules lead, so no rule of the task's own denies a sidecar.
+                # The sidecars start first, so the main sandbox is created with their addresses in its policy.
+                # These rules lead, so no rule of the task's own denies a sidecar.
                 allowed = [{"action": "allow", "target": address} for address in addresses.values()]
                 policy = {**policy, "egress": [*allowed, *(policy.get("egress") or ())]}
                 spec = replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
@@ -3154,7 +3190,9 @@ class OpenSandboxProvider:
                 from opensandbox.models.execd import ExecutionHandlers
 
                 async def forward_stdout(message: Any) -> None:
-                    on_stdout(message.text + "\n")
+                    # Newer execd keeps each line's ending in the event; older execd strips it.
+                    text = message.text
+                    on_stdout(text if text.endswith(("\n", "\r")) else text + "\n")
 
                 run_kwargs["handlers"] = ExecutionHandlers(on_stdout=forward_stdout)
             execution = await self._submit_command(
@@ -3452,7 +3490,9 @@ class OpenSandboxProvider:
         diagnostic_remaining_s = 0.0
         status_failure_error: NgFailureEvent | None = None
         seen_running = False
-        # How many bytes of the command's output `on_stdout` has received.
+        # Where the next read of the command's output starts (execd's byte cursor), and how many characters of
+        # that output `on_stdout` has received.
+        log_cursor = 0
         forwarded = 0
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
@@ -3572,7 +3612,7 @@ class OpenSandboxProvider:
                 if on_stdout is not None:
                     try:
                         new = await self._await_sdk_call(
-                            handle.raw.commands.get_background_command_logs(execution_id, forwarded),
+                            handle.raw.commands.get_background_command_logs(execution_id, log_cursor),
                             operation="command logs",
                             sandbox_id=handle.sandbox_id,
                             timeout_s=status_timeout_s,
@@ -3583,7 +3623,11 @@ class OpenSandboxProvider:
                     else:
                         if new.content:
                             on_stdout(new.content)
-                            forwarded += len(new.content.encode())
+                            forwarded += len(new.content)
+                        # execd's cursor is the byte offset after what it returned; text decoded from output that
+                        # is not UTF-8 has a different length, so the bytes are counted only when it sends none.
+                        cursor = getattr(new, "cursor", None)
+                        log_cursor = cursor if cursor is not None else log_cursor + len(new.content.encode())
                 if command_deadline is not None and not timed_out and loop.time() >= command_deadline:
                     timed_out = await self._interrupt_at_deadline(
                         handle, execution_id, timeout_s=command_timeout_s, request_timeout_s=status_timeout_s
@@ -3658,8 +3702,8 @@ class OpenSandboxProvider:
             logs = None
             output_deleted = True
         stdout = getattr(logs, "content", None) or None
-        if on_stdout is not None and stdout and (rest := stdout.encode()[forwarded:]):
-            on_stdout(rest.decode(errors="replace"))
+        if on_stdout is not None and stdout and (rest := stdout[forwarded:]):
+            on_stdout(rest)
         status_error = getattr(status, "error", None)
         stderr = status_error or None
         if output_deleted:
@@ -4089,14 +4133,24 @@ class OpenSandboxProvider:
     ) -> SandboxExecResult:
         """Run ``argv`` in the sidecar's sandbox. execd runs it through a shell, which the sidecar image needs."""
         return await self._exec(
-            self._sidecars[handle.sandbox_id][sidecar], shlex.join(argv), timeout_s=timeout_s, on_stdout=on_stdout
+            self._sidecar_handle(handle, sidecar), shlex.join(argv), timeout_s=timeout_s, on_stdout=on_stdout
         )
 
     async def download_sidecar_file(
         self, handle: SandboxHandle, sidecar: str, source_path: str, target_path: Path
     ) -> None:
         """Download one file from the sidecar's sandbox."""
-        await self.download_file(self._sidecars[handle.sandbox_id][sidecar], source_path, target_path)
+        await self.download_file(self._sidecar_handle(handle, sidecar), source_path, target_path)
+
+    def _sidecar_handle(self, handle: SandboxHandle, sidecar: str) -> SandboxHandle:
+        """The handle of a sidecar this provider created, or connected from a descriptor with its id."""
+        try:
+            return self._sidecars[handle.sandbox_id][sidecar]
+        except KeyError:
+            raise RuntimeError(
+                f"OpenSandbox holds no sidecar {sidecar!r} of sandbox {handle.sandbox_id!r}: it was stopped, or the "
+                "sandbox was connected from a descriptor without its sidecar_ids"
+            ) from None
 
     async def _kill_with_retry(self, kill: Callable[[], Awaitable[None]], *, sandbox_id: str) -> None:
         """Apply the same idempotent deletion and permission guards to handles and orphan cleanup."""
@@ -4132,7 +4186,7 @@ class OpenSandboxProvider:
         sidecars = self._sidecars.get(sandbox_id)
         if not sidecars:
             self._sidecars.pop(sandbox_id, None)
-            self._connected_sidecars.discard(sandbox_id)
+            self._connected_sidecars.pop(sandbox_id, None)
             return await self._close_one(handle)
         # Each is deleted whatever happens to the others. One that cannot be deleted is retried by a repeated close,
         # which leaves alone a main sandbox it has deleted: that one's SDK handle is closed.
@@ -4147,7 +4201,7 @@ class OpenSandboxProvider:
                 del sidecars[name]
         if not sidecars:
             del self._sidecars[sandbox_id]
-            self._connected_sidecars.discard(sandbox_id)
+            self._connected_sidecars.pop(sandbox_id, None)
             self._deleted_with_sidecars_left.discard(sandbox_id)
         for result in results:
             if isinstance(result, BaseException):

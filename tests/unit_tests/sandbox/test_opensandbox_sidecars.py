@@ -27,6 +27,7 @@ pytestmark = pytest.mark.sandbox
 pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
 pytest.importorskip("opensandbox", reason="opensandbox optional sandbox dependency is not installed")
 
+from nemo_gym.core.failure_kinds import PROVIDER_SETUP_FAILED
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import PLACEMENT_GROUP_KEY, SandboxSpec, SupportsSandboxSidecars
@@ -36,7 +37,8 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 class FakeSandbox:
     """The SDK sandbox: records creates and kills, and runs commands by echoing them.
 
-    A background command stays running for two status polls and writes one line before each poll.
+    A background command stays running for two status polls and writes one line before each poll: ``log_prefix``
+    and the poll's number. Its log is read like execd's, from a byte offset, and the reply names the offset after it.
     """
 
     created: list[dict[str, Any]] = []
@@ -45,6 +47,7 @@ class FakeSandbox:
     fail_image: str | None = None
     fail_kill: str | None = None
     fail_connect: str | None = None
+    log_prefix = b"line"
 
     def __init__(self, sandbox_id: str) -> None:
         self.id = sandbox_id
@@ -77,7 +80,9 @@ class FakeSandbox:
         if getattr(opts, "background", False):
             return SimpleNamespace(id="execution-1", logs=SimpleNamespace(stdout=[], stderr=[]), error=None)
         if handlers is not None:
+            # Older execd strips each line's ending from the event; newer execd keeps it.
             await handlers.on_stdout(SimpleNamespace(text="PORT 8080"))
+            await handlers.on_stdout(SimpleNamespace(text="ready\n"))
         line = SimpleNamespace(text=f"{self.id}: {command}")
         return SimpleNamespace(logs=SimpleNamespace(stdout=[line], stderr=[]), exit_code=0, error=None)
 
@@ -86,8 +91,8 @@ class FakeSandbox:
         return SimpleNamespace(running=self.polls < 3, exit_code=None if self.polls < 3 else 0, error=None)
 
     async def _logs(self, _execution_id: str, cursor: int | None = None) -> Any:
-        output = "".join(f"line {poll}\n" for poll in range(1, self.polls + 1))
-        return SimpleNamespace(content=output[cursor or 0 :], cursor=len(output))
+        output = b"".join(type(self).log_prefix + f" {poll}\n".encode() for poll in range(1, self.polls + 1))
+        return SimpleNamespace(content=output[cursor or 0 :].decode(errors="replace"), cursor=len(output))
 
     async def _read(self, path: str) -> Any:
         async def chunks() -> Any:
@@ -120,6 +125,7 @@ class FakeConnectionConfig:
 def provider(monkeypatch: pytest.MonkeyPatch) -> opensandbox_provider.OpenSandboxProvider:
     FakeSandbox.created, FakeSandbox.killed, FakeSandbox.closed = [], [], []
     FakeSandbox.fail_image = FakeSandbox.fail_kill = FakeSandbox.fail_connect = None
+    FakeSandbox.log_prefix = b"line"
     monkeypatch.setattr(
         opensandbox_provider,
         "_require_opensandbox_sdk",
@@ -181,19 +187,22 @@ async def test_sidecar_commands_and_downloads_go_to_the_sidecars_sandbox(provide
     result = await sandbox.sidecar("tools").exec("serve", "--dir", "/my data", timeout_s=5, on_stdout=streamed.append)
     await sandbox.sidecar("tools").download("/out/log.txt", tmp_path / "log.txt")
 
-    # The argv is quoted into one shell command, and stdout arrives line by line.
+    # The argv is quoted into one shell command, and stdout arrives line by line, each line ended once.
     assert result.stdout == "sandbox-1: serve --dir '/my data'"
-    assert streamed == ["PORT 8080\n"]
+    assert streamed == ["PORT 8080\n", "ready\n"]
     assert (tmp_path / "log.txt").read_text() == "sandbox-1:/out/log.txt"
 
 
-async def test_a_polled_sidecar_command_hands_over_its_output_as_it_arrives(provider) -> None:
-    polled = opensandbox_provider.OpenSandboxProvider(
+def _polled_provider() -> opensandbox_provider.OpenSandboxProvider:
+    return opensandbox_provider.OpenSandboxProvider(
         probe={"command": None},
         create={"retries": 0},
         operations={"background_exec": True, "background_poll_initial_s": 0.01, "background_poll_interval_s": 0.01},
     )
-    sandbox = await AsyncSandbox(polled, _SPEC).start()
+
+
+async def test_a_polled_sidecar_command_hands_over_its_output_as_it_arrives(provider) -> None:
+    sandbox = await AsyncSandbox(_polled_provider(), _SPEC).start()
     streamed: list[str] = []
 
     result = await sandbox.sidecar("tools").exec("serve", timeout_s=5, on_stdout=streamed.append)
@@ -201,6 +210,19 @@ async def test_a_polled_sidecar_command_hands_over_its_output_as_it_arrives(prov
     # Two polls while it runs, then the rest once it has ended; no request stays open for the command.
     assert streamed == ["line 1\n", "line 2\n", "line 3\n"]
     assert result.stdout == "line 1\nline 2\nline 3\n" and result.return_code == 0
+
+
+async def test_a_polled_command_whose_output_is_not_utf8_is_read_from_execds_cursor(provider) -> None:
+    # One invalid byte per line decodes to a three-byte replacement character, so the text forwarded so far is
+    # longer than the bytes execd sent: the next read starts where execd says, not after the text's length.
+    FakeSandbox.log_prefix = b"\xff"
+    sandbox = await AsyncSandbox(_polled_provider(), _SPEC).start()
+    streamed: list[str] = []
+
+    result = await sandbox.sidecar("tools").exec("serve", timeout_s=5, on_stdout=streamed.append)
+
+    assert streamed == ["\ufffd 1\n", "\ufffd 2\n", "\ufffd 3\n"]
+    assert "".join(streamed) == result.stdout
 
 
 async def test_closing_the_sandbox_deletes_its_sidecars(provider) -> None:
@@ -274,7 +296,7 @@ async def test_a_sidecar_shares_the_main_sandboxs_egress_policy_and_the_main_san
     # The sidecar's rule leads, so no rule of the task's own denies it.
     assert main["network_policy"] == {
         "defaultAction": "deny",
-        "egress": [{"action": "allow", "target": "10.0.0.5"}, {"action": "allow", "target": "models.example.com"}],
+        "egress": [*_reach("10.0.0.5"), {"action": "allow", "target": "models.example.com"}],
     }
     assert hosts == {"sandbox-2": {"tools": "10.0.0.5"}}
 
@@ -283,7 +305,7 @@ async def test_a_sidecar_shares_the_main_sandboxs_egress_policy_and_the_main_san
 
     sidecar, main = FakeSandbox.created[2:]
     assert sidecar["network_policy"] == {}
-    assert main["network_policy"] == {"egress": [{"action": "allow", "target": "10.0.0.5"}]}
+    assert main["network_policy"] == {"egress": _reach("10.0.0.5")}
 
 
 async def test_a_reconnected_sandbox_reaches_its_sidecars(provider) -> None:
@@ -323,7 +345,7 @@ async def test_a_borrower_releases_the_sidecar_handles_it_connected(provider) ->
     await borrowed.disconnect()
 
     # Released, not deleted: the owner still reaches the sidecar.
-    assert borrower._sidecars == {} and borrower._connected_sidecars == set()
+    assert borrower._sidecars == {} and borrower._connected_sidecars == {}
     assert FakeSandbox.closed == ["sandbox-1"] and FakeSandbox.killed == []
     assert (await owner.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: status"
 
@@ -337,3 +359,140 @@ async def test_a_reconnect_on_the_owners_provider_keeps_the_owners_sidecar_handl
 
     assert provider._sidecars == {"sandbox-2": handles}
     assert FakeSandbox.closed == []
+
+
+def _peers(provider: opensandbox_provider.OpenSandboxProvider, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Turn on networking; each sandbox's address ends in its number, and the hosts entries are recorded."""
+    hosts: dict[str, dict[str, str]] = {}
+
+    async def network_address(handle: Any) -> str:
+        return f"10.0.0.{handle.sandbox_id.removeprefix('sandbox-')}"
+
+    async def set_hosts(handle: Any, addresses: dict[str, str]) -> None:
+        hosts[handle.sandbox_id] = addresses
+
+    monkeypatch.setattr(opensandbox_provider, "_to_network_policy", lambda policy: policy)
+    monkeypatch.setattr(provider, "network_address", network_address)
+    monkeypatch.setattr(provider, "set_hosts", set_hosts)
+    provider._networking.enabled = True
+    return hosts
+
+
+def _reach(address: str) -> list[dict[str, Any]]:
+    """The rule that lets the main sandbox reach a sidecar."""
+    return [{"action": "allow", "target": address}]
+
+
+def _only(host: str) -> dict[str, Any]:
+    return {"defaultAction": "deny", "egress": [{"action": "allow", "target": host}]}
+
+
+async def test_a_sidecar_with_its_own_egress_policy_reaches_only_its_own_hosts(
+    provider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hosts = _peers(provider, monkeypatch)
+    tools = {**_TOOLS, "provider_options": {"network_policy": _only("api.example.com"), "extensions": {"pool": "t"}}}
+    spec = SandboxSpec(
+        image="task:1",
+        provider_options={"network_policy": _only("models.example.com")},
+        sidecars=[tools, {"name": "judge", "image": "judge:3"}],
+    )
+
+    await provider.create(spec)
+
+    tools_created, judge_created, main = FakeSandbox.created
+    # Its own policy and options replace what it would get from the main sandbox; a sidecar without one inherits.
+    assert tools_created["network_policy"] == _only("api.example.com")
+    assert tools_created["extensions"]["pool"] == "t"
+    assert judge_created["network_policy"] == _only("models.example.com")
+    # The main sandbox reaches the model and both sidecars, nothing else.
+    assert main["network_policy"]["egress"] == [
+        *_reach("10.0.0.1"),
+        *_reach("10.0.0.2"),
+        {"action": "allow", "target": "models.example.com"},
+    ]
+    assert hosts == {"sandbox-3": {"tools": "10.0.0.1", "judge": "10.0.0.2"}}
+
+
+async def test_a_misspelled_sidecar_option_starts_no_sandbox(provider) -> None:
+    judge = {"name": "judge", "image": "judge:3", "provider_options": {"network_polcy": _only("api.example.com")}}
+
+    with pytest.raises(ValueError, match="Unknown OpenSandbox provider option"):
+        await provider.create(SandboxSpec(image="task:1", sidecars=[_TOOLS, judge]))
+
+    assert FakeSandbox.created == []
+
+
+async def test_a_sidecar_the_main_sandbox_cannot_reach_fails_the_create_on_the_infrastructure(
+    provider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _peers(provider, monkeypatch)
+
+    async def mapped_address(_handle: Any) -> str:
+        raise ValueError("OpenSandbox networking requires a direct, unmapped IP endpoint without routing headers")
+
+    monkeypatch.setattr(provider, "network_address", mapped_address)
+
+    with pytest.raises(NgFailureEvent) as raised:
+        await provider.create(_SPEC)
+
+    # An infrastructure failure, so the attempt is retried or masked, never scored; nothing is left running.
+    assert raised.value.failure_kind == PROVIDER_SETUP_FAILED
+    assert "Sidecar 'tools'" in raised.value.failure_reason
+    assert [created["image"] for created in FakeSandbox.created] == ["tools:2"]
+    assert FakeSandbox.killed == ["sandbox-1"]
+
+
+async def test_a_sidecar_the_provider_does_not_hold_is_refused_by_name(provider) -> None:
+    sandbox = await AsyncSandbox(provider, _SPEC).start()
+    descriptor = await sandbox.serialize()
+    # A descriptor that declares the sidecar but carries no id to connect it with.
+    del descriptor["sidecar_ids"]
+    borrowed = await AsyncSandbox.connect(
+        descriptor, provider=opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    )
+
+    with pytest.raises(RuntimeError, match="holds no sidecar 'tools' of sandbox 'sandbox-2'"):
+        await borrowed.sidecar("tools").exec("status", timeout_s=5)
+
+
+async def test_a_sidecar_name_the_hosts_file_cannot_take_starts_no_sandbox(provider, monkeypatch) -> None:
+    _peers(provider, monkeypatch)
+
+    with pytest.raises(ValueError, match="Invalid sandbox hostname"):
+        await provider.create(SandboxSpec(image="task:1", sidecars=[_TOOLS, {"name": "web search", "image": "s:1"}]))
+
+    assert FakeSandbox.created == []
+
+
+async def test_borrowers_on_one_provider_share_the_sidecar_handles_until_the_last_disconnects(provider) -> None:
+    owner = await AsyncSandbox(provider, _SPEC).start()
+    descriptor = await owner.serialize()
+    shared = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    first = await AsyncSandbox.connect(descriptor, provider=shared, owns_provider=False)
+    second = await AsyncSandbox.connect(descriptor, provider=shared, owns_provider=False)
+    await first.disconnect()
+
+    # The second borrower still reaches the sidecar; the handles go only with the last disconnect.
+    assert (await second.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: status"
+    assert FakeSandbox.closed == []
+    await second.disconnect()
+    assert shared._sidecars == {} and shared._connected_sidecars == {}
+    assert FakeSandbox.closed == ["sandbox-1"] and FakeSandbox.killed == []
+
+
+async def test_an_owner_that_connected_the_sandbox_still_deletes_the_sidecars_after_a_borrower_leaves(
+    provider,
+) -> None:
+    created = await AsyncSandbox(provider, _SPEC).start()
+    descriptor = await created.serialize()
+    # A restarted owner holds the sandbox only through its descriptor, and lends it on the same provider.
+    restarted = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    owner = await AsyncSandbox.connect(descriptor, provider=restarted, owns_provider=False)
+    borrowed = await AsyncSandbox.connect(descriptor, provider=restarted, owns_provider=False)
+    await borrowed.disconnect()
+
+    await owner.stop()
+
+    assert sorted(FakeSandbox.killed) == ["sandbox-1", "sandbox-2"]

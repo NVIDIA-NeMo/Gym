@@ -162,6 +162,9 @@ class SandboxSidecarSpec:
     image: str
     env: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+    # Options for this sidecar alone, read by a provider that runs each sidecar as a sandbox of its own (on
+    # OpenSandbox, for example, its own ``network_policy``). A provider refuses an option it cannot apply.
+    provider_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.name or not self.image:

@@ -423,9 +423,9 @@ A public sandbox therefore cannot be switched to a restricted policy once it run
 ### Sidecars
 
 OpenSandbox has no second container in a sandbox, so the provider creates each entry of `SandboxSpec.sidecars` as a
-separate sandbox from the sidecar's image, environment and resources. It is created before the main sandbox, with the
-same `ttl_s`, `ready_timeout_s`, metadata and `network_policy`, none of the main sandbox's other provider options, and
-the default keep-alive entrypoint. Closing the main sandbox deletes its sidecars.
+separate sandbox from the sidecar's image, environment, resources and its own `provider_options`. It is created before
+the main sandbox, with the same `ttl_s`, `ready_timeout_s` and metadata, none of the main sandbox's other provider
+options, and the default keep-alive entrypoint. Closing the main sandbox deletes its sidecars.
 
 - The main sandbox and its sidecars carry one `nemo.nvidia.com/placement-group` label, so a
   [multi-cell front end](#multi-cell-front-ends) creates them on one cell. A group the spec's metadata already names
@@ -433,16 +433,35 @@ the default keep-alive entrypoint. Closing the main sandbox deletes its sidecars
 - With `networking.enabled: true`, the main sandbox resolves each sidecar by its name through `/etc/hosts`, which
   needs root in the main sandbox. The two do not share a loopback interface. Without it the sidecar is reachable only
   through `sandbox.sidecar(name)`.
-- A sidecar has the main sandbox's [egress policy](#network-policy), so a host a sidecar must reach goes into that
-  policy. With `networking.enabled: true`, the main sandbox's policy also gets a leading allow rule for each sidecar's
-  IP, so a deny-by-default main sandbox still reaches its sidecars. A sidecar under a deny-by-default policy cannot
-  open a connection to the main sandbox.
+- A sidecar has the main sandbox's [egress policy](#network-policy) unless its own `provider_options` name a
+  `network_policy`. Give each sidecar its own policy to let it reach only its own hosts, for example a tool sidecar
+  that alone reaches its API while the main sandbox reaches only the model:
+
+  ```python
+  def only(host: str) -> dict:
+      return {"defaultAction": "deny", "egress": [{"action": "allow", "target": host}]}
+
+  SandboxSpec(
+      image="task:1",
+      provider_options={"network_policy": only("models.example.com")},
+      sidecars=[{"name": "tools", "image": "tools:2", "provider_options": {"network_policy": only("api.example.com")}}],
+  )
+  ```
+
+  With `networking.enabled: true`, the main sandbox's policy also gets a leading allow rule for each sidecar's IP, so a
+  deny-by-default main sandbox still reaches its sidecars. That rule opens every port of the sidecar, including its
+  exec daemon (44772) and egress API (18080): code in the main sandbox can run commands in a sidecar and read the
+  environment it was given. Do not give a sidecar a secret that the main sandbox's code must not read. A sidecar under
+  a deny-by-default policy cannot open a connection to the main sandbox.
+- A sidecar that does not start, or that the main sandbox cannot reach by IP, fails the create as a provider failure
+  (`provider_setup_failed` when its address is not peer-reachable) and deletes every member already started.
 - `sandbox.sidecar(name).exec(*argv)` quotes the argv into one shell command, so the sidecar image needs a POSIX
   shell. `on_stdout` receives stdout one line at a time from the streamed request. With
   `operations.background_exec`, it receives what each poll finds new, stdout and stderr together.
 - A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.
 - A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs. The
-  connect fails when one of them is gone.
+  connect fails when one of them is gone. Connects to one sandbox through one provider share its sidecar handles, and
+  the last `disconnect` releases them.
 - Pausing and resuming act on the main sandbox only. Its sidecars keep running, and are deleted when their TTL or
   sandbox lease ends.
 
