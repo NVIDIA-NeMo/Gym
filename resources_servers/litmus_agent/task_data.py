@@ -15,6 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one (Litmus-Bench: `metadata.uuid`).",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     expected_answer: Union[str, float, int] = Field(
         description="Gold answer, compared after parsing per the answer type.",
         json_schema_extra={"consumed_by": ["verify"]},

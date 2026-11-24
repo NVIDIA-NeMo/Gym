@@ -1054,10 +1054,10 @@ async def test_cancelled_preparation_retains_activation(setup, retire):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_close_timeout_retry_waits_for_finalization_and_retains_evidence(setup, tmp_path):
+async def test_close_timeout_retry_waits_for_finalization_and_retains_evidence(setup, tmp_path, monkeypatch):
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)
-    collecting, release = asyncio.Event(), asyncio.Event()
+    collecting, release, retrying = asyncio.Event(), asyncio.Event(), asyncio.Event()
     request = Request(
         {"type": "http", "session": {}, "headers": [(AGENT_ACTIVATION_HEADER.encode(), b"1")], "path_params": {}}
     )
@@ -1075,14 +1075,25 @@ async def test_close_timeout_retry_waits_for_finalization_and_retains_evidence(s
     running = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(collecting.wait(), 2)
     close_body = AgentCloseSessionRequest(agent_session_id=body.agent_session_id, episode_id=body.episode_id)
+    close_timeout = agent.config.session_close_timeout_seconds
     agent.config.session_close_timeout_seconds = 0.01
     try:
         with pytest.raises(TimeoutError):
             await agent.close_agent_session(request, close_body)
         assert agent._session_records[body.agent_session_id].state is state
-        agent.config.session_close_timeout_seconds = 1
+        record = agent._session_records[body.agent_session_id]
+        close_activations = record.activations.close
+
+        async def retry_close(*, timeout):
+            retrying.set()
+            await close_activations(timeout=timeout)
+
+        monkeypatch.setattr(record.activations, "close", retry_close)
+        # Only the first close tests a deadline. The retry must allow ordinary evidence collection.
+        agent.config.session_close_timeout_seconds = close_timeout
         retry = asyncio.create_task(agent.close_agent_session(request, close_body))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(retrying.wait(), 2)
+        assert not retry.done()
         release.set()
         receipt = await retry
         with pytest.raises(asyncio.CancelledError):
@@ -1099,7 +1110,7 @@ async def test_close_timeout_retry_waits_for_finalization_and_retains_evidence(s
     finally:
         release.set()
         await asyncio.gather(running, return_exceptions=True)
-        agent.config.session_close_timeout_seconds = 1
+        agent.config.session_close_timeout_seconds = close_timeout
         await agent.close_agent_session(request, close_body)
 
 
