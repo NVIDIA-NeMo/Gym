@@ -17,7 +17,7 @@ Status rules take precedence over kind rules, then `default_action`. The adapter
 
 ## Sandbox mode
 
-With `sandboxed: true`, Simple Agent runs its turn loop inside the sandbox its environment lends each agent session, instead of in the agent server's process. Pair it with an Environment Server that lends a sandbox, such as `single_agent_turn` with `sandbox_provider` and `sandbox_config` set. In-process mode stays the default.
+With `sandboxed: true`, Simple Agent runs its agent loop inside the sandbox its environment lends each agent session, instead of in the agent server's process. Pair it with an Environment Server that lends a sandbox, such as `single_agent_turn` with `sandbox_provider` and `sandbox_config` set. In-process mode stays the default.
 
 ```yaml
 simple_agent:
@@ -32,8 +32,11 @@ simple_agent:
 | Activation | Stages the loop's arguments and runs `sandbox_runner.py` under Gym's process supervisor. The runner builds the same `SimpleAgent` class and calls the same `_create_episode` loop as in process, so `max_steps`, retries and the outcome policy cannot drift. It calls only the model server, at the address the sandbox reaches, under the same rollout path, and returns the output items unchanged. |
 | Close | Stops the loop if it still runs and releases the borrowed client. The sandbox's owner stops the sandbox. |
 
-There is no host fallback. A seed that lends no sandbox is refused (HTTP 422), as is a model server bound to a loopback address the sandbox cannot reach, and a sandboxed agent never runs the loop in its own process. A sandboxed session is not checkpointed: after a crash its episode starts over. `sandbox_install_timeout_seconds`, `sandbox_loop_timeout_seconds` and `sandbox_close_timeout_seconds` bound the runtime install, one activation, and stopping the loop. Tool calls go to the granted URL from inside the sandbox, so a pairing that grants `direct_http` tools needs an egress rule that allows the tool server too.
+There is no host fallback. A seed that lends no sandbox is refused (HTTP 422), as is a model server or a `direct_http` tool grant at a loopback address the sandbox cannot reach, and a sandboxed agent never runs the loop in its own process. A subclass that changes the agent loop (`_create_episode` or `_create_session_episode`) refuses sandbox mode, since the sandbox runs Simple Agent's own loop. A model server's HTTP error the loop raises comes back with its status, headers and body; any other error the loop raises becomes a `RuntimeError` naming it.
 
+A sandboxed session is not checkpointed: after a crash its episode starts over. Retiring or closing it stops the loop and releases the borrowed client. `sandbox_install_timeout_seconds` and `sandbox_runner_timeout_seconds` bound the runtime install and one activation; `session_close_timeout_seconds` bounds stopping the loop. Tool calls go to the granted URL from inside the sandbox, so a pairing that grants `direct_http` tools needs an egress rule that allows the tool server too. Rollout stops (`POST /rollouts/{rollout_id}/stop`) are not supported in sandbox mode yet.
+
+The runtime's packages are pinned to this server's versions and installed as wheels, except OmegaConf's `antlr4-python3-runtime`, which PyPI ships only as source and the host builds from its PyPI URL.
 
 # Licensing information
 Code: Apache 2.0

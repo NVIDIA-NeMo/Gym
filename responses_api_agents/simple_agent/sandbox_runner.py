@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run Simple Agent's turn loop once inside the sandbox its environment lends.
+"""Run Simple Agent's agent loop once inside the sandbox its environment lends.
 
 The agent server unpacks ``nemo_gym`` and this package beside this file and launches it with the sandbox's Python
 runtime: ``sandbox_runner.py <input.json> <output.json>``. It builds the same ``SimpleAgent`` the agent server runs,
@@ -61,6 +61,29 @@ async def run_loop(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def error_output(error: Exception) -> dict[str, Any]:
+    """What the agent server needs to raise ``error`` again: a model server's HTTP error keeps its status, headers and
+    body, as the agent boundary reads them; any other error keeps its type and message."""
+    from aiohttp import ClientResponseError
+
+    output: dict[str, Any] = {
+        "error": f"{type(error).__name__}: {error}",
+        "error_type": type(error).__name__,
+        "traceback": traceback.format_exc(),
+    }
+    if isinstance(error, ClientResponseError):
+        content = getattr(error, "response_content", None)
+        output["http_error"] = {
+            "url": str(error.request_info.real_url),
+            "method": error.request_info.method,
+            "status": error.status,
+            "message": error.message,
+            "headers": list((error.headers or {}).items()),
+            "content": content.decode(errors="replace") if isinstance(content, bytes) else content,
+        }
+    return output
+
+
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     if argv[1:] == ["--check"]:
@@ -72,12 +95,8 @@ def main(argv: list[str]) -> int:
     try:
         output = asyncio.run(run_loop(payload))
     except Exception as error:
-        # The agent server raises it again; the loop's own failures, such as a failed model call, are in the response.
-        output = {
-            "error": f"{type(error).__name__}: {error}",
-            "error_type": type(error).__name__,
-            "traceback": traceback.format_exc(),
-        }
+        # The agent server raises it again; the loop's own failures, such as a rejected model call, are in the response.
+        output = error_output(error)
     partial = output_path.with_name(f".{output_path.name}.{os.getpid()}")
     partial.write_text(json.dumps(output))
     partial.replace(output_path)

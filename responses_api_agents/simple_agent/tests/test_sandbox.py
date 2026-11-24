@@ -202,6 +202,16 @@ async def test_the_sandboxed_loop_returns_what_the_in_process_loop_returns(repli
     (payload,) = loop.payloads
     assert payload["config"]["sandboxed"] is False
     assert payload["config"]["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+    # Only the settings the loop reads are staged in the sandbox.
+    assert set(payload["config"]) == {
+        "name",
+        "host",
+        "port",
+        "entrypoint",
+        "model_server",
+        "max_model_retries",
+        "sandboxed",
+    }
     assert payload["model_server"] == {"host": "127.0.0.1", "port": port}
     assert payload["body"] == {"input": "Which option?", "temperature": 0.2}
     assert "activation" not in payload["loop"]
@@ -209,7 +219,7 @@ async def test_the_sandboxed_loop_returns_what_the_in_process_loop_returns(repli
 
 async def test_the_runner_unpacked_from_the_harness_archive_runs_the_loop(tmp_path: Path) -> None:
     """The archive holds everything the loop imports: the runner runs from it alone, as in the sandbox."""
-    sandbox_module.harness_archive.cache_clear()
+    sandbox_module._harness_bytes.cache_clear()
     archive = sandbox_module.harness_archive()
     with tarfile.open(archive) as members:
         names = set(members.getnames())
@@ -220,9 +230,13 @@ async def test_the_runner_unpacked_from_the_harness_archive_runs_the_loop(tmp_pa
         "responses_api_agents/simple_agent/app.py",
         "responses_api_agents/simple_agent/sandbox_runner.py",
     } <= names
-    # The same sources give the same archive.
-    sandbox_module.harness_archive.cache_clear()
-    assert sandbox_module.harness_archive() == archive
+    # The same sources give the same archive, and a removed or changed file is written again.
+    content = archive.read_bytes()
+    sandbox_module._harness_bytes.cache_clear()
+    assert sandbox_module._harness_bytes() == content
+    archive.write_bytes(b"tampered")
+    assert sandbox_module.harness_archive().read_bytes() == content
+    assert archive.parent.stat().st_mode & 0o077 == 0
 
     runner = tmp_path / "responses_api_agents/simple_agent/sandbox_runner.py"
     async with _model_server([(200, _reply("42"))]) as (port, seen):
@@ -357,5 +371,84 @@ async def test_a_sandboxed_agent_never_runs_its_loop_in_process() -> None:
         await agent._create_episode(
             NeMoGymResponseCreateParamsNonStreaming(input="hi"), model_url_path=MODEL_PATH, in_session=True
         )
-    assert agent._seed_restarts(_seed(sandbox_access=ACCESS)) is True
-    assert SimpleAgent(config=_config(), server_client=_client(1))._seed_restarts(_seed()) is False
+    # A loop in a borrowed sandbox is never checkpointed: its episode starts over after a crash.
+    assert agent._seed_must_restart(_seed(sandbox_access=ACCESS)) is True
+
+
+def test_a_model_servers_http_error_comes_back_from_the_sandbox_as_it_was_raised() -> None:
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    url = URL(f"http://10.0.0.5:8000{MODEL_PATH}")
+    raised = ClientResponseError(
+        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url),
+        (),
+        status=502,
+        message="Bad Gateway",
+        headers=CIMultiDictProxy(CIMultiDict([("x-ng-failure", "report"), ("x-other", "1")])),
+    )
+    raised.response_content = b'{"detail": "upstream"}'
+    try:
+        raise raised
+    except ClientResponseError as error:
+        output = json.loads(json.dumps(sandbox_runner.error_output(error)))
+
+    again = sandbox_module.loop_error(output)
+
+    assert isinstance(again, ClientResponseError)
+    assert (again.status, again.message, again.request_info.method) == (502, "Bad Gateway", "POST")
+    assert again.headers["x-ng-failure"] == "report"
+    assert again.response_content == b'{"detail": "upstream"}'
+    assert isinstance(
+        sandbox_module.loop_error({"error": "ValueError: bad", "error_type": "ValueError"}), RuntimeError
+    )
+
+
+class _ClosingLoop:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    async def close(self, *, timeout: float) -> None:
+        self.closed += 1
+
+
+async def test_retiring_a_sandboxed_session_stops_its_loop_and_releases_the_sandbox() -> None:
+    agent = SimpleAgent(config=_config(sandboxed=True), server_client=_client(1))
+    loop = _ClosingLoop()
+    state = SimpleAgentSessionState(
+        request=_seed(sandbox_access=ACCESS),
+        tool_access=None,
+        resources_cookies=None,
+        sandbox_loop=loop,
+        model_server_endpoint=("10.0.0.5", 8000),
+    )
+    agent._install_restored_session("agent-session", state)
+
+    await agent.retire_agent_session("agent-session")
+
+    assert loop.closed == 1
+    assert "agent-session" not in agent._session_records
+
+
+async def test_a_sandboxed_agent_refuses_a_tool_grant_the_sandbox_cannot_reach(monkeypatch) -> None:
+    agent = SimpleAgent(config=_config(sandboxed=True), server_client=_client(1))
+    monkeypatch.setattr(
+        "responses_api_agents.simple_agent.app.sandbox_server_url", lambda name, require_reachable: "http://10.0.0.5:1"
+    )
+    grant = {"name": "mcqa.direct_http", "kind": "direct_http", "required": True, "base_url": "http://127.0.0.1:9"}
+
+    with pytest.raises(Exception, match="cannot reach its tool grant"):
+        await agent._seed_agent_session_state(_seed(sandbox_access=ACCESS, tool_accesses=[grant]))
+
+
+def test_sandbox_mode_refuses_a_subclass_that_changes_the_agent_loop() -> None:
+    class _OwnLoop(SimpleAgent):
+        async def _create_episode(self, body, **kwargs):  # noqa: ANN001, ANN003, ANN202
+            raise AssertionError("not reached")
+
+    agent = _OwnLoop(config=_config(sandboxed=True), server_client=_client(1))
+
+    detail = check_agent_seed_rejected(agent.setup_webserver(), _seed(sandbox_access=ACCESS))
+
+    assert "changes the agent loop" in detail

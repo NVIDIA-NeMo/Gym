@@ -51,7 +51,6 @@ from nemo_gym.agents import (
     Body,
     OutcomeAction,
     OutcomePolicyConfig,
-    SandboxSession,
     SimpleResponsesAPIAgent,
     confirmed_policy_response_timeout,
     failure_outcome_policy,
@@ -126,7 +125,7 @@ from nemo_gym.trajectory import (
     TrajectoryTurn,
     failure_observations,
 )
-from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint, reachable_host
 from responses_api_agents.simple_agent.sandbox import SandboxLoop, model_server_endpoint
 
 
@@ -136,6 +135,18 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 RESOURCE_ONLY_METADATA_KEYS = frozenset(
     {"baseline_response", "baseline_model", "baseline_dataset_file", "baseline_row_index"}
 )
+
+# The settings a sandboxed agent loop is staged with: the ones _create_episode reads, and the ones a config requires.
+_SANDBOX_LOOP_CONFIG = {
+    "name",
+    "host",
+    "port",
+    "entrypoint",
+    "model_server",
+    "resources_server",
+    "max_steps",
+    "max_model_retries",
+}
 
 # Legacy /run episodes are checkpointed under their logical rollout ID so a replacement attempt finds them.
 _LEGACY_SESSION_PREFIX = "run:"
@@ -187,7 +198,7 @@ class SimpleAgentSessionState(AgentSessionState):
     # a restored reply holds the JSON it was exported as.
     completed_activation: int = 0
     completed_reply: dict[str, Any] | None = None
-    # With sandboxed: the borrowed sandbox the session's turn loop runs in, and the model server's host and port as
+    # With sandboxed: the borrowed sandbox the session's agent loop runs in, and the model server's host and port as
     # that sandbox reaches them.
     sandbox_loop: SandboxLoop | None = None
     model_server_endpoint: tuple[str, int] | None = None
@@ -247,20 +258,23 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     sandboxed: bool = Field(
         default=False,
         description=(
-            "Run the turn loop inside the sandbox the environment lends each agent session, which the agent borrows, "
+            "Run the agent loop inside the sandbox the environment lends each agent session, which the agent borrows, "
             "instead of in this process. The same loop runs, calls only the model server and returns the same "
             "output items. Agent sessions only: a seed that lends no sandbox is refused, and nothing falls back to "
             "this process."
         ),
     )
     sandbox_install_timeout_seconds: float = Field(
-        default=900, gt=0, description="How long installing the loop's runtime in a lent sandbox may take."
+        default=900,
+        gt=0,
+        allow_inf_nan=False,
+        description="How long installing the agent loop's runtime in a lent sandbox may take.",
     )
-    sandbox_loop_timeout_seconds: float = Field(
-        default=21600, gt=0, description="How long one activation of a sandboxed turn loop may run."
-    )
-    sandbox_close_timeout_seconds: float = Field(
-        default=60, gt=0, description="How long stopping a sandboxed turn loop and releasing its sandbox may take."
+    sandbox_runner_timeout_seconds: float = Field(
+        default=21600,
+        gt=0,
+        allow_inf_nan=False,
+        description="How long one activation of a sandboxed agent loop may run.",
     )
 
     @model_validator(mode="before")
@@ -394,7 +408,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         return state
 
     async def _borrow_sandbox(self, state: SimpleAgentSessionState) -> None:
-        """Borrow the session's lent sandbox and install the turn loop in it.
+        """Borrow the session's lent sandbox and install the agent loop in it.
 
         A setup that fails releases the borrowed client; if that release fails too, the session is kept for close.
         """
@@ -407,19 +421,35 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             )
         except ValueError as error:
             raise AgentSeedRejectedError(f"A sandboxed Simple Agent cannot reach its model server: {error}") from error
+        if state.tool_access is not None:
+            try:
+                # Tool calls leave from the sandbox too, so the grant must name an address the sandbox reaches.
+                reachable_host(str(state.tool_access.base_url))
+            except ValueError as error:
+                raise AgentSeedRejectedError(
+                    f"A sandboxed Simple Agent cannot reach its tool grant {state.tool_access.name!r}: {error}"
+                ) from error
         state.sandbox_loop = SandboxLoop.borrowed(await borrow(access), workdir=access.workdir)
         state.model_server_endpoint = (model_host, model_port)
         try:
             await state.sandbox_loop.install(timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
-                await state.sandbox_loop.close(timeout=self.config.sandbox_close_timeout_seconds)
+                await state.sandbox_loop.close(timeout=self.config.session_close_timeout_seconds)
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
             raise
 
     def _new_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
         """Validate a seed request's grants and build its session state; a restore rebuilds sessions the same way."""
+        if self.config.sandboxed and (
+            type(self)._create_episode is not SimpleAgent._create_episode
+            or type(self)._create_session_episode is not SimpleAgent._create_session_episode
+        ):
+            # The sandbox runs SimpleAgent's own loop, so a subclass's changes to it would silently not apply.
+            raise AgentSeedRejectedError(
+                f"{type(self).__name__} changes the agent loop, which sandbox mode cannot run"
+            )
         if self.config.sandboxed and body.sandbox_access is None:
             # No host fallback: a sandboxed loop runs only in a sandbox its environment lends.
             raise AgentSeedRejectedError(
@@ -503,16 +533,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def retire_agent_session(self, session_key: str) -> None:
         self._legacy_replies.pop(session_key, None)
+        if self.config.sandboxed:
+            # A sandboxed loop may still run in its borrowed sandbox: the close stops it and releases the client.
+            await super().retire_agent_session(session_key)
         self._release_retired_session(session_key)
-
-    def _seed_restarts(self, body: AgentSeedSessionRequest) -> bool:
-        # A checkpoint does not reach a loop that runs in a borrowed sandbox, so its episode starts over after a crash.
-        return self.config.sandboxed
-
-    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
-        return (
-            state.sandbox_loop.session if isinstance(state, SimpleAgentSessionState) and state.sandbox_loop else None
-        )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, SimpleAgentSessionState):
@@ -520,7 +544,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if state.sandbox_loop is not None:
             # Stop the loop if it still runs and release the borrowed sandbox, so its owner can lend it to the
             # verifier; a failed release raises and keeps the session for another close.
-            await state.sandbox_loop.close(timeout=self.config.sandbox_close_timeout_seconds)
+            await state.sandbox_loop.close(timeout=self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations,
@@ -545,7 +569,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         if self.config.sandboxed:
             # A sandboxed agent's loop runs in its lent sandbox, never in this process: no host fallback.
-            raise RuntimeError("A sandboxed Simple Agent runs its turn loop only in the sandbox its session borrows")
+            raise RuntimeError("A sandboxed Simple Agent runs its agent loop only in the sandbox its session borrows")
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
         turns: list[TrajectoryTurn] = []
@@ -1084,8 +1108,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         tool_access = kwargs.get("tool_access")
         cookies = kwargs.get("resources_server_cookies")
         payload = {
-            # The sandbox runs the loop itself, so its copy of the config runs in process there.
-            "config": self.config.model_dump(mode="json", exclude_unset=True) | {"sandboxed": False},
+            # Only the settings the loop reads; the sandbox runs the loop itself, so its copy runs in process there.
+            "config": self.config.model_dump(mode="json", exclude_unset=True, include=_SANDBOX_LOOP_CONFIG)
+            | {"sandboxed": False},
             "model_server": {"host": host, "port": port},
             "body": body.model_dump(mode="json", exclude_unset=True),
             "loop": kwargs
@@ -1096,8 +1121,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         }
         output = await state.sandbox_loop.run(
             payload,
-            timeout=self.config.sandbox_loop_timeout_seconds,
-            close_timeout=self.config.sandbox_close_timeout_seconds,
+            timeout=self.config.sandbox_runner_timeout_seconds,
+            close_timeout=self.config.session_close_timeout_seconds,
         )
         trajectory = output.get("trajectory")
         return (

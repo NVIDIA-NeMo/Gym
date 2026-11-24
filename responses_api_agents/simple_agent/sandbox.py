@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Agent-server side of a Simple Agent whose turn loop runs in the sandbox its environment lends.
+"""Agent-server side of a Simple Agent whose agent loop runs in the sandbox its environment lends.
 
 At seed the agent borrows the sandbox, installs a private Python runtime in it and unpacks this server's own
 ``nemo_gym`` sources and Simple Agent module there. Each activation stages the loop's arguments, runs
@@ -9,6 +9,7 @@ At seed the agent borrows the sandbox, installs a private Python runtime in it a
 sandboxed loop cannot drift from the in-process one.
 """
 
+import asyncio
 import functools
 import gzip
 import hashlib
@@ -22,6 +23,10 @@ from shlex import quote
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
+
+from aiohttp import ClientResponseError, RequestInfo
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
 import nemo_gym
 from nemo_gym.agents import SandboxCommand, SandboxPythonRuntime, SandboxSession
@@ -56,27 +61,33 @@ RUNTIME = SandboxPythonRuntime(
     requirements=RUNTIME_REQUIREMENTS,
     import_check="import aiohttp, fastapi, hydra, omegaconf, openai, pydantic, uvicorn",
 )
-# The harness sources live beside the runtime, outside the task's working directory.
-HARNESS_DIR = f"{RUNTIME.directory}/harness"
-RUNNER = f"{HARNESS_DIR}/responses_api_agents/simple_agent/sandbox_runner.py"
 # The Simple Agent files the runner imports; the rest of nemo_gym comes from this server's own package.
 _AGENT_FILES = ("__init__.py", "app.py", "sandbox.py", "sandbox_runner.py")
 
 
-@functools.cache
-def harness_archive() -> Path:
-    """This server's ``nemo_gym`` Python sources and the Simple Agent files, as a gzipped tar to unpack in a sandbox.
+def harness_dir() -> str:
+    """Where the harness sources live in the sandbox: beside the runtime, outside the task's working directory.
 
-    It is built once per process from the code this server runs, into the system's temporary directory, under a name
-    that hashes its contents.
+    A function, so importing this module does not key the runtime on this server's installed packages.
+    """
+    return f"{RUNTIME.directory}/harness"
+
+
+def runner_path() -> str:
+    return f"{harness_dir()}/responses_api_agents/simple_agent/sandbox_runner.py"
+
+
+@functools.cache
+def _harness_bytes() -> bytes:
+    """This server's ``nemo_gym`` Python sources and the Simple Agent files, as a gzipped tar, built once a process.
+
+    Fixed member times and order, and a gzip header without a time, keep the bytes the same for the same sources.
     """
     package = Path(nemo_gym.__file__).parent
     agent = Path(__file__).parent
     members = [(path, f"nemo_gym/{path.relative_to(package)}") for path in sorted(package.rglob("*.py"))]
     members += [(agent / name, f"responses_api_agents/simple_agent/{name}") for name in _AGENT_FILES]
     buffer = io.BytesIO()
-    # Fixed member times and order, and a gzip header without a time, keep the archive's bytes, and so its name,
-    # the same for the same sources.
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         for path, name in members:
             data = path.read_bytes()
@@ -84,9 +95,25 @@ def harness_archive() -> Path:
             info.size = len(data)
             info.mode = 0o644
             archive.addfile(info, io.BytesIO(data))
-    content = gzip.compress(buffer.getvalue(), compresslevel=6, mtime=0)
-    target = Path(tempfile.gettempdir()) / f"nemo-gym-simple-agent-{hashlib.sha256(content).hexdigest()[:16]}.tar.gz"
-    if not target.is_file():
+    return gzip.compress(buffer.getvalue(), compresslevel=6, mtime=0)
+
+
+@functools.cache
+def _private_dir() -> Path:
+    """A directory only this process's user can write, so no one else can stage what the sandbox runs."""
+    return Path(tempfile.mkdtemp(prefix="nemo-gym-simple-agent-"))
+
+
+def harness_archive() -> Path:
+    """The harness archive as a file to upload, written again if it is gone or was changed since.
+
+    Blocking file IO: call it off the event loop.
+    """
+    content = _harness_bytes()
+    directory = _private_dir()
+    target = directory / f"harness-{hashlib.sha256(content).hexdigest()[:16]}.tar.gz"
+    if not target.is_file() or target.read_bytes() != content:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         partial = target.with_name(f".{target.name}.{uuid4().hex}")
         partial.write_bytes(content)
         partial.replace(target)
@@ -101,9 +128,33 @@ def model_server_endpoint(url: str) -> tuple[str, int]:
     return parts.hostname, parts.port
 
 
+def loop_error(output: dict[str, Any]) -> Exception:
+    """The error the sandboxed loop raised, as the agent server raises it.
+
+    A model server's HTTP error comes back as one, with its status, headers and body, so the agent boundary reports it
+    as it reports one the in-process loop raises. Any other error is a ``RuntimeError`` naming the loop's error.
+    """
+    http = output.get("http_error")
+    if http is not None:
+        url = URL(http["url"])
+        error = ClientResponseError(
+            RequestInfo(url, http["method"], CIMultiDictProxy(CIMultiDict()), url),
+            (),
+            status=http["status"],
+            message=http["message"],
+            headers=CIMultiDictProxy(CIMultiDict(http["headers"])),
+        )
+        if http.get("content") is not None:
+            error.response_content = http["content"].encode()
+        return error
+    return RuntimeError(
+        f"Simple Agent agent loop failed in the sandbox: {output['error']}\n{output.get('traceback', '')}"
+    )
+
+
 @dataclass
 class SandboxLoop:
-    """One agent session's borrowed sandbox and the supervised runs of the turn loop in it."""
+    """One agent session's borrowed sandbox and the supervised runs of the agent loop in it."""
 
     session: SandboxSession[dict[str, Any]]
     # Each activation gets its own staged input, output and supervisor files.
@@ -128,47 +179,51 @@ class SandboxLoop:
             await RUNTIME.install(sandbox, timeout_s=timeout)
         archive = f"{self.session.session_dir}/harness.tar.gz"
         prepared = await sandbox.exec(
-            f"mkdir -p {quote(self.session.session_dir)} {quote(HARNESS_DIR)}", cwd="/", timeout_s=30
+            f"mkdir -p {quote(self.session.session_dir)} {quote(harness_dir())}", cwd="/", timeout_s=30
         )
         _check(prepared, "prepare the harness directories")
-        await sandbox.upload(harness_archive(), archive)
+        await sandbox.upload(await asyncio.to_thread(harness_archive), archive)
         unpacked = await sandbox.exec(
-            f"tar -xzf {quote(archive)} -C {quote(HARNESS_DIR)} && rm -f {quote(archive)}", cwd="/", timeout_s=120
+            f"tar -xzf {quote(archive)} -C {quote(harness_dir())} && rm -f {quote(archive)}", cwd="/", timeout_s=120
         )
         _check(unpacked, "unpack the harness sources")
         # Fail the seed, not the first activation, when the runtime cannot import the loop.
-        checked = await sandbox.exec(f"{quote(RUNTIME.python)} -E -s {quote(RUNNER)} --check", cwd="/", timeout_s=120)
-        _check(checked, "import the turn loop")
+        checked = await sandbox.exec(
+            f"{quote(RUNTIME.python)} -E -s {quote(runner_path())} --check", cwd="/", timeout_s=120
+        )
+        _check(checked, "import the agent loop")
 
     async def run(self, payload: dict[str, Any], *, timeout: float, close_timeout: float) -> dict[str, Any]:
-        """Run the turn loop once with ``payload`` and return what it wrote; raise what the loop raised."""
+        """Run the agent loop once with ``payload`` and return what it wrote; raise what the loop raised."""
         self.activations += 1
         if self.activations > 1:
             # A later activation of a continued session runs a fresh supervisor in a fresh directory.
             await self.session.begin_activation(
                 session_dir=f"{self.session.root_dir}/activation-{self.activations}", timeout=close_timeout
             )
-        input_path = f"{self.session.session_dir}/input.json"
-        output_path = f"{self.session.session_dir}/output.json"
+        session_dir = self.session.session_dir
+        input_path = f"{session_dir}/input.json"
+        output_path = f"{session_dir}/output.json"
 
         async def stage() -> SandboxCommand:
+            # A provider's upload need not create the directory a later activation's files go to.
+            prepared = await self.session.sandbox.exec(f"mkdir -p {quote(session_dir)}", cwd="/", timeout_s=30)
+            _check(prepared, "prepare the activation directory")
             await upload_text(self.session.sandbox, path=input_path, text=json.dumps(payload))
-            return SandboxCommand(argv=[RUNTIME.python, "-E", "-s", RUNNER, input_path, output_path])
+            return SandboxCommand(argv=[RUNTIME.python, "-E", "-s", runner_path(), input_path, output_path])
 
         async def collect() -> dict[str, Any]:
             try:
                 return json.loads(await read_text(self.session.sandbox, path=output_path))
             except Exception as error:
                 logs = await self.session.read_output_log()
-                raise RuntimeError(f"Simple Agent turn loop exited without output: {logs}") from error
+                raise RuntimeError(f"Simple Agent agent loop exited without output: {logs}") from error
 
         output = await self.session.execute(
             stage_activation=stage, collect=collect, timeout=timeout, close_timeout=close_timeout
         )
         if output.get("error") is not None:
-            raise RuntimeError(
-                f"Simple Agent turn loop failed in the sandbox: {output['error']}\n{output.get('traceback', '')}"
-            )
+            raise loop_error(output)
         return output
 
     async def close(self, *, timeout: float) -> None:
