@@ -29,7 +29,8 @@ class Vision2CodeAgentConfig(SimpleAgentConfig):
         default=None,
         gt=0,
         strict=True,
-        description="Cap on each policy call's output tokens, reasoning included. A task's smaller cap is kept.",
+        description="Cap on the output tokens of each policy call that /run makes, reasoning included. "
+        "A task's smaller cap is kept.",
     )
 
     include_rendered_image: bool = True
