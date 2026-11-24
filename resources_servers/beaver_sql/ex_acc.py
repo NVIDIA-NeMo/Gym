@@ -193,24 +193,18 @@ class MySqlRunner:
             except asyncio.CancelledError:
                 # The request went away: stop the query before the slot is released.
                 attempt.cancelled.set()
-                await self._settle(attempt, released)
+                self._warn_if_abandoned(db_id, await self._settle(attempt, released))
                 raise
             timed_out = not attempt.finished.is_set()
             if timed_out:
                 attempt.cancelled.set()
-            stopped = await self._settle(attempt, released)
+            self._warn_if_abandoned(db_id, await self._settle(attempt, released))
             if timed_out:
                 if attempt.connection_id is None:
                     # Still connecting after the whole limit: the server is unreachable or overloaded, which says
                     # nothing about the query. (The official evaluator would score this as an empty result.)
                     raise MySqlUnavailableError(
                         f"could not connect to MySQL within {self.timeout_s:g} s: {attempt.unavailable or 'no answer'}"
-                    )
-                if not stopped:
-                    # The server didn't stop it: give up on the thread rather than hold the slot. Its statement runs on
-                    # as the read-only user until the server ends it.
-                    logger.warning(
-                        "BEAVER query on %s still running %g s after KILL QUERY; abandoned", db_id, self.stop_grace_s
                     )
                 return QueryOutcome(status="timeout", error="timeout", seconds=self.timeout_s)
             seconds = attempt.ended - attempt.started
@@ -224,6 +218,17 @@ class MySqlRunner:
             assert outcome is not None
             outcome.seconds = seconds
             return outcome
+
+    def _warn_if_abandoned(self, db_id: str, done: bool) -> None:
+        if not done:
+            # The query's thread didn't finish in time (the server didn't stop the query, or closing its connection
+            # hangs): the slot is released rather than held. Its statement may run on as the read-only user until the
+            # server ends it.
+            logger.warning(
+                "BEAVER query on %s not finished %g s after it ended or was stopped; abandoned",
+                db_id,
+                self.stop_grace_s,
+            )
 
     async def _settle(self, attempt: _Attempt, released: asyncio.Event) -> bool:
         """Hold the slot until the query's thread is done (its connection closed), for at most ``stop_grace_s``, and
@@ -267,6 +272,8 @@ class MySqlRunner:
 
         attempt.started = self._clock()
         conn = None
+        # Set while a result has rows left to read: closing the connection then would read them all.
+        unread = False
         try:
             try:
                 # No session settings: the model's SQL sees the server's defaults, as under the official evaluator.
@@ -286,6 +293,7 @@ class MySqlRunner:
                     columns = [d[0] for d in cur.description]
                     # In chunks, so a timed-out query stops reading a large result (KILL QUERY can't stop the client
                     # reading rows the server has already sent) and memory stays bounded.
+                    unread = True
                     size = 0
                     while chunk := cur.fetchmany(_FETCH_CHUNK_ROWS):
                         rows.extend(chunk)
@@ -296,6 +304,7 @@ class MySqlRunner:
                         if len(rows) > MAX_RESULT_ROWS or size > MAX_RESULT_BYTES:
                             attempt.outcome = QueryOutcome(status="error", error="result too large", oversized=True)
                             return
+                    unread = False
                 attempt.outcome = QueryOutcome(status="ok", frame=pd.DataFrame(rows, columns=columns))
             except mysql.connector.Error as e:
                 if attempt.cancelled.is_set() or e.errno in _INTERRUPTED_ERRNOS:
@@ -317,8 +326,10 @@ class MySqlRunner:
             attempt.notify()
             try:
                 if conn is not None:
-                    if attempt.connection_id is not None and _more_results_pending(conn):
-                        # Statements after the first would run on after close, unwatched.
+                    if attempt.connection_id is not None and (unread or _more_results_pending(conn)):
+                        # Closing with rows unread would read every one of them while the query runs on (a result
+                        # stopped at the size limit or the time limit), and statements after the first would run on
+                        # after close, unwatched. Killing the connection first ends both.
                         self._kill(attempt.connection_id, "CONNECTION")
                     try:
                         conn.close()
@@ -338,7 +349,7 @@ class MySqlRunner:
         """
         deadline = time.monotonic() + grace_s
         while not attempt.done.is_set() and time.monotonic() < deadline:
-            if attempt.cancelled.is_set() and not attempt.finished.is_set() and attempt.connection_id is not None:
+            if attempt.cancelled.is_set() and attempt.connection_id is not None:
                 self._kill(attempt.connection_id, "QUERY")
             attempt.done.wait(min(1.0, max(0.0, deadline - time.monotonic())))
         return attempt.done.is_set()

@@ -9,13 +9,15 @@ official evaluator ([`eval/utils/ex_acc.py`](https://github.com/beaverbench/beav
 does (`ex_acc.py` here):
 
 - Each query gets its own connection, with no session settings, and 10 seconds, from connecting to the last row read.
-  A slower query is a timeout; it is then stopped on the server with `KILL QUERY`, and its rows stop being read.
+  A slower query is a timeout; it is then stopped on the server with `KILL QUERY`, its rows stop being read, and its
+  connection is killed rather than read to the end.
 - A query that fails or times out is an **empty result**, as is a missing prediction (no ```` ```sql ```` block in the
   answer). A gold query that times out is an empty result too, so its task stays in the score. A gold query that
-  *errors* masks the row instead: every gold query runs on a correctly set-up server (see the benchmark's gold check),
-  so that means the setup is wrong. (The official evaluator would score it as an empty result.)
-- A result over 5,000,000 rows or about 1 GiB isn't compared and scores as the query's failure. The largest BEAVER gold
-  result has 622,224 rows.
+  *errors* within the 10 seconds masks the row instead: every gold query runs on a correctly set-up server (see the
+  benchmark's gold check), so that means the setup is wrong. (The official evaluator would score it as an empty result.)
+- A result over 5,000,000 rows or about 1 GiB is not compared and **never matches**, not even an empty gold result
+  (officially it would be read whole and compared). Reading stops at the limit and the query's connection is killed.
+  The largest BEAVER gold result has 622,224 rows.
 - Two results match when both are empty, or when their rows, built into a `pandas.DataFrame` and converted with
   `astype(str)` and stripped, are equal sets with the same number of columns. Row order, duplicate rows and column
   names don't matter. `150.250` and `150.25` differ; `1` and `'1'` don't.
@@ -31,11 +33,12 @@ empty gold result is matched by any query that returns nothing, so BEAVER publis
 
 **Grading path:** the resources server grades (path A, `observe_programmatic_grading`). **Failures:** when the grader
 can't reach the data (it can't connect within the 10 seconds, the connection is lost during a query, or the password is
-wrong), when the server runs out of memory, threads, disk or temporary space (MySQL errors 1021, 1030, 1037, 1038,
-1041, 1114, 1135), when the grader runs out of memory, or when a gold query errors, the row is masked with
+wrong), when the grader runs out of memory, or when a gold query errors within the 10 seconds, the row is masked with
 `failure_kind` `verifier_error` and `failure_reason` `database_unavailable`; a crash in the grader is masked as
-`unknown_error`. Any other error in the model's query, access denied included, is the query's and scores as an empty
-result. A request cancelled while its query runs stops the query first. A stateless reverify grades the saved answer once the cause is fixed. **Time
+`unknown_error`. Any other error in the model's query is the query's and scores as an empty result. That includes
+access denied, and the server running short of memory, threads, disk or temporary space (MySQL errors 1021, 1030,
+1037, 1038, 1041, 1114, 1135), which a runaway query causes itself. A request cancelled while its query runs stops the
+query first. A stateless reverify grades the saved answer once the cause is fixed. **Time
 contract:** 10 seconds per query (`query_timeout_s`), connecting included, timed on the query's own thread
 (`MySqlRunner.run`). A query that ends after the limit is a timeout, an empty result, whether it returned rows, failed
 or lost its connection; one that never connected masks the row. There is no episode deadline in the server; the

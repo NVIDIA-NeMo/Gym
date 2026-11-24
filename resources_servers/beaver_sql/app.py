@@ -6,11 +6,12 @@ Runs the model's MySQL query and the gold query on BEAVER's MySQL databases and 
 execution accuracy (``ex_acc.py``): 10 seconds per query, a failed, timed-out or missing query is an empty result,
 and two results match when both are empty or their rows, as stripped text, are equal sets.
 
-Every task is scored, including one whose gold query fails (an empty gold result, as officially). Each row records
-``gold_result`` (``empty_gold`` or ``nonempty_gold``), and the metrics report accuracy over all tasks and over
+A task whose gold query returns nothing or times out is scored, with an empty gold result, as officially. Each row
+records ``gold_result`` (``empty_gold`` or ``nonempty_gold``), and the metrics report accuracy over all tasks and over
 ``nonempty_gold`` tasks: an empty gold result is matched by any query that returns nothing, so BEAVER publishes both.
 
-When the grader can't reach the data (no MySQL, wrong password, a database not loaded) the row is masked with
+When the grader can't reach the data (no MySQL, wrong password, a database not loaded), or a gold query errors within
+the time limit (every gold query runs on a correctly set-up server, so the setup is wrong), the row is masked with
 ``failure_kind`` ``verifier_error`` instead of entering the score. Startup checks that every configured database is
 loaded and visible to the grader's user, so a setup gap fails there rather than scoring every query empty.
 """
@@ -145,7 +146,7 @@ class BeaverSqlVerifyResponse(BaseVerifyResponse):
     had_codeblock: bool = False
     execution_match: bool = False
     failure_reason: Optional[FailureCode] = None
-    # "ok", "error" or "timeout"; a failed gold query is scored as an empty result.
+    # "ok" or "timeout" (scored as an empty result); a gold query that errors masks the row before this is set.
     gold_status: Optional[str] = None
     gold_result: Optional[str] = None  # "empty_gold" or "nonempty_gold"
     pred_status: Optional[str] = None  # "ok", "error", "timeout" or "missing"
@@ -186,7 +187,6 @@ _FAILURE_SCORE_NAMES = (
     "no_sql",
     "pred-sql-error",
     "pred-sql-timeout",
-    "gold-sql-error",
     "gold-sql-timeout",
     "empty-gold",
 )
@@ -320,7 +320,6 @@ class BeaverSqlResourcesServer(BeaverSqlVerifier, SimpleResourcesServer):
             "no_sql": r.get("pred_status") == "missing",
             "pred-sql-error": r.get("pred_status") == "error",
             "pred-sql-timeout": r.get("pred_status") == "timeout",
-            "gold-sql-error": r.get("gold_status") == "error",
             "gold-sql-timeout": r.get("gold_status") == "timeout",
             "empty-gold": r.get("gold_result") == "empty_gold",
         }

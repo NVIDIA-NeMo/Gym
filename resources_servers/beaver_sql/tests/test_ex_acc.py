@@ -123,8 +123,11 @@ class _FakeServer:
         self.next_id = 100
         self.lock = threading.Lock()
         self.interrupt = threading.Event()
-        # How long closing a connection takes, and when each connection (by id) was opened and closed.
+        # How long closing a connection takes, and when each connection (by id) was opened and closed. Closing a
+        # connection with rows still unread takes drain_s more, as the C driver reads them all, unless the connection
+        # was killed first.
         self.close_delay = 0.0
+        self.drain_s = 0.0
         self.opened: Dict[int, float] = {}
         self.closed: Dict[int, float] = {}
 
@@ -154,11 +157,15 @@ class _FakeConnection:
         self._cmysql = _FakeCMySql(server)
 
     def cursor(self) -> "_FakeCursor":
-        return _FakeCursor(self)
+        self._cursor = _FakeCursor(self)
+        return self._cursor
 
     def close(self) -> None:
         if self.server.close_delay:
             time.sleep(self.server.close_delay)
+        unread = getattr(self, "_cursor", None) is not None and bool(self._cursor._rows)
+        if unread and self.connection_id not in self.server.killed_connections:
+            time.sleep(self.server.drain_s)
         self.server.closed[self.connection_id] = time.monotonic()
 
 
@@ -406,6 +413,25 @@ def test_cancelled_request_stops_its_query_before_releasing_the_slot(fake) -> No
         assert time.monotonic() - start < 2
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("why", ["result too large", "timed out while reading"])
+def test_a_result_left_unread_kills_its_connection_before_close(fake, monkeypatch, why) -> None:
+    # Closing a connection with rows unread would read them all (a cartesian product: for ever) while the query runs on
+    # the server. The connection is killed first, so the close is quick and the slot comes straight back.
+    monkeypatch.setattr("resources_servers.beaver_sql.ex_acc._FETCH_CHUNK_ROWS", 10)
+    if why == "result too large":
+        monkeypatch.setattr("resources_servers.beaver_sql.ex_acc.MAX_RESULT_ROWS", 25)
+    server = fake({"BIG": (["x"], [(i,) for i in range(1000)])})
+    server.drain_s = 3.0
+    if why == "timed out while reading":
+        server.fetch_delay = 0.05
+    runner = MySqlRunner("mysql://r@h", timeout_s=0.3)
+    start = time.monotonic()
+    outcome = _run(runner, "BIG")
+    assert outcome.status == ("error" if why == "result too large" else "timeout")
+    assert 101 in server.killed_connections and 101 in server.closed
+    assert time.monotonic() - start < 1.5
 
 
 def test_a_stop_that_cannot_start_still_holds_the_slot_until_the_query_ends(fake) -> None:

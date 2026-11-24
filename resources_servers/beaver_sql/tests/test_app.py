@@ -257,11 +257,9 @@ class TestMetrics:
             1,
             1,
         )
-        assert (metrics["gold-sql-timeout_count"], metrics["gold-sql-error_count"], metrics["empty-gold_count"]) == (
-            1,
-            0,
-            1,
-        )
+        assert (metrics["gold-sql-timeout_count"], metrics["empty-gold_count"]) == (1, 1)
+        # A gold query that errors masks its row, which never reaches the metrics, so there is no count for it.
+        assert "gold-sql-error_count" not in metrics
         key = server.get_key_metrics({**metrics, "mean/input_tokens": 10.0})
         assert key["mean/input_tokens"] == 10.0
         assert key["pass@1[avg-of-1]/accuracy"] == pytest.approx(50.0)
