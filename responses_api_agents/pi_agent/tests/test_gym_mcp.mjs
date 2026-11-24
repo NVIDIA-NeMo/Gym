@@ -394,16 +394,129 @@ test("a started stdio server is stopped when another required server fails setup
     registerGymTools(agent(), { magic: stdioServer(t, { env: { PID_FILE: pidFile } }), resources: down }),
     /^Error: resources: TypeError \(ECONNREFUSED\)/,
   );
-  const pid = Number(readFileSync(pidFile, "utf8"));
-  const deadline = Date.now() + 5000;
-  const alive = () => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
+  assert.equal(await stopsWithin(Number(readFileSync(pidFile, "utf8")), 5000), true);
+});
+
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Whether the process is gone within `ms`; the system reaps a stopped server whose client has exited.
+async function stopsWithin(pid, ms) {
+  const deadline = Date.now() + ms;
+  while (alive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  return !alive(pid);
+}
+
+// A stdio MCP server that answers discovery, then stops reading its standard input, so the pipe fills and a large
+// request's write waits for a reader that never comes. It ignores SIGTERM when IGNORE_SIGTERM is set.
+const STALLED_SERVER = `
+  import { createInterface } from "node:readline";
+  import { writeFileSync } from "node:fs";
+  writeFileSync(process.env.PID_FILE, String(process.pid));
+  if (process.env.IGNORE_SIGTERM) process.on("SIGTERM", () => {});
+  const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+  const lines = createInterface({ input: process.stdin });
+  lines.on("line", (line) => {
+    const message = JSON.parse(line);
+    if (message.method === "initialize") {
+      send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-03-26", capabilities: {} } });
+    } else if (message.method === "tools/list") {
+      send({ jsonrpc: "2.0", id: message.id, result: { tools: [{ name: "echo", inputSchema: { type: "object" } }] } });
+      lines.pause();
     }
-  };
-  while (alive() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(alive(), false);
+  });
+  setInterval(() => {}, 60000);
+`;
+
+for (const ignoresSigterm of [false, true]) {
+  const outcome = ignoresSigterm ? "is killed when it ignores SIGTERM" : "is stopped";
+  test(`at session shutdown, a stdio server that stopped reading ${outcome}, and Pi exits`, async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "gym-mcp-stalled-"));
+    const pidFile = join(dir, "pid");
+    const script = join(dir, "server.mjs");
+    writeFileSync(script, STALLED_SERVER);
+    const env = { PID_FILE: pidFile, ...(ignoresSigterm ? { IGNORE_SIGTERM: "1" } : {}) };
+    const servers = { stalled: { command: process.execPath, args: [script], env, timeout: 500 } };
+    t.after(() => {
+      // A server the client failed to stop outlives it; do not leave it running.
+      try {
+        process.kill(Number(readFileSync(pidFile, "utf8")), "SIGKILL");
+      } catch {}
+      rmSync(dir, { recursive: true, force: true });
+    });
+    // As in Pi's print mode: session_start, a tool call, then session_shutdown, and no process.exit after it.
+    const client = `
+      import assert from "node:assert/strict";
+      const { default: extension } = await import(${GYM_MCP});
+      const handlers = {};
+      const tools = [];
+      extension({ on: (name, handler) => { handlers[name] = handler; }, getAllTools: () => [], registerTool: (tool) => tools.push(tool) });
+      await handlers.session_start();
+      // 1 MiB is more than the pipe and the server's read buffer hold, so this write never completes.
+      await assert.rejects(tools[0].execute("a", { text: "x".repeat(1 << 20) }), (e) => e.name === "TimeoutError");
+      const started = Date.now();
+      for (const _ of [1, 2]) await handlers.session_shutdown?.({ type: "session_shutdown", reason: "quit" });
+      process.stderr.write("shutdown took " + (Date.now() - started) + " ms\\n");
+    `;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", client], {
+      encoding: "utf8",
+      env: { ...process.env, NEMO_GYM_PI_MCP_CONFIG: serversFile(t, servers) },
+      timeout: 10000,
+    });
+    assert.equal(child.signal, null, `the client did not exit by itself: ${child.stderr}`);
+    assert.equal(child.status, 0, child.stderr);
+    const took = Number(/shutdown took (\d+) ms/.exec(child.stderr)[1]);
+    // SIGTERM stops the server at once; one that ignores it is sent SIGKILL after the 2 second grace.
+    assert.ok(ignoresSigterm ? took >= 2000 : took < 2000, child.stderr);
+    assert.equal(await stopsWithin(Number(readFileSync(pidFile, "utf8")), 5000), true);
+  });
+}
+
+test("a timed-out stdio call leaves the shared server usable and its late answer unread", async (t) => {
+  // `hold` is answered only when `release` arrives, first with the held answer, then with release's own.
+  const holding = STDIO_SERVER.replace(
+    '} else if (message.method === "tools/call") {',
+    `} else if (message.params?.arguments?.text === "hold") {
+      globalThis.held = message.id;
+    } else if (message.params?.arguments?.text === "release") {
+      send({ jsonrpc: "2.0", id: globalThis.held, result: { content: [{ type: "text", text: "late hold" }] } });
+      send({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text: "released" }] } });
+    } else if (message.method === "tools/call") {`,
+  );
+  const pidDir = mkdtempSync(join(tmpdir(), "gym-mcp-pid-"));
+  t.after(() => rmSync(pidDir, { recursive: true, force: true }));
+  const pidFile = join(pidDir, "pid");
+  const a = agent();
+  const stop = await registerGymTools(a, {
+    magic: { ...stdioServer(t, { script: holding, env: { PID_FILE: pidFile } }), timeout: 300 },
+  });
+  t.after(stop);
+  const [echo] = a.tools;
+  const held = assert.rejects(echo.execute("a", { text: "hold" }), (e) => e.name === "TimeoutError");
+  // Calls made while another waits are answered, each with its own result.
+  const both = await Promise.all([echo.execute("b", { text: "one" }), echo.execute("c", { text: "two" })]);
+  assert.deepEqual(both.map((r) => r.content[0].text.split(" ")[0]), ["one", "two"]);
+  await held;
+  // The timeout ends only that call: the server keeps running, and the answer to the timed-out call, arriving while
+  // the next call waits, does not become that call's result.
+  assert.equal(alive(Number(readFileSync(pidFile, "utf8"))), true);
+  assert.equal((await echo.execute("d", { text: "release" })).content[0].text, "released");
+  assert.equal((await echo.execute("e", { text: "again" })).content[0].text.split(" ")[0], "again");
+});
+
+test("stopping the kept stdio servers fails their waiting and later calls, and can be repeated", async (t) => {
+  const silent = STDIO_SERVER.replace('} else if (message.method === "tools/call") {', '} else if (false) {');
+  const a = agent();
+  const stop = await registerGymTools(a, { magic: stdioServer(t, { script: silent }) });
+  const waiting = assert.rejects(a.tools[0].execute("a", { text: "x" }), /^Error: stdio server was stopped$/);
+  await Promise.all([stop(), stop()]);
+  await waiting;
+  await assert.rejects(a.tools[0].execute("b", { text: "x" }), /^Error: stdio server was stopped$/);
+  await stop();
 });

@@ -137,8 +137,9 @@ Pi provides its own sandbox tools. It can also use the Resources server's tools 
   proxy the sandbox environment sets.
 - A `stdio` grant, such as a Harbor task's own stdio MCP server, is a command `gym_mcp.mjs` starts inside the
   sandbox, as the user Pi runs as, with the grant's `args` and its `env` over Pi's environment, and reaches over its
-  standard input and output. The server's standard error goes to Pi's. It runs as long as Pi does, and is stopped
-  when its setup fails. `gym_mcp.mjs` has no SSE client: a required `sse` grant is refused at seed with a 422 that
+  standard input and output. The server's standard error goes to Pi's. It is stopped when its setup fails, and
+  when Pi's session ends: Pi sends it SIGTERM, then SIGKILL if it has not exited 2 seconds later, and drops any
+  request it has not read. `gym_mcp.mjs` has no SSE client: a required `sse` grant is refused at seed with a 422 that
   names it, and an optional one is left out and recorded as an `mcp_server_skipped` gap.
 - `gym_mcp.mjs` names each tool `<grant name>_<tool name>`, at most 64 letters, digits, `-` or `_`. Seeding
   refuses a required grant whose name is not 1 to 62 of these characters, and two required grants whose names

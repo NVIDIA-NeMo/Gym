@@ -44,15 +44,16 @@ function locationOf(server) {
 
 // A `url` server is reached over stateless Streamable HTTP with JSON responses, as Gym's MCP server answers. A
 // `command` server is started with its `args` and `env` (over Pi's environment) as a child process that speaks MCP
-// over stdio, one JSON-RPC message per line, as a task's own stdio server does; it lives as long as Pi, or until its
-// discovery fails. This adapter deliberately does not implement SSE.
+// over stdio, one JSON-RPC message per line, as a task's own stdio server does; it runs until the returned function
+// stops it, its discovery fails, or Pi exits. This adapter deliberately does not implement SSE.
 // A server marked `required: false` is skipped when its discovery fails; any other
 // failure registers no tools. A tool listed in any server's `terminal_tools` is a finish
 // tool: Pi ends the run after a turn whose calls were all successful finish calls. Each
 // listed tool must be offered. The names are matched without the server, so as for grant
 // names, an optional server offering a finish tool that another server offers is skipped,
 // and two required ones fail setup. `emit` writes diagnostic events, and `replyCutOff`
-// tells whether the model's latest reply was cut off at the output limit.
+// tells whether the model's latest reply was cut off at the output limit. Resolves to a
+// function that stops the servers whose tools were registered, and may be called again.
 export async function registerGymTools(pi, servers, { emit = emitEvent, replyCutOff = () => false } = {}) {
   const names = new Set(pi.getAllTools().map((tool) => tool.name));
   const discovered = [];
@@ -109,6 +110,9 @@ export async function registerGymTools(pi, servers, { emit = emitEvent, replyCut
     }
     // A failed discovery must not leave a partially registered tool set.
     for (const entry of kept) for (const tool of entry.tools) pi.registerTool(tool);
+    return async () => {
+      await Promise.all(kept.map((entry) => entry.connection.close()));
+    };
   } catch (error) {
     for (const entry of discovered) entry.connection.close();
     throw error;
@@ -155,9 +159,13 @@ function httpConnection(server) {
   };
 }
 
+// How long a stdio server has to exit after SIGTERM before it is killed.
+const STOP_GRACE_MS = 2000;
+
 // MCP's stdio transport: the server is a child process that reads messages on its standard input and writes them on
 // its standard output, one JSON object per line; its standard error is Pi's. A request from the server is answered
-// (an empty result for `ping`, "method not found" otherwise) and its notifications are ignored.
+// (an empty result for `ping`, "method not found" otherwise) and its notifications are ignored. A request that is
+// cancelled or times out stops waiting for its answer, but leaves the server running for other calls.
 function stdioConnection(server) {
   const child = spawn(server.command, server.args ?? [], {
     env: { ...process.env, ...server.env },
@@ -216,9 +224,10 @@ function stdioConnection(server) {
       }
     }
   });
-  // The server must not outlive Pi, which ends without waiting for it.
-  const stop = () => child.kill();
-  process.once("exit", stop);
+  // The server must not outlive Pi. The session stops it at shutdown (see close); this covers an exit before that.
+  const killOnExit = () => child.kill();
+  process.once("exit", killOnExit);
+  let closed;
   return {
     async send(message, signal) {
       if (ended) throw ended;
@@ -248,9 +257,29 @@ function stdioConnection(server) {
         write(message);
       });
     },
+    // Fails the requests still waiting and drops the writes the server has not read, which would otherwise keep Pi
+    // running, then sends SIGTERM, and SIGKILL if the server has not exited after STOP_GRACE_MS. Resolves once it
+    // exited or was sent SIGKILL; a later call returns the same promise.
     close() {
-      process.removeListener("exit", stop);
-      if (child.exitCode === null && child.signalCode === null) child.kill();
+      closed ??= new Promise((resolve) => {
+        end(new GymMcpError("stdio server was stopped"));
+        child.stdin.destroy();
+        child.stdout.destroy();
+        let timer;
+        const done = () => {
+          clearTimeout(timer);
+          process.removeListener("exit", killOnExit);
+          resolve();
+        };
+        if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return done();
+        child.once("exit", done);
+        timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          done();
+        }, STOP_GRACE_MS);
+        child.kill();
+      });
+      return closed;
     },
   };
 }
@@ -367,6 +396,12 @@ export default function (pi) {
     cutOff =
       message.stopReason === "length" || (Number.isSafeInteger(maxTokens) && message.usage?.output >= maxTokens);
   });
+  let stopServers;
+  // Pi's print mode emits session_shutdown when the run ends, then returns without exiting the process, so a stdio
+  // server still running, or a write to one that stopped reading, would keep Pi alive until the activation timed out.
+  pi.on("session_shutdown", async () => {
+    await stopServers?.();
+  });
   // getAllTools() needs a bound runtime; session_start runs before inference.
   pi.on("session_start", async () => {
     try {
@@ -377,7 +412,7 @@ export default function (pi) {
         // A parse error would quote the file, which holds the session tokens.
         throw new GymMcpError("unreadable Gym MCP configuration");
       }
-      await registerGymTools(pi, servers, { replyCutOff: () => cutOff });
+      stopServers = await registerGymTools(pi, servers, { replyCutOff: () => cutOff });
     } catch (error) {
       // Pi normally tolerates extension errors. Required Gym tools must instead
       // fail the rollout, rather than silently run without them.
