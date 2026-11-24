@@ -327,7 +327,9 @@ def _counted_user_seconds(samples, exited=()):
     baseline: dict = {}
     total = 0.0
     for current in samples:
-        used, baseline = advance_cpu_baseline(baseline, current, has_exited=lambda key: key in exited)
+        used, baseline = advance_cpu_baseline(
+            baseline, current, has_exited=lambda key: key in exited, parent_pid_of=lambda key: None
+        )
         assert used.user_seconds >= 0
         total += used.user_seconds
     return total
@@ -391,7 +393,10 @@ def test_a_child_reparented_out_of_the_tree_keeps_what_was_counted_and_adds_noth
     baseline: dict = {}
     counted = []
     for current, exited in samples_and_exits:
-        used, baseline = advance_cpu_baseline(baseline, current, has_exited=exited.__contains__)
+        reparented_to_init = lambda key: 1  # noqa: E731
+        used, baseline = advance_cpu_baseline(
+            baseline, current, has_exited=exited.__contains__, parent_pid_of=reparented_to_init
+        )
         counted.append(used.user_seconds)
 
     assert counted == pytest.approx([3.0, 0.2, 0.0])
@@ -578,6 +583,46 @@ def test_a_child_reaped_between_two_stat_reads_of_one_walk_is_counted_once(monke
     proc.sample(100)
 
     assert proc.sample(100) == pytest.approx(3.5)
+
+
+def test_an_orphan_adopted_by_a_subreaper_and_missed_by_the_walk_is_counted_once(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)  # a child subreaper
+    proc.spawn(101, ppid=100, own=1.0)
+    proc.spawn(102, ppid=101, own=2.0)
+    proc.sample(100)
+
+    proc.processes[101].own = 1.2
+    proc.processes[102].ppid = 100  # its parent exits without waiting; the subreaper adopts it
+    proc.reap(101)
+    proc.processes[102].missed_by_walk = True
+    proc.sample(100)
+    proc.processes[102].own = 2.5
+    proc.reap(102)
+
+    assert proc.sample(100) == pytest.approx(3.7)
+
+
+def test_an_orphan_that_exits_with_its_parent_is_counted_twice_until_its_time_reaches_the_subreaper(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)  # a child subreaper
+    proc.spawn(101, ppid=100, own=1.0)
+    proc.spawn(102, ppid=101, own=0.5)
+    proc.spawn(103, ppid=102, own=2.0)
+    assert proc.sample(100) == pytest.approx(3.5)
+
+    proc.processes[103].ppid = 100  # 102 exits without waiting for 103, which the subreaper adopts and reaps
+    proc.reap(102)
+    proc.processes[103].own = 2.5
+    proc.reap(103)
+    assert proc.sample(100) == pytest.approx(4.0 + 2.0)  # 103's 2.0 already counted is counted again
+
+    proc.processes[101].own = 1.2
+    proc.reap(101)
+    assert proc.sample(100) == pytest.approx(6.0)  # 101 hands the 2.0 on to the subreaper
+
+    proc.processes[100].own = 2.0
+    assert proc.sample(100) == pytest.approx(6.2)  # taken back from the subreaper's own time: 1.2 + 0.5 + 2.5 + 2.0
 
 
 @pytest.mark.parametrize(

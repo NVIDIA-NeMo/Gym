@@ -178,6 +178,17 @@ def process_has_exited(key: ProcessKey) -> bool:
         return False
 
 
+def current_parent_pid(key: ProcessKey) -> int | None:
+    """The parent pid the process ``key`` names reports now, or ``None`` if it cannot be read or its pid was reused."""
+    try:
+        fields = _stat_fields(key[0])
+        if int(fields[19]) == key[1]:
+            return int(fields[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def fold_exited_processes(
     previous: dict[ProcessKey, ProcessCpuTimes],
     current: dict[ProcessKey, ProcessCpuTimes],
@@ -227,6 +238,7 @@ def advance_cpu_baseline(
     previous: dict[ProcessKey, ProcessCpuTimes],
     current: dict[ProcessKey, ProcessCpuTimes],
     has_exited: Callable[[ProcessKey], bool] = process_has_exited,
+    parent_pid_of: Callable[[ProcessKey], int | None] = current_parent_pid,
 ) -> tuple[ProcessCpuTimes, dict[ProcessKey, ProcessCpuTimes]]:
     """The CPU time a tree used since ``previous``, and the baseline for the next sample.
 
@@ -234,11 +246,16 @@ def advance_cpu_baseline(
     read just before it waited) is held back until they do, and the total never goes down either.
 
     A parent that could not be read in this walk but still runs keeps its baseline, so a child naming it is linked to
-    it: a running process's reported parent pid always names its live parent.
+    it: a running process's reported parent pid always names its live parent. A process missing from this walk that
+    still runs is linked to the parent it reports now, such as a child subreaper that adopted it, or to none when it
+    was reparented outside the tree.
     """
     baseline = fold_exited_processes(previous, current, has_exited)
     used = cpu_time_since(baseline, current)
     running = {key[0]: key for key in [*baseline, *current]}
+    for key, times in list(baseline.items()):
+        if key not in current and (parent_pid := parent_pid_of(key)) not in (None, times.parent_pid):
+            baseline[key] = replace(times, parent=running.get(parent_pid), parent_pid=parent_pid)
     for key, times in current.items():
         if times.parent is None and times.parent_pid in running:
             times = replace(times, parent=running[times.parent_pid])

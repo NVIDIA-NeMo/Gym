@@ -301,7 +301,7 @@ Each process's CPU time includes the children it waited for (`cutime` and `cstim
 - A process whose parent does not wait for it, because the parent ignores `SIGCHLD` or exits first, can be undercounted by up to its whole CPU time. Once reparented outside the tree, it is no longer counted.
 - The time the server's root process uses after the last sample before it exits is lost.
 
-The exception is a child subreaper inside the server's tree (`PR_SET_CHILD_SUBREAPER`, such as an init process like `tini` started as a descendant). A process orphaned to it that exits in the same sample interval as its old parent can be counted twice, by up to the time it had already reported.
+The exception is a child subreaper inside the server's tree (`PR_SET_CHILD_SUBREAPER`). The CritPt grader's runner is one under the `local` sandbox provider, where it runs as a descendant of the resources server and adopts the orphans of the code it grades. An orphan that a sample sees after its adoption, or sees missing but still running, is counted once. When an orphan and its old parent both exit between the same two samples, the time the orphan had already reported moves onto the old parent's nearest running ancestor rather than onto the subreaper that waited for it, so the subreaper counts it again. The counter then runs ahead by up to that time per such orphan until that ancestor exits: its held time passes up to the subreaper, which takes it back from its later CPU time.
 
 The rollout driver of a `--no-serve` run is not a supervisor-managed server and is not included; its own `process.cpu.time` covers it.
 
