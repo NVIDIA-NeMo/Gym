@@ -242,7 +242,9 @@ async def test_failed_stop_keeps_ownership_until_a_stop_succeeds(tmp_path, monke
         failing_stops = 3
         refused = await run_episode(server, task)
         assert refused.failure.stage == "seed" and not refused.failure.terminal
-        assert "could not be stopped yet" in refused.failure.failure_reason
+        assert refused.failure.failure_reason == (
+            "A sandbox of a previous attempt of this episode could not be stopped yet: stop temporarily unavailable"
+        )
         assert sandbox.stopped and not server._sandboxes and len(attempts) == 4
         # With the old sandbox gone, the next repeat provisions its own and runs.
         again = await run_episode(server, task)
@@ -307,6 +309,42 @@ async def test_serialize_failure_after_seed_is_a_retryable_seed_failure(tmp_path
     assert response.failure.stage == "seed" and not response.failure.terminal
     assert "descriptor unavailable" in response.failure.failure_reason
     assert server.server_client.calls == [] and sandbox.stopped and not server._sandboxes
+
+
+async def test_a_failed_seed_whose_sandbox_cannot_be_stopped_starts_no_second_sandbox(tmp_path, monkeypatch):
+    """A seed retry (`seed_retries`) after a failed `serialize` first stops the sandbox the failed seed left owned.
+    While that stop fails, each retry is refused before it creates anything, so the episode key never holds two
+    sandboxes, and the episode's reason keeps the seed's own error; the final cleanup tries the stop again and
+    shutdown stops it once the provider answers."""
+    server, task, sandbox, created = make_server(tmp_path, monkeypatch, seed_retries=2)
+    monkeypatch.setattr("environment_servers.harbor.app._pull_retry_delay", lambda attempt: 0)
+    stops: list[int] = []
+    stop_works = False
+
+    async def broken_serialize(*args, **kwargs):
+        raise RuntimeError("descriptor unavailable")
+
+    async def stop():
+        stops.append(1)
+        if not stop_works:
+            raise RuntimeError("stop temporarily unavailable")
+        sandbox.stopped = True
+
+    monkeypatch.setattr(sandbox, "serialize", broken_serialize)
+    monkeypatch.setattr(sandbox, "stop", stop)
+    response = await run_episode(server, task)
+
+    assert response.failure.stage == "seed" and not response.failure.terminal
+    assert response.failure.failure_reason == (
+        "An earlier seed of this episode failed (descriptor unavailable) and its sandbox could not be stopped yet: "
+        "stop temporarily unavailable"
+    )
+    # One sandbox was ever created; both retries and the final cleanup tried to stop it.
+    assert len(created) == 1 and len(stops) == 3
+    assert server._sandboxes["r1"] is sandbox and not sandbox.stopped and server.server_client.calls == []
+    stop_works = True
+    await server.shutdown()
+    assert sandbox.stopped and not server._sandboxes
 
 
 async def test_hung_agent_close_does_not_pin_episode_key(tmp_path, monkeypatch):

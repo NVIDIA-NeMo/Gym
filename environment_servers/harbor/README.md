@@ -16,9 +16,9 @@ One `/run` call is one whole episode, and no Resources Server takes part. For ea
 2. **Agent.** Open a session on the configured Agent Server with a `SandboxAccess` for that sandbox, post the
    task's `responses_create_params`, then close the session and keep what the agent observed. A failed response
    whose harness names its cause goes through `agent_outcome_policy` before verification; by default a transport or
-   unknown cause is retried ungraded. When the agent is `harbor_oracle_agent`, the seed first uploads the task's
-   `solution/` to `/solution`; a `[[steps]]` task instead gets each step's `steps/<name>/solution/` (else the
-   task's) before that step.
+   unknown cause is returned ungraded as a retryable failure, and the server does not run it again. When the agent
+   is `harbor_oracle_agent`, the seed first uploads the task's `solution/` to `/solution`; a `[[steps]]` task
+   instead gets each step's `steps/<name>/solution/` (else the task's) before that step.
 3. **Verify.** Run the `[[verifier.collect]]` hooks. In shared mode, empty `/tests` and `/logs/verifier` in the
    agent's sandbox, keeping only the task's `[verifier].inputs`, and upload `tests/`. In separate mode (also forced
    by `separate_verifier_for_artifacts` for a task with `artifacts`), collect `/logs/artifacts` and the task's
@@ -32,9 +32,10 @@ failure (a lost sandbox, a failed transfer) sets `mask_sample`. So do a failed A
 `timeout`, an image `ENTRYPOINT` that exits non-zero during the rollout and an overlay or entrypoint that fails in a
 separate verifier's sandbox. A task that cannot be set up fails at `stage: seed`: terminally when the server refuses
 the task, row or configuration (such as a failed overlay `RUN` line or `ENTRYPOINT`), and retryably otherwise, even
-for a health check that never passes or an image that cannot be pulled. A task with `[[steps]]` runs one such turn
-per step in the same sandbox. It stops early after a step whose preparation fails, or one that is masked, leaves no
-valid reward or misses its `min_reward`.
+for a health check that never passes or an image that cannot be pulled. With `seed_retries` above 0, a retryable seed
+failure first runs again on a fresh sandbox that many times, before any model call. A task with `[[steps]]` runs one
+such turn per step in the same sandbox. It stops early after a step whose preparation fails, or one that is masked,
+leaves no valid reward or misses its `min_reward`.
 
 ## How it fits
 

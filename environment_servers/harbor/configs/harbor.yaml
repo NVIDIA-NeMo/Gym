@@ -41,6 +41,9 @@ harbor_environment_server:
       # Sandbox and Compose group starts that fail on an image pull are retried here, with jittered backoff,
       # before the failure is reported as retryable.
       image_pull_retries: 2
+      # A seed that failed for a reason a retry can fix runs again on a fresh sandbox this many times before the
+      # episode fails; no model call has been made yet. Refusals of the task, row or configuration are not retried.
+      seed_retries: 0
       # Verify tasks that declare `artifacts` in a fresh sandbox even when task.toml keeps the shared mode
       # (tamper-proof grading, as training runs want). Tasks without artifacts keep their declared mode.
       separate_verifier_for_artifacts: false

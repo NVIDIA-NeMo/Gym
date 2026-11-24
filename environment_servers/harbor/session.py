@@ -406,7 +406,7 @@ class HarborSessionMixin:
         """
         implementation = self._agent_implementation()
         if implementation is None:
-            # Not an oracle run as far as this server can tell. Say so once per episode: an oracle wired through
+            # Not an oracle run as far as this server can tell. Say so once per seed attempt: an oracle wired through
             # a block this lookup cannot read would otherwise report every task as unvalidated.
             LOGGER.warning(
                 "agent %r has no single responses_api_agents implementation in the run config, so no solution is "

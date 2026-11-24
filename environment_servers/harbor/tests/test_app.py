@@ -439,8 +439,10 @@ class TestEpisode:
 
     async def test_sandbox_failure_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
+        starts: list[str] = []
 
         async def boom(task, workdir, *, episode_key):
+            starts.append(episode_key)
             raise RuntimeError("pull failed")
 
         monkeypatch.setattr(server, "_create_sandbox", boom)
@@ -448,6 +450,138 @@ class TestEpisode:
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "pull failed" in response.failure.failure_reason
         assert server.server_client.calls == []
+        # `seed_retries` defaults to 0: the failed seed is reported without running it again.
+        assert server.config.seed_retries == 0 and starts == ["r1"]
+
+    @pytest.mark.parametrize("failing", ["create", "serialize"])
+    async def test_seed_retries_seed_a_failed_episode_again_on_a_fresh_sandbox(self, tmp_path, monkeypatch, failing):
+        """A seed that failed for a retryable reason, before its sandbox existed (create) or after (serialize), runs
+        again on a fresh sandbox once the failed one is stopped; the harness gets one session, for the seed that
+        succeeded."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, seed_retries=1)
+        monkeypatch.setattr("environment_servers.harbor.app._pull_retry_delay", lambda attempt: 0)
+        sandboxes: list[FakeSandbox] = []
+        # Whether each earlier sandbox of the episode was stopped, as every start saw it.
+        stopped_at_start: list[list[bool]] = []
+
+        async def create(task, workdir, *, episode_key):
+            stopped_at_start.append([sandbox.stopped for sandbox in sandboxes])
+            if failing == "create" and len(stopped_at_start) == 1:
+                raise RuntimeError("sandbox did not become ready")
+            sandbox = FakeSandbox()
+            sandbox.created_in(workdir)
+            if failing == "serialize" and not sandboxes:
+
+                async def unavailable(*, scope=None):
+                    raise RuntimeError("descriptor unavailable")
+
+                sandbox.serialize = unavailable
+            sandboxes.append(sandbox)
+            return sandbox
+
+        monkeypatch.setattr(server, "_create_sandbox", create)
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_rewards == {"reward": 1.0}
+        assert len(stopped_at_start) == 2
+        assert stopped_at_start == ([[], []] if failing == "create" else [[], [True]])
+        assert server.server_client.paths() == [
+            "/v1/agent_sessions",
+            "/ng-rollout/r1/v1/responses",
+            "/v1/agent_sessions/close",
+        ]
+        # The verifier ran in the sandbox of the seed that succeeded only.
+        assert [any("test.sh" in call["command"] for call in sandbox.execs) for sandbox in sandboxes] == (
+            [True] if failing == "create" else [False, True]
+        )
+        assert all(sandbox.stopped for sandbox in sandboxes) and not server._sandboxes and not server._sessions
+
+    async def test_exhausted_seed_retries_are_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, seed_retries=2)
+        backoffs: list[int] = []
+
+        def no_delay(attempt: int) -> float:
+            backoffs.append(attempt)
+            return 0
+
+        monkeypatch.setattr("environment_servers.harbor.app._pull_retry_delay", no_delay)
+        starts: list[str] = []
+
+        async def boom(task, workdir, *, episode_key):
+            starts.append(episode_key)
+            raise RuntimeError(f"sandbox start {len(starts)} failed")
+
+        monkeypatch.setattr(server, "_create_sandbox", boom)
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and not failure.terminal
+        assert starts == ["r1", "r1", "r1"] and backoffs == [1, 2]
+        assert "sandbox start 3 failed" in failure.failure_reason
+        assert server.server_client.calls == [] and not server._sandboxes and not server._sessions
+
+    async def test_a_refused_seed_is_not_retried(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, seed_retries=2)
+        starts: list[str] = []
+
+        async def overlay_fails(task, workdir, *, episode_key):
+            starts.append(episode_key)
+            raise overlay.HarborOverlayError("RUN apt-get install missing-package exited 100")
+
+        monkeypatch.setattr(server, "_create_sandbox", overlay_fails)
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == "seed" and failure.terminal
+        assert "Dockerfile overlay failed for 'hello'" in failure.failure_reason
+        assert starts == ["r1"] and server.server_client.calls == []
+
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_rejected_sandbox_credentials_are_not_retried(self, tmp_path, monkeypatch, status):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, seed_retries=2)
+        starts: list[str] = []
+
+        class SandboxApiException(Exception):  # the provider SDK's error, with its integer status_code
+            status_code = status
+
+        async def refused(task, workdir, *, episode_key):
+            starts.append(episode_key)
+            raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
+
+        monkeypatch.setattr(server, "_create_sandbox", refused)
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == "seed" and not failure.terminal
+        outer = response.failure_report.events[response.failure_report.failure_id]
+        assert response.failure_report.events[outer.cause_id].failure_kind == "provider_credentials_rejected"
+        assert starts == ["r1"] and server.server_client.calls == []
+
+    async def test_a_seed_that_fails_while_the_server_shuts_down_is_not_retried(self, tmp_path, monkeypatch):
+        """No backoff and no second seed during shutdown: the episode reports the seed's own error."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, seed_retries=2)
+        backoffs: list[int] = []
+
+        def no_delay(attempt: int) -> float:
+            backoffs.append(attempt)
+            return 0
+
+        monkeypatch.setattr("environment_servers.harbor.app._pull_retry_delay", no_delay)
+        starts: list[str] = []
+
+        async def fails_as_shutdown_starts(task, workdir, *, episode_key):
+            starts.append(episode_key)
+            server._shutting_down = True
+            raise RuntimeError("sandbox did not become ready")
+
+        monkeypatch.setattr(server, "_create_sandbox", fails_as_shutdown_starts)
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert failure.stage == "seed" and not failure.terminal
+        assert "sandbox did not become ready" in failure.failure_reason
+        assert starts == ["r1"] and backoffs == []
 
     @pytest.mark.parametrize("status", [401, 403, 500, None])
     async def test_sandbox_credentials_refused_at_seed_are_named(self, tmp_path, monkeypatch, status):
@@ -4184,6 +4318,7 @@ def test_server_config_holds_only_deployment_settings():
         "harness_setup_allowance_s",
         "step_setup_timeout_s",
         "image_pull_retries",
+        "seed_retries",
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
         "turn_sessions",

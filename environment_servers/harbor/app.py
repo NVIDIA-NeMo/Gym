@@ -38,7 +38,8 @@ score, which is their sum, and the result names them as ``reward_components`` (k
 ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample. A
 failed agent response whose harness classified the cause (``ng_agent_outcome``) goes through
 ``agent_outcome_policy`` before verification, as on ``single_agent_turn``: by default a
-transport or unknown cause is retried ungraded instead of scoring 0. A task that cannot be set up is a handled episode failure:
+transport or unknown cause is returned ungraded as a retryable failure instead of scoring 0, and the server does not
+run it again. A task that cannot be set up is a handled episode failure:
 terminal when the task itself is at fault (unknown task, changed folder, unsupported
 settings), retryable when the sandbox provider failed.
 """
@@ -70,8 +71,10 @@ from environment_servers.harbor.overlay import HarborOverlayError, HarborOverlay
 from environment_servers.harbor.sandboxes import (
     COMPOSE_IMAGES_FILE,
     PULL_RETRY_CONCURRENCY,
+    PULL_RETRY_MAX_DELAY_S,
     SEED_CREATE_GRACE_S,
     HarborSandboxMixin,
+    _pull_retry_delay,
 )
 from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
 from environment_servers.harbor.steps import HarborStepsMixin, StepPrepareError
@@ -383,6 +386,12 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # a separate verifier's sandbox) is retried here before the failure is reported as retryable. Bounded,
     # jittered and gated per server.
     image_pull_retries: int = Field(default=2, ge=0)
+    # How many times a seed that failed for a reason a retry can fix (a sandbox or Compose group that did not start
+    # or become healthy, a provider error, a solution upload or `serialize` that failed) runs again on a fresh
+    # sandbox before the episode fails at stage seed. No model call has been made at that point. A refusal of the
+    # task, row or configuration (4xx) is not retried, and neither are rejected provider credentials. The retries
+    # count toward a multi-step task's episode bound.
+    seed_retries: int = Field(default=0, ge=0)
     # Verify tasks that declare `artifacts` in a fresh sandbox even when `task.toml` keeps Harbor's shared
     # mode: the agent cannot tamper with the grader. Tasks without artifacts keep their declared mode.
     separate_verifier_for_artifacts: bool = False
@@ -783,13 +792,16 @@ class HarborEnvironmentServer(
         """The most the seed may take before the task's own deadline opens: every sandbox start it may make
         (``sandbox_ready_timeout_s`` plus the create grace per attempt, ``image_pull_retries + 1`` attempts: a
         single sandbox runs its attempts under one such deadline, a Compose group each under its own) and the
-        Dockerfile overlay when there is one. The nominal one-start allowance of :meth:`_task_budget_s` sizes
-        the sandbox lifetime; this is the bound an episode deadline that starts at the request has to cover."""
+        Dockerfile overlay when there is one, for each of the ``seed_retries + 1`` seeds, plus the longest backoff
+        before each seed retry. The nominal one-start allowance of :meth:`_task_budget_s` sizes the sandbox
+        lifetime; this is the bound an episode deadline that starts at the request has to cover."""
         attempts = self.config.image_pull_retries + 1
         bound = (self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S) * attempts
         if task.overlay:
             bound += task.config.environment.build_timeout_sec
-        return bound
+        seed_retries = self.config.seed_retries
+        # `_pull_retry_delay` waits at most 1.5 times its cap.
+        return bound * (seed_retries + 1) + seed_retries * PULL_RETRY_MAX_DELAY_S * 1.5
 
     def _episode_bound_s(self, task: HarborTask) -> float:
         """What one episode of a multi-step task may take from the request: the seed's bound
@@ -885,10 +897,7 @@ class HarborEnvironmentServer(
             # support before any environment spend; a single step could never continue, so the setting is moot.
             await self._require_turn_continuation()
         try:
-            session = await self._seed(request, episode_key)
-            # The sandbox is seeded; the oracle alone also gets the task's solution before its session opens.
-            await self._seed_solution(session)
-            access = await self._sandbox_access(session)
+            session, access = await self._seed_with_retries(request, episode_key)
         except HTTPException as error:
             # 4xx: the task or row is at fault and a retry would fail the same way. 5xx: the provider failed.
             raise self._failure(
@@ -896,7 +905,7 @@ class HarborEnvironmentServer(
             ) from error
         except Exception as error:
             # The sandbox exists but cannot be described to the harness (serialize failed): a provider-side
-            # seed failure, retried elsewhere; the cleanup stops what was claimed.
+            # seed failure, retried by the caller after any `seed_retries`; the cleanup stops what was claimed.
             raise dependency_failure(
                 error,
                 stage="seed",
@@ -1353,9 +1362,10 @@ class HarborEnvironmentServer(
 
     def _route_failed_response(self, agent_response: NeMoGymResponse, handle: _AgentSessionHandle) -> None:
         """A failed response whose harness classified the cause is routed by the deployment's policy before any
-        grading: a transport or unknown cause is retried ungraded, as on ``single_agent_turn``, instead of
-        handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
-        episode at the turn that failed; a verify cause is graded as before."""
+        grading: a transport or unknown cause is returned ungraded as a retryable failure, which the server does not
+        run again, as on ``single_agent_turn``, instead of handing test.sh a half-finished sandbox and recording a
+        real 0. In a multi-step task this ends the episode at the turn that failed; a verify cause is graded as
+        before."""
         action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
         if action != OutcomeAction.VERIFY:
             raise self._failure(
@@ -1775,8 +1785,55 @@ class HarborEnvironmentServer(
                 "does; remove the file to run the task without its prior context",
             )
 
-    async def _seed(self, request: HarborEpisodeRequest, episode_key: str) -> HarborSession:
-        """Resolve the task and start its sandbox; the sandbox stays owned by the server until it is stopped."""
+    async def _seed_with_retries(
+        self, request: HarborEpisodeRequest, episode_key: str
+    ) -> tuple[HarborSession, SandboxAccess]:
+        """Seed the episode and describe its sandbox to the harness, running a failed seed again on a fresh
+        sandbox up to ``seed_retries`` times, after the jittered backoff image pull retries use.
+
+        No agent session is open yet, so no model call is lost or captured twice. A refusal (4xx), rejected
+        provider credentials and a server that is shutting down end the retries: another seed would be refused or
+        fail the same way. Nothing is stopped here: ``_seed`` stops what it started when it fails, and the next
+        ``_seed`` stops a sandbox a failed solution upload or ``serialize`` left owned before it starts another,
+        refusing with a 503 that names the failed seed's error while that stop fails. Cancellation (the episode
+        deadline) is not an ``Exception`` and ends the seed.
+        """
+        attempts = self.config.seed_retries + 1
+        # The error of the seed that left the episode's sandbox owned: a later seed that cannot stop that sandbox
+        # fails on the stop, and its reason keeps this error, the one the episode failed for.
+        failed_seed_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            owned = self._sandboxes.get(episode_key)
+            try:
+                session = await self._seed(request, episode_key, failed_seed_error=failed_seed_error)
+                # The sandbox is seeded; the oracle alone also gets the task's solution before its session opens.
+                await self._seed_solution(session)
+                return session, await self._sandbox_access(session)
+            except Exception as exc:
+                if self._sandboxes.get(episode_key) is not owned:
+                    failed_seed_error = exc
+                refused = isinstance(exc, HTTPException) and exc.status_code < 500
+                cause = exc.__cause__
+                credentials_rejected = (
+                    isinstance(cause, NgFailureEvent)
+                    and cause.failure_kind == failure_kinds.PROVIDER_CREDENTIALS_REJECTED
+                )
+                if attempt >= attempts or refused or credentials_rejected or self._shutting_down:
+                    raise
+                LOGGER.warning(
+                    f"{request.task.task_id.task_id}: seed failed (attempt {attempt}/{attempts}), "
+                    f"seeding again on a fresh sandbox: {exc}"
+                )
+                await asyncio.sleep(_pull_retry_delay(attempt))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _seed(
+        self, request: HarborEpisodeRequest, episode_key: str, *, failed_seed_error: Exception | None = None
+    ) -> HarborSession:
+        """Resolve the task and start its sandbox; the sandbox stays owned by the server until it is stopped.
+
+        ``failed_seed_error`` is the error of an earlier seed of this ``/run`` that left the episode's sandbox
+        owned (:meth:`_seed_with_retries`); the refusal of a seed that cannot stop that sandbox names it."""
         if self._shutting_down:
             raise HTTPException(503, "Environment server is shutting down")
         task = await self._resolve_task(request.task.task_id, request.task.task_input.task_data)
@@ -1891,8 +1948,8 @@ class HarborEnvironmentServer(
         if task.turns:
             # Three figures of one episode: what the steps need once the sandbox is ready (`_post_seed_budget_s`),
             # the nominal episode of one sandbox start, with the overlay build, before that (`_task_budget_s`), and
-            # the worst case a deadline opened before the seed has to cover, every image pull attempt at its
-            # timeout (`_episode_bound_s`), the one the deadline is raised to and the sandbox lifetime follows.
+            # the worst case a deadline opened before the seed has to cover, every image pull and seed attempt at
+            # its timeout (`_episode_bound_s`), the one the deadline is raised to and the sandbox lifetime follows.
             # The refusal compares the nominal figure: a normal seed makes one start, and a task that fits the
             # default that way is run, not refused for the worst case; the WARNINGs name both figures.
             bound = self._episode_bound_s(task)
@@ -1904,13 +1961,13 @@ class HarborEnvironmentServer(
                 f"setup.sh and healthcheck bounds, agent and verifier budgets, hooks and grace per step), "
                 f"{nominal:.0f}s with one "
                 f"sandbox start and "
-                f"up to {bound:.0f}s with every image pull retry"
+                f"up to {bound:.0f}s with every image pull and seed retry"
             )
             if not self.config.enforce_task_timeouts:
                 # Nothing derives a longer deadline without enforcement, so the default is the deadline. An
                 # episode that cannot fit it after one sandbox start would be cut short and retried, never scored:
                 # refused with the setting named. One that fits only without a retried seed runs, with a WARNING
-                # once per episode: a retried seed is a possibility whose outcome is a retryable timeout.
+                # once per seed attempt: a retried seed is a possibility whose outcome is a retryable timeout.
                 if nominal > default:
                     raise HTTPException(
                         422,
@@ -1928,7 +1985,7 @@ class HarborEnvironmentServer(
                         "enforce_task_timeouts: true to give the episode the task's own bound"
                     )
             elif bound > default:
-                # Once per episode of such a task, at WARNING so the run's log shows which tasks run above the
+                # Once per seed attempt of such a task, at WARNING so the run's log shows which tasks run above the
                 # run-wide default (a notable operational fact, not an error): the deadline and the sandbox
                 # lifetime follow the task's own bound, so the episode is not cut short and retried.
                 LOGGER.warning(
@@ -1941,15 +1998,21 @@ class HarborEnvironmentServer(
             if stale_key not in self._sandboxes:
                 continue
             # Left by a finished attempt whose stop failed (run() refuses the key while an attempt is live):
-            # the agent's sandbox or its separate verifier. Retry the stop here; the repeat goes ahead only
-            # once the old sandbox is gone.
+            # the agent's sandbox or its separate verifier. Or left by an earlier seed of this attempt
+            # (`failed_seed_error`). Retry the stop here; the repeat goes ahead only once the old sandbox is gone.
             try:
                 await self._stop_sandbox(stale_key)
             except Exception as exc:
-                LOGGER.exception(f"Could not stop the sandbox of a previous attempt of {episode_key}")
-                raise HTTPException(
-                    503, f"A sandbox of a previous attempt of this episode could not be stopped yet: {exc}"
-                ) from exc
+                if failed_seed_error is None:
+                    LOGGER.exception(f"Could not stop the sandbox of a previous attempt of {episode_key}")
+                    detail = f"A sandbox of a previous attempt of this episode could not be stopped yet: {exc}"
+                else:
+                    LOGGER.exception(f"Could not stop the sandbox of an earlier seed of {episode_key}")
+                    detail = (
+                        f"An earlier seed of this episode failed ({failed_seed_error}) and its sandbox could not be "
+                        f"stopped yet: {exc}"
+                    )
+                raise HTTPException(503, detail) from exc
         compose: AsyncSandboxCompose | None = None
         launch: EntrypointLaunch | None = None
         try:
