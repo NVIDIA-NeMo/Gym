@@ -19,7 +19,7 @@ from pathlib import Path
 from shlex import quote
 from string import Template
 
-from nemo_gym.data.prompt import load_prompt_config
+from nemo_gym.data import load_prompt_config
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1]

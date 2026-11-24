@@ -88,8 +88,8 @@ def test_direct_hf_export_keeps_panels_bounds_and_reference_private(tmp_path: Pa
 
 
 def test_native_gym_loads_export_and_materializes_task_routes(tmp_path: Path) -> None:
-    from nemo_gym.data.tasks.harbor import context_digest, load_task
-    from nemo_gym.data.tasks.harbor.materialize import materialize_task, run_config
+    from nemo_gym.data.tasks.harbor import context_digest, load_task, materialize_task
+    from nemo_gym.data.tasks.harbor.materialize import run_config
     from nemo_gym.data.tasks.harbor.records import write_json_record
 
     folder = export(tmp_path)

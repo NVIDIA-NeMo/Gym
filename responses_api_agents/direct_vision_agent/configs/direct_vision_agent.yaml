@@ -2,6 +2,8 @@ direct_vision_agent:
   responses_api_agents:
     direct_vision_agent:
       entrypoint: app.py
+      # The environment server lends the sandbox through an agent session.
+      resources_server: null
       model_server:
         type: responses_api_models
         name: policy_model

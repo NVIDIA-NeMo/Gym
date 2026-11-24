@@ -32,9 +32,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import AsyncSandbox, create_provider, download_bytes, resolve_provider_config, upload_text
-from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, ObservationGap
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

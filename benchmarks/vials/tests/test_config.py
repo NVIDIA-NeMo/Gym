@@ -6,7 +6,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from environment_servers.harbor.app import HarborEnvironmentServerConfig
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.direct_vision_agent.app import DirectVisionAgentConfig
 
 
