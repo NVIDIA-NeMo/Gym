@@ -142,7 +142,9 @@ async def test_a_stream_that_reports_its_failure_in_band_keeps_its_status_class(
     assert attributes["nemo.gym.model.call_outcome"] == "2xx"
 
 
-@pytest.mark.parametrize("failure", [RuntimeError("boom"), asyncio.CancelledError()], ids=["raised", "server cancelled"])
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("boom"), asyncio.CancelledError()], ids=["raised", "server cancelled"]
+)
 async def test_a_call_that_fails_mid_response_is_an_error(collected_metrics, failure) -> None:
     with pytest.raises(type(failure)):
         await _call(_failing(failure))
