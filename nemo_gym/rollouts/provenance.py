@@ -61,6 +61,23 @@ _CONCURRENCY_KEYS = frozenset(
         "max_concurrent_episodes",
         "max_concurrency",
         "concurrency",
+        "max_concurrent",
+        "num_concurrent_requests",
+        "num_parallel_requests",
+        "judge_concurrency",
+        "max_judge_concurrency",
+        "judge_parallelism",
+        "verification_concurrency",
+        "render_concurrency",
+        "image_metrics_concurrency",
+        "sandbox_upload_concurrency",
+        "max_parallel_agents",
+        "exec_concurrency",
+        "delete_concurrency",
+        "build_parallelism",
+        "parallelism",
+        "global_aiohttp_intended_concurrency",
+        "global_aiohttp_intended_concurrency_per_host",
     }
 )
 # Server-specific limits, such as `judge_endpoint_max_concurrency` or `max_concurrent_rollouts`.

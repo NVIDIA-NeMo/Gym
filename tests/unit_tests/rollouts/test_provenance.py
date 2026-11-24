@@ -236,6 +236,112 @@ def test_concurrency_limits_include_worker_counts_and_server_specific_limit_name
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.mark.parametrize(
+    ("config_fpath", "path", "key", "limit"),
+    [
+        (
+            "benchmarks/healthbench/configs/nemotron-ultra.yaml",
+            "policy_model.responses_api_models.inference_provider",
+            "num_concurrent_requests",
+            4,
+        ),
+        (
+            "responses_api_models/azure_openai_model/configs/azure_openai_model.yaml",
+            "policy_model.responses_api_models.azure_openai_model",
+            "num_concurrent_requests",
+            8,
+        ),
+        (
+            "benchmarks/lmarena_v3/config_super35_gemini38flash_judge.yaml",
+            "lmarena_v3_benchmark_resources_server.resources_servers.arena",
+            "judge_concurrency",
+            32,
+        ),
+        ("nemo_gym/sandbox/providers/bwrap/configs/bwrap.yaml", "sandbox.bwrap", "exec_concurrency", 256),
+        (
+            "nemo_gym/sandbox/providers/openshell/configs/openshell.yaml",
+            "sandbox.openshell.operations",
+            "delete_concurrency",
+            32,
+        ),
+        (
+            "resources_servers/vision2code/configs/vision2code.yaml",
+            "vision2code.resources_servers.vision2code",
+            "render_concurrency",
+            8,
+        ),
+        (
+            "resources_servers/vision2code/configs/vision2code.yaml",
+            "vision2code.resources_servers.vision2code",
+            "image_metrics_concurrency",
+            2,
+        ),
+        (
+            "responses_api_agents/collab_intel_agent/configs/collab_intel_agent.yaml",
+            "collab_intel_agent.responses_api_agents.collab_intel_agent",
+            "max_concurrent",
+            16,
+        ),
+        (
+            "resources_servers/competitive_coding_challenges/configs/competitive_coding_challenges.yaml",
+            "competitive_coding_challenges_resources_server.resources_servers.competitive_coding_challenges",
+            "num_parallel_requests",
+            16,
+        ),
+        ("resources_servers/legal_agent_bench/configs/legal_agent_bench.yaml", "lab", "judge_parallelism", 6),
+        (
+            "responses_api_agents/conversational_tool_use_policy_tool_generation/configs/"
+            "conversational_tool_use_policy_tool_generation.yaml",
+            "conversational_tool_use_policy_tool_generation.responses_api_agents."
+            "conversational_tool_use_policy_tool_generation",
+            "max_judge_concurrency",
+            None,
+        ),
+        (
+            "responses_api_agents/qwen_code_agent/configs/qwen_code_agent.yaml",
+            "qwen_code_agent.responses_api_agents.qwen_code_agent",
+            "max_parallel_agents",
+            None,
+        ),
+    ],
+)
+def test_a_shipped_config_limit_under_its_own_name_is_recorded(config_fpath, path, key, limit) -> None:
+    node = OmegaConf.select(OmegaConf.load(REPO_ROOT / config_fpath), path)
+    config: dict = {}
+    for part in reversed(path.split(".")):
+        config = {part: config or {key: node[key]}}
+
+    record = provenance.build_provenance(config)
+
+    assert record.concurrency_limits == {path: {key: limit}}
+
+
+def test_limits_named_only_in_their_config_models_are_recorded() -> None:
+    record = provenance.build_provenance(
+        {
+            "global_aiohttp_intended_concurrency": 512,
+            "global_aiohttp_intended_concurrency_per_host": 64,
+            "mm_coding": {
+                "resources_servers": {
+                    "mm_coding_training": {"verification_concurrency": 8, "checkpoint": {"parallelism": 16}}
+                }
+            },
+            "vcqa": {"responses_api_agents": {"vcqa_agent": {"sandbox_upload_concurrency": 4}}},
+            "sandbox": {"ecs_fargate": {"build_parallelism": 50}},
+        }
+    )
+    assert record.concurrency_limits == {
+        provenance.TOP_LEVEL_PATH: {
+            "global_aiohttp_intended_concurrency": 512,
+            "global_aiohttp_intended_concurrency_per_host": 64,
+        },
+        "mm_coding.resources_servers.mm_coding_training": {"verification_concurrency": 8},
+        "mm_coding.resources_servers.mm_coding_training.checkpoint": {"parallelism": 16},
+        "vcqa.responses_api_agents.vcqa_agent": {"sandbox_upload_concurrency": 4},
+        "sandbox.ecs_fargate": {"build_parallelism": 50},
+    }
+
+
 def _write_without_probing(output: Path, config, monkeypatch) -> dict:
     monkeypatch.setattr(provenance, "served_models", lambda servers: {})
     materialized_path_for(output).write_bytes(b"")

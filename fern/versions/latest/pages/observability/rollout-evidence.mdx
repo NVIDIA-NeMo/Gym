@@ -381,10 +381,13 @@ by config path, configured judge models and judge-prompt versions, and the runni
 commit. Unknown values are null or absent from the corresponding settings map. Prompt text and
 request metadata from the input rows are fingerprinted, not copied.
 
-`concurrency_limits` holds integer or `null` values of `num_samples_in_parallel`,
-`max_resident_rollout_tasks`, `num_workers`, `max_concurrent_requests`, `max_concurrent_episodes`,
-`max_concurrency` and `concurrency` (such as a sandbox's `exec.concurrency`), and of any key named
-`max_concurrent_*`, `*_max_concurrency` or `*_max_concurrent`, such as `judge_endpoint_max_concurrency`.
+`concurrency_limits` holds integer or `null` values of the rollout limits (`num_samples_in_parallel`,
+`max_resident_rollout_tasks`), each server's `num_workers`, and the server, judge, verifier and
+sandbox limits Gym's configs name, such as `max_concurrent_requests`, `num_concurrent_requests`,
+`max_concurrent_episodes`, `judge_concurrency`, `concurrency` (including a sandbox's
+`exec.concurrency`) and `exec_concurrency`, plus any key named `max_concurrent_*`,
+`*_max_concurrency` or `*_max_concurrent`, such as `judge_endpoint_max_concurrency`. The full list of
+names is `_CONCURRENCY_KEYS` in `nemo_gym/rollouts/provenance.py`.
 Server limits such as `max_concurrent_requests` and `max_concurrent_episodes` apply per worker
 process, so the server's effective limit is that value times its `num_workers` (`null` runs one
 worker).
