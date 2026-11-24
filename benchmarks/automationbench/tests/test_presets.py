@@ -41,9 +41,10 @@ def test_a_preset_binds_its_harness_over_mcp_to_the_config_yaml_resources_server
     assert _benchmark_config_name(path.relative_to(ROOT / "benchmarks")) == f"automationbench/{preset}"
     benchmark = BenchmarkConfig.from_config_path(path, strict=False)
     assert benchmark is not None and benchmark.agent_name == instance
-    # simple_agent and its environment server are gone; the preset's own environment server runs the harness with
-    # the tools granted over MCP.
-    assert (config.automationbench, config.automationbench_environment_server) == (None, None)
+    # config.yaml is not loaded: no simple_agent or its environment server, and no run-level request field such as
+    # its sampling, which the harnesses refuse. The preset's own environment server runs the harness with the tools
+    # granted over MCP.
+    assert not {"automationbench", "automationbench_environment_server", "responses_create_params"} & set(config)
     environment = config[f"automationbench_{preset}_environment_server"].environment_servers.single_agent_turn_legacy
     assert (environment.agent_server.name, list(environment.resources_tool_transports)) == (instance, ["mcp"])
     assert environment.resources_server.name == "automationbench_resources_server"
@@ -71,9 +72,9 @@ def test_a_preset_binds_its_harness_over_mcp_to_the_config_yaml_resources_server
         "prepare_script": "benchmarks/automationbench/prepare_harness_neutral.py",
     }
     assert dataset == baseline_dataset | neutral
-    # config.yaml's run-level sampling, which the harnesses refuse, is deleted rather than cleared: the run overrides
-    # no request field of any row.
-    assert not config.get("responses_create_params")
+    # Episodes are admitted at the harness's rate, before their deadline starts.
+    assert environment.max_concurrent_episodes == agent.concurrency == 32
+    assert environment.queue_timeout_seconds == 86400
     # The sandbox calls the resources server's /mcp by address.
     assert "resources_servers" in config.absolute_ip_server_types
 
@@ -88,4 +89,12 @@ def test_the_presets_load_together_and_each_environment_server_runs_its_own_harn
         for preset in HARNESSES
     }
     assert bound == {preset: f"automationbench_{preset}_agent" for preset in HARNESSES}
-    assert config.automationbench_environment_server is None
+    assert "automationbench_environment_server" not in config
+
+
+def test_the_presets_leave_another_workloads_run_level_request_fields_as_they_are() -> None:
+    other = _merged(BENCHMARK / "config.yaml")
+    config = _merged(BENCHMARK / "config.yaml", *(BENCHMARK / f"{preset}.yaml" for preset in HARNESSES))
+
+    assert OmegaConf.to_container(config.responses_create_params) == {"temperature": 1.0, "top_p": 1.0}
+    assert config.responses_create_params == other.responses_create_params

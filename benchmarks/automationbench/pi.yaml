@@ -3,21 +3,17 @@
 # AutomationBench with Pi in place of simple_agent: the same resources server, tasks and aa_headline scoring as
 # config.yaml. Pi runs in a sandbox it creates and calls the api tools over MCP. See "Session harnesses" in
 # README.md for the run command, the sandbox image and the model server settings.
+
+# config.yaml's resources server and environment server type, without config.yaml itself: its run-level
+# temperature and top_p would reach every row of a run that loads it. These presets set no run-level request
+# field; sampling goes on the model server.
 config_paths:
-  - benchmarks/automationbench/config.yaml
+  - resources_servers/automationbench/configs/automationbench.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
   - responses_api_agents/pi_agent/configs/profiles/benchmark.yaml
 
 # The sandbox reaches the resources server's MCP endpoint by address, so the resources servers leave loopback too.
 absolute_ip_server_types: [responses_api_models, resources_servers]
-
-# Pi refuses sampling in the request: drop config.yaml's run-level temperature and top_p, and set sampling on the
-# model server. Deleted, not cleared, so the other workloads of a run keep their rows' values.
-responses_create_params:
-  _delete_key: temperature,top_p
-
-# Drop simple_agent and its environment server; automationbench_pi_environment_server below runs Pi.
-automationbench: null
-automationbench_environment_server: null
 
 automationbench_resources_server:
   resources_servers:
@@ -45,6 +41,9 @@ automationbench_pi_agent:
       # Per model call; the shipped 131,072 leaves no room for a prompt past half a 262,144-token window.
       max_output_tokens: 32768
       timeout: 3600
+      # Concurrent Pi runs. Keep it at least the environment server's max_concurrent_episodes: an episode
+      # beyond it waits with its deadline running.
+      concurrency: 32
       datasets:
         # The tasks without the tool list and the output budget, which Pi refuses in the request
         # (prepare_harness_neutral.py; `gym eval prepare --benchmark automationbench/pi`).
@@ -56,8 +55,7 @@ automationbench_pi_agent:
           num_repeats: 1
           license: MIT
 
-# Its own environment server rather than config.yaml's rebound, so a run that loads several of these presets binds
-# each harness.
+# Its own environment server, so a run that loads several of these presets binds each harness.
 automationbench_pi_environment_server:
   _inherit_from: single_agent_turn_legacy
   environment_servers:
@@ -69,3 +67,7 @@ automationbench_pi_environment_server:
         type: responses_api_agents
         name: automationbench_pi_agent
       resources_tool_transports: [mcp]
+      # Admit episodes at the agent's rate (its concurrency, 32): an episode admitted beyond it would wait for a
+      # Pi run with its deadline running. Admission comes before the deadline starts.
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400
