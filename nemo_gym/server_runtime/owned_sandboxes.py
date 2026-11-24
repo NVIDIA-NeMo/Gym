@@ -91,6 +91,7 @@ from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
@@ -109,6 +110,7 @@ from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 
 
 LOGGER = logging.getLogger(__name__)
+__getattr__ = moved_names_getattr(__name__)
 
 # A fork that the backend answers with "snapshot not found" is retried this many times, this far apart: a snapshot
 # store that is not fully shared across the service's replicas can answer from one that has not seen it yet.
@@ -425,11 +427,9 @@ class OwnedSandboxes:
         self._entries: dict[str, _Entry] = {}
         self._index: Optional[_SnapshotIndex] = None
         self._state_dir_id: Optional[str] = None
+        self._checkpoint_global_config: Mapping[str, Any] | None = None
         if state_dir is not None:
-            # Fails at server start, not at the first commit, if the directory cannot be created.
-            self._state_dir_id = read_state_dir_id(Path(state_dir))
-            self._index = _SnapshotIndex(Path(state_dir) / self._server_name / "snapshots")
-            self._index.root.mkdir(parents=True, exist_ok=True)
+            self._initialize_index(Path(state_dir))
         # Keys whose sandbox is being created or restored: no other create, add or restore may take them meanwhile.
         self._pending: set[str] = set()
         # Set while no key is pending, which is what ``aclose`` waits for before it stops the sandboxes.
@@ -471,14 +471,14 @@ class OwnedSandboxes:
         """The instance a server holds for the provider its config names in ``provider_field``.
 
         ``config`` is the server's config and ``global_config`` the merged global config, which resolves a named
-        provider and ``checkpoint.state_dir``. An instance for a field other than ``sandbox_provider`` gets its own
+        provider. ``checkpoint.state_dir`` is resolved on the first export, restore or release, so servers that only
+        restart their episodes need no snapshot index. An instance for a field other than ``sandbox_provider`` gets its own
         server name, ``<server>.<field>``, so its snapshot index and snapshot names stay apart. The instance owns the
         provider it creates and closes it in :meth:`aclose`. ``on`` gives the server's instance for another field,
         which :meth:`on` calls.
 
         Raises:
-            ValueError: If the config has no field ``provider_field`` or leaves it unset, or checkpointing is on
-                without a valid ``checkpoint.state_dir``.
+            ValueError: If the config has no field ``provider_field`` or leaves it unset.
         """
         if provider_field not in type(config).model_fields:
             raise ValueError(f"{config.name} has no config field {provider_field!r} naming a sandbox provider")
@@ -487,7 +487,8 @@ class OwnedSandboxes:
             raise ValueError(f"{config.name} sets no {provider_field}, so it cannot own sandboxes on it")
         # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
         provider_config = resolve_provider_config(reference, global_config)
-        state_dir = checkpoint_state_dir(global_config)
+        suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
+        server_name = _path_component(f"{config.name}{suffix}", "server name")
         if "local" in provider_config:
             LOGGER.warning(
                 "%s owns sandboxes on the local provider, which runs their commands as processes on this host; "
@@ -495,16 +496,30 @@ class OwnedSandboxes:
                 config.name,
             )
         provider = create_provider(provider_config)
-        suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
         owned = cls(
             provider,
-            state_dir=state_dir,
-            server_name=f"{config.name}{suffix}",
+            state_dir=None,
+            server_name=server_name,
             provider_config_ref=reference if isinstance(reference, str) else None,
             owns_provider=True,
         )
+        owned._checkpoint_global_config = global_config
         owned._on = on
         return owned
+
+    def _initialize_index(self, state_dir: Path) -> None:
+        state_dir_id = read_state_dir_id(state_dir)
+        index = _SnapshotIndex(state_dir / self._server_name / "snapshots")
+        index.root.mkdir(parents=True, exist_ok=True)
+        # Publish only after initialization succeeds, so a failed attempt can be retried.
+        self._state_dir_id = state_dir_id
+        self._index = index
+
+    def _ensure_checkpoint_index(self) -> None:
+        if self._index is None and self._checkpoint_global_config is not None:
+            state_dir = checkpoint_state_dir(self._checkpoint_global_config)
+            if state_dir is not None:
+                self._initialize_index(state_dir)
 
     def on(self, provider_field: str) -> "OwnedSandboxes":
         """The same server's instance for the provider its config names in ``provider_field``, created on first use.
@@ -683,6 +698,7 @@ class OwnedSandboxes:
         ``snapshot_attempts`` attempts, or a snapshot cannot be indexed, which fails the commit. Every sandbox keeps
         running, and the snapshots already taken are deleted by a release that does not keep ``checkpoint_id``.
         """
+        self._ensure_checkpoint_index()
         keys = list(keys)
         outcomes = await asyncio.gather(
             *(self._export_one(key, checkpoint_id) for key in keys), return_exceptions=True
@@ -823,6 +839,7 @@ class OwnedSandboxes:
         the crashed process's sandboxes are stopped in the background, best effort; a failure there is logged and
         the sandbox runs out its lifetime.
         """
+        self._ensure_checkpoint_index()
         self._require_open()
         await self._stop_forks()
         # Again, since ``aclose`` may have run during the stops: nothing awaits from here until the keys are taken.
@@ -977,6 +994,7 @@ class OwnedSandboxes:
         ``RuntimeError`` if the index cannot be locked; the provider's error if the listing fails. Whatever a
         failed or cancelled call left is still indexed, and the next release deletes it.
         """
+        self._ensure_checkpoint_index()
         if self._index is None:
             return
         kept = frozenset(kept)
