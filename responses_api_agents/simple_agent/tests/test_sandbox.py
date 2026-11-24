@@ -23,7 +23,7 @@ from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult
 from responses_api_agents.simple_agent import sandbox as sandbox_module
 from responses_api_agents.simple_agent import sandbox_runner
 from responses_api_agents.simple_agent.app import (
@@ -452,3 +452,167 @@ def test_sandbox_mode_refuses_a_subclass_that_changes_the_agent_loop() -> None:
     detail = check_agent_seed_rejected(agent.setup_webserver(), _seed(sandbox_access=ACCESS))
 
     assert "changes the agent loop" in detail
+
+
+class _FakeSandbox:
+    """A borrowed sandbox that records commands and keeps uploaded files in memory; a command naming ``fail`` fails."""
+
+    def __init__(self, *, fail: str | None = None) -> None:
+        self.commands: list[str] = []
+        self.files: dict[str, bytes] = {}
+        self.fail = fail
+
+    async def exec(self, command: str, **kwargs: Any) -> SandboxExecResult:
+        self.commands.append(command)
+        failed = self.fail is not None and self.fail in command
+        return SandboxExecResult(stdout="", stderr="no such module" if failed else "", return_code=1 if failed else 0)
+
+    async def upload(self, source: Path, target: str) -> None:
+        self.files[target] = Path(source).read_bytes()
+
+    async def download(self, source: str, destination: Path) -> None:
+        Path(destination).write_bytes(self.files[source])
+
+
+@pytest.fixture
+def installed_runtime(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The runtime counts as installed unless a test says otherwise; installs are recorded by their timeout."""
+    installs: list[float] = []
+
+    async def install(sandbox: Any, *, timeout_s: float) -> None:
+        installs.append(timeout_s)
+
+    monkeypatch.setattr(sandbox_module.RUNTIME, "is_installed", lambda sandbox: _resolved(True))
+    monkeypatch.setattr(sandbox_module.RUNTIME, "install", install)
+    return installs
+
+
+async def _resolved(value: Any) -> Any:
+    return value
+
+
+async def test_install_unpacks_this_servers_sources_beside_the_runtime_and_checks_the_runner(
+    installed_runtime,
+) -> None:
+    sandbox = _FakeSandbox()
+    loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
+
+    await loop.install(timeout=900)
+
+    assert installed_runtime == []
+    archive = f"{loop.session.session_dir}/harness.tar.gz"
+    assert sandbox.files[archive] == sandbox_module.harness_archive().read_bytes()
+    harness = sandbox_module.harness_dir()
+    assert harness.startswith(sandbox_module.RUNTIME.directory)
+    assert any(f"tar -xzf {archive} -C {harness}" in command for command in sandbox.commands)
+    assert sandbox.commands[-1].endswith(f"{sandbox_module.runner_path()} --check")
+
+
+async def test_install_builds_a_missing_runtime_and_fails_the_seed_when_the_runner_cannot_import(
+    installed_runtime, monkeypatch
+) -> None:
+    monkeypatch.setattr(sandbox_module.RUNTIME, "is_installed", lambda sandbox: _resolved(False))
+    sandbox = _FakeSandbox(fail="--check")
+    loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
+
+    with pytest.raises(RuntimeError, match="could not import the agent loop in the sandbox: no such module"):
+        await loop.install(timeout=123)
+
+    assert installed_runtime == [123]
+
+
+async def test_each_activation_stages_its_own_input_and_returns_what_the_runner_wrote(monkeypatch) -> None:
+    sandbox = _FakeSandbox()
+    loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
+    rearmed: list[str] = []
+    commands: list[list[str]] = []
+
+    async def begin_activation(*, session_dir: str, timeout: float) -> None:
+        rearmed.append(session_dir)
+        loop.session.session_dir = session_dir
+
+    async def execute(*, stage_activation, collect, timeout: float, close_timeout: float) -> dict[str, Any]:
+        command = await stage_activation()
+        commands.append(command.argv)
+        # The runner writes its output where the command says.
+        sandbox.files[command.argv[-1]] = json.dumps({"response": {"answer": len(commands)}}).encode()
+        return await collect()
+
+    monkeypatch.setattr(loop.session, "begin_activation", begin_activation)
+    monkeypatch.setattr(loop.session, "execute", execute)
+    root = loop.session.session_dir
+
+    first = await loop.run({"body": 1}, timeout=10, close_timeout=5)
+    second = await loop.run({"body": 2}, timeout=10, close_timeout=5)
+
+    assert (first, second) == ({"response": {"answer": 1}}, {"response": {"answer": 2}})
+    assert rearmed == [f"{root}/activation-2"]
+    assert commands[1] == [
+        sandbox_module.RUNTIME.python,
+        "-E",
+        "-s",
+        sandbox_module.runner_path(),
+        f"{root}/activation-2/input.json",
+        f"{root}/activation-2/output.json",
+    ]
+    assert json.loads(sandbox.files[f"{root}/activation-2/input.json"]) == {"body": 2}
+    # Each activation's directory is made before its input is uploaded there.
+    assert f"mkdir -p {root}/activation-2" in sandbox.commands
+
+
+async def test_an_activation_raises_what_the_loop_raised_or_its_missing_output(monkeypatch) -> None:
+    from aiohttp import ClientResponseError
+
+    sandbox = _FakeSandbox()
+    loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
+    written: dict[str, Any] | None = None
+
+    async def execute(*, stage_activation, collect, timeout: float, close_timeout: float) -> dict[str, Any]:
+        command = await stage_activation()
+        if written is not None:
+            sandbox.files[command.argv[-1]] = json.dumps(written).encode()
+        return await collect()
+
+    monkeypatch.setattr(loop.session, "execute", execute)
+    monkeypatch.setattr(loop.session, "read_output_log", lambda: _resolved("Traceback: killed"))
+    monkeypatch.setattr(loop.session, "begin_activation", lambda **kwargs: _resolved(None))
+
+    with pytest.raises(RuntimeError, match="exited without output: Traceback: killed"):
+        await loop.run({}, timeout=10, close_timeout=5)
+
+    written = {
+        "error": "ClientResponseError: 503",
+        "error_type": "ClientResponseError",
+        "http_error": {
+            "url": "http://10.0.0.5:8000/v1/responses",
+            "method": "POST",
+            "status": 503,
+            "message": "Service Unavailable",
+            "headers": [],
+            "content": None,
+        },
+    }
+    with pytest.raises(ClientResponseError) as raised:
+        await loop.run({}, timeout=10, close_timeout=5)
+    assert raised.value.status == 503
+
+
+async def test_close_releases_the_borrowed_sandbox_through_its_session(monkeypatch) -> None:
+    loop = sandbox_module.SandboxLoop.borrowed(_FakeSandbox(), workdir="/workspace")
+    closed: list[float] = []
+
+    async def close(*, timeout: float) -> None:
+        closed.append(timeout)
+
+    monkeypatch.setattr(loop.session, "close", close)
+
+    await loop.close(timeout=7)
+
+    assert closed == [7]
+    assert loop.session.owns_sandbox is False
+
+
+def test_the_model_servers_address_must_name_a_host_and_a_port() -> None:
+    assert sandbox_module.model_server_endpoint("http://10.0.0.5:8000") == ("10.0.0.5", 8000)
+    with pytest.raises(ValueError, match="names no host and port"):
+        sandbox_module.model_server_endpoint("http://10.0.0.5")

@@ -21,7 +21,7 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from time import monotonic, perf_counter, time
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
@@ -130,7 +130,10 @@ from nemo_gym.trajectory import (
     failure_observations,
 )
 from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint, reachable_host
-from responses_api_agents.simple_agent.sandbox import SandboxLoop, model_server_endpoint
+
+
+if TYPE_CHECKING:
+    from responses_api_agents.simple_agent.sandbox import SandboxLoop
 
 
 LOG = logging.getLogger(__name__)
@@ -216,7 +219,7 @@ class SimpleAgentSessionState(AgentSessionState):
     trajectory: TrajectoryRecord | None = None
     # With sandboxed: the borrowed sandbox the session's agent loop runs in, and the model server's host and port as
     # that sandbox reaches them.
-    sandbox_loop: SandboxLoop | None = None
+    sandbox_loop: "SandboxLoop | None" = None
     model_server_endpoint: tuple[str, int] | None = None
 
 
@@ -451,6 +454,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         A setup that fails releases the borrowed client; if that release fails too, the session is kept for close.
         """
+        # Imported here, so an agent whose loop runs in process never loads the sandbox runtime's helpers.
+        from responses_api_agents.simple_agent.sandbox import SandboxLoop, model_server_endpoint
+
         access = state.request.sandbox_access
         assert access is not None  # _new_session_state refuses a sandboxed seed without one
         try:
