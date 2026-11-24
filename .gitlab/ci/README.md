@@ -75,7 +75,7 @@ flowchart LR
 ```
 
 The GitLab adapter pin will move to
-`f73591c0cd73adc86bb9d9bf33970ba0f9c26c0b`
+`f6e8ed5837b263566534bf0dff0d83a7c653ca8b`
 ([FW-CI-templates PR 631](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/631)).
 The adapter will skip mapped users without active Developer-or-higher project
 membership and report them in `warnings`. Missing identity mappings, empty pools,
