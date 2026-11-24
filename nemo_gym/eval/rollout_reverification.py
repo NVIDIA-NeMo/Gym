@@ -90,6 +90,7 @@ from nemo_gym.rollouts.rollout_store import RolloutStore, raw_outcomes_are_selec
 from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
+from nemo_gym.telemetry.observer import flush_observed_metrics, observe_event_loop
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,
@@ -1832,8 +1833,9 @@ class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         # With settle_into_source the source run lock is held from binding through judging to settlement, so a second
         # re-judgment of the same run is refused (non-blocking flock) instead of judging against the same budget.
-        with ExitStack() as settle_lock:
-            return await self._run_from_config(config, settle_lock)
+        async with observe_event_loop("driver"):
+            with ExitStack() as settle_lock:
+                return await self._run_from_config(config, settle_lock)
 
     async def _run_from_config(self, config: RolloutReverificationConfig, settle_lock: ExitStack) -> List[Dict]:
         # A separate output may reuse selected source answers. Updating a managed
@@ -2127,6 +2129,8 @@ class RolloutReverificationHelper(BaseModel):
         finally:
             results_file.close()
             failures_file.close()
+            # The pass's limit stops reporting once the pass returns, which can be before the next periodic export.
+            flush_observed_metrics()
 
         # Read the full main jsonl (cached + newly re-verified successes) ONCE — the source of truth,
         # reused for both the rollouts export and aggregate metrics so the file is never re-read.

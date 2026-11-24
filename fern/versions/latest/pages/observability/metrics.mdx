@@ -176,7 +176,7 @@ The rollout driver, which is `gym eval run`, reports how much work it holds and 
 
 Resident minus active is the number of rollouts waiting for admission. A standalone `gym eval run --no-serve` driver sets up its own telemetry from the `telemetry:` block, so it reports these metrics and the `gym.job` span too.
 
-`gym.event_loop.lag_ms` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop.
+`gym.event_loop.lag_ms` and `gym.event_loop.tasks` carry `nemo.gym.event_loop`, which is `server` for a server's own loop, `head_server` for the head server's loop inside the supervisor, and `driver` for the rollout driver's loop, including a reverification pass.
 
 The `process.*` metrics keep the OpenTelemetry process semantic-convention names, units, and `cpu.mode` attribute, so standard dashboards recognize them. The Gym metrics follow Gym's own conventions: durations in milliseconds with a `_ms` suffix, counters with a `_total` suffix, and attributes under `nemo.gym.`.
 
@@ -236,7 +236,7 @@ How to read them:
 - A rising `admission_timeouts_total` means callers gave up waiting. For a model server, these are the requests that fail with "Timed out acquiring an upstream provider slot"; for an environment server, the episodes that fail at the `admission` stage.
 - `queue_wait_duration_ms` shows how long the callers that queued waited, per limit. For the rollout driver, `gym.driver.admission_duration_ms` also gives the wait per rollout, including rollouts that did not queue, and `gym.concurrency.queue_depth` the number waiting right now.
 
-A free slot costs a few integer updates and no OpenTelemetry call; a caller that queued records one histogram sample when it gets its slot. The exporter's background thread reads the totals, and they are reported whenever metrics are exported.
+A free slot costs a few integer updates and no OpenTelemetry call; a caller that queued records one histogram sample when it gets its slot. The exporter's background thread reads the totals, and they are reported whenever metrics are exported. A reverification pass, from `gym eval reverify` or the re-judge pass that follows a collection, exports once more before it ends, so a pass shorter than one export interval still reports its `reverifications` limit.
 
 ### Sandbox Metrics
 

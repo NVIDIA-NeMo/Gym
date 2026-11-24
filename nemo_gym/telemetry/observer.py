@@ -570,6 +570,16 @@ def _flush_metrics() -> None:
         logger.debug("nemo-lens: could not export the final observer metrics", exc_info=True)
 
 
+def flush_observed_metrics() -> None:
+    """Export the observed metrics now, while the state they read still exists. Does nothing while no observer runs.
+
+    Releasing the last observer exports once. Work that ends while another event loop keeps the observer running, and
+    whose concurrency limit is gone by the next periodic export, calls this before it returns.
+    """
+    if _PROCESS_OBSERVER is not None:
+        _flush_metrics()
+
+
 def _release_process_observer() -> None:
     global _PROCESS_OBSERVER, _ACTIVE_LOOPS
     with _PROCESS_LOCK:

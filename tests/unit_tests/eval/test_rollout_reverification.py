@@ -2960,6 +2960,115 @@ class TestRolloutReverificationRunFromConfig:
         assert isinstance(captured_semaphore[0], Semaphore)
         assert captured_semaphore[0]._value == 3
 
+    @pytest.mark.parametrize(
+        "head_server_observed",
+        [
+            pytest.param(True, id="gym eval reverify beside the head server's observer"),
+            pytest.param(False, id="saved judge failures re-judged after a standalone collection"),
+        ],
+    )
+    async def test_a_pass_shorter_than_an_export_interval_exports_its_limit_and_queue_wait(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, head_server_observed: bool
+    ) -> None:
+        pytest.importorskip("opentelemetry.sdk.metrics")
+        import gc
+
+        from opentelemetry import metrics
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import (
+            MetricExporter,
+            MetricExportResult,
+            PeriodicExportingMetricReader,
+        )
+
+        from nemo_gym.telemetry import concurrency, gym_metrics, observer
+        from nemo_gym.telemetry import setup as telemetry_setup
+
+        class _CapturingExporter(MetricExporter):
+            def __init__(self):
+                super().__init__()
+                self.batches = []
+
+            def export(self, metrics_data, timeout_millis=10_000, **kwargs):
+                self.batches.append(metrics_data)
+                return MetricExportResult.SUCCESS
+
+            def force_flush(self, timeout_millis=10_000):
+                return True
+
+            def shutdown(self, timeout_millis=30_000, **kwargs):
+                pass
+
+        exporter = _CapturingExporter()
+        provider = MeterProvider(metric_readers=[PeriodicExportingMetricReader(exporter, export_interval_millis=10**9)])
+
+        class _Handle:
+            is_exporting = True
+            meter = provider.get_meter("test")
+
+        monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+        monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
+        monkeypatch.setattr(metrics, "get_meter_provider", lambda: provider)
+        concurrency._reset_for_testing()
+        gym_metrics._reset_for_testing()
+
+        self._patch_common(monkeypatch, [(self._make_row("agent_a", task=task), {}) for task in range(2)])
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification._run_verification_payloads", _run_verification_payloads
+        )
+        client = MagicMock()
+        client.global_config_dict = {}
+
+        async def slow_verify(**_kwargs):
+            await asyncio.sleep(0.01)
+            return MagicMock()
+
+        client.post = slow_verify
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification._build_agent_to_resources_server_mapping",
+            lambda _: {"agent_a": "rs_a"},
+        )
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification.get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
+        config = self._make_config(tmp_path, disable_aggregation=True, num_samples_in_parallel=1)
+
+        async def reverify_then_shut_down() -> None:
+            await RolloutReverificationHelper().run_from_config(config)
+            gc.collect()
+            provider.shutdown()  # the process's final export, as shutdown_telemetry runs it
+
+        if head_server_observed:
+            async with observer.observe_event_loop("head_server"):
+                await reverify_then_shut_down()
+        else:
+            await reverify_then_shut_down()
+
+        attributes = {
+            concurrency.COMPONENT_ATTRIBUTE: "rollout_driver",
+            concurrency.LIMIT_NAME_ATTRIBUTE: "reverifications",
+        }
+
+        def points(name: str) -> list:
+            return [
+                point
+                for data in exporter.batches
+                for resource_metrics in data.resource_metrics
+                for scope_metrics in resource_metrics.scope_metrics
+                for metric in scope_metrics.metrics
+                if metric.name == name
+                for point in metric.data.data_points
+                if dict(point.attributes) == attributes
+            ]
+
+        assert {point.value for point in points(concurrency.LIMIT_INSTRUMENT)} == {1}
+        assert points(gym_metrics.CONCURRENCY_QUEUE_WAIT_INSTRUMENT)[-1].count == 1, "the second call queued once"
+        assert observer._PROCESS_OBSERVER is None
+        concurrency._reset_for_testing()
+        gym_metrics._reset_for_testing()
+
     async def test_num_samples_in_parallel_none_uses_unbounded_nullcontext(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
