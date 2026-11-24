@@ -19,8 +19,9 @@ from fastapi.testclient import TestClient
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.sandbox.providers.base import SandboxSpec
-from nemo_gym.server_runtime import OwnedSandboxes, SimpleServer
 from nemo_gym.server_runtime import owned_sandboxes as owned_sandboxes_module
+from nemo_gym.server_runtime.base_server import SimpleServer
+from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
 from tests.unit_tests.server_runtime.test_checkpoint_sandbox import FakeSnapshotProvider
 
 
@@ -140,6 +141,22 @@ def test_a_server_without_a_sandbox_provider_is_refused(providers) -> None:
 
     with pytest.raises(ValueError, match="my_server sets no sandbox_provider"):
         server.sandboxes
+
+
+def test_a_refused_config_builds_no_provider(providers, monkeypatch) -> None:
+    # Checkpointing on without checkpoint.state_dir is refused; a provider built first would never be closed, and a
+    # later self.sandboxes would build another.
+    def no_state_dir(global_config: Any) -> None:
+        raise ValueError("checkpoint.state_dir is required to checkpoint sandboxes")
+
+    monkeypatch.setattr(owned_sandboxes_module, "checkpoint_state_dir", no_state_dir)
+    server = _server(sandbox_provider="opensandbox")
+
+    for _ in range(2):
+        with pytest.raises(ValueError, match="checkpoint.state_dir is required"):
+            server.sandboxes
+
+    assert providers == {}
 
 
 def test_an_instance_no_server_holds_has_no_other_providers() -> None:

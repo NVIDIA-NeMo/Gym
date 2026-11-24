@@ -324,10 +324,12 @@ class SimpleServer(BaseServer):
     def sandboxes(self) -> "OwnedSandboxes":
         """The sandboxes this server owns on its ``sandbox_provider``, created on first use.
 
-        Every sandbox the server starts, lends or snapshots goes through it, and the server's shutdown stops what is
-        left in it. ``self.sandboxes.on("<field>")`` gives the instance for a second provider field, such as a GPU
-        provider. A server that never uses it creates nothing. Lending needs ``sandbox_provider`` to name a provider
-        block, since a borrower resolves the provider by that name.
+        A server tracks, lends, snapshots and stops the sandboxes it starts through it, and the server's shutdown stops
+        what is left in it. (Servers that own sandboxes through ``LentSandboxes`` or ``start_episode_sandbox`` move onto
+        it in later changes.) ``self.sandboxes.on("<field>")`` gives the instance for a second provider field, such as a
+        GPU provider. A server that never uses it creates nothing. Lending needs ``sandbox_provider`` to name a provider
+        block, since a borrower resolves the provider by that name. Use it from the event loop: the instance is built
+        on first use without a lock, so a worker thread could build a second one that the shutdown never stops.
 
         Raises:
             ValueError: If the server's config sets no ``sandbox_provider``.
