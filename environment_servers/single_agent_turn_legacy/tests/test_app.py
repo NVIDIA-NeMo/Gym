@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 
 import asyncio
 import runpy
@@ -12,7 +13,7 @@ import orjson
 import pytest
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
-from pydantic import ConfigDict
+from pydantic import ConfigDict, ValidationError
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
@@ -170,6 +171,21 @@ async def test_legacy_compatibility_is_a_separate_environment_deployment() -> No
     assert result["agent_ref"] == {"name": "agent"}
     assert "verification" not in result
     assert "ng_agent_observations" not in result
+
+
+@pytest.mark.parametrize("pool_names", [["agent"], ["agent", "other"]])
+def test_legacy_adapter_rejects_pool_before_creating_sessions(pool_names: list[str]) -> None:
+    environment_server, client = _environment_server()
+    config = environment_server.config.model_copy(
+        update={
+            "agent_server_pool": [(AgentServerRef(type="responses_api_agents", name=name), 1) for name in pool_names]
+        }
+    )
+
+    with pytest.raises(ValidationError, match="agent_server_pool requires single_agent_turn with typed tasksets"):
+        SingleAgentTurnLegacyEnvironmentServer(config=config, server_client=client)
+
+    assert client.calls == []
 
 
 def test_legacy_adapter_forwards_aggregate_metrics_to_resources() -> None:

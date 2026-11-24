@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 
 import asyncio
 import contextlib
@@ -18,6 +19,7 @@ import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Response
+from omegaconf import OmegaConf
 from pydantic import BaseModel, Field, ValidationError
 
 from environment_servers.single_agent_turn.app import (
@@ -39,6 +41,7 @@ from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ResourcesServerRef,
@@ -53,6 +56,7 @@ from nemo_gym.core import (
     TaskId,
     encode_model_sampling,
 )
+from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     AgentContext,
@@ -2559,3 +2563,419 @@ async def test_a_checkpoint_does_not_wait_for_a_replacement_s_re_seed() -> None:
     assert record.boundary["next"] == "invoke_agent"
     assert episode.result is not None and episode.result.reward == 1.0
     assert [path for _, path, _ in client.calls][:2] == ["/seed_session", "/v1/agent_sessions"]
+
+
+def _configure_agent_pool(
+    environment: SingleAgentTurnEnvironmentServer, *, weights: tuple[int, int, int, int] = (1, 1, 1, 1)
+) -> None:
+    names = ["opencode", "pi", "kilo", "cline"]
+    environment.config.agent_server_pool = [
+        (AgentServerRef(type="responses_api_agents", name=name), weight)
+        for name, weight in zip(names, weights, strict=True)
+    ]
+    for index, name in enumerate(names):
+        environment.server_client.global_config_dict[name] = {
+            "responses_api_agents": {
+                "test": {"host": name, "port": 8100 + index, "entrypoint": "app.py", "token_id_capture": name == "pi"}
+            }
+        }
+
+
+@pytest.mark.parametrize("rollout,index", [("route-7", 0), ("route-0", 1), ("route-3", 2), ("route-1", 3)])
+def test_agent_hash_routing_has_stable_vectors_and_ignores_attempt(rollout: str, index: int) -> None:
+    environment, _ = _environment_server()
+    _configure_agent_pool(environment)
+    request = _request()
+    for attempt in (0, 1, 7):
+        request.episode_id = EpisodeId(rollout_id=rollout, attempt=attempt)
+        assert environment.agent_server_for(request) == ["opencode", "pi", "kilo", "cline"][index]
+    environment.config.agent_routing_key = "task"
+    assert environment.agent_server_for(request) == "opencode"
+    assert environment.config.agent_server.name == "agent"
+
+
+@pytest.mark.parametrize(
+    "pool",
+    [
+        [],
+        [
+            (AgentServerRef(type="responses_api_agents", name="same"), 1),
+            (AgentServerRef(type="responses_api_agents", name="same"), 2),
+        ],
+    ],
+)
+def test_agent_pool_rejects_empty_or_duplicate_destinations(pool: list[tuple[AgentServerRef, int]]) -> None:
+    environment, _ = _environment_server()
+    with pytest.raises(ValueError):
+        SingleAgentTurnEnvironmentServerConfig.model_validate(
+            environment.config.model_dump() | {"agent_server_pool": pool}
+        )
+
+
+@pytest.mark.parametrize(
+    "rollout,agent", [("route-7", "opencode"), ("route-0", "pi"), ("route-3", "kilo"), ("route-1", "cline")]
+)
+async def test_hash_route_keeps_seed_invoke_close_and_capture_on_one_agent(rollout: str, agent: str) -> None:
+    environment, client = _environment_server(token_capture=True)
+    _configure_agent_pool(environment)
+    request = _request().model_copy(update={"episode_id": EpisodeId(rollout_id=rollout)})
+    result = await environment.run_request(request)
+    assert result.result is not None and result.result.reward == 1.0
+    assert result.result.model_dump()["ng_agent_server"] == agent
+    assert [server for server, _, _ in client.calls] == ["resources", agent, agent, agent, "resources", "resources"]
+    assert ("/training-token-capture/" in client.calls[2][1]) == (agent == "pi")
+    assert client.calls[2][2]["cookies"] == client.calls[3][2]["cookies"] == {"session": "cookie-value"}
+    assert client.calls[1][2]["json"]["agent_session_id"] == client.calls[3][2]["json"]["agent_session_id"]
+    assert environment.config.agent_server.name == "agent"
+
+
+@pytest.mark.parametrize(
+    ("stage", "consumed_responses", "expected_servers"),
+    [
+        ("invoke_agent", 2, ["pi", "pi", "resources", "resources"]),
+        ("close_agent", 3, ["pi", "resources", "resources"]),
+        ("verify", 4, ["resources", "resources"]),
+        ("return", 5, ["resources"]),
+    ],
+)
+async def test_checkpoint_keeps_chosen_harness_when_pool_order_and_weights_change(
+    stage: str, consumed_responses: int, expected_servers: list[str]
+) -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+
+    environment, client = _environment_server(token_capture=True)
+    _configure_agent_pool(environment)
+    environment._checkpoint = EnvironmentParticipant(mode="exported")
+    boundaries = {}
+    original_boundary = environment.checkpoint_boundary
+
+    async def record_boundary(request, state) -> None:
+        payload = state() if callable(state) else state
+        boundaries[payload["next"]] = orjson.loads(orjson.dumps(payload))
+        await original_boundary(request, payload)
+
+    object.__setattr__(environment, "checkpoint_boundary", record_boundary)
+    request = _request().model_copy(update={"episode_id": EpisodeId(rollout_id="route-0")})
+    assert (await environment.run_request(request)).result is not None
+    assert boundaries["invoke_agent"]["handles"]["agent_server_name"] == "pi"
+    restored, restored_client = _environment_server(token_capture=True)
+    _configure_agent_pool(restored)
+    restored.config.agent_server_pool.reverse()
+    restored.config.agent_server_pool = [
+        (agent, 1 if index == 0 else 0) for index, (agent, _) in enumerate(restored.config.agent_server_pool)
+    ]
+    assert restored.agent_server_for(request) == "cline"
+    restored._checkpoint = EnvironmentParticipant(mode="exported")
+    restored._checkpoint.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=request.episode_id,
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary=boundaries[stage],
+            )
+        ]
+    )
+    del restored_client.responses[:consumed_responses]
+    retry = request.model_copy(update={"episode_id": EpisodeId(rollout_id="route-0", attempt=1)})
+    result = await restored.run_request(retry)
+    assert result.result is not None and result.result.model_dump()["ng_agent_server"] == "pi"
+    assert [server for server, _, _ in restored_client.calls] == expected_servers
+    if stage == "invoke_agent":
+        assert "/training-token-capture/" in restored_client.calls[0][1]
+
+
+def test_routing_is_per_session_and_old_session_handles_remain_readable() -> None:
+    environment, _ = _environment_server()
+    _configure_agent_pool(environment)
+    first = SessionHandles.new()
+    second = SessionHandles.new()
+    request = _request().model_copy(update={"episode_id": EpisodeId(rollout_id="route-0")})
+    other = request.model_copy(update={"episode_id": EpisodeId(rollout_id="route-3")})
+    assert environment._agent_server_name(request, first) == "pi"
+    assert environment._agent_server_name(other, second) == "kilo"
+    environment.config.agent_server_pool.reverse()
+    assert environment._agent_server_name(request, first) == "pi"
+    assert environment._agent_server_name(other, second) == "kilo"
+    old = SessionHandles.model_validate({"resources_session_id": "r", "agent_session_id": "a"})
+    assert old.agent_server_name is None
+    environment.config.agent_server_pool = None
+    assert environment._agent_server_name(request, old) == "agent"
+
+
+async def test_concurrent_rollouts_do_not_cross_harness_sessions() -> None:
+    class ConcurrentClient(_Client):
+        async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+            body = kwargs.get("json")
+            body = body.model_dump(mode="json") if isinstance(body, BaseModel) else body
+            self.calls.append((server_name, url_path, {**kwargs, "json": body}))
+            self.rollout_ids.append(current_rollout_id())
+            await asyncio.sleep(0)
+            if url_path in ("/seed_session", "/close_session"):
+                return _Response({"resources_session_id": body["resources_session_id"]})
+            if url_path in ("/v1/agent_sessions", "/v1/agent_sessions/close"):
+                return _Response({"agent_session_id": body["agent_session_id"]})
+            if url_path.endswith("/v1/responses"):
+                return _Response(_agent_response().model_dump(mode="json"))
+            assert url_path == "/verify"
+            return _Response(
+                {
+                    "responses_create_params": {"input": "task"},
+                    "response": _agent_response().model_dump(mode="json"),
+                    "reward": 1.0,
+                }
+            )
+
+    environment, client = _environment_server(client_type=ConcurrentClient)
+    _configure_agent_pool(environment)
+    requests = [
+        _request().model_copy(update={"episode_id": EpisodeId(rollout_id=rollout)})
+        for rollout in ("route-0", "route-3")
+    ]
+    results = await asyncio.gather(*(environment.run_request(request) for request in requests))
+    assert [result.result.model_dump()["ng_agent_server"] for result in results] == ["pi", "kilo"]
+    sessions = []
+    for rollout, selected in [("route-0", "pi"), ("route-3", "kilo")]:
+        calls = [call for call, context in zip(client.calls, client.rollout_ids, strict=True) if context == rollout]
+        assert [server for server, _, _ in calls] == [
+            "resources",
+            selected,
+            selected,
+            selected,
+            "resources",
+            "resources",
+        ]
+        assert calls[1][2]["json"]["agent_session_id"] == calls[3][2]["json"]["agent_session_id"]
+        sessions.append(calls[1][2]["json"]["agent_session_id"])
+    assert sessions[0] != sessions[1]
+
+
+@pytest.mark.parametrize(
+    ("rollout", "selected"),
+    [
+        ("weighted-10", "opencode"),  # bucket 0
+        ("weighted-20", "opencode"),  # bucket 4: last of five OpenCode buckets
+        ("weighted-3", "pi"),  # bucket 5: first Pi bucket
+        ("weighted-18", "pi"),  # bucket 6
+        ("weighted-31", "kilo"),  # bucket 7
+        ("weighted-0", "kilo"),  # bucket 8
+        ("weighted-32", "cline"),  # bucket 9
+    ],
+)
+def test_weighted_hash_routes_at_every_bucket_boundary(rollout: str, selected: str) -> None:
+    environment, _ = _environment_server()
+    _configure_agent_pool(environment, weights=(5, 2, 2, 1))
+    for attempt in (0, 1, 7):
+        request = _request().model_copy(update={"episode_id": EpisodeId(rollout_id=rollout, attempt=attempt)})
+        assert environment.agent_server_for(request) == selected
+
+
+@pytest.mark.parametrize("weights", [(1, 1, 1, 1), (0, 1, 0, 0)])
+def test_unit_weights_preserve_uniform_routing_and_zero_weights_disable_selection(
+    weights: tuple[int, int, int, int],
+) -> None:
+    environment, _ = _environment_server()
+    _configure_agent_pool(environment, weights=weights)
+    for rollout, uniform in [("route-7", "opencode"), ("route-0", "pi"), ("route-3", "kilo"), ("route-1", "cline")]:
+        request = _request().model_copy(update={"episode_id": EpisodeId(rollout_id=rollout)})
+        assert environment.agent_server_for(request) == ("pi" if weights == (0, 1, 0, 0) else uniform)
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [[0, 0, 0, 0], [-1, 2, 2, 1], [True, 1, 1, 1], [1.5, 1, 1, 1], [1.0, 1, 1, 1], ["1", 1, 1, 1]],
+)
+def test_pool_rejects_invalid_weights(weights: list[object]) -> None:
+    environment, _ = _environment_server()
+    _configure_agent_pool(environment)
+    pool = [(agent, weight) for (agent, _), weight in zip(environment.config.agent_server_pool, weights, strict=True)]
+    with pytest.raises(ValidationError, match="agent_server_pool"):
+        SingleAgentTurnEnvironmentServerConfig.model_validate(
+            environment.config.model_dump() | {"agent_server_pool": pool}
+        )
+
+
+def test_pool_requires_an_explicit_shared_verifier() -> None:
+    environment, _ = _environment_server()
+    _configure_agent_pool(environment)
+    with pytest.raises(ValidationError, match="resources_server"):
+        SingleAgentTurnEnvironmentServerConfig.model_validate(
+            environment.config.model_dump() | {"resources_server": None}
+        )
+
+
+@pytest.mark.parametrize("rollout", ["route-0", "route-3"])
+def test_task_routing_ignores_rollout_and_taskset_participates_in_hash(rollout: str) -> None:
+    environment, _ = _environment_server()
+    _configure_agent_pool(environment, weights=(0, 1, 1, 0))
+    environment.config.agent_routing_key = "task"
+    request = _request().model_copy(update={"episode_id": EpisodeId(rollout_id=rollout)})
+    assert environment.agent_server_for(request) == "pi"
+    request.task.task_id = TaskId(taskset="test:source2", task_id="task")
+    assert environment.agent_server_for(request) == "kilo"
+
+
+@pytest.mark.parametrize(
+    ("fail_path", "response_indices", "expected_servers"),
+    [
+        ("/seed_session", [5], ["resources", "resources"]),
+        ("/v1/agent_sessions", [0, 3, 5], ["resources", "pi", "pi", "resources"]),
+        ("/ng-rollout/route-0/v1/responses", [0, 1, 3, 5], ["resources", "pi", "pi", "pi", "resources"]),
+        ("/v1/agent_sessions/close", [0, 1, 2, 3, 5], ["resources", "pi", "pi", "pi", "pi", "resources"]),
+        ("/verify", [0, 1, 2, 3, 5], ["resources", "pi", "pi", "pi", "resources", "resources"]),
+    ],
+)
+async def test_routed_failure_cleans_up_only_the_selected_harness(
+    fail_path: str, response_indices: list[int], expected_servers: list[str]
+) -> None:
+    environment, client = _environment_server()
+    _configure_agent_pool(environment, weights=(0, 1, 0, 0))
+    client.responses = [client.responses[index] for index in response_indices]
+    client.fail_path = fail_path
+    result = await environment.run_request(
+        _request().model_copy(update={"episode_id": EpisodeId(rollout_id="route-0")})
+    )
+    assert result.failure is not None
+    assert [server for server, _, _ in client.calls] == expected_servers
+    assert not client.responses
+
+
+@pytest.mark.parametrize("environment_skip", [None, False, True])
+@pytest.mark.parametrize("rollout", ["route-0", "route-3"])
+async def test_pool_verification_uses_selected_agent_with_environment_override(
+    environment_skip: bool | None, rollout: str
+) -> None:
+    environment, client = _environment_server()
+    _configure_agent_pool(environment)
+    environment.config.skip_verification = environment_skip
+    client.global_config_dict.pi.responses_api_agents.test.update(
+        {"skip_verification": True, "skip_verification_reward": 0.5}
+    )
+    # The unused fallback's configuration must not control selected harnesses.
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"skip_verification": True, "skip_verification_reward": 99.0}
+    )
+    should_skip = environment_skip if environment_skip is not None else rollout == "route-0"
+    if should_skip:
+        del client.responses[4]
+    result = await environment.run_request(_request().model_copy(update={"episode_id": EpisodeId(rollout_id=rollout)}))
+    assert result.failure is None
+    dumped = result.result.model_dump()
+    assert dumped.get("verification_skipped", False) is should_skip
+    assert dumped["reward"] == ((0.5 if rollout == "route-0" else 0.0) if should_skip else 1.0)
+    assert ("/verify" in [path for _, path, _ in client.calls]) is not should_skip
+
+
+@pytest.mark.parametrize("include_measured", [False, True])
+async def test_pool_fixed_rewards_disable_aggregation_without_mixing_synthetic_and_measured_results(
+    *, include_measured: bool
+) -> None:
+    environment, client = _environment_server()
+    _configure_agent_pool(environment)
+    client.global_config_dict.pi.responses_api_agents.test.update({"skip_verification": True})
+    del client.responses[4]
+    skipped = await environment.run_request(
+        _request().model_copy(update={"episode_id": EpisodeId(rollout_id="route-0")})
+    )
+    rows = [skipped.result.model_dump() | {"ng_perf": {"completion_tokens": 17}}]
+    if include_measured:
+        verified_environment, _ = _environment_server()
+        _configure_agent_pool(verified_environment)
+        measured = await verified_environment.run_request(
+            _request().model_copy(update={"episode_id": EpisodeId(rollout_id="route-3")})
+        )
+        rows.append(measured.result.model_dump())
+    calls_before = len(client.calls)
+    with pytest.warns(RuntimeWarning, match="mixed measured and fixed-reward pool results"):
+        metrics = await environment.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+    assert metrics.key_metrics == {}
+    assert metrics.agent_metrics["mean_across_repeats/mean_completion_tokens"] == 17
+    assert metrics.perf_summary["total_completion_tokens"] == 17
+    assert len(client.calls) == calls_before
+
+
+async def test_pool_measured_results_are_aggregated_by_the_shared_verifier() -> None:
+    environment, client = _environment_server()
+    _configure_agent_pool(environment)
+    result = await environment.run_request(
+        _request().model_copy(update={"episode_id": EpisodeId(rollout_id="route-3")})
+    )
+    client.responses.append(_Response({"key_metrics": {"reward": 1.0}}))
+    # Another unused member may skip; aggregation follows the results actually supplied.
+    client.global_config_dict.pi.responses_api_agents.test.update({"skip_verification": True})
+    metrics = await environment.aggregate_metrics(
+        AggregateMetricsRequest(verify_responses=[result.result.model_dump()])
+    )
+    assert metrics.key_metrics == {"reward": 1.0}
+    assert client.calls[-1][:2] == ("resources", "/aggregate_metrics")
+    assert client.calls[-1][2]["json"]["verify_responses"][0]["ng_agent_server"] == "kilo"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"type": "responses_api_agents", "name": "pi"},
+        [],
+        [{"type": "responses_api_agents", "name": "pi"}],
+        [{"type": "responses_api_agents", "name": "pi"}, 1, 2],
+        [1, {"type": "responses_api_agents", "name": "pi"}],
+    ],
+    ids=["unweighted-reference", "empty-pair", "missing-weight", "extra-pair-item", "reversed-pair"],
+)
+def test_pool_requires_agent_weight_pairs(entry: object) -> None:
+    environment, _ = _environment_server()
+    with pytest.raises(ValidationError, match="agent_server_pool"):
+        SingleAgentTurnEnvironmentServerConfig.model_validate(
+            environment.config.model_dump() | {"agent_server_pool": [entry]}
+        )
+
+
+@pytest.mark.parametrize("serialization", ["json", "yaml"])
+def test_pool_pairs_deserialize_to_tuples_and_keep_weights_with_agents(serialization: str) -> None:
+    environment, _ = _environment_server()
+    pair_data = [
+        [{"type": "responses_api_agents", "name": "opencode"}, 0],
+        [{"type": "responses_api_agents", "name": "pi"}, 10],
+    ]
+    config_data = environment.config.model_dump(mode="json")
+    if serialization == "json":
+        environment.config = SingleAgentTurnEnvironmentServerConfig.model_validate_json(
+            orjson.dumps(config_data | {"agent_server_pool": pair_data})
+        )
+    else:
+        pool_yaml = OmegaConf.create(
+            "agent_server_pool:\n"
+            "  - [{type: responses_api_agents, name: opencode}, 0]\n"
+            "  - [{type: responses_api_agents, name: pi}, 10]\n"
+        )
+        environment.config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+            config_data | OmegaConf.to_container(pool_yaml, resolve=True)
+        )
+    assert environment.config.agent_server_pool == [
+        (AgentServerRef(type="responses_api_agents", name="opencode"), 0),
+        (AgentServerRef(type="responses_api_agents", name="pi"), 10),
+    ]
+    assert environment.config.model_dump(mode="json")["agent_server_pool"] == pair_data
+    assert environment.agent_server_for(_request()) == "pi"
+
+
+def test_separate_weights_field_is_rejected() -> None:
+    environment, _ = _environment_server()
+    _configure_agent_pool(environment)
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted") as error:
+        SingleAgentTurnEnvironmentServerConfig.model_validate(
+            environment.config.model_dump() | {"agent_server_weights": [1, 1, 1, 1]}
+        )
+    assert error.value.errors()[0]["loc"] == ("agent_server_weights",)
+
+
+def test_pool_tool_grants_follow_the_selected_agent_and_environment_override() -> None:
+    environment, client = _environment_server()
+    _configure_agent_pool(environment)
+    client.global_config_dict.pi.responses_api_agents.test.tool_servers = [
+        {"type": "resources_servers", "name": "search"}
+    ]
+    for rollout, expected in [("route-0", ["search"]), ("route-3", [])]:
+        request = _request().model_copy(update={"episode_id": EpisodeId(rollout_id=rollout)})
+        assert environment._tool_servers_for(environment.agent_server_for(request)) == expected
+    environment.config.tool_servers = []
+    assert environment._tool_servers_for("pi") == []

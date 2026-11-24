@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -262,11 +263,31 @@ def test_finds_the_agent_references_gym_finds() -> None:
         "user_agent": {"type": "responses_api_agents", "name": "typed_field"},
         "helper": {"name": "untyped_other_field"},
         "resources_server": {"type": "resources_servers", "name": "not_an_agent"},
+        "agent_server_pool": [[{"type": "responses_api_agents", "name": "pooled_agent"}, 0]],
     }
 
     expected = [reference["name"] for reference in environment_server_agent_refs(OmegaConf.create(server))]
-    assert expected == ["untyped_agent_server", "typed_field"]
+    assert expected == ["untyped_agent_server", "typed_field", "pooled_agent"]
     assert [agent for _, agent in migration.agent_references(server)] == expected
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"type": "responses_api_agents", "name": "old_shape"},
+        [{"type": "responses_api_agents", "name": "missing_weight"}],
+        [{"type": "responses_api_agents", "name": "extra_item"}, 1, 2],
+        [None, 1],
+        ["bare_name", 1],
+        [{"type": "resources_servers", "name": "wrong_type"}, 1],
+    ],
+)
+def test_pool_reference_discovery_ignores_malformed_pairs(entry: object) -> None:
+    # Discovery precedes typed server validation; malformed pairs must not become agent bindings.
+    server = {"agent_server_pool": [entry]}
+
+    assert environment_server_agent_refs(OmegaConf.create(server)) == []
+    assert migration.agent_references(server) == []
 
 
 @pytest.mark.parametrize(

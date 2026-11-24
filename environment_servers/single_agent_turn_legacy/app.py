@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 
 """Legacy flat-row adapter for the single-agent-turn environment server."""
 
@@ -7,7 +8,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
-from pydantic import ConfigDict, PositiveFloat, ValidationError
+from pydantic import ConfigDict, PositiveFloat, ValidationError, field_validator
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
@@ -51,6 +52,18 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
     config: SingleAgentTurnLegacyEnvironmentServerConfig
+
+    @field_validator("config")
+    @classmethod
+    def reject_agent_pool(
+        cls, config: SingleAgentTurnEnvironmentServerConfig
+    ) -> SingleAgentTurnEnvironmentServerConfig:
+        """Flat rows pin an agent; pool routing requires the typed taskset contract."""
+        if config.agent_server_pool is not None:
+            raise ValueError(
+                "agent_server_pool requires single_agent_turn with typed tasksets, not single_agent_turn_legacy"
+            )
+        return config
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()

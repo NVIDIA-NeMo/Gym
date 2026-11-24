@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -354,10 +355,11 @@ def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
 
     An environment server can front several agents, such as a user and an assistant.
     Any top-level field whose value has `type: responses_api_agents` references an agent.
-    So does `agent_server`, whose type may be left out.
+    So does `agent_server`, whose type may be left out, and the typed reference in each
+    `(agent, weight)` pair in `agent_server_pool`.
     `scripts/add_legacy_agent_environment_servers.py` applies the same rule.
     """
-    return [
+    references = [
         reference
         for field, reference in server.items()
         if isinstance(reference, DictConfig)
@@ -366,23 +368,43 @@ def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
             or (field == AGENT_SERVER_REF_KEY_NAME and reference.get("type") is None)
         )
     ]
+    pool = server.get("agent_server_pool")
+    if isinstance(pool, ListConfig):
+        references.extend(
+            reference
+            for entry in pool
+            if isinstance(entry, ListConfig) and len(entry) == 2
+            if isinstance(reference := entry[0], DictConfig) and reference.get("type") == AGENT_SERVER_TYPE_KEY_NAME
+        )
+    return references
 
 
 def environment_server_agent_names(server: DictConfig) -> list[str]:
-    """Return the names of the agents one environment server's config references."""
-    return [
-        str(reference["name"])
-        for reference in environment_server_agent_refs(server)
-        if reference.get("name") is not None
-    ]
+    """Return distinct referenced agent names in configuration order."""
+    return list(
+        dict.fromkeys(
+            str(reference["name"])
+            for reference in environment_server_agent_refs(server)
+            if reference.get("name") is not None
+        )
+    )
 
 
 def environment_server_attributed_agent(server: DictConfig) -> Optional[str]:
     """Return the agent that results from one environment server are attributed to.
 
-    That is the server's `agent_server`, or the only agent it references.
+    An explicit pool takes precedence: only a singleton pool has static attribution.
+    Without a pool, use the server's `agent_server`, or the only agent it references.
     A server that fronts several agents without an `agent_server` has no single agent to attribute.
     """
+    pool = server.get("agent_server_pool")
+    if isinstance(pool, ListConfig) and len(pool):
+        names = {
+            entry[0].get("name")
+            for entry in pool
+            if isinstance(entry, ListConfig) and len(entry) == 2 and isinstance(entry[0], DictConfig)
+        }
+        return next(iter(names)) if len(names) == 1 else None
     agent_ref = server.get(AGENT_SERVER_REF_KEY_NAME)
     if isinstance(agent_ref, DictConfig):
         return agent_ref.get("name")
@@ -802,7 +824,15 @@ Duplicate config paths:
             run_server_config_dict = server_instance_config.get_inner_run_server_config_dict()
 
             # Check server refs
-            for field_name, v in run_server_config_dict.items():
+            fields = list(run_server_config_dict.items())
+            pool = run_server_config_dict.get("agent_server_pool")
+            if server_instance_config.SERVER_TYPE == ENVIRONMENT_SERVER_TYPE_KEY_NAME and isinstance(pool, ListConfig):
+                fields.extend(
+                    (f"agent_server_pool[{index}][0]", entry[0])
+                    for index, entry in enumerate(pool)
+                    if isinstance(entry, ListConfig) and len(entry) == 2
+                )
+            for field_name, v in fields:
                 maybe_server_ref = is_server_ref(v)
                 if not maybe_server_ref:
                     continue
@@ -2492,8 +2522,9 @@ def resolve_dataset_agent(
     A declared ``taskset`` routes to the Environment Server named by ``environment_server_routes``, not
     to an agent, so its dataset cannot pin one. Resolution checks the route: every agent the server
     references (``environment_server_agent_refs``) must exist, a declaring agent must be one of them,
-    and a declaring resources server must be the one the server binds. It returns the declaring agent,
-    or the server's attributed agent (``environment_server_attributed_agent``), or None when the server
+    and a declaring resources server must be the one the server binds. An explicit pool uses the
+    server's attributed agent (``environment_server_attributed_agent``), or None for multiple members.
+    Otherwise it returns the declaring agent, the server's attributed agent, or None when the server
     fronts several agents, such as a user and an assistant, without an ``agent_server``. It does not
     require an agent -> resources edge.
     Otherwise, first hit wins:
@@ -2551,6 +2582,8 @@ def resolve_dataset_agent(
                     f"Environment Server {environment_name!r} must bind declaring resources server "
                     f"{declaring_instance_name!r} for taskset {taskset!r}."
                 )
+        if isinstance(environment_config.get("agent_server_pool"), ListConfig):
+            return environment_server_attributed_agent(environment_config)
         if is_agent:
             return str(declaring_instance_name)
         return environment_server_attributed_agent(environment_config)

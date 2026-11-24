@@ -241,6 +241,32 @@ Before you increase concurrency, inspect the response, reward, failure sidecar, 
 
 For callers that still submit flat rows, `single_agent_turn_legacy` wraps the same session lifecycle as a migration adapter. Name both `resources_server` and `agent_server` in its block. The separate `legacy_agent` implementation delegates to the agent's old `/run` endpoint and names only `agent_server`. New experiments should use the taskset configuration above.
 
+### Route rollouts across harnesses
+
+A typed `single_agent_turn` Environment Server can choose one harness per rollout from an ordered pool. Define each agent instance and its runtime/model configuration first, then add this overlay to an experiment whose `benchmark` Resources server supports all four adapters:
+
+```yaml
+experiment:
+  environment_servers:
+    single_agent_turn:
+      resources_server: {type: resources_servers, name: benchmark}
+      agent_server: {type: responses_api_agents, name: opencode_agent}
+      agent_server_pool:
+        - [{type: responses_api_agents, name: opencode_agent}, 50]
+        - [{type: responses_api_agents, name: pi_agent}, 20]
+        - [{type: responses_api_agents, name: kilocode_agent}, 20]
+        - [{type: responses_api_agents, name: cline_agent}, 10]
+      agent_routing_key: task_rollout
+```
+
+This is a routing overlay, not a complete launch configuration. The pool replaces the single `agent_server` destination for typed episodes. Every member must implement agent sessions and be allowed by the benchmark and dataset. The pool requires an explicit shared `resources_server`; all adapters must support its sandbox and tool grants. This feature does not add support for a new benchmark/harness pairing. The flat-row `single_agent_turn_legacy` adapter rejects pools.
+
+Each pool entry is an `[agent reference, weight]` pair, so the agent and its weight stay together when you edit or reorder the pool. Weights are required nonnegative integers, with at least one positive value. They need not sum to 100: weights of `5`, `2`, `2`, and `1` have the same expected proportions as the example. Use weight `1` for every member to give equal shares. A zero weight disables new assignments to that member; omitting the pool preserves single-agent behavior. The example targets 50%, 20%, 20%, and 10% of rollouts over a large sample. A small batch can differ from those proportions or omit a harness entirely; this is not exact batch balancing or a run of every task through every harness.
+
+Selection hashes the taskset, task ID, and logical rollout ID into the weighted buckets. Retrying the same rollout keeps its harness while the pool order and weights stay fixed. `agent_routing_key: task` omits the rollout ID, so all repeats of a task use one harness. A resumed checkpoint uses its saved harness for activation and cleanup even if the weights change; keep that server reachable. Changing pool membership, order, or weights can reassign fresh rollouts, so use a new output directory when changing the experiment. Successful results record the selected instance in `ng_agent_server`.
+
+The Environment Server's `skip_verification` and `skip_verification_reward` override each selected agent's settings. If a pool batch contains fixed rewards from skipped verification, aggregation returns empty metrics with a warning rather than mixing those rewards into verifier metrics. Use consistent verification settings for comparisons.
+
 ### Swap the agent or the benchmark
 
 Wait for the experiment to finish and its servers to shut down before you change the configuration. Then resolve and run it again. Use a new output directory for each variant, so that resume does not pick up another experiment's results.

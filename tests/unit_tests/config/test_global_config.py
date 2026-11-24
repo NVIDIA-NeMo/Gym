@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -253,7 +254,7 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         hydra_main_mock = MagicMock()
-        hydra_main_mock.return_value = lambda fn: (lambda: fn(config_dict))
+        hydra_main_mock.return_value = lambda fn: lambda: fn(config_dict)
         monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
     def _mock_openai_topology(self, monkeypatch: MonkeyPatch, parent_version: str) -> None:
@@ -452,7 +453,7 @@ b: 2
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
@@ -499,7 +500,7 @@ config_paths:
 
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         get_global_config_dict()
@@ -589,7 +590,7 @@ config_paths:
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
     def test_get_global_config_dict_config_paths_later_sibling_wins(
@@ -4110,3 +4111,118 @@ def test_the_cli_parse_survives_argparses_strict_help_check(monkeypatch: MonkeyP
 
     assert config.probe == 1
     assert ArgumentParser._check_help is strict_check_help
+
+
+def test_environment_pool_agents_are_fronted_without_static_misattribution() -> None:
+    from nemo_gym.global_config import environment_server_agent_names, environment_server_attributed_agent
+
+    server = OmegaConf.create(
+        {
+            "agent_server": {"type": "responses_api_agents", "name": "first"},
+            "agent_server_pool": [
+                [{"type": "responses_api_agents", "name": "first"}, 3],
+                [{"type": "responses_api_agents", "name": "second"}, 1],
+            ],
+        }
+    )
+    assert environment_server_agent_names(server) == ["first", "second"]
+    graph = OmegaConf.create({"environment": {"environment_servers": {"single_agent_turn": server}}})
+    assert _environment_servers_by_agent(graph) == {"first": ["environment"], "second": ["environment"]}
+    assert environment_server_attributed_agent(server) is None
+    server.agent_server_pool = [server.agent_server_pool[1]]
+    assert environment_server_attributed_agent(server) == "second"
+
+
+@mark.parametrize("pooled_name", ["second", "missing", "resources"])
+def test_config_parser_validates_pool_destinations(pooled_name: str) -> None:
+    config = OmegaConf.create(
+        {
+            "first": {"responses_api_agents": {"pi_agent": {"entrypoint": "app.py"}}},
+            "second": {"responses_api_agents": {"pi_agent": {"entrypoint": "app.py"}}},
+            "resources": {
+                "resources_servers": {"example_single_tool_call": {"entrypoint": "app.py", "domain": "other"}}
+            },
+            "environment": {
+                "environment_servers": {
+                    "single_agent_turn": {
+                        "entrypoint": "app.py",
+                        "agent_server": {"type": "responses_api_agents", "name": "first"},
+                        "resources_server": {"type": "resources_servers", "name": "resources"},
+                        "agent_server_pool": [
+                            [{"type": "responses_api_agents", "name": "first"}, 1],
+                            [{"type": "responses_api_agents", "name": pooled_name}, 0],
+                        ],
+                    }
+                }
+            },
+        }
+    )
+    expected = (
+        does_not_raise()
+        if pooled_name == "second"
+        else raises(ServerRefNotFoundError, match=r"agent_server_pool\[1\]\[0\].*" + pooled_name)
+    )
+    with expected:
+        GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=config,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+
+def test_pool_retargeting_updates_all_references_to_a_renamed_agent() -> None:
+    config = OmegaConf.create(
+        {
+            "environment": {
+                "environment_servers": {
+                    "single_agent_turn": {
+                        "agent_server": {"type": "responses_api_agents", "name": "first"},
+                        "agent_server_pool": [
+                            [{"type": "responses_api_agents", "name": "first"}, 3],
+                            [{"type": "responses_api_agents", "name": "second"}, 0],
+                        ],
+                    }
+                }
+            }
+        }
+    )
+
+    GlobalConfigDictParser._retarget_environment_servers(config, {"first": "renamed"})
+
+    server = config.environment.environment_servers.single_agent_turn
+    assert server.agent_server.name == "renamed"
+    assert [entry[0].name for entry in server.agent_server_pool] == ["renamed", "second"]
+    assert [entry[1] for entry in server.agent_server_pool] == [3, 0]
+    assert _environment_servers_by_agent(config) == {"renamed": ["environment"], "second": ["environment"]}
+
+
+@mark.parametrize(
+    ("pool_names", "expected"),
+    [(["declaring", "other"], None), (["other"], "other")],
+    ids=["multiple-harnesses-have-no-static-agent", "singleton-overrides-declaring-fallback"],
+)
+def test_agent_declared_taskset_uses_pool_attribution(pool_names: list[str], expected: str | None) -> None:
+    config = OmegaConf.create(
+        {
+            "declaring": {"responses_api_agents": {"opencode_agent": {}}},
+            "other": {"responses_api_agents": {"pi_agent": {}}},
+            "resources": {"resources_servers": {"example_single_tool_call": {}}},
+            "environment_server_routes": {"tasks": "environment"},
+            "environment": {
+                "environment_servers": {
+                    "single_agent_turn": {
+                        "resources_server": {"type": "resources_servers", "name": "resources"},
+                        "agent_server": {"type": "responses_api_agents", "name": "declaring"},
+                        "agent_server_pool": [
+                            [{"type": "responses_api_agents", "name": name}, 1] for name in pool_names
+                        ],
+                    }
+                }
+            },
+        }
+    )
+
+    assert resolve_dataset_agent(config, "declaring", taskset="tasks") == expected

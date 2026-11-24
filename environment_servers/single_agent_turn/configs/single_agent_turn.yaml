@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Weighted harness routing contributed by Yu Yao under Apache-2.0.
 # The top-level key names this instance; routes, `_inherit_from`, and server references use it.
 # The key under `environment_servers` names the implementation directory, environment_servers/single_agent_turn.
 single_agent_turn:
@@ -10,6 +13,14 @@ single_agent_turn:
       agent_server:
         type: responses_api_agents
         name: ???
+      # Optional ordered pool replaces agent_server; requires one explicit shared resources_server.
+      # Keep pool order and weights fixed across fresh retries. Checkpoints retain the selected session destination.
+      # Each entry is [agent reference, nonnegative integer weight]; at least one weight must be positive.
+      # Example: [[{type: responses_api_agents, name: opencode}, 50], [{type: responses_api_agents, name: pi}, 50]].
+      # Use 1 for every weight for uniform routing. Zero disables fresh selection; shares are not exact batch counts.
+      agent_server_pool: null
+      # task_rollout can select different harnesses for repeated tasks; task fixes one harness per task.
+      agent_routing_key: task_rollout
       max_concurrent_episodes: null
       queue_timeout_seconds: null
       default_episode_timeout_seconds: 21600
