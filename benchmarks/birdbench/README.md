@@ -156,6 +156,11 @@ model, `--model-url` its base URL (e.g. `http://localhost:8000/v1`) and `--model
 ./benchmarks/birdbench/eval.sh --model <name> --split train --dialect spark   # train, spark
 ```
 
+**The verifier sandbox.** With the SQLite dialect, the server runs the gold and the model's query in a fresh sandbox
+per grade (see `resources_servers/bird_sql/README.md`, "Verifier sandbox"). `--sandbox-config` names the provider
+config that defines its `sandbox` block; the default, `nemo_gym/sandbox/providers/docker/configs/docker.yaml`, needs a
+local Docker daemon.
+
 `--limit 5` gives a smoke test and `--num-repeats N` N rollouts per task. Results go to
 `benchmarks/birdbench/results/<split>_<dialect>/<model>/` (override with `--output_dir`). The script header documents every option;
 other flags pass through to `gym eval run`.

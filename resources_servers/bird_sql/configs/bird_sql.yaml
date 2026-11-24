@@ -11,6 +11,27 @@ bird_sql_resources_server:
       bird_sql_dir: resources_servers/bird_sql/.bird_sql
       max_concurrency: 32
       sql_execution_timeout_s: 30.0
+      # The gold and the model's SQL run in a verifier sandbox, one per grade, never on this server. Add a provider
+      # config that defines the `sandbox` block, e.g. nemo_gym/sandbox/providers/docker/configs/docker.yaml.
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        # Each sandbox gets the row's database (up to 600 MB in dev) by upload. Set databases_dir to an image (or a
+        # provider mount) that already holds <db_id>/<db_id>.sqlite to skip the upload.
+        databases_dir: null
+        resources:
+          cpu: 1
+          memory_mib: 4096
+        # The runner's address-space cap, below memory_mib: a query that needs more fails as the model's error.
+        memory_limit_mib: 3072
+        provider_options:
+          # Grading needs no network. OpenSandbox and E2B enforce this; Docker and Enroot ignore it (set Docker's
+          # `network: none` instead), and Daytona and OpenShell reject the key, so remove it for them.
+          network_policy:
+            defaultAction: deny
+            egress: []
+      # A failed sandbox is retried on a fresh one this many times; then the row is masked.
+      inconclusive_verification_retries: 2
       domain: coding
       verified: false
       description: Text-to-SQL with execution-based evaluation on BIRD dev (1534 SQLite tasks). Binary reward from unordered result-set equality.

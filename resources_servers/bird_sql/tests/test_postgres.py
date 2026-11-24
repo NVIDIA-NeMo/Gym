@@ -77,7 +77,7 @@ async def test_verify_postgres_dialect_routes_to_postgres(tmp_path, monkeypatch)
         raise AssertionError("sqlite path must not run for dialect=postgres")
 
     monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare_postgres", fake_postgres)
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_sqlite)
+    monkeypatch.setattr("resources_servers.bird_sql.app.grade_in_fresh_sandbox", fail_sqlite)
     config = BirdSqlResourcesServerConfig(
         host="127.0.0.1",
         port=20099,
