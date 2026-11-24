@@ -18,6 +18,8 @@ from nemo_gym.trajectory.trajectory_record import (
 
 CAPTURE_UNREADABLE_GAP = "model_call_capture_unreadable"
 CAPTURE_RECORDS_UNREADABLE_GAP = "model_call_capture_records_unreadable"
+# The capture holds no call for the rollout: a missing file and a rollout that made no call look the same.
+NO_CAPTURED_CALLS_GAPS = frozenset({"model_call_capture_no_records", "model_calls_unavailable"})
 CAPTURE_INCOMPLETE_GAPS = frozenset(
     {"model_call_capture_pending", "model_call_capture_incomplete", CAPTURE_RECORDS_UNREADABLE_GAP}
 )
@@ -35,9 +37,10 @@ _CAPTURED_CALL_TOKEN_FIELDS: tuple[tuple[str, str], ...] = (
 def build_captured_calls(result: dict[str, Any]) -> Optional[CapturedCallSummary]:
     """Summarize every captured model call of a rollout by role.
 
-    ``None`` without ``ng_trajectory`` (capture off), and when the capture could not be read at all or none of its
-    records could: those calls are unknown, not zero. A capture with writes still pending or incomplete, or with some
-    unreadable records, is summarized with ``capture_complete=False``, so its totals read as a lower bound.
+    ``None`` without ``ng_trajectory`` (capture off), when no captured call was found for the rollout, and when the
+    capture could not be read at all or none of its records could: those calls are unknown, not zero. A capture with
+    writes still pending or incomplete, or with some unreadable records, is summarized with ``capture_complete=False``,
+    so its totals read as a lower bound.
     """
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if not isinstance(raw_trajectory, dict):
@@ -48,8 +51,10 @@ def build_captured_calls(result: dict[str, Any]) -> Optional[CapturedCallSummary
         return None
     gap_codes = {gap.code for gap in trajectory.gaps}
     calls = len(trajectory.model_calls)
-    # Unreadable as a whole, or every record in it unreadable: those calls are unknown, not zero.
-    if CAPTURE_UNREADABLE_GAP in gap_codes or (CAPTURE_RECORDS_UNREADABLE_GAP in gap_codes and not calls):
+    # Unreadable as a whole, or no readable call in it: those calls are unknown, not zero.
+    if CAPTURE_UNREADABLE_GAP in gap_codes or (
+        not calls and (CAPTURE_RECORDS_UNREADABLE_GAP in gap_codes or gap_codes & NO_CAPTURED_CALLS_GAPS)
+    ):
         return None
     roles = _call_roles(trajectory)
     by_role = _totals_by_role(trajectory.model_calls, roles)

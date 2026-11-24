@@ -16308,6 +16308,16 @@ class TestEnrichRunResult:
             True,
         )
 
+    async def test_a_rollout_whose_capture_file_is_missing_has_no_captured_call_counts(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+        result = {"response": {"output": []}, "reward": 1.0}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert {"code": "model_call_capture_no_records"} in result["ng_model_call_capture"]["gaps"]
+        assert NG_CAPTURED_CALLS_KEY not in result, "a capture the collector could not find is unknown, not zero"
+
     async def test_metadata_only_keeps_the_capture_file(self, tmp_path: Path) -> None:
         from nemo_gym.models.model_call_capture import CaptureStore
         from nemo_gym.rollouts.rollout_collection import enrich_run_result

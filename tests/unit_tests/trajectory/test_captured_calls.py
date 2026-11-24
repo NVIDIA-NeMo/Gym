@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 from nemo_gym.rollouts.rollout_perf import _build_ng_perf
 from nemo_gym.trajectory.captured_calls import build_captured_calls
 from nemo_gym.trajectory.trajectory_record import NG_TRAJECTORY_KEY
@@ -72,16 +74,11 @@ def test_captured_calls_count_shared_references_once_and_keep_missing_usage_out_
     assert captured["by_role"]["unattributed"] == {"calls": 1, "calls_without_usage": 1}
 
 
-def test_captured_calls_distinguish_no_calls_from_no_capture() -> None:
+@pytest.mark.parametrize("gap", ["model_call_capture_no_records", "model_calls_unavailable"])
+def test_a_rollout_without_captured_calls_has_no_summary_rather_than_zero_calls(gap: str) -> None:
     assert build_captured_calls({}) is None
-    empty = {NG_TRAJECTORY_KEY: {"task_id": "t", "rollout_id": "t-0"}}
-    assert build_captured_calls(empty) == {
-        "calls": 0,
-        "calls_without_usage": 0,
-        "attributed_call_coverage": None,
-        "capture_complete": True,
-        "by_role": {},
-    }
+    empty = {NG_TRAJECTORY_KEY: {"task_id": "t", "rollout_id": "t-0", "gaps": [{"code": gap}]}}
+    assert build_captured_calls(empty) is None
 
 
 def test_an_unreadable_capture_has_no_summary_rather_than_zero_calls() -> None:
