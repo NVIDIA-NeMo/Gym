@@ -319,6 +319,10 @@ class TestAwaitServerReady:
             return answer
 
         monkeypatch.setattr(module.requests, "get", get)
+        # A wait with a limit probes through `get_within_deadline`, so it answers from the same script.
+        monkeypatch.setattr(
+            module, "get_within_deadline", lambda url, *, timeout_s, **kwargs: get(url, timeout=timeout_s)
+        )
 
         class Server:
             config = MagicMock(server_ready_timeout_seconds=timeout_s, base_url=["http://engine/v1"])
@@ -389,7 +393,11 @@ class TestAwaitServerReady:
             clocks[0][0] += 5  # the answer arrives after the 1 s limit
             return answer(url, **kwargs)
 
-        monkeypatch.setattr(responses_api_models.local_vllm_model.app.requests, "get", slow_get)
+        monkeypatch.setattr(
+            responses_api_models.local_vllm_model.app,
+            "get_within_deadline",
+            lambda url, *, timeout_s, **kwargs: slow_get(url, timeout=timeout_s),
+        )
 
         with pytest.raises(TimeoutError, match="was not ready within 1"):
             LocalVLLMModel.await_server_ready(server)
@@ -484,6 +492,9 @@ class TestStartupDeadline:
 
         monkeypatch.setattr(module.ray, "get", ray_get)
         monkeypatch.setattr(module.requests, "get", lambda url, **kwargs: polled.append(url) or MagicMock())
+        monkeypatch.setattr(
+            module, "get_within_deadline", lambda url, *, timeout_s, **kwargs: polled.append(url) or MagicMock()
+        )
 
         actor = MagicMock()
         actor.base_url.remote.return_value = "address"
