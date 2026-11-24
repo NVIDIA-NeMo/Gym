@@ -16,6 +16,7 @@ from aiohttp import ClientTimeout
 from pydantic import BaseModel, ValidationError
 
 from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.verification import JudgeError, reraise_judge_errors
 from resources_servers.apex_agents.artifacts import (
     ArtifactChange,
     artifact_change_content,
@@ -155,6 +156,18 @@ def _selection_artifact_xml(index: int, change: ArtifactChange, content: str, *,
     return "\n".join(parts)
 
 
+async def _post_chat_completion(server_client: Any, model_server_name: str, body: dict[str, Any]) -> Any:
+    """One judge request. Callers await it through ``reraise_judge_errors``, so a failed call is a judge failure."""
+    response = await server_client.post(
+        server_name=model_server_name,
+        url_path="/v1/chat/completions",
+        json=body,
+        timeout=ClientTimeout(total=3600),
+    )
+    await raise_for_status(response)
+    return await get_response_json(response)
+
+
 async def _select_artifacts_if_needed(
     *,
     server_client: Any,
@@ -212,53 +225,30 @@ async def _select_artifacts_if_needed(
     ]
     raw_content: str | None = None
     parsed: ArtifactSelectionResponse | None = None
-    try:
-        for _ in range(_MAX_JSON_RETRIES):
-            body = dict(judge_create_params_overrides)
-            body.update(
-                {
-                    "model": judge_model,
-                    "messages": messages,
-                    "response_format": {"type": "json_object"},
-                }
-            )
-            response = await server_client.post(
-                server_name=model_server_name,
-                url_path="/v1/chat/completions",
-                json=body,
-                timeout=ClientTimeout(total=3600),
-            )
-            await raise_for_status(response)
-            payload = await get_response_json(response)
-            choices = payload.get("choices") if isinstance(payload, dict) else None
-            message = choices[0].get("message") if isinstance(choices, list) and choices else None
-            raw_content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(raw_content, str) or not raw_content:
-                continue
-            try:
-                parsed = ArtifactSelectionResponse.model_validate_json(raw_content)
-                break
-            except ValidationError:
-                continue
-    except Exception as exc:
-        LOG.exception("APEX artifact selection failed")
-        return [], {
-            "status": "failed",
-            "error": str(exc),
-            "artifact_tokens": total_tokens,
-            "threshold_tokens": threshold,
-            "selected_count": 0,
-            "total_count": len(changes),
-        }
+    for _ in range(_MAX_JSON_RETRIES):
+        body = dict(judge_create_params_overrides)
+        body.update(
+            {
+                "model": judge_model,
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+            }
+        )
+        payload = await reraise_judge_errors(_post_chat_completion(server_client, model_server_name, body))
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        message = choices[0].get("message") if isinstance(choices, list) and choices else None
+        raw_content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        try:
+            parsed = ArtifactSelectionResponse.model_validate_json(raw_content)
+            break
+        except ValidationError:
+            continue
     if parsed is None:
-        return [], {
-            "status": "failed",
-            "error": f"selector returned invalid structured output after {_MAX_JSON_RETRIES} attempts",
-            "artifact_tokens": total_tokens,
-            "threshold_tokens": threshold,
-            "selected_count": 0,
-            "total_count": len(changes),
-        }
+        # Grading with no artifacts would score the answer on evidence the selector never chose, so a selection
+        # that cannot be read is an unusable judgement, not an empty one.
+        raise JudgeError(f"artifact selector returned invalid structured output after {_MAX_JSON_RETRIES} attempts")
 
     selected = [changes[index - 1] for index in parsed.selected_artifact_indices if 1 <= index <= len(changes)]
     return selected, {
@@ -272,6 +262,24 @@ async def _select_artifacts_if_needed(
     }
 
 
+_ARTIFACT_SEPARATOR = "\n\n"
+_ARTIFACT_FIT_ATTEMPTS = 8
+
+
+def _rendered_artifact(index: int, change: ArtifactChange, *, content_chars: int) -> str:
+    content = artifact_change_text(change, max_chars=content_chars)
+    change_name = {"added": "created", "modified": "modified", "deleted": "deleted"}[change.change_type]
+    indented_content = "\n".join(f"  {line}" for line in content.splitlines())
+    return "\n".join(
+        [
+            f'<ARTIFACT id="{index}" type="{change.artifact_type}" change="{change_name}">',
+            *_artifact_metadata_xml(change),
+            indented_content,
+            "</ARTIFACT>",
+        ]
+    )
+
+
 def _artifact_xml(changes: list[ArtifactChange], *, character_budget: int) -> str:
     if not changes:
         return ""
@@ -279,22 +287,26 @@ def _artifact_xml(changes: list[ArtifactChange], *, character_budget: int) -> st
     remaining = character_budget
     rendered: list[str] = []
     for index, change in enumerate(changes, 1):
-        content = artifact_change_text(change, max_chars=min(per_artifact, remaining))
-        change_name = {"added": "created", "modified": "modified", "deleted": "deleted"}[change.change_type]
-        indented_content = "\n".join(f"  {line}" for line in content.splitlines())
-        artifact = "\n".join(
-            [
-                f'<ARTIFACT id="{index}" type="{change.artifact_type}" change="{change_name}">',
-                *_artifact_metadata_xml(change),
-                indented_content,
-                "</ARTIFACT>",
-            ]
-        )
-        if len(artifact) > remaining:
+        available = remaining - (len(_ARTIFACT_SEPARATOR) if rendered else 0)
+        # An artifact's share covers all of it: content, wrapper, metadata and indentation. Rendering the content at
+        # the full share therefore overshoots, so shrink the content until the whole artifact fits. A selected
+        # artifact reaches the judge truncated, never dropped, unless even its wrapper does not fit what is left.
+        share = min(per_artifact, available)
+        content_chars = share
+        artifact: str | None = None
+        for _ in range(_ARTIFACT_FIT_ATTEMPTS):
+            if content_chars <= 0:
+                break
+            candidate = _rendered_artifact(index, change, content_chars=content_chars)
+            if len(candidate) <= share:
+                artifact = candidate
+                break
+            content_chars -= len(candidate) - share
+        if artifact is None:
             break
         rendered.append(artifact)
-        remaining -= len(artifact)
-    return "\n\n".join(rendered)
+        remaining = available - len(artifact)
+    return _ARTIFACT_SEPARATOR.join(rendered)
 
 
 def _build_prompt(
@@ -390,14 +402,7 @@ async def _judge_criterion(
                 "response_format": {"type": "json_object"},
             }
         )
-        judge_response = await server_client.post(
-            server_name=model_server_name,
-            url_path="/v1/chat/completions",
-            json=body,
-            timeout=ClientTimeout(total=3600),
-        )
-        await raise_for_status(judge_response)
-        payload = await get_response_json(judge_response)
+        payload = await reraise_judge_errors(_post_chat_completion(server_client, model_server_name, body))
         choices = payload.get("choices") if isinstance(payload, dict) else None
         if not isinstance(choices, list) or not choices:
             continue
@@ -414,7 +419,7 @@ async def _judge_criterion(
         except (json.JSONDecodeError, ValidationError):
             continue
     if parsed is None:
-        raise ValueError(f"judge returned invalid structured output after {_MAX_JSON_RETRIES} attempts")
+        raise JudgeError(f"judge returned invalid structured output after {_MAX_JSON_RETRIES} attempts")
     return parsed
 
 

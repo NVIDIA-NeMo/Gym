@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import hashlib
 import io
 import json
 import math
@@ -192,6 +193,100 @@ def _extract_text_from_pptx_shape(shape: Any) -> list[str]:
     return text_parts
 
 
+def _visual_key(data: bytes) -> dict[str, Any]:
+    """A fingerprint entry for visual content that text extraction does not see.
+
+    Sub-artifact matching compares these keys, so a slide, page or sheet whose picture or chart changed counts as
+    changed even when its text is identical.
+    """
+    return {"hash": hashlib.sha256(data).hexdigest()}
+
+
+def _pptx_shape_visual_keys(shape: Any) -> list[dict[str, Any]]:
+    keys: list[dict[str, Any]] = []
+    try:
+        for child in getattr(shape, "shapes", None) or []:
+            keys.extend(_pptx_shape_visual_keys(child))
+        image = getattr(shape, "image", None)
+        if image is not None:
+            keys.append(_visual_key(image.blob))
+        if getattr(shape, "has_chart", False):
+            keys.append(_visual_key(shape.chart.part.blob))
+    except Exception:
+        # A shape whose picture or chart cannot be read keeps its text-only fingerprint.
+        pass
+    return keys
+
+
+def _pdf_page_visual_keys(page: Any) -> list[dict[str, Any]]:
+    keys: list[dict[str, Any]] = []
+    try:
+        resources = page.get("/Resources")
+        xobjects = resources.get_object().get("/XObject") if resources is not None else None
+        if xobjects is None:
+            return keys
+        for name in sorted(xobjects.get_object()):
+            xobject = xobjects.get_object()[name].get_object()
+            if xobject.get("/Subtype") == "/Image":
+                keys.append(_visual_key(bytes(getattr(xobject, "_data", b"") or b"")))
+    except Exception:
+        return []
+    return keys
+
+
+_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def _part_relationships(archive: zipfile.ZipFile, part: str) -> dict[str, tuple[str, str]]:
+    """Relationship id -> (type suffix, target part) for one package part; empty when it has none."""
+    directory, _, name = part.rpartition("/")
+    rels_path = f"{directory}/_rels/{name}.rels"
+    if rels_path not in archive.namelist():
+        return {}
+    relationships: dict[str, tuple[str, str]] = {}
+    for relationship in ET.fromstring(archive.read(rels_path)).findall(f"{{{_REL_NS}}}Relationship"):
+        if relationship.get("TargetMode") == "External":
+            continue
+        target = str(relationship.get("Target") or "")
+        segments: list[str] = [] if target.startswith("/") else directory.split("/")
+        for segment in target.split("/"):
+            if segment == "..":
+                if segments:
+                    segments.pop()
+            elif segment and segment != ".":
+                segments.append(segment)
+        relationships[str(relationship.get("Id"))] = (
+            str(relationship.get("Type") or "").rsplit("/", 1)[-1],
+            "/".join(segments),
+        )
+    return relationships
+
+
+def _xlsx_sheet_visual_keys(path: Path) -> dict[str, list[dict[str, Any]]]:
+    """Sheet name -> fingerprints of the charts and pictures drawn on that sheet."""
+    keys_by_sheet: dict[str, list[dict[str, Any]]] = {}
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = set(archive.namelist())
+            workbook_rels = _part_relationships(archive, "xl/workbook.xml")
+            namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            for sheet in ET.fromstring(archive.read("xl/workbook.xml")).findall(".//main:sheet", namespace):
+                _, sheet_part = workbook_rels.get(str(sheet.get(f"{{{_OFFICE_REL_NS}}}id")), ("", ""))
+                keys: list[dict[str, Any]] = []
+                for kind, drawing_part in sorted(_part_relationships(archive, sheet_part).values()):
+                    if kind != "drawing" or drawing_part not in names:
+                        continue
+                    for visual_kind, visual_part in sorted(_part_relationships(archive, drawing_part).values()):
+                        if visual_kind in {"chart", "image"} and visual_part in names:
+                            keys.append(_visual_key(archive.read(visual_part)))
+                if keys and sheet.get("name"):
+                    keys_by_sheet[str(sheet.get("name"))] = keys
+    except Exception:
+        return {}
+    return keys_by_sheet
+
+
 def _extract_pptx(path: Path) -> ExtractedContent:
     from pptx import Presentation
 
@@ -200,6 +295,7 @@ def _extract_pptx(path: Path) -> ExtractedContent:
     sub_artifacts: list[SubArtifact] = []
     for slide_index, slide in enumerate(presentation.slides):
         slide_text_parts: list[str] = []
+        slide_visual_keys: list[dict[str, Any]] = []
         slide_title: str | None = None
         for shape in slide.shapes:
             if slide_title is None:
@@ -209,6 +305,7 @@ def _extract_pptx(path: Path) -> ExtractedContent:
                 except Exception:
                     pass
             slide_text_parts.extend(_extract_text_from_pptx_shape(shape))
+            slide_visual_keys.extend(_pptx_shape_visual_keys(shape))
         if slide_title is None and slide_text_parts:
             slide_title = slide_text_parts[0][:100]
         slide_text = "\n".join(slide_text_parts)
@@ -218,6 +315,7 @@ def _extract_pptx(path: Path) -> ExtractedContent:
                 type="slide",
                 title=slide_title or f"Slide {slide_index + 1}",
                 content=slide_text,
+                images=slide_visual_keys,
             )
         )
         full_text_parts.append(f"=== Slide {slide_index + 1}: {slide_title or 'Untitled'} ===\n{slide_text}")
@@ -243,6 +341,7 @@ def _extract_pdf(path: Path) -> ExtractedContent:
                 type="page",
                 title=f"Page {page_index + 1}",
                 content=page_text,
+                images=_pdf_page_visual_keys(page),
             )
         )
         pages.append(f"=== Page {page_index + 1} ===\n{page_text}")
@@ -677,8 +776,11 @@ def _extract_xlsx(path: Path, *, document_converter_image: str | None = None) ->
             "=== Extraction Note ===\n[formula cells could not be recalculated — LibreOffice unavailable; "
             "blanks may be uncomputed formulas, not missing values]\n\n"
         )
+    visual_keys = _xlsx_sheet_visual_keys(path)
     sub_artifacts = [
-        SubArtifact(index=index, type="sheet", title=title, content=banner + content)
+        SubArtifact(
+            index=index, type="sheet", title=title, content=banner + content, images=visual_keys.get(title, [])
+        )
         for index, title, content in sheet_values
     ]
     chart_images: list[dict[str, Any]] = []

@@ -160,6 +160,35 @@ async def test_verify_returns_saved_snapshots_when_grading_fails(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["connection", "unreadable_verdict"])
+async def test_verify_routes_a_judge_failure_to_the_judge_failed_row(monkeypatch, tmp_path: Path, fault: str) -> None:
+    from nemo_gym.verification import JudgeError, judge_failsafe, reraise_judge_errors
+
+    async def failing_judge(**_kwargs):
+        if fault == "unreadable_verdict":
+            raise JudgeError("judge returned invalid structured output after 3 attempts")
+
+        async def call():
+            raise ConnectionError("judge unreachable")
+
+        await reraise_judge_errors(call())
+
+    monkeypatch.setattr("resources_servers.apex_agents.app.grade_apex_output", failing_judge)
+    server = _server(artifact_output_dir=str(tmp_path / "saved"))
+
+    # The endpoint is registered behind judge_failsafe; call it the same way.
+    response = await judge_failsafe(server.verify)(body=_body())
+
+    row = json.loads(response.body)
+    assert row["_ng_failure_class"] == "judge_failed"
+    assert row["mask_sample"] is True
+    assert "invalid_judge_response" not in row
+    saved = next((tmp_path / "saved").rglob("grading.json"))
+    assert json.loads(saved.read_text())["error"]
+    assert (saved.parent / "final_snapshot.zip").is_file()
+
+
+@pytest.mark.asyncio
 async def test_verify_rejects_bad_snapshot() -> None:
     result = await _server().verify(_body("not-base64"))
     assert result.reward == 0.0

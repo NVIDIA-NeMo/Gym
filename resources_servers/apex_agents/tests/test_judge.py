@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.verification import JudgeError
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.apex_agents.artifacts import ArtifactChange
 from resources_servers.apex_agents.judge import (
     _artifact_xml,
@@ -395,3 +397,145 @@ async def test_unknown_scoring_method_is_rejected(tmp_path: Path) -> None:
             judge_context_window_size=1_000_000,
             scoring_method="partial",
         )
+
+
+def _sheet_change(title: str, content: str) -> ArtifactChange:
+    return ArtifactChange(
+        path="filesystem/model.xlsx",
+        change_type="added",
+        before_path=None,
+        after_path=Path("/unused/model.xlsx"),
+        artifact_type="sheet",
+        index=0,
+        title=title,
+        new_content=content,
+    )
+
+
+@pytest.mark.parametrize("budget", [400, 1_000, 1_500])
+def test_one_oversized_artifact_is_truncated_not_dropped(budget: int) -> None:
+    rendered = _artifact_xml([_sheet_change("Summary", "value row\n" * 400)], character_budget=budget)
+
+    assert rendered.startswith('<ARTIFACT id="1" type="sheet" change="created">')
+    assert rendered.endswith("</ARTIFACT>")
+    assert "<path>model.xlsx</path>" in rendered
+    assert "<title>Summary</title>" in rendered
+    assert "value row" in rendered
+    assert len(rendered) <= budget
+
+
+def test_several_oversized_artifacts_share_the_total_budget() -> None:
+    changes = [_sheet_change(f"Sheet {number}", f"row {number}\n" * 500) for number in range(3)]
+
+    # Three equal shares of the budget: each artifact is cut to its share, wrapper included.
+    rendered = _artifact_xml(changes, character_budget=3_300)
+
+    assert len(rendered) <= 3_300
+    assert rendered.count("<ARTIFACT ") == rendered.count("</ARTIFACT>") == 3
+    for number in range(3):
+        assert f"row {number}" in rendered
+
+
+def test_an_artifact_whose_wrapper_does_not_fit_is_left_out() -> None:
+    assert _artifact_xml([_sheet_change("Summary", "value row\n" * 400)], character_budget=40) == ""
+
+
+async def _grade(client, tmp_path: Path, *, changes: list[ArtifactChange] | None = None, window: int = 1_000_000):
+    return await grade_apex_output(
+        server_client=client,
+        model_server_name="apex_judge_model",
+        task_id="task-1",
+        world_id="world-1",
+        instruction="Do the task",
+        response="Done",
+        rubric=[{"verifier_id": "v1", "criteria": "Correct result"}],
+        expected_output=None,
+        artifact_changes=changes or [],
+        final_root=tmp_path,
+        judge_model="judge",
+        judge_create_params_overrides=None,
+        judge_context_window_size=window,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_judge_call_is_a_judge_failure_not_a_wrong_answer(tmp_path: Path) -> None:
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=ConnectionError("judge unreachable"))
+
+    with pytest.raises(Exception) as raised:
+        await _grade(client, tmp_path)
+
+    assert is_judge_failure(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_judge_http_error_is_a_judge_failure(monkeypatch, tmp_path: Path) -> None:
+    client = MagicMock()
+    client.post = AsyncMock(return_value=object())
+
+    async def unavailable(_response) -> None:
+        raise RuntimeError("503 Service Unavailable")
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", unavailable)
+
+    with pytest.raises(Exception) as raised:
+        await _grade(client, tmp_path)
+
+    assert is_judge_failure(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_that_cannot_be_read_is_a_judge_failure(monkeypatch, tmp_path: Path) -> None:
+    client = MagicMock()
+    client.post = AsyncMock(return_value=object())
+
+    async def fake_status(_response) -> None:
+        return None
+
+    async def not_json(_response) -> dict:
+        return {"choices": [{"message": {"content": "not json"}}]}
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", fake_status)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.get_response_json", not_json)
+
+    with pytest.raises(JudgeError, match="invalid structured output"):
+        await _grade(client, tmp_path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selector_fault", ["call", "unreadable"])
+async def test_a_failed_artifact_selection_is_not_graded_as_no_artifacts(
+    monkeypatch, tmp_path: Path, selector_fault: str
+) -> None:
+    deliverable = tmp_path / "filesystem" / "notes.txt"
+    deliverable.parent.mkdir(parents=True)
+    deliverable.write_text("Germany-North Thermal Overload " * 200, encoding="utf-8")
+    changes = [
+        ArtifactChange(path="filesystem/notes.txt", change_type="added", before_path=None, after_path=deliverable)
+    ]
+    client = MagicMock()
+    client.post = AsyncMock(return_value=object())
+
+    async def status(_response) -> None:
+        if selector_fault == "call":
+            raise RuntimeError("503 Service Unavailable")
+
+    async def unreadable(_response) -> dict:
+        return {"choices": [{"message": {"content": "not json"}}]}
+
+    monkeypatch.setattr("resources_servers.apex_agents.judge.raise_for_status", status)
+    monkeypatch.setattr("resources_servers.apex_agents.judge.get_response_json", unreadable)
+    monkeypatch.setattr(
+        "resources_servers.apex_agents.judge.artifact_change_content",
+        lambda change: change.after_path.read_text(encoding="utf-8"),
+    )
+
+    with pytest.raises(Exception) as raised:
+        # A 100-token window forces the selection step before any criterion is graded.
+        await _grade(client, tmp_path, changes=changes, window=100)
+
+    assert is_judge_failure(raised.value)
+    # Every request made was a selection request: no criterion was graded on an empty selection.
+    for call in client.post.call_args_list:
+        assert "preprocessing filter" in call.kwargs["json"]["messages"][0]["content"]

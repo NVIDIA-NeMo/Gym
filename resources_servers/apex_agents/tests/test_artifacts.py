@@ -238,3 +238,109 @@ def test_snapshot_changes_flattens_and_matches_pdf_pages(monkeypatch, tmp_path: 
         ("added", "page", 1, 0),
     ]
     assert all(change.path == "filesystem/report.pdf" for change in changes)
+
+
+def _png(path: Path, colour: tuple[int, int, int]) -> Path:
+    from PIL import Image
+
+    Image.new("RGB", (40, 30), colour).save(path)
+    return path
+
+
+def _roots(tmp_path: Path, name: str) -> tuple[Path, Path, Path, Path]:
+    initial_root = tmp_path / "initial"
+    final_root = tmp_path / "final"
+    initial_path = initial_root / "filesystem" / name
+    final_path = final_root / "filesystem" / name
+    initial_path.parent.mkdir(parents=True)
+    final_path.parent.mkdir(parents=True)
+    return initial_root, initial_path, final_root, final_path
+
+
+def _deck_with_picture(path: Path, picture: Path) -> None:
+    from pptx.util import Inches
+
+    presentation = Presentation()
+    _add_slide(presentation, "Alpha", "Stable alpha content")
+    _add_slide(presentation, "Results", "Chart of quarterly revenue")
+    presentation.slides[1].shapes.add_picture(str(picture), Inches(1), Inches(3))
+    presentation.save(path)
+
+
+def test_a_slide_whose_only_change_is_its_picture_is_a_change(tmp_path: Path) -> None:
+    initial_root, initial_path, final_root, final_path = _roots(tmp_path, "deck.pptx")
+    _deck_with_picture(initial_path, _png(tmp_path / "red.png", (200, 0, 0)))
+    _deck_with_picture(final_path, _png(tmp_path / "blue.png", (0, 0, 200)))
+
+    changes = snapshot_changes(initial_root, [initial_path], final_root, [final_path])
+
+    assert [(change.change_type, change.artifact_type, change.index) for change in changes] == [
+        ("modified", "slide", 1)
+    ]
+    assert changes[0].after_path == final_path
+    assert changes[0].embedded_images_old != changes[0].embedded_images_new
+
+
+def test_a_resaved_deck_with_the_same_pictures_is_not_a_change(tmp_path: Path) -> None:
+    initial_root, initial_path, final_root, final_path = _roots(tmp_path, "deck.pptx")
+    picture = _png(tmp_path / "red.png", (200, 0, 0))
+    _deck_with_picture(initial_path, picture)
+    _deck_with_picture(final_path, picture)
+    # Not the byte-identical shortcut: the same deck written again, as an agent that opens and saves it would.
+    resaved = Presentation(str(final_path))
+    resaved.core_properties.revision = 7
+    resaved.save(final_path)
+    assert initial_path.read_bytes() != final_path.read_bytes()
+
+    assert snapshot_changes(initial_root, [initial_path], final_root, [final_path]) == []
+
+
+def _workbook_with_chart(path: Path, last_row: int) -> None:
+    from openpyxl.chart import BarChart, Reference
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Revenue"
+    for row in [("Quarter", "Revenue"), ("Q1", 10), ("Q2", 12), ("Q3", 15)]:
+        sheet.append(row)
+    notes = workbook.create_sheet("Notes")
+    notes.append(("Prepared for the board",))
+    chart = BarChart()
+    chart.add_data(Reference(sheet, min_col=2, min_row=1, max_row=last_row), titles_from_data=True)
+    sheet.add_chart(chart, "D2")
+    workbook.save(path)
+
+
+def test_a_sheet_whose_only_change_is_its_chart_is_a_change(monkeypatch, tmp_path: Path) -> None:
+    # No converter in the test environment: the chart is seen through the workbook's own parts, not a rendering.
+    monkeypatch.setattr(
+        "resources_servers.apex_agents.file_extraction._convert_office_to_pdf", lambda *_args, **_kwargs: None
+    )
+    initial_root, initial_path, final_root, final_path = _roots(tmp_path, "model.xlsx")
+    _workbook_with_chart(initial_path, last_row=3)
+    _workbook_with_chart(final_path, last_row=4)
+
+    changes = snapshot_changes(initial_root, [initial_path], final_root, [final_path])
+
+    assert [(change.change_type, change.artifact_type, change.title) for change in changes] == [
+        ("modified", "sheet", "Revenue")
+    ]
+
+
+def _image_pdf(path: Path, colours: list[tuple[int, int, int]]) -> None:
+    from PIL import Image
+
+    pages = [Image.new("RGB", (60, 80), colour) for colour in colours]
+    pages[0].save(path, save_all=True, append_images=pages[1:])
+
+
+def test_a_pdf_page_whose_only_change_is_its_image_is_a_change(tmp_path: Path) -> None:
+    initial_root, initial_path, final_root, final_path = _roots(tmp_path, "scan.pdf")
+    _image_pdf(initial_path, [(200, 0, 0), (0, 200, 0), (0, 0, 200)])
+    _image_pdf(final_path, [(200, 0, 0), (0, 200, 0), (90, 90, 90)])
+
+    changes = snapshot_changes(initial_root, [initial_path], final_root, [final_path])
+
+    assert [(change.change_type, change.artifact_type, change.index) for change in changes] == [
+        ("modified", "page", 2)
+    ]

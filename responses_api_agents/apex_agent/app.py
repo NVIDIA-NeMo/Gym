@@ -86,6 +86,7 @@ _GUEST_WORLD_LOGS = {
 }
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_FAILURE_TERMINAL_KEY = "_ng_failure_terminal"
+NG_FAILURE_COUNTS_AS_ZERO_KEY = "_ng_failure_counts_as_zero"
 _WORLD_ID_RE = re.compile(r"^world_[0-9a-f]{32}$")
 
 
@@ -626,6 +627,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
         return_code: int | None = None,
         failure_class: str = "apex_error",
         failure_terminal: bool = False,
+        counts_as_zero: bool = False,
         partial_result: Optional[dict[str, Any]] = None,
     ) -> ApexAgentVerifyResponse:
         LOG.error("Apex rollout failed for task %s: %s", body.task_id, error)
@@ -646,6 +648,11 @@ class ApexAgent(SimpleResponsesAPIAgent):
         payload[NG_FAILURE_CLASS_KEY] = failure_class
         if failure_terminal:
             payload[NG_FAILURE_TERMINAL_KEY] = True
+        if counts_as_zero:
+            # The model's own outcome, not a fault around it: collection counts the rollout as a zero in the
+            # metrics instead of leaving it out of the denominator. Only a final failure can settle that way.
+            payload[NG_FAILURE_TERMINAL_KEY] = True
+            payload[NG_FAILURE_COUNTS_AS_ZERO_KEY] = True
         return ApexAgentVerifyResponse.model_validate(payload)
 
     @staticmethod
@@ -966,6 +973,7 @@ class ApexAgent(SimpleResponsesAPIAgent):
                             f"Stirrup did not submit a completed Finish call (status={result.get('completion_status')})",
                             failure_class="agent_incomplete",
                             failure_terminal=True,
+                            counts_as_zero=True,
                             partial_result=result,
                         )
                         if output_dir is not None:

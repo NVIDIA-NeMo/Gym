@@ -33,6 +33,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.verification import VerifierFixture
+from nemo_gym.verification.judge import is_judge_failure, is_judge_provider_stop
 from resources_servers.apex_agents.artifacts import (
     safe_extract_snapshot,
     snapshot_changes,
@@ -483,6 +484,10 @@ class ApexResourcesServer(SimpleResourcesServer):
                     )
             except Exception as exc:
                 self._persist_grading_result(persisted_output_dir, error=str(exc))
+                if is_judge_failure(exc) or is_judge_provider_stop(exc):
+                    # A judge that could not be reached or gave no usable verdict did not grade the answer: the
+                    # verify endpoint's judge failsafe records the rollout as judge_failed, not as a scored zero.
+                    raise
                 return self._failure(
                     body,
                     str(exc),

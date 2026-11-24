@@ -18,6 +18,7 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from responses_api_agents.apex_agent import prebuilt_world_entrypoint
 from responses_api_agents.apex_agent.app import (
     NG_FAILURE_CLASS_KEY,
+    NG_FAILURE_COUNTS_AS_ZERO_KEY,
     NG_FAILURE_TERMINAL_KEY,
     ApexAgent,
     ApexAgentConfig,
@@ -165,6 +166,30 @@ def test_terminal_failure_is_marked_for_sidecar_without_retry() -> None:
 
     assert payload[NG_FAILURE_CLASS_KEY] == "agent_incomplete"
     assert payload[NG_FAILURE_TERMINAL_KEY] is True
+    assert NG_FAILURE_COUNTS_AS_ZERO_KEY not in payload
+
+
+def test_incomplete_rollout_counts_as_a_zero_in_the_metrics() -> None:
+    from nemo_gym.rollouts.rollout_collection import _counted_failure_rows
+
+    incomplete = (
+        _agent()
+        ._failure(_body(), "maximum turns reached", failure_class="agent_incomplete", counts_as_zero=True)
+        .model_dump()
+    )
+    assert incomplete[NG_FAILURE_TERMINAL_KEY] is True
+    assert incomplete[NG_FAILURE_COUNTS_AS_ZERO_KEY] is True
+
+    # No failure class is named here: the marker alone puts the rollout in the denominator.
+    counted = _counted_failure_rows([incomplete], [])
+    assert [row["reward"] for row in counted] == [0.0]
+    assert counted[0]["mask_sample"] is False
+    rewards = [1.0, *(row["reward"] for row in counted)]
+    assert sum(rewards) / len(rewards) == 0.5
+
+    # A fault around the model stays out of the metrics unless the caller asks for its class.
+    sandbox_fault = _agent()._failure(_body(), "sandbox died", failure_class="sandbox_error").model_dump()
+    assert _counted_failure_rows([sandbox_fault], []) == []
 
 
 @pytest.mark.parametrize(
