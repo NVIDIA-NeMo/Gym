@@ -87,7 +87,8 @@ Pass: `check: <p> passed, 0 failed`.
 Two options record what you reviewed instead of failing on it: `--normalize-newlines` for native prompts with CRLF (a
 difference to record, Step 5), and `--allow-values <file>` for short hidden values that match shipped code by
 coincidence (swe_rebench: test names such as `continue` inside vendored modules; it covers files under
-`environment/` only: a match in `instruction.md` or `[environment].env` always fails); keep both in the evidence.
+`environment/` only: a match in `instruction.md` or the agent-visible `[environment]` settings always fails); keep
+both in the evidence.
 Loading and unknown `task.toml` keys are checked by `gym dataset validate` (G2): an overlay task loads only after
 prepare has recorded its base image.
 
@@ -171,14 +172,15 @@ gym dev compare <G4 rollouts.jsonl> <G5 rollouts.jsonl> --key <field>   # only w
 `first-request` passes when at least one pair exists, every task is paired, and no pair reports `model differs`,
 `tools differs` (the tool names, then each complete tool definition, in any order of tools and of object keys),
 `sampling differs` (every top-level request key but `messages`, `tools`, `stream` and
-`stream_options`, so `tool_choice` counts) or `roles differ`, and no contamination flag (`AGENTS.md`, `CLAUDE.md`,
-`Instructions from`, `<available_skills>`, counted in every message but the assistant's) has a count that differs
-between the sides or sits on a system-prompt line that differs. A capture file without an agent request is listed as
-`no agent request`. A flag on the native side only is host contamination (fix the isolation in
-[native-baseline.md](native-baseline.md#isolation)); a flag on the Harbor side only is something in the task or
-image the native arm lacks. OpenCode's own system prompt lists its built-in skill as `<available_skills>` even with
-an empty HOME (math 5/5), and its coding prompt names `AGENTS.md` ("suggest writing it to AGENTS.md"; scale_swe 3/3,
-not math): a flag on both sides on identical system-prompt lines is noted, not failed.
+`stream_options`, so `tool_choice` counts), `roles differ` or `messages differ` (any message but the system prompt,
+whole and in order, the first user message's text aside: the pairing matched it), and no contamination flag
+(`AGENTS.md`, `CLAUDE.md`, `Instructions from`, `<available_skills>`, counted in every message but the assistant's)
+has a count that differs between the sides or sits on a system-prompt line that differs. A capture file without an
+agent request is listed as `no agent request`. A flag on the native side only is host contamination (fix the
+isolation in [native-baseline.md](native-baseline.md#isolation)); a flag on the Harbor side only is something in the
+task or image the native arm lacks. OpenCode's own system prompt lists its built-in skill as `<available_skills>`
+even with an empty HOME (math 5/5), and its coding prompt names `AGENTS.md` ("suggest writing it to AGENTS.md";
+scale_swe 3/3, not math): a flag on both sides on identical system-prompt lines is noted, not failed.
 Confirm it in the pair's `native.system.txt` and `harbor.system.txt` under `--out`. Differences in the system
 prompt's working-directory, date or provider-prefix lines are reported only; write them down. A pair matched only
 after undoing argv quoting means the Harbor arm needs `argv_prompt_quoting`; one matched only with CRLF read as LF

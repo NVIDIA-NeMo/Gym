@@ -113,7 +113,12 @@ def contents(path: Path, base: Path, problems: list[str]) -> Iterator[tuple[str,
     the start is scanned). Lines of mixed widths that happen to use only the base64 alphabet (a word list) and do not
     decode are not base64 and are skipped.
     """
-    yield from _walk(str(path.relative_to(base)), path.read_bytes(), problems, [MAX_DECODED], 0)
+    yield from layers(str(path.relative_to(base)), path.read_bytes(), problems)
+
+
+def layers(label: str, blob: bytes, problems: list[str]) -> Iterator[tuple[str, bytes]]:
+    """`contents` of bytes that are not a file (an environment variable's name or value), with their own budget."""
+    yield from _walk(label, blob, problems, [MAX_DECODED], 0)
 
 
 def _walk(label: str, blob: bytes, problems: list[str], budget: list[int], depth: int) -> Iterator[tuple[str, bytes]]:

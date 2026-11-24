@@ -26,7 +26,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from scripts.harbor_conversion_checks import check, scan
+from scripts.harbor_conversion_checks import check, first_request, scan
 from scripts.harbor_conversion_checks.__main__ import main
 from scripts.harbor_conversion_checks.fake_model import FakeModelServer
 from scripts.harbor_conversion_checks.messages import message_text, unquote_argv
@@ -542,6 +542,76 @@ def test_first_request_unpaired_task_fails(tmp_path, capsys):
     assert capsys.readouterr().out.splitlines()[-1] == "first-request: 0 paired, 2 unpaired, 0 differing"
 
 
+CALL = {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": '{"cmd": "ls"}'}}
+CONTEXT = [
+    {"role": "user", "content": "Constraints: be brief."},
+    {"role": "assistant", "content": None, "tool_calls": [CALL]},
+    {"role": "tool", "tool_call_id": "c1", "content": "a.txt"},
+    {"role": "user", "content": [{"type": "text", "text": "Look at "}, {"type": "text", "text": "a.txt"}]},
+]
+
+
+def _changed(number, **fields):
+    """CONTEXT with message `number` (1-based, after the first user message) given `fields`."""
+    return [{**m, **fields} if i == number else m for i, m in enumerate(CONTEXT, 1)]
+
+
+@pytest.mark.parametrize(
+    "harbor_context, problem",
+    [
+        (CONTEXT, None),
+        (_changed(1, content="The answer is 42."), "messages differ: non-system message 2 (user)"),
+        (_changed(2, content="I will run ls."), "messages differ: non-system message 3 (assistant)"),
+        (
+            _changed(2, tool_calls=[{**CALL, "function": {"name": "bash", "arguments": '{"cmd": "cat answer"}'}}]),
+            "messages differ: non-system message 3 (assistant)",
+        ),
+        (_changed(3, content="answer.txt"), "messages differ: non-system message 4 (tool)"),
+        (
+            _changed(4, content=[{"type": "text", "text": "Look at a.txt"}]),
+            "messages differ: non-system message 5 (user)",
+        ),
+        (
+            _changed(4, content=list(reversed(CONTEXT[3]["content"]))),
+            "messages differ: non-system message 5 (user)",
+        ),
+    ],
+)
+def test_first_request_compares_every_later_message_whole(tmp_path, capsys, harbor_context, problem):
+    print(first_request.__file__)
+    # The first prompt is argv-quoted and CRLF on the native side: the pairing's normalization still applies.
+    _capture(tmp_path / "native", "0-0", '"Say \\"hi\\"\r\nnow"', more_messages=CONTEXT)
+    _capture(tmp_path / "harbor", "0-0", 'Say "hi"\nnow', more_messages=harbor_context)
+    assert _first_request(tmp_path) == (1 if problem else 0)
+    out = capsys.readouterr().out
+    assert "argv_prompt_quoting" in out and "newlines: the user messages differ" in out
+    assert out.splitlines()[-1] == f"first-request: 1 paired, 0 unpaired, {1 if problem else 0} differing"
+    assert (problem in out) if problem else "messages differ: " not in out
+
+
+IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+
+@pytest.mark.parametrize(
+    "harbor_user, problem",
+    [
+        ([{"type": "text", "text": "task"}, IMAGE], None),
+        ([{"type": "text", "text": "task"}, {**IMAGE, "image_url": {"url": "data:image/png;base64,BBBB"}}], True),
+        ([IMAGE, {"type": "text", "text": "task"}], True),
+        ([{"type": "text", "text": "task"}], True),
+        ("task", True),
+    ],
+)
+def test_first_request_compares_the_first_user_messages_parts_but_its_text(tmp_path, capsys, harbor_user, problem):
+    print(first_request.__file__)
+    _capture(tmp_path / "native", "0-0", [{"type": "text", "text": "task"}, IMAGE])
+    _capture(tmp_path / "harbor", "0-0", harbor_user)
+    assert _first_request(tmp_path) == (1 if problem else 0)
+    out = capsys.readouterr().out
+    assert out.splitlines()[-1] == f"first-request: 1 paired, 0 unpaired, {1 if problem else 0} differing"
+    assert ("messages differ: non-system message 1 (user)" in out) == bool(problem)
+
+
 def test_first_request_extra_harbor_user_message_with_instructions_fails(tmp_path, capsys):
     _capture(tmp_path / "native", "0-0", "task")
     extra = {"role": "user", "content": "Instructions from: /workspace/AGENTS.md\nThe answer is 42."}
@@ -888,6 +958,122 @@ def test_hidden_value_in_a_dataset_env_override_fails_as_in_task_toml(tmp_path, 
     (dataset / "dataset.toml").write_text('[gym.tasks.t1.environment.env]\nOTHER = "fine"\n')
     assert _check(dataset, rows, "--hidden", "expected") == 1
     assert "t1/task.toml [environment].env contains expected value" in capsys.readouterr().out
+
+
+def _encoded(text, *, gzipped=False):
+    """`text` after 60 lines of filler, gzipped or not, as one base64 line long enough to be decoded."""
+    data = ("\n".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(60)) + f"\n{text}\n").encode()
+    return base64.b64encode(gzip.compress(data, mtime=0) if gzipped else data).decode()
+
+
+ENV_DECLARATIONS = {
+    "task": (
+        "t1/task.toml [environment].env",
+        lambda body: ("t1/task.toml", f'version = "1.0"\n[environment.env]\n{body}'),
+    ),
+    "dataset": (
+        'dataset.toml [gym.tasks."t1".environment].env',
+        lambda body: ("dataset.toml", f"[gym.tasks.t1.environment.env]\n{body}"),
+    ),
+}
+
+
+@pytest.mark.parametrize("declaration", ["task", "dataset"])
+@pytest.mark.parametrize(
+    "body, where",
+    [
+        (f'EXPECTED = "{_encoded(ANSWER)}"', "[base64 at 0]"),
+        (f'EXPECTED = "{_encoded(ANSWER, gzipped=True)}"', "[base64 at 0]"),
+        (f'"{ANSWER}" = "1"', " name"),
+        (f'"{_encoded(ANSWER)}" = "1"', " name[base64 at 0]"),
+    ],
+)
+def test_encoded_hidden_values_and_names_in_the_effective_env_fail(tmp_path, capsys, declaration, body, where):
+    print(check.__file__)
+    dataset, rows = _dataset(tmp_path)
+    label, write = ENV_DECLARATIONS[declaration]
+    path, text = write(body)
+    (dataset / path).write_text(text)
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert f"{label}{where} contains expected value {ANSWER!r}" in capsys.readouterr().out
+
+
+def test_encoded_hidden_value_in_env_replaced_or_cleared_by_the_dataset_passes(tmp_path, capsys):
+    print(check.__file__)
+    dataset, rows = _dataset(tmp_path)
+    (dataset / "t1" / "task.toml").write_text(f'version = "1.0"\n[environment.env]\nEXPECTED = "{_encoded(ANSWER)}"\n')
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    capsys.readouterr()
+    for value in (_encoded("nothing hidden here"), ""):
+        (dataset / "dataset.toml").write_text(f'[gym.tasks.t1.environment.env]\nEXPECTED = "{value}"\nOTHER = "x"\n')
+        assert _check(dataset, rows, "--hidden", "expected") == 0
+        assert _statuses(capsys)["hidden-values"] == "PASS"
+
+
+@pytest.mark.parametrize("declaration", ["task", "dataset"])
+@pytest.mark.parametrize("bound", ["zip", "nesting", "budget"])
+def test_an_env_value_past_the_scan_bounds_is_not_scanned(tmp_path, capsys, monkeypatch, declaration, bound):
+    print(check.__file__)
+    dataset, rows = _dataset(tmp_path)
+    label, write = ENV_DECLARATIONS[declaration]
+    value = _encoded("nothing hidden here")
+    if bound == "zip":
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("answer.txt", "x" * 1024)
+        value = base64.b64encode(archive.getvalue()).decode()
+    elif bound == "nesting":
+        for _ in range(scan.MAX_NESTING):
+            value = base64.b64encode(value.encode()).decode()
+    else:
+        monkeypatch.setattr(scan, "MAX_DECODED", 100)
+    path, text = write(f'SEED = "{value}"')
+    (dataset / path).write_text(text)
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    out = capsys.readouterr().out
+    assert "FAIL hidden-values" in out and f"{label}[base64 at 0]" in out and "not scanned" in out
+
+
+MCP = '[[environment.mcp_servers]]\nname = "tools"\ntransport = "stdio"\ncommand = "serve"\n'
+SSE = 'name = "tools"\ntransport = "sse"\nurl = "http://h/?q=' + ANSWER + '"\n'
+
+
+@pytest.mark.parametrize(
+    "task_toml, dataset_toml, label",
+    [
+        (MCP + f'args = ["{ANSWER}"]\n', "", "t1/task.toml [environment].mcp_servers"),
+        ("[[environment.mcp_servers]]\n" + SSE, "", "t1/task.toml [environment].mcp_servers"),
+        (
+            "",
+            "[[gym.tasks.t1.environment.mcp_servers]]\n" + SSE,
+            'dataset.toml [gym.tasks."t1".environment].mcp_servers',
+        ),
+        (f'[environment]\nskills_dir = "/skills/{ANSWER}"\n', "", "t1/task.toml [environment].skills_dir"),
+        (f'[environment.healthcheck]\ncommand = "echo {ANSWER}"\n', "", "t1/task.toml [environment].healthcheck"),
+    ],
+)
+def test_hidden_value_in_agent_visible_environment_settings_fails(tmp_path, capsys, task_toml, dataset_toml, label):
+    print(check.__file__)
+    dataset, rows = _dataset(tmp_path)
+    (dataset / "t1" / "task.toml").write_text('version = "1.0"\n' + task_toml)
+    (dataset / "dataset.toml").write_text(dataset_toml)
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert f"{label} contains expected value {ANSWER!r}" in capsys.readouterr().out
+
+
+def test_only_the_image_and_workdir_settings_exempt_a_hidden_value(tmp_path, capsys):
+    print(check.__file__)
+    dataset, rows = _dataset(tmp_path)
+    (dataset / "t1" / "environment" / "answer.txt").write_text(ANSWER)
+    (dataset / "t1" / "task.toml").write_text(f'version = "1.0"\n{MCP}args = ["{ANSWER}"]\n')
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert f"t1/environment/answer.txt contains expected value {ANSWER!r}" in capsys.readouterr().out
+    # A hidden value equal to the image or the working directory is visible by design and not scanned.
+    for setting in (f'docker_image = "{ANSWER}"', f'workdir = "{ANSWER}"'):
+        for name in ("t1", "t2"):
+            (dataset / name / "task.toml").write_text(f'version = "1.0"\n[environment]\n{setting}\n')
+        assert _check(dataset, rows, "--hidden", "expected") == 0
+        assert _statuses(capsys)["hidden-values"] == "PASS"
 
 
 @pytest.mark.parametrize(

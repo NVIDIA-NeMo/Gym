@@ -29,7 +29,7 @@ from scripts.harbor_conversion_checks.messages import (
     read_id_list,
     task_folders,
 )
-from scripts.harbor_conversion_checks.scan import candidates, contents, leaves
+from scripts.harbor_conversion_checks.scan import candidates, contents, layers, leaves
 
 
 CANARY_LINE = re.compile(r"^(<!--.*canary.*-->|#.*canary.*)$", re.IGNORECASE)
@@ -390,13 +390,14 @@ def effective_environment(environment: object, override: object) -> tuple[object
 
 
 def _environment_settings(folder: Path, environment: object) -> set[str]:
-    """What configures the agent's own environment, visible by design: the values of the effective `[environment]`
-    table but `env` (the working directory, `docker_image`) and the images `FROM` lines of environment/Dockerfile name.
-    An image pinned by digest also counts without it (`<image>@sha256:<hex>` names `<image>`). The `env` variables are
-    scanned instead: the agent reads them, and they are where an adapter could put a reference answer."""
+    """What configures the agent's own environment, visible by design: the effective `[environment]` table's
+    `docker_image` and `workdir`, and the images `FROM` lines of environment/Dockerfile name. An image pinned by digest
+    also counts without it (`<image>@sha256:<hex>` names `<image>`). The `env` variables and the other settings that
+    reach the agent (`mcp_servers`, `skills_dir`, `healthcheck`) are scanned instead: an adapter could put a reference
+    answer there."""
+    settings = set()
     if isinstance(environment, dict):
-        environment = {key: value for key, value in environment.items() if key != "env"}
-    settings = {leaf.strip() for leaf in leaves(environment)}
+        settings = {leaf.strip() for key in ("docker_image", "workdir") for leaf in leaves(environment.get(key))}
     dockerfile = folder / "environment" / "Dockerfile"
     if dockerfile.is_file():
         settings.update(image.decode(errors="replace") for image in FROM_LINE.findall(dockerfile.read_bytes()))
@@ -443,27 +444,35 @@ def _check_hidden_values(
         scanned += len(found)
         if not found:
             continue
-        env = (environment.get("env") or {}) if isinstance(environment, dict) else {}
-        if not isinstance(env, dict):
-            env = {"": env}
-        sources = {
-            f"{(folder / 'task.toml').relative_to(base)} [environment].env": [
-                value for key, value in env.items() if key not in overridden
-            ],
-            f'dataset.toml [gym.tasks."{task_id}".environment].env': [
-                value for key, value in env.items() if key in overridden
-            ],
-        }
-        for env_label, values in sources.items():
-            joined = "\n".join(leaves(values))
-            for text, name in sorted(found.items()):
-                if text in joined:
-                    failures.append(f"{env_label} contains {name} value {text[:60]!r}")
         # A JSON file in environment/ holds a value escaped: quotes, backslashes, newlines and (by default) non-ASCII.
         forms = {
             text: {text.encode(), json.dumps(text)[1:-1].encode(), json.dumps(text, ensure_ascii=False)[1:-1].encode()}
             for text in found
         }
+        # The effective `env` reaches the agent: each variable's name and value get the traversal files get. So do
+        # the MCP servers, the skills folder and the healthcheck command, which the harbor Environment Server hands
+        # the harness or writes into the agent's sandbox.
+        task_toml = f"{(folder / 'task.toml').relative_to(base)} [environment]"
+        override_toml = f'dataset.toml [gym.tasks."{task_id}".environment]'
+        env = (environment.get("env") or {}) if isinstance(environment, dict) else {}
+        if not isinstance(env, dict):
+            env = {"": env}
+        entries = []
+        for key, value in env.items():
+            source = f"{override_toml if key in overridden else task_toml}.env"
+            entries += ([(f"{source} name", key)] if key else []) + [(source, leaf) for leaf in leaves(value)]
+        override = (overrides.get(task_id) or {}).get("environment") if applied else None
+        for key in ("mcp_servers", "skills_dir", "healthcheck"):
+            source = f"{override_toml if isinstance(override, dict) and key in override else task_toml}.{key}"
+            value = environment.get(key) if isinstance(environment, dict) else None
+            entries += [(source, leaf) for leaf in leaves(value)]
+        for entry_label, text in entries:
+            for label, data in layers(entry_label, text.encode(errors="replace"), problems):
+                failures += [
+                    f"{label} contains {name} value {hidden[:60]!r}"
+                    for hidden, name in sorted(found.items())
+                    if any(form in data for form in forms[hidden])
+                ]
         instructions = [folder / "instruction.md", *sorted((folder / "steps").glob("*/instruction.md"))]
         # A step's workdir/ is uploaded into the agent's working directory before its turn; its tests/ and
         # solution/ stay with the verifier and the oracle.

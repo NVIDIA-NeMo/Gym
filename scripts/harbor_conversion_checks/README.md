@@ -62,13 +62,15 @@ runs after G2. The checks:
 - `hidden-values` (needs `--hidden FIELD` or `--hidden-from task_data.py`): fails when a hidden native value is in
   `instruction.md`, a `steps/<name>/instruction.md`, the effective `[environment].env` variables (`task.toml`'s with
   the dataset's `dataset.toml` `[gym.tasks."<task>".environment.env]` merged over them, as Gym's loader merges them),
-  or a file under `environment/` or a `steps/<name>/workdir/` (uploaded into the agent's working directory before its
-  turn). The `tests/` and `solution/` folders, the task's and each step's, stay with the verifier and the oracle and
-  are not scanned. A `dataset.toml` that Gym would not load, or an override of a shape this does not model, fails as
-  not scanned. Every file goes through one traversal: each base64 run of 1024+ characters (one line, or wrapped
-  as `base64` wraps) is decoded, a gzip is gunzipped (every member of the stream) and a tar is untarred, and each of
-  those layers is traversed the same way, so a base64 bundle and the same file on disk are scanned alike. A zip, xz
-  or bz2 file, base64 payload or tar member is reported as not scanned. JSON-escaped copies
+  the effective `mcp_servers`, `skills_dir` and `healthcheck` (which the harbor Environment Server hands the harness
+  or writes into the agent's sandbox), or a file under `environment/` or a `steps/<name>/workdir/` (uploaded into the
+  agent's working directory before its turn). The `tests/` and `solution/` folders, the task's and each step's, stay
+  with the verifier and the oracle and are not scanned. A `dataset.toml` that Gym would not load, or an override of a
+  shape this does not model, fails as not scanned. Every file, the name and value of every effective `env` variable,
+  and every string of those other settings goes through one traversal: each base64 run of 1024+ characters (one
+  line, or wrapped as `base64` wraps) is decoded, a gzip is gunzipped (every member of the stream) and a tar is
+  untarred, and each of those layers is traversed the same way, so a base64 bundle and the same file on disk are
+  scanned alike. A zip, xz or bz2 file, base64 payload or tar member is reported as not scanned. JSON-escaped copies
   of a value are found, but case-changed copies and other encodings are not scanned and must be read by hand
   (`first-request` is the stronger evidence).
 - `hidden-template` (needs `--template`, `--template-hidden NAME`): fails when a template file Gym renders
@@ -85,7 +87,7 @@ runs after G2. The checks:
 A check whose inputs are absent prints `SKIP`. What a check cannot scan in full fails it, naming the file: a zip, xz
 or bz2 file, base64 payload or tar member, a gzip that does not gunzip, ends early or has other bytes after it, a run
 laid out as base64 that does not decode, a layer nested more than 8 deep (each base64 run, gunzip and tar member is
-one layer), or anything past 256 MiB of decoded bytes per file (all layers together).
+one layer), or anything past 256 MiB of decoded bytes per file or `env` name or value (all layers together).
 
 `secrets` and `local-paths` scan every file under DATASET, so on a folder that was already validated they also scan
 the records validation wrote there (`compose-images.json`, `compose-images.json.lock`, `manifest.toml`).
@@ -119,10 +121,10 @@ so the count can be lower than the number of hidden leaves:
 
 - it occurs in the row's prompt or in the `tools` the row offers (tool names and descriptions), so pass rows that
   still carry their `tools` for a tool environment;
-- it equals a value of the task's effective `[environment]` table (`task.toml`'s, with a `dataset.toml` override
-  applied: the working directory, `docker_image`) or an
-  image a `FROM` line of `environment/Dockerfile` names, with or without its `@sha256:` digest. The `[environment].env`
-  variables are not exempt: the agent reads them, so they are scanned.
+- it equals the task's effective `[environment]` `docker_image` or `workdir` (`task.toml`'s, with a `dataset.toml`
+  override applied) or an image a `FROM` line of `environment/Dockerfile` names, with or without its `@sha256:`
+  digest. No other `[environment]` setting is exempt: `env`, `mcp_servers`, `skills_dir` and `healthcheck` reach the
+  agent and are scanned.
 
 A short generic value can also occur by coincidence in the code the adapter ships (a test named `continue` inside a
 vendored module). Read each match, and list the ones that are not row data in a file passed as `--allow-values` (one
@@ -235,8 +237,13 @@ quoting undone (noted as `argv_prompt_quoting`) and CRLF or CR read as LF (noted
 names, then each tool's whole definition, such as its description, parameter schema and `strict`, in any order of
 tools and of JSON keys; a changed definition reports `tools differs: the definition of NAME`), every other top-level
 request key except `messages`, `tools`, `stream` and `stream_options` (the sampling settings: `temperature`,
-`max_tokens`, `tool_choice`, `top_k`, `seed`, `chat_template_kwargs` and so on) and the message roles,
-prints a unified diff of the system prompts, and counts `AGENTS.md`, `CLAUDE.md`, `Instructions from` and
+`max_tokens`, `tool_choice`, `top_k`, `seed`, `chat_template_kwargs` and so on), the message roles, and every
+message but the system and developer ones, whole and in order: content text and content parts (in order), tool calls,
+tool results and any other field (a change reports `messages differ: non-system message N (role)`). Two things are
+tolerated: the first user message's text, which the pairing already matched (exactly, or with argv quoting undone and
+newlines read as LF; its other content parts are still compared), and the system prompt, which is diffed on its own
+and whose dynamic lines (provider prefix, working directory, date) are reported, not failed. It prints a unified diff
+of the system prompts, and counts `AGENTS.md`, `CLAUDE.md`, `Instructions from` and
 `<available_skills>` in every message but the assistant's. `--out` writes each pair's system prompt and user message
 to `DIR/<sha256 of the user message, 12 hex>/{native,harbor}.{system,user}.txt`. A capture file with no request that
 offers tools (a rollout that died before its first agent call) is listed as `no agent request`, not counted as
@@ -244,9 +251,9 @@ unpaired. Every capture is compared: the repeats of a prompt (and distinct tasks
 order, a capture left over on one side is unpaired, and `--out` writes the second and later pairs of a prompt to
 `<key>.2`, `<key>.3` and so on.
 
-It exits 1 when there is no pair at all (0 pairs fails), on an unpaired task, a model, tool, sampling or role
-sequence difference, or a flag whose count differs between the sides or that sits on a system-prompt line that
-differs (a host's `Instructions from: .../AGENTS.md` on one side). OpenCode's
+It exits 1 when there is no pair at all (0 pairs fails), on an unpaired task, a model, tool, sampling, role
+sequence or non-system message difference, or a flag whose count differs between the sides or that sits on a
+system-prompt line that differs (a host's `Instructions from: .../AGENTS.md` on one side). OpenCode's
 built-in prompt names `AGENTS.md` and lists its built-in skills in `<available_skills>` identically on both paths: such
 flags are noted, not failed. Other system-prompt lines that differ, such as the working directory or the date, are
 reported only.

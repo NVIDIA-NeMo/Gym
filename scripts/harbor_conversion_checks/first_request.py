@@ -11,7 +11,10 @@ a note, not a failure. Every capture is compared: repeats of a prompt (and disti
 file-name order, and a capture left over on one side is unpaired.
 Each pair compares the model, the tools (their names, then each definition whole, in any order of tools and of object
 keys), every other top-level request key but `messages`, `stream` and `stream_options` (the sampling settings,
-`tool_choice` among them) and the message roles. A contamination flag
+`tool_choice` among them), the message roles and every message but the system prompt whole and in order (content text
+and parts, tool calls, tool results, other fields), the first user message's text aside: the pairing matched it. The
+system prompt is diffed and reported, not failed (its provider prefix, working directory and date differ by path). A
+contamination flag
 (`AGENTS.md`, `CLAUDE.md`, `Instructions from`, `<available_skills>`), counted over every message but the assistant's,
 fails a pair when its count differs between the sides or it sits on a system-prompt line that differs; OpenCode's
 built-in prompt carries some of them identically on both paths. Zero pairs fails.
@@ -29,6 +32,8 @@ from scripts.harbor_conversion_checks.messages import InputError, iter_jsonl, lf
 NOT_SAMPLING = ("messages", "tools", "stream", "stream_options", "model")
 FLAGS = ("AGENTS.md", "CLAUDE.md", "Instructions from", "<available_skills>")
 DIFF_LINES = 40
+# Stands in for the first user message's text in the message context: the pairing has compared it.
+FIRST_PROMPT = "<first user prompt>"
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -67,6 +72,30 @@ def _messages(request: dict) -> list[dict]:
     return [m for m in messages if isinstance(m, dict)] if isinstance(messages, list) else []
 
 
+def _context(messages: list[dict]) -> list[str]:
+    """Every message but the system and developer ones, in order, each whole as canonical JSON, with the text of the
+    first user message (a string, or each text part) replaced by `FIRST_PROMPT`."""
+    context, first = [], True
+    for message in messages:
+        if message.get("role") in ("system", "developer"):
+            continue
+        content = message.get("content")
+        if first and message.get("role") == "user":
+            first = False
+            if isinstance(content, str):
+                content = FIRST_PROMPT
+            elif isinstance(content, list):
+                content = [
+                    {**part, "text": FIRST_PROMPT}
+                    if isinstance(part, dict) and isinstance(part.get("text"), str)
+                    else part
+                    for part in content
+                ]
+            message = {**message, "content": content}
+        context.append(json.dumps(message, sort_keys=True))
+    return context
+
+
 def describe(request: dict) -> dict:
     messages = _messages(request)
     system = "\n".join(message_text(m.get("content")) for m in messages if m.get("role") in ("system", "developer"))
@@ -84,6 +113,7 @@ def describe(request: dict) -> dict:
         "tool_definitions": {name: sorted(texts) for name, texts in definitions.items()},
         "sampling": {key: value for key, value in request.items() if key not in NOT_SAMPLING},
         "roles": [m.get("role") for m in messages],
+        "context": _context(messages),
         "flags": {flag: seen.count(flag) for flag in FLAGS if flag in seen},
         "system": system,
     }
@@ -116,7 +146,15 @@ def compare(native_key: str, harbor_key: str, native: dict, harbor: dict) -> dic
             name for name in a["tool_definitions"] if a["tool_definitions"][name] != b["tool_definitions"][name]
         )
         problems += [f"tools differs: the definition of {', '.join(changed)}"] if changed else []
-    problems += ["roles differ"] if a["roles"] != b["roles"] else []
+    if a["roles"] != b["roles"]:
+        problems.append("roles differ")
+    else:
+        changed = [
+            f"{number} ({json.loads(x).get('role')})"
+            for number, (x, y) in enumerate(zip(a["context"], b["context"]), 1)
+            if x != y
+        ]
+        problems += [f"messages differ: non-system message {', '.join(changed)}"] if changed else []
     diff = list(
         difflib.unified_diff(a["system"].splitlines(), b["system"].splitlines(), "native", "harbor", n=0, lineterm="")
     )
@@ -130,8 +168,8 @@ def compare(native_key: str, harbor_key: str, native: dict, harbor: dict) -> dic
     return {
         "key": hashlib.sha256(harbor_key.encode()).hexdigest()[:12],
         "files": {"native": native["file"], "harbor": harbor["file"]},
-        "native": {k: v for k, v in a.items() if k not in ("system", "tool_definitions")},
-        "harbor": {k: v for k, v in b.items() if k not in ("system", "tool_definitions")},
+        "native": {k: v for k, v in a.items() if k not in ("system", "tool_definitions", "context")},
+        "harbor": {k: v for k, v in b.items() if k not in ("system", "tool_definitions", "context")},
         "problems": problems,
         "notes": notes,
         "system_diff": diff[:DIFF_LINES],

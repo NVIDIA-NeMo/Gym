@@ -281,8 +281,8 @@ Short hidden values (under 8 characters, such as a numeric answer) are counted, 
 `--template-hidden` so the check fails on any template file outside `solution/` and `tests/` that references them.
 A longer generic value can match shipped code by coincidence (a test named `continue` in a vendored module): read
 each match, and list the ones that are not row data in a file for `--allow-values` (it covers files under
-`environment/` only; a match in `instruction.md` or `[environment].env` always fails). A `--hidden` field that no
-native row has exits 2 (a typo or a wrong dotted path).
+`environment/` only; a match in `instruction.md` or the agent-visible `[environment]` settings always fails). A
+`--hidden` field that no native row has exits 2 (a typo or a wrong dotted path).
 
 Before moving on:
 - [ ] `check` reports 0 failed on the folder G1b names (Step 9).
@@ -345,7 +345,7 @@ claim a gate you did not run: paste the command, the run folder and the result.
 | G3 negative | controls from a never-validated conversion, under their own dataset folder name, into a folder that must not exist: empty or wrong solution and the plant probes score 0 unmasked on both arms; `--strict --expect 0` PASS |
 | G4 native smoke | the smoke dataset's native rows, parity harness and model flags, model-call capture on |
 | G5 Harbor smoke | the smoke dataset, same harness and flags, `harbor_arm.yaml` and `harbor_arm_harness.yaml`, capture on |
-| G6 comparison | `first-request`: at least one pair, every task paired, no model, tool (names and complete definitions), sampling or role difference, no contamination flag whose count or system-prompt line differs between the sides; `harbor_parity --min-tasks 3` per-task table; masked and failed counts |
+| G6 comparison | `first-request`: at least one pair, every task paired, no model, tool (names and complete definitions), sampling, role or non-system message difference, no contamination flag whose count or system-prompt line differs between the sides; `harbor_parity --min-tasks 3` per-task table; masked and failed counts |
 
 `gym dataset validate` exits 1 on a negative control by design, and labels a 0 "oracle solved": read the rewards and
 `failure_kind` from `rollouts_run_summary.json`. A smoke where every task scores 1 on both arms says nothing about
