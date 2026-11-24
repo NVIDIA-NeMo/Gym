@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -209,44 +210,81 @@ def _failing(fail: BaseException):
     return app
 
 
-def _model_server_app(route):
-    """``route`` on every path, behind the request middleware a model server runs, in the order it runs it."""
-    from types import SimpleNamespace
+def _model_server_app(responses, *, stream_keepalive_s: float | None = None):
+    """A minimal model server whose ``responses()`` awaits ``responses``, with the request middleware
+    ``run_webserver`` adds, in its order."""
+    from unittest.mock import MagicMock
 
-    from fastapi import FastAPI
+    from fastapi import Body
 
-    from nemo_gym.models.base_responses_api_model import SimpleResponsesAPIModel
-    from nemo_gym.server_runtime.base_server import SimpleServer
-    from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
+    from nemo_gym.client.server_client import ServerClient
+    from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
     from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
 
-    app = FastAPI()
-    app.post("/{path:path}")(route)
-    app.add_middleware(ModelSamplingMiddleware)
-    server = SimpleNamespace(config=SimpleNamespace(name="policy_model"))
-    SimpleServer.setup_exception_middleware(server, app)
-    SimpleResponsesAPIModel.setup_request_timing(server, app)
-    SimpleServer.setup_cancellation_middleware(server, app)
+    class _Model(SimpleResponsesAPIModel):
+        def _mints_response_ids(self) -> bool:
+            return True
+
+        async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()):
+            return await responses()
+
+        async def chat_completions(self, body: Any = Body()):
+            raise NotImplementedError
+
+    server = _Model(
+        config=BaseResponsesAPIModelConfig(
+            host="0.0.0.0", port=8099, entrypoint="", name="policy_model", stream_keepalive_s=stream_keepalive_s
+        ),
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+    )
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    server.setup_request_timing(app)
+    server.setup_cancellation_middleware(app)
     install_trace_context_path(app)
     return app
 
 
-async def _serve(app, path: str, *, disconnect_once: asyncio.Event | None = None) -> list[dict[str, Any]]:
-    """POST to ``app`` over raw ASGI and return what reached the client; the client leaves once ``disconnect_once``
-    is set."""
+def _response():
+    from nemo_gym.core.responses_api_types import NeMoGymResponse
+
+    return NeMoGymResponse(
+        id="resp_1",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        tools=[],
+    )
+
+
+async def _serve(
+    app, path: str, *, stream: bool = False, disconnect_once: asyncio.Event | None = None
+) -> list[dict[str, Any]]:
+    """POST a Responses request to ``app`` over raw ASGI and return what reached the client.
+
+    The client leaves once ``disconnect_once`` is set; without it, a streaming client leaves after its first body
+    message."""
     sent: list[dict[str, Any]] = []
     requested = False
+    leave = disconnect_once or asyncio.Event()
+    body = json.dumps({"input": "hi", **({"stream": True} if stream else {})}).encode()
 
     async def receive() -> dict[str, Any]:
         nonlocal requested
         if not requested:
             requested = True
-            return {"type": "http.request", "body": b"{}", "more_body": False}
-        await (disconnect_once or asyncio.Event()).wait()
+            return {"type": "http.request", "body": body, "more_body": False}
+        await leave.wait()
         return {"type": "http.disconnect"}
 
     async def send(message: dict[str, Any]) -> None:
         sent.append(message)
+        if stream and disconnect_once is None and message["type"] == "http.response.body":
+            leave.set()
 
     scope = {
         "type": "http",
@@ -258,7 +296,7 @@ async def _serve(app, path: str, *, disconnect_once: asyncio.Event | None = None
         "raw_path": path.encode(),
         "root_path": "",
         "query_string": b"",
-        "headers": [(b"content-type", b"application/json")],
+        "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
         "client": ("127.0.0.1", 50000),
         "server": ("127.0.0.1", 8000),
     }
@@ -284,26 +322,21 @@ async def test_a_client_that_leaves_before_the_reply_starts_is_a_cancelled_call_
     assert gym_metrics.MODEL_TIME_TO_FIRST_BYTE_INSTRUMENT not in metrics
 
 
-async def test_a_client_that_leaves_mid_stream_is_a_cancelled_call_with_its_first_byte(collected_metrics) -> None:
-    from fastapi.responses import StreamingResponse
-
-    first_delta_sent = asyncio.Event()
-
-    async def stream():
-        yield DELTA
-        first_delta_sent.set()
+async def test_a_client_that_leaves_a_held_open_stream_is_a_cancelled_call_without_a_first_byte(
+    collected_metrics,
+) -> None:
+    async def generating() -> None:
         await asyncio.sleep(3600)
 
-    async def streaming() -> StreamingResponse:
-        return StreamingResponse(stream(), media_type="text/event-stream")
+    sent = await _serve(_model_server_app(generating, stream_keepalive_s=0.01), "/v1/responses", stream=True)
 
-    sent = await _serve(_model_server_app(streaming), "/v1/responses", disconnect_once=first_delta_sent)
-
-    assert [message.get("body") for message in sent if message["type"] == "http.response.body"] == [DELTA]
+    (status,) = [message["status"] for message in sent if message["type"] == "http.response.start"]
+    assert status == 200
+    assert [message for message in sent if message["type"] == "http.response.body"], "the keepalive opened the stream"
     metrics = collected_metrics()
     attributes, _ = _only(metrics[gym_metrics.MODEL_CALL_DURATION_INSTRUMENT])
     assert attributes["nemo.gym.model.call_outcome"] == "cancelled"
-    _only(metrics[gym_metrics.MODEL_TIME_TO_FIRST_BYTE_INSTRUMENT])
+    assert gym_metrics.MODEL_TIME_TO_FIRST_BYTE_INSTRUMENT not in metrics
 
 
 @pytest.mark.parametrize(
@@ -315,12 +348,16 @@ async def test_a_client_that_leaves_mid_stream_is_a_cancelled_call_with_its_firs
     ],
 )
 async def test_a_model_server_times_a_call_under_any_correlation_prefix(collected_metrics, path) -> None:
-    async def answered() -> dict[str, str]:
-        return {"id": "resp_1"}
+    reached: list[bool] = []
+
+    async def answered():
+        reached.append(True)
+        return _response()
 
     sent = await _serve(_model_server_app(answered), path)
 
     assert sent[0]["status"] == 200
+    assert reached == [True]
     metrics = collected_metrics()
     attributes, _ = _only(metrics[gym_metrics.MODEL_CALL_DURATION_INSTRUMENT])
     assert attributes == {
