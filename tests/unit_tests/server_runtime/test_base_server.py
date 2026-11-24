@@ -13,15 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import pickle
+import secrets
 import signal
 import socket
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import itsdangerous
 import uvicorn
 from aiohttp import ClientResponseError, RequestInfo
 from fastapi import Request
@@ -48,11 +53,14 @@ from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.server_runtime.base_server import (
+    RUN_SESSION_SECRET_ENV_PREFIX,
     BaseServer,
     KeepaliveHttpToolsProtocol,
     SimpleServer,
     UvicornProxyHeadersConfig,
+    run_session_secret,
 )
 from nemo_gym.server_runtime.ray_support import DictConfig, initialize_ray
 from nemo_gym.server_runtime.registry_server import HeadServer
@@ -1403,6 +1411,7 @@ class TestRunWebserverProxyKwargs:
         routes_sessions: bool = False,
         server_reuse_port: bool | None = None,
         unsupported_reason: str | None = None,
+        mcp: dict | None = None,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -1435,13 +1444,15 @@ class TestRunWebserverProxyKwargs:
 
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.uvicorn, "run", run)
 
-        server_config = BaseRunServerInstanceConfig(
+        # With ``mcp``, a resources server's config that serves the MCP endpoint with those options.
+        server_config = (BaseRunServerInstanceConfig if mcp is None else BaseResourcesServerConfig)(
             name="my_server",
             host="127.0.0.1",
             port=8000,
             entrypoint="app.py",
             num_workers=num_workers,
             uvicorn_reuse_port=server_reuse_port,
+            **({} if mcp is None else {"expose_tools_over_mcp": True, **mcp}),
         )
         ray_setting = ray_enabled
 
@@ -1776,11 +1787,134 @@ class TestRunWebserverProxyKwargs:
 
         assert 4096 == install.call_args.kwargs["backlog"]
 
+    def test_the_session_router_reads_the_cookie_as_the_session_middleware_does(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "install_session_routing", install)
+        monkeypatch.setattr(SimpleServer, "get_session_cookie_name", lambda self: "sid_named")
+        monkeypatch.setattr(SimpleServer, "get_session_secret", lambda self: "a secret")
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4, is_worker=True, routes_sessions=True)
+
+        assert install.call_args.kwargs["session_cookie"] == "sid_named"
+        assert install.call_args.kwargs["secret_key"] == "a secret"
+
+    @mark.parametrize(
+        ("mcp", "header", "credentials"),
+        [
+            ({"mcp_bearer_token": True}, "Authorization", "Bearer {token}"),
+            ({}, "X-NeMo-Gym-Session-Token", "{token}"),
+        ],
+    )
+    def test_the_session_router_reads_mcp_tokens_where_and_as_the_server_signs_them(
+        self, monkeypatch: MonkeyPatch, mcp: dict, header: str, credentials: str
+    ) -> None:
+        import nemo_gym.server_runtime.mcp_auto_exposure
+        from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
+        from nemo_gym.server_runtime.request_handling.session_routing import mcp_session_token
+
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "install_session_routing", install)
+        # The endpoint itself is not under test: only what run_webserver hands the session router.
+        monkeypatch.setattr(nemo_gym.server_runtime.mcp_auto_exposure, "maybe_auto_expose", MagicMock())
+        monkeypatch.setattr(SimpleServer, "get_session_secret", lambda self: "a secret")
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4, is_worker=True, routes_sessions=True, mcp=mcp)
+
+        routing = install.call_args.kwargs
+        assert routing["mcp_token_header"] == header
+        token = mcp_session_token_serializer("a secret").dumps({"sid": "s"})
+        assert mcp_session_token({header: credentials.format(token=token)}, routing["mcp_token_header"]) == token
+        assert routing["mcp_token_serializer"].loads(token) == {"sid": "s"}
+        # A token signed with the server's public name is refused.
+        with raises(itsdangerous.BadSignature):
+            routing["mcp_token_serializer"].loads(
+                mcp_session_token_serializer("TestSimpleServer___my_server").dumps({"sid": "s"})
+            )
+
     def test_a_listen_backlog_below_one_fails_before_uvicorn_starts(self, monkeypatch: MonkeyPatch) -> None:
         with raises(ValidationError, match="uvicorn_backlog"):
             self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 0}, num_workers=1)
 
         assert self.uvicorn_kwargs == {}
+
+
+def _run_secret_variable(server_name: str) -> str:
+    return RUN_SESSION_SECRET_ENV_PREFIX + hashlib.sha256(server_name.encode()).hexdigest()[:16].upper()
+
+
+class _Plain(SimpleServer):
+    def setup_webserver(self):
+        raise AssertionError("not served")
+
+
+class TestRunSessionSecret:
+    @staticmethod
+    def _server(server_class: type[SimpleServer], **resources_config: object) -> SimpleServer:
+        config_class = BaseResourcesServerConfig if resources_config else BaseRunServerInstanceConfig
+        return server_class(
+            config=config_class(name="my_server", host="", port=0, entrypoint="", **resources_config),
+            server_client=ServerClient(
+                head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
+            ),
+        )
+
+    @staticmethod
+    def _fresh(monkeypatch: MonkeyPatch, *server_names: str) -> None:
+        # An empty variable reads as unset, and monkeypatch restores each one when the test ends.
+        for name in server_names:
+            monkeypatch.setenv(_run_secret_variable(name), "")
+
+    def test_each_server_gets_one_secret_for_the_run_which_its_workers_inherit(self, monkeypatch: MonkeyPatch) -> None:
+        self._fresh(monkeypatch, "store", "other")
+        secret = run_session_secret("store")
+        assert secret and run_session_secret("store") == secret
+        assert run_session_secret("other") not in {"", secret}
+        # uvicorn starts a server's workers after its main process made the secret: a process started with that
+        # environment reads the same one.
+        worker = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from nemo_gym.server_runtime.base_server import run_session_secret; "
+                "print(run_session_secret('store'))",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=dict(os.environ),
+        )
+        assert worker.stdout.strip() == secret
+
+    def test_the_public_key_signs_sessions_unless_the_server_or_its_bearer_tokens_take_a_run_secret(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        self._fresh(monkeypatch, "my_server")
+
+        class Lending(_Plain):
+            signs_sessions_with_run_secret = True
+
+        plain = self._server(_Plain)
+        assert plain.session_secret == plain.get_session_middleware_key() == "_Plain___my_server"
+        assert self._server(Lending).session_secret == run_session_secret("my_server")
+        bearer = self._server(_Plain, expose_tools_over_mcp=True, mcp_bearer_token=True)
+        assert bearer.session_secret == run_session_secret("my_server") != bearer.get_session_middleware_key()
+
+    def test_the_secret_is_resolved_once_per_server_however_it_was_built(self) -> None:
+        asked: list[str] = []
+
+        class Fickle(_Plain):
+            def get_session_secret(self) -> str:
+                asked.append(secrets.token_urlsafe(8))
+                return asked[-1]
+
+        server = self._server(Fickle)
+        assert server.session_secret == server.session_secret == asked[0] and len(asked) == 1
+        # As tests that build a server without its model_post_init do: no private attribute holds the secret.
+        with patch.object(_Plain, "model_post_init"):
+            unprepared = self._server(_Plain)
+        assert unprepared.session_secret == unprepared.get_session_middleware_key()
 
 
 class TestHeadServerProxyKwargs:

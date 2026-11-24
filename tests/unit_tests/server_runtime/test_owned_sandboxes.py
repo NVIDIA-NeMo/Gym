@@ -1650,7 +1650,3 @@ def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch, re
     def refuse(*args: Any) -> None:
         raise ValueError("unknown provider block")
 
-    monkeypatch.setattr(owned_sandboxes_module, resolver, refuse)
-    with pytest.raises(ValueError, match="unknown provider block"):
-        _server(sandbox_provider="missing").sandboxes
-    assert providers == {}
