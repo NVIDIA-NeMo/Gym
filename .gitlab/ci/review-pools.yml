@@ -18,10 +18,10 @@ gym-review-pools-prepare:
     GIT_DEPTH: "1"
     GIT_SUBMODULE_STRATEGY: none
   script:
-    - python3 .gitlab/ci/prepare_review_pools.py "$TRIGGER_PAYLOAD" review-pools-child.json
+    - python3 .gitlab/ci/prepare_review_pools.py "$TRIGGER_PAYLOAD" review-pools-child.yml
   artifacts:
     paths:
-      - review-pools-child.json
+      - review-pools-child.yml
     expire_in: 1 day
 
 gym-review-pools:
@@ -31,7 +31,7 @@ gym-review-pools:
   allow_failure: true
   trigger:
     include:
-      - artifact: review-pools-child.json
+      - artifact: review-pools-child.yml
         job: gym-review-pools-prepare
     strategy: depend
     forward:
