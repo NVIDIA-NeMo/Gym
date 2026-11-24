@@ -5,6 +5,8 @@
 resolved config with secrets masked."""
 
 import logging
+import math
+import re
 import urllib.request
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -61,6 +63,11 @@ _CONCURRENCY_KEYS = frozenset(
 # Server-specific limits, such as `judge_endpoint_max_concurrency` or `max_concurrent_rollouts`.
 _CONCURRENCY_KEY_SUFFIXES = ("_max_concurrency", "_max_concurrent")
 _CONCURRENCY_KEY_PREFIX = "max_concurrent_"
+# Plain numbers as text: what an `${oc.env:...}` setting resolves to before the server's config reads it.
+_INTEGER_TEXT = re.compile(r"[+-]?[0-9]+")
+_DECIMAL_TEXT = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
+# Marks a value that is neither an explicit null nor a number, so it is left out.
+_NOT_RECORDED = object()
 _MODEL_KEYS = frozenset(
     {
         "model",
@@ -129,13 +136,23 @@ def _private(key: object) -> bool:
     return looks_like_secret_key(key) or is_credential_name(key) or name == "env" or name.endswith("env_vars")
 
 
+def _setting(value: object, *, decimal: bool) -> object:
+    """An explicit null, an integer, or with ``decimal`` a finite float; a plain numeric string is read as one."""
+    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+        return value
+    if isinstance(value, str):
+        if _INTEGER_TEXT.fullmatch(value):
+            return int(value)
+        if decimal and _DECIMAL_TEXT.fullmatch(value):
+            value = float(value)
+    if decimal and isinstance(value, float) and math.isfinite(value):
+        return value
+    return _NOT_RECORDED
+
+
 def _sampling(config: Mapping) -> dict[str, JsonValue]:
-    return {
-        key: value
-        for key, value in config.items()
-        if key in _SAMPLING_KEYS
-        and (value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)))
-    }
+    selected = {key: _setting(value, decimal=True) for key, value in config.items() if key in _SAMPLING_KEYS}
+    return {key: value for key, value in selected.items() if value is not _NOT_RECORDED}
 
 
 def _is_concurrency_key(key: object) -> bool:
@@ -147,11 +164,8 @@ def _is_concurrency_key(key: object) -> bool:
 
 
 def _concurrency(config: Mapping) -> dict[str, int | None]:
-    return {
-        key: value
-        for key, value in config.items()
-        if _is_concurrency_key(key) and (value is None or (isinstance(value, int) and not isinstance(value, bool)))
-    }
+    selected = {key: _setting(value, decimal=False) for key, value in config.items() if _is_concurrency_key(key)}
+    return {key: value for key, value in selected.items() if value is not _NOT_RECORDED}
 
 
 def build_provenance(
@@ -162,8 +176,8 @@ def build_provenance(
     efb_config_ref = config.get("efb_config_ref")
     if isinstance(efb_config_ref, str):
         record.efb_config_ref = url_without_credentials(efb_config_ref)
-    seed = config.get("seed")
-    if isinstance(seed, int) and not isinstance(seed, bool):
+    seed = _setting(config.get("seed"), decimal=False)
+    if isinstance(seed, int):
         record.seed = seed
 
     def visit(node: Mapping, path: str) -> None:

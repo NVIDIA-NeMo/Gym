@@ -233,6 +233,65 @@ def test_concurrency_limits_include_worker_counts_and_server_specific_limit_name
     }
 
 
+def test_env_backed_limits_and_sampling_settings_are_read_as_numbers(monkeypatch) -> None:
+    """`${oc.env:...}` resolves to a string; the servers read it as a number, and so does the record."""
+    monkeypatch.setenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", "6")
+    monkeypatch.setenv("POLICY_TEMPERATURE", "0.6")
+    monkeypatch.setenv("POLICY_SEED", "7")
+    monkeypatch.delenv("SANDBOX_EXEC_CONCURRENCY", raising=False)
+    config = OmegaConf.create(
+        {
+            "seed": "${oc.env:POLICY_SEED}",
+            "gdpval_gemini_judge_model": {
+                "responses_api_models": {
+                    "openai_model": {
+                        "max_concurrent_requests": "${oc.env:GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS,2}",
+                        "temperature": "${oc.env:POLICY_TEMPERATURE}",
+                    }
+                }
+            },
+            "sandbox": {"docker": {"exec": {"concurrency": "${oc.env:SANDBOX_EXEC_CONCURRENCY,32}"}}},
+        }
+    )
+
+    record = provenance.build_provenance(config)
+
+    assert record.seed == 7
+    assert record.concurrency_limits == {
+        "gdpval_gemini_judge_model.responses_api_models.openai_model": {"max_concurrent_requests": 6},
+        "sandbox.docker.exec": {"concurrency": 32},
+    }
+    assert record.sampling_parameters == {
+        provenance.TOP_LEVEL_PATH: {"seed": 7},
+        "gdpval_gemini_judge_model.responses_api_models.openai_model": {"temperature": 0.6},
+    }
+
+
+def test_only_plain_numeric_strings_are_read_as_numbers() -> None:
+    record = provenance.build_provenance(
+        {
+            "server": {
+                "max_concurrent_requests": "${oc.env:UNRESOLVED}",
+                "max_concurrency": "two",
+                "concurrency": "1.5",
+                "num_workers": "1_000",
+                "judge_max_concurrency": "-1",
+                "max_concurrent_episodes": None,
+                "max_tokens": "inf",
+                "temperature": "nan",
+                "top_p": "1e999",
+                "top_k": "true",
+                "min_p": float("inf"),
+                "presence_penalty": "-0.5",
+                "frequency_penalty": "1e-3",
+                "seed": "${seed}",
+            }
+        }
+    )
+    assert record.concurrency_limits == {"server": {"judge_max_concurrency": -1, "max_concurrent_episodes": None}}
+    assert record.sampling_parameters == {"server": {"presence_penalty": -0.5, "frequency_penalty": 0.001}}
+
+
 def test_review_provenance_excludes_boolean_sampling_values() -> None:
     record = provenance.build_provenance({"seed": True, "temperature": False, "top_p": 0.9})
     assert record.sampling_parameters == {provenance.TOP_LEVEL_PATH: {"top_p": 0.9}}

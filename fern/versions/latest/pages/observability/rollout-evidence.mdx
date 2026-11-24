@@ -387,7 +387,8 @@ request metadata from the input rows are fingerprinted, not copied.
 `max_concurrent_*`, `*_max_concurrency` or `*_max_concurrent`, such as `judge_endpoint_max_concurrency`.
 Server limits such as `max_concurrent_requests` and `max_concurrent_episodes` apply per worker
 process, so the server's effective limit is that value times its `num_workers` (`null` runs one
-worker).
+worker). A setting given as a plain number in text, such as `${oc.env:MAX_REQUESTS,2}`, is
+recorded as that number; an unresolved reference or other text is left out.
 
 `resolved_config` holds the whole resolved Gym configuration, so two results can be compared
 setting by setting. Secret-shaped keys (tokens, keys, headers, passwords, cookies) are masked as
