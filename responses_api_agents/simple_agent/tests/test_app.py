@@ -2252,7 +2252,10 @@ async def _until(condition) -> None:
 
 
 def _checkpoint(checkpoint_id: str, **extra) -> dict:
-    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 5, **extra}
+    # Commits and restores (the only calls that take a checkpoint_dir) write the checkpoint with fsync or read it
+    # back, which a busy CI disk can stall for seconds. Their 30 s deadline only bounds a hang.
+    seconds = 30 if "checkpoint_dir" in extra else 5
+    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + seconds, **extra}
 
 
 _SESSION_ID = "agent-session"
@@ -3148,11 +3151,14 @@ async def test_a_checkpoint_of_a_legacy_run_parked_at_verify_holds_its_reply_onc
     running = asyncio.create_task(server.run(MagicMock(cookies={}), _legacy_run_request(0)))
     await asyncio.wait_for(verifying.wait(), 5)
     await controller.prepare(CheckpointRequest(**_checkpoint("c1")))
-    await controller.commit(CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path))))
-    [path] = (tmp_path / "gym" / "agent").glob("**/records-*.jsonl")
-    [record] = [json.loads(line) for line in path.read_text().splitlines()]
-    await controller.resume(CheckpointRequest(**_checkpoint("c1")))
-    release.set()
+    try:
+        await controller.commit(CommitRequest(**_checkpoint("c1", checkpoint_dir=str(tmp_path))))
+        [path] = (tmp_path / "gym" / "agent").glob("**/records-*.jsonl")
+        [record] = [json.loads(line) for line in path.read_text().splitlines()]
+    finally:
+        # The parked run waits for resume, so a failed commit would otherwise hang the test's teardown.
+        await controller.resume(CheckpointRequest(**_checkpoint("c1")))
+        release.set()
     first = await running
 
     restored, _, restored_controller = observed_agent()
@@ -3227,11 +3233,12 @@ async def test_a_restored_session_s_direct_http_tool_calls_reach_the_restored_re
         await client.post("/ng-rollout/rollout/get_weather", json={})
         cookies = dict(client.cookies)
         await client.post("/ng-control/v1/checkpoint/prepare", json=_checkpoint("c1"), headers=_RESOURCES_AUTH)
-        await client.post(
+        committed = await client.post(
             "/ng-control/v1/checkpoint/commit",
             json=_checkpoint("c1", checkpoint_dir=str(tmp_path)),
             headers=_RESOURCES_AUTH,
         )
+        assert committed.status_code == 200, committed.text
 
     restored_resources, fresh = _weather_resources()
     server, server_client = _make_agent(False)
@@ -3277,12 +3284,14 @@ async def test_a_restored_session_s_direct_http_tool_calls_reach_the_restored_re
 
     monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", resources_request)
     async with fresh:
-        await fresh.post(
+        restored = await fresh.post(
             "/ng-control/v1/checkpoint/restore",
             json=_checkpoint("r1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "rollout"}]),
             headers=_RESOURCES_AUTH,
         )
-        await fresh.post("/ng-control/v1/checkpoint/resume", json=_checkpoint("r1"), headers=_RESOURCES_AUTH)
+        assert restored.status_code == 200, restored.text
+        resumed = await fresh.post("/ng-control/v1/checkpoint/resume", json=_checkpoint("r1"), headers=_RESOURCES_AUTH)
+        assert resumed.status_code == 200, resumed.text
         request = MagicMock(cookies={}, session={AGENT_SESSION_COOKIE_KEY: _SESSION_ID}, headers={})
         request.path_params = {"rollout_id": "rollout-a1"}
         await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="weather?"))
