@@ -381,6 +381,8 @@ Wrap the **call**, not the scoring around it: `reraise_judge_errors` relabels ev
 | Judge answered with nothing | your call; `raise JudgeError(...)` if an empty verdict is meaningless |
 | Bug in your own scoring code | let it raise |
 
+A masked judge-failure row carries a placeholder reward, `0.0` by default. The row goes to `<output>_failures.jsonl`, so the Gym aggregate leaves it out, unless the run counts its class with `count_failure_classes_as_zero`. A trainer that reads the `/run` reply itself, such as NeMo RL, gets the placeholder as the row's `reward`. Under NeMo RL's default `masked_reward_policy: include`, the placeholder counts in the group baseline. If the neutral score of your resources server is not `0.0`, override `SimpleResourcesServer.judge_failure_reward()` to return that score.
+
 ---
 
 ## Troubleshooting

@@ -24,15 +24,13 @@ aggregate``), and retained on resume without regenerating its answer. Judge-only
 recovery requires a supported reverification path; manifest-backed runs currently
 reject reverification.
 
-Boundary: a failed *call* (transport/timeout/auth/HTTP) → ``judge_failed`` event → sidecar; a
-*received-but-unparseable* response is a legitimate wrong answer (let the parser
-score it, don't raise), unless the benchmark explicitly treats an invalid judge
-verdict as an unusable grade. FrontierScience Research uses that exception for
-missing/invalid final numeric rubric verdicts: retry through the judge-failure
-sidecar rather than assign zero points to the model answer; ordinary resume does
-not regenerate that answer. Completion checks
-must still reject a partial evaluation. Empty output is a per-benchmark call,
-so servers differ.
+Boundary: a failed *call* (transport/timeout/auth/HTTP) → ``judge_failed`` event → sidecar. A judge that
+answered without a valid verdict on every attempt failed too: the parser raises
+``JudgeError(..., failure_kind="judge_unparseable")``, and the row is masked and judged again from its saved answer.
+Score an unclear reply instead only where the benchmark defines it as a grade. FrontierScience Research sends
+missing/invalid final numeric rubric verdicts through the judge-failure sidecar rather than assign zero points to
+the model answer; ordinary resume does not regenerate that answer. Completion checks must still reject a partial
+evaluation. Empty output is a per-benchmark call, so servers differ.
 
 Wrap the call, not the scoring around it: ``reraise_judge_errors`` relabels every
 exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
@@ -356,7 +354,10 @@ async def call_judge(
 def judge_failsafe(verify_fn: Callable, *, placeholder_reward: float = 0.0) -> Callable:
     """Wrap verify() so a judge failure returns a sidecar-routed row (reward ``placeholder_reward``,
     the routing keys, the request's ``response`` carried) instead of propagating.
-    The row is masked, so its placeholder reward reaches reward metrics but no training signal.
+    The row is masked, so a trainer that honors ``mask_sample`` adds no loss for it. Gym leaves the row out of its
+    aggregates, unless a run counts its class with ``count_failure_classes_as_zero``. A trainer that reads the
+    ``/run`` reply gets the placeholder as the row's reward. Under NeMo RL's default
+    ``masked_reward_policy: include``, it counts in the group baseline, so it changes the other rollouts' advantages.
     functools.wraps keeps verify's signature so FastAPI injects the same params
     (``body``, and ``request`` for servers that take it); ``*args, **kwargs`` pass
     them straight through."""
