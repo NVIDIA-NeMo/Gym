@@ -704,7 +704,7 @@ class OwnedSandboxes:
             owns_provider=True,
             max_concurrent_starts=concurrency.starts,
             max_concurrent_stops=concurrency.stops,
-            default_metadata=resolve_provider_metadata(reference, global_config),
+            default_metadata=default_metadata,
             global_config=global_config,
         )
         owned._checkpoint_global_config = global_config
