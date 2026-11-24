@@ -177,8 +177,8 @@ requires the selected source and all requested operations. Set
 `allow_partial_operation_replacements: true` to permit a same-source selected
 reference with the largest number of distinct matching operations after the
 exact-match candidates run out. The verifier metadata records missing operations
-in `reference_operation_fallback`. A render or execution timeout can trigger
-immediate bounded replacement. A process crash or kill needs two matching
+in `reference_operation_fallback`. An execution timeout can trigger immediate
+bounded replacement. A render timeout, process crash or kill needs two matching
 observations from fresh renderer attempts before quarantine; success clears the pending
 observation. SIGKILL/exit 137 is a possible memory-limit kill, not proof of OOM.
 Repeated failures are an operational heuristic; after repairing a shared runtime,

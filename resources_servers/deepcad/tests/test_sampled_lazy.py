@@ -4,6 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -80,6 +81,11 @@ def test_partial_replacement_warms_once_and_replays_in_fresh_process(tmp_path, m
         assert not Path(argv[-1]).is_relative_to(Path(config["cache_root"]))
         name = json.loads(Path(argv[-2]).read_text())["record"]["id"]
         calls.append(name)
+        if name == "bad":
+            Path(argv[-1]).with_suffix(".rejected.json").write_text(
+                json.dumps({"reason": "slow program", "confirmation_key": "reference_execution_timeout"})
+            )
+            return SimpleNamespace(returncode=0)
         if name == "near":
             step.write_bytes(b"test reference")
             step.with_suffix(".json").write_text(
@@ -129,3 +135,65 @@ def test_verify_cold_entry_never_starts_renderer(tmp_path, monkeypatch):
     )
     with pytest.raises(FileNotFoundError, match="Prompt cache entry missing"):
         lazy_inputs.materialize_one(row, cache_only=True)
+
+
+@pytest.mark.parametrize("recover", [True, False])
+def test_warm_outage_does_not_confirm_duplicate_draws(tmp_path, monkeypatch, recover):
+    bad = examples(tmp_path, [("near", ["cut", "hole"], "source-a", "selected")])
+    bad["deepcad_lazy"]["config"]["warm_start_cache"] = True
+    good = deepcopy(bad)
+    good["deepcad_lazy"]["record"].update(
+        id="near",
+        asset_id="near",
+        task_id="near",
+        source_sha256="near",
+        reference_step="references/near.step",
+        reference_operations=["cut", "hole"],
+    )
+    draws = tmp_path / "draws.jsonl"
+    draws.write_text("".join(json.dumps(row) + "\n" for row in [good, *[bad] * 7]))
+    (tmp_path / "draws-manifest.json").write_text(
+        json.dumps({"draw_count": 8, "draws_sha256": sampled_lazy.sha256(draws)})
+    )
+    calls = []
+    repaired = False
+    run = sampled_lazy.subprocess.run
+
+    def render(argv, **kwargs):
+        if argv[1] == "-m":
+            return run(argv, **kwargs)
+        record = json.loads(Path(argv[-2]).read_text())["record"]
+        calls.append(record["id"])
+        if record["id"] == "bad" and not repaired:
+            return SimpleNamespace(returncode=-11, stderr="broken renderer")
+        step = tmp_path / record["reference_step"]
+        step.parent.mkdir(exist_ok=True)
+        step.write_bytes(record["id"].encode())
+        step.with_suffix(".json").write_text(json.dumps({"step_sha256": sampled_lazy.sha256(step)}))
+        return worker(argv, **{**kwargs, "recover": True})
+
+    monkeypatch.setattr(lazy_inputs.subprocess, "run", render)
+    with pytest.raises(lazy_inputs.UnconfirmedReferenceFailure):
+        sampled_lazy.warm(tmp_path, 0, 8, 4)
+    assert calls == ["near", "bad"]
+    cache = tmp_path / "cache"
+    assert len(list(cache.rglob("*.failure.json"))) == 1
+    assert not list(cache.rglob("*.rejected.json"))
+    assert not list(cache.rglob("*.resolved.json"))
+    assert (tmp_path / "draw0-ready.json").exists()
+    assert not (tmp_path / "warm-0-8-ready.json").exists()
+
+    repaired = recover
+    receipt = sampled_lazy.warm(tmp_path, 0, 8, 4)
+    assert calls == ["near", "bad", "bad"]
+    assert [entry["draw_index"] for entry in receipt["entries"]] == list(range(8))
+    assert [entry["requested_task_id"] for entry in receipt["entries"]] == ["near", *["bad"] * 7]
+    assert [entry["resolved_task_id"] for entry in receipt["entries"]] == ["near", *["bad" if recover else "near"] * 7]
+    if recover:
+        assert not list(cache.rglob("*.failure.json"))
+        assert not list(cache.rglob("*.rejected.json"))
+        assert not list(cache.rglob("*.resolved.json"))
+    else:
+        rejected = list(cache.rglob("*.rejected.json"))
+        assert len(rejected) == 1
+        assert json.loads(rejected[0].read_text())["confirmation_count"] == 2

@@ -178,7 +178,11 @@ def _materialize_one(example: dict[str, Any], *, cache_only: bool = False) -> di
         timed_out = root / f"{key}.timeout-{config.timeout_s}.json"
         if timed_out.exists() and not target.exists():
             detail = json.loads(timed_out.read_text())
-            raise ReferenceRenderTimeout(detail["reason"])
+            if (
+                detail.get("confirmation_count") == 2
+                or detail.get("confirmation_key") == "reference_execution_timeout"
+            ):
+                raise ReferenceRenderTimeout(detail["reason"])
         if target.exists():
             row = json.loads(target.read_text())
         else:
@@ -236,7 +240,10 @@ def _materialize_one(example: dict[str, Any], *, cache_only: bool = False) -> di
                             "source_sha256": record["source_sha256"],
                             "timeout_s": config.timeout_s,
                             "status": "render_timeout_unverified",
+                            "confirmation_key": "renderer_timeout",
                         }
+                        _confirm_failure(target, detail, config)
+                        detail["status"] = "render_timeout_confirmed"
                         temporary = timed_out.with_suffix(".building")
                         temporary.write_text(json.dumps(detail))
                         temporary.replace(timed_out)

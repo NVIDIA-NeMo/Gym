@@ -8,10 +8,12 @@ import unittest
 from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image
 
+from resources_servers.deepcad.dataset import lazy_inputs
 from resources_servers.deepcad.dataset import materialized_inputs as module
 from resources_servers.deepcad.dataset.source_operation_sampler import (
     SourceOperationSampler,
@@ -204,13 +206,72 @@ class MaterializedInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "catalog changed"):
             module.render(self.selection, self.shards, 0, 2, 2, 8)
 
-    def test_confirmation_continues_across_replacement_candidates(self):
-        example = next(module.read_jsonl(self.selection / "selected.jsonl"))["example"]
-        row = self.materialize(example)
-        failure = RuntimeError("Unconfirmed reference failure; retry in a fresh renderer: SIGSEGV")
-        with patch.object(module, "materialize_one", side_effect=[failure, failure, row]) as renderer:
-            self.assertEqual(module._resolve(example), row)
-            self.assertEqual(renderer.call_count, 3)
+    def test_render_outage_does_not_quarantine_or_publish_chunk(self):
+        draws = list(module.read_jsonl(self.selection / "selected.jsonl"))[:8]
+        expected = {draw["example"]["deepcad_lazy"]["record"]["id"] for draw in draws}
+        calls = []
+
+        def crash(args, **kwargs):
+            calls.append(json.loads(Path(args[-2]).read_text())["record"]["id"])
+            return SimpleNamespace(returncode=-11, stderr="broken renderer")
+
+        with patch.object(lazy_inputs.subprocess, "run", side_effect=crash):
+            with self.assertRaises(lazy_inputs.UnconfirmedReferenceFailure):
+                module.render(self.selection, self.shards, 0, 1, 4, 8, max_chunks=1)
+        self.assertTrue(calls)
+        self.assertLessEqual(set(calls), expected)
+        self.assertEqual(len(calls), len(set(calls)))
+        self.assertFalse(list((self.root / "cache").glob("*.rejected.json")))
+        self.assertFalse(list(self.shards.glob("*.receipt.json")))
+
+        def recover(args, **kwargs):
+            lazy = json.loads(Path(args[-2]).read_text())
+            row = self.materialize({"task_source": "deepcad_simple_agent", "deepcad_lazy": lazy})
+            Path(args[-1]).write_text(json.dumps(row))
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(lazy_inputs.subprocess, "run", side_effect=recover) as renderer:
+            module.render(self.selection, self.shards, 0, 1, 4, 8, max_chunks=1)
+            self.assertEqual(renderer.call_count, len(expected))
+        self.assertTrue((self.shards / "chunk-000000.receipt.json").exists())
+        self.assertFalse(list((self.root / "cache").glob("*.failure.json")))
+        self.assertFalse(list((self.root / "cache").glob("*.rejected.json")))
+        with patch.object(lazy_inputs.subprocess, "run", side_effect=AssertionError("rendered completed chunk")):
+            module.render(self.selection, self.shards, 0, 1, 4, 8, max_chunks=1)
+
+    def test_descriptor_variants_do_not_confirm_each_other_and_keep_overrides(self):
+        draws = list(module.read_jsonl(self.selection / "selected.jsonl"))
+        example = draws[0]["example"]
+        for index, draw in enumerate(draws):
+            draw["example"] = deepcopy(example)
+            draw["example"]["responses_create_params"]["temperature"] = (index % 2) / 2
+            draw["example"]["agent_ref"] = {"name": f"agent-{index % 2}"}
+        path = self.selection / "selected.jsonl"
+        path.write_text("".join(json.dumps(draw) + "\n" for draw in draws))
+        metadata = json.loads((self.selection / "selection.json").read_text())
+        metadata["selected_sha256"] = module.sha256(path)
+        module.write_json(self.selection / "selection.json", metadata)
+        with patch.object(
+            lazy_inputs.subprocess, "run", return_value=SimpleNamespace(returncode=-11, stderr="broken renderer")
+        ) as renderer:
+            with self.assertRaises(lazy_inputs.UnconfirmedReferenceFailure):
+                module.render(self.selection, self.shards, 0, 1, 4, 8, max_chunks=1)
+            self.assertEqual(renderer.call_count, 1)
+        self.assertFalse(list((self.root / "cache").glob("*.rejected.json")))
+        self.assertFalse(list(self.shards.glob("*.receipt.json")))
+
+        def recover(args, **kwargs):
+            lazy = json.loads(Path(args[-2]).read_text())
+            row = self.materialize({"task_source": "deepcad_simple_agent", "deepcad_lazy": lazy})
+            Path(args[-1]).write_text(json.dumps(row))
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(lazy_inputs.subprocess, "run", side_effect=recover) as renderer:
+            module.render(self.selection, self.shards, 0, 1, 4, 8, max_chunks=1)
+            self.assertEqual(renderer.call_count, 1)
+        rows = [draw["row"] for draw in module.read_jsonl(self.shards / "chunk-000000.jsonl")]
+        self.assertEqual([row["responses_create_params"]["temperature"] for row in rows], [0, 0.5] * 4)
+        self.assertEqual([row["agent_ref"]["name"] for row in rows], ["agent-0", "agent-1"] * 4)
 
     def test_mixed_chunk_settings_refused(self):
         self.render_all()
@@ -261,23 +322,15 @@ class MaterializedInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "image bytes cannot be decoded"):
             module.validate_materialized_row(row)
 
-    def test_only_native_unconfirmed_failure_is_retried(self):
+    def test_resolve_propagates_unconfirmed_failures_and_provider_outages(self):
         example = next(module.read_jsonl(self.selection / "selected.jsonl"))["example"]
-        row = self.materialize(example)
-        with patch.object(
-            module,
-            "materialize_one",
-            side_effect=[
-                RuntimeError("Unconfirmed reference failure; retry in a fresh renderer: SIGSEGV"),
-                row,
-            ],
-        ) as renderer:
-            self.assertEqual(module._resolve(example), row)
-            self.assertEqual(renderer.call_count, 2)
-        with patch.object(module, "materialize_one", side_effect=RuntimeError("provider outage")) as renderer:
-            with self.assertRaisesRegex(RuntimeError, "provider outage"):
-                module._resolve(example)
-            self.assertEqual(renderer.call_count, 1)
+        for failure in (lazy_inputs.UnconfirmedReferenceFailure("unconfirmed"), RuntimeError("provider outage")):
+            with self.subTest(failure=type(failure).__name__):
+                with patch.object(module, "materialize_one", side_effect=failure) as renderer:
+                    with self.assertRaises(type(failure)) as caught:
+                        module._resolve(example)
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual(renderer.call_count, 1)
 
 
 if __name__ == "__main__":

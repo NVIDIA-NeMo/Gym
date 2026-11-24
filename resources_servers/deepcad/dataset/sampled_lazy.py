@@ -20,7 +20,6 @@ import numpy as np
 
 from resources_servers.deepcad.dataset.lazy_inputs import (
     LazyRenderConfig,
-    UnconfirmedReferenceFailure,
     cache_target,
     materialize_one,
     resolution_target,
@@ -137,13 +136,7 @@ def warm_one(example: dict[str, Any]) -> dict[str, Any]:
         lazy["record"] = json.loads(choice.read_text())["record"]
     hit = cache_target(lazy).exists()
     started = time.monotonic()
-    for attempt in range(config.max_reference_replacements + 2):
-        try:
-            row = materialize_one(example)
-            break
-        except UnconfirmedReferenceFailure:
-            if attempt == config.max_reference_replacements + 1:
-                raise
+    row = materialize_one(example)
     if choice.exists():
         lazy["record"] = json.loads(choice.read_text())["record"]
     target = cache_target(lazy)
@@ -216,8 +209,11 @@ def warm(output: Path, start: int, count: int, workers: int) -> dict[str, Any]:
         Path(temp.name).replace(first)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         while batch := list(islice(draws, workers * 4)):
-            for entry in pool.map(warm_one, batch):
-                entries.append({"draw_index": start + len(entries), **entry})
+            keys = [json.dumps(draw["deepcad_lazy"], sort_keys=True) for draw in batch]
+            unique = dict(zip(keys, batch))
+            warmed = dict(zip(unique, pool.map(warm_one, unique.values()), strict=True))
+            for key in keys:
+                entries.append({"draw_index": start + len(entries), **warmed[key]})
     verified = verify_fresh(output, start, count)
     receipt.update(verified)
     receipt.update(entries=entries, cache_verification=verified)

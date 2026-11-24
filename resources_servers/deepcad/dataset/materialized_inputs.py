@@ -159,17 +159,7 @@ def load_selection(selection: Path) -> tuple[dict[str, Any], list[dict[str, Any]
 
 
 def _resolve(example: dict[str, Any]) -> dict[str, Any]:
-    config = LazyRenderConfig.model_validate(example["deepcad_lazy"]["config"])
-    for attempt in range(config.max_reference_replacements + 2):
-        try:
-            return materialize_one(example)
-        except RuntimeError as exc:
-            if (
-                not str(exc).startswith("Unconfirmed reference failure; retry in a fresh renderer:")
-                or attempt == config.max_reference_replacements + 1
-            ):
-                raise
-    raise AssertionError("Unreachable reference confirmation state")
+    return materialize_one(example)
 
 
 def render(
@@ -227,8 +217,19 @@ def render(
             key = json.dumps(example, sort_keys=True)
             unique.setdefault(key, example)
             draw["work_key"] = key
+        # Caller-only variants must not confirm the same descriptor's failure.
+        groups = {}
+        for key, example in unique.items():
+            descriptor = json.dumps(example["deepcad_lazy"], sort_keys=True)
+            groups.setdefault(descriptor, []).append((key, example))
+
+        def resolve_group(group: list[tuple[str, dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+            return {key: _resolve(example) for key, example in group}
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            prepared = dict(zip(unique, pool.map(_resolve, unique.values()), strict=True))
+            prepared = {}
+            for resolved in pool.map(resolve_group, groups.values()):
+                prepared.update(resolved)
         rows_path = stem.with_suffix(".jsonl")
         assets_path = stem.with_suffix(".tar")
         with tempfile.TemporaryDirectory(prefix="cad-publish-") as work:
