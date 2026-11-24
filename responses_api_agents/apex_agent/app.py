@@ -27,6 +27,7 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.artifacts import NG_NO_GENERATION_METADATA
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     AggregateMetrics,
@@ -36,6 +37,9 @@ from nemo_gym.config import (
     get_first_server_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
+    VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
@@ -86,7 +90,9 @@ _GUEST_WORLD_LOGS = {
 }
 NG_FAILURE_CLASS_KEY = "_ng_failure_class"
 NG_FAILURE_TERMINAL_KEY = "_ng_failure_terminal"
-NG_FAILURE_COUNTS_AS_ZERO_KEY = "_ng_failure_counts_as_zero"
+# The policy did not finish: a scored zero, as in upstream Pass@1, where a task counts as solved only when the agent
+# finishes and meets every rubric criterion.
+AGENT_INCOMPLETE = "apex_agents:agent_incomplete"
 _WORLD_ID_RE = re.compile(r"^world_[0-9a-f]{32}$")
 
 
@@ -627,33 +633,63 @@ class ApexAgent(SimpleResponsesAPIAgent):
         return_code: int | None = None,
         failure_class: str = "apex_error",
         failure_terminal: bool = False,
-        counts_as_zero: bool = False,
         partial_result: Optional[dict[str, Any]] = None,
     ) -> ApexAgentVerifyResponse:
+        """A failure row for a fault around the policy: the environment failed, so the rollout has no answer.
+
+        The response carries no-generation metadata, so collection does not keep the partial trajectory as an answer,
+        and a namespaced failure kind, so recovery retries the rollout unless the failure is terminal.
+        """
         LOG.error("Apex rollout failed for task %s: %s", body.task_id, error)
+        payload = self._outcome_payload(body, error, return_code, partial_result)
+        payload["response"].metadata = dict(NG_NO_GENERATION_METADATA)
+        payload["failure_kind"] = (
+            VERIFIER_ERROR if failure_class == "verification_error" else f"apex_agents:{failure_class}"
+        )
+        payload[NG_FAILURE_CLASS_KEY] = failure_class
+        if failure_terminal:
+            payload[NG_FAILURE_TERMINAL_KEY] = True
+        return ApexAgentVerifyResponse.model_validate(payload)
+
+    def _model_outcome(
+        self,
+        body: ApexAgentRunRequest,
+        error: str,
+        failure_kind: str,
+        return_code: int | None = None,
+        partial_result: Optional[dict[str, Any]] = None,
+    ) -> ApexAgentVerifyResponse:
+        """A scored zero for an ending the policy caused: it ran out of its time or context, or did not finish.
+
+        A result row, not a failure row, so the task stays in the mean. Gym still retries an ``agent_timeout`` whose
+        window held server faults.
+        """
+        LOG.warning("Apex rollout for task %s scored 0: %s", body.task_id, error)
+        return ApexAgentVerifyResponse.model_validate(
+            self._outcome_payload(body, error, return_code, partial_result) | {"failure_kind": failure_kind}
+        )
+
+    def _outcome_payload(
+        self,
+        body: ApexAgentRunRequest,
+        error: str,
+        return_code: int | None,
+        partial_result: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
         try:
             model = self._policy_model()
         except RuntimeError:
             model = body.responses_create_params.model or "error"
         partial_result = partial_result or {"final_answer": ""}
-        response = self._response_from_result(partial_result, model)
-        payload = body.model_dump() | {
-            "response": response,
+        return body.model_dump() | {
+            "response": self._response_from_result(partial_result, model),
             "reward": 0.0,
             "apex_error": error,
+            "failure_reason": error,
             "container_exit_code": return_code,
             "apex_trajectory": partial_result.get("trajectory") or [],
             "apex_completion_status": partial_result.get("completion_status"),
         }
-        payload[NG_FAILURE_CLASS_KEY] = failure_class
-        if failure_terminal:
-            payload[NG_FAILURE_TERMINAL_KEY] = True
-        if counts_as_zero:
-            # The model's own outcome, not a fault around it: collection counts the rollout as a zero in the
-            # metrics instead of leaving it out of the denominator. Only a final failure can settle that way.
-            payload[NG_FAILURE_TERMINAL_KEY] = True
-            payload[NG_FAILURE_COUNTS_AS_ZERO_KEY] = True
-        return ApexAgentVerifyResponse.model_validate(payload)
 
     @staticmethod
     async def _recover_partial_result(
@@ -825,11 +861,11 @@ class ApexAgent(SimpleResponsesAPIAgent):
                 if resume_checkpoint is not None:
                     remaining = self.config.timeout - resume_checkpoint.elapsed_seconds
                     if remaining < self.config.resume_min_remaining_seconds:
-                        return self._failure(
+                        return self._model_outcome(
                             body,
                             f"per-task budget exhausted before resume: {resume_checkpoint.elapsed_seconds:.0f}s of "
                             f"{self.config.timeout}s used across {resume_checkpoint.segments} segment(s)",
-                            failure_class="timeout_exceeded",
+                            AGENT_TIMEOUT,
                             partial_result=partial_result_from_checkpoint(resume_checkpoint),
                         )
                     timeout_s = max(1, int(remaining))
@@ -938,13 +974,24 @@ class ApexAgent(SimpleResponsesAPIAgent):
                                 world_logs_dir = (
                                     await self._persist_world_logs(sandbox, body) if prebuilt_world else None
                                 )
-                                failure = self._failure(
-                                    body,
-                                    f"sandbox Stirrup rollout exited: {detail}",
-                                    process.return_code,
-                                    failure_class=failure_class,
-                                    partial_result=result,
-                                )
+                                error = f"sandbox Stirrup rollout exited: {detail}"
+                                if failure_class == "sandbox_error":
+                                    failure = self._failure(
+                                        body,
+                                        error,
+                                        process.return_code,
+                                        failure_class=failure_class,
+                                        partial_result=result,
+                                    )
+                                else:
+                                    # The policy used up its time or its context.
+                                    failure = self._model_outcome(
+                                        body,
+                                        error,
+                                        AGENT_TIMEOUT if failure_class == "timeout_exceeded" else MODEL_CONTEXT_LIMIT,
+                                        process.return_code,
+                                        partial_result=result,
+                                    )
                                 if world_logs_dir is not None:
                                     failure.artifact_output_dir = str(world_logs_dir)
                                 return failure
@@ -968,12 +1015,10 @@ class ApexAgent(SimpleResponsesAPIAgent):
                                 )
                     if not result.get("completed"):
                         output_dir = self._persist_ungraded_snapshots(body, result, initial_snapshot, snapshot)
-                        failure = self._failure(
+                        failure = self._model_outcome(
                             body,
                             f"Stirrup did not submit a completed Finish call (status={result.get('completion_status')})",
-                            failure_class="agent_incomplete",
-                            failure_terminal=True,
-                            counts_as_zero=True,
+                            AGENT_INCOMPLETE,
                             partial_result=result,
                         )
                         if output_dir is not None:

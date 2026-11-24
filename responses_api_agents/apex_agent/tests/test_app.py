@@ -13,12 +13,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pytest import MonkeyPatch
 
+from nemo_gym.artifacts import NG_NO_GENERATION_METADATA
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from responses_api_agents.apex_agent import prebuilt_world_entrypoint
 from responses_api_agents.apex_agent.app import (
+    AGENT_INCOMPLETE,
     NG_FAILURE_CLASS_KEY,
-    NG_FAILURE_COUNTS_AS_ZERO_KEY,
     NG_FAILURE_TERMINAL_KEY,
     ApexAgent,
     ApexAgentConfig,
@@ -105,26 +106,34 @@ def test_instruction_from_input_only_uses_user_messages() -> None:
     assert instruction_from_input(body.responses_create_params) == "Do the work"
 
 
-def test_timeout_failure_is_routed_as_retryable_infra() -> None:
-    result = _agent()._failure(
-        _body(),
-        "sandbox Stirrup rollout exited: direct apptainer command timed out after 12600s",
-        return_code=125,
-        failure_class="timeout_exceeded",
+@pytest.mark.parametrize("failure_kind", ["agent_timeout", "model_context_limit", AGENT_INCOMPLETE])
+def test_an_ending_the_policy_caused_is_a_scored_zero_not_a_failure_row(failure_kind: str) -> None:
+    payload = (
+        _agent()
+        ._model_outcome(
+            _body(), "the policy ran out of its budget", failure_kind, partial_result={"final_answer": "x"}
+        )
+        .model_dump()
     )
-    payload = result.model_dump()
 
-    assert payload["reward"] == 0.0
-    assert payload[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
-    assert "_ng_failure_terminal" not in payload
-    assert "_ng_no_persist" not in payload
+    # A result row: it stays in the mean, and Gym still retries an agent_timeout whose window held server faults.
+    assert (payload["reward"], payload["mask_sample"]) == (0.0, False)
+    assert payload["failure_kind"] == failure_kind
+    assert payload["failure_reason"] == "the policy ran out of its budget"
+    assert not any(key.startswith("_ng_failure") for key in payload)
+    assert payload["response"].get("metadata") != NG_NO_GENERATION_METADATA
 
 
-def test_non_timeout_failure_is_not_misclassified_as_timeout() -> None:
+def test_a_fault_around_the_policy_is_a_retryable_failure_row_without_an_answer() -> None:
     payload = _agent()._failure(_body(), "sandbox Stirrup rollout exited: command failed", return_code=1).model_dump()
 
     assert payload[NG_FAILURE_CLASS_KEY] == "apex_error"
-    assert payload[NG_FAILURE_CLASS_KEY] != "timeout_exceeded"
+    assert payload["failure_kind"] == "apex_agents:apex_error"
+    assert NG_FAILURE_TERMINAL_KEY not in payload
+    # Collection must not keep the partial trajectory as the rollout's answer, or the row is never retried.
+    assert payload["response"]["metadata"] == NG_NO_GENERATION_METADATA
+    verification = _agent()._failure(_body(), "verify failed", failure_class="verification_error").model_dump()
+    assert verification["failure_kind"] == "verifier_error"
 
 
 def test_failure_preserves_partial_trajectory_and_usage() -> None:
@@ -157,47 +166,23 @@ def test_terminal_failure_is_marked_for_sidecar_without_retry() -> None:
         _agent()
         ._failure(
             _body(),
-            "maximum turns reached",
-            failure_class="agent_incomplete",
+            "task input contains no user instruction",
+            failure_class="invalid_task_input",
             failure_terminal=True,
         )
         .model_dump()
     )
 
-    assert payload[NG_FAILURE_CLASS_KEY] == "agent_incomplete"
+    assert payload[NG_FAILURE_CLASS_KEY] == "invalid_task_input"
     assert payload[NG_FAILURE_TERMINAL_KEY] is True
-    assert NG_FAILURE_COUNTS_AS_ZERO_KEY not in payload
-
-
-def test_incomplete_rollout_counts_as_a_zero_in_the_metrics() -> None:
-    from nemo_gym.rollouts.rollout_collection import _counted_failure_rows
-
-    incomplete = (
-        _agent()
-        ._failure(_body(), "maximum turns reached", failure_class="agent_incomplete", counts_as_zero=True)
-        .model_dump()
-    )
-    assert incomplete[NG_FAILURE_TERMINAL_KEY] is True
-    assert incomplete[NG_FAILURE_COUNTS_AS_ZERO_KEY] is True
-
-    # No failure class is named here: the marker alone puts the rollout in the denominator.
-    counted = _counted_failure_rows([incomplete], [])
-    assert [row["reward"] for row in counted] == [0.0]
-    assert counted[0]["mask_sample"] is False
-    rewards = [1.0, *(row["reward"] for row in counted)]
-    assert sum(rewards) / len(rewards) == 0.5
-
-    # A fault around the model stays out of the metrics unless the caller asks for its class.
-    sandbox_fault = _agent()._failure(_body(), "sandbox died", failure_class="sandbox_error").model_dump()
-    assert _counted_failure_rows([sandbox_fault], []) == []
 
 
 @pytest.mark.parametrize(
-    ("error_type", "checkpoint_error", "expected_class"),
+    ("error_type", "checkpoint_error", "expected_class", "expected_kind"),
     [
-        ("timeout", None, "timeout_exceeded"),
-        (None, "ContextOverflowError: Context overflow reached the summarized context", "context_overflow"),
-        (None, "RuntimeError: startup failed", "sandbox_error"),
+        ("timeout", None, None, "agent_timeout"),
+        (None, "ContextOverflowError: Context overflow reached the summarized context", None, "model_context_limit"),
+        (None, "RuntimeError: startup failed", "sandbox_error", "apex_agents:sandbox_error"),
     ],
 )
 async def test_run_classifies_sandbox_exit(
@@ -205,7 +190,8 @@ async def test_run_classifies_sandbox_exit(
     tmp_path: Path,
     error_type: str | None,
     checkpoint_error: str | None,
-    expected_class: str,
+    expected_class: str | None,
+    expected_kind: str,
 ) -> None:
     agent = _agent()
     agent._ensure_runtime_setup = AsyncMock(return_value=tmp_path / "stirrup-runtime.tar.gz")
@@ -262,7 +248,9 @@ async def test_run_classifies_sandbox_exit(
     result = await agent.run(MagicMock(cookies={}), _body())
     payload = result.model_dump()
 
-    assert payload[NG_FAILURE_CLASS_KEY] == expected_class
+    # The policy's own timeout or context overflow is a scored zero; a sandbox fault is a retryable failure row.
+    assert payload.get(NG_FAILURE_CLASS_KEY) == expected_class
+    assert payload["failure_kind"] == expected_kind
     assert "_ng_failure_terminal" not in payload
     assert "_ng_no_persist" not in payload
     assert payload["apex_trajectory"] == [{"role": "assistant", "content": "partial"}]
@@ -821,7 +809,8 @@ async def test_run_reports_a_timeout_when_the_budget_is_spent_before_resuming(
     result = await agent.run(MagicMock(cookies={}), _gym_body())
     payload = result.model_dump()
 
-    assert payload[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+    assert NG_FAILURE_CLASS_KEY not in payload
+    assert payload["failure_kind"] == "agent_timeout"
     assert "budget exhausted" in payload["apex_error"]
     assert [m["content"] for m in payload["apex_trajectory"] if m["role"] == "assistant"] == [
         "turn 1",
@@ -883,7 +872,7 @@ async def test_run_resumes_with_the_remaining_budget_and_the_checkpointed_world(
     agent._download_world.assert_not_awaited()
     assert "/app/apex-gym/world.zip" not in uploads
     assert execs[-1]["timeout_s"] == 2600
-    assert payload[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+    assert payload["failure_kind"] == "agent_timeout"
     assert payload["response"]["apex_resume_segments"] == 2
     assert not directory.exists()
 

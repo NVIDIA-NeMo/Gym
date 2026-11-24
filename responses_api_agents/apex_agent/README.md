@@ -64,7 +64,7 @@ outlives the node (a shared filesystem) to continue such rollouts instead:
   snapshot is carried forward so grading still diffs against the pre-agent world. A retry after a classed failure
   carries the next attempt index and starts clean in its own directory.
 - Time already spent, including the heartbeat, is subtracted from the per-task `timeout`. When less than
-  `resume_min_remaining_seconds` remains, the rollout is reported as `timeout_exceeded` with its checkpointed
+  `resume_min_remaining_seconds` remains, the rollout is scored 0 as `agent_timeout` with its checkpointed
   trajectory instead of starting a segment.
 - Any row written for the attempt, graded or a classed failure, deletes its checkpoint directory. A manifest that
   fails verification is retried once and otherwise ignored, never deleted; the next checkpoint supersedes it.

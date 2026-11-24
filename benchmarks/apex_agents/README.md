@@ -31,7 +31,10 @@ number. The port was checked against revision `92c86856cf1b11f9833a8a076b3a45a63
 - **Tools:** Stirrup's `list_tools`, `inspect_tool`, `add_tool`, `remove_tool`, `todo_write` and `finish`; the
   workplace MCP tools become callable once the model adds them.
 - **Submission:** `finish` is the only way to submit. A rollout that ends without a completed `finish` (turn limit,
-  timeout, `status="incomplete"`) is not graded and scores 0.
+  timeout, context overflow, `status="incomplete"`) is not graded and scores 0: a result row with `failure_kind`
+  `apex_agents:agent_incomplete`, `agent_timeout` or `model_context_limit`, which stays in the mean. Gym retries an
+  `agent_timeout` whose window held server faults. A fault around the policy (sandbox, setup or verification
+  failure) is a failure row instead: retried, and left out of the mean if it never succeeds.
 - **Artifacts the verifier reads:** the final answer plus the initial and final snapshots of `filesystem/` and
   `.apps_data/`.
 
