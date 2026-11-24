@@ -157,9 +157,7 @@ def _sampling(config: Mapping) -> dict[str, JsonValue]:
 
 def _is_concurrency_key(key: object) -> bool:
     return isinstance(key, str) and (
-        key in _CONCURRENCY_KEYS
-        or key.endswith(_CONCURRENCY_KEY_SUFFIXES)
-        or key.startswith(_CONCURRENCY_KEY_PREFIX)
+        key in _CONCURRENCY_KEYS or key.endswith(_CONCURRENCY_KEY_SUFFIXES) or key.startswith(_CONCURRENCY_KEY_PREFIX)
     )
 
 
