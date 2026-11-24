@@ -24,6 +24,10 @@ POST such as a search is not an act), and two more assertion types grade when th
   `day` (YYYY-MM-DD, in the time zone of the seed's `meta.current_time`, UTC for a naive one). Acting early fails it.
 - `not_acted` (`record`): no write named `record`. It is a guardrail.
 
+`record` is matched in the request URL's path and query only (the host and API version segments such as `/v3/` are
+skipped; a sheet row number matches its A1 range, `B7` or `Sheet1!A7:B7`). Records that some APIs name only in the
+body, such as a Slack channel in `chat.postMessage` or a GraphQL id, cannot be graded with these two assertions.
+
 ## Multi-turn
 
 When the agent ends a turn without tool calls, a requester model answers as the person who sent the request:
@@ -42,8 +46,8 @@ conversation, never reasoning or tool traffic. The environment refuses to load m
 `requester_base_url` or `requester_model` is unset. Each try ends after `requester_timeout_s` (default 300). A requester that still fails after
 `requester_max_tries`, or keeps calling tools after its tool budget, ends the episode and sets the `requester_failed`
 metric. A dated event that cannot be applied (a missing record, an invalid field) does the same, since it is a dataset
-failure and not the agent's. An event on a record the agent deleted itself is skipped instead, and the rollout is
-scored. The agent config in `config.yaml` lists
+failure and not the agent's. An event on a record that existed and is gone (the agent, or the requester it asked,
+deleted it) is skipped instead, and the rollout is scored. The agent config in `config.yaml` lists
 it in `mask_sample_metrics`, so `verifiers_agent` returns that rollout with `mask_sample: true`
 (`failure_kind: verifiers_agent:requester_failed`) and the reward is not counted as a measurement.
 

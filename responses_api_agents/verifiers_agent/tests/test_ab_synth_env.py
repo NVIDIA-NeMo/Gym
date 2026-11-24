@@ -486,18 +486,75 @@ class WriteLogTest(unittest.TestCase):
         # 17:30 Pacific on 2026-03-04 is 01:30 UTC on 2026-03-05: the due day is the row's own day.
         self.assertEqual(env.replay(info, [{"wait": "2026-03-04T17:30:00-08:00"}, PROMOTE]), 1.0)
 
+    def test_body_contains_with_quotes_or_newlines_matches_an_object_body(self):
+        for text in ('Hi "Ana"', "Line one\nLine two", "C:\\Reports"):
+            info = {
+                **INFO,
+                "assertions": [{"type": "acted_on_day", "record": "101", "day": "2026-03-04", "body_contains": text}],
+            }
+            write = {"method": "PATCH", "url": CONTACTS + "101", "body": {"properties": {"lastname": text}}}
+
+            self.assertEqual(env.replay(info, [{"wait": "2026-03-04T09:00:00"}, write]), 1.0, text)
+
 
 class RowNumberTest(unittest.TestCase):
+    SHEET = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc/values/"
+
     def test_a_row_number_does_not_match_the_api_version_or_the_tab_name(self):
         self.assertFalse(env.names("4", ROW_7))  # inside /v4/
         self.assertFalse(env.names("1", ROW_7))  # inside Sheet1
         self.assertFalse(env.names("3", CONTACTS + "101"))  # inside crm/v3
         self.assertTrue(env.names("7", ROW_7))  # the A1 cell reference
 
-    def test_a_write_to_row_7_does_not_break_not_acted_on_row_4(self):
+    def test_bare_and_lowercase_a1_ranges_name_their_row(self):
+        self.assertTrue(env.names("7", self.SHEET + "B7"))  # first-sheet range, no sheet name
+        self.assertTrue(env.names("7", self.SHEET + "a7:b7"))
+        self.assertTrue(env.names("7", self.SHEET + "Sheet1!a7"))
+        self.assertTrue(env.names("1", self.SHEET + "Sheet1!A1:B1"))
+
+    def test_bare_number_version_segments_and_hosts_do_not_name_a_record(self):
+        self.assertFalse(env.names("2", "https://api.twitter.com/2/tweets"))
+        self.assertFalse(env.names("1", "https://api.trello.com/1/cards"))
+        self.assertFalse(env.names("1", "https://app.asana.com/api/1.0/tasks"))
+        self.assertFalse(env.names("3", "https://3.basecampapi.com/999/buckets/5/todos.json"))
+        self.assertFalse(env.names("3", "https://example.atlassian.net/rest/api/3/issue/10001/comment"))
+        self.assertTrue(env.names("10001", "https://example.atlassian.net/rest/api/3/issue/10001/comment"))
+        self.assertTrue(env.names("5", "https://3.basecampapi.com/999/buckets/5/todos.json"))
+
+    def test_writes_elsewhere_do_not_break_not_acted_on_low_row_numbers(self):
+        info = {**INFO, "events": [], "assertions": [PROMOTED, {"type": "not_acted", "record": "2"}]}
+        tweet = {"method": "POST", "url": "https://api.twitter.com/2/tweets", "body": {"text": "Launch day"}}
         log = [{"at": "2026-03-04T09:00:00", "method": "PUT", "url": ROW_7, "body": "{}"}]
 
+        self.assertEqual(env.replay(info, [PROMOTE, tweet]), 1.0)
         self.assertTrue(env.day_check(log, {"type": "not_acted", "record": "4"}))
+
+    def test_an_on_time_write_to_a_bare_range_passes_acted_on_day(self):
+        seed = {
+            "meta": {"current_time": "2026-03-02T09:00:00"},
+            "google_sheets": {
+                "spreadsheets": [{"id": "ss_abc", "title": "Tracker"}],
+                "worksheets": [{"id": "ws1", "spreadsheet_id": "ss_abc", "title": "Sheet1", "headers": ["A", "B"]}],
+                "rows": [
+                    {
+                        "spreadsheet_id": "ss_abc",
+                        "worksheet_id": "ws1",
+                        "row_id": i,
+                        "cells": {"A": f"n{i}", "B": "open"},
+                    }
+                    for i in range(2, 9)
+                ],
+            },
+        }
+        info = {"initial_state": seed, "assertions": [{"type": "acted_on_day", "record": "7", "day": "2026-03-02"}]}
+        write = {
+            "method": "PUT",
+            "url": self.SHEET + "B7",
+            "params": {"valueInputOption": "RAW"},
+            "body": {"values": [["done"]]},
+        }
+
+        self.assertEqual(env.replay(info, [write]), 1.0)
 
 
 class DictCollectionEventTest(unittest.TestCase):
@@ -557,6 +614,45 @@ class EventAfterPolicyDeleteTest(unittest.TestCase):
         self.assertEqual(state["clock"].now(), datetime(2026, 3, 5, 9))
         self.assertEqual(env.reward(state), 0.0)
 
+    def test_a_delete_whose_url_does_not_name_the_target_is_scored_not_masked(self):
+        initial = {
+            "meta": {"current_time": "2026-03-02T09:00:00"},
+            "quickbooks": {"invoices": [{"id": "130", "customer_id": "7", "balance": "100"}]},
+        }
+        patch = {"app": "quickbooks", "collection": "invoices", "id": "130", "set": {"balance": "50"}}
+        info = {
+            **INFO,
+            "initial_state": initial,
+            "events": [{"at": "2026-03-03T08:00:00", "patch": patch}],
+            "assertions": [{"type": "not_acted", "record": "130"}],
+        }
+        vf_env, state = load(info)
+        # QuickBooks deletes with POST .../invoice?operation=delete and the id in the body, not in the URL.
+        qb = "https://quickbooks.api.intuit.com/v3/company/123/invoice"
+        state["clock"].fetch("POST", qb, {"operation": "delete"}, {"Id": "130"})
+        self.assertEqual(state["world"].quickbooks.invoices, [])
+        self.assertEqual(len(state["clock"].log), 1)
+
+        call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "2026-03-04T09:00:00"}))
+        asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
+
+        self.assertNotIn("requester_failed", state)
+        self.assertEqual(state["clock"].now(), datetime(2026, 3, 4, 9))
+
+    def test_an_event_on_a_record_added_by_an_earlier_event_and_then_deleted_is_scored(self):
+        events = [
+            {"at": "2026-03-03T08:00:00", "patch": {"app": "hubspot", "collection": "contacts", "add": {"id": "202"}}},
+            {
+                "at": "2026-03-04T08:00:00",
+                "patch": {"app": "hubspot", "collection": "contacts", "id": "202", "set": {"lifecyclestage": "lead"}},
+            },
+        ]
+        clock = env.Clock(WorldState(**copy.deepcopy(INITIAL_STATE)), events, "2026-03-06T18:00:00")
+        clock.wait("2026-03-03T09:00:00")
+        clock.fetch("DELETE", CONTACTS + "202")
+
+        self.assertEqual(json.loads(clock.wait("2026-03-05T09:00:00"))["advanced"], True)
+
     def test_an_event_on_a_record_that_never_existed_still_ends_the_rollout_unscored(self):
         events = [
             {
@@ -570,6 +666,29 @@ class EventAfterPolicyDeleteTest(unittest.TestCase):
         with self.assertRaises(vf.ToolCallError):
             asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
         self.assertEqual(state["requester_failed"], 1)
+
+
+class RefusedRequesterTest(unittest.TestCase):
+    def test_a_refused_connection_fails_the_try_at_once_with_the_connection_error(self):
+        import socket
+        import time
+
+        with socket.socket() as s:  # a local port with nothing listening: every connect is refused at once
+            s.bind(("127.0.0.1", 0))
+            url = f"http://127.0.0.1:{s.getsockname()[1]}/v1"
+        vf_env, _ = load(
+            {**SINGLE_DAY, "user_card": "notes"},
+            requester_base_url=url,
+            requester_max_tries=1,
+            requester_timeout_s=4.0,
+        )
+        start = time.monotonic()
+        with self.assertRaises(env.RequesterUnavailable) as caught:
+            asyncio.run(vf_env._chat([{"role": "user", "content": "hi"}]))
+
+        self.assertNotIn("TimeoutError", str(caught.exception))
+        self.assertIn("Connect", str(caught.exception))
+        self.assertLess(time.monotonic() - start, 2.0)
 
 
 class OverlongPromptTest(unittest.TestCase):

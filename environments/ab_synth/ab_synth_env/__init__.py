@@ -37,7 +37,7 @@ import re
 import typing
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from automationbench.rubric.registry import AssertionRegistry
 from automationbench.schema.world import WorldState
@@ -154,6 +154,17 @@ class Clock:
         self.log: list[dict] = []
         # acted_on_day reads the day in the seed's own time zone (UTC for a naive seed); the clock itself runs in UTC.
         self.zone = world.meta.current_time.tzinfo or timezone.utc
+        # Records that existed at the seed or were added by an event, so an event on one that is gone now can be told
+        # from an event on a record that never existed.
+        self.known = {
+            (app, collection, str(_get(r, "id")))
+            for app, records in world.model_dump(mode="json").items()
+            if isinstance(records, dict)
+            for collection, items in records.items()
+            if isinstance(items, list)
+            for r in items
+            if isinstance(r, dict)
+        }
 
     def now(self) -> datetime:
         return _time(self.world.meta.current_time.isoformat())
@@ -165,15 +176,17 @@ class Clock:
             return json.dumps({"now": self.now().isoformat(), "advanced": False})
         while self.events and _time(self.events[0]["at"]) <= target:
             patch = self.events.pop(0)["patch"]
+            key = (patch["app"], patch["collection"], str(patch["id"] if "id" in patch else _get(patch["add"], "id")))
             try:
                 apply_patch(self.world, patch)
             except MissingRecord:
-                # The agent deleted the record itself: the event has nothing left to change, and the rollout is
-                # scored (a not_acted guardrail on that record catches the deletion). Any other missing target is a
-                # dataset fault and still ends the rollout unscored.
-                if not any(e["method"] == "DELETE" and names(str(patch.get("id")), e["url"]) for e in self.log):
+                # The record existed and is gone: the agent, or the requester it asked, deleted it by some route. The
+                # event has nothing left to change and the rollout is scored. An event on a record that never existed
+                # is a dataset fault and still ends the rollout unscored.
+                if key not in self.known:
                     raise
-                logger.info("ab_synth: event skipped, the agent deleted %s", patch.get("id"))
+                logger.info("ab_synth: event skipped, %s.%s %s was deleted", *key)
+            self.known.add(key)
         # Keep the seed's awareness: upstream date queries read a naive time as host-local time.
         aware = self.world.meta.current_time.tzinfo is not None
         self.world.meta.current_time = target.replace(tzinfo=timezone.utc) if aware else target
@@ -194,16 +207,27 @@ class Clock:
 
 
 def names(record: str, url: str) -> bool:
-    """Whether `record` appears in the decoded URL as a whole identifier.
+    """Whether `record` appears in the decoded URL's path or query as a whole identifier.
 
     Row "6" matches "Sheet!I6:J6" but not "I16" or "I60", and "FD-101" does not match "FD-1010": an edge digit may not
-    touch another digit, an edge letter may not touch a letter or digit. A leading digit after letters matches only in
-    an A1 cell reference ("!I6", ":J6"), not inside "/v4/" or "Sheet1".
+    touch another digit, an edge letter may not touch a letter or digit. A leading digit after letters matches only
+    after an A1 column ("B7", "a7:b7", "Sheet1!I6"), not inside "Sheet1". The host and API version segments ("/v4/",
+    "/2/" first, "/1.0/") never match.
     """
-    url = unquote(url)
-    for match in re.finditer(re.escape(record), url):
-        before, after = url[match.start() - 1 : match.start()], url[match.end() : match.end() + 1]
-        if record[0].isdigit() and before.isalpha() and not re.search(r"[!:][A-Z]{1,3}$", url[: match.start()]):
+    parts = urlsplit(unquote(url))
+    path = parts.path.split("/")
+    segments = [
+        ""
+        if re.fullmatch(r"v\d+(\.\d+)*|\d+\.\d+(\.\d+)*", s)
+        or (re.fullmatch(r"\d{1,2}", s) and (i == 1 or path[i - 1].lower() in ("api", "rest")))
+        else s
+        for i, s in enumerate(path)
+    ]
+    text = "/".join(segments) + ("?" + parts.query if parts.query else "")
+    for match in re.finditer(re.escape(record), text):
+        before, after = text[match.start() - 1 : match.start()], text[match.end() : match.end() + 1]
+        a1_column = re.search(r"(^|[^A-Za-z0-9])[A-Za-z]{1,3}$", text[: match.start()])
+        if record[0].isdigit() and before.isalpha() and not a1_column:
             continue
         if not (_joins(record[0], before) or _joins(record[-1], after)):
             return True
@@ -214,12 +238,31 @@ def _joins(edge: str, neighbor: str) -> bool:
     return bool(neighbor) and (neighbor.isdigit() if edge.isdigit() else edge.isalpha() and neighbor.isalnum())
 
 
+def _body_strings(body: str) -> list[str]:
+    """The string values in a JSON body, unescaped (a quote, newline or backslash reads as itself)."""
+    try:
+        node = json.loads(body)
+    except ValueError:
+        return []
+    found, stack = [], [node]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            found.append(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
+
+
 def day_check(log: list[dict], assertion: dict) -> bool:
+    text = assertion.get("body_contains")
     hits = [
         e
         for e in log
         if names(assertion["record"], e["url"])
-        and (not assertion.get("body_contains") or assertion["body_contains"] in e["body"])
+        and (not text or text in e["body"] or any(text in s for s in _body_strings(e["body"])))
     ]
     if assertion["type"] == "not_acted":
         return not hits
@@ -523,7 +566,8 @@ def load_environment(
             payload = {"model": requester_model, "messages": messages, **body, **(requester_body or {})}
 
             async def attempt_once() -> dict:
-                response = await request("POST", url, json=payload, headers=headers or {})
+                # One connection try: request() would otherwise retry a refused connection until wait_for fires.
+                response = await request("POST", url, json=payload, headers=headers or {}, _max_num_tries=1)
                 response.raise_for_status()
                 return (await response.json())["choices"][0]
 
