@@ -26,8 +26,9 @@ lifetime.
 
 A snapshot lives while a checkpoint the controller may restore names it. No episode event deletes one: a checkpoint
 taken before a rollout finished still restores that rollout. Instead the owner keeps an index on disk, an
-empty file ``<state_dir>/<server>/snapshots/<checkpoint id>/<snapshot id>`` per snapshot, and the controller's
-release decides, through :meth:`~OwnedSandboxes.delete_snapshots`:
+empty file ``<state_dir>/<server>/snapshots/<checkpoint id>/<snapshot id>`` per snapshot (under
+``<state_dir>/<server>/providers/<provider field>/snapshots`` for a server's other provider fields), and the
+controller's release decides, through :meth:`~OwnedSandboxes.delete_snapshots`:
 
 - At commit, :meth:`~OwnedSandboxes.export` snapshots every live sandbox it is asked for. The moment the
   service returns a snapshot's id, its file is written, before the snapshot is awaited; then the export waits until
@@ -61,7 +62,8 @@ the provider's own tooling.
 
 Snapshot names are ``ng-<state dir>-<server>-<checkpoint>-<key>-<attempt>``, each part but the attempt a short hash,
 so names stay within provider limits and a listing can tell the state directory, the server and the checkpoint of
-each snapshot. ``<state dir>`` is read from ``<state_dir>/state_dir_id``, written once by the first server to use
+each snapshot. For a server's other provider fields, ``<server>`` hashes ``<server>/<provider field>``, which no
+server name spells, since a server name has no ``/``. ``<state dir>`` is read from ``<state_dir>/state_dir_id``, written once by the first server to use
 the directory, so every server and every restart that shares a ``state_dir`` shares it too. It identifies the
 directory, not a collection run: it is unrelated to the ``run_id`` of a rollouts manifest or an exporter.
 
@@ -297,10 +299,14 @@ def read_state_dir_id(state_dir: Path) -> str:
     return state_dir_id
 
 
-def _open_index(state_dir: Path, server_name: str) -> tuple[str, "_SnapshotIndex"]:
-    """The ID of ``state_dir`` and ``server_name``'s snapshot index in it, whose directory this creates if needed."""
+def _open_index(state_dir: Path, server_name: str, provider_field: str | None) -> tuple[str, "_SnapshotIndex"]:
+    """The ID of ``state_dir`` and the snapshot index in it of ``server_name``'s owner on ``provider_field`` (its
+    ``sandbox_provider`` for ``None``), whose directory this creates if needed."""
     state_dir_id = read_state_dir_id(state_dir)
-    index = _SnapshotIndex(state_dir / server_name / "snapshots")
+    owner_dir = state_dir / server_name
+    if provider_field is not None:
+        owner_dir = owner_dir / "providers" / provider_field
+    index = _SnapshotIndex(owner_dir / "snapshots")
     index.root.mkdir(parents=True, exist_ok=True)
     return state_dir_id, index
 
@@ -408,6 +414,8 @@ class OwnedSandboxes:
     submits, creates, stops and deletes against the backend; size it with the commit deadline.
     ``provider_config_ref`` names the provider's config block, which :meth:`access` hands to a borrower.
     With ``owns_provider``, :meth:`aclose` closes the provider too; otherwise the caller that made it closes it.
+    ``provider_field`` names the server's config field for a provider other than its ``sandbox_provider``, which gets
+    its own snapshot index and snapshot names.
     """
 
     def __init__(
@@ -421,6 +429,7 @@ class OwnedSandboxes:
         snapshot_retry_delay_s: float = 5.0,
         provider_config_ref: str | None = None,
         owns_provider: bool = False,
+        provider_field: str | None = None,
     ) -> None:
         config = SandboxCheckpointConfig(
             parallelism=parallelism,
@@ -433,6 +442,12 @@ class OwnedSandboxes:
         # Set by the server that holds this instance, so :meth:`on` can give its instance for another provider.
         self._on: Callable[[str], "OwnedSandboxes"] | None = None
         self._server_name = _path_component(server_name, "server name")
+        self._provider_field = _path_component(provider_field, "provider field") if provider_field else None
+        # Who owns the sandboxes, in snapshot names and logs: the server, and the provider field unless it is the
+        # server's sandbox_provider. "/" cannot occur in a server name, so no two owners share one.
+        self._owner = self._server_name if self._provider_field is None else f"{server_name}/{self._provider_field}"
+        # One provider close at a time; the provider counts as closed only once a close succeeded.
+        self._provider_close = asyncio.Lock()
         self._snapshot_attempts = config.snapshot_attempts
         self._snapshot_retry_delay_s = config.snapshot_retry_delay_s
         self._semaphore = asyncio.Semaphore(config.parallelism)
@@ -441,7 +456,7 @@ class OwnedSandboxes:
         self._state_dir_id: str | None = None
         if state_dir is not None:
             # Fails at server start, not at the first commit, if the directory cannot be created.
-            self._state_dir_id, self._index = _open_index(Path(state_dir), self._server_name)
+            self._state_dir_id, self._index = _open_index(Path(state_dir), self._server_name, self._provider_field)
         # Keys whose sandbox is being created or restored: no other create, add or restore may take them meanwhile.
         self._pending: set[str] = set()
         # Set while no key is pending, which is what ``aclose`` waits for before it stops the sandboxes.
@@ -484,7 +499,7 @@ class OwnedSandboxes:
 
         ``config`` is the server's config and ``global_config`` the merged global config, which resolves a named
         provider and ``checkpoint.state_dir``. An instance for a field other than ``sandbox_provider`` gets its own
-        server name, ``<server>.<field>``, so its snapshot index and snapshot names stay apart. Without a
+        snapshot index and snapshot names, kept apart from every other server's and field's. Without a
         ``checkpoint.state_dir`` the instance has no snapshot index: it creates, lends and stops sandboxes, and only
         :meth:`export` refuses, so a server that never exports, such as an agent, needs none. The instance owns the
         provider it creates and closes it in :meth:`aclose`. ``on`` gives the server's instance for another field,
@@ -503,10 +518,10 @@ class OwnedSandboxes:
         # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
         provider_config = resolve_provider_config(reference, global_config)
         state_dir = _configured_state_dir(global_config)
-        suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
-        server_name = _path_component(f"{config.name}{suffix}", "server name")
+        server_name = _path_component(config.name, "server name")
+        other_field = None if provider_field == "sandbox_provider" else _path_component(provider_field, "field")
         if state_dir is not None:
-            _open_index(state_dir, server_name)
+            _open_index(state_dir, server_name, other_field)
         if "local" in provider_config:
             LOGGER.warning(
                 "%s owns sandboxes on the local provider, which runs their commands as processes on this host; "
@@ -520,6 +535,7 @@ class OwnedSandboxes:
             server_name=server_name,
             provider_config_ref=reference if isinstance(reference, str) else None,
             owns_provider=True,
+            provider_field=other_field,
         )
         owned._on = on
         return owned
@@ -554,7 +570,7 @@ class OwnedSandboxes:
         """The name prefix of every snapshot this server takes under its ``state_dir``; ``None`` without one."""
         if self._state_dir_id is None:
             return None
-        return f"ng-{self._state_dir_id}-{name_hash(self._server_name)}-"
+        return f"ng-{self._state_dir_id}-{name_hash(self._owner)}-"
 
     def snapshot_name(self, checkpoint_id: str, key: str, attempt: int) -> str:
         """The name of attempt ``attempt`` to snapshot ``key``'s sandbox for ``checkpoint_id``."""
@@ -668,7 +684,8 @@ class OwnedSandboxes:
         then on, and the ones already running are waited for, so a restore that installs its forks during the
         shutdown has them stopped here. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is
         logged and stays tracked (its key stays in :attr:`keys`), the others are still stopped, and calling this
-        again tries the rest again. An instance that owns its provider closes it once every sandbox is stopped.
+        again tries the rest again. An instance that owns its provider closes it once every sandbox is stopped;
+        a close that fails or is cancelled is tried again by the next call, and one that succeeded is not repeated.
         Snapshots are not touched: the controller may still restore from them, and only its release deletes them.
         """
         self._closed = True
@@ -682,8 +699,10 @@ class OwnedSandboxes:
         if self._owns_provider and not self._entries and not self._unstopped_forks:
             # Last, and only once nothing is left to stop, so a later call can still retry a failed stop. Closing
             # runs the provider's own cleanup too, such as reaping a create the shutdown abandoned.
-            self._owns_provider = False
-            await self._provider.aclose()
+            async with self._provider_close:
+                if self._owns_provider:
+                    await self._provider.aclose()
+                    self._owns_provider = False
 
     # -- commit -------------------------------------------------------------------------------------------------
 
@@ -735,7 +754,7 @@ class OwnedSandboxes:
                 "release deletes a snapshot, so each of them keeps its snapshots on the provider: check that the "
                 "controller releases the checkpoints it no longer restores, and delete what a finished job left "
                 "by the name prefix %s",
-                self._server_name,
+                self._owner,
                 count,
                 self.snapshot_name_prefix,
             )
