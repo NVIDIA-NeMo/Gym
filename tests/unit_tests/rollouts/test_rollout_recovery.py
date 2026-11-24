@@ -2488,14 +2488,16 @@ async def test_a_grading_provider_stop_ends_the_run_without_a_retry(
     ],
 )
 async def test_a_credentials_or_quota_stop_writes_no_aggregate(runner_config, monkeypatch, failure_class, kind):
-    """The stop is a rejection like an incomplete run: one rollout scored, yet no score is computed or left behind."""
+    """A provider stop gets no score, partial or complete: one rollout scored, yet no score is computed or left behind."""
     from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
-    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for, partial_aggregate_metrics_path_for
 
     runner_config.require_complete = True
     runner_config.disable_aggregation = False
     aggregate = aggregate_metrics_path_for(Path(runner_config.output_jsonl_fpath))
     aggregate.write_text("[]")  # an earlier segment's aggregate describes other rows
+    partial_aggregate = partial_aggregate_metrics_path_for(Path(runner_config.output_jsonl_fpath))
+    partial_aggregate.write_text("[]")
     urls = []
     calls = []
 
@@ -2523,6 +2525,7 @@ async def test_a_credentials_or_quota_stop_writes_no_aggregate(runner_config, mo
     assert raised.value.failure_kind == kind
     assert "/aggregate_metrics" not in urls
     assert not aggregate.exists()
+    assert not partial_aggregate.exists()
 
 
 async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rollouts(runner_config, monkeypatch):

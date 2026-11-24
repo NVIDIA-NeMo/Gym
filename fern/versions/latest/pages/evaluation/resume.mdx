@@ -409,6 +409,9 @@ default. Local `gym eval run` and standalone collection default to `require_comp
 partial results; use `+require_complete=true` to require completion. With completion required and aggregation enabled, the
 built-in collector saves a rejected incomplete run's rollouts, failures and coverage but writes no
 `rollouts_aggregate_metrics.json` and exports no score. It writes the aggregate when a resume completes the run.
+Meanwhile it writes `rollouts_partial_aggregate_metrics.json`: the same metrics over the settled rollouts only, so its
+denominator is smaller than the expected rollouts. It is not the run's score and is never exported, and the run stays
+incomplete. The complete aggregate replaces it.
 Custom collection drivers can differ: GDPVal multistage keeps its stage-aware aggregate before checking completion.
 
 With completion required, the CLI exits with **75** if the evaluation is incomplete, tasks remain eligible for resume,

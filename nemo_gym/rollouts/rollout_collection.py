@@ -215,6 +215,7 @@ from nemo_gym.utils.path_utils import (
     batch_status_path_for,
     failures_path_for,
     materialized_path_for,
+    partial_aggregate_metrics_path_for,
     resubmit_offset_path_for,
     task_selection_path_for,
 )
@@ -5322,6 +5323,9 @@ executions → not run again (left to recovery)
             rejection = await asyncio.to_thread(
                 lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
             )
+        # A credentials or quota stop ends the run before its rollouts could settle: a resume fixes it, so it gets
+        # no score at all, partial or not.
+        provider_stop = rejection is not None
         if rejection is None:
             rejection = config.completion_rejection(
                 expected=completion["expected"],
@@ -5332,22 +5336,32 @@ executions → not run again (left to recovery)
                 made_progress=store.progress_outcomes_recorded > 0,
                 unsettled_note=unsettled_masked_note(completion),
             )
+        partial_aggregate_fpath: Optional[Path] = None
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
                 "Run `gym eval aggregate` after all shards finish to compute the global metrics."
             )
             aggregate_metrics_fpath = None
-        elif rejection is not None:
-            # An aggregate an earlier segment left describes a different set of rows: remove it with the score.
-            await asyncio.to_thread(aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
-            print(
-                "Not computing aggregate metrics: the run is incomplete and require_complete is set. "
-                "Resume it; the aggregate is written when the run completes."
-            )
+        elif provider_stop:
+            for stale in (aggregate_metrics_path_for(output_fpath), partial_aggregate_metrics_path_for(output_fpath)):
+                await asyncio.to_thread(stale.unlink, missing_ok=True)
+            print("The run was stopped by its provider and has no score. Resume it once the provider accepts calls.")
             aggregate_metrics_fpath = None
         else:
-            print("Computing aggregate metrics")
+            partial = rejection is not None
+            if partial:
+                # An aggregate an earlier segment left describes a different set of rows: remove it with the score.
+                await asyncio.to_thread(aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
+                print(
+                    "The run is incomplete and require_complete is set, so it has no aggregate metrics. "
+                    "Computing a partial score over the settled rollouts only. It is not the run's score: "
+                    "its denominator is the settled rollouts, not the expected ones."
+                )
+            else:
+                # A partial score an earlier segment left is superseded by the run's own aggregate.
+                await asyncio.to_thread(partial_aggregate_metrics_path_for(output_fpath).unlink, missing_ok=True)
+                print("Computing aggregate metrics")
             if config.count_failure_classes_as_zero:
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
@@ -5365,12 +5379,21 @@ executions → not run again (left to recovery)
             scored_rows = persisted_results + counted
             metadata_rows = persisted_rows + counted if config.retain_results_in_memory else scored_rows
             order = sorted(range(len(scored_rows)), key=lambda i: _rollout_order_key(scored_rows[i]))
-            aggregate_metrics_fpath = await self._call_aggregate_metrics(
-                [scored_rows[i] for i in order],
-                [metadata_rows[i] for i in order],
-                output_fpath,
-                raise_on_error=False,  # Write batch status before reporting aggregation failures below.
-            )
+            aggregate_args = ([scored_rows[i] for i in order], [metadata_rows[i] for i in order], output_fpath)
+            if partial:
+                # Best effort: a score that cannot be computed must not hide why the run was rejected.
+                try:
+                    partial_aggregate_fpath = await self._call_aggregate_metrics(
+                        *aggregate_args, raise_on_error=False, partial=True
+                    )
+                except Exception:
+                    logger.exception("Could not compute the partial score of the incomplete run")
+                aggregate_metrics_fpath = None
+            else:
+                aggregate_metrics_fpath = await self._call_aggregate_metrics(
+                    *aggregate_args,
+                    raise_on_error=False,  # Write batch status before reporting aggregation failures below.
+                )
 
         if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
             batch_tracker.write_status(
@@ -5429,6 +5452,8 @@ executions → not run again (left to recovery)
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
+        if partial_aggregate_fpath is not None:
+            print(f"Partial score over the settled rollouts, not the run's score: {partial_aggregate_fpath}")
 
         if rejection is not None:
             raise rejection
@@ -5595,8 +5620,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         output_fpath: Path,
         *,
         raise_on_error: bool = True,
+        partial: bool = False,
     ) -> Optional[Path]:
         """Aggregate ``results`` per environment server and write the run's _aggregate_metrics.json.
+
+        With ``partial`` the rows are the settled ones of a strict run that is not complete: the file is the
+        run's ``_partial_aggregate_metrics.json`` and nothing is exported, so no tracker or dashboard shows it as the
+        run's score.
 
         See ``_aggregate_entries`` for how rows are grouped. Writes a single _aggregate_metrics.json with
         one entry per environment server (same shape as the old _agent_metrics.json, plus the server
@@ -5612,12 +5642,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics, first_error = await self._aggregate_entries(results, rows)
 
-        metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
-
-        export_metrics(metrics_to_log)
+        if not partial:
+            export_metrics(flatten_aggregate_metrics(all_agent_metrics))
 
         # Write single file with all agents
-        metrics_fpath = aggregate_metrics_path_for(output_fpath)
+        metrics_fpath = (partial_aggregate_metrics_path_for if partial else aggregate_metrics_path_for)(output_fpath)
         metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
         if raise_on_error and first_error is not None:
