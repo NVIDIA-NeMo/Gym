@@ -981,7 +981,7 @@ async def test_rollout_stop_before_cline_opened_its_output_keeps_an_empty_transc
 async def test_sessionless_calls_keep_the_host_cli_path(monkeypatch):
     instance = agent()
     instance._run_cline = AsyncMock(return_value=([], {}, "policy-model"))
-    plain = SimpleNamespace(path_params={}, url=SimpleNamespace(path=""))
+    plain = SimpleNamespace(path_params={}, url=SimpleNamespace(path=""))  # what harness_exa_search's runner passes
     response = await instance.responses(plain, NeMoGymResponseCreateParamsNonStreaming(input="Question"))
     instance._run_cline.assert_awaited_once_with("Question", None, None)
     assert response.output[0].type == "message"

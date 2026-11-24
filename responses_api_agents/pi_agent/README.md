@@ -362,7 +362,7 @@ Calls without an agent session retain local CLI compatibility. They do not use t
 Resources-owned task sandbox. Configure a Gym `model_server`, or supply an explicit Pi provider
 configuration as below. The self-contained math example keeps its local execution settings.
 
-AnySWE, AnyTerminal, and HarnessAgent can continue forwarding their existing Responses
+AnySWE, AnyTerminal, and `harness_exa_search`'s sandbox runner can continue forwarding their existing Responses
 request fields. On this compatibility path, the configured model and per-call token cap
 remain authoritative; forwarding request-level sampling fields or `max_output_tokens`
 does not add support for them or enforce a total-response budget.
