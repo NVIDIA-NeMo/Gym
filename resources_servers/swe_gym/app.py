@@ -436,9 +436,10 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             body,
             # An unresolved-but-completed run is a real 0. An incomplete run (no verdict) is masked, so a broken row
             # or a verifier outage is not trained as a hard task. A test run that hit evaluation_timeout stays a
-            # trained 0: a test the patch made hang is the patch's fault.
+            # trained 0: a test the patch made hang is the patch's fault. It is reported as completed, as the sibling
+            # SWE servers report a timeout, so Gym's eval recovery reads it as a measured 0 and not as masked.
             reward=1.0 if result.resolved else 0.0,
-            evaluation_completed=result.completed,
+            evaluation_completed=result.completed or result.timed_out,
             **(
                 {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": error or "No verdict"}
                 if not result.completed and not result.timed_out

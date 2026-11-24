@@ -524,8 +524,8 @@ def test_the_patch_s_own_failures_stay_a_trained_zero(consumer, outcome):
 
 @pytest.mark.parametrize("episode", [True, False], ids=["episode", "agent_run"])
 def test_a_swe_gym_test_run_that_timed_out_stays_a_trained_zero(monkeypatch, episode):
-    """A timed-out test run is retried like any run without a verdict, then scored 0, not masked: the patch can make
-    the held-out tests hang."""
+    """A timed-out test run is retried like any run without a verdict, then reported as a completed 0, not masked:
+    the patch can make the held-out tests hang."""
     server, sandboxes = swe_sessions._server(monkeypatch)
     swe_app.run_verification.return_value = swe_app.VerificationResult(
         False, False, False, None, "", "test run did not finish (timeout): ", timed_out=True
@@ -536,6 +536,6 @@ def test_a_swe_gym_test_run_that_timed_out_stays_a_trained_zero(monkeypatch, epi
     assert verified.status_code == 200, verified.text
     result = verified.json()
     assert not result["mask_sample"] and result["failure_kind"] is None
-    assert not result["evaluation_completed"] and result["reward"] == 0
+    assert result["evaluation_completed"] and result["reward"] == 0
     assert result["error"].startswith("test run did not finish (timeout)")
     assert swe_app.run_verification.await_count == 2
