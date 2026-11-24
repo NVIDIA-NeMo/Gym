@@ -2549,3 +2549,18 @@ def test_a_start_whose_rollback_stop_fails_raises_the_starts_own_error(start: st
         assert str(raised.value.__context__) == "provider unreachable", "the failed stop rides along as context"
 
     asyncio.run(run())
+
+
+def test_a_setup_whose_rollback_stop_fails_raises_the_setups_own_error() -> None:
+    async def run() -> None:
+        sandbox = AsyncSandbox(_FailingUploadAndCloseProvider())
+
+        async def setup(started: AsyncSandbox) -> None:
+            assert started.started
+            raise ValueError("setup failed")
+
+        with pytest.raises(ValueError, match="setup failed") as raised:
+            await sandbox.start_with_setup(SandboxSpec(image="image:tag"), setup)
+        assert str(raised.value.__context__) == "provider unreachable"
+
+    asyncio.run(run())

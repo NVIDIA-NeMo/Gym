@@ -663,13 +663,17 @@ class OwnedSandboxes:
         return f"{prefix}{name_hash(checkpoint_id)}-{name_hash(key)}-{attempt}"
 
     def __contains__(self, key: object) -> bool:
-        """Whether ``key`` currently has a sandbox."""
-        return key in self._entries
+        """Whether ``key`` has a running sandbox whose start completed successfully."""
+        entry = self._entries.get(key)
+        return entry is not None and entry.exportable and entry.sandbox.started
 
     def get(self, key: str) -> Optional[AsyncSandbox]:
-        """``key``'s current sandbox, or ``None``; after a restore it is the fork, under a new id."""
+        """``key``'s running sandbox, or ``None`` while starting or after a failed start.
+
+        After a restore it is the fork, under a new id. ``keys`` includes entries kept only for cleanup.
+        """
         entry = self._entries.get(key)
-        return entry.sandbox if entry is not None else None
+        return entry.sandbox if entry is not None and entry.exportable and entry.sandbox.started else None
 
     def add(self, key: str, sandbox: AsyncSandbox, spec: SandboxSpec) -> None:
         """Track a sandbox the owner started itself; ``spec`` is what a restore re-creates its fork from.
@@ -1264,10 +1268,15 @@ class OwnedSandboxes:
         Unlike :meth:`stop`, every key can be restored again at once, whether or not the stops succeed. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the
         forks that :meth:`settle`, the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped.
         """
-        for key in keys:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self._unstopped_forks.append(entry.sandbox)
+        # Wait for starts and restores before detaching their entries. Stopping a not-yet-started AsyncSandbox
+        # marks it closed; a later provider reply would then leave a running sandbox that stop cannot reach.
+        with anyio.CancelScope(shield=True):
+            async with contextlib.AsyncExitStack() as held:
+                for key in sorted(set(keys)):
+                    await held.enter_async_context(self._key_locks.locked(key))
+                    entry = self._entries.pop(key, None)
+                    if entry is not None:
+                        self._unstopped_forks.append(entry.sandbox)
         await self._stop_forks()
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:

@@ -1057,3 +1057,23 @@ def test_the_old_checkpointer_name_resolves_with_a_deprecation_warning() -> None
         module = importlib.import_module("nemo_gym.server_runtime._checkpoint.sandbox")
         old = getattr(module, "SandboxSessionCheckpointer")
     assert old is OwnedSandboxes
+
+
+async def test_discard_waits_for_a_pending_start_and_stops_the_sandbox() -> None:
+    provider = _GatedProvider()
+    owned = _owned(provider)
+    provider.create_gate.clear()
+    creating = asyncio.create_task(owned.create("session", _spec()))
+    await _until(lambda: provider.in_flight == 1)
+    assert owned.get("session") is None
+    assert "session" not in owned
+    assert owned.keys == ["session"]
+    discarding = asyncio.create_task(owned.discard(["session"]))
+    await asyncio.sleep(0)
+    assert not discarding.done()
+    provider.create_gate.set()
+    sandbox = await creating
+    await discarding
+    assert not sandbox.started
+    assert _states(provider) == ["stopped"]
+    assert owned.keys == []

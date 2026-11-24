@@ -196,6 +196,8 @@ sandbox:
       domain: ${oc.env:OPENSANDBOX_DOMAIN}
 ```
 
+Servers using `OwnedSandboxes.from_config`, including SWE-bench checkpoint sessions, retain `parallelism` as each of their start, stop and snapshot limits. These limits are independent: the maximum concurrent backend calls can be three times the previous shared limit.
+
 The helpers used by agents are public:
 
 ```python
