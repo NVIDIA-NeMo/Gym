@@ -40,7 +40,7 @@ These adapters run a harness inside a sandbox. The `single_agent_turn` Environme
 | Terminus 2 (`terminus_2_agent`) | Chat Completions | None | Off by default (`collect_rollout_details`); returned in a result file that the model can also write; evaluation only | Not declared | Not declared | Not validated |
 
 The [visual benchmark catalog](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/opencode_multimodal_benchmarks)
-uses stock OpenCode sessions for VStar, HRBench8K, VTCBench and ZeroBench. Prompt
+uses stock OpenCode sessions for VStar, HRBench8K, VTCBench, Agent-X and ZeroBench. Prompt
 and tool images use the shared media path. Evaluation disables auxiliary tool
 rewards; optional training rewards are implemented by the Resources verifier.
 Network and tool profiles are selected per task before sandbox creation.
@@ -51,7 +51,7 @@ On Harbor task folders, you pick the harness with `gym eval run <folder> --agent
 
 Copilot pairings remain experimental pending full benchmark qualification and benchmark-owner review. Use `--allow-unsupported-pairing` for validation runs; the SWE-bench Pro pairing also requires task-network access to install its runtime.
 
-The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
+The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and relay recipes such as `terminal_bench_2_1/opencode_legacy_agent` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
 
 <Warning>
 This legacy `/run` path is deprecated and will be removed after the Environment Server migration. Do not build new benchmarks, agents, or configs on `opencode_sandboxed_agent`, `pi_sandboxed_agent`, `hermes_sandboxed_agent`, or `miniswe_sandboxed_agent`, or on the `/run` path of `terminus_2_sandboxed_agent`. Use a harness from the table above instead. Each of these agents logs a deprecation warning when it starts on this path. Episode sessions of `terminus_2_sandboxed_agent`, which [task folders](/main/data/task-folders/harbor-tasks) use, are not deprecated.
@@ -329,6 +329,13 @@ retries, skipped indices, and overlapping new activations fail. The existing
 `metadata.agent_timeout_sec` sets the per-activation budget, including preparation,
 queueing and staging. Setup and cleanup retain their separate bounds.
 
+`simple_agent` also resumes its session, without a sandbox: it keeps the conversation in the
+session and sends each activation's input after it. The first activation's settings (tools,
+tool choice, sampling and the rest) hold for the session, and a later activation that changes
+one gets HTTP 422. `max_steps` bounds each activation. The close returns the trajectory of
+every activation. Under checkpointing, the session restarts. A subclass of `simple_agent` supports continuation only when it sets
+`continuation_supported` itself.
+
 Adapters that support continuation override `_agent_continuation_capabilities()` to return
 the supported mode and observations, implement `_validate_agent_activation()` before
 binding an index, `_activate_agent_session_state()` for execution, and
@@ -352,6 +359,39 @@ carry only new output, usage and evidence; close supplies the cumulative record.
 termination receipt fails the activation and skips verification; close releases
 the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
 the connection remain retryable.
+
+## OpenCode partial-rollout checkpoints
+
+With checkpointing on (the top-level `checkpoint` block sets `enabled: true`), an `opencode_agent`
+session with one activation in a borrowed sandbox takes part in partial-rollout checkpoints. At a
+checkpoint the activation parks and OpenCode's processes are paused in place with `SIGSTOP`, then
+continued with `SIGCONT`. The Resources Server snapshots the sandbox. Two agent settings apply:
+
+| Setting | Default | Constraint |
+| --- | --- | --- |
+| `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on storage the sandbox snapshot covers. The saved conversation lives here; a restore that does not find it starts the task afresh. |
+| `checkpoint_pause_allowance_seconds` | `3600` | Bounds the time a launch spends paused. Size it to cover the longest checkpoint commit. |
+
+- **Pause limits.** Paused time does not count against the agent's `timeout`. A launch paused for
+  longer than the allowance fails the execution. One pause that lasts longer than the allowance
+  makes the process supervisor end OpenCode as at its time limit, so OpenCode is not left paused
+  if the Agent Server dies during a checkpoint.
+- **Clocks.** A pause stops OpenCode's processes, not their clocks. A tool that runs across a
+  pause can hit its own timeout when OpenCode continues. Model calls are not affected.
+- **Pause and continue versus crash recovery.** Pause and continue keep OpenCode's processes. If a
+  pause is not confirmed, OpenCode is stopped and relaunched after the checkpoint. After a crash no
+  process is kept: the restore forks the sandbox snapshot, the Environment Server seeds the session
+  again, and the agent re-binds the session to the fork. A re-sent activation gets the reply the
+  session already gave if it is the same request, and otherwise relaunches OpenCode. A relaunch
+  reprompts the saved conversation without adding a user turn when it starts with the task's
+  prompt and the model answered at least once. Otherwise it sets the saved conversation aside and
+  starts the task afresh.
+- **Restart-only sessions.** Sandboxes the agent owns, multi-turn continuation sessions, sessions
+  that continue an imported conversation (`session_import_path`), and OpenCode 2 sessions start
+  over after a crash.
+
+See [Partial-rollout checkpoints](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/README.md#partial-rollout-checkpoints)
+in the `opencode_agent` README for the relaunch rules, interrupted tool calls and the reply metadata.
 
 ## NOOA worker checkpoints
 
@@ -385,6 +425,59 @@ Existing agents may come with predefined tools, allowing you to leverage them di
 
 See [Choose a Path](/main/agent-server#choose-a-path) to compare the options.
 
+## Training with tool rewards
+
+Use `string_match_tool_rewards`, `mcqa_tool_rewards` or `math_tool_rewards` to
+combine the standalone grader (`string_match`, `mcqa` or `math_with_judge`) with optional tool rewards. Their dataset schemas and
+grading behavior match the corresponding standalone graders. Enable
+`forward_agent_evidence: true` on the paired environment so the wrapper receives
+Gym's canonical tool-execution observations.
+
+The default shell name is `bash`. For a harness that calls its shell tool `shell`,
+configure the resources server with:
+
+```yaml
+tool_rewards:
+  shell_tool_name: shell
+```
+
+To use one reward configuration with several shell tool names:
+
+```yaml
+tool_rewards:
+  shell_tool_names: [terminal, bash, shell, exec, exec_command]
+  invalid_tool_call_names: null
+```
+
+Set either `shell_tool_name` or a non-null `shell_tool_names` list; setting both
+is rejected. The list must be nonempty and contain nonempty names. An omitted or
+`null` list retains the single-name setting and its
+default of `bash`. All selected names share one shell-call count and success-bonus
+schedule, including the existing `correct_bash_call_penalties` schedule. Duplicate
+comparison retains the tool name: identical arguments sent to different tools are
+not treated as duplicate calls.
+
+When omitted, `invalid_tool_call_names` defaults to the configured shell names.
+An explicit list selects tools eligible for failure penalties; `null` includes all
+supported function tools and `[]` disables failure penalties. `null` penalizes
+failed calls, not every call, and the existing correctness gates still apply.
+These settings control scoring; they do not enable tools in the harness.
+
+A nonzero shell exit must be reported as a failed tool observation.
+The configured shell names control shell counting, duplicate normalization and
+success bonuses; they do not infer exit status from tool output. Changing tool names does
+not supply missing execution evidence. The historical OpenCode and local Pi CLI
+smoke reports cover single-shell settings. The Pi smoke registered its shell as
+`shell` and checked failure filtering and call-count penalties; it does not validate
+Pi sandbox sessions or the plural setting.
+
+These components replace `opencode_string_match_tool_rewards`,
+`opencode_mcqa_tool_rewards` and `opencode_math_tool_rewards`. Update component
+keys, imports and config paths. Keep logical server-instance names unchanged to
+preserve environment bindings. The `opencode_*_tool_rewards` component paths are removed. Reward
+defaults and saved reward fields such as `opencode_tool_reward` and
+`bash_call_count` are unchanged.
+
 <Cards>
 
 <Card title="Agent Server" href="/agent-server">
@@ -396,3 +489,46 @@ Understand where shared tool implementations and verification logic belong.
 </Card>
 
 </Cards>
+
+
+For generic answer-equivalence training with configurable tool rewards, use the
+`llm_judge_tool_rewards` Resources component and
+`resources_servers/llm_judge_tool_rewards/configs/llm_judge_tool_rewards.yaml`. It retains
+`equivalence_llm_judge`'s dataset schema (`expected_answer` and optional question
+metadata); visual-benchmark metadata is unnecessary. Bind the environment to
+`llm_judge_with_tools`, configure a separate `training_judge` model, and enable
+`forward_agent_evidence: true`. Reverification needs that flag separately when
+recomputing tool rewards. The wrapper preserves the saved policy response and
+records correctness and tool reward separately; unusable judge replies remain
+masked failures. Shell/search tool names and rate-limit matching are configurable;
+the shipped settings are OpenCode-compatible. Other harnesses must provide matching
+tool settings and canonical execution observations; OpenCode is the currently
+validated tool-using pairing.
+
+For a harness exposing several shell tools, set `tool_rewards.shell_tool_names`
+instead of `shell_tool_name`. They share the shell-use penalty schedule and success
+bonus cap; duplicate detection still distinguishes tool names. When omitted,
+`invalid_tool_call_names` follows the configured shell names. An explicit list
+limits failure penalties to those tools, `[]` disables failure penalties, and
+`null` includes every tool. Setting both singular and non-null plural shell fields
+is rejected.
+
+The shipped LLM-judge config explicitly sets `shell_tool_name: bash` and
+`invalid_tool_call_names: [bash]`. Config overlays merge fields, so adding plural
+shell names alone would leave both settings in place. This overlay removes the
+inherited singular name and explicitly enables failure penalties for all tools:
+
+```yaml
+llm_judge_with_tools:
+  resources_servers:
+    llm_judge_tool_rewards:
+      tool_rewards:
+        _delete_key: shell_tool_name
+        shell_tool_names: [terminal, bash, shell, exec, exec_command]
+        invalid_tool_call_names: null
+```
+
+Choose shell names that match the harness's actual tools. Existing search-name and
+rate-limit settings remain inherited. Each harness must still supply canonical
+execution observations; this configuration does not add tools to the harness or
+change its network access.

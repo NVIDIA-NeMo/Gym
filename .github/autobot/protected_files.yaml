@@ -1,0 +1,6 @@
+# Paths whose change grades a pull request high, whatever its size. pr_risk.py reads this list from the
+# pull request's target branch. Each entry is a glob over the whole repository path; `*` also matches `/`.
+- .github/*
+- .gitattributes
+- pyproject.toml
+- uv.lock

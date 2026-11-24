@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The AGA Code-assisted VQA / Agent-X training task under five native harnesses. The rows are built by
+# `prepare.py` from a private data export and are not committed; `aga_opencode_agent` carries the dataset
+# descriptor for the catalog, and `prepare.py --harness NAME` routes each row to its harness.
+config_paths:
+  - resources_servers/aga_visual_tasks/configs/multiharness.yaml
+  - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+
+aga_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+        - name: aga_visual_tasks
+          type: train
+          jsonl_fpath: environments/aga_visual_tasks/data/aga_visual_tasks_train.jsonl
+          prepare_script: environments/aga_visual_tasks/prepare.py
+          license: TBD

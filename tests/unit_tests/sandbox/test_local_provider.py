@@ -303,3 +303,38 @@ async def test_registered_provider_drives_the_public_sandbox_api(tmp_path: Path)
     assert await sandbox.status() is SandboxStatus.RUNNING
     await sandbox.stop()
     assert not workspace.exists()
+
+
+@pytest.mark.parametrize("absolute_cwd", [False, True])
+async def test_exec_uses_requested_sandbox_work_directory(tmp_path: Path, absolute_cwd: bool) -> None:
+    provider = LocalProvider(workspace_root=str(tmp_path))
+    handle = await provider.create(SandboxSpec())
+    work = handle.raw["workspace"] / "work"
+    work.mkdir()
+    (work / "marker.txt").write_text("sandbox runner directory")
+    try:
+        result = await provider.exec(handle, "cat marker.txt", cwd=str(work) if absolute_cwd else "work")
+        assert result.return_code == 0, result.stderr
+        assert result.stdout == "sandbox runner directory"
+    finally:
+        await provider.close(handle)
+
+
+@pytest.mark.parametrize("absolute_workdir", [False, True])
+@pytest.mark.parametrize("exec_cwd", [None, "nested", "absolute"])
+async def test_caller_workdir_and_exec_overrides(tmp_path: Path, monkeypatch, absolute_workdir, exec_cwd) -> None:
+    monkeypatch.chdir(tmp_path)
+    workdir = tmp_path / "repo"
+    override = tmp_path / "nested"
+    override.mkdir()
+    sandbox = AsyncSandbox(LocalProvider())
+    await sandbox.start(SandboxSpec(workdir=str(workdir) if absolute_workdir else "repo"))
+    try:
+        # Caller-supplied execution overrides retain their host-relative semantics.
+        cwd = str(override) if exec_cwd == "absolute" else exec_cwd
+        result = await sandbox.exec("pwd", cwd=cwd)
+        assert result.return_code == 0, result.stderr
+        assert Path(result.stdout.strip()).resolve() == (workdir if exec_cwd is None else override).resolve()
+    finally:
+        await sandbox.stop()
+    assert workdir.is_dir() and override.is_dir()

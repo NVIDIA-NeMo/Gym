@@ -23,6 +23,7 @@ import resources_servers.swe_next.app as app
 import resources_servers.swebench.agent_network as agent_network
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
+from nemo_gym.sandbox import SandboxExecResult
 
 
 # Seeding creates the agent's sandbox with for_agent=True; verify creates the evaluation sandbox without it.
@@ -45,8 +46,8 @@ class _RecordingAsyncSandbox:
         if _RecordingAsyncSandbox.raise_on_start:
             raise _Started(spec)
 
-    async def exec(self, *args, **kwargs) -> None:
-        return None
+    async def exec(self, *args, **kwargs) -> SandboxExecResult:
+        return SandboxExecResult(return_code=0, stdout="", stderr="")
 
     async def stop(self) -> None:
         return None
@@ -59,6 +60,10 @@ _RecordingAsyncSandbox.raise_on_start = False
 def make_server(monkeypatch):
     def make(*, enforce=True, provider="opensandbox", model_url="http://10.1.2.3:8000", sandbox_config=None):
         monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        # A session's sandbox is made on the provider the server's task sandboxes share; record its spec too.
+        monkeypatch.setattr(
+            app.SWENextResourcesServer, "new_task_sandbox", lambda self, session_id, spec: _RecordingAsyncSandbox(None)
+        )
         monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
         monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {provider: {}})
         monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})

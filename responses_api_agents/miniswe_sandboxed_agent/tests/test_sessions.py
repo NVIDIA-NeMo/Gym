@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
+from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
 from responses_api_agents.miniswe_sandboxed_agent import app as module
@@ -584,3 +585,66 @@ async def test_a_turn_cancelled_before_its_first_step_is_a_masked_cancellation(t
     assert refused.value.status_code == 503 and "cancelled" in refused.value.detail
     assert state.result is not None and state.result.termination.reason == "cancelled"
     assert state.result.agent_started is False
+
+
+def grant(name, *, kind, required):
+    access = {"name": name, "required": required, "kind": kind}
+    if kind == "mcp":
+        access["connection"] = {"transport": "streamable_http", "url": "http://resources/mcp"}
+    else:
+        access["base_url"] = "http://resources"
+    return access
+
+
+@pytest.mark.parametrize("required", [True, False])
+@pytest.mark.parametrize("configured", [True, False])
+@pytest.mark.parametrize("kind", ["mcp", "direct_http"])
+def test_required_grants_outside_task_json_are_refused(monkeypatch, tmp_path, required, configured, kind):
+    agent, client, sandbox, provider, connect = make_agent(tmp_path, monkeypatch)
+    body = seed_body()
+    body["tool_accesses"] = [grant("gdpval_finish", kind=kind, required=required)]
+    if configured:
+        agent.config.tool_accesses = AgentSeedSessionRequest.model_validate(body).tool_accesses
+        body["tool_accesses"] = []
+    if not required:
+        assert client.post("/v1/agent_sessions", json=body).status_code == 200
+        connect.assert_awaited_once()
+        return
+    detail = check_agent_seed_rejected(client.app, AgentSeedSessionRequest.model_validate(body))
+    assert "gdpval_finish" in detail
+    if kind == "direct_http":
+        # mini-SWE has no direct HTTP tool path, so the refusal needs no sandbox.
+        connect.assert_not_awaited()
+    else:
+        # An MCP grant is checked against task.json, and the borrowed transport is released on refusal.
+        connect.assert_awaited_once()
+        sandbox.disconnect.assert_awaited_once()
+        provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_a_required_grant_of_a_task_json_mcp_server_is_served(monkeypatch, tmp_path, configured):
+    """Harbor's task_mcp_grants: required grants the task's MCP servers, which mini-SWE starts from task.json."""
+    agent, client, sandbox, provider, connect = make_agent(tmp_path, monkeypatch)
+    body = seed_body()
+    body["tool_accesses"] = [grant(TASK_CONTEXT["mcp_servers"][0]["name"], kind="mcp", required=True)]
+    if configured:
+        agent.config.tool_accesses = AgentSeedSessionRequest.model_validate(body).tool_accesses
+        body["tool_accesses"] = []
+    response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == 200, response.text
+    sandbox.disconnect.assert_not_awaited()
+    provider.aclose.assert_not_awaited()
+
+
+def test_a_task_json_read_failure_at_seed_releases_the_transport(monkeypatch, tmp_path):
+    _, client, sandbox, provider, _ = make_agent(tmp_path, monkeypatch)
+    sandbox.exec.side_effect = None
+    sandbox.exec.return_value = exec_result(error_type="timeout", return_code=125)
+    body = seed_body()
+    body["tool_accesses"] = [grant("fs", kind="mcp", required=True)]
+    response = TestClient(client.app, raise_server_exceptions=False).post("/v1/agent_sessions", json=body)
+    # A sandbox failure is not the task's: the seed answers 500, which the environment server retries.
+    assert response.status_code == 500
+    sandbox.disconnect.assert_awaited_once()
+    provider.aclose.assert_awaited_once()

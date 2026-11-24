@@ -11,6 +11,10 @@ dependencies = [
     # only when `dialect: spark`; the dialect also needs a JDK 17 on the machine (see benchmarks/birdbench/README.md).
     "pyspark>=3.5,<4",
     "sqlglot",
+    # PostgreSQL dialect: psycopg runs the model's SQL on psycopg_pool's pooled connections. Both are imported only
+    # when `dialect: postgres`; the dialect also needs a PostgreSQL server (see benchmarks/birdbench/README.md).
+    "psycopg[binary]>=3.2",
+    "psycopg_pool>=3.2",
 ]
 
 [tool.uv]

@@ -60,6 +60,7 @@ gym eval resubmit             # queue a submitted benchmark again, or recover it
 gym eval aggregate            # merge sharded rollout results
 gym eval export               # export a finished run (default exporter: atif)
 gym eval status               # show saved run progress
+gym eval lustre-stats         # summarize a submitted job's Lustre metadata requests per phase
 gym eval health-check         # verify rollout artifact quality for an existing run
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
@@ -119,6 +120,7 @@ non-default config in that directory.
 gym eval run \
     --benchmark terminal_bench_2_1/opencode \
     --agent-type terminus_2_sandboxed_agent \
+    --sandbox opensandbox \
     --model-type vllm_model
 ```
 
@@ -148,12 +150,12 @@ renaming is involved, and the dataset's `[gym] allowed_agents` is the compatibil
 
 **The composed server instance is renamed after the agent that runs it**, so metrics and `gym env status`
 report the harness actually used: composing `terminus_2_sandboxed_agent` onto
-`terminal_bench_2_1_opencode_sandboxed_agent` produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
+`terminal_bench_2_1_opencode_sandboxed_agent` (the relay recipe `terminal_bench_2_1/opencode_legacy_agent`) produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
 `gym env start` prints the instance list, which matters for the two-step flow:
 
 ```bash
 gym env start \
-    --benchmark terminal_bench_2_1/opencode \
+    --benchmark terminal_bench_2_1/opencode_legacy_agent \
     --agent-type terminus_2_sandboxed_agent \
     --model-type vllm_model
 gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl
@@ -895,6 +897,7 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 | `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). Task targets only. Without it, `env.yaml` or a `--config` file must supply the `sandbox:` block, or every episode fails at seed. |
 | `--only-tasks PATTERNS`, `--exclude-tasks PATTERNS` | Comma-separated task names or globs to run or to leave out. Task targets only. |
 | `--skip-unloadable` | Run the tasks that load and record the rest in `skipped.json`. Without it, a task that does not load stops the run before any server starts. |
+| `+harbor_output_root=DIR` | Write the rows, run config, `skipped.json`, `images.json` and `verifier/` under `DIR/<taskset>/` instead of `results/harbor/<taskset>/` (a parameterized dataset also renders there). Task targets only. A run submitted with a `target` sets it to a folder in its job directory. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
 | `--environment NAME` | Load the named environment config. Repeatable. |
@@ -995,6 +998,7 @@ Next to `--output` (`<stem>` is its name without `.jsonl`), the run writes:
 | `<stem>_failures.jsonl` | Failed rollouts routed to the sidecar, when there are any. |
 | `<stem>_aggregate_metrics.json` | Aggregate metrics, unless aggregation is disabled. |
 | `<stem>_resolved_config.yaml` | The run's configuration, written before collection starts and overwritten by each attempt. Secrets are masked and `${...}` interpolations stay unresolved. Masking is a precaution (it also covers the password in a URL's user info), not a guarantee: keep secrets out of the config with `${oc.env:NAME}` or `env.yaml`. |
+| `<stem>_provenance.json` | What produced the run, written just before the first rollout is dispatched: Gym version and commit, model, dataset and sampling identifiers (credentials and query strings dropped from URLs), fingerprints of the inputs, prompts and templates, the seed, each model server's served models as its backends report them at `GET <base_url>/models` (the served `id` and, for vLLM, the loaded checkpoint `root`), and `efb_config_ref` when passed. Unknown values are recorded with the reason; `status: unavailable` when it cannot be written. |
 
 #### Resume interrupted runs
 
@@ -1247,6 +1251,19 @@ identities warn once and disable status reporting while collection continues. Gy
 Fresh runs clear their output stem's previous status before initializing the tracker. Manifest-backed runs
 retain strict validation. Resume loading retains compact identities rather than full input payloads,
 and general-run progress counters update incrementally as results arrive.
+
+### `gym eval lustre-stats`
+
+Summarize the Lustre metadata requests of a job whose Slurm compute sets `lustre_md_stats: true`. Pass the
+benchmark directory, which reads every `logs/lustre-md-stats-<slurm job id>.tsv` in it, or one such file:
+
+```bash
+gym eval lustre-stats <job.output_path>/<gym job id>/<benchmark>
+gym eval lustre-stats <benchmark dir>/logs/lustre-md-stats-123456.tsv --json
+```
+
+It prints one table per Slurm job, with a row per phase interval. `--json` prints a mapping from each file to its
+report. See [Lustre Metadata Load](/orchestration/how-to/lustre-metadata-stats).
 
 ### `gym eval health-check`
 
