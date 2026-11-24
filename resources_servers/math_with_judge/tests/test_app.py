@@ -809,6 +809,14 @@ class TestApp:
         with raises(LibraryVerifierError, match="TimeoutException"):
             _run_math_verify(timeout_mock, "3", "3")
 
+    def test_run_math_verify_scores_a_failure_on_the_answer_as_wrong(self) -> None:
+        def library_verifier(golds, predictions):
+            if predictions == golds:
+                return 1.0, None
+            raise TimeoutException()
+
+        assert _run_math_verify(library_verifier, "3", "\\boxed{9^{9^{9^{9}}} + 8^{8^{8^{8}}}}") == (approx(0.0), None)
+
     @mark.parametrize("should_use_judge", [False, True])
     async def test_library_failure_is_masked_unless_the_judge_grades_instead(
         self, config: LibraryJudgeMathResourcesServerConfig, should_use_judge: bool
@@ -1115,6 +1123,40 @@ class TestApp:
         result = await judge_failsafe(resources_server.verify)(request)
         assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, False, None)
         assert result.judge_evaluations[0].verdict_label == "[[A!=B]]"
+
+    async def test_a_prompt_the_judge_refused_for_its_length_scores_zero(
+        self, config: LibraryJudgeMathResourcesServerConfig
+    ) -> None:
+        # vllm_model answers a prompt longer than the judge's window with an empty reply cut before any output token.
+        config.should_use_judge = True
+        refused = self._judge_reply(
+            [self._create_response_output_message("")],
+            status="incomplete",
+            incomplete_details={"reason": "max_output_tokens"},
+            usage={
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        )
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(return_value=MagicMock(read=AsyncMock(return_value=json.dumps(refused))))
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        request = LibraryJudgeMathVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse(
+                **self._create_response("policy", self._create_response_output_message("\\boxed{5}"))
+            ),
+            question="What is 2 + 2?",
+            expected_answer="4",
+        )
+
+        result = await judge_failsafe(resources_server.verify)(request)
+
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, False, None)
+        assert server_mock.post.await_count == 1
 
     async def test_generate_judge_evaluation(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         judge_config = config.model_copy(deep=True)

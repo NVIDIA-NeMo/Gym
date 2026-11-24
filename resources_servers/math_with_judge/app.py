@@ -327,6 +327,12 @@ def _prepare_format_tolerant_response(response: str) -> str:
     return _repair_final_unclosed_box(_normalize_unicode_digits(response))
 
 
+def _judge_refused_prompt(judge_response: NeMoGymResponse) -> bool:
+    """Whether the judge server refused the prompt for its length: a reply cut before any output token."""
+    usage = judge_response.usage
+    return judge_response.incomplete_details is not None and usage is not None and usage.output_tokens == 0
+
+
 class LibraryVerifierError(Exception):
     """math-verify gave no result: it raised or timed out, or its process crashed or ran past its deadline.
 
@@ -368,10 +374,22 @@ def _run_math_verify(
 
     # It's possible to emit a TimeoutException and that wouldn't be caught since
     # it actually subclasses from BaseException and math-verify itself does not
-    # catch it. An unparseable expected answer raises ValueError. Either way the
-    # library gave no grade, which is not the same as grading the answer wrong.
+    # catch it. An unparseable expected answer raises ValueError. If math-verify still
+    # grades the gold, the answer caused the failure and scores 0; else it is no grade.
     except (Exception, TimeoutException) as error:
+        if _gold_grades_itself(library_verifier, expected_answer):
+            return 0.0, None
         raise LibraryVerifierError(f"math-verify raised {type(error).__name__}: {str(error)[:500]}") from error
+
+
+def _gold_grades_itself(library_verifier: Any, expected_answer: str) -> bool:
+    ground_truth = "\\boxed{" + LibraryJudgeMathResourcesServer._strip_math_delimiters(expected_answer) + "}"
+    try:
+        with LibraryJudgeMathResourcesServer._mute_output():
+            score, _ = library_verifier([ground_truth], [ground_truth])
+    except (Exception, TimeoutException):
+        return False
+    return float(score) == 1.0
 
 
 def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, result_connection: Any) -> None:
@@ -686,6 +704,10 @@ Example output: "My final verdict is different [[A!=B]]"."""
             json=responses_create_params,
             response_model=NeMoGymResponse,
         )
+        if _judge_refused_prompt(judge_response):
+            # The answer, which the policy controls, did not fit the judge's window: it scores as not equal. This
+            # check runs before the cut-reply check below, which masks the row.
+            return False, JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
         # A reply cut at the judge's own output limit, or one that names no verdict (only reasoning, a refusal, or
         # text without a label), is no grade: the judge failed, not the answer. JudgeError makes judge_failsafe mask
         # the row as judge_unparseable, and recovery re-judges it from the saved answer.
