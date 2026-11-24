@@ -33,7 +33,6 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     resolve_provider_config,
     resolve_provider_metadata,
-    stop_sandbox,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -293,10 +292,11 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
     async def _release_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> bool:
         """Stop a golden- or null-validation sandbox, which no session owns, and say whether it stopped.
 
-        The stop is shielded and bounded, so a cancelled request still stops it instead of leaving it to ``ttl_s``.
+        ``AsyncSandbox.stop`` is shielded and bounded, so a cancelled request still stops it instead of leaving it to
+        ``ttl_s``.
         """
         try:
-            await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
+            await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
             return True
         except Exception:
             logger.exception("Could not release %s sandbox for %s", phase, task_id)

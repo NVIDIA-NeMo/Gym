@@ -123,6 +123,45 @@ def adapt_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return gym_row(task)
 
 
+def adapt_visualwebarena_record(
+    record: Mapping[str, Any],
+    *,
+    task_index: int | None = None,
+    collision_plan: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Adapt one maintained VisualWebArena row to the shared visual-browser contract."""
+
+    source_id = record.get("id", record.get("task_id"))
+    if source_id is None:
+        raise ValueError("VisualWebArena record requires id or task_id")
+    task = WebTask(
+        benchmark=WebBenchmark.VISUALWEBARENA,
+        task_id=source_id if task_index is None else task_index,
+        intent=str(record.get("ques") or record.get("intent") or ""),
+        start_urls=_start_urls(record.get("web") or record.get("start_url")),
+        sites=_string_list(record.get("web_name") or record.get("sites")),
+        input_images=_string_list(record.get("image") or record.get("images")),
+        observation_profile=WebObservationProfile.SCREENSHOT,
+        verifier_profile="visualwebarena_classic",
+        task_kwargs={
+            "collision_plan": dict(collision_plan) if collision_plan is not None else {},
+        },
+        original_metadata=dict(record),
+    )
+    return gym_row(task)
+
+
+def adapt_visualwebarena_records(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Match the maintained runner's contiguous IDs and protect shared targets."""
+
+    source_records = [dict(record) for record in records]
+    plans = build_collision_plans(source_records)
+    return [
+        adapt_visualwebarena_record(record, task_index=index, collision_plan=plan)
+        for index, (record, plan) in enumerate(zip(source_records, plans, strict=True))
+    ]
+
+
 def load_json_records(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path)
     if source.suffix == ".jsonl":

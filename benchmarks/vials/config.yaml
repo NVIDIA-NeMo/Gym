@@ -1,0 +1,9 @@
+# Deployment overlay for Gym's native Harbor environment server.
+# The task-folder CLI selects and wires the agent, model, sandbox, and taskset.
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      secrets:
+        VIALS_JUDGE_BASE_URL: ${judge_base_url}
+        VIALS_JUDGE_API_KEY: ${judge_api_key}
+        VIALS_JUDGE_MODEL: ${judge_model_name}

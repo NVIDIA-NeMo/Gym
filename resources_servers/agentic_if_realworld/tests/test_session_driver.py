@@ -9,7 +9,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 import pytest
 import uvicorn
-from aiohttp import ClientResponseError, web
+from aiohttp import web
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
 
@@ -24,6 +24,7 @@ from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, 
 from resources_servers.agentic_if_realworld.app import ResourcesConfig, ResourcesServer
 from resources_servers.agentic_if_realworld.benchmark import core
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create
+from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
 from resources_servers.agentic_if_realworld.tests.test_transport import indexed_review
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
@@ -225,7 +226,8 @@ async def test_configured_session_driver(tmp_path, monkeypatch, unused_tcp_port_
                 assert all(p.read_bytes() == value for p, value in saved.items())
             else:
                 if delivery == "judge_outage":
-                    with pytest.raises(ClientResponseError, match="503"):
+                    # A 503 from /verify defers the task to a resume instead of failing the whole run.
+                    with pytest.raises(RetryableTransportError, match="503 for .*synthetic judge outage"):
                         await rollout_driver.run_rollout_collection(config, settings)
                     assert len(policy_calls) == 1 and not judge_calls
                     config.resume_from_cache = True

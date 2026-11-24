@@ -15,7 +15,7 @@
 """Public sandbox API for NeMo Gym."""
 
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-from nemo_gym.sandbox.api import AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
 from nemo_gym.sandbox.config import (
     resolve_provider_config,
     resolve_provider_metadata,
@@ -44,8 +44,10 @@ from nemo_gym.sandbox.providers import (
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
+    SnapshotContent,
     SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
+    SupportsSandboxExecScopedProcesses,
     SupportsSandboxNetwork,
     SupportsSandboxNetworkRules,
     SupportsSandboxParkedPolling,
@@ -61,6 +63,7 @@ from nemo_gym.sandbox.providers import (
     create_provider,
     get_provider_class,
     list_providers,
+    provider_capabilities,
     register_provider,
 )
 from nemo_gym.sandbox.utils import rewrite_image
@@ -69,6 +72,7 @@ from nemo_gym.sandbox.utils import rewrite_image
 __all__ = [
     "Sandbox",
     "AsyncSandbox",
+    "STOP_TIMEOUT_S",
     "AsyncSandboxCompose",
     "AsyncSandboxSidecar",
     "ConnectableProvider",
@@ -87,13 +91,17 @@ __all__ = [
     "SandboxSidecarSpec",
     "SandboxSnapshotError",
     "SandboxSnapshotFailedError",
+    "SandboxCapabilities",
     "SandboxSnapshotInfo",
+    "SnapshotContent",
+    "provider_capabilities",
     "SandboxSnapshotInUseError",
     "SandboxSnapshotNotFoundError",
     "SandboxSpec",
     "SandboxStatus",
     "SupportsSandboxCheckpointPolling",
     "SupportsSandboxEndpoint",
+    "SupportsSandboxExecScopedProcesses",
     "SupportsSandboxNetwork",
     "SupportsSandboxParkedPolling",
     "SupportsSandboxPauseResume",
@@ -102,7 +110,6 @@ __all__ = [
     "SupportsSandboxSharedStorage",
     "SupportsSandboxSidecars",
     "SupportsSandboxSnapshot",
-    "SandboxCapabilities",
     "NetworkRule",
     "SupportsSandboxNetworkRules",
     "SupportsSandboxPty",
@@ -141,6 +148,7 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
+    from nemo_gym.sandbox.providers.e2b.provider import E2BProvider
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
     from nemo_gym.sandbox.transfer import (
@@ -159,13 +167,11 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.utils import (
         CPU_CAP_ENV_VARS,
         MEDIA_DIRECTORY,
-        STOP_TIMEOUT_S,
         cpu_cap_env,
         download_bytes,
         media_path,
         read_text,
         stage_media,
-        stop_sandbox,
         upload_bytes,
         upload_text,
     )
@@ -180,6 +186,7 @@ _PUBLIC_API = {
     "DirectSandboxConnection": "access",
     "DockerCreateConfig": "providers.docker.provider",
     "DockerProvider": "providers.docker.provider",
+    "E2BProvider": "providers.e2b.provider",
     "LocalProvider": "providers.local.provider",
     "MEDIA_DIRECTORY": "utils",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
@@ -189,7 +196,6 @@ _PUBLIC_API = {
     "SandboxProbeError": "transfer",
     "SandboxTransferError": "transfer",
     "SandboxUnavailableError": "transfer",
-    "STOP_TIMEOUT_S": "utils",
     "TRANSFER_USER": "transfer",
     "adapt_non_root_sidecars": "compose_config",
     "cpu_cap_env": "utils",
@@ -207,7 +213,6 @@ _PUBLIC_API = {
     "sandbox_credentials_rejected": "providers.base",
     "sandbox_failure": "failures",
     "sandbox_platform": "compose_config",
-    "stop_sandbox": "utils",
     "service_gpus": "compose_fields",
     "service_resources": "compose_fields",
     "stage_media": "utils",

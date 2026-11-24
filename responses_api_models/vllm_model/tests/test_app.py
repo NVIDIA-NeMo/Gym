@@ -10618,6 +10618,19 @@ async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
     assert [message["status"] for message in sent] == [200]
 
 
+def test_transport_log_uses_capture_identity_over_trace_headers():
+    from starlette.requests import Request
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-nemo-gym-log-rollout-id", b"untrusted")],
+            "state": {"nemo_gym_model_call_identity": {"rollout_id": "0-0", "model_call_id": "unique-call"}},
+        }
+    )
+    assert _transport_log_context(request) == {"rollout_id": "0-0", "model_call_id": "unique-call"}
+
+
 def _capture_vllm_messages(tmp_path: Path, *, stream: bool, completions: bool, finish: str, stop: str | int | None):
     server = VLLMModel(
         config=VLLMModelConfig(
@@ -10744,6 +10757,10 @@ def test_messages_preserve_native_provider_causes_and_saved_response_population(
     if stream:
         events = [json.loads(line[6:]) for line in received.text.splitlines() if line.startswith("data: ")]
         served = next(event["message"] for event in events if event["type"] == "message_start")
+        assert served["stop_reason"] is None
+        assert served["usage"] == {"input_tokens": 3, "output_tokens": 0}
+        [final] = [event for event in events if event["type"] == "message_delta"]
+        served = {**served, **final["delta"], "usage": {**served["usage"], **final["usage"]}}
         assert events[-1]["type"] == "message_stop"
         assert [event["delta"]["text"] for event in events if event["type"] == "content_block_delta"] == [
             "Retained answer."

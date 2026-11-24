@@ -4,17 +4,19 @@
 #
 # Install a private Node.js plus the pinned Prime Agent package, both uploaded by the agent server, into a runtime
 # directory inside the task sandbox, or reuse one that already reports the pinned version. npm installs the package's
-# remaining dependencies from the registry. Pinned Prime release dependencies are uploaded local archives.
+# dependencies from a complete lockfile. Pinned Prime release dependencies are uploaded local archives.
 # The task's own Node, npm and PATH are untouched: Prime Agent runs as
 # RUNTIME/bin/node RUNTIME/lib/node_modules/prime-agent/dist/bundle/cli.js. Needs bash, sha256sum, tar, gzip, mktemp
 # and flock, plus a glibc image.
 #
 # Prime Agent's only built-in tool is an IPython kernel. RUNTIME/kernel is a private Python, also uploaded, with the
 # packages Prime Agent's own kernel bootstrap installs (pinned here) and the package's prime-agent-runtime, installed
-# by the uploaded uv from the package index.
+# by the checksum-verified uploaded uv with exact runtime and build dependency constraints.
 #
 # usage: install_prime_runtime.sh RUNTIME VERSION NODE_ARCHIVE NODE_SHA256 PACKAGE PACKAGE_SHA256 PYTHON_ARCHIVE
-#        PYTHON_SHA256 UV_ARCHIVE [DEPENDENCY_ARCHIVE DEPENDENCY_SHA256]...
+#        PYTHON_SHA256 UV_ARCHIVE [INPUT_FILE INPUT_SHA256]...
+# The agent also uploads runtime-package{,-lock}.json, runtime-python{,-build}-constraints.txt and runtime-profile.txt
+# beside this script, and includes all of them and uv in INPUT_FILE/INPUT_SHA256 pairs.
 set -euo pipefail
 runtime=$1
 version=$2
@@ -27,6 +29,8 @@ python_sha256=$8
 uv_archive=$9
 shift 9
 cli=lib/node_modules/prime-agent/dist/bundle/cli.js
+input_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+profile="$input_dir/runtime-profile.txt"
 kernel_packages=(
     ipykernel==7.4.0 dill==0.4.1 nest-asyncio==1.6.0 tyro==1.0.16 requests==2.34.2 httpx==0.28.1 pyyaml==6.0.3
     tomli==2.5.0 python-dotenv==1.2.4 pandas==3.1.0 numpy==2.5.4 scipy==1.18.1 beautifulsoup4==4.15.0 lxml==6.1.3
@@ -45,7 +49,7 @@ kernel_ready() {
 scipy, bs4, lxml, pydantic, tyro"
 }
 
-ready() { [ -f "$runtime/ready" ] && [ "$(installed "$runtime")" = "$version" ] && kernel_ready "$runtime" 2>/dev/null; }
+ready() { [ -f "$runtime/ready" ] && cmp -s "$profile" "$runtime/ready" && [ "$(installed "$runtime")" = "$version" ] && kernel_ready "$runtime" 2>/dev/null; }
 ready && exit 0
 # The official Node.js Linux builds need glibc.
 if ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
@@ -68,22 +72,36 @@ while [ "$#" -gt 0 ]; do
     echo "$2  $1" | sha256sum -c -
     shift 2
 done
+test -s "$profile"
+grep -Eq '^[a-f0-9]{64}$' "$profile"
 tar -xzf "$node_archive" -C "$staging" --strip-components=1
-# npm's cache and logs stay in the staging directory, out of the task's HOME. The package's optional postinstall only
-# pre-downloads tools that Prime Agent otherwise fetches on first use.
+# npm ci clears its node_modules directory. Keep the uploaded Node distribution's npm and corepack outside it
+# while the locked Prime project installs, then restore both so the Node entrypoints remain intact.
+bootstrap_modules="$staging/.node-bundled-modules"
+mv "$staging/lib/node_modules" "$bootstrap_modules"
+cp "$input_dir/runtime-package.json" "$staging/lib/package.json"
+cp "$input_dir/runtime-package-lock.json" "$staging/lib/package-lock.json"
 HOME="$staging/.npm-home" npm_config_cache="$staging/.npm-cache" PATH="$staging/bin:$PATH" \
-    "$staging/bin/node" "$staging/lib/node_modules/npm/bin/npm-cli.js" install --global --prefix "$staging" \
-    --ignore-scripts --no-audit --no-fund "$package"
+    "$staging/bin/node" "$bootstrap_modules/npm/bin/npm-cli.js" ci --prefix "$staging/lib" \
+    --install-strategy=shallow --omit=dev --ignore-scripts --no-audit --no-fund
+for bundled in npm corepack; do
+    test ! -e "$staging/lib/node_modules/$bundled"
+    mv "$bootstrap_modules/$bundled" "$staging/lib/node_modules/$bundled"
+done
+rmdir "$bootstrap_modules"
+ln -s "../$cli" "$staging/bin/prime-agent"
 rm -rf "$staging/.npm-home" "$staging/.npm-cache"
 test "$(installed "$staging")" = "$version"
 mkdir "$staging/kernel" "$staging/uv"
 tar -xzf "$python_archive" -C "$staging/kernel" --strip-components=1
 tar -xzf "$uv_archive" -C "$staging/uv" --strip-components=1
 UV_CACHE_DIR="$staging/.uv-cache" "$staging/uv/uv" pip install --python "$staging/kernel/bin/python3" \
-    --break-system-packages "${kernel_packages[@]}" "$staging/lib/node_modules/prime-agent/dist/prime-agent-runtime"
+    --break-system-packages --constraints "$input_dir/runtime-python-constraints.txt" \
+    --build-constraints "$input_dir/runtime-python-build-constraints.txt" \
+    "${kernel_packages[@]}" "$staging/lib/node_modules/prime-agent/dist/prime-agent-runtime"
 rm -rf "$staging/uv" "$staging/.uv-cache"
 kernel_ready "$staging"
-touch "$staging/ready"
+cp "$profile" "$staging/ready"
 rm -rf "$runtime.old"
 if [ -d "$runtime" ]; then mv "$runtime" "$runtime.old"; fi
 mv "$staging" "$runtime"

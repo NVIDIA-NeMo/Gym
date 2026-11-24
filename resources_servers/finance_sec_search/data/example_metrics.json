@@ -3,6 +3,7 @@
     "type": "example",
     "jsonl_fpath": "resources_servers/finance_sec_search/data/example.jsonl",
     "num_repeats": 1,
+    "source": null,
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": null,
@@ -16,9 +17,9 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 848.8,
-        "Min": 847.0,
-        "Max": 851.0,
+        "Average": 965.8,
+        "Min": 964.0,
+        "Max": 968.0,
         "Standard deviation": 1.48
     },
     "Number of turns": {
@@ -29,10 +30,10 @@
         "Standard deviation": 0.0
     },
     "Temperature": {
-        "Total # non-null values": 5,
-        "Average": 0.6,
-        "Min": 0.6,
-        "Max": 0.6,
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
         "Standard deviation": 0.0
     },
     "question": {
