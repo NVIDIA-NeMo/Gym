@@ -114,6 +114,17 @@ from nemo_gym.eval.recovery.policy import (
     _sidecar_action,
 )
 from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
+from nemo_gym.rollouts.rollout_recovery import matches_failure_class
+
+
+def _judge_failure_row(row: Mapping[str, Any]) -> bool:
+    """Whether a saved row is a judge failure that recovery re-judges from its saved answer.
+
+    Collection saves a failsafe row whose judge failure names its own kind (``judge_unparseable``, or a provider stop)
+    under that kind and keeps the producer's ``judge_failed`` as its legacy class. ``gym eval reverify
+    --judge-failed-only`` selects both names, so recovery plans for the rows that the re-judge selects.
+    """
+    return matches_failure_class(row, {JUDGE_FAILED})
 
 
 def decide_recovery(
@@ -216,7 +227,7 @@ def decide_recovery(
                     )
                 )
                 continue
-            judge = row.get(FAILURE_CLASS) == JUDGE_FAILED
+            judge = _judge_failure_row(row)
             if (
                 not judge
                 and identity in managed
@@ -472,7 +483,7 @@ def decide_recovery(
         )
         spent = fact.attempts if fact else len(rows)
         quota_wait = False
-        if last.get(FAILURE_CLASS) == JUDGE_FAILED:
+        if _judge_failure_row(last):
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
             quota_wait = state == IdentityState.TERMINAL and last.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
