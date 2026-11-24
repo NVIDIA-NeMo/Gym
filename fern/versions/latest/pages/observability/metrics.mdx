@@ -398,12 +398,14 @@ calls are timed too:
 
 | Metric | Attributes | Meaning |
 | --- | --- | --- |
-| `gym.model.call_duration_ms` | `nemo.gym.model.dialect`, `nemo.gym.server.name`, `nemo.gym.model.call_outcome` | From the request until the server handed the last response byte to the connection, so a streamed reply counts its whole stream. That waits on the client only while the connection's write buffer is full; it does not wait for the client to read the bytes. The outcome is the HTTP status class the server sent (`2xx`, `4xx`, `5xx`), so a stream that reports a failure in its body after a 200, such as a Responses `response.failed` or an SSE `error` event, is `2xx`. It is `cancelled` when the client went away before the last byte, or `error` when the server raised or stopped before its last byte, even after part of the response was sent. |
+| `gym.model.call_duration_ms` | `nemo.gym.model.dialect`, `nemo.gym.server.name`, `nemo.gym.model.call_outcome` | From the request until the server handed the last response byte to the connection, so a streamed reply counts its whole stream. That waits on the client only while the connection's write buffer is full; it does not wait for the client to read the bytes. The outcome is the HTTP status class the server sent (`2xx`, `4xx`, `5xx`), so a stream that reports a failure in its body after a 200, such as a Responses `response.failed` or an SSE `error` event, is `2xx`. It is `cancelled` when the client went away before the last byte, or `error` when the server raised or stopped before its last byte, even after part of the response was sent; either is timed until the server finished with the call, including any cleanup, such as waiting for the backend call to stop. |
 | `gym.model.time_to_first_byte_ms` | `nemo.gym.model.dialect`, `nemo.gym.server.name` | From the request until the server handed the first content byte to the connection. SSE keepalives and Responses `response.created` / `response.in_progress` events are skipped, as in model-call capture, so a held-open stream does not look fast. A call that sends no content records no sample. |
 
 Both use buckets from 5 ms to 30 min. They overlap `http.server.duration`, which stays the request-latency metric
 for every route; these add time to first byte, buckets for minute-long generations, and a server name that is present
-whether or not traces are on. Each call costs at most two histogram records.
+whether or not traces are on. Each call costs at most two histogram records. A response byte sent in the same
+event-loop turn in which the connection is lost is dropped without the timing learning of it, so such a call can still
+record its first byte, or `2xx` when that byte was its last.
 
 ### A Note on `gym.server.request_duration_ms`
 
