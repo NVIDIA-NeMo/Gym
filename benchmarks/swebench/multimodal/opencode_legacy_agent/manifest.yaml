@@ -7,7 +7,9 @@ domain: coding
 description: SWE-bench Multimodal dev-split JavaScript repair tasks with the issue's images
   attached, using prepared repair prompts, a sandboxed OpenCode agent, and binary
   patch-resolution scoring.
-modality: text,image
+modality:
+- text
+- image
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

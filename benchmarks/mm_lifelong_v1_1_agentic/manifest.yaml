@@ -7,7 +7,9 @@ domain: other
 description: MM-Lifelong v1.1 open-ended questions about a recorded day, week and month, answered by OpenCode in a
   sandbox whose image holds the split's original videos, with frame-sampling video tools; graded 0-5 against frozen
   rubrics by the dataset's grader.
-modality: video
+modality:
+- text
+- video
 licensing: MIT
 authors:
 - Guo Chen

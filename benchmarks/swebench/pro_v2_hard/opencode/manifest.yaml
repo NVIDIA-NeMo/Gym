@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: SWE-bench Pro V2 HARD-51 subset under the locked protocol, with a network-locked sandboxed OpenCode
   agent and a regrade on a pristine image; binary patch-resolution scoring.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

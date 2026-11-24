@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: BIRD-Interact Lite or Full, interactive text-to-SQL with a simulated user in c-Interact or a-Interact,
   on PostgreSQL database sandboxes; Lite c-Interact by default.
-modality: text
+modality:
+- text
 licensing: CC-BY-SA-4.0
 authors:
 - Felipe Vieira Frujeri

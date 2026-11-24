@@ -7,7 +7,10 @@ kind: benchmark
 integration_profile: custom-gym-verifier
 domain: agent
 description: 605 non-generative image/video tasks scored with an independent reference-answer judge.
-modality: image and video
+modality:
+- text
+- image
+- video
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors

@@ -6,7 +6,9 @@ integration_profile: custom-gym-agent-loop
 domain: other
 description: Video-MME v2 answered by OpenCode in a sandbox that holds the video, with frame-sampling video tools;
   a judge model reads the chosen option and the official group rating scores it.
-modality: video
+modality:
+- text
+- video
 licensing: MIT
 authors:
 - Guo Chen

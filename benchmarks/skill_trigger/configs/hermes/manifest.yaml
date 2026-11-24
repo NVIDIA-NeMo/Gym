@@ -5,7 +5,8 @@ kind: benchmark
 integration_profile: external-agent-loop
 domain: agent
 description: Skill instructions returned by hermes under standard Harbor execution.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - Daniel Burkhardt

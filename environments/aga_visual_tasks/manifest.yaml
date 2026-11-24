@@ -8,7 +8,9 @@ integration_profile: custom-gym-agent-loop
 domain: agent
 description: Code-assisted VQA and Agent-X training under OpenCode, Pi, Codex, Claude Code and OpenClaw, graded by the
   original math, multiple-choice and string answer graders.
-modality: multimodal
+modality:
+- text
+- image
 licensing: internal
 authors:
 - NVIDIA NeMo Gym contributors

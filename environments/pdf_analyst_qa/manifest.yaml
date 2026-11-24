@@ -5,7 +5,9 @@ config_path: example.yaml
 integration_profile: custom-gym-agent-loop
 domain: agent
 description: Synthetic document QA training with isolated OpenSandbox workspaces and format-aware outcome rewards.
-modality: multimodal
+modality:
+- text
+- image
 licensing: Apache-2.0
 authors: [Jarno Seppänen]
 reward:

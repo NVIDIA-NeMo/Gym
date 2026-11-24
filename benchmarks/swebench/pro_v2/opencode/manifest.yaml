@@ -6,7 +6,8 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: SWE-bench Pro v2 (642 validated tasks) using the upstream instruction text, a sandboxed OpenCode agent,
   and the upstream per-task test.sh verifier with binary patch-resolution scoring.
-modality: text
+modality:
+- text
 licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
