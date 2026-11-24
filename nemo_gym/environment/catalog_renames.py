@@ -16,6 +16,8 @@ RENAMED_CATALOG_NAMES: dict[str, str] = {
     # Each taskset has one manifest pointing at its default config. The configs that only change the harness, or the
     # route it runs on, are its run presets.
     "automationbench/config_legacy_agent": "automationbench",
+    # BIRD-Interact's releases and modes are scored separately, so each has its own catalog name.
+    "bird_interact": "bird_interact/lite/c_interact",
     "deepsearchqa/configs/deepsearchqa_claude_code": "deepsearchqa/long_run",
     "deepsearchqa/configs/deepsearchqa_cline": "deepsearchqa/long_run",
     "deepsearchqa/configs/deepsearchqa_codex": "deepsearchqa/long_run",
