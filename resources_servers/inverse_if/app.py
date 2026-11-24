@@ -211,6 +211,9 @@ def _extract_text_from_response(response: NeMoGymResponse, exclude_thinking: boo
     return ""
 
 
+_FALLBACK_VERDICT_WORD = re.compile(r"\b(PASS|FAIL)\b")
+
+
 def _extract_verdict(judge_text: str) -> tuple[str | None, str]:
     """
     Extract PASS/FAIL verdict and explanation from judge response.
@@ -250,14 +253,17 @@ def _extract_verdict(judge_text: str) -> tuple[str | None, str]:
         except (json.JSONDecodeError, AttributeError):
             pass
 
-    # Strategy 3: Keyword fallback — scan last few lines
+    # Strategy 3: Keyword fallback: the whole word PASS or FAIL on one of the last few lines, latest line first. A word
+    # that only contains one ("passenger", "passport", "passing", "passed") is not a verdict. A line that names both
+    # words ("FAIL, but it would PASS with a date") is ambiguous: neither word wins, so the reply has no verdict and
+    # the caller masks the row, as it does for any reply without a verdict.
     lines = judge_text.strip().split("\n")
     for line in reversed(lines[-5:]):
-        upper = line.strip().upper()
-        if "PASS" in upper:
-            return "PASS", ""
-        if "FAIL" in upper:
-            return "FAIL", ""
+        words = set(_FALLBACK_VERDICT_WORD.findall(line.upper()))
+        if len(words) == 1:
+            return words.pop(), ""
+        if words:
+            return None, ""
 
     # No verdict: the caller decides between masking the row and scoring FAIL.
     return None, ""
