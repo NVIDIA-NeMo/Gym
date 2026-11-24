@@ -50,8 +50,12 @@ class ReviewPoolDispatchTests(unittest.TestCase):
         script = "\n".join(child[".gym-review-pools"]["script"])
         self.assertIn("--require-codeowners", script)
         self.assertIn("--codeowners-fallback @nvidia-nemo/gym_maintainers", script)
-        pin = re.search(r"fetch --depth=1 origin ([0-9a-f]{40})", script).group(1)
-        self.assertIn(f"`{pin}`", (ROOT / ".gitlab/ci/README.md").read_text(), "README pin differs from the job pin")
+        pin = re.search(r"fetch --depth=1 origin ([0-9a-f]{40})", script)
+        self.assertIsNotNone(pin, "child job must fetch the adapter by full commit SHA")
+        readme = (ROOT / ".gitlab/ci/README.md").read_text()
+        self.assertIn(
+            f"The GitLab adapter is pinned to\n`{pin.group(1)}`", readme, "README pin differs from the job pin"
+        )
 
     def test_invalid_payload_cannot_create_child(self) -> None:
         """Reject malformed payloads without producing runnable child configuration."""

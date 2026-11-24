@@ -58,12 +58,12 @@ flowchart LR
 The GitLab adapter is pinned to
 `828755659a6f9be14bc691c1394a33b38c9f92f8`
 ([FW-CI-templates PR 632](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/632),
-which adds `--require-codeowners`). The adapter skips mapped users without active Developer-or-higher project
-membership and report them in `warnings`. Missing identity mappings, empty pools,
-and attempts to replace required approval rules will still block writes. The MR
-author is excluded. The adapter will always reconcile the optional approval pools.
-When the MR has no reviewers, the adapter will additionally assign eligible pool
-members as reviewers. If reviewers already exist, their list will stay unchanged.
+which adds `--require-codeowners`). The adapter skips mapped users without active
+Developer-or-higher project membership and reports them in `warnings`. It manages
+only the rules it names (`github-review-pool:` and `github-codeowners:`) and never
+touches other required rules. The MR author is excluded. The adapter always
+reconciles the optional approval pools. When the MR has no reviewers, it also
+assigns eligible pool members as reviewers; an existing reviewer list stays unchanged.
 The adapter rechecks the reviewer list immediately before assignment and checks
 the current MR state and head before writes. GitLab has no atomic assign-if-empty
 operation, so a manual assignment in the remaining read/write window can race.
@@ -106,8 +106,12 @@ prevents resolving the exact pools; the job then fails with the problems listed 
 converges on a later run. All three review-pool jobs use `allow_failure: false`
 so a failed reconciliation is visible in the trigger pipeline.
 
-Limitation: the rules are MR-local, so the MR author and Maintainers can edit them
+Limitations: the rules are MR-local, so the MR author and Maintainers can edit them
 and no webhook reports that edit; the adapter restores them on the next MR update.
+The rules exist only after the adapter has run: if the trigger pipeline fails before
+the adapter writes (package install, adapter fetch, expired credentials, provider
+outage), the MR has no required rule and only the red trigger pipeline shows it.
+A project-level backstop rule is not configured today.
 Keep "Prevent editing approval rules in merge requests" disabled on the project:
 that setting also removes the adapter's permission to manage MR approval rules.
 
