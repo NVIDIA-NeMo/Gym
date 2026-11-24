@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Export ordered CAD draws, warm a bounded range and verify it without rendering."""
+"""Export ordered CAD draws, warm or prepare a range, and verify cache readiness."""
 
 import argparse
+import base64
 import hashlib
 import json
 import subprocess
@@ -12,11 +13,13 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from io import BytesIO
 from itertools import islice
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image
 
 from resources_servers.deepcad.dataset.lazy_inputs import (
     LazyRenderConfig,
@@ -127,6 +130,99 @@ def verify(output: Path, start: int, count: int) -> dict[str, Any]:
     }
 
 
+def prepare(output: Path, destination: Path, *, start: int, count: int, cache_only: bool = False) -> dict[str, Any]:
+    """Publish an ordered range as ordinary rows and content-addressed assets."""
+    destination = destination.resolve()
+    if destination.exists():
+        raise FileExistsError(f"Choose a new output directory: {destination}")
+    draws = read_range(output, start, count)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".cad-prepare-", dir=destination.parent) as work:
+        staged = Path(work) / "prepared"
+        assets = staged / "assets"
+        assets.mkdir(parents=True)
+        hashes = {}
+
+        def save_asset(data: bytes, suffix: str) -> str:
+            digest = hashlib.sha256(data).hexdigest()
+            name = f"{digest[:2]}/{digest}{suffix}"
+            if name not in hashes:
+                target = assets / name
+                target.parent.mkdir(exist_ok=True)
+                target.write_bytes(data)
+                hashes[name] = digest
+            return name
+
+        written = 0
+        with (staged / "rows.jsonl").open("w") as stream:
+            for example in draws:
+                config = LazyRenderConfig.model_validate(example["deepcad_lazy"]["config"])
+                if config.harness != "simple" or example.get("target_images"):
+                    raise ValueError("Prepared asset paths require the simple harness without target_images")
+                row = deepcopy(materialize_one(example, cache_only=cache_only))
+                if row.get("target_images"):
+                    raise ValueError("Prepared asset paths require the simple harness without target_images")
+                lazy = example["deepcad_lazy"]
+                choice = resolution_target(lazy)
+                record = json.loads(choice.read_text())["record"] if choice.exists() else lazy["record"]
+                if (
+                    record["task_id"] != row["verifier_metadata"]["task_id"]
+                    or Path(record["reference_step"]).name != row["verifier_metadata"]["reference_step"]
+                ):
+                    raise ValueError("Resolved row does not match its pinned reference")
+                root = Path(config.dataset_root).resolve()
+                reference = (root / record["reference_step"]).resolve()
+                if not reference.is_relative_to(root):
+                    raise ValueError("Reference STEP must remain inside dataset_root")
+                reference_bytes = reference.read_bytes()
+                expected = (
+                    json.loads(reference.with_suffix(".json").read_text())["step_sha256"]
+                    if record.get("source_kind") == "cad_corpus"
+                    else record["reference_step_sha256"]
+                )
+                if hashlib.sha256(reference_bytes).hexdigest() != expected:
+                    raise ValueError(f"Reference STEP checksum mismatch: {reference}")
+                row["verifier_metadata"]["reference_step"] = save_asset(reference_bytes, ".step")
+                for item in row["responses_create_params"]["input"]:
+                    if not isinstance(item.get("content"), list):
+                        continue
+                    for part in item["content"]:
+                        if part.get("type") != "input_image":
+                            continue
+                        url = part["image_url"]
+                        header, encoded = url.split(",", 1)
+                        suffix = {
+                            "data:image/png;base64": ".png",
+                            "data:image/jpeg;base64": ".jpg",
+                            "data:image/webp;base64": ".webp",
+                        }[header]
+                        data = base64.b64decode(encoded, validate=True)
+                        if not data:
+                            raise ValueError("Prepared images must be nonempty")
+                        with Image.open(BytesIO(data)) as image:
+                            image.verify()
+                        name = save_asset(data, suffix)
+                        part["image_url"] = str(destination / "assets" / name)
+                if "deepcad_lazy" in row:
+                    raise ValueError("Prepared rows must not contain lazy descriptors")
+                stream.write(json.dumps(row, separators=(",", ":")) + "\n")
+                written += 1
+        if written != count:
+            raise ValueError("Incomplete draw range")
+        receipt = {
+            "version": 1,
+            "start": start,
+            "count": written,
+            "draws_sha256": sha256(output / "draws.jsonl"),
+            "draw_manifest_sha256": sha256(output / "draws-manifest.json"),
+            "rows_sha256": sha256(staged / "rows.jsonl"),
+            "assets_sha256": hashes,
+        }
+        (assets / "manifest.json").write_text(json.dumps(receipt, indent=2) + "\n")
+        staged.rename(destination)
+    return receipt
+
+
 def warm_one(example: dict[str, Any]) -> dict[str, Any]:
     config = LazyRenderConfig.model_validate(example["deepcad_lazy"]["config"])
     requested = cache_target(example["deepcad_lazy"])
@@ -235,17 +331,20 @@ def main() -> None:
     select.add_argument("--sampler-config", type=Path, required=True)
     select.add_argument("--overrides", type=Path)
     select.add_argument("--batch-size", type=int, required=True)
-    prepare = commands.add_parser("warm")
-    prepare.add_argument("--workers", type=int, default=8)
+    warmer = commands.add_parser("warm")
+    warmer.add_argument("--workers", type=int, default=8)
+    prepared = commands.add_parser("prepare")
+    prepared.add_argument("--destination", type=Path, required=True)
+    prepared.add_argument("--cache-only", action="store_true")
     check = commands.add_parser("verify")
-    for command in (select, prepare, check):
+    for command in (select, warmer, prepared, check):
         command.add_argument("--output", type=Path, required=True)
         command.add_argument("--count", type=int, required=True)
-    for command in (prepare, check):
+    for command in (warmer, prepared, check):
         command.add_argument("--start", type=int, default=0)
     args = vars(parser.parse_args())
     command = args.pop("command")
-    result = {"export": export, "warm": warm, "verify": verify}[command](**args)
+    result = {"export": export, "warm": warm, "prepare": prepare, "verify": verify}[command](**args)
     if result:
         print(json.dumps(result))
 

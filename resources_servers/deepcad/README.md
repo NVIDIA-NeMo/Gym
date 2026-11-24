@@ -224,6 +224,42 @@ whether its cache was already warm, and preparation time. An immutable
 process's cache check, before the rest of the requested range finishes. A full
 0–1,023 warmup also publishes `warm1024-ready.json` for prefix consumers.
 
+### Prepare ordered rows for offline rendering
+
+Resolve a bounded range into ordinary Gym rows before evaluation or training.
+Export descriptors with the same Gym source version used for preparation. If the
+source checksums differ after an upgrade, regenerate the descriptor export using
+the same source manifest, sampler settings, batch size and deployment overrides;
+the existing cache keys and draw order can then be reused:
+
+```sh
+python -m "$module" prepare --output ordered --start 0 --count 1024 --destination prepared
+# After an existing warm --workers run, require cache hits without rendering:
+python -m "$module" prepare --output ordered --start 0 --count 1024 --destination prepared-cached --cache-only
+```
+
+Each destination must be new. Publication is atomic: a failed range leaves no
+partial destination. The bundle contains only `rows.jsonl` and `assets/`; the latter
+holds SHA-256-addressed, prefix-sharded image and reference STEP files plus
+`manifest.json` with row and asset hashes. Duplicate draws remain duplicate rows
+and share assets; render variants use their own image content hashes. Preparation
+uses the existing resolver and pinned replacements, preserving prompt text,
+request settings, routing, operations and replacement metadata. It changes only
+asset references in copies of resolved rows; cached images remain embedded.
+An unconfirmed reference failure stops preparation for diagnosis or a later retry.
+For bulk preparation, use the existing bounded `warm --workers` command first.
+This command supports the simple harness. It rejects the OpenCode harness and
+`target_images` workspace seeds, whose runtime requires embedded images.
+
+Consume `prepared/rows.jsonl` in order, with shuffling and runtime resampling
+disabled, using the existing dataset and processor. No NeMo-RL code change is
+needed. These rows have no `deepcad_lazy` field. Set the CAD resources server's
+`reference_root` to the absolute `prepared/assets` directory: `reference_step`
+is relative to that root. Image paths are absolute final paths supported by
+NeMo-RL media normalization. Publish at the persistent path visible to every
+worker and keep that path fixed; moving the bundle requires regenerating its
+image paths. The bundle no longer needs the rendering cache or source dataset.
+
 ### Deployment overrides and staged catalogs
 
 The `resources_servers.deepcad.dataset.training` hook accepts optional
