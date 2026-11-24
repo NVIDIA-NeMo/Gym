@@ -90,10 +90,13 @@ def test_each_documented_build_reaches_docker_with_its_tag(
     if shutil.which("bash") is None:
         pytest.skip("build_image.sh needs bash")
     root = tmp_path / "gym"
-    for benchmark in ("bird_interact", "birdbench"):
-        script = root / "benchmarks" / benchmark / "auto_ontology" / "build_image.sh"
-        script.parent.mkdir(parents=True)
-        shutil.copy(BENCHMARK_DIR.parent / benchmark / "auto_ontology" / "build_image.sh", script)
+    for path in (
+        "bird_interact/auto_ontology/build_image.sh",
+        "birdbench/auto_ontology/build_image.sh",
+        "birdbench/auto_ontology/models_settings_digest.sh",
+    ):
+        (root / "benchmarks" / path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(BENCHMARK_DIR.parent / path, root / "benchmarks" / path)
     release = next(arg for arg in args if arg in ("lite", "full"))
     (root / "benchmarks" / "bird_interact" / "data" / release / "databases").mkdir(parents=True)
     models_env = tmp_path / "models.env"
@@ -118,6 +121,14 @@ def test_each_documented_build_reaches_docker_with_its_tag(
     [build] = [call for call in calls.read_text().splitlines() if call.startswith("build ")]
     assert f"--tag {tag} " in build
     assert f"--build-arg COLUMN_MEANINGS={column_meanings} " in build
+    # The models key the catalog stage's cache, as in the BIRD dev image's build.
+    digest = subprocess.run(
+        ["bash", str(BENCHMARK_DIR.parent / "birdbench" / "auto_ontology" / "models_settings_digest.sh"), models_env],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert f"--build-arg MODELS_SETTINGS_DIGEST={digest} " in build
 
 
 def test_the_pairing_runs_c_interact_on_the_auto_ontology_agent_alone():

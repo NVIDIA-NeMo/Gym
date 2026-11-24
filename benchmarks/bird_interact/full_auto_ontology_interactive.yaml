@@ -4,8 +4,15 @@
 # BIRD-Interact Full in c-Interact with Auto Ontology's interactive pipeline: full_auto_ontology_agent.yaml with
 # auto_ontology/interactive.yaml. See README.md, "Auto Ontology".
 #
-#   gym eval run --config benchmarks/bird_interact/full_auto_ontology_interactive.yaml --model-type vllm_model \
-#     --split benchmark --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+# As auto-ontology-eval runs it, on the catalog built with the column meanings and with the non-reasoning role on a
+# model of its own (the default image, nemo-gym/bird-interact-catalog:full, holds the schema only: report a run on it
+# apart):
+#
+#   gym eval run --config benchmarks/bird_interact/full_auto_ontology_interactive.yaml \
+#     --config benchmarks/bird_interact/auto_ontology/non_reasoning_model.yaml \
+#     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --model-type vllm_model --split benchmark \
+#     ++auto_ontology_image=nemo-gym/bird-interact-catalog:full-meanings \
+#     ++auto_ontology_non_reasoning_model_name=<model> \
 #     --output results/bird_interact_full_c_auto_ontology_interactive.jsonl ++auto_ontology_api_key=<key>
 
 config_paths:

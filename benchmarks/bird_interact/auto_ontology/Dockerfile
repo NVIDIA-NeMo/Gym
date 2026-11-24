@@ -38,16 +38,19 @@ ENV POSTGRES_HOST=localhost \
     POSTGRES_DATABASE=auto_ontology
 COPY benchmarks/bird_interact/auto_ontology/build_catalog.py benchmarks/bird_interact/auto_ontology/column_meanings.py \
      /opt/bird-catalog/
-# With COLUMN_MEANINGS=true, the catalog holds the release's column meanings as column descriptions, as
-# auto-ontology-eval builds it. The release's files are copied either way; only the catalog build reads them.
-ARG BIRD_INTERACT_RELEASE=lite
-ARG COLUMN_MEANINGS=false
-COPY benchmarks/bird_interact/data/${BIRD_INTERACT_RELEASE}/databases /opt/bird-catalog/databases
 
 # The catalog, in its own stage: `--target runtime` builds the rest without the model keys.
 FROM runtime AS catalog
-ARG COLUMN_MEANINGS
+# With COLUMN_MEANINGS=true, the catalog holds the release's column meanings as column descriptions, as
+# auto-ontology-eval builds it. The build reads each database's schema and column meanings from a bind mount, so no
+# layer holds the release's files, and the build context leaves out the knowledge base, part of which each task hides
+# (Dockerfile.dockerignore).
+ARG BIRD_INTERACT_RELEASE=lite
+ARG COLUMN_MEANINGS=false
+# build_image.sh's digest of the secret's settings: BuildKit leaves the secret's contents out of the cache key.
+ARG MODELS_SETTINGS_DIGEST
 RUN --mount=type=secret,id=models,required=true \
+    --mount=type=bind,source=benchmarks/bird_interact/data/${BIRD_INTERACT_RELEASE}/databases,target=/opt/bird-catalog/databases \
     /opt/auto-ontology/.venv/bin/python /opt/bird-catalog/build_catalog.py /run/secrets/models \
       $([ "$COLUMN_MEANINGS" = true ] && echo --column-meanings /opt/bird-catalog/databases)
 

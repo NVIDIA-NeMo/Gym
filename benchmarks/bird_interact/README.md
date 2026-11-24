@@ -103,7 +103,17 @@ Each turn runs one Auto Ontology episode there, with Auto Ontology's prompts and
 `submit`) and the server's `ask_user`. The query that Auto Ontology accepts goes to the server's `submit_sql`, which
 grades it as it grades the query of any agent.
 
-1. Build the release's database image (step 1), then the catalog image:
+1. Build the release's database image (step 1), then prepare. Preparing writes the release's database files to
+   `data/<release>/databases/`, which the catalog build reads:
+
+   ```bash
+   gym eval prepare --config benchmarks/bird_interact/auto_ontology_agent.yaml ++auto_ontology_api_key=<embedding key>
+   ```
+
+   `auto_ontology_api_key` is the key of the embedding endpoint that the catalog is built with. Retrieval calls it
+   for each search. The agent's config requires it, so `prepare` needs it too, although `prepare` does not call the
+   endpoint.
+2. Build the catalog image:
 
    ```bash
    benchmarks/bird_interact/auto_ontology/build_image.sh lite <models env>
@@ -111,20 +121,17 @@ grades it as it grades the query of any agent.
 
    `<models env>` is a `KEY=VALUE` file with Auto Ontology's model keys: `DEFAULT_MODELS_API_KEY`, and `EMBED_*` or
    `*_MODEL` settings where they differ from Auto Ontology's defaults. The build embeds and compiles each database of
-   the release with these models. The keys reach the build as a BuildKit secret, so no image layer holds them. Use
-   `full` for Full.
-2. Prepare and run:
+   the release with these models. The keys reach the build as a BuildKit secret, so no image layer holds them; a
+   digest of the other settings keys the build's cache, so another model rebuilds the catalog. The image holds none
+   of the release's files: the build reads each database's schema and column meanings through a bind mount, and its
+   context leaves out the knowledge base, part of which each task hides. Use `full` for Full.
+3. Run:
 
    ```bash
-   gym eval prepare --config benchmarks/bird_interact/auto_ontology_agent.yaml ++auto_ontology_api_key=<embedding key>
    gym eval run --config benchmarks/bird_interact/auto_ontology_agent.yaml --model-type vllm_model --split benchmark \
      --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
      --output results/bird_interact_lite_c_auto_ontology.jsonl ++auto_ontology_api_key=<embedding key>
    ```
-
-   `auto_ontology_api_key` is the key of the embedding endpoint that the catalog was built with. Retrieval calls it
-   for each search. The agent's config requires it, so `prepare` needs it too, although `prepare` does not call the
-   endpoint.
 
 Auto Ontology's interactive pipeline, the one auto-ontology-eval runs on BIRD-Interact, runs in place of its ReAct
 agent with `auto_ontology_interactive.yaml` (Lite) and `full_auto_ontology_interactive.yaml` (Full) in c-Interact, and
@@ -132,6 +139,23 @@ agent with `auto_ontology_interactive.yaml` (Lite) and `full_auto_ontology_inter
 chains `auto_ontology/interactive.yaml`. To run Auto Ontology's non-reasoning role on a model of its own, as
 auto-ontology-eval does, add `--config benchmarks/bird_interact/auto_ontology/non_reasoning_model.yaml` and
 `++auto_ontology_non_reasoning_model_name=<model>`.
+
+The interactive pipeline's Full runs are measured as auto-ontology-eval runs it: on the catalog built with the column
+meanings (`build_image.sh --column-meanings full`), with Claude Sonnet 5.5 in the non-reasoning role, and Claude Opus
+5.5 as the policy and the simulator. For a-Interact:
+
+```bash
+gym eval run --config benchmarks/bird_interact/full_auto_ontology_a_interact.yaml \
+  --config benchmarks/bird_interact/auto_ontology/non_reasoning_model.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --model-type vllm_model --split benchmark \
+  ++auto_ontology_image=nemo-gym/bird-interact-catalog:full-meanings \
+  ++auto_ontology_non_reasoning_model_name=<Claude Sonnet 5.5> ++user_model_name=<Claude Opus 5.5> \
+  --output results/bird_interact_full_a_auto_ontology.jsonl ++auto_ontology_api_key=<embedding key>
+```
+
+For c-Interact, use `full_auto_ontology_interactive.yaml`. The configs' default image, `full`, holds the schema only.
+A run on it is another comparison, so report it apart: in a-Interact the agent still buys the column meanings, and
+does not read them, as auto-ontology-eval's adapter does, which finds them in its catalog.
 
 What differs from `simple_agent`:
 
