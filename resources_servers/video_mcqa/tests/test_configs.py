@@ -2,15 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
+from nemo_gym.client import ServerClient
 from nemo_gym.config import DatasetConfig
-from resources_servers.video_mcqa.app import VideoMCQAResourcesServerConfig
+from resources_servers.video_mcqa.app import VideoMCQAResourcesServer, VideoMCQAResourcesServerConfig
+from resources_servers.video_mcqa.question_set import QuestionSetCohort
 from resources_servers.video_mcqa.sandbox import PLUGIN_PATH, SANDBOX_IMAGE_DIR
+from resources_servers.video_mcqa.tests.helpers import REVISION
 from resources_servers.video_mcqa.tests.test_app import make_server
+from resources_servers.video_mcqa.tests.test_question_sets import SOURCE, agentic_row, request
 from resources_servers.videomme_v2.app import VideoMMEV2ResourcesServerConfig
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 from responses_api_agents.simple_agent.app import SimpleAgentConfig
@@ -48,10 +53,30 @@ def test_actual_composed_single_turn_configs_resolve_and_validate(tmp_path, serv
     assert environment.resources_server.name == server_name
 
 
-@pytest.mark.parametrize("server_name", ["videomme_v1", "lvbench", "videomme_v2"])
+def question_set_cohort(directory: Path, **updates: object) -> Path:
+    """An agentic question-set cohort for the rows of agentic_row(), as configs/video_mcqa_agentic.yaml serves."""
+    cohort = QuestionSetCohort(
+        question_set="invented_shapes",
+        dataset_source=SOURCE,
+        dataset_revision=REVISION,
+        setting="agentic",
+        task_ids=("shapes:one",),
+        **updates,
+    )
+    path = directory / f"question-set-agentic-{cohort.answer_policy}.json"
+    path.write_text(cohort.model_dump_json())
+    return path
+
+
+@pytest.mark.parametrize("server_name", ["videomme_v1", "lvbench", "videomme_v2", "video_mcqa"])
 def test_actual_composed_agentic_configs_resolve_and_validate(tmp_path, monkeypatch, server_name) -> None:
     monkeypatch.setenv("VIDEO_MCQA_SANDBOX_IMAGE", "registry.example/video-mcqa-sandbox:test")
-    cohort = Path(__file__).parents[2] / server_name / "data" / "example_agentic_cohort.json"
+    # The shared server's agentic config serves a question set; the benchmarks' serve their example cohorts.
+    cohort = (
+        question_set_cohort(tmp_path)
+        if server_name == "video_mcqa"
+        else Path(__file__).parents[2] / server_name / "data" / "example_agentic_cohort.json"
+    )
     path = Path(__file__).parents[2] / server_name / "configs" / f"{server_name}_agentic.yaml"
     values = {
         f"{server_name}_agentic_cohort_manifest": str(cohort),
@@ -93,6 +118,33 @@ def test_actual_composed_agentic_configs_resolve_and_validate(tmp_path, monkeypa
     )
     assert environment.agent_server.name == f"{name}_opencode" and environment.resources_server.name == name
     assert environment.max_concurrent_episodes == agent.concurrency
+
+
+async def test_question_set_agentic_config_grades_a_training_row_by_its_boxed_letter(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VIDEO_MCQA_SANDBOX_IMAGE", "registry.example/video-mcqa-sandbox:test")
+    path = Path(__file__).parents[1] / "configs" / "video_mcqa_agentic.yaml"
+    values = {
+        "video_mcqa_agentic_cohort_manifest": str(question_set_cohort(tmp_path)),
+        "video_mcqa_agentic_video_roots": [str(tmp_path)],
+        "policy_model_name": "policy",
+    }
+    config = OmegaConf.to_container(OmegaConf.merge(OmegaConf.load(path), OmegaConf.create(values)), resolve=True)
+    resource = VideoMCQAResourcesServerConfig(
+        name="video_mcqa_agentic", port=8001, **config["video_mcqa_agentic"]["resources_servers"]["video_mcqa"]
+    )
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
+    server = VideoMCQAResourcesServer(config=resource, server_client=client)
+    # The cohort's boxed_only_v1 grades the final answer's \boxed{} letter; no judge model is called.
+    correct = await server.verify(request(agentic_row(), r"\boxed{B}"))
+    wrong = await server.verify(request(agentic_row(), r"\boxed{A}"))
+    assert (correct.reward, correct.outcome) == (1.0, "correct")
+    assert (wrong.reward, wrong.outcome) == (0.0, "incorrect")
+    assert not client.method_calls
+    # The config names no judge model, so a cohort whose answer policy needs one is refused at start.
+    judged = question_set_cohort(tmp_path, answer_policy="llm_extraction_v1")
+    with pytest.raises(ValueError, match="needs judge_model_server"):
+        VideoMCQAResourcesServer(config=resource.model_copy(update={"cohort_manifest": judged}), server_client=client)
 
 
 @pytest.mark.parametrize("server_name", ["videomme_v1", "lvbench", "videomme_v2"])
