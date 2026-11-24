@@ -168,9 +168,9 @@ its private HOME. The adapter requires a fresh successful-initialization receipt
 the task environment hook before accepting a gradable result. A missing or invalid
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 `SandboxAccess.env` is forwarded over the sandbox's values, except `OPENCODE_*`,
-`OPENAI_*` and `NEMO_GYM_*` variables. A `HOME` or XDG directory in it is the task's,
-which tool shells get. `SandboxAccess.user` is not applied: OpenCode runs as the
-sandbox's default user.
+`OPENAI_*` and `NEMO_GYM_*` variables and `PWD`, which stays the task workdir. A `HOME`
+or XDG directory in it is the task's, which tool shells get. `SandboxAccess.user` is
+not applied: OpenCode runs as the sandbox's default user.
 
 The session path accepts one user task, optional system/developer text and
 `instructions`. The user task may include images as base64 data-URI `input_image` parts,

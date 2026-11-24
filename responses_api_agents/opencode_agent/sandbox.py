@@ -541,10 +541,10 @@ class OpenCodeSandboxSession(AgentSessionState):
                 + ") || exit 1\n"
             )
             # env(1) then sets the entries for the CLI alone, over the sandbox's values. The names in ``env`` are left
-            # out, so the adapter's own variables keep their values.
+            # out, so the adapter's own variables keep their values, and so is PWD, which the runner's ``cd`` sets.
             params["command"] = [
                 "env",
-                *(f"{key}={value}" for key, value in access_env.items() if key not in env),
+                *(f"{key}={value}" for key, value in access_env.items() if key not in env and key != "PWD"),
                 *command,
             ]
         if payload.get("path_prefix"):

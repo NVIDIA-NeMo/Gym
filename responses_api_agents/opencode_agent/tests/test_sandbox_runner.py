@@ -59,6 +59,12 @@ async def stage(
     return (await OpenCodeSandboxSession.stage_activation(state, payload)).argv
 
 
+def lent_sandbox(tmp_path: Path, env: dict[str, str]) -> SandboxAccess:
+    """Access to a lent sandbox whose owner states ``env`` for the harness."""
+    connection = {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {}}
+    return SandboxAccess(connection=connection, workdir=str(tmp_path), env=env)
+
+
 # Generous enough for a loaded runner to start the harness chain; a test that needs the deadline fires it on
 # purpose through the expire file after the harness is ready, rather than racing the harness start.
 SUPERVISOR_TIMEOUT_SECONDS = 60
@@ -140,10 +146,9 @@ async def test_runner_records_task_directories_before_private_overrides(tmp_path
 
 
 async def test_sandbox_access_env_reaches_opencode_except_opencode_openai_and_nemo_gym_variables(tmp_path):
-    access = SandboxAccess(
-        connection={"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {}},
-        workdir=str(tmp_path),
-        env={
+    access = lent_sandbox(
+        tmp_path,
+        {
             "TASK_API_TOKEN": "task value",
             "LANG": "C",
             "PATH": f"/task-bin:{os.environ['PATH']}",
@@ -180,17 +185,33 @@ async def test_sandbox_access_env_reaches_opencode_except_opencode_openai_and_ne
 @pytest.mark.parametrize("name", ["command", "cwd", "env", "stdout"])
 async def test_sandbox_access_env_entry_named_like_a_runner_parameter_reaches_opencode_only(tmp_path, name):
     value = str(tmp_path / "elsewhere")
-    access = SandboxAccess(
-        connection={"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {}},
-        workdir=str(tmp_path),
-        env={name: value},
-    )
+    access = lent_sandbox(tmp_path, {name: value})
     argv = await stage(tmp_path, ["bash", "-c", f'printf "%s|" "$PWD" "$HOME" "${name}"'], sandbox_access=access)
     completed = subprocess.run(argv, capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
     # The runner started the staged command in its working directory, with the private HOME and the staged output file.
-    assert not (tmp_path / "elsewhere").exists()
     assert (tmp_path / "stdout.jsonl").read_text() == f"{tmp_path}|{tmp_path / 'private' / 'HOME'}|{value}|"
+
+
+async def test_sandbox_access_env_pwd_entry_leaves_pwd_at_the_workdir(tmp_path):
+    # printenv shows the variable as OpenCode receives it; a shell would set PWD again when it starts.
+    argv = await stage(tmp_path, ["printenv", "PWD"], sandbox_access=lent_sandbox(tmp_path, {"PWD": "/nowhere"}))
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    assert (tmp_path / "stdout.jsonl").read_text() == f"{tmp_path}\n"
+
+
+async def test_sandbox_access_env_entries_keep_a_failed_setup_from_starting_opencode(tmp_path):
+    # The setup cannot record the task's directories in a folder.
+    (tmp_path / "task-env.json").mkdir()
+    access = lent_sandbox(tmp_path, {"TASK_API_TOKEN": "task value"})
+    argv = await stage(tmp_path, ["true"], sandbox_access=access, path_prefix=["/opt/tools/bin"])
+    assert subprocess.run(argv, capture_output=True, text=True, timeout=10).returncode == 125
+
+
+async def test_sandbox_access_env_entry_with_an_invalid_name_fails_staging(tmp_path):
+    with pytest.raises(ValueError, match="Invalid environment variable names"):
+        await stage(tmp_path, ["true"], sandbox_access=lent_sandbox(tmp_path, {"NOT A NAME": "value"}))
 
 
 async def test_unset_home_falls_back_to_the_account_home(tmp_path):
