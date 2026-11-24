@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# BIRD text-to-SQL benchmark configuration.
+# BIRD text-to-SQL benchmark configuration: BIRD dev in the SQLite dialect (birdbench). spark.yaml and postgres.yaml
+# are the other dialects, each a benchmark of its own (birdbench/spark, birdbench/postgres). See README.md.
 
 # Chain to the BIRD execution-based resource server + agent config.
 config_paths:
@@ -14,7 +15,7 @@ config_paths:
 prepare_script_args:
   include_evidence: true
   dscp: name_or_col_dscp
-  dialect: sqlite  # the default; other dialects are selected by `eval.sh --dialect` (see README.md, "SQL dialects")
+  dialect: sqlite  # spark.yaml and postgres.yaml set their own (see README.md, "Dialects and splits")
   split: dev  # the default; the train split is selected by `eval.sh --split train` (see README.md, "Splits")
 
 # Inherit-from directives isolate this benchmark config from the generic server config.

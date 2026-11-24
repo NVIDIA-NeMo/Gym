@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Evaluate ONE policy model on BIRD dev (or, with --split train, BIRD train) via the standard, existing birdbench pipeline
-# (`gym eval prepare`/`gym eval run --benchmark birdbench`, as documented in this directory's own
-# README) -- no custom collection code. Verification
+# (`gym eval prepare`/`gym eval run --benchmark birdbench`, or `birdbench/<dialect>` for another dialect, as documented
+# in this directory's own README) -- no custom collection code. Verification
 # runs through resources_servers/bird_sql/eval_utils.py exactly as it always has, so this
 # benefits from the GIL-contention-safe concurrency and `conn.close()` fixes made there
 # automatically, with zero changes needed here.
@@ -29,7 +29,9 @@
 #                                         config that defines `policy_model`, referenced by
 #                                         birdbench_bird_sql_simple_agent's model_server field --
 #                                         required, same as `gym env start --model-type ...`)
-#   --dialect sqlite|spark|postgres       Default: sqlite. The SQL dialect the model writes. Selects the prepared
+#   --dialect sqlite|spark|postgres       Default: sqlite. The SQL dialect the model writes. Each dialect is its own
+#                                           benchmark: sqlite is `birdbench` (config.yaml), spark and postgres are
+#                                           `birdbench/<dialect>` (<dialect>.yaml). Its config selects the prepared
 #                                           file (data/birdbench_<dialect>_<split>.jsonl), the prompt
 #                                           (prompts/default_<dialect>.yaml), what
 #                                           `prepare` renders, and the engine the server runs the model's SQL on.
@@ -129,24 +131,28 @@ if [[ -z "${OUTPUT_DIR}" ]]; then
     SAFE_MODEL_NAME="$(echo "${MODEL}" | tr '/: ' '___')"
     OUTPUT_DIR="benchmarks/birdbench/results/${SPLIT}_${DIALECT}/${SAFE_MODEL_NAME}"
 fi
-# dev + sqlite is config.yaml's own default, so it needs no overrides. Any other dialect or split overrides, for both
-# `gym eval prepare` and `gym eval run`: what `prepare` renders, the engine the server runs, and the dataset
-# (Hydra cannot override one list item, so the whole `datasets` list is replaced; `gym eval prepare` also requires
-# prepare()'s output path to equal the dataset's jsonl_fpath). num_repeats is 1: the dataset is never repeated.
-# (File naming mirrors prepare.output_fpath_for and prepare.prompt_config_fpath_for.)
+# Each dialect is its own benchmark, with its own config, prepared file, prompt and taskset, so dev needs no overrides.
+# The train split overrides the dialect's config, for both `gym eval prepare` and `gym eval run`: what `prepare`
+# renders, the server's split, and the dataset (Hydra cannot override one list item, so the whole `datasets` list is
+# replaced; `gym eval prepare` also requires prepare()'s output path to equal the dataset's jsonl_fpath). num_repeats
+# is 1: the dataset is never repeated. (File naming mirrors prepare.output_fpath_for and
+# prepare.prompt_config_fpath_for.)
 PREPARED_JSONL="benchmarks/birdbench/data/birdbench_${DIALECT}_${SPLIT}.jsonl"
 PROMPT_CONFIG="benchmarks/birdbench/prompts/default_${DIALECT}.yaml"
 case "${SPLIT}" in
-    dev) DATASET_NAME="birdbench" ;;
-    train) DATASET_NAME="birdbench_train" ;;
+    dev|train) ;;
     *)
         echo "Unsupported --split '${SPLIT}'; expected dev or train." >&2
         exit 1
         ;;
 esac
-DIALECT_ARGS=()
+BENCHMARK="birdbench/${DIALECT}"
+DATASET_NAME="birdbench_${DIALECT}"
 case "${DIALECT}" in
-    sqlite) ;;
+    sqlite)
+        BENCHMARK="birdbench"
+        DATASET_NAME="birdbench"
+        ;;
     spark)
         if ! "${JAVA_HOME:+${JAVA_HOME}/bin/}java" -version >/dev/null 2>&1; then
             echo "--dialect spark needs a JDK: set JAVA_HOME or put java on PATH (see README.md, 'Installation')." >&2
@@ -164,23 +170,20 @@ case "${DIALECT}" in
         exit 1
         ;;
 esac
-if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
-    DIALECT_ARGS=(
-        "+prepare_script_args.dialect=${DIALECT}"
+OVERRIDES=()
+if [[ "${SPLIT}" == "train" ]]; then
+    OVERRIDES=(
         "+prepare_script_args.split=${SPLIT}"
-        "+birdbench_bird_sql_resources_server.resources_servers.bird_sql.dialect=${DIALECT}"
         "+birdbench_bird_sql_resources_server.resources_servers.bird_sql.split=${SPLIT}"
-        "++birdbench_bird_sql_simple_agent.responses_api_agents.simple_agent.datasets=[{name:${DATASET_NAME},type:benchmark,jsonl_fpath:${PREPARED_JSONL},prompt_config:${PROMPT_CONFIG},prepare_script:benchmarks/birdbench/prepare.py,prepare_project:benchmarks/birdbench,num_repeats:1,taskset:birdbench}]"
-    )
-    if [[ "${DIALECT}" == "postgres" ]]; then
-        DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.postgres_dsn='${BIRD_PG_DSN}'")
-        if [[ -n "${BIRD_PG_ADMIN_DSN:-}" ]]; then
-            DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.postgres_admin_dsn='${BIRD_PG_ADMIN_DSN}'")
-        fi
-    fi
-    if [[ "${SPLIT}" != "dev" ]]; then
         # Train has its own db_ids: keep its Spark warehouse apart from dev's.
-        DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.spark_warehouse_dir=resources_servers/bird_sql/.bird_sql/spark_warehouse_${SPLIT}")
+        "+birdbench_bird_sql_resources_server.resources_servers.bird_sql.spark_warehouse_dir=resources_servers/bird_sql/.bird_sql/spark_warehouse_${SPLIT}"
+        "++birdbench_bird_sql_simple_agent.responses_api_agents.simple_agent.datasets=[{name:${DATASET_NAME}_${SPLIT},type:benchmark,jsonl_fpath:${PREPARED_JSONL},prompt_config:${PROMPT_CONFIG},prepare_script:benchmarks/birdbench/prepare.py,prepare_project:benchmarks/birdbench,num_repeats:1,taskset:${BENCHMARK}}]"
+    )
+fi
+if [[ "${DIALECT}" == "postgres" ]]; then
+    OVERRIDES+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.postgres_dsn='${BIRD_PG_DSN}'")
+    if [[ -n "${BIRD_PG_ADMIN_DSN:-}" ]]; then
+        OVERRIDES+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.postgres_admin_dsn='${BIRD_PG_ADMIN_DSN}'")
     fi
 fi
 mkdir -p "${OUTPUT_DIR}"
@@ -188,7 +191,7 @@ mkdir -p "${OUTPUT_DIR}"
 # Reuses ${PREPARED_JSONL} when it exists and prepare.py's is_prepared_data_current() accepts it (a Spark file
 # prepared before table names were sanitized is rebuilt); otherwise prepares it once, shared across every model.
 echo "Preparing BIRD ${SPLIT} data for ${DIALECT} if needed -> ${PREPARED_JSONL} ..."
-gym eval prepare --benchmark birdbench +use_cached_prepared_benchmarks=true ${DIALECT_ARGS[@]+"${DIALECT_ARGS[@]}"}
+gym eval prepare --benchmark "${BENCHMARK}" +use_cached_prepared_benchmarks=true ${OVERRIDES[@]+"${OVERRIDES[@]}"}
 
 MODEL_ARGS=(--model "${MODEL}")
 if [[ -n "${MODEL_URL}" ]]; then
@@ -204,7 +207,7 @@ fi
 echo "=== Evaluating model=${MODEL} on BIRD ${SPLIT} (${DIALECT}) -> ${OUTPUT_DIR} ==="
 EVAL_STATUS=0
 gym eval run \
-    --benchmark birdbench \
+    --benchmark "${BENCHMARK}" \
     --model-type "${MODEL_TYPE}" \
     --split benchmark \
     --output "${OUTPUT_DIR}/rollouts.jsonl" \
@@ -213,7 +216,7 @@ gym eval run \
     --num-repeats "${NUM_REPEATS}" \
     --concurrency "${CONCURRENCY}" \
     "${MODEL_ARGS[@]}" \
-    ${DIALECT_ARGS[@]+"${DIALECT_ARGS[@]}"} \
+    ${OVERRIDES[@]+"${OVERRIDES[@]}"} \
     ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} || EVAL_STATUS=$?
 
 if [[ "${EVAL_STATUS}" -ne 0 ]]; then
