@@ -53,7 +53,7 @@ from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
-from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer
 from nemo_gym.server_runtime.base_server import (
     RUN_SESSION_SECRET_ENV_PREFIX,
     BaseServer,
@@ -1454,8 +1454,9 @@ class TestRunWebserverProxyKwargs:
             **({} if mcp is None else {"expose_tools_over_mcp": True, **mcp}),
         )
         ray_setting = ray_enabled
+        server_type = SimpleServer if mcp is None else SimpleResourcesServer
 
-        class TestSimpleServer(SimpleServer):
+        class TestSimpleServer(server_type):
             ray_enabled = ray_setting
             routes_sessions_to_owner = routes_sessions
 
@@ -1470,6 +1471,8 @@ class TestRunWebserverProxyKwargs:
                 return unsupported_reason
 
             def setup_webserver(self) -> FastAPI:
+                if mcp is not None:
+                    return super().setup_webserver()
                 return FastAPI()
 
             def setup_telemetry(self) -> None: ...
