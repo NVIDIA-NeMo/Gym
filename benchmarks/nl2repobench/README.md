@@ -15,7 +15,7 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
   The restricted modes need the OpenCode runtime staged in the lent sandbox, which this preset does not do yet: run it in
   `official` (or another open-egress mode) until it does.
 - **opencode, legacy relay** (`opencode_sandboxed_agent.yaml`, deprecated `responses_api_agents/opencode_sandboxed_agent`
-  behind `legacy_agent`): kept to reproduce the runs below. No compaction and no pruning (`compaction.auto: false`, `prune: false` in `opencode.yaml`), so a conversation that outgrows the declared 524288-token window (`opencode_max_context_window`) ends the run with a context error instead of being summarised. It continues an idle session with `idle_nudge` (finish with `TASK_COMPLETE`), ends a looping one with `stuck_detector`, and holds OpenCode's 500-step cap as one budget across resumes.
+  behind `legacy_agent`): kept to reproduce the runs below. No compaction and no pruning (`compaction.auto: false`, `prune: false` in `opencode_sandboxed_agent.yaml`), so a conversation that outgrows the declared 524288-token window (`opencode_max_context_window`) ends the run with a context error instead of being summarised. It continues an idle session with `idle_nudge` (finish with `TASK_COMPLETE`), ends a looping one with `stuck_detector`, and holds OpenCode's 500-step cap as one budget across resumes.
 
 ## Network modes (`++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=<mode>`)
 | Mode | Agent sandbox | Egress | Reference-lookup protection |
