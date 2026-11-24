@@ -85,16 +85,24 @@ def stage(tmp_path):
     return str(tmp_path / "stage")
 
 
-@pytest.fixture
-def packed_root(tmp_path, stage):
-    """A cache root with search + browse entries, packed and finalized; flat files still present."""
-    root = str(tmp_path / "cache")
+@pytest.fixture(scope="module")
+def packed_template(tmp_path_factory):
+    base = tmp_path_factory.mktemp("packed")
+    root = str(base / "cache")
     w = SearchCache(root)
     w.put_search("small query", SMALL, provider="tavily")
     w.put_search("compressible query", COMPRESSIBLE, provider="exa")
     w.put_search("large query", LARGE, provider="exa")
     w.put_extract("https://x.com/page", "PAGE BODY", provider="tavily")
-    _make_pack(root, stage)
+    _make_pack(root, str(base / "stage"))
+    return root
+
+
+@pytest.fixture
+def packed_root(tmp_path, packed_template):
+    """A cache root with search + browse entries, packed and finalized; flat files still present."""
+    root = str(tmp_path / "cache")
+    shutil.copytree(packed_template, root)
     return root
 
 
@@ -277,6 +285,18 @@ class TestPackWithCacheFeatures:
         assert cache.get_search("68th session CSW 2024 countries elected") == ("tavily", SMALL)
         s = cache.stats()
         assert s["search_fuzzy_hits"] == 1 and s["search_pack_hits"] == 1 and s["search_hits"] == 1
+
+    def test_index_rebuild_keeps_packed_queries_fuzzy_visible(self, tmp_path, stage) -> None:
+        """After its flat file is deleted, the pack is a query's only copy, so the index rebuild reads the pack too."""
+        from resources_servers.browsecomp_advanced_harness.build_cache_index import build_index
+
+        root = str(tmp_path / "cache")
+        SearchCache(root).put_search("countries elected 68th session CSW 2024", SMALL, "tavily")
+        _make_pack(root, stage)
+        os.remove(_flat(root, "search", normalize_query("countries elected 68th session CSW 2024")))
+        assert build_index(root) == 1
+        cache = SearchCache(root, fuzzy_threshold=0.8)
+        assert cache.get_search("68th session CSW 2024 countries elected") == ("tavily", SMALL)
 
     def test_concurrent_reads(self, tmp_path, stage, monkeypatch) -> None:
         root = str(tmp_path / "cache")
@@ -477,6 +497,23 @@ class TestVerifyAndFinalize:
             os.path.relpath(_flat(packed_root, "search", "large query"), packed_root),
             os.path.relpath(_flat(packed_root, "browse", normalize_url("https://x.com/page")), packed_root),
         }
+
+    def test_candidates_lists_only_shards_the_manifest_serves(self, tmp_path, stage) -> None:
+        """Before finalize, or with a shard file at the wrong size, the server cannot serve the packed copy."""
+        root = str(tmp_path / "cache")
+        SearchCache(root).put_search("q", SMALL, provider="tavily")
+        for kind, ab in scp.all_shards():
+            bcp.build_shard(root, kind, ab, stage)
+        for kind, ab in scp.all_shards():
+            assert bcp.verify_shard(root, kind, ab)["verified"]
+        assert bcp.candidates(root, scp.all_shards(), io.StringIO())[0] == 0  # not finalized
+        assert bcp.finalize(root)[1] == []
+        assert bcp.candidates(root, scp.all_shards(), io.StringIO())[0] == 1
+        ab = _digest(normalize_query("q"))[:1].hex()
+        with open(scp.shard_paths(scp.pack_root_of(root), "search", ab)[1], "ab") as f:
+            f.write(b"x")
+        n, skipped = bcp.candidates(root, scp.all_shards(), io.StringIO())
+        assert n == 0 and f"search/{ab}" in skipped
 
     def test_corrupt_dat_fails_verify_and_blocks_finalize(self, tmp_path, stage) -> None:
         root = str(tmp_path / "cache")

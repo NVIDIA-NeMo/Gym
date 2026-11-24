@@ -34,6 +34,13 @@ from multiprocessing import Pool
 from os import PathLike
 
 from resources_servers.browsecomp_advanced_harness.search_cache import INDEX_BASE, INDEX_DIR
+from resources_servers.browsecomp_advanced_harness.search_cache_pack import (
+    INDEX_HEAD_SIZE,
+    REC_SIZE,
+    open_pack,
+    read_index_head,
+    shard_paths,
+)
 from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (
     DEFAULT_TOKENIZER,
     build_master_db,
@@ -69,6 +76,29 @@ def _scan_subdir(subdir):
     return norms
 
 
+def _packed_norms(cache_root):
+    """Norms of the packed search entries: once their flat files are removed, the pack is their only copy."""
+    reader = open_pack(cache_root)
+    if reader is None:
+        return []
+    norms = []
+    try:
+        for b in range(256):
+            idx_path, _ = shard_paths(reader.pack_root, "search", f"{b:02x}")
+            with open(idx_path, "rb") as f:
+                data = f.read()
+            count, _ = read_index_head(data[:INDEX_HEAD_SIZE], len(data), idx_path)
+            for i in range(count):
+                start = INDEX_HEAD_SIZE + i * REC_SIZE
+                entry = reader.load("search", data[start : start + 32])
+                norm = entry.get("norm") if isinstance(entry, dict) else None
+                if isinstance(norm, str) and norm:
+                    norms.append(norm)
+    finally:
+        reader.close()
+    return norms
+
+
 def build_index(cache_root: str | PathLike[str], *, workers: int = 1, tokenizer: str = DEFAULT_TOKENIZER) -> int:
     """Scan the search tree and (re)write the base index. Returns #norms.
 
@@ -89,7 +119,7 @@ def build_index(cache_root: str | PathLike[str], *, workers: int = 1, tokenizer:
             chunks = pool.map(_scan_subdir, subdirs)
     else:
         chunks = [_scan_subdir(d) for d in subdirs]
-    norms = sorted({n for chunk in chunks for n in chunk})
+    norms = sorted({n for chunk in chunks for n in chunk}.union(_packed_norms(cache_root)))
 
     index_dir = os.path.join(cache_root, INDEX_DIR)
     os.makedirs(index_dir, exist_ok=True)

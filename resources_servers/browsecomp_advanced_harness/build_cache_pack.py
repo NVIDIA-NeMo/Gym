@@ -20,8 +20,9 @@ verifies them, and last writes <root>/pack/MANIFEST.json, which is what turns
 the pack on for SearchCache. The flat tree is only listed and read; `unpack`
 is the one command that writes there, and it only creates missing files.
 
-Usage (Gym root on PYTHONPATH):
-    python -m resources_servers.browsecomp_advanced_harness.build_cache_pack <command> <cache_root> [options]
+Usage, from the Gym root with this server's venv (search_cache.py imports rapidfuzz; the root venv does not have it):
+    resources_servers/browsecomp_advanced_harness/.venv/bin/python \\
+        -m resources_servers.browsecomp_advanced_harness.build_cache_pack <command> <cache_root> [options]
 
     build       pack the selected shards (resumable: built shards are skipped)
     verify      check built shards; records a verified flag per shard
@@ -732,13 +733,21 @@ def candidates(root, shards, out):
     """Write the flat files verified byte-identical to their packed copy.
 
     One line per file: relpath, size, mtime_ns, sha256 (tab-separated). Only
-    from verified shards; a deletion must still re-check each file against
-    these values right before removing it. Returns (count, unverified shards)."""
+    from verified shards that MANIFEST.json serves, at their recorded sizes; a
+    deletion must still re-check each file against these values right before
+    removing it. Returns (count, shards skipped)."""
     n, unverified = 0, []
+    live = (_load_json(os.path.join(pack_root_of(root), MANIFEST)) or {}).get("shards") or {}
     for kind, ab in shards:
         m = load_shard_manifest(root, kind, ab)
         v = (m or {}).get("verify") or {}
-        if not (m and m.get("verified") and v.get("build_id") == m.get("build_id")):
+        if not (
+            m
+            and m.get("verified")
+            and v.get("build_id") == m.get("build_id")
+            and live.get(shard_key(kind, ab), {}).get("build_id") == m["build_id"]
+            and tuple(_size(p) for p in shard_paths(pack_root_of(root), kind, ab)) == (m["idx_bytes"], m["dat_bytes"])
+        ):
             unverified.append(shard_key(kind, ab))
             continue
         excluded = set(v["flat_changed"]) | set(v["flat_missing"]) | set(v["flat_unreadable"])

@@ -375,7 +375,7 @@ def open_pack(root):
         shown = "; ".join(problems[:10]) + (f"; ... {len(problems) - 10} more" if len(problems) > 10 else "")
         raise PackManifestError(
             f"search cache pack {pack_root} (generation {manifest.get('generation')}) does not match its "
-            f"MANIFEST.json: {len(problems)} problem(s): {shown}. Restore the shard files, or move "
-            f"MANIFEST.json aside to serve from the flat files alone."
+            f"MANIFEST.json: {len(problems)} problem(s): {shown}. Restore the shard files, or run "
+            f"build_cache_pack.py unpack and then move MANIFEST.json aside to serve from the flat files alone."
         )
     return PackReader(pack_root, shards=shards.keys(), generation=manifest.get("generation"))

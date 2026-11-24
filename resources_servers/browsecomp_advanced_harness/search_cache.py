@@ -188,9 +188,10 @@ class SearchCache:
             "browse_get_max_s": 0.0,
             "browse_get_slow": 0,
             "put_errors": 0,
-            # Hits the pack served because the flat file was absent (fuzzy
-            # included); subsets of search_hits / browse_hits. pack_errors is
-            # the reader's own counter, merged in by stats().
+            # Well-formed entries the pack returned because the flat file was
+            # absent (fuzzy included). The caller can still refuse one (accept,
+            # min_characters), so these can exceed search_hits / browse_hits.
+            # pack_errors is the reader's own counter, merged in by stats().
             "search_pack_hits": 0,
             "browse_pack_hits": 0,
         }

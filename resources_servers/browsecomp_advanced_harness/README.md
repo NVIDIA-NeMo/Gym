@@ -135,6 +135,34 @@ verbose_phase_log: false                     # log every cache get and put, not 
     resources_servers/browsecomp_advanced_harness/build_cache_index.py /shared/browsecomp-cache
   ```
 
+### Cache pack
+
+A cache of millions of entries is millions of small files. `build_cache_pack.py` packs the same entries into 512
+shard file pairs under `<root>/pack/`, on the same filesystem as the cache. Reads try the flat file first and use the
+pack only when the flat file does not exist. Writes still go to flat files.
+
+The server turns the pack on at startup when `<root>/pack/MANIFEST.json` exists, so restart running servers after
+`finalize`. If the manifest names a missing or wrong-size shard file, the server does not start. The startup line
+shows `pack=<generation>`, and the `[cache]` line adds pack hits and pack errors. Run the tool from the Gym root with
+this server's venv:
+
+```bash
+PY=resources_servers/browsecomp_advanced_harness/.venv/bin/python
+$PY -m resources_servers.browsecomp_advanced_harness.build_cache_pack build /shared/browsecomp-cache
+$PY -m resources_servers.browsecomp_advanced_harness.build_cache_pack verify /shared/browsecomp-cache
+$PY -m resources_servers.browsecomp_advanced_harness.build_cache_pack finalize /shared/browsecomp-cache
+```
+
+`build` stages each shard in `$TMPDIR/bcpack-<host>-<pid>/` (or `--tmp-dir`) and leaves it there if it fails. The
+pack needs about the compressed size of the cache, on top of the flat files.
+
+`candidates` lists the flat files that match their packed copy byte for byte. Run it only after `finalize` and a
+server restart. Right before you delete each file, make sure that it still has the listed size, mtime and sha256.
+
+To roll back, run `unpack`, which recreates the missing flat files. Then move `MANIFEST.json` aside and restart the
+servers. Rebuild a finalized pack between runs: stop the servers that read this root first, since they check the
+pack's file sizes only at startup.
+
 ## Sessions
 
 Each rollout has its own session: the provider-call metrics that `/verify` reports and, with `workspace: per_session`, the disk workspace that `search` and `browse` write pages to and `bash_command` reads.
