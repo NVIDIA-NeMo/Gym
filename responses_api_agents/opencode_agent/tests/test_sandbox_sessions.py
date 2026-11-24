@@ -596,9 +596,17 @@ def test_session_rejects_images_it_cannot_attach(setup, items):
 
 
 @pytest.mark.parametrize("output_budget", [4096, 32000])
-def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
+@pytest.mark.parametrize("model_call_timeout", [None, 1800000])
+def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, tmp_path, output_budget, model_call_timeout):
     agent, sandbox = setup
     agent.config.max_output_tokens = output_budget
+    if model_call_timeout is not None:
+        agent.config.opencode_model_call_timeout = model_call_timeout
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]
+    assistant["parts"] = [{"type": "step-start"}, *assistant["parts"], {"type": "step-finish"}]
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
@@ -620,6 +628,9 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["provider"]["nemo_gym"]["options"]["timeout"] == (
+            model_call_timeout if model_call_timeout is not None else False
+        )
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
             "input": 32000,
@@ -630,21 +641,70 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
             config["provider"]["nemo_gym"]["options"]["baseURL"]
             == "http://model.example:9000/ng-rollout/opencode-smoke-a2/v1"
         )
-        # As on opencode_sandboxed_agent with opencode_model_call_timeout null, only the run's own deadline bounds a
-        # model call. Here the provider timeout is off and there is no chunkTimeout; the relay's chunkTimeout is its
-        # run budget.
-        options = config["provider"]["nemo_gym"]["options"]
-        assert options["timeout"] is False
-        assert "chunkTimeout" not in options
+        assert "chunkTimeout" not in config["provider"]["nemo_gym"]["options"]
         assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+        trajectory = closed.json()["trajectory"]
+        assert trajectory["rollout_id"] == "opencode-smoke-a2"
+        answer = trajectory["turns"][0]["answer"]
+        assert [item["type"] for item in answer] == ["message", "function_call"]
+        assert trajectory["turns"][0]["reasoning_content"][0]["text"] == "Inspect"
+        assert answer[0]["content"][0]["text"] == "Fixed"
+        assert "cleanup_confirmed" not in closed.json()
     assert not active_sessions(agent)
     assert not any(path.startswith("/app/") for path in sandbox.files)
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("settings", "reason"),
+    [
+        ({"sandbox_musl_executable_path": "/pins/musl"}, "requires sandbox_musl_executable_sha256"),
+        ({"sandbox_musl_executable_sha256": "a" * 64}, "set sandbox_musl_executable_path"),
+        (
+            {"sandbox_musl_executable_path": "/pins/musl", "sandbox_musl_executable_sha256": "a" * 64},
+            "musl OpenCode pin requires a verified primary",
+        ),
+    ],
+)
+def test_invalid_runtime_source_is_rejected_before_connecting(setup, settings, reason):
+    agent, sandbox = setup
+    for key, value in settings.items():
+        setattr(agent.config, key, value)
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422, response.text
+    assert reason in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("musl", [False, True])
+def test_session_setup_passes_the_runtime_pins_in_the_installer_argument_order(setup, musl):
+    agent, sandbox = setup
+    agent.config.sandbox_executable_path = "/pins/opencode"
+    agent.config.sandbox_executable_sha256 = "B" * 64
+    # The installer compares lowercase digests.
+    expected = ["/pins/opencode", "b" * 64, ""]
+    if musl:
+        agent.config.sandbox_musl_executable_path = "/pins/opencode-musl"
+        agent.config.sandbox_musl_executable_sha256 = "C" * 64
+        expected += ["", "--musl-executable", "/pins/opencode-musl", "c" * 64]
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert response.status_code == 200, response.text
+        install = shlex.split(
+            next(call.args[0] for call in sandbox.exec.call_args_list if "install_opencode_runtime.sh" in call.args[0])
+        )
+        script = next(i for i, arg in enumerate(install) if arg.endswith("install_opencode_runtime.sh"))
+        # $1 runtime and $2 version, then $3 executable, $4 digest, $5 PATH prefix and, with a musl pin, $6 release
+        # digests (empty for OpenCode 1) before the musl pin.
+        assert install[script + 3 :] == expected
+        closed = client.post("/v1/agent_sessions/close", json=close_body(response.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
 
 
 @pytest.mark.parametrize("owned", [False, True])

@@ -36,6 +36,12 @@ swebench_pro_opencode_agent:
   responses_api_agents:
     opencode_agent:
       resources_server: null
+      # An overlay's swebench_pro_opencode_runtime block (benchmarks/nemotron_3.5_super/sandbox_utils.yaml) supplies
+      # verified binaries for both task-image libc variants; without it, OpenCode is downloaded.
+      sandbox_executable_path: ${oc.select:swebench_pro_opencode_runtime.glibc_path,null}
+      sandbox_executable_sha256: ${oc.select:swebench_pro_opencode_runtime.glibc_sha256,null}
+      sandbox_musl_executable_path: ${oc.select:swebench_pro_opencode_runtime.musl_path,null}
+      sandbox_musl_executable_sha256: ${oc.select:swebench_pro_opencode_runtime.musl_sha256,null}
 
 swebench_pro_opencode_single_agent_turn:
   _inherit_from: single_agent_turn

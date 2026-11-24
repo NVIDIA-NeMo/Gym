@@ -334,6 +334,7 @@ stricter, single-activation contract described above. The intentional difference
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
+| `opencode_model_call_timeout` | Not applied | OpenCode 1's per-request provider timeout, in milliseconds, as on `opencode_sandboxed_agent`; unset (the default), only the run's `timeout` bounds a model call. Rejected at seed for OpenCode 2 |
 | Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` (a per-call limit) accepted when at least the configured limit; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
@@ -403,6 +404,15 @@ SHA-256. Seed verifies bytes and version before copying it into the adapter cach
 `sandbox_path_prefix` adds executable directories for installation and
 CLI/tool subprocesses while retaining the image PATH. These paths must already
 exist; the sandbox owner supplies mounts or image contents.
+
+For task images of both libc variants, add `sandbox_musl_executable_path` and
+`sandbox_musl_executable_sha256` for the musl build. The installer identifies the
+sandbox's libc and, on a musl image, verifies and installs the musl pin in place of the
+primary one. A glibc image always gets the primary pin. A musl pin requires the primary pin.
+
+`opencode_sandboxed_agent`'s mounted installer (`remote_opencode_install_script_path`,
+`remote_opencode_binary_path` and `remote_opencode_musl_binary_path`) is not supported here,
+and the agent ignores those keys. Use the verified pins above instead.
 
 `sandbox_model_id` selects the native OpenCode model ID. It defaults to the existing
 `dummy_model` compatibility alias. Benchmarks can set the native ID to retain

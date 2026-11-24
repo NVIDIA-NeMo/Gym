@@ -103,8 +103,9 @@ Agent settings live under `deepswe_opencode_agent.responses_api_agents.opencode_
 | --- | --- |
 | `sandbox_timeout: 10800` | `timeout: 10800` |
 | `opencode_max_context_window` | `context_window`; `max_output_tokens` follows it, as the previous output limit did |
-| `remote_opencode_install_script_path`, `remote_opencode_binary_path` | `sandbox_executable_path` and `sandbox_executable_sha256` (no install script) |
-| `remote_opencode_musl_binary_path` | `sandbox_executable_path` and `sandbox_executable_sha256` of the musl build, for musl images |
+| `remote_opencode_install_script_path`, `remote_opencode_binary_path` | `sandbox_executable_path` and `sandbox_executable_sha256`, which check the binary's digest. `opencode_agent` has no mounted installer: the `remote_opencode_*` keys are unsupported and ignored if set |
+| `remote_opencode_musl_binary_path` | `sandbox_musl_executable_path` and `sandbox_musl_executable_sha256`, used in place of the primary pin on musl images |
+| `opencode_model_call_timeout` (one hour per model request) | Same key, in milliseconds. The recipe leaves it unset: model requests have no per-request deadline, and the three-hour budget bounds the run |
 | `local_ripgrep_binary_path` | `sandbox_ripgrep_path` and `sandbox_ripgrep_sha256` |
 | `opencode_config.permission` | Same command restrictions; `webfetch`, `websearch` and `skill` are disabled under `opencode_config.tools` |
 | `execution_failure_reward_zero: false` (a run that ended on an OpenCode error was still verified and graded normally) | A run on which OpenCode reports a model error returns status `failed` and is still verified and graded. A run that fails without one (lost sandbox, nonzero exit, no assistant result) fails the episode instead of scoring 0 |
@@ -113,8 +114,6 @@ Agent settings live under `deepswe_opencode_agent.responses_api_agents.opencode_
 
 The session path does not support these previous controls, and the agent ignores them if they are set:
 
-- `opencode_model_call_timeout` (one hour per model request): model requests have no per-request deadline; the
-  three-hour budget bounds the run.
 - `token_id_capture`, `debug` and `artifacts_dir`. The transcript is returned in the rollout's agent observations
   instead of an export file; set `export_dir` to also keep OpenCode's own exports in the sandbox.
 

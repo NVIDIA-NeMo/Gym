@@ -83,6 +83,13 @@ else
 fi
 mkdir -p "$runtime/home" "$runtime/cache" "$runtime/data" "$runtime/config"
 export HOME="$runtime/home" XDG_CACHE_HOME="$runtime/cache" XDG_DATA_HOME="$runtime/data" XDG_CONFIG_HOME="$runtime/config"
+# After the release digests, an optional verified musl executable replaces the primary pin on musl images.
+if [ "${7:-}" = --musl-executable ]; then
+  if [[ $arch == *-musl ]]; then
+    source_binary=${8:?missing musl executable}
+    source_sha256=${9:?missing musl executable digest}
+  fi
+fi
 if [ -n "$source_binary" ]; then
   [ -n "$source_sha256" ] || { echo 'A preinstalled OpenCode binary requires its SHA-256' >&2; exit 1; }
   # Publish a verified new inode so active sessions can keep executing the old one.

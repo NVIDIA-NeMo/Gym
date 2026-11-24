@@ -737,11 +737,17 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
+    # Sandbox sessions only, OpenCode 1 only. Milliseconds, OpenCode's per-request provider timeout, as on
+    # opencode_sandboxed_agent. Unset, only the run's timeout bounds a model call.
+    opencode_model_call_timeout: int | None = Field(default=None, gt=0)
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
     sandbox_path_prefix: list[str] = Field(default_factory=list)
     sandbox_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # On musl task images an optional second verified pin replaces the primary executable.
+    sandbox_musl_executable_path: str | None = None
+    sandbox_musl_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     # The native model ID affects OpenCode's model-family prompts and tools.
     # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
     sandbox_model_id: str = "dummy_model"
@@ -1539,6 +1545,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     access.workdir,
                     state.runtime,
                     checkpointed=True,
+                    musl_executable=self._pinned_file("musl_executable"),
                     ripgrep=self._pinned_file("ripgrep"),
                     plugin_dependencies=self._pinned_file("plugin_dependencies"),
                 )
@@ -1627,6 +1634,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 name
                 for name, value in (
                     ("reasoning_effort", self.config.reasoning_effort is not None),
+                    ("opencode_model_call_timeout", self.config.opencode_model_call_timeout is not None),
                     ("interleaved_reasoning_field", self.config.interleaved_reasoning_field != "reasoning_content"),
                     ("output_token_policy", self.config.output_token_policy != "fixed"),
                     ("declare_model_limits", not self.config.declare_model_limits),
@@ -1668,6 +1676,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, f"OpenCode sandbox config: compaction.{key} must be below context_window")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
+        musl_executable = self._pinned_file("musl_executable")
+        if musl_executable and not self._pinned_file("executable"):
+            raise AgentSeedRejectedError("A musl OpenCode pin requires a verified primary sandbox_executable_path")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
             raise AgentSeedRejectedError("OpenCode plugins must be absolute, normalized paths inside the sandbox")
         if self.config.export_dir is not None and (
@@ -1798,6 +1809,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 workdir,
                 runtime,
                 checkpointed=checkpointed,
+                musl_executable=musl_executable,
                 ripgrep=ripgrep,
                 plugin_dependencies=plugin_dependencies,
             )
@@ -1986,15 +1998,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         runtime: str,
         *,
         checkpointed: bool,
+        musl_executable: "_PinnedFile | None" = None,
         ripgrep: "_PinnedFile | None" = None,
         plugin_dependencies: "_PinnedFile | None" = None,
     ) -> None:
         """Install the OpenCode runtime if the sandbox lacks it, and upload the session's helper files.
 
-        ``ripgrep`` and ``plugin_dependencies`` are the pinned files a seed resolved, staged under ``directory``, the
-        session's persistent directory. Everything goes through ``sandbox``: a restored session that is being
-        re-bound has no ``state.session`` yet. A checkpointed session also gets the script that reprompts its saved
-        conversation.
+        ``musl_executable`` is the seed's musl OpenCode pin, which the installer uses in place of the primary pin on
+        a musl image. ``ripgrep`` and ``plugin_dependencies`` are the pinned files a seed resolved, staged under
+        ``directory``, the session's persistent directory. Everything goes through ``sandbox``: a restored session
+        that is being re-bound has no ``state.session`` yet. A checkpointed session also gets the script that
+        reprompts its saved conversation.
         """
         if self.config.plugins:
             # Owner-staged plugins are checked before installation. OpenCode 2 loads a plugin from a directory.
@@ -2016,29 +2030,24 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command = "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1 "
         else:
             command = ""
-        command += "bash " + " ".join(
-            quote(arg)
-            for arg in (
-                installer,
-                runtime,
-                self.config.opencode_version,
-                self.config.sandbox_executable_path or "",
-                self.config.sandbox_executable_sha256 or "",
-                ":".join(self.config.sandbox_path_prefix),
-                # OpenCode 2 downloads are checked against the release's pinned SHA-256 digests.
-                *(
-                    [
-                        " ".join(
-                            f"{arch}={digest}"
-                            for arch, digest in OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {}).items()
-                        )
-                    ]
-                    if self._opencode2
-                    else []
-                ),
-            )
-        )
-        # The installer serializes concurrent runs and skips a runtime already in place, so running it again is safe.
+        install_args = [
+            installer,
+            runtime,
+            self.config.opencode_version,
+            self.config.sandbox_executable_path or "",
+            # The installer compares against sha256sum's lowercase output.
+            (self.config.sandbox_executable_sha256 or "").lower(),
+            ":".join(self.config.sandbox_path_prefix),
+        ]
+        if self._opencode2 or musl_executable:
+            # The sixth script argument is reserved for OpenCode 2 release digests.
+            digests = OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {}) if self._opencode2 else {}
+            install_args.append(" ".join(f"{arch}={digest}" for arch, digest in digests.items()))
+        if musl_executable:
+            install_args.extend(["--musl-executable", musl_executable.sandbox_path, musl_executable.digest])
+        command += "bash " + shlex.join(install_args)
+        # The installer serializes concurrent runs, checks a pinned binary, publishes it as a new file, and skips the
+        # download when a runtime is already in place, so running it again is safe.
         result = await exec_idempotent(
             sandbox,
             command,
@@ -2745,7 +2754,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     "options": {
                         "baseURL": base_url,
                         "apiKey": "dummy_key",
-                        "timeout": False,
+                        "timeout": self.config.opencode_model_call_timeout
+                        if self.config.opencode_model_call_timeout is not None
+                        else False,
                     },  # pragma: allowlist secret
                     "models": {model_id: model},
                 }
