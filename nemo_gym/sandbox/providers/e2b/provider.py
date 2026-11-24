@@ -56,7 +56,7 @@ import os
 import re
 import shlex
 import uuid
-from collections.abc import Coroutine, Mapping
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from time import monotonic
@@ -64,6 +64,8 @@ from typing import Any, Awaitable, Callable, ClassVar, TypeVar
 
 from nemo_gym.sandbox.attribution import AttributionConfig
 from nemo_gym.sandbox.providers.base import (
+    NETWORK_RULES,
+    NetworkRule,
     SandboxCapabilities,
     SandboxCreateError,
     SandboxEndpoint,
@@ -76,6 +78,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.e2b._sdk import E2B_SDK_CONSTRAINT, require_e2b_sdk
+from nemo_gym.utils.network_policy import allowlist_policy
 
 
 LOGGER = logging.getLogger(__name__)
@@ -566,8 +569,23 @@ class E2BProvider:
     """Provider backed by the E2B Python SDK."""
 
     name = "e2b"
-    # A snapshot saves memory and processes, and a sandbox created from it continues them.
-    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(snapshot_keeps=frozenset({"files", "processes"}))
+    # A snapshot saves memory and processes, and a sandbox created from it continues them. Every network rule is
+    # applied as a deny-by-default network_policy, which create maps onto E2B's own network option.
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(
+        snapshot_keeps=frozenset({"files", "processes"}), network_rules=NETWORK_RULES
+    )
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with a ``network_policy`` for ``rule``: deny all egress but ``hosts``.
+
+        ``inherit`` leaves them as they are, so ``create.network`` applies. Every other rule replaces
+        ``create.network`` for the sandbox; ``no_network``, given no hosts, denies all egress.
+        """
+        if rule == "inherit":
+            return dict(provider_options)
+        return {**provider_options, "network_policy": allowlist_policy(hosts)}
 
     def __init__(
         self,

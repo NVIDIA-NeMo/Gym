@@ -2,15 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """The typed network rule of a sandbox block, and how each provider declares and applies the rules it supports."""
 
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.config import NetworkRuleOptions, SandboxConfig
 from nemo_gym.sandbox.providers import registry
 from nemo_gym.sandbox.providers.base import SandboxCapabilities
 from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
+from nemo_gym.sandbox.providers.e2b.provider import E2BProvider
+from nemo_gym.sandbox.providers.e2b.provider import _network_options as e2b_network_options
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 from nemo_gym.sandbox.providers.registry import get_provider_class
 
@@ -129,25 +131,69 @@ class TestARuleNeverReachesASpecWithoutItsPolicy:
             {"docker": {}},
             image="image",
             workdir=None,
-            network_options={"run_args": ["--network", "none"]},
+            network_options=NetworkRuleOptions("no_network", {"run_args": ["--network", "none"]}),
         )
 
         assert spec.provider_options == {"run_args": ["--network", "none"]}
+
+    @pytest.mark.parametrize("options", [{}, NetworkRuleOptions("model_only", {})])
+    def test_options_not_built_for_the_blocks_rule_are_refused(self, options: Any) -> None:
+        # An empty mapping would start the sandbox with the provider's default egress.
+        with pytest.raises(ValueError, match="takes the NetworkRuleOptions the owner built for it"):
+            SandboxConfig(network="no_network").spec(
+                {"docker": {}}, image="image", workdir=None, network_options=options
+            )
 
 
 class _OwnNetwork(SandboxConfig):
     network: Literal["package_index"] = "package_index"  # type: ignore[assignment]
 
 
-def test_a_subclass_with_its_own_network_setting_keeps_its_own_checks() -> None:
-    # The typed rule's checks would refuse allowed_hosts without a restricted rule; this subclass owns its network.
-    assert _OwnNetwork(allowed_hosts=["pypi.org"]).allowed_hosts == ["pypi.org"]
+def test_a_subclass_with_its_own_network_setting_keeps_its_own_meaning() -> None:
+    assert _OwnNetwork().network == "package_index"
+
+
+@pytest.mark.parametrize(
+    "fields", [{"allowed_hosts": ["pypi.org"]}, {"model_server": "policy"}, {"tool_servers": ["search"]}]
+)
+def test_the_typed_rules_fields_are_refused_beside_a_subclasss_own_network_setting(fields: dict) -> None:
+    # They would load and do nothing.
+    with pytest.raises(ValidationError, match="go with a network rule"):
+        _OwnNetwork(**fields)
+
+
+@pytest.mark.parametrize(
+    "host", ["pypi.org", "*.pypi.org", "files.pythonhosted.org.", "10.0.0.5", "10.0.0.0/8", "2001:db8::1"]
+)
+def test_allowed_hosts_take_what_an_egress_rule_matches(host: str) -> None:
+    assert SandboxConfig(network="hosts_only", allowed_hosts=[host]).allowed_hosts == [host]
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "https://pypi.org/simple",
+        "pypi.org:443",
+        "pypi.org/simple",
+        "*",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "0.0.0.0/0",
+        "-bad-.org",
+        "",
+    ],
+)
+def test_allowed_hosts_refuse_what_no_egress_rule_would_match(host: str) -> None:
+    with pytest.raises(ValidationError, match="allowed_hosts entry"):
+        SandboxConfig(network="hosts_only", allowed_hosts=[host])
 
 
 TABLE = [
     ("opensandbox", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
     ("docker", {"inherit", "no_network"}, "same_host"),
-    ("e2b", {"inherit"}, "always"),
+    ("e2b", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
     ("openshell", {"inherit"}, "always"),
     ("daytona", {"inherit"}, "never"),
     ("apptainer", {"inherit"}, "same_host"),
@@ -204,3 +250,30 @@ class TestDockerAppliesNoNetworkOnce:
     def test_run_args_that_pick_a_network_are_refused(self, run_args) -> None:
         with pytest.raises(ValueError, match="pick a network themselves"):
             self._provider().network_options("no_network", [], {"run_args": run_args})
+
+    @pytest.mark.parametrize("extra_run_args", [["--network", "host"], ["--net=bridge"]])
+    def test_a_provider_whose_extra_run_args_pick_a_network_refuses_no_network(self, extra_run_args) -> None:
+        provider = object.__new__(DockerProvider)
+        provider._create_config = DockerCreateConfig(extra_run_args=extra_run_args)
+
+        with pytest.raises(ValueError, match="create.extra_run_args pick a network"):
+            provider.network_options("no_network", [], {})
+
+
+class TestE2BAppliesEveryRuleAsANetworkPolicy:
+    def test_a_restricted_rule_becomes_a_deny_by_default_policy_e2b_maps(self) -> None:
+        options = object.__new__(E2BProvider).network_options("model_only", ["10.0.0.5"], {"template": "t"})
+
+        assert options == {
+            "template": "t",
+            "network_policy": {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.5"}]},
+        }
+        assert e2b_network_options(options["network_policy"]) == {"deny_out": ["0.0.0.0/0"], "allow_out": ["10.0.0.5"]}
+
+    def test_no_network_denies_all_egress(self) -> None:
+        options = object.__new__(E2BProvider).network_options("no_network", [], {})
+
+        assert e2b_network_options(options["network_policy"]) == {"deny_out": ["0.0.0.0/0"], "allow_out": []}
+
+    def test_inherit_leaves_the_options(self) -> None:
+        assert object.__new__(E2BProvider).network_options("inherit", [], {"template": "t"}) == {"template": "t"}
