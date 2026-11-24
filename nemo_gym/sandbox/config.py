@@ -256,7 +256,7 @@ def validate_volume_sources(sources: Any, source: str = "the sandbox block") -> 
 
 
 # provider_options entries that set a sandbox's network themselves, which a typed ``network_access`` rule replaces. Today
-# only OpenSandbox reads one (network_policy); the other providers set their network in the provider block.
+# OpenSandbox and E2B read network_policy; other providers set their network in the provider block.
 PROVIDER_NETWORK_OPTIONS = ("network_policy", "network")
 
 
@@ -310,7 +310,7 @@ class SandboxConfig(BaseModel):
             if conflicting:
                 raise ValueError(
                     f"network {rule!r} and provider_options {conflicting} both set this sandbox's network; set only "
-                    "network"
+                    "network_access"
                 )
         return self
 
