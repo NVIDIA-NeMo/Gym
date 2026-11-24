@@ -71,8 +71,8 @@ def test_parse_mysql_dsn() -> None:
 @pytest.mark.parametrize(
     "dsn",
     [
-        "mysql://u:hunter2@h:3306",
-        "mysql://u:hunter2%40x@h",
+        "mysql://u:hunter2@h:3306",  # pragma: allowlist secret
+        "mysql://u:hunter2%40x@h",  # pragma: allowlist secret
         "mysql://u:@h",
         "mysql://u@x:hunter2@h",
         # Characters a URL can't hold unescaped, which make urlparse misread the password as a host or a fragment.
@@ -80,8 +80,8 @@ def test_parse_mysql_dsn() -> None:
         "mysql://u:hunter2#x@h",
         "mysql://u:hunter2?x@h",
         # urlparse's own errors would quote these.
-        "mysql://u:hunter2／x@h",
-        "mysql://u:hunter2@[h",
+        "mysql://u:hunter2／x@h",  # pragma: allowlist secret
+        "mysql://u:hunter2@[h",  # pragma: allowlist secret
     ],
 )
 def test_a_dsn_holding_a_password_is_refused_without_echoing_it(dsn) -> None:
@@ -331,7 +331,8 @@ def test_reader_same_as_admin_is_refused(tmp_path, tiny, fake_mysql) -> None:
 
 
 @pytest.mark.parametrize(
-    "admin,reader", [(ADMIN, "mysql://beaver_reader:rpw@h:3306"), ("mysql://root:pw@h:3306", READER)]
+    "admin,reader",
+    [(ADMIN, "mysql://beaver_reader:rpw@h:3306"), ("mysql://root:pw@h:3306", READER)],  # pragma: allowlist secret
 )
 def test_a_password_in_either_dsn_is_refused_before_anything_changes(
     tmp_path, tiny, fake_mysql, admin, reader

@@ -37,7 +37,7 @@ DATA_DIR = BENCHMARK_DIR / "data"
 DEFAULT_CACHE_DIR = BENCHMARK_DIR.parent.parent / "resources_servers" / "beaver_sql" / ".beaver"
 
 HF_QUERY_REPO = "beaverbench/beaver-query"
-HF_QUERY_REVISION = "3c8eb607ee2b7709ad4b1d53243e04af1b9eda4b"
+HF_QUERY_REVISION = "3c8eb607ee2b7709ad4b1d53243e04af1b9eda4b"  # pragma: allowlist secret
 DOMAINS = tuple(DOMAIN_DB)
 SAMPLE_SEED = 77
 

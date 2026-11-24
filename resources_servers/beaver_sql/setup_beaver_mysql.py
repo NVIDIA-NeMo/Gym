@@ -30,7 +30,7 @@ from urllib.parse import unquote, urlparse
 logger = logging.getLogger(__name__)
 
 HF_TABLE_REPO = "beaverbench/beaver-table"
-HF_TABLE_REVISION = "86f2c4ec45990ac30677dfdfec9826f28171000a"
+HF_TABLE_REVISION = "86f2c4ec45990ac30677dfdfec9826f28171000a"  # pragma: allowlist secret
 HF_DUMP_FILE = "beaver_db.zip"
 
 # dw_real questions run against the dw database, as in BEAVER's own evaluator.
@@ -50,7 +50,9 @@ DUMPS: Dict[str, BeaverDump] = {
     "dw": BeaverDump("beaver_db/dw.sql", "bf2535fd86bce88748bd8b5a9dd65691e08b82fc43a352d6f17defc00ade2ad0", 97),
     "nova": BeaverDump("beaver_db/nova.sql", "0c237eb9810c0d9d7b65e61e848516afab24409f604de0806c0d64f48b28d9fe", 109),
     "neutron": BeaverDump(
-        "beaver_db/neutron.sql", "10ae308e1ff9c30e0547aad3b421a85d5770cd6b84885e9d17bd173018b366a3", 175
+        "beaver_db/neutron.sql",
+        "10ae308e1ff9c30e0547aad3b421a85d5770cd6b84885e9d17bd173018b366a3",  # pragma: allowlist secret
+        175,
     ),
 }
 

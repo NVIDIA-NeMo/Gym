@@ -39,7 +39,7 @@ from resources_servers.beaver_sql.ex_acc import MySqlRunner, missing_prediction,
 from resources_servers.beaver_sql.setup_beaver_mysql import parse_mysql_dsn
 
 
-OFFICIAL_COMMIT = "81a2a88a1a2e236281c5d09b3171edd7580f8ec9"
+OFFICIAL_COMMIT = "81a2a88a1a2e236281c5d09b3171edd7580f8ec9"  # pragma: allowlist secret
 OFFICIAL_URL = f"https://raw.githubusercontent.com/beaverbench/beaver/{OFFICIAL_COMMIT}/eval/utils/ex_acc.py"
 DEFAULT_CACHE = Path(__file__).parent / "data" / "official"
 BORDERLINE_S = 8.0
