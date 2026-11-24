@@ -392,8 +392,9 @@ queueing. See [HTTP Connection Pool](/reference/configuration#http-connection-po
 ### Model Call Timing
 
 Every model server times each call to its three dialect routes (`/v1/responses`, `/v1/chat/completions`,
-`/v1/messages`), with or without a rollout prefix and whether or not model-call capture is on. The timing sits outside
-the server's checkpoint admission and exception handling, so refused and failed calls are timed too:
+`/v1/messages`), with or without a correlation prefix (rollout, agent instance, sampling) and whether or not model-call
+capture is on. The timing sits outside the server's checkpoint admission and exception handling, so refused and failed
+calls are timed too:
 
 | Metric | Attributes | Meaning |
 | --- | --- | --- |

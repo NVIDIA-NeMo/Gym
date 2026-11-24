@@ -107,9 +107,13 @@ async def test_a_streamed_call_is_timed_to_its_last_byte_and_its_first_content_b
         ("/v1/chat/completions", "chat"),
         ("/v1/messages", "messages"),
         ("/ng-rollout/3-0-a1/v1/responses", "responses"),
+        ("/ng-rollout/3-0-a1/training-token-capture/v1/chat/completions", "chat"),
+        ("/ng-sampling/null/v1/responses", "responses"),
+        ("/ng-rollout/task0-r1-a0/ng-agent-instance/judge/v1/responses", "responses"),
+        ("/ng-rollout/3-0-a1/ng-sampling/null/v1/messages", "messages"),
     ],
 )
-async def test_each_dialect_route_is_timed_with_or_without_a_rollout_prefix(collected_metrics, path, dialect) -> None:
+async def test_each_dialect_route_is_timed_under_any_correlation_prefix(collected_metrics, path, dialect) -> None:
     await _call(_app(200, [b'{"id": "x"}']), path=path)
 
     attributes, _ = _only(collected_metrics()[gym_metrics.MODEL_CALL_DURATION_INSTRUMENT])
@@ -152,6 +156,8 @@ async def test_other_routes_and_methods_are_not_timed(collected_metrics) -> None
     await _call(_app(200, [b"ok"]), path="/v1/models", method="GET")
     await _call(_app(200, [b"ok"]), path="/v1/embeddings")
     await _call(_app(200, [b"ok"]), path="/foo/v1/responses")
+    await _call(_app(200, [b"ok"]), path="/ng-rollout/3-0-a1/v1/models")
+    await _call(_app(200, [b"ok"]), path="/ng-sampling/v1/responses")
 
     metrics = collected_metrics()
     assert gym_metrics.MODEL_CALL_DURATION_INSTRUMENT not in metrics

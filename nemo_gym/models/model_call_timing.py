@@ -20,28 +20,25 @@ It needs no rollout id and no capture: every call to the three dialect routes re
 """
 
 import asyncio
-import re
 import time
 from typing import Any, Optional
 
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.core.correlation import CorrelationPathError, resolve
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.telemetry.gym_metrics import record_model_call_duration, record_model_time_to_first_byte
 
 
-_DIALECT_BY_ROUTE = {"responses": "responses", "chat/completions": "chat", "messages": "messages"}
-# The dialect route, optionally under the rollout prefix (`/ng-rollout/<id>[/training-token-capture]`) that capture
-# strips further in. Any other path, such as `/foo/v1/responses`, is not a model call.
-_MODEL_CALL_PATH_RE = re.compile(
-    rf"^(?:/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+(?:/{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)})?)?"
-    r"/v1/(responses|chat/completions|messages)$"
-)
+_DIALECT_BY_PATH = {"/v1/responses": "responses", "/v1/chat/completions": "chat", "/v1/messages": "messages"}
 
 
-def _dialect(path: str) -> Optional[str]:
-    match = _MODEL_CALL_PATH_RE.match(path)
-    return _DIALECT_BY_ROUTE[match.group(1)] if match else None
+def _dialect(scope: dict[str, Any]) -> Optional[str]:
+    """The dialect of a call to a dialect route, under any correlation prefix that inner middleware strips."""
+    try:
+        resolved = resolve(scope)
+    except CorrelationPathError:
+        return None
+    return _DIALECT_BY_PATH.get(resolved[1] if resolved is not None else scope.get("path", ""))
 
 
 def _outcome(status: Optional[int]) -> str:
@@ -57,7 +54,7 @@ class ModelCallTimingMiddleware:
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         is_post = scope.get("type") == "http" and scope.get("method") == "POST"
-        dialect = _dialect(scope.get("path", "")) if is_post else None
+        dialect = _dialect(scope) if is_post else None
         if dialect is None:
             await self._app(scope, receive, send)
             return
