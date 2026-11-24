@@ -425,14 +425,14 @@ def _settle_s(spec: SandboxSpec) -> float:
 
 
 async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, **start_kwargs: Any) -> None:
-    """Start ``sandbox``; if the caller is cancelled meanwhile, let the start end and stop what it started.
+    """Let a cancelled start settle so its owner can roll back the handle under its stop limit.
 
     A provider create cut short can leave a sandbox with no handle to stop, and not every provider applies ``ttl_s``
     (Enroot does not). So a cancelled caller waits for the start, shielded through any further cancellation and
-    bounded by ``settle_s``, stops the sandbox it started, and only then lets the cancellation go on. A start still
-    running after ``settle_s`` is cancelled, and its ``ttl_s`` is all that reclaims what it made.
+    bounded by ``settle_s``, before handing cleanup back to the owner. A start still running after ``settle_s`` is
+    cancelled. If the provider never returned a handle, only its ``ttl_s`` can reclaim what it made.
     """
-    start = asyncio.ensure_future(sandbox.start(**start_kwargs))
+    start = asyncio.ensure_future(sandbox.start(_owner_rolls_back=True, **start_kwargs))
     try:
         await asyncio.shield(start)
     except asyncio.CancelledError:
@@ -445,12 +445,6 @@ async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, **start_k
                 start.cancel()
                 with anyio.move_on_after(STOP_TIMEOUT_S):
                     await asyncio.wait({start})
-            elif not start.cancelled() and start.exception() is None:
-                try:
-                    await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
-                except Exception as error:
-                    # The caller's own rollback stops it again where it still tracks the sandbox.
-                    LOGGER.warning("a sandbox started for a cancelled caller was not stopped: %r", error)
         if start.done() and not start.cancelled() and start.exception() is not None:
             # Retrieved so it is not reported as never retrieved; the caller's cancellation is what goes on.
             LOGGER.info("a cancelled caller's start failed: %r", start.exception())
@@ -1350,7 +1344,10 @@ class OwnedSandboxes:
                 raise SandboxCheckpointError(
                     key, f"could not be re-created from snapshot {state.snapshot_id!r}: {error}"
                 ) from error
-        created[key] = sandbox
+            finally:
+                # A caller can be cancelled as the provider returns its handle. Rollback must own that fork too.
+                if sandbox.started:
+                    created[key] = sandbox
 
     def _track_unstopped(self, created: Mapping[str, AsyncSandbox]) -> None:
         """Record the forks of a restore that will not install them, before anything stops them."""
