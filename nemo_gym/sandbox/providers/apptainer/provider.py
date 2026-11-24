@@ -42,7 +42,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
-from nemo_gym.sandbox.providers.utils import kill_cancelled_command
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command, missing_source_error, read_regular_host_file
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
 from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
@@ -746,14 +746,16 @@ class ApptainerProvider:
 
         Fast path (source under the bind mount): read directly from the host side
         of the shared folder. Fallback (arbitrary path): cp inside the container
-        into the shared folder, then read the host side.
+        into the shared folder, then read the host side. Both host reads take a
+        regular file only, never through a link (:func:`read_regular_host_file`):
+        the sandbox's code may have left a link to any host path there.
         """
         inst = handle.raw
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         rel = _path_under_mount(inst.mount_point, source_path)
         if rel is not None:
-            target_path.write_bytes((inst.staging_dir / rel).read_bytes())
+            target_path.write_bytes(read_regular_host_file(inst.staging_dir / rel))
             return
 
         tmp_name = uuid.uuid4().hex
@@ -763,8 +765,10 @@ class ApptainerProvider:
             script = f"cp {shlex.quote(source_path)} {shlex.quote(container_tmp)}"
             result = await self.exec(handle, script, user="root")
             if result.return_code != 0:
-                raise RuntimeError(f"apptainer download from {source_path!r} failed: {result.stderr}")
-            target_path.write_bytes(host_tmp.read_bytes())
+                raise missing_source_error(source_path, result.stderr) or RuntimeError(
+                    f"apptainer download from {source_path!r} failed: {result.stderr}"
+                )
+            target_path.write_bytes(read_regular_host_file(host_tmp))
         finally:
             host_tmp.unlink(missing_ok=True)
 

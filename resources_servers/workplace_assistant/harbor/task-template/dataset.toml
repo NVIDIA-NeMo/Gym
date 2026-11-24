@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[dataset]
+name = "nvidia/workplace-assistant"
+version = "1.0.0"
+description = "workplace_assistant rows as Harbor tasks: tools and tables in a per-episode MCP sidecar, graded by replaying its call journal"
+
+[gym]
+license = "Apache 2.0"
+domain = "agent"
+
+[gym.defaults]
+timeout_multiplier = 1.0
+resource_multiplier = 1.0

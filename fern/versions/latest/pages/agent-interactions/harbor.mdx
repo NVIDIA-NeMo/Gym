@@ -24,7 +24,8 @@ row, the server runs one episode:
 4. **Verify.** Write the agent's transcript to `/logs/agent/trajectory.json`, upload the verifier to `/tests` and
    run it in the same sandbox, or in a fresh one when the task or the server asks for separate verification. A
    separate verifier image that ships `/tests/test.sh` gets no upload, unless a Python verifier grades the task.
-   Read the reward from `/logs/verifier/reward.json`, or from `reward.txt` when there is no `reward.json`.
+   Read the reward from `/logs/verifier/reward.json`, or from `reward.txt` when there is no `reward.json`, through
+   the sandbox provider's file transfer, before collecting the logs.
 5. **Clean up.** Stop every sandbox of the episode, whatever happened before.
 
 Once the verifier has run, the attempt counts: a missing or invalid reward file scores 0 with a `failure_kind`.

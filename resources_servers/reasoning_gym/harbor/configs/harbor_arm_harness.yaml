@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass to `gym eval run` of the converted dataset only: the OpenCode settings opencode_reasoning_gym_agent has
+# natively, where the sandbox session would otherwise default differently.
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      thinking: false                          # native value; the session default is true
+      sandbox_model_id: ${policy_model_name}   # OpenCode picks its system prompt by model id; default "dummy_model"
+      argv_prompt_quoting: true                # the local CLI quotes the argv prompt; the session uses stdin
+      max_output_tokens: 32000                 # the local path leaves OpenCode's 32000 default
+      opencode_config:
+        permission: {bash: allow, edit: allow, webfetch: allow, skill: allow}  # native's block; skill undoes the default deny

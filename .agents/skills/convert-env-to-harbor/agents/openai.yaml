@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Convert Environment to Harbor"
+  short_description: "Convert a native Gym environment to Harbor task folders and prove parity"
+  default_prompt: "Use $convert-env-to-harbor to convert a NeMo Gym environment to Harbor task folders and pass its parity gates."

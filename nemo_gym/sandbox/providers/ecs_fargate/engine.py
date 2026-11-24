@@ -1009,9 +1009,15 @@ class ExecClient:
         import urllib.parse
 
         url = f"{self._base}/download?path={urllib.parse.quote(remote_path)}"
-        return await self._request(
-            label=f"download {remote_path}", url=url, method="GET", timeout=self._timeout, max_retries=max_retries
-        )
+        try:
+            return await self._request(
+                label=f"download {remote_path}", url=url, method="GET", timeout=self._timeout, max_retries=max_retries
+            )
+        except RuntimeError as exc:
+            # The exec server answers 404 "not found: <path>" for a path that is not a file.
+            if "(HTTP 404): not found: " in str(exc):
+                raise FileNotFoundError(f"{remote_path!r} does not exist in the sandbox") from exc
+            raise
 
     async def verify_identity(self) -> None:
         """Refuse a stale forward or a server that cannot identify its sandbox."""

@@ -6,6 +6,8 @@ import errno
 import inspect
 import io
 import json
+import logging
+import os
 import posixpath
 import re
 import shutil
@@ -60,12 +62,11 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.verifier import (
     COLLECT_HOOK_GRACE_S,
-    EXIT_RECORD_NAME,
+    REWARD_FILE_LIMIT,
     TIMEOUT_WRAPPER_GUARD,
     _verifier_image,
     _verifier_runs_task_image,
     _verifier_start,
-    parse_exit_record,
     parse_reward_file,
     reward_components,
     select_reward,
@@ -194,25 +195,6 @@ class TestRewardFile:
     def test_boolean_rewards_match_harbor(self, tmp_path):
         (tmp_path / "reward.json").write_text('{"passed": true, "failed": false}')
         assert parse_reward_file(tmp_path) == ({"passed": 1.0, "failed": 0.0}, None)
-
-    @pytest.mark.parametrize(
-        ("text", "expected"),
-        [
-            ("137 1700000000 1700000120\n", (137, 120)),
-            ("0 1700000000 1700000001", (0, 1)),
-            # An image without `date` leaves empty timestamps: the exit code is still known.
-            ("137  \n", (137, None)),
-            ("137 x y", (137, None)),
-            ("", None),
-            ("nope", None),
-        ],
-    )
-    def test_exit_record(self, tmp_path, text, expected):
-        (tmp_path / EXIT_RECORD_NAME).write_text(text)
-        assert parse_exit_record(tmp_path) == expected
-
-    def test_exit_record_missing(self, tmp_path):
-        assert parse_exit_record(tmp_path) is None
 
     def test_non_utf8_bytes_do_not_raise(self, tmp_path):
         (tmp_path / "reward.txt").write_bytes(b"\xff\xfe1\n")
@@ -1560,6 +1542,12 @@ class TestAgentStage:
         assert sandbox.stopped and not server._sandboxes
 
 
+def host_clock(monkeypatch, elapsed: float) -> None:
+    """This host's clock around the one run exec of a verification: the run took ``elapsed`` seconds."""
+    times = iter([1000.0, 1000.0 + elapsed])
+    monkeypatch.setattr("environment_servers.harbor.verifier.monotonic", lambda: next(times))
+
+
 class TestVerify:
     async def verified(self, tmp_path, monkeypatch, sandbox=None, **kwargs):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, sandbox, **kwargs)
@@ -1575,15 +1563,13 @@ class TestVerify:
 
         run = next(call for call in sandbox.execs if "test.sh" in call["command"] and "timeout" in call["command"])
         assert run["command"] == verifier_command(120)
-        # The portable short form (`--signal=` fails on BusyBox), guarded so a missing wrapper exits 127
-        # before anything is redirected, and followed by the exit record the server reads the deadline from.
-        assert run["command"].startswith(f"{TIMEOUT_WRAPPER_GUARD}; start=$(date +%s); ")
-        assert (
-            "timeout -s KILL 120 bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1; rc=$?; " in run["command"]
-        )
-        assert run["command"].endswith('echo "$rc $start $(date +%s)" > /logs/verifier/.ng-exit; exit $rc')
+        # The portable short form (`--signal=` fails on BusyBox); the guard is its own exec, right before the run,
+        # with the run's user, environment and directory.
         assert "--signal" not in run["command"]
         assert run["cwd"] == "/app"
+        guard = sandbox.execs[sandbox.execs.index(run) - 1]
+        assert guard["command"] == TIMEOUT_WRAPPER_GUARD
+        assert (guard["user"], guard["env"], guard["cwd"]) == (run["user"], run["env"], run["cwd"])
         # The exec itself is bounded by the budget plus the grace period; the provider keeps it alive that long.
         assert run["timeout_s"] == 120 + server.config.verifier_grace_s
         commands = [call["command"] for call in sandbox.execs]
@@ -1840,6 +1826,171 @@ class TestVerify:
         assert result.failure_kind == "harbor:missing_reward" and result.verifier_return_code == 75
         assert "exited 75 in the agent's sandbox" in result.failure_reason
 
+    def test_verifier_command_runs_nothing_after_test_sh(self):
+        """The shell redirects itself for good, then runs test.sh under `timeout` and only the builtin `exit` after:
+        no `date`, no exit record, no program from the sandbox's disk between the tests and the reward read."""
+        assert verifier_command(120) == (
+            "exec > /logs/verifier/test-stdout.txt 2>&1; timeout -s KILL 120 bash /tests/test.sh; exit $?"
+        )
+        assert verifier_command(120).split("/tests/test.sh", 1)[1] == "; exit $?"
+
+    async def _verified_on(self, separate, tmp_path, monkeypatch, sandbox):
+        if separate:
+            return await self.separately_verified(tmp_path, monkeypatch, sandbox)
+        return (await self.verified(tmp_path, monkeypatch, sandbox))[3]
+
+    @pytest.mark.parametrize("separate", [True, False])
+    async def test_a_program_run_after_test_sh_cannot_change_the_scored_reward(self, tmp_path, monkeypatch, separate):
+        """Tests that replaced `tar`, `date`, `rm` or `sh` in the sandbox rewrite both reward files whenever Gym runs
+        anything there after test.sh: the reward read before that is the one scored, and the host copy is it."""
+
+        def forge(sandbox, command):
+            sandbox.verifier_files["reward.txt"] = "1\n"
+            sandbox.verifier_files["reward.json"] = '{"reward": 1}'
+
+        sandbox = FakeSandbox(
+            verifier_files={"reward.txt": "0\n"}, test_result=SandboxExecResult("", "", 1), after_run=forge
+        )
+        response = await self._verified_on(separate, tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is False and result.failure_kind is None
+        assert sandbox.verifier_files["reward.json"] == '{"reward": 1}'  # the forgery ran (the logs collection)
+        logs = Path(result.verifier_logs_dir)
+        assert (logs / "reward.txt").read_text() == "0\n" and not (logs / "reward.json").exists()
+
+    @pytest.mark.parametrize("separate", [True, False])
+    async def test_the_reward_is_read_before_any_command_after_test_sh(self, tmp_path, monkeypatch, separate):
+        sandbox = FakeSandbox(verifier_files={"reward.txt": "1\n", "test-stdout.txt": "ok"})
+        response = await self._verified_on(separate, tmp_path, monkeypatch, sandbox)
+        assert response.result.reward == 1.0
+        run = sandbox.calls.index(("exec", verifier_command(120)))
+        assert sandbox.calls[run + 1 : run + 3] == [
+            ("download", "/logs/verifier/reward.json"),
+            ("download", "/logs/verifier/reward.txt"),
+        ]
+        logs = next(
+            i for i, (kind, what) in enumerate(sandbox.calls) if kind == "exec" and "-C /logs/verifier" in what
+        )
+        assert logs > run + 2
+
+    async def test_reward_json_present_skips_reward_txt(self, tmp_path, monkeypatch):
+        """reward.json wins whenever it exists, even malformed: reward.txt is not read at all."""
+        sandbox = FakeSandbox(verifier_files={"reward.json": "not json", "reward.txt": "1\n"})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        reads = [what for kind, what in sandbox.calls if kind == "download" and what.startswith("/logs/verifier/")]
+        assert reads == ["/logs/verifier/reward.json"]
+        assert response.result.reward == 0.0 and response.result.failure_kind == "harbor:invalid_reward"
+
+    async def test_a_planted_exit_75_after_the_run_does_not_mask(self, tmp_path, monkeypatch):
+        """The exit status is the run exec's: an exit record the tests plant afterwards is never read."""
+
+        def plant(sandbox, command):
+            sandbox.verifier_files[".ng-exit"] = "75 0 0\n"
+
+        sandbox = FakeSandbox(verifier_files={}, test_result=SandboxExecResult("", "", 1), after_run=plant)
+        response = await self.separately_verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.mask_sample is False and result.reward == 0.0
+        assert result.failure_kind == "harbor:missing_reward" and result.verifier_return_code == 1
+
+    async def test_a_gone_verifier_folder_is_measured_zero(self, tmp_path, monkeypatch):
+        """Gym made /logs/verifier before test.sh: a folder that is gone afterwards is the task's doing, a measured
+        zero, and the failed logs collection only warns."""
+
+        class Gone(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+                if self.ran_tests and "/logs/verifier" in command and "tar -czf" in command:
+                    return _fails("tar: /logs/verifier: Cannot open: No such file or directory")
+                return result
+
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, Gone(verifier_files={}))
+        result = response.result
+        assert result.mask_sample is False and result.reward == 0.0
+        assert result.failure_kind == "harbor:missing_reward"
+
+    async def test_a_reward_download_outage_masks(self, tmp_path, monkeypatch):
+        class Outage(FakeSandbox):
+            async def download(self, remote_path, local_path):
+                if remote_path.startswith("/logs/verifier/"):
+                    raise RuntimeError("provider lost the sandbox")
+                await super().download(remote_path, local_path)
+
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, Outage())
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "provider lost the sandbox" in result.failure_reason
+
+    async def test_a_reward_read_past_the_time_limit_masks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("environment_servers.harbor.verifier.REWARD_READ_TIMEOUT_S", 0.1)
+        sandbox = FakeSandbox(slow_downloads={"reward.json"})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert result.failure_reason.startswith("TimeoutError")
+        assert sandbox.cancelled_downloads == ["/logs/verifier/reward.json"]
+
+    @pytest.mark.parametrize("shape", ["symlink", "directory", "fifo"])
+    async def test_a_reward_that_is_not_a_regular_file_is_measured_invalid(self, tmp_path, monkeypatch, shape):
+        """The reward path's type was chosen by task code, so it is measured, never a mask, and a link is never
+        followed on this host."""
+        outside = tmp_path / "host-secret"
+        outside.write_text("1\n")
+
+        class Fifo(FakeSandbox):
+            async def download(self, remote_path, local_path):
+                if remote_path == "/logs/verifier/reward.txt":
+                    self.calls.append(("download", remote_path))
+                    os.mkfifo(local_path)
+                    return
+                await super().download(remote_path, local_path)
+
+        if shape == "symlink":
+            sandbox, name = FakeSandbox(verifier_files={}, verifier_links={"reward.txt": str(outside)}), "reward.txt"
+        elif shape == "directory":
+            # A directory named reward.json used to fall back to reward.txt; it is now the reward file, invalid.
+            sandbox, name = (
+                FakeSandbox(verifier_files={"reward.txt": "1\n"}, verifier_dirs={"reward.json"}),
+                "reward.json",
+            )
+        else:
+            sandbox, name = Fifo(verifier_files={}), "reward.txt"
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.mask_sample is False and result.reward == 0.0
+        assert (
+            result.failure_kind == "harbor:invalid_reward" and f"{name} is not a regular file" in result.failure_reason
+        )
+        logs = Path(result.verifier_logs_dir)
+        assert not (logs / "reward.txt").is_symlink() and not (logs / "reward.txt").exists()
+
+    @pytest.mark.parametrize("provider", ["openshell", "apptainer", "enroot", "docker"])
+    async def test_a_reward_read_that_runs_a_program_in_the_sandbox_is_warned_once_per_verification(
+        self, tmp_path, monkeypatch, caplog, provider
+    ):
+        """Where the provider's download itself runs a program in the sandbox, separate mode does not protect the
+        score, and each verification says so; where it does not (Docker), nothing is logged."""
+        sandbox = FakeSandbox()
+        sandbox.provider_name = provider
+        caplog.set_level(logging.WARNING, logger="environment_servers.harbor.verifier")
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.reward == 1.0
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING and "separate mode does not protect the score" in record.getMessage()
+        ]
+        assert len(warnings) == (0 if provider == "docker" else 1)
+        if warnings:
+            assert provider in warnings[0].getMessage()
+
+    async def test_an_oversized_reward_is_measured_invalid(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.txt": "1" + " " * REWARD_FILE_LIMIT})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.mask_sample is False and result.reward == 0.0
+        assert result.failure_kind == "harbor:invalid_reward" and "reward.txt exceeds" in result.failure_reason
+
     async def test_invalid_reward_scores_zero(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.txt": "maybe"})
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
@@ -1869,19 +2020,20 @@ class TestVerify:
         sandbox = FakeSandbox(
             verifier_files={"reward.txt": "1\n"},
             test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
-            test_elapsed=5,
         )
+        host_clock(monkeypatch, 5)
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         result = response.result
         assert result.reward == 1.0 and result.mask_sample is False and result.failure_kind is None
         assert result.verifier_return_code == 137
 
     async def test_exit_137_at_the_deadline_without_a_reward_is_a_timeout(self, tmp_path, monkeypatch):
+        """The run's length is this host's clock around the run exec, never a time the sandbox wrote."""
         sandbox = FakeSandbox(
             verifier_files={"test-stdout.txt": "still running"},
             test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
-            test_elapsed=120,
         )
+        host_clock(monkeypatch, 120)
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         result = response.result
         assert result.reward == 0.0 and result.mask_sample is False
@@ -1892,32 +2044,44 @@ class TestVerify:
         sandbox = FakeSandbox(
             verifier_files={"reward.txt": "0.5\n"},
             test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
-            test_elapsed=120,
         )
+        host_clock(monkeypatch, 120)
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         assert response.result.reward == 0.5 and response.result.failure_kind is None
 
-    async def test_exit_137_without_timestamps_falls_back_to_the_exit_code(self, tmp_path, monkeypatch):
-        """An image without `date` leaves no elapsed time: 137 then means the timer, as before."""
+    @pytest.mark.parametrize("return_code", [-9, 137])
+    async def test_a_killed_relay_without_a_reward_is_measured(self, tmp_path, monkeypatch, return_code):
+        """Tests that kill `timeout` (137) or the run's shell (a signal death) before the budget: measured, not a
+        timeout and not a mask."""
         sandbox = FakeSandbox(
-            verifier_files={EXIT_RECORD_NAME: "137  \n"},
-            test_result=SandboxExecResult(stdout="", stderr="", return_code=137),
+            verifier_files={}, test_result=SandboxExecResult(stdout="", stderr="", return_code=return_code)
         )
+        host_clock(monkeypatch, 3)
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
-        assert response.result.failure_kind == "harbor:verifier_timeout"
+        result = response.result
+        assert result.mask_sample is False and result.reward == 0.0
+        assert result.failure_kind == "harbor:missing_reward" and result.verifier_return_code == return_code
 
     async def test_missing_timeout_wrapper_masks_the_sample(self, tmp_path, monkeypatch):
-        """BusyBox without `timeout`, or an image without `bash`: the guard exits 127 before test.sh starts."""
-        sandbox = FakeSandbox(
-            verifier_files={},
-            test_result=SandboxExecResult(stdout="", stderr="", return_code=127),
-            wrapper_ran=False,
-        )
+        """BusyBox without `timeout`, or an image without `bash`: the guard exec exits 127 and the run is never
+        issued."""
+        sandbox = FakeSandbox(verifier_files={}, wrapper_ran=False)
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         result = response.result
         assert result.reward == 0.0 and result.mask_sample is True
         assert result.failure_kind == "verifier_error"
         assert "could not be started" in result.failure_reason and "exit 127" in result.failure_reason
+        assert not any("timeout -s KILL" in command for kind, command in sandbox.calls if kind == "exec")
+
+    async def test_guard_provider_error_masks(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(
+            guard_result=SandboxExecResult(stdout=None, stderr="gone", return_code=125, error_type="sandbox")
+        )
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "verifier_error"
+        assert "could not check for timeout and bash: sandbox" in result.failure_reason
+        assert not any("timeout -s KILL" in command for kind, command in sandbox.calls if kind == "exec")
 
     async def test_test_sh_exiting_127_itself_is_measured(self, tmp_path, monkeypatch):
         """The wrapper ran: a script that ends 127 (a missing command of its own) is an ordinary measured zero."""

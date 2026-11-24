@@ -1,0 +1,55 @@
+# The 50 parity task ids, in draw order; the first 5 are the smoke subset.
+# dapo17k-<n> is 0-based line n of environments/opencode_math/prepare.py output (Hugging Face
+# YouJiacheng/DAPO-Math-17k-dedup at revision 6e26a33abdabd3e6aaa1d742326b790758f7dbc5, split train, 17398 rows).
+# Drawn with random.Random(20261122).sample(sorted ids, 50) from the rows whose reference answer the grader
+# scores 1 (all 17398 rows).
+dapo17k-16545
+dapo17k-07797
+dapo17k-12603
+dapo17k-01186
+dapo17k-02044
+dapo17k-12672
+dapo17k-00573
+dapo17k-05612
+dapo17k-14311
+dapo17k-16315
+dapo17k-16129
+dapo17k-07433
+dapo17k-11870
+dapo17k-09803
+dapo17k-13060
+dapo17k-17311
+dapo17k-08569
+dapo17k-16955
+dapo17k-15451
+dapo17k-09267
+dapo17k-11029
+dapo17k-04504
+dapo17k-12818
+dapo17k-16998
+dapo17k-12092
+dapo17k-14301
+dapo17k-07355
+dapo17k-09117
+dapo17k-07183
+dapo17k-16256
+dapo17k-06948
+dapo17k-13229
+dapo17k-08601
+dapo17k-01972
+dapo17k-03324
+dapo17k-14737
+dapo17k-11284
+dapo17k-15003
+dapo17k-06133
+dapo17k-05979
+dapo17k-09743
+dapo17k-12902
+dapo17k-08674
+dapo17k-06040
+dapo17k-04194
+dapo17k-13905
+dapo17k-07144
+dapo17k-14763
+dapo17k-02714
+dapo17k-11126

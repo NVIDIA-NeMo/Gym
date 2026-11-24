@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# One workplace_assistant row. The agent's sandbox (main) holds nothing of the task; the 27 tools and the five tables
+# run in the `tools` sidecar (environment/docker-compose.yaml), which journals every call. A separate verifier
+# copies the journal out of the sidecar and replays it with the Resources Server's own is_correct.
+schema_version = "1.4"
+
+# The tool server's call journal, read by the separate verifier. The agent cannot write it except by calling a tool.
+artifacts = [{ source = "/var/lib/wa-journal/calls.jsonl", service = "tools" }]
+
+[task]
+name = "nvidia/workplace-assistant"
+version = "1.0.0"
+description = "Workplace assistant: multi-step tool use on email, calendar, analytics, project and CRM tables"
+authors = []
+keywords = ["tool-use", "mcp", "stateful"]
+
+[metadata]
+category = "tool-use"
+source = "resources_servers/workplace_assistant"
+
+[agent]
+timeout_sec = 900.0
+
+[verifier]
+timeout_sec = 600.0
+
+# A fresh sandbox for the verifier. Gym does not create its working directory, so name one the image has.
+[verifier.environment]
+docker_image = "ghcr.io/astral-sh/uv:python3.13-bookworm-slim@sha256:531f855bda2c73cd6ef67d56b733b357cea384185b3022bd09f05e002cd144ca"
+workdir = "/tmp"
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+
+[environment]
+build_timeout_sec = 600.0
+workdir = "/workspace"
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+
+# The model sees these tools as workplace_assistant_<tool>, as it does when the Resources Server serves them over MCP.
+[[environment.mcp_servers]]
+name = "workplace_assistant"
+transport = "streamable-http"
+url = "http://tools:8000/mcp"

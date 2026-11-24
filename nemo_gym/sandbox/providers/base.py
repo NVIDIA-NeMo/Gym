@@ -424,7 +424,13 @@ class SandboxProvider(Protocol):
         ...
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
-        """Download one sandbox file to the local filesystem."""
+        """Download one sandbox file to the local filesystem.
+
+        Raises ``FileNotFoundError`` when ``source_path`` does not exist in the sandbox; every other failure raises
+        something else, so a caller can tell an absent file (an answer) from an outage. A provider that sees the
+        entry's type itself may refuse a link (``OSError`` with ``ELOOP``), a directory (``IsADirectoryError``) or
+        another non-regular file (``OSError`` with ``EINVAL``).
+        """
         ...
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:

@@ -17,6 +17,7 @@ import posixpath
 import re
 import shlex
 import tarfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,7 +34,7 @@ from environment_servers.harbor.app import (
     HarborEpisodeRequest,
     HarborEpisodeResponse,
 )
-from environment_servers.harbor.verifier import EXIT_RECORD_NAME
+from environment_servers.harbor.verifier import TIMEOUT_WRAPPER_GUARD
 from nemo_gym.agents import AGENT_ACTIVATION_HEADER, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
@@ -139,6 +140,9 @@ def archive_of(files: dict[str, str]) -> bytes:
 
 OK = SandboxExecResult(stdout="", stderr="", return_code=0)
 
+# Where `download_dir` has the sandbox's `tar` pack an archive; any other download is one file (the reward read).
+DOWNLOAD_ARCHIVE_PREFIX = "/tmp/.nemo-gym-download-"
+
 
 def _fails(message: str) -> SandboxExecResult:
     return SandboxExecResult(stdout="", stderr=message, return_code=1)
@@ -148,10 +152,16 @@ def _fails(message: str) -> SandboxExecResult:
 class FakeSandbox:
     """Records sandbox calls and behaves like the container they would reach.
 
-    ``verifier_files`` is what ``/logs/verifier`` holds after test.sh. The verifier wrapper's exit
-    record is added when the wrapper ran to its end: ``test_elapsed`` is how long the run took inside
-    the container. A provider timeout, or ``wrapper_ran=False`` (no ``timeout`` or ``bash`` in the
-    image), leaves no record. The container side: a command runs as the exec's ``user``, else as the
+    ``verifier_files`` is what ``/logs/verifier`` holds after test.sh. A download of one file (the
+    reward read; any path but an archive ``download_dir`` packed) delivers that name's text, a host symbolic link to the path
+    ``verifier_links`` gives (as ``docker cp`` copies a link), a directory for a name in ``verifier_dirs``,
+    blocks until cancelled for a name in ``slow_downloads``, and raises ``FileNotFoundError`` for any other
+    name; any other download is an archive of ``verifier_files``, as the sandbox's ``tar`` packs it.
+    ``wrapper_ran=False`` (no ``timeout`` or ``bash`` in the image) makes the guard exec exit 127, and
+    ``guard_result`` replaces the guard's result outright. ``after_run`` is called with the sandbox and the
+    command on every exec issued after the run exec: it stands in for a program on the sandbox's disk the tests
+    replaced (``tar``, ``date``, ``rm``, ``sh``). ``calls`` records the execs and downloads in order, as
+    ``("exec", command)`` and ``("download", remote path)``. The container side: a command runs as the exec's ``user``, else as the
     image's default user; ``spec_env`` is the environment the sandbox was created with, and the
     ``unset``/``export``/``cd`` prefix the server puts before a Dockerfile ``RUN`` line is applied to
     it, so each exec's record carries under ``seen`` the command, environment, user and directory the
@@ -162,8 +172,15 @@ class FakeSandbox:
 
     verifier_files: dict[str, str] = field(default_factory=lambda: {"reward.txt": "1\n"})
     test_result: SandboxExecResult = OK
-    test_elapsed: int = 1
     wrapper_ran: bool = True
+    guard_result: SandboxExecResult | None = None
+    after_run: Callable[["FakeSandbox", str], None] | None = None
+    verifier_links: dict[str, str] = field(default_factory=dict)
+    verifier_dirs: set[str] = field(default_factory=set)
+    slow_downloads: set[str] = field(default_factory=set)
+    cancelled_downloads: list[str] = field(default_factory=list)
+    calls: list[tuple[str, str]] = field(default_factory=list)
+    ran_tests: bool = False
     execs: list[dict] = field(default_factory=list)
     uploads: list[tuple[Path, str]] = field(default_factory=list)
     uploaded_archives: list[bytes] = field(default_factory=list)
@@ -217,15 +234,18 @@ class FakeSandbox:
             "seen": None,
         }
         self.execs.append(record)
+        self.calls.append(("exec", command))
+        if self.ran_tests and self.after_run is not None:
+            self.after_run(self, command)
+        if command == TIMEOUT_WRAPPER_GUARD:
+            if self.guard_result is not None:
+                return self.guard_result
+            return OK if self.wrapper_ran else SandboxExecResult(stdout="", stderr="", return_code=127)
         if "test.sh" in command:
             if "timeout" not in command:
                 # Harbor's `chmod +x` on test.sh before the run, or a separate verifier's probe for the file.
                 return SandboxExecResult(stdout="", stderr="", return_code=0)
-            if self.wrapper_ran and self.test_result.error_type != "timeout":
-                start = 1_700_000_000
-                self.verifier_files.setdefault(
-                    EXIT_RECORD_NAME, f"{self.test_result.return_code} {start} {start + self.test_elapsed}\n"
-                )
+            self.ran_tests = True
             return self.test_result
         if command == "pwd":
             # The image's own WORKDIR, asked for when a task declares none.
@@ -288,6 +308,24 @@ class FakeSandbox:
         self.uploaded_archives.append(Path(local_path).read_bytes())
 
     async def download(self, remote_path, local_path):
+        self.calls.append(("download", remote_path))
+        if not remote_path.startswith(DOWNLOAD_ARCHIVE_PREFIX):
+            name = posixpath.basename(remote_path)
+            if name in self.slow_downloads:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled_downloads.append(remote_path)
+                    raise
+            if name in self.verifier_links:
+                Path(local_path).symlink_to(self.verifier_links[name])
+            elif name in self.verifier_dirs:
+                Path(local_path).mkdir()
+            elif name in self.verifier_files:
+                Path(local_path).write_text(self.verifier_files[name])
+            else:
+                raise FileNotFoundError(remote_path)
+            return
         Path(local_path).write_bytes(archive_of(self.verifier_files))
 
     async def serialize(self, *, scope=None):
@@ -632,6 +670,11 @@ class AgentSandbox(FakeSandbox):
         return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
     async def download(self, remote_path, local_path):
+        if not remote_path.startswith(DOWNLOAD_ARCHIVE_PREFIX):
+            # A reward read: the base fake's single-file download.
+            await super().download(remote_path, local_path)
+            return
+        self.calls.append(("download", remote_path))
         Path(local_path).write_bytes(self.archives[self.archived[-1]])
 
 

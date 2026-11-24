@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass with native_pairing.yaml (this folder) for the native arm of a parity run (`gym eval run --config <that file>
+# --config <this file> --agent workplace_assistant_opencode_agent --split validation <model flags>`). That file
+# already holds the rest of what the native arm needs: the MCP exposure, use_absolute_ip for the OpenCode sandbox,
+# the agent image and the 900 s timeout. On main it does not run: see its header and harbor/README.md.
+#
+# Written for `--model-type openai_model`. The same temperature as on the Harbor arm (harbor_arm_harness.yaml). Here
+# OpenCode already sends the rows' 1.0, so it changes nothing; the parity run passed it on both arms on the command
+# line (++policy_model.responses_api_models.openai_model.extra_body.temperature=1.0).
+policy_model:
+  responses_api_models:
+    openai_model:
+      extra_body:
+        temperature: 1.0

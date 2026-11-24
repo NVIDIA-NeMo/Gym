@@ -1196,6 +1196,7 @@ class BwrapProvider:
     def _open_parent(root: Path, parts: tuple[str, ...], *, create: bool) -> int:
         """Open the directory holding ``parts[-1]`` without following any symlink below ``root``."""
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        part = ""
         try:
             for part in parts[:-1]:
                 try:
@@ -1209,9 +1210,18 @@ class BwrapProvider:
                 os.close(fd)
                 fd = next_fd
         except OSError as error:
-            os.close(fd)
             if error.errno in (errno.ELOOP, errno.ENOTDIR):
-                raise BwrapPathError(f"refusing to traverse a symlink or non-directory under {root}") from error
+                # O_DIRECTORY reports a link as ENOTDIR; the refusal carries ELOOP for one, so a caller
+                # (read_file_bytes) can tell a planted link from an outage.
+                is_link = False
+                with contextlib.suppress(OSError):
+                    is_link = stat.S_ISLNK(os.lstat(part, dir_fd=fd).st_mode)
+                os.close(fd)
+                raise BwrapPathError(
+                    errno.ELOOP if is_link else error.errno,
+                    f"refusing to traverse a symlink or non-directory under {root}",
+                ) from error
+            os.close(fd)
             raise
         return fd
 
@@ -1256,7 +1266,7 @@ class BwrapProvider:
                 fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
             except OSError as error:
                 if error.errno == errno.ELOOP:
-                    raise BwrapPathError(f"refusing to read through symlink {source_path!r}") from error
+                    raise BwrapPathError(errno.ELOOP, f"refusing to read through symlink {source_path!r}") from error
                 raise
         finally:
             os.close(parent)

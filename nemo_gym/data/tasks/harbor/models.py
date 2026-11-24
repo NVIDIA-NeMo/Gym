@@ -169,8 +169,9 @@ class HarborCollectHook(HarborSettings):
     user: str | int | None = None
 
 
-# The files the shared verifier's own run leaves in /logs/verifier (the reward, the exit record, the wrapper's
-# stdout): never a sidecar input, so `[verifier].inputs` cannot name them.
+# The files the shared verifier's own run leaves in /logs/verifier (the reward and the wrapper's stdout), and the exit
+# record earlier versions of the wrapper wrote, kept reserved for a release: never a sidecar input, so
+# `[verifier].inputs` cannot name them.
 VERIFIER_OUTPUT_NAMES = ("reward.json", "reward.txt", "test-stdout.txt", ".ng-exit")
 
 

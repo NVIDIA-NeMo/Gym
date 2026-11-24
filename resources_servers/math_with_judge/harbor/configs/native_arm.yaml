@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass with environments/opencode_math/config.yaml for the native arm of a parity run, on `gym env start` and on the
+# `gym eval run --no-serve` client.
+# 1. Route the local OpenCode CLI through Gym's policy_model server, so the same --model-type/--model/--model-url
+#    flags pick the model on both arms (the pairing YAML names its own provider instead).
+# 2. Keep the machine out of the prompt. The native agent runs OpenCode as a local CLI on the agent-server host. In a
+#    workspace inside a git checkout it reads that checkout's AGENTS.md into the system prompt, and with your real
+#    HOME it reads your personal instructions and skills. The Harbor sandbox has none of them.
+#    Supply both values below (for example with ++opencode_math_agent.responses_api_agents.opencode_agent.<key>=...):
+#    - workspace_root: a directory outside any git repository, with no AGENTS.md or CLAUDE.md on the way up to /.
+#    - env.HOME: a fresh empty directory for every run. The XDG directories default to folders under it.
+#    Create the directories before the run. Do not set OPENCODE_DISABLE_PROJECT_CONFIG: the local path writes its
+#    provider into the workspace's opencode.json, and with that flag OpenCode ignores it and fails before any model
+#    call.
+# Also put the OpenCode release the sandbox installs (opencode_version in the pairing YAML, 1.17.11) first on PATH,
+# so the local CLI and the sandbox run the same binary. The CLI runs as your user and can read any file, the native
+# rows (which hold the answers) included: keep the rows outside the workspace and HOME.
+opencode_math_agent:
+  responses_api_agents:
+    opencode_agent:
+      model: ${policy_model_name}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      workspace_root: ???
+      env:
+        HOME: ???
+        XDG_CONFIG_HOME: ${.HOME}/.config
+        XDG_CACHE_HOME: ${.HOME}/.cache
+        XDG_STATE_HOME: ${.HOME}/.local/state

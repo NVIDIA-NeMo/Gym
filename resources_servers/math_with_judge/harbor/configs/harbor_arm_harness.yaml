@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass to `gym eval run` of the converted dataset, after harbor_arm.yaml: the OpenCode settings that make the
+# sandbox session send what opencode_math_agent's local CLI run sends. Each one was found by diffing the first model
+# request of both paths.
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      # opencode_math_agent sets thinking: false; the session default is true (adds --thinking and model reasoning).
+      thinking: false
+      # opencode_math_agent pins 1.17.11; pinned here too (it is the session default) so both arms run one release.
+      opencode_version: 1.17.11
+      # The local CLI names the model by its real id; the session default is "dummy_model". OpenCode picks its
+      # model-family system prompt from this id, so use the same one.
+      sandbox_model_id: ${policy_model_name}
+      # The local CLI gets the prompt as one argv word, and OpenCode 1.17.11's `run` wraps it in double quotes and
+      # escapes the quotes inside it. The session passes it on stdin unchanged unless this is set.
+      argv_prompt_quoting: true
+      # The local path leaves OpenCode's default cap of 32000 output tokens per call; the session would set 131072.
+      max_output_tokens: 32000
+      # opencode_math_agent's permission block. `skill: allow` undoes the session profile's deny: natively the
+      # skill tool is offered (with OpenCode's one built-in skill).
+      opencode_config:
+        permission:
+          bash: allow
+          edit: allow
+          webfetch: allow
+          skill: allow

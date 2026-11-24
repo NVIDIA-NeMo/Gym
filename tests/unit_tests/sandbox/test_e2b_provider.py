@@ -79,6 +79,10 @@ class FakeSandboxNotFound(Exception):
     pass
 
 
+class FakeFileNotFound(FakeSandboxNotFound):
+    """Like the SDK's FileNotFoundException, a NotFoundException subclass."""
+
+
 class FakeTimeout(Exception):
     pass
 
@@ -212,6 +216,13 @@ class FakeCommands:
             raise behaviour
         return behaviour or FakeCommandResult(stdout="ok")
 
+    async def kill(self, pid, request_timeout=None):
+        self._sandbox.process_kill_calls.append(pid)
+        return True
+
+    async def list(self, request_timeout=None):
+        return self._sandbox.processes
+
     async def connect(self, pid, timeout=None, request_timeout=None):
         self._sandbox.connect_calls.append({"pid": pid, "timeout": timeout, "request_timeout": request_timeout})
         if self._sandbox.connect_error is not None:
@@ -231,10 +242,36 @@ class FakeFiles:
 
     async def read(self, path, **kwargs):
         _reject_connection_params("Filesystem.read", kwargs)
+        self._sandbox.file_read_calls.append({"path": path, **kwargs})
         if path not in self._sandbox.files_written:
-            raise FakeSandboxNotFound(path)
+            raise FakeFileNotFound(path)
         data = self._sandbox.files_written[path]
-        return data if isinstance(data, bytes) else str(data).encode()
+        data = data if isinstance(data, bytes) else str(data).encode()
+        if kwargs.get("format") == "stream":
+            return FakeFileStream([data[i : i + 4] for i in range(0, len(data), 4)])
+        return data
+
+
+class FakeFileStream:
+    """Like the SDK's AsyncFileStreamReader: an async iterator of chunks that is also an async context manager."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        if not self.chunks:
+            raise StopAsyncIteration
+        return self.chunks.pop(0)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info) -> None:
+        self.closed = True
 
 
 class FakeSdkError(Exception):
@@ -273,7 +310,10 @@ class FakeSandbox:
         self.create_kwargs = create_kwargs
         self.exec_calls: list[dict] = []
         self.file_write_calls: list[dict] = []
+        self.file_read_calls: list[dict] = []
         self.files_written: dict[str, object] = {}
+        self.process_kill_calls: list[int] = []
+        self.processes: list[types.SimpleNamespace] = []
         self.killed = False
         self.kill_calls: list[dict] = []
         self.kill_outcomes: list[object] = []
@@ -381,6 +421,7 @@ def _fake_sdk() -> types.SimpleNamespace:
         api=types.SimpleNamespace(client_async=types.SimpleNamespace(get_api_client=FakeApiClient)),
         SandboxNotFoundException=FakeSandboxNotFound,
         NotFoundException=FakeSandboxNotFound,
+        FileNotFoundException=FakeFileNotFound,
         TimeoutException=FakeTimeout,
         RateLimitException=FakeRateLimit,
         CommandExitException=FakeCommandExit,
@@ -1511,6 +1552,39 @@ class TestFiles:
         target = tmp_path / "nested" / "out.bin"
         await provider.download_file(handle, "/remote/in.bin", target)
         assert target.read_bytes() == b"payload\x00binary"
+
+    async def test_reads_run_as_root_and_a_download_streams_to_disk(self, tmp_path: Path) -> None:
+        """A reward only root can read (a grader under umask 077) is read as Gym's own root transfers read it, and a
+        download is written chunk by chunk, so a caller watching the file's size can stop a huge one."""
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+        handle.raw.files_written["/logs/verifier/reward.txt"] = b"0.75\n"
+
+        target = tmp_path / "reward.txt"
+        await provider.download_file(handle, "/logs/verifier/reward.txt", target)
+        assert target.read_bytes() == b"0.75\n"
+        assert await provider.read_file(handle, "/logs/verifier/reward.txt") == b"0.75\n"
+        download, read = handle.raw.file_read_calls
+        assert (download["user"], download["format"]) == ("root", "stream")
+        assert (read["user"], read["format"]) == ("root", "bytes")
+
+    async def test_a_missing_file_downloads_as_file_not_found(self, tmp_path: Path) -> None:
+        provider = E2BProvider(create={"template": "base"}, operations={"retries": 2, "retry_delay_s": 0.0})
+        handle = await provider.create(_spec())
+        with pytest.raises(FileNotFoundError):
+            await provider.download_file(handle, "/logs/verifier/reward.json", tmp_path / "reward.json")
+        assert len(handle.raw.file_read_calls) == 1, "an absent file is an answer, not retried"
+
+    async def test_a_gone_sandbox_is_not_a_missing_file(self, tmp_path: Path) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+
+        async def gone(path, **kwargs):
+            raise FakeSandboxNotFound("sandbox sbx-1 not found")
+
+        handle.raw.files.read = gone
+        with pytest.raises(FakeSandboxNotFound):
+            await provider.download_file(handle, "/logs/verifier/reward.json", tmp_path / "reward.json")
 
     async def test_upload_missing_file_raises(self, tmp_path: Path) -> None:
         provider = E2BProvider(create={"template": "base"})
@@ -2700,9 +2774,11 @@ class TestCommandDeadline:
         markers = [call["envs"]["NEMO_GYM_E2B_EXEC"] for call in handle.raw.exec_calls]
         assert len(set(markers)) == 2 and all(re.fullmatch(r"[0-9a-f]{32}", marker) for marker in markers)
 
-    async def test_a_command_that_runs_out_its_deadline_exits_124_and_its_leftovers_are_killed(
+    async def test_a_command_that_runs_out_its_deadline_exits_124_and_is_ended_by_pid(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """At the deadline the command is ended through envd's process API: no program from the sandbox's disk runs
+        (no `commands.run` after the command's own), since the command may be tests that replaced any of them."""
         # Exec start, run start, then the timeout seen at 99.5% of 60 s by the run (not reattached) and by exec.
         clock = iter([0.0, 0.0, 59.7, 59.7])
         monkeypatch.setattr(e2b_provider, "monotonic", lambda: next(clock))
@@ -2714,11 +2790,35 @@ class TestCommandDeadline:
 
         assert (result.return_code, result.error_type) == (124, "timeout")
         assert handle.raw.connect_calls == [], "a timeout at the deadline is final, not reattached"
+        assert len(handle.raw.exec_calls) == 1, "nothing is run in the sandbox after the timed-out command"
+        assert handle.raw.process_kill_calls == [handle.raw.pid]
+
+    async def test_the_leftover_sweep_waits_for_the_next_exec_on_the_sandbox(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The marker sweep runs a shell from the sandbox's disk, so it never runs at the deadline (before the caller
+        reads what the command wrote); the next exec on the sandbox runs it first, with the timed-out command's
+        marker, and then its own command."""
+        times = [0.0, 0.0, 59.7, 59.7]
+        monkeypatch.setattr(e2b_provider, "monotonic", lambda: times.pop(0) if times else 100.0)
+        provider = E2BProvider(create={"template": "base"})
+        handle = await provider.create(_spec())
+        handle.raw.wait_outcomes = [FakeTimeout("deadline exceeded")]
+
+        result = await provider.exec(handle, "sleep 999", timeout_s=60)
+        assert (result.return_code, result.error_type) == (124, "timeout")
+        assert len(handle.raw.exec_calls) == 1, "no sweep at the deadline"
         marker = handle.raw.exec_calls[0]["envs"]["NEMO_GYM_E2B_EXEC"]
-        cleanup = handle.raw.exec_calls[1]
-        assert cleanup["user"] == "root" and f"NEMO_GYM_E2B_EXEC={marker}" in cleanup["cmd"]
-        assert "kill -- -" not in cleanup["cmd"], "never by process group: envd shares it"
-        assert "NEMO_GYM_E2B_EXEC" not in (cleanup.get("envs") or {}), "the cleanup must not kill itself"
+
+        await provider.exec(handle, "echo next", timeout_s=60)
+        sweep, command = handle.raw.exec_calls[1:]
+        assert sweep["user"] == "root" and f"NEMO_GYM_E2B_EXEC={marker}" in sweep["cmd"]
+        assert "kill -- -" not in sweep["cmd"], "never by process group: envd shares it"
+        assert "NEMO_GYM_E2B_EXEC" not in (sweep.get("envs") or {}), "the sweep must not kill itself"
+        assert command["cmd"] == "echo next"
+
+        await provider.exec(handle, "echo again", timeout_s=60)
+        assert [call["cmd"] for call in handle.raw.exec_calls[3:]] == ["echo again"], "a marker is swept once"
 
     async def test_the_leftover_kill_script_kills_only_marked_processes(self, tmp_path: Path) -> None:
         """Run the real script against this machine's /proc: a marked child dies, an unmarked one survives."""
@@ -2740,6 +2840,28 @@ class TestCommandDeadline:
             for process in (marked, unmarked):
                 process.kill()
                 process.wait()
+
+    async def test_a_foreground_command_at_its_deadline_is_found_by_its_marker_and_ended(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock = iter([0.0, 59.7])
+        monkeypatch.setattr(e2b_provider, "monotonic", lambda: next(clock))
+        provider = E2BProvider(create={"template": "base"}, exec={"background": False})
+        handle = await provider.create(_spec())
+        handle.raw.exec_behaviour = FakeTimeout("deadline exceeded")
+        handle.raw.processes = [types.SimpleNamespace(pid=7, envs={"NEMO_GYM_E2B_EXEC": "another-command"})]
+
+        async def run(**kwargs):
+            handle.raw.exec_calls.append(kwargs)
+            marker = kwargs["envs"]["NEMO_GYM_E2B_EXEC"]
+            handle.raw.processes.append(types.SimpleNamespace(pid=99, envs={"NEMO_GYM_E2B_EXEC": marker}))
+            raise FakeTimeout("deadline exceeded")
+
+        monkeypatch.setattr(handle.raw.commands, "run", run)
+        result = await provider.exec(handle, "sleep 999", timeout_s=60)
+
+        assert (result.return_code, result.error_type) == (124, "timeout")
+        assert len(handle.raw.exec_calls) == 1 and handle.raw.process_kill_calls == [99]
 
     async def test_early_timeouts_past_the_reattach_attempts_stay_an_error(self) -> None:
         provider = E2BProvider(create={"template": "base"})

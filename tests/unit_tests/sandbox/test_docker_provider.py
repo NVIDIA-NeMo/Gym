@@ -846,6 +846,31 @@ async def test_download_cp_failure_raises(fake_binary: str, monkeypatch: pytest.
         await provider.download_file(_make_handle(), "/var/log/app.log", tmp_path / "local.txt")
 
 
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "Error: No such container:path: nemo-gym-x:/logs/verifier/reward.json",
+        "Error response from daemon: Could not find the file /logs/verifier/reward.json in container nemo-gym-x",
+        "error: NO SUCH CONTAINER:PATH: nemo-gym-x:/logs/verifier/reward.json",
+    ],
+)
+async def test_download_of_a_missing_source_raises_file_not_found(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str
+) -> None:
+    """The absent-file contract of ``download_file``, for both forms the Docker CLI and daemon versions print."""
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", stderr))
+    with pytest.raises(FileNotFoundError):
+        await provider.download_file(_make_handle(), "/logs/verifier/reward.json", tmp_path / "local.txt")
+
+
+async def test_download_from_a_missing_container_is_not_a_missing_file(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", "Error: No such container: nemo-gym-x"))
+    with pytest.raises(RuntimeError, match="docker cp download"):
+        await provider.download_file(_make_handle(), "/logs/verifier/reward.json", tmp_path / "local.txt")
+
+
 # --------------------------------------------------------------------------- #
 # status
 # --------------------------------------------------------------------------- #

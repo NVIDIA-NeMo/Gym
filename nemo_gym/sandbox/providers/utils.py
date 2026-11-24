@@ -48,6 +48,36 @@ def coerce_config(value: Any, config_cls: type[Any]) -> Any:
     raise TypeError(f"{config_cls.__name__} must be a mapping or {config_cls.__name__} instance")
 
 
+def read_regular_host_file(path: Path) -> bytes:
+    """The bytes of a host file that must be a regular file, opened without following a link.
+
+    For a download read from the host side of a sandbox's bind mount, where the sandbox's own code may have left a
+    link to any host path or a FIFO under the name being read: a link raises ``OSError`` (``ELOOP``), a directory
+    ``IsADirectoryError``, any other non-regular file ``OSError`` (``EINVAL``), and an absent path
+    ``FileNotFoundError``. The type is checked on the opened descriptor, so it cannot change between check and read.
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISDIR(mode):
+            raise IsADirectoryError(errno.EISDIR, "is a directory", str(path))
+        if not stat.S_ISREG(mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        chunks = []
+        while chunk := os.read(fd, 1024 * 1024):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def missing_source_error(source_path: str, stderr: str | None) -> FileNotFoundError | None:
+    """``FileNotFoundError`` when an in-sandbox ``cp`` of ``source_path`` failed because the source is absent."""
+    if "no such file" in (stderr or "").lower():
+        return FileNotFoundError(f"{source_path!r} does not exist in the sandbox: {(stderr or '').strip()}")
+    return None
+
+
 def path_under_mount(mount_point: str, path: str) -> str | None:
     """If `path` is inside the mount, return its path relative to the mount; else None."""
     if not path.startswith("/"):

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -22,6 +24,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -840,8 +843,9 @@ async def test_download_symlink_in_mount_is_refused(
     provider, _rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
     handle = _make_handle(staging)
     dest = tmp_path / "out.txt"
-    with pytest.raises(RuntimeError, match="symlink"):
+    with pytest.raises(OSError) as refused:
         await provider.download_file(handle, "/sandbox/leak.txt", dest)
+    assert refused.value.errno == errno.ELOOP
 
 
 # --------------------------------------------------------------------------- #
@@ -1215,3 +1219,91 @@ async def test_a_cancelled_enroot_command_is_killed(fake_binary: str, tmp_path: 
     assert not is_running(cli.last_pid())
     cli.hang.unlink()
     assert (await provider._run([str(cli.path)], timeout_s=10))[0] == 0
+
+
+@pytest.mark.parametrize("branch", ["fast", "fallback"])
+@pytest.mark.parametrize("shape", ["symlink", "directory", "fifo"])
+async def test_download_refuses_what_is_not_a_regular_file_on_the_host_side(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, branch: str, shape: str
+) -> None:
+    """Both host reads open without following a link and take a regular file only: a link to a host file the
+    sandbox's code (or a replaced in-container `cp`) left in the shared folder is refused and the file never read."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    secret = tmp_path / "host-secret"
+    secret.write_text("1")
+    provider, *_ = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    handle = _make_handle(staging)
+
+    fifos: list[Path] = []
+
+    def plant(entry: Path) -> None:
+        if shape == "symlink":
+            entry.symlink_to(secret)
+        elif shape == "directory":
+            entry.mkdir()
+        else:
+            os.mkfifo(entry)
+            fifos.append(entry)
+
+    async def fake_exec(h: SandboxHandle, command: str, **_: Any) -> SandboxExecResult:
+        plant(staging / Path(shlex.split(command)[-1]).name)
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    # A host read that opened the FIFO by mistake blocks this thread, and with it the event loop: after 10 s the
+    # timer opens the write end and closes it, which releases the reader, so a regression fails instead of hanging.
+    fired = threading.Event()
+
+    def unblock() -> None:
+        fired.set()
+        for fifo in fifos:
+            with contextlib.suppress(OSError):
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+
+    monkeypatch.setattr(provider, "exec", fake_exec)
+    if branch == "fast":
+        plant(staging / "reward.txt")
+        source = "/sandbox/reward.txt"
+    else:
+        source = "/logs/verifier/reward.txt"
+    dest = tmp_path / "local.txt"
+    timer = threading.Timer(10, unblock)
+    timer.start()
+    try:
+        with pytest.raises(OSError) as refused:
+            await provider.download_file(handle, source, dest)
+    finally:
+        timer.cancel()
+    assert not fired.is_set(), "the host read blocked on the FIFO"
+    assert refused.value.errno in (errno.ELOOP, errno.EISDIR, errno.EINVAL)
+    assert not dest.exists()
+
+
+async def test_download_fallback_of_a_missing_source_raises_file_not_found(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, *_ = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    handle = _make_handle(staging)
+
+    async def fake_exec(h: SandboxHandle, command: str, **_: Any) -> SandboxExecResult:
+        return SandboxExecResult(
+            stdout="", stderr="cp: cannot stat '/logs/verifier/reward.json': No such file or directory", return_code=1
+        )
+
+    monkeypatch.setattr(provider, "exec", fake_exec)
+    with pytest.raises(FileNotFoundError):
+        await provider.download_file(handle, "/logs/verifier/reward.json", tmp_path / "local.txt")
+    staged = list(staging.iterdir())
+    assert staged == []
+
+
+async def test_download_fast_path_of_a_missing_source_raises_file_not_found(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, *_ = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    with pytest.raises(FileNotFoundError):
+        await provider.download_file(_make_handle(staging), "/sandbox/reward.json", tmp_path / "local.txt")

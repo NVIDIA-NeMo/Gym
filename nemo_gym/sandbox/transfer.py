@@ -12,6 +12,8 @@ which a path is. :func:`upload_archive` replays the archive a download kept (``a
 another sandbox, so what the verifier receives is byte for byte what the agent's sandbox packed.
 :func:`tar_extract_command` is the shell line that unpacks an uploaded archive with GNU or BusyBox tar, and
 :func:`remote_size_bytes` measures a tree so a large transfer gets a deadline that fits it.
+:func:`read_file_bytes` reads one small file through the provider's own file download, with no program run in
+the sandbox, bounded in size and time; :class:`SandboxFileRefused` reports one that is not a regular file or too large.
 :class:`SandboxTransferError` reports a transfer command that failed inside the
 sandbox, :class:`SandboxProbeError` a probe the sandbox could not answer, and
 :class:`SandboxUnavailableError` a command the provider could not run at all, which is Gym's outage
@@ -20,9 +22,13 @@ rather than the task's. Environment servers and the agents that seed a sandbox s
 
 import asyncio
 import contextlib
+import errno
 import logging
+import os
+import posixpath
 import shlex
 import shutil
+import stat
 import tarfile
 import tempfile
 from collections.abc import Callable
@@ -110,9 +116,11 @@ def _unpack(
     """
 
     def safe_member(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
-        if names is not None and member.name.removeprefix("./") not in names:
+        # Normalized, so `.//reward.json` or `x/../reward.json` is matched as the `reward.json` it extracts to.
+        key = posixpath.normpath(member.name.lstrip("/"))
+        if names is not None and key not in names:
             return None
-        if protect and member.name.removeprefix("./").split("/", 1)[0] in protect:
+        if protect and key.split("/", 1)[0] in protect:
             LOGGER.warning("Skipping archive member %r: the host owns that name under %s", member.name, target)
             return None
         strict = links == "data" or member.islnk()
@@ -395,6 +403,108 @@ async def download_dir(
         # Best effort: a sandbox that is gone cannot clean up, and must not hide why the download failed.
         with contextlib.suppress(SandboxUnavailableError):
             await exec_as_root(sandbox, f"rm -f {remote}", timeout_s=60)
+
+
+class SandboxFileRefused(ValueError):
+    """What :func:`read_file_bytes` received is not a regular file, or is larger than its limit."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(f"{path} {reason}")
+        self.path = path
+        self.reason = reason
+
+
+# How often :func:`read_file_bytes` checks the size of a download that is still running.
+_READ_POLL_S = 0.2
+
+
+async def read_file_bytes(sandbox: AsyncSandbox, path: str, *, max_bytes: int, timeout_s: float) -> bytes | None:
+    """One sandbox file's bytes through the provider's file download, with nothing run in the sandbox by Gym.
+
+    ``None`` when the provider reports the file absent (``FileNotFoundError``). Raises :class:`SandboxFileRefused`
+    when what arrived is not a regular file (a link the provider copied as a link, a directory, a FIFO) or passes
+    ``max_bytes``, which is checked while the download runs, so a huge or sparse file cannot fill this host before it
+    is refused; raises ``TimeoutError`` when the download takes longer than ``timeout_s``. Any other provider error
+    propagates: it is an outage, not a property of the file. Unlike :func:`download_dir`, no ``tar`` or shell runs
+    in the sandbox, so a program the sandbox's own code replaced cannot change what is read.
+    """
+    folder = Path(tempfile.mkdtemp(prefix="nemo-gym-read-"))
+    payload = folder / "payload"
+    task: asyncio.Future | None = None
+    try:
+        task = asyncio.ensure_future(sandbox.download(path, payload))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while not task.done():
+            await asyncio.wait({task}, timeout=max(0.0, min(_READ_POLL_S, deadline - loop.time())))
+            if task.done():
+                break
+            info = None
+            with contextlib.suppress(OSError):
+                info = os.lstat(payload)
+            if info is not None:
+                # A directory's own size says nothing of the tree being copied under it: refuse it at once.
+                if not stat.S_ISREG(info.st_mode):
+                    await _cancel(task)
+                    raise SandboxFileRefused(path, "is not a regular file")
+                if info.st_size > max_bytes:
+                    await _cancel(task)
+                    raise SandboxFileRefused(path, f"exceeds {max_bytes} bytes")
+            if loop.time() >= deadline:
+                await _cancel(task)
+                raise TimeoutError(f"Reading {path} from the sandbox took longer than {timeout_s:g}s")
+        try:
+            task.result()
+        except FileNotFoundError:
+            return None
+        except (IsADirectoryError, NotADirectoryError) as exc:
+            # A provider that sees the entry's type itself (bwrap, apptainer, enroot) refuses a non-file this way.
+            raise SandboxFileRefused(path, "is not a regular file") from exc
+        except OSError as exc:
+            # ELOOP: a link the provider refused to follow; EINVAL: another non-regular file (a FIFO, a device).
+            if exc.errno not in (errno.ELOOP, errno.EINVAL):
+                raise
+            raise SandboxFileRefused(path, "is not a regular file") from exc
+        return _read_regular_file(payload, path, max_bytes)
+    finally:
+        # A caller cancelled mid-download (an episode deadline) must not leave the download writing into a removed
+        # folder.
+        if task is not None and not task.done():
+            await _cancel(task)
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+async def _cancel(task: asyncio.Future) -> None:
+    """Cancel a provider download and wait for it to end; whatever it raises while ending is not the caller's."""
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+
+def _read_regular_file(payload: Path, path: str, max_bytes: int) -> bytes:
+    """The bytes of the downloaded ``payload``, opened without following a link and only when it is a regular file."""
+    try:
+        fd = os.open(payload, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError as exc:
+        # ELOOP: the provider delivered a symbolic link (docker cp copies one as a link); EISDIR and the like: not
+        # a file at all.
+        raise SandboxFileRefused(path, f"is not a regular file ({exc.strerror})") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SandboxFileRefused(path, "is not a regular file")
+        if info.st_size > max_bytes:
+            raise SandboxFileRefused(path, f"exceeds {max_bytes} bytes")
+        chunks, size = [], 0
+        while size <= max_bytes and (chunk := os.read(fd, max_bytes + 1 - size)):
+            chunks.append(chunk)
+            size += len(chunk)
+        data = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if len(data) > max_bytes:
+        raise SandboxFileRefused(path, f"exceeds {max_bytes} bytes")
+    return data
 
 
 async def remote_kind(sandbox: AsyncSandbox, path: str) -> str | None:

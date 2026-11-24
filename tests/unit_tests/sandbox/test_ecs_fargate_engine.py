@@ -793,6 +793,20 @@ async def test_exec_client_download_quotes_path():
     assert req.await_args.kwargs["url"].endswith("/download?path=/a%20b/c")
 
 
+async def test_exec_client_download_of_a_missing_path_raises_file_not_found():
+    client = engine.ExecClient(port=18000)
+    missing = RuntimeError(
+        "download /logs/verifier/reward.json failed (HTTP 404): not found: /logs/verifier/reward.json"
+    )
+    with patch.object(client, "_request", AsyncMock(side_effect=missing)):
+        with pytest.raises(FileNotFoundError):
+            await client.download("/logs/verifier/reward.json")
+    other = RuntimeError("download /x failed (HTTP 500): disk error")
+    with patch.object(client, "_request", AsyncMock(side_effect=other)):
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            await client.download("/x")
+
+
 async def test_exec_client_health_true_and_false():
     client = engine.ExecClient(port=18000)
     with patch.object(client, "_request", AsyncMock(return_value=b"{}")):

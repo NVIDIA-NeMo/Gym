@@ -935,8 +935,17 @@ async def test_download_file_roundtrips_base64(make_provider, fake_client: FakeC
 
 async def test_download_file_failure_raises(make_provider, fake_client: FakeClient, tmp_path: Path) -> None:
     provider = make_provider()
-    fake_client.exec_results = [make_exec_result(exit_code=1, stderr="No such file")]
-    with pytest.raises(RuntimeError, match="No such file"):
+    fake_client.exec_results = [make_exec_result(exit_code=1, stderr="base64: /data: Permission denied")]
+    with pytest.raises(RuntimeError, match="Permission denied"):
+        await provider.download_file(_make_handle(), "/data", tmp_path / "out.bin")
+
+
+async def test_download_file_of_a_missing_source_raises_file_not_found(
+    make_provider, fake_client: FakeClient, tmp_path: Path
+) -> None:
+    provider = make_provider()
+    fake_client.exec_results = [make_exec_result(exit_code=1, stderr="base64: /missing: No such file or directory")]
+    with pytest.raises(FileNotFoundError):
         await provider.download_file(_make_handle(), "/missing", tmp_path / "out.bin")
 
 

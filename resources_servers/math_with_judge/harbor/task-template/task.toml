@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = "1.4"
+
+# Nothing here is graded: declaring an artifact lets a server with `separate_verifier_for_artifacts: true` verify in
+# a fresh sandbox of this image (overlay included), where nothing the agent did can change the grader. Under the
+# default shared verification the agent's sandbox grades, and an agent with root there can fake the reward.
+artifacts = ["/logs/artifacts"]
+
+[task]
+name = "nemo-gym/dapo-math-17k"
+version = "1.0.0"
+description = "Solve a DAPO-Math-17k problem; graded by math_with_judge's math-verify check"
+authors = []
+keywords = ["math", "dapo", "math_with_judge"]
+
+[metadata]
+category = "math"
+tags = ["math_with_judge", "dapo17k"]
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+# opencode_math's agent `timeout`.
+timeout_sec = 900.0
+
+[environment]
+build_timeout_sec = 600.0
+workdir = "/workspace"
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]

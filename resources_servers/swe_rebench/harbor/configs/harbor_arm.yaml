@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Pass to every `gym dataset validate` and `gym eval run` of the converted dataset. Every task already verifies in a
+# separate sandbox (`environment_mode = "separate"`), so no server option is needed for that; these are the
+# deployment settings swe_rebench_resources_server uses natively (configs/swe_rebench_legacy_agent.yaml).
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      sandbox_ready_timeout_s: 1200          # sandbox_config.ready_timeout_s (harbor default 900)
+      default_episode_timeout_seconds: 18000 # single_agent_turn's default_episode_timeout_seconds in swe_rebench.yaml
+      sandbox_provider_options:
+        resource_requests:                   # sandbox_config.provider_options.resource_requests (scheduling floor)
+          cpu: 1
+          memory_mib: 4096
+          disk_gib: 30
