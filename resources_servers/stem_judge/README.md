@@ -85,6 +85,31 @@ A rubric row follows its `answer_format` too, so proof or explanation rubrics
 should usually be `free`. Other row fields are kept in the verify response. See
 `data/example.jsonl` for one row of each kind.
 
+### Per-task template contracts
+
+A task may instead supply `answer_format_regex`, using the same contract as
+`math_with_judge`. It must match the entire final assistant text and contain a
+named `answer` capture, for example:
+
+```json
+{"answer_format_regex": "\\s*<answer>(?P<answer>[^<>]+)</answer>\\s*"}
+```
+
+The regex takes precedence over `answer_format` and `boxed_judge_input`. A failed
+match or empty/whitespace-only capture scores zero with
+`grading_status: answer_format_invalid` and `answer_format_valid: false`, without
+calling the judge. Otherwise, only the captured text goes to the answer or rubric
+judge, and `answer_format_valid` is true even if the judge finds it incorrect.
+`max_answer_chars` limits the captured text; box-specific settings do not apply.
+The existing truncation and empty-final-answer gates run first; those leave
+`answer_format_valid` unset because no format check ran.
+
+Matching excludes reasoning and uses the unstripped final text, so the regex must
+explicitly allow any permitted surrounding whitespace. Malformed regexes and
+patterns without a named `answer` group fail task-data and request validation.
+Saved results retain the original response, regex, and boxed/free `answer_format`
+setting for reverification. Without a regex, boxed/free behavior is unchanged.
+
 ## Config
 
 | Option | Default | |

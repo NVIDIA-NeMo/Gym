@@ -10,9 +10,10 @@ Arena-Hard-style bidirectional judge whose prompt is filled from ``question`` an
 ``expected_answer``. Rows carry both fields at the top level; no ``verifier_metadata`` bucket.
 """
 
+import re
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TaskData(BaseModel):
@@ -34,3 +35,22 @@ class TaskData(BaseModel):
         description="Stable upstream task identifier, when the benchmark provides one.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    answer_format_regex: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Full-match final-answer contract with a named 'answer' capture.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+
+    @field_validator("answer_format_regex")
+    @classmethod
+    def validate_answer_format_regex(cls, value: str | None) -> str | None:
+        """Validate the same contract accepted by the verifier request."""
+        if value is not None:
+            try:
+                pattern = re.compile(value)
+            except re.error as exc:
+                raise ValueError("Invalid answer_format_regex") from exc
+            if "answer" not in pattern.groupindex:
+                raise ValueError("answer_format_regex requires a named 'answer' capture")
+        return value

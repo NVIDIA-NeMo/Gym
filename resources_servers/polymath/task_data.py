@@ -18,6 +18,10 @@ from resources_servers.math_with_judge.task_data import TaskData as MathWithJudg
 
 
 class TaskData(MathWithJudgeTaskData):
+    answer_format_regex: None = Field(
+        default=None, exclude=True, description="Answer-format contracts are not supported by this resources server."
+    )
+
     weight: Optional[float] = Field(
         default=None,
         description="Difficulty weight for weighted pass/majority aggregation; treated as 1.0 when absent.",

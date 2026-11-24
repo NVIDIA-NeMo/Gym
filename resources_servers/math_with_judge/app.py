@@ -26,7 +26,7 @@ from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
+from pydantic import BaseModel, Field, PositiveFloat, PositiveInt, field_validator
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -61,6 +61,20 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
 class LibraryJudgeMathRunRequest(BaseRunRequest):
     question: str
     expected_answer: str
+    answer_format_regex: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @field_validator("answer_format_regex")
+    @classmethod
+    def validate_answer_format_regex(cls, value: str | None) -> str | None:
+        """A task contract matches the entire final text and names its answer capture."""
+        if value is not None:
+            try:
+                pattern = re.compile(value)
+            except re.error as exc:
+                raise ValueError("Invalid answer_format_regex") from exc
+            if "answer" not in pattern.groupindex:
+                raise ValueError("answer_format_regex requires a named 'answer' capture")
+        return value
 
 
 class LibraryJudgeMathVerifyRequest(LibraryJudgeMathRunRequest, BaseVerifyRequest):
@@ -84,6 +98,8 @@ class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
     extracted_answer: Optional[str]
     library_reward: float
     judge_evaluations: Optional[list[JudgeEvaluation]]
+    answer_format_regex: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    answer_format_valid: bool | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 def _extract_last_boxed_answer(response: str) -> Optional[str]:
@@ -447,16 +463,70 @@ Example output: "My final verdict is different [[A!=B]]"."""
                 assistant_responses.append(content_item.text)
 
         combined_response = "".join(assistant_responses)
-        reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
-            body.question, body.expected_answer, combined_response
-        )
+        answer_format_valid = None
+        if body.answer_format_regex is not None:
+            final_message = next(
+                (
+                    item
+                    for item in reversed(body.response.output)
+                    if item.type == "message" and item.role == "assistant"
+                ),
+                None,
+            )
+            final_text = (
+                "".join(item.text for item in final_message.content if item.type == "output_text")
+                if final_message
+                else ""
+            )
+            match = re.fullmatch(body.answer_format_regex, final_text)
+            answer = match.group("answer") if match else None
+            answer_format_valid = bool(answer and answer.strip())
+            if not answer_format_valid:
+                # Correctness judges must never override a failed task format contract.
+                return LibraryJudgeMathVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    extracted_answer=None,
+                    library_reward=0.0,
+                    judge_evaluations=None,
+                    answer_format_valid=False,
+                )
+            reward, extracted_answer, library_reward, judge_evaluations = await self._verify_captured_answer(
+                body.question, body.expected_answer, answer
+            )
+        else:
+            reward, extracted_answer, library_reward, judge_evaluations = await self._verify_answer(
+                body.question, body.expected_answer, combined_response
+            )
         return LibraryJudgeMathVerifyResponse(
             **body.model_dump(),
             reward=reward,
             extracted_answer=extracted_answer,
             library_reward=library_reward,
             judge_evaluations=judge_evaluations,
+            answer_format_valid=answer_format_valid,
         )
+
+    async def _verify_captured_answer(
+        self, question: str, expected_answer: str, answer: str
+    ) -> tuple[float, str | None, float, list[JudgeEvaluation] | None]:
+        # The capture already selects the answer. Never run final-answer selection
+        # again for the judge. Only use symbolic grading when boxing round-trips
+        # the capture: nested boxes or unmatched braces can select a fragment.
+        boxed_answer = "\\boxed{" + answer + "}"
+        library_reward, extracted_answer = 0.0, None
+        if _extract_last_boxed_answer(boxed_answer) == answer:
+            library_reward, extracted_answer = await self._verify_answer_with_library_async(
+                expected_answer, boxed_answer
+            )
+        # A successful format capture is still an extracted answer when the
+        # symbolic parser declines it; majority metrics must not count it as missing.
+        if extracted_answer is None:
+            extracted_answer = answer
+        if not self.config.should_use_judge or library_reward > 0.5:
+            return library_reward, extracted_answer, library_reward, None
+        judge_reward, judge_evaluations = await self._verify_answer_with_judge(question, expected_answer, answer)
+        return judge_reward, extracted_answer, library_reward, judge_evaluations
 
     async def _verify_answer(
         self, question: str, expected_answer: str, generated_answer: str
