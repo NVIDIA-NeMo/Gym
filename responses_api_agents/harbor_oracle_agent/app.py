@@ -102,6 +102,11 @@ ORACLE_ERROR_WRAPPER = "wrapper"
 ORACLE_ERROR_ANSWER = "answer"
 
 
+def exit_code_write_command(return_code: int) -> str:
+    """The root shell line that records ``return_code`` in ``exit-code.txt``: the bare number, readable by all."""
+    return f"printf %s {int(return_code)} > {EXIT_CODE_LOG} && chmod a+r {EXIT_CODE_LOG}"
+
+
 class OracleAgentConfig(BaseResponsesAPIAgentConfig):
     # Like every other harness config, this one tolerates the keys the run config puts on an agent block
     # (`datasets`, carried by the generated per-taskset agent) without declaring them.
@@ -307,10 +312,12 @@ class OracleAgent(SimpleResponsesAPIAgent):
 
         Harbor 0.22.0 (``agents/oracle.py``) writes ``str(return_code)``, without a newline, to the trial's agent
         folder, which is ``/logs/agent`` in the environment. Only an exit the sandbox reported is recorded: a provider
-        error (Harbor's exec raises on its timeout) leaves no file. A write that fails is warned about; the turn is
-        already reported as a failed oracle with its return code.
+        error (Harbor's exec raises on its timeout) leaves no file. Root creates the file under the sandbox shell's
+        umask (``0600`` under umask 077), so it is then opened to every reader, as the environment server does for
+        ``trajectory.json``: a non-root ``[verifier].user`` must be able to read it. A write that fails is warned
+        about; the turn is already reported as a failed oracle with its return code.
         """
-        written = await exec_as_root(session.sandbox, f"printf %s {int(return_code)} > {EXIT_CODE_LOG}", timeout_s=60)
+        written = await exec_as_root(session.sandbox, exit_code_write_command(return_code), timeout_s=60)
         if written.return_code != 0:
             LOGGER.warning(
                 "%s: episode %s: could not write %s: %s",
