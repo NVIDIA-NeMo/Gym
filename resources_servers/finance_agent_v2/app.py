@@ -46,7 +46,7 @@ import shutil
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence, Union
+from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence, TextIO, Union
 
 import yaml
 from fastapi import Body, FastAPI
@@ -118,45 +118,75 @@ except ImportError:  # pragma: no cover - exercised only under flat entrypoint e
 logger = logging.getLogger(__name__)
 
 
+# Shared locks on the staged generations that this process reads. They stay open for the life of the process, so
+# no stager removes a generation while this server can still open a connection to it.
+_STAGED_GENERATIONS_IN_USE: list[TextIO] = []
+
+
+def _stage_fingerprint(path: Path) -> str:
+    """Identity of a source file version: a rebuild, a replacement or an in-place rewrite changes at least one part."""
+    stat = path.stat()
+    return f"{path.name}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ctime_ns}"
+
+
 def stage_local_edgar_files(index_path: str, metadata_path: str | None, stage_dir: str) -> tuple[str, str | None]:
-    """Copy the local EDGAR index and its metadata sidecar into a subfolder of stage_dir; return the staged paths.
+    """Copy the local EDGAR index and its metadata sidecar into a generation folder under stage_dir; return its paths.
 
     A runtime SQLite database should not be read in place on shared storage, so the server reads a node-local copy.
     Each source index gets its own subfolder of stage_dir, named by a hash of its absolute path, so two indexes with
-    the same file name never overwrite each other's copy. The index (and a configured sidecar) must exist. A staged
-    copy whose size and modification time match its source is kept; anything else is copied again, through a
-    ``.partial`` name and a rename, under a lock on the subfolder so that concurrent server processes on a node copy
-    each file once. A default sidecar that the source lacks is removed from the stage, so a stale copy never pairs
-    with a new index.
+    the same file name never overwrite each other's copy. In that subfolder, each version of the index and sidecar
+    gets its own generation folder, named by a hash of their inode, size, modification time and change time. A
+    generation folder never changes after it is staged: a new version goes into a new folder, through a ``.partial``
+    folder and a rename, under a lock on the subfolder, so concurrent server processes on a node copy it once. A
+    server that reads a generation holds a shared lock on it for its whole life. A later start removes the
+    generations that no process holds. The index (and a configured sidecar) must exist.
     """
     index = Path(index_path)
     if not index.is_file():
         raise FileNotFoundError(f"Local EDGAR index not found: {index}")
-    stage = Path(stage_dir) / hashlib.sha256(os.path.abspath(index_path).encode()).hexdigest()[:16]
-    stage.mkdir(parents=True, exist_ok=True)
     sidecar = Path(metadata_path) if metadata_path else default_sidecar_path(index)
     if metadata_path and not sidecar.is_file():
         raise FileNotFoundError(f"Local EDGAR metadata sidecar not found: {sidecar}")
-    with open(stage / ".stage.lock", "w") as lock:
+    sources = [source for source in (index, sidecar) if source.is_file()]
+    source_dir = Path(stage_dir) / hashlib.sha256(os.path.abspath(index_path).encode()).hexdigest()[:16]
+    source_dir.mkdir(parents=True, exist_ok=True)
+    generation = hashlib.sha256("|".join(_stage_fingerprint(s) for s in sources).encode()).hexdigest()[:16]
+    stage = source_dir / generation
+    with open(source_dir / ".stage.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        for source in (index, sidecar):
-            target = stage / source.name
-            if not source.is_file():
-                target.unlink(missing_ok=True)
-                continue
-            source_stat = source.stat()
-            if target.is_file():
-                target_stat = target.stat()
-                if (target_stat.st_size, target_stat.st_mtime_ns) == (source_stat.st_size, source_stat.st_mtime_ns):
-                    continue
-            started = time.monotonic()
-            partial = target.with_name(target.name + ".partial")
+        if not stage.is_dir():
+            partial = source_dir / f"{generation}.partial"
+            shutil.rmtree(partial, ignore_errors=True)
+            partial.mkdir()
             try:
-                shutil.copy2(source, partial)
-                os.replace(partial, target)
+                for source in sources:
+                    started = time.monotonic()
+                    shutil.copy2(source, partial / source.name)
+                    logger.info(
+                        "edgar_search: staged %s to %s in %.0f s",
+                        source,
+                        stage / source.name,
+                        time.monotonic() - started,
+                    )
+                os.replace(partial, stage)
             finally:
-                partial.unlink(missing_ok=True)
-            logger.info("edgar_search: staged %s to %s in %.0f s", source, target, time.monotonic() - started)
+                shutil.rmtree(partial, ignore_errors=True)
+        in_use = open(stage / ".in-use", "a")
+        fcntl.flock(in_use, fcntl.LOCK_SH)
+        _STAGED_GENERATIONS_IN_USE.append(in_use)
+        for old in source_dir.iterdir():
+            if old == stage or not old.is_dir():
+                continue
+            if old.name.endswith(".partial"):
+                shutil.rmtree(old, ignore_errors=True)
+                continue
+            with open(old / ".in-use", "a") as old_in_use:
+                try:
+                    fcntl.flock(old_in_use, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue  # a running server still reads this generation
+                shutil.rmtree(old, ignore_errors=True)
+                logger.info("edgar_search: removed unused staged generation %s", old)
     return str(stage / index.name), (str(stage / sidecar.name) if metadata_path else None)
 
 
@@ -200,9 +230,9 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
     local_edgar_stage_dir: str | None = Field(
         default=None,
         description="Node-local directory to copy the local index (and its metadata sidecar) into once at "
-        "startup; the server then reads the copy. Each source index gets its own subfolder of this directory. "
-        "For an index on shared storage, where a runtime database should not "
-        "be read in place.",
+        "startup; the server then reads the copy. Each source index gets its own subfolder of this directory, and "
+        "each version of it its own generation folder in that subfolder. For an index on shared storage, where a "
+        "runtime database should not be read in place.",
     )
     sec_dump_path: Optional[str] = Field(
         default=None,

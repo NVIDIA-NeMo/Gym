@@ -24,6 +24,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import time
 from collections import Counter
 from pathlib import Path
@@ -455,7 +456,7 @@ def _source_index(tmp_path: Path) -> Path:
 
 
 def _identity(path: Path) -> tuple[int, int]:
-    """A staged file is rewritten through a rename, so a rewrite shows up as a new inode."""
+    """A staged file is never rewritten, so an unchanged identity means that the same copy is still in place."""
     stat = path.stat()
     return stat.st_ino, stat.st_mtime_ns
 
@@ -463,6 +464,19 @@ def _identity(path: Path) -> tuple[int, int]:
 def _per_source(stage: Path, index: Path) -> Path:
     """The stage folder that stage_local_edgar_files keeps for one configured index path."""
     return stage / hashlib.sha256(os.path.abspath(index).encode()).hexdigest()[:16]
+
+
+def _rewrite_header(index: Path, user_version: int) -> None:
+    """Change the index content in place without changing its size: the user version is a field in the header.
+
+    A real rebuild ends long after the previous one, so the modification time moves forward by one second.
+    """
+    connection = sqlite3.connect(index)
+    connection.execute(f"PRAGMA user_version = {user_version}")
+    connection.commit()
+    connection.close()
+    mtime_ns = index.stat().st_mtime_ns + 10**9
+    os.utime(index, ns=(mtime_ns, mtime_ns))
 
 
 class TestLocalEdgarStaging:
@@ -474,8 +488,10 @@ class TestLocalEdgarStaging:
             edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
         )
 
-        assert server._local_edgar.index_path == _per_source(stage, index) / "index.sqlite"
-        assert (_per_source(stage, index) / "index.sqlite").read_bytes() == index.read_bytes()
+        staged = server._local_edgar.index_path
+        assert staged.parent.parent == _per_source(stage, index)
+        assert staged.name == "index.sqlite"
+        assert staged.read_bytes() == index.read_bytes()
 
     def test_without_a_stage_dir_the_index_is_read_in_place(self, tmp_path) -> None:
         index = _source_index(tmp_path)
@@ -493,7 +509,7 @@ class TestLocalEdgarStaging:
             edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
         )
 
-        assert server._local_edgar.metadata_path == _per_source(stage, index) / "index.sqlite.metadata"
+        assert server._local_edgar.metadata_path == server._local_edgar.index_path.parent / "index.sqlite.metadata"
 
     def test_a_configured_sidecar_is_staged_and_returned(self, tmp_path) -> None:
         index = _source_index(tmp_path)
@@ -503,47 +519,138 @@ class TestLocalEdgarStaging:
 
         staged_index, staged_sidecar = stage_local_edgar_files(str(index), str(sidecar), str(stage))
 
-        assert staged_index == str(_per_source(stage, index) / "index.sqlite")
-        assert staged_sidecar == str(_per_source(stage, index) / "custom.metadata")
-        assert (_per_source(stage, index) / "custom.metadata").read_bytes() == sidecar.read_bytes()
+        assert Path(staged_index).parent.parent == _per_source(stage, index)
+        assert staged_sidecar == str(Path(staged_index).parent / "custom.metadata")
+        assert Path(staged_sidecar).read_bytes() == sidecar.read_bytes()
 
     def test_an_unchanged_source_is_copied_once(self, tmp_path) -> None:
         index = _source_index(tmp_path)
         stage = tmp_path / "node_local"
-        stage_local_edgar_files(str(index), None, str(stage))
-        first = _identity(_per_source(stage, index) / "index.sqlite")
+        first, _ = stage_local_edgar_files(str(index), None, str(stage))
+        first_identity = _identity(Path(first))
 
-        stage_local_edgar_files(str(index), None, str(stage))
+        second, _ = stage_local_edgar_files(str(index), None, str(stage))
 
-        assert _identity(_per_source(stage, index) / "index.sqlite") == first
+        assert second == first
+        assert _identity(Path(second)) == first_identity
 
-    def test_a_changed_source_is_copied_again(self, tmp_path) -> None:
-        """Same size is not enough: an index rebuilt in place keeps its size but not its modification time."""
+    def test_a_changed_source_is_staged_beside_the_copy_in_use(self, tmp_path) -> None:
+        """Same size is not enough: an index rebuilt in place keeps its size. The copy in use must not change."""
         index = _source_index(tmp_path)
         stage = tmp_path / "node_local"
-        stage_local_edgar_files(str(index), None, str(stage))
-        first = _identity(_per_source(stage, index) / "index.sqlite")
-        mtime_ns = index.stat().st_mtime_ns + 10**9
-        os.utime(index, ns=(mtime_ns, mtime_ns))
+        first, _ = stage_local_edgar_files(str(index), None, str(stage))
+        first_bytes, first_identity = Path(first).read_bytes(), _identity(Path(first))
+        _rewrite_header(index, user_version=7)
 
-        stage_local_edgar_files(str(index), None, str(stage))
+        second, _ = stage_local_edgar_files(str(index), None, str(stage))
 
-        assert _identity(_per_source(stage, index) / "index.sqlite") != first
-        assert (_per_source(stage, index) / "index.sqlite").stat().st_mtime_ns == mtime_ns
+        assert Path(second).parent != Path(first).parent
+        assert Path(second).read_bytes() == index.read_bytes() != first_bytes
+        # This process still holds the first generation, so it stays as it was.
+        assert _identity(Path(first)) == first_identity
+        assert Path(first).read_bytes() == first_bytes
 
-    def test_sources_with_the_same_file_name_are_staged_apart(self, tmp_path) -> None:
-        """Even with equal size and modification time, each source keeps its own copy."""
+    def test_a_changed_sidecar_is_staged_with_its_index_in_a_new_generation(self, tmp_path) -> None:
+        """The index and the sidecar of one generation always come from the same source version."""
+        index = _source_index(tmp_path)
+        sidecar = tmp_path / "shared" / "custom.metadata"
+        build_sidecar(index, sidecar)
+        stage = tmp_path / "node_local"
+        first_index, first_sidecar = stage_local_edgar_files(str(index), str(sidecar), str(stage))
+        first_sidecar_bytes = Path(first_sidecar).read_bytes()
+        build_sidecar(index, sidecar)
+        mtime_ns = sidecar.stat().st_mtime_ns + 10**9
+        os.utime(sidecar, ns=(mtime_ns, mtime_ns))
+
+        second_index, second_sidecar = stage_local_edgar_files(str(index), str(sidecar), str(stage))
+
+        assert Path(second_index).parent == Path(second_sidecar).parent != Path(first_index).parent
+        assert Path(second_index).read_bytes() == index.read_bytes()
+        assert Path(second_sidecar).read_bytes() == sidecar.read_bytes()
+        assert Path(first_sidecar).read_bytes() == first_sidecar_bytes
+
+    def test_a_replacement_with_equal_size_and_modification_time_is_staged_again(self, tmp_path) -> None:
+        """A copy is not reused for a different file that only matches the size and modification time."""
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        first, _ = stage_local_edgar_files(str(index), None, str(stage))
+        replacement = build_index(tmp_path / "replacement.sqlite")
+        _rewrite_header(replacement, user_version=7)
+        os.utime(replacement, ns=(index.stat().st_atime_ns, index.stat().st_mtime_ns))
+        os.replace(replacement, index)
+
+        second, _ = stage_local_edgar_files(str(index), None, str(stage))
+
+        assert second != first
+        assert Path(second).read_bytes() == index.read_bytes()
+
+    def test_a_reader_keeps_its_corpus_after_another_server_stages_a_new_version(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        server_a = _make_server(
+            edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
+        )
+        corpus_a = index.read_bytes()
+        _rewrite_header(index, user_version=7)
+
+        server_b = _make_server(
+            edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
+        )
+
+        assert server_a._local_edgar.index_path.read_bytes() == corpus_a
+        assert server_b._local_edgar.index_path.read_bytes() == index.read_bytes() != corpus_a
+
+    def test_a_later_start_removes_only_the_generations_that_no_process_reads(self, tmp_path) -> None:
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+        in_use, _ = stage_local_edgar_files(str(index), None, str(stage))
+        unused = _per_source(stage, index) / "0123456789abcdef"
+        unused.mkdir()
+        (unused / "index.sqlite").write_bytes(b"an old version that no server reads")
+        leftover = _per_source(stage, index) / "fedcba9876543210.partial"
+        leftover.mkdir()
+        _rewrite_header(index, user_version=7)
+
+        current, _ = stage_local_edgar_files(str(index), None, str(stage))
+
+        assert Path(in_use).is_file()
+        assert Path(current).is_file()
+        assert not unused.exists()
+        assert not leftover.exists()
+
+    def test_a_failed_copy_leaves_no_partial_folder(self, tmp_path, monkeypatch) -> None:
+        index = _source_index(tmp_path)
+        stage = tmp_path / "node_local"
+
+        def fail_copy(source, target) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("shutil.copy2", fail_copy)
+        with pytest.raises(OSError, match="No space left on device"):
+            stage_local_edgar_files(str(index), None, str(stage))
+
+        assert sorted(p.name for p in _per_source(stage, index).iterdir()) == [".stage.lock"]
+
+    @pytest.mark.parametrize("same_size_and_mtime", [True, False])
+    def test_sources_with_the_same_file_name_are_staged_apart(self, tmp_path, same_size_and_mtime) -> None:
+        """Each source keeps its own copy, with equal or different size and modification time."""
         (tmp_path / "a").mkdir()
         (tmp_path / "b").mkdir()
         a = _source_index(tmp_path / "a")
         b = _source_index(tmp_path / "b")
-        os.utime(b, ns=(a.stat().st_atime_ns, a.stat().st_mtime_ns))
+        if same_size_and_mtime:
+            _rewrite_header(b, user_version=7)
+            os.utime(b, ns=(a.stat().st_atime_ns, a.stat().st_mtime_ns))
+        else:
+            with open(b, "ab") as handle:
+                handle.write(b"\0" * 4096)
         stage = tmp_path / "node_local"
 
         staged_a, _ = stage_local_edgar_files(str(a), None, str(stage))
         staged_b, _ = stage_local_edgar_files(str(b), None, str(stage))
 
         assert staged_a != staged_b
+        assert a.read_bytes() != b.read_bytes()
         assert Path(staged_a).read_bytes() == a.read_bytes()
         assert Path(staged_b).read_bytes() == b.read_bytes()
 

@@ -41,10 +41,13 @@ can route around it.
 
 With `local_edgar_stage_dir` set (off by default), the server copies the local
 index and its metadata sidecar into that node-local folder at startup and reads
-the copy. Each source index gets its own subfolder of that folder, so two indexes
-with the same file name do not overwrite each other. Use it when the index is on
-shared storage. A copy whose size and modification time match the source is
-reused, so only the first server on a node copies it.
+the copy. Use it when the index is on shared storage. Each source index gets its
+own subfolder of that folder, so two indexes with the same file name do not
+overwrite each other. Each version of the source gets its own generation folder
+in that subfolder, and a staged copy never changes while a server reads it. A
+copy whose inode, size, modification time and change time match the source is
+reused, so only the first server on a node copies it. A later start removes the
+versions that no running server reads.
 
 The benchmark config sets `live`. Asking for `local` without an index fails at
 startup. The
