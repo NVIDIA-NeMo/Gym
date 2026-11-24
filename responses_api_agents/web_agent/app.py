@@ -39,6 +39,7 @@ from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.web import (
     BROWSER_TARGET_CLOSED_STATUS,
     CAPTCHA_BUDGET_EXHAUSTED_STATUS,
+    MAX_SCROLL_AMOUNT,
     NANO_OMNI_SYSTEM_PROMPT,
     ActionParseError,
     WebActionLimits,
@@ -102,11 +103,13 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     policy_protocol: Literal["nano_omni_toolcall", "qwen_xml_computer_use"] = "nano_omni_toolcall"
     max_steps: int = Field(default=15, ge=1, le=200)
+    nano_omni_stop_at_step_budget: bool = False
     max_parse_retries: int = Field(default=2, ge=0, le=10)
     # None preserves the reference's complete response call list. Individual
     # action validation and resource operation timeouts remain in force.
     nano_omni_max_tool_calls: int | None = Field(default=8, ge=1)
     nano_omni_max_computer_actions: int = Field(default=20, ge=1, le=100)
+    nano_omni_max_scroll_amount: int | None = Field(default=MAX_SCROLL_AMOUNT, ge=0)
     nano_omni_retry_invalid_tool_calls: bool = True
     nano_omni_parse_retry_feedback: bool = False
     nano_omni_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
@@ -203,6 +206,7 @@ def _parse_response_action(
     qwen_state: QwenPolicyState | None = None,
     nano_omni_max_tool_calls: int | None = 8,
     nano_omni_max_computer_actions: int = 20,
+    nano_omni_max_scroll_amount: int | None = MAX_SCROLL_AMOUNT,
     action_limits: WebActionLimits | None = None,
 ):
     if profile != WebActionProfile.COMPUTER_USE:
@@ -212,6 +216,7 @@ def _parse_response_action(
             response.output,
             max_calls=nano_omni_max_tool_calls,
             max_computer_actions=nano_omni_max_computer_actions,
+            max_scroll_amount=nano_omni_max_scroll_amount,
             limits=action_limits,
         )
     if qwen_state is None:
@@ -616,7 +621,7 @@ class WebAgent(SimpleResponsesAPIAgent):
             if base_body.instructions is None:
                 base_body.instructions = NANO_OMNI_SYSTEM_PROMPT
             if not base_body.tools:
-                base_body.tools = nano_omni_tools()
+                base_body.tools = nano_omni_tools(max_scroll_amount=self.config.nano_omni_max_scroll_amount)
             base_body.tool_choice = "auto"
             base_body.parallel_tool_calls = True
 
@@ -636,7 +641,9 @@ class WebAgent(SimpleResponsesAPIAgent):
             ):
                 raise ValueError("browser step wait budget must be shorter than resources_request_timeout_secs")
             if self.config.policy_protocol == "nano_omni_toolcall" and use_default_tools:
-                base_body.tools = nano_omni_tools(limits=action_limits)
+                base_body.tools = nano_omni_tools(
+                    max_scroll_amount=self.config.nano_omni_max_scroll_amount, limits=action_limits
+                )
             artifacts.session_id = seed_data.session_id
             env_cookies = seed_response.cookies
             artifacts.seed_completed = True
@@ -679,6 +686,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                         visual_observation_text=self.config.visual_observation_text,
                         task_image_root=self.config.task_image_root,
                         max_task_image_bytes=self.config.max_task_image_bytes,
+                        budget_stop=self.config.nano_omni_stop_at_step_budget and self.config.max_steps == 2,
                     )
                 ]
 
@@ -699,6 +707,18 @@ class WebAgent(SimpleResponsesAPIAgent):
                             append_redaction_notice=False,
                         )
                     model_updates: dict[str, Any] = {"input": model_input}
+                    if (
+                        self.config.policy_protocol == "nano_omni_toolcall"
+                        and self.config.nano_omni_stop_at_step_budget
+                        and step_index + 2 >= self.config.max_steps
+                    ):
+                        metadata = dict(base_body.metadata or {})
+                        template = json.loads(metadata.get("chat_template_kwargs") or "{}")
+                        if not isinstance(template, dict):
+                            raise ValueError("chat_template_kwargs must encode a JSON object")
+                        template["enable_thinking"] = False
+                        metadata["chat_template_kwargs"] = json.dumps(template, separators=(",", ":"))
+                        model_updates["metadata"] = metadata
                     if parse_attempt > 0 and self.config.nano_omni_parse_retry_temperature is not None:
                         model_updates["temperature"] = self.config.nano_omni_parse_retry_temperature
                     model_body = base_body.model_copy(update=model_updates)
@@ -824,6 +844,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             qwen_state=qwen_state,
                             nano_omni_max_tool_calls=self.config.nano_omni_max_tool_calls,
                             nano_omni_max_computer_actions=self.config.nano_omni_max_computer_actions,
+                            nano_omni_max_scroll_amount=self.config.nano_omni_max_scroll_amount,
                             action_limits=action_limits,
                         )
                         # Both maintained policy adapters add only a
@@ -1033,6 +1054,9 @@ class WebAgent(SimpleResponsesAPIAgent):
                             visual_observation_text=self.config.visual_observation_text,
                             task_image_root=self.config.task_image_root,
                             max_task_image_bytes=self.config.max_task_image_bytes,
+                            budget_stop=(
+                                self.config.nano_omni_stop_at_step_budget and step_index + 3 == self.config.max_steps
+                            ),
                         )
                     )
                 signature = _repeatable_action_signature(action)

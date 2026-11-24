@@ -36,6 +36,7 @@ Requires ``bm25s`` and ``nltk`` (``uv sync --locked --project benchmarks/birdben
 
 import argparse
 import json
+import re
 import shutil
 import sqlite3
 import urllib.request
@@ -48,7 +49,7 @@ from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bi
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-DIALECTS = ("sqlite", "spark")
+DIALECTS = ("sqlite", "spark", "postgres")
 SPLITS = ("dev", "train")
 
 VERIFIED_TRAIN_URL = "https://raw.githubusercontent.com/uiuc-kang-lab/ReViSQL/main/data/bird-verified-train.json"
@@ -60,6 +61,34 @@ TRAIN_CORPUS_LIMIT_PER_COLUMN = 2000
 def output_fpath_for(dialect: str, split: str = "dev") -> Path:
     """``data/birdbench_<dialect>_<split>.jsonl``."""
     return DATA_DIR / f"birdbench_{dialect}_{split}.jsonl"
+
+
+# A table heading of a spark/postgres ``sql_context``: ``- `db_id`.`table`:`` (see build_db_values.render_sql_context).
+_QUOTED_TABLE_HEADING = re.compile(r"^- `[^`]+`\.`([^`]+)`:$", re.MULTILINE)
+
+
+def is_prepared_data_current(fpath: Path) -> bool:
+    """Whether a cached prepared file can be reused (``gym eval prepare +use_cached_prepared_benchmarks=true``).
+
+    A Spark file is stale when a table heading in its ``sql_context`` is not a name Spark can hold: the server
+    registers tables under ``setup_bird_spark.spark_table_name`` (``\\w`` characters only), so a file prepared before
+    that mapping existed shows the model names such as ``air carriers`` that its SQL then cannot resolve.
+    """
+    fpath = Path(fpath)
+    if not fpath.is_file():
+        return False
+    if "_spark_" not in fpath.name:
+        return True
+    with fpath.open() as f_in:
+        for line in f_in:
+            if not line.strip():
+                continue
+            for table in _QUOTED_TABLE_HEADING.findall(json.loads(line).get("sql_context", "")):
+                if not re.fullmatch(
+                    r"\w+", table
+                ):  # == spark_table_name(table) != table, without importing pyspark deps
+                    return False
+    return True
 
 
 def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -159,7 +188,7 @@ def prepare(
             the default, matching this benchmark's original pre-``dscp`` behavior). E.g.
             ``"name,col_dscp"`` uses both fields, name first. Blank fields are dropped. See
             ``build_db_values._combine_description``.
-        dialect: SQL dialect the ``sql_context`` is rendered for: ``sqlite`` (default) or ``spark``. Each dialect
+        dialect: SQL dialect the ``sql_context`` is rendered for: ``sqlite`` (default), ``spark`` or ``postgres``. Each dialect
             writes its own file, see ``output_fpath_for``.
         split: ``dev`` (default; the 1534-task benchmark) or ``train`` (the uberset, see module docstring).
         train_dir: ``split="train"`` only: extracted BIRD ``train/`` directory holding ``train.json`` and

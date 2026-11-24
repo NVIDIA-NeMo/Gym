@@ -2,15 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
 import tomllib
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +27,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
@@ -35,14 +41,14 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
-from nemo_gym.sandbox import SandboxStatus
+from nemo_gym.sandbox import MEDIA_DIRECTORY, SandboxStatus, SandboxTransferError, SandboxUnavailableError
 from responses_api_agents.codex_agent.app import (
     _SANDBOX_SESSION_KEY,
     CodexAgent,
     CodexAgentConfig,
     _model_endpoint_error,
 )
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -128,7 +134,11 @@ class Sandbox:
         self.signals = []
 
     async def upload(self, source, destination):
-        self.files[destination] = Path(source).read_text()
+        data = Path(source).read_bytes()
+        try:
+            self.files[destination] = data.decode()
+        except UnicodeDecodeError:
+            self.files[destination] = data
         if destination.endswith("/expire.request"):
             # The supervisor ends the harness as at its deadline; before launch, it never starts it.
             self.result.update(timed_out=True, return_code=-signal.SIGTERM if hasattr(self, "directory") else None)
@@ -148,8 +158,23 @@ class Sandbox:
             self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def execute(self, command, **kwargs):
+        if command.startswith("rm -f -- "):
+            for path in shlex.split(command)[3:]:
+                self.files.pop(path, None)
+        for source, destination in re.findall(r"mv -f -- (\S+) (\S+)", command):
+            self.files[shlex.split(destination)[0]] = self.files.pop(shlex.split(source)[0])
         if "exec bash " in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
+        if command.startswith("tail -c "):
+            # preserve_failure_artifacts trims a log inside the sandbox before downloading it.
+            limit, source, _, target = shlex.split(command)[2:6]
+            if source not in self.files:
+                return SimpleNamespace(error_type=None, return_code=1, stdout="", stderr=f"tail: {source}: missing")
+            self.files[target] = self.files[source][-int(limit) :]
+            return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
+        if command.startswith("readlink ") and "launch.claim" in command:
+            # stop_and_confirm_cleanup asks who won the launch claim.
+            return SimpleNamespace(error_type=None, return_code=0, stdout="launch\n", stderr="")
         if "echo absent" in command:
             # The adapter checks whether a stopped worker left a transcript.
             present = any(path.endswith("/events.jsonl") for path in self.files)
@@ -681,6 +706,95 @@ def test_unreadable_startup_stderr_does_not_hold_the_activation(setup):
     assert result.json()["detail"] == "Codex execution failed: Codex exited with code 1"
     # The read is bounded by session_close_timeout_seconds (1 s in this fixture).
     assert elapsed < 5
+
+
+def _supervisor_left_no_receipt(sandbox):
+    """Seen in a real run: Codex ran, the launch exec returned, no cleanup.json."""
+
+    def publish():
+        sandbox.files[f"{sandbox.directory}/runtime.json"] = json.dumps({"hostname": "task-container", "pid": 2})
+        sandbox.files[f"{sandbox.directory}/events.jsonl"] = sandbox.events
+        sandbox.files[f"{sandbox.directory}/output.log"] = "supervisor diagnostics"
+
+    sandbox.publish = publish
+
+
+def test_missing_receipt_confirmed_by_provider_completes_and_keeps_diagnostics(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        state = agent._session_records[session_id].state
+        assert state.session.cleanup_receipt_missing
+        assert "cleanup_receipt_missing" in {gap.code for gap in state.observations.gaps}
+        commands = [
+            str(call.args[0] if call.args else call.kwargs.get("command")) for call in sandbox.exec.await_args_list
+        ]
+        assert not any("stop.request" in command and "touch " in command for command in commands)
+        sandbox.launch.assert_awaited_once()
+        (saved,) = (tmp_path / "failures").iterdir()
+        assert (saved / "output.log").read_text() == "supervisor diagnostics"
+        summary = json.loads((saved / "failure.json").read_text())
+        assert summary["cleanup_receipt_missing"] is True and summary["failure"] is None
+        assert "cleanup.json" in summary["unavailable"] and "events.jsonl" in summary["copied"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    sandbox.disconnect.assert_awaited_once()
+
+
+def test_failure_logs_are_trimmed_inside_the_sandbox_before_the_download(setup, tmp_path, monkeypatch):
+    from responses_api_agents.codex_agent import sandbox as sandbox_module
+
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    monkeypatch.setattr(sandbox_module, "FAILURE_ARTIFACT_MAX_BYTES", 10)
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+    (saved,) = (tmp_path / "failures").iterdir()
+    # Only the tail crossed into the Agent Server: the sandbox trimmed "supervisor diagnostics" first.
+    assert (saved / "output.log").read_text() == "iagnostics"
+    commands = [
+        str(call.args[0] if call.args else call.kwargs.get("command")) for call in sandbox.exec.await_args_list
+    ]
+    assert any(command.startswith("tail -c 10 ") and "output.log" in command for command in commands)
+
+
+def test_unprovable_missing_receipt_fails_closed_and_preserves_logs(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)  # this provider cannot prove termination
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code >= 500
+        (saved,) = (tmp_path / "failures").iterdir()
+        assert (saved / "output.log").read_text() == "supervisor diagnostics"
+        summary = json.loads((saved / "failure.json").read_text())
+        assert "launch outcome is unknown" in summary["failure"]
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code >= 500
+    sandbox.disconnect.assert_not_awaited()
+
+
+def test_failure_artifacts_are_off_by_default(setup, tmp_path, monkeypatch):
+    agent, sandbox = setup
+    monkeypatch.chdir(tmp_path)
+    _supervisor_left_no_receipt(sandbox)
+    # The guard itself, not preserve_failure_artifacts' own error handling, must keep it from running.
+    preserve = AsyncMock()
+    monkeypatch.setattr(CodexSandboxSession, "preserve_failure_artifacts", preserve)
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code >= 500
+    preserve.assert_not_awaited()
+    assert not list(tmp_path.iterdir())
 
 
 def test_several_workers_seed_sessions(setup):
@@ -1371,7 +1485,7 @@ async def test_close_stops_config_staging_before_releasing_the_sandbox(setup):
             raise
 
     sandbox.upload = stall_config
-    sandbox.disconnect.side_effect = lambda: events.append("sandbox released")
+    sandbox.disconnect.side_effect = lambda **_: events.append("sandbox released")
     request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
     # The configuration carries the grant's headers.
     body = AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": [mcp_grant()]})
@@ -1401,6 +1515,7 @@ async def test_rollout_stop_ends_codex_as_a_timeout(setup):
     assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
     assert "ng_agent_outcome" not in response.metadata
     assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output", "message"]
+    assert response.usage is None  # stopped after model work, which Codex's records may not fully count
     assert sandbox.signals == []
     assert (await agent.stop_rollout(rollout_id)).stopped is False
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -1417,6 +1532,7 @@ async def test_rollout_stop_before_activation_never_starts_codex(setup):
     assert (await agent.stop_rollout(seed().episode_id.capture_key)).stopped is True
     response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert response.status == "incomplete" and response.error is None and response.output == []
+    assert response.usage.total_tokens == 0  # no model call could run, so the zero is a measurement
     assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": None}
     assert "ng_agent_outcome" not in response.metadata
     launch = next(call.kwargs["command"] for call in sandbox.launch.await_args_list)
@@ -1433,6 +1549,7 @@ async def test_rollout_stop_before_the_worker_writes_events_is_an_empty_timeout(
     response = await task
     # The launch ran and the supervisor ended it at the stop, with no transcript: graded like the timeout it is.
     assert response.status == "incomplete" and response.error is None and response.output == []
+    assert response.usage.total_tokens == 0  # no turn started and no model call is on record
     assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
     assert "ng_agent_outcome" not in response.metadata
     state = agent._session_records[session_id].state
@@ -1777,7 +1894,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
 
-    async def disconnect():
+    async def disconnect(**_):
         clock[0] = 200.0
 
     sandbox.disconnect.side_effect = disconnect
@@ -1794,7 +1911,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -3041,6 +3158,9 @@ def test_unenforceable_network_access_is_a_terminal_seed_refusal(
     ("reported", "return_code", "error_type", "outcome"),
     [
         ("codex-cli 0.144.4", 0, None, "accepted"),
+        ("WARNING: could not create PATH aliases\ncodex-cli 0.144.4", 0, None, "accepted"),
+        ("WARNING: could not create PATH aliases\ncodex-cli 0.143.0", 0, None, "refused"),
+        ("codex-cli 0.144.4\ncodex-cli 0.143.0", 0, None, "refused"),
         ("codex-cli 0.143.0", 0, None, "refused"),
         # The check is exact: a version that only starts with the pinned one is another version.
         ("codex-cli 0.144.40", 0, None, "refused"),
@@ -3048,7 +3168,16 @@ def test_unenforceable_network_access_is_a_terminal_seed_refusal(
         # A transport failure or timeout may pass on another attempt, so it stays retryable.
         ("", None, "timeout", "retried"),
     ],
-    ids=["pinned", "other_version", "version_prefix", "failed_run", "timeout"],
+    ids=[
+        "pinned",
+        "warning",
+        "warning_wrong_version",
+        "ambiguous",
+        "other_version",
+        "version_prefix",
+        "failed_run",
+        "timeout",
+    ],
 )
 def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code, error_type, outcome):
     agent, sandbox = setup
@@ -3224,8 +3353,8 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, owned):
         await asyncio.Future()
 
     state.execute = pause_after_capture
-    sandbox.stop.side_effect = sandbox.files.clear
-    sandbox.disconnect.side_effect = sandbox.files.clear
+    sandbox.stop.side_effect = lambda **_: sandbox.files.clear()
+    sandbox.disconnect.side_effect = lambda **_: sandbox.files.clear()
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
     await asyncio.wait_for(captured.wait(), 2)
     closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))
@@ -3295,12 +3424,16 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
         session_id = created.json()["agent_session_id"]
+        started = time.monotonic()
         response = client.post(
             "/ng-rollout/codex-smoke-a2/v1/responses", json=body.model_dump(mode="json", exclude_unset=True)
         )
+        elapsed = time.monotonic() - started
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        remaining = float(command[command.index("--timeout") + 1])
+        assert 0 < remaining <= expected
+        assert remaining >= expected - elapsed
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
@@ -3690,6 +3823,91 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
         assert body["usage"] is None
 
 
+@pytest.mark.parametrize("session_total", [True, False], ids=["session-total", "no-session-total"])
+@pytest.mark.parametrize("budget", ["output-limit", "wall-time", "wall-time-during-429-retry"])
+def test_budget_stop_after_model_work_reports_unknown_usage(setup, budget, session_total):
+    """A run stopped at its output or wall-time budget reports unknown usage, never the CLI's zero or a subtotal.
+
+    Codex records no usage for a capped response and writes a call's token_count only after the call's tools finish,
+    so the session-file total of a stopped run can omit calls.
+    """
+    agent, sandbox = setup
+    sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
+    tool = {"id": "item_1", "type": "command_execution", "command": "printf retained", "status": "in_progress"}
+    records = [
+        {"type": "turn.started"},
+        {"type": "item.started", "item": tool},
+        {"type": "item.completed", "item": tool | {"status": "completed", "exit_code": 0, "aggregated_output": "ok"}},
+    ]
+    if budget == "output-limit":
+        sandbox.result["return_code"] = 1
+        records.append({"type": "turn.failed", "error": {"message": CODEX_OUTPUT_CAP}})
+        attempts = [200] * 7  # one completed call, then the capped call and Codex's five stream retries of it
+    else:
+        sandbox.result["return_code"] = 128 + signal.SIGKILL
+        sandbox.result["timed_out"] = True
+        attempts = [200]  # one completed call; the next one was still running at the stop
+    if budget == "wall-time-during-429-retry":
+        # Stopped while the forwarder retried a 429: no output and no completed call on record.
+        records = [{"type": "turn.started"}]
+        attempts = [429]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(records))
+    transcript = native_transcript(
+        [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}]
+    )
+    if session_total:
+        transcript += "\n" + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 20,
+                            "output_tokens": 8,
+                            "total_tokens": 28,
+                            "cached_input_tokens": 3,
+                            "reasoning_output_tokens": 2,
+                        }
+                    },
+                },
+            }
+        )
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = "".join(
+            json.dumps({"status": status}) + "\n" for status in attempts
+        )
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["error"]) == ("incomplete", None)
+    assert body["incomplete_details"] == ({"reason": "max_output_tokens"} if budget == "output-limit" else None)
+    assert "graded_agent_error" not in body["metadata"]
+    assert "ng_agent_outcome" not in body["metadata"]
+    if budget == "wall-time-during-429-retry":
+        assert body["output"] == []
+    else:
+        assert [item["type"] for item in body["output"]] == ["function_call", "function_call_output"]
+        assert body["output"][1]["output"] == "ok"
+    assert body["usage"] is None
+    assert closed.status_code == 200, closed.text
+    gaps = {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    assert {
+        "partial_model_usage_unavailable",
+        "cached_token_usage_unavailable",
+        "reasoning_token_usage_unavailable",
+    } <= gaps
+
+
 async def test_activation_failure_takes_precedence_over_recorded_rejection(setup):
     agent, sandbox = setup
     state = await agent._seed_agent_session_state(seed())
@@ -3933,3 +4151,231 @@ async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(
                 )
         assert len(run_calls) == 1
     sandbox.launch.assert_awaited_once()
+
+
+def image_bytes(gray: int = 0) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes([0, gray])))
+        + chunk(b"IEND", b"")
+    )
+
+
+def image_part(gray: int = 0) -> dict:
+    return {
+        "type": "input_image",
+        "image_url": "data:image/png;base64," + base64.b64encode(image_bytes(gray)).decode(),
+        "detail": "auto",
+    }
+
+
+@pytest.mark.parametrize("image_only", [False, True])
+def test_session_stages_images_once_and_attaches_in_order(setup, image_only):
+    agent, sandbox = setup
+    grays = (0, 1, 1)  # A reversed attachment order must fail while repeated images still share a file.
+    content = [image_part(gray) for gray in grays]
+    if not image_only:
+        content.insert(1, {"type": "input_text", "text": "Describe these"})
+    body = {"input": [{"role": "system", "content": "system"}, {"role": "user", "content": content}]}
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json=body)
+        assert result.status_code == 200, result.text
+        replay = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json=body)
+        assert replay.json() == result.json()
+        changed = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={**body, "instructions": "changed"})
+        assert changed.status_code == 409
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    command = payload["command"]
+    paths = [command[i + 1] for i, arg in enumerate(command) if arg == "--image"]
+    assert paths == [f"{MEDIA_DIRECTORY}/{hashlib.sha256(image_bytes(gray)).hexdigest()}.png" for gray in grays]
+    assert [sandbox.files[path] for path in paths] == [image_bytes(gray) for gray in grays]
+    assert command[-2:] == ["--", "" if image_only else "-"]
+    assert payload["prompt"] == ("" if image_only else "Describe these")
+    assert len([path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]) == 2
+    sandbox.launch.assert_awaited_once()
+    invocation = closed.json()["agent_observations"]["records"][0]
+    images = [
+        part
+        for msg in invocation["conversation"]
+        if msg.get("role") == "user"
+        for part in msg["content"]
+        if part["type"] == "input_image"
+    ]
+    assert [part["image_url"] for part in images] == [image_part(gray)["image_url"] for gray in grays]
+
+
+@pytest.mark.parametrize("ending", ["completed", "output-limit", "wall-timeout", "model-error"])
+@pytest.mark.parametrize("retained", [0, 1, 2])
+def test_session_requires_every_native_prompt_image(setup, ending, retained):
+    agent, sandbox = setup
+    if ending == "output-limit":
+        transcript = [json.loads(line) for line in sandbox.events.splitlines()]
+        transcript[-1][1] = {
+            "type": "turn.failed",
+            "error": {
+                "message": "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+            },
+        }
+        sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+        sandbox.result["return_code"] = 1
+    elif ending == "wall-timeout":
+        sandbox.result.update(timed_out=True, return_code=-signal.SIGTERM)
+    elif ending == "model-error":
+        sandbox.events = json.dumps([1.0, {"type": "turn.failed", "error": {"message": BAD_REQUEST}}])
+        sandbox.result["return_code"] = 1
+    publish = sandbox.publish
+
+    def publish_images():
+        publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = native_transcript(
+            [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        *[image_part() for _ in range(retained)],
+                        {"type": "input_text", "text": "image content omitted because it could not be processed"},
+                    ],
+                }
+            ]
+        )
+
+    sandbox.publish = publish_images
+    body = {"input": [{"role": "user", "content": [image_part(), image_part()]}]}
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json=body)
+        missing = retained < 2 and ending in {"completed", "output-limit"}
+        if missing:
+            assert result.status_code == 502, result.text
+            assert f"Codex attached {retained} of 2 prompt images" in result.json()["detail"]
+        else:
+            assert result.status_code == 200, result.text
+            assert result.json()["status"] == (
+                "failed" if ending == "model-error" else "completed" if ending == "completed" else "incomplete"
+            )
+            if ending != "model-error":
+                assert "Fixed" in json.dumps(result.json()["output"])
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+        if missing:
+            assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "role,part,detail",
+    [
+        ("user", {"type": "input_image", "image_url": "https://example.com/a.png"}, "base64 data URI"),
+        ("user", {"type": "input_image", "file_id": "file-id"}, "base64 data URI"),
+        ("user", {"type": "input_image", "image_url": "data:image/png;base64,%%%"}, "invalid base64"),
+        ("user", {"type": "input_image", "image_url": "data:image/png;base64,é"}, "invalid base64"),
+        ("user", {"type": "input_image", "image_url": "data:image/svg+xml;base64,PHN2Zy8+"}, "Unsupported media type"),
+        (
+            "user",
+            {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+            "no data of a supported media type",
+        ),
+        ("system", image_part(), "only in the user prompt"),
+        ("developer", image_part(), "only in the user prompt"),
+    ],
+)
+def test_session_rejects_invalid_images_before_consuming_activation(setup, role, part, detail):
+    agent, sandbox = setup
+    content = [{"role": role, "content": [{"detail": "auto", **part}]}]
+    if role != "user":
+        content.append({"role": "user", "content": "question"})
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": content})
+        assert response.status_code == 422 and detail in response.text
+        sandbox.launch.assert_not_awaited()
+        recovery = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "text recovery"})
+        assert recovery.status_code == 200, recovery.text
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+
+
+async def start_image_activation(agent, *, timeout=None):
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
+    seeded = await agent.seed_agent_session(request, seed())
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": [image_part()]}],
+        metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)} if timeout else None,
+    )
+    return request, seeded.agent_session_id, asyncio.create_task(agent.responses(request, body))
+
+
+async def test_close_cancels_image_staging_before_sandbox_release(setup):
+    agent, sandbox = setup
+    staging = asyncio.Event()
+    order = []
+    upload = sandbox.upload
+
+    async def stall(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            staging.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                order.append("staging cancelled")
+                raise
+        await upload(source, destination)
+
+    sandbox.upload = stall
+    sandbox.disconnect.side_effect = lambda **_: order.append("sandbox released")
+    request, session_id, task = await start_image_activation(agent)
+    await asyncio.wait_for(staging.wait(), 2)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert order == ["staging cancelled", "sandbox released"]
+    sandbox.launch.assert_not_awaited()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+
+
+async def test_image_staging_spends_the_activation_deadline(setup):
+    agent, sandbox = setup
+    upload = sandbox.upload
+
+    async def stall(source, destination):
+        if destination.startswith(f"{MEDIA_DIRECTORY}/"):
+            await asyncio.sleep(5)
+        await upload(source, destination)
+
+    sandbox.upload = stall
+    request, session_id, task = await start_image_activation(agent, timeout=0.2)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(task, 2)
+    assert time.monotonic() - started < 2
+    sandbox.launch.assert_not_awaited()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize(
+    "return_code,error_type,error", [(None, "timeout", SandboxUnavailableError), (1, None, SandboxTransferError)]
+)
+async def test_image_staging_failure_keeps_sandbox_error(setup, return_code, error_type, error):
+    agent, sandbox = setup
+    execute = sandbox.execute
+
+    async def fail_rename(command, **kwargs):
+        if "mv -f -- " in command:
+            return SimpleNamespace(return_code=return_code, error_type=error_type, stderr="rename failed", stdout="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = fail_rename
+    request, session_id, task = await start_image_activation(agent)
+    with pytest.raises(error) as failure:
+        await task
+    assert not isinstance(failure.value, TimeoutError)
+    sandbox.launch.assert_not_awaited()
+    assert not [path for path in sandbox.files if path.startswith(f"{MEDIA_DIRECTORY}/")]
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))

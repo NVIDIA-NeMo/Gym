@@ -947,6 +947,44 @@ class OpenShellProvider:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(target_path.write_bytes, data)
 
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Share gateway identity without serializing gateway credentials."""
+        inst = handle.raw
+        return {
+            "provider": self.name,
+            "sandbox_id": inst.sandbox_id,
+            "name": inst.name,
+            "endpoint": self._connection.endpoint,
+            "workspace": inst.workspace,
+            "image": inst.image,
+            "workdir": inst.workdir,
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Reconnect through the configured gateway, retaining owner-managed lifetime."""
+        if (
+            descriptor.get("provider") != self.name
+            or descriptor.get("endpoint") != self._connection.endpoint
+            or descriptor.get("workspace") != self._connection.workspace
+        ):
+            raise ValueError("OpenShell reconnect requires the same gateway and workspace")
+        name, sandbox_id = descriptor["name"], descriptor["sandbox_id"]
+        ref = await self._call(self._client.get, name, workspace=self._connection.workspace)
+        if ref.id != sandbox_id or ref.name != name:
+            raise ValueError("OpenShell sandbox identity changed")
+        return SandboxHandle(
+            sandbox_id=sandbox_id,
+            provider_name=self.name,
+            raw=_OpenShellSandbox(
+                name=name,
+                sandbox_id=sandbox_id,
+                workspace=self._connection.workspace,
+                image=descriptor.get("image"),
+                env={},
+                workdir=descriptor.get("workdir"),
+            ),
+        )
+
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Sandbox phase via GetSandbox (missing -> STOPPED; RPC failure -> UNKNOWN)."""
         inst = handle.raw

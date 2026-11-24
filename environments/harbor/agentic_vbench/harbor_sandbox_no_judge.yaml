@@ -1,0 +1,23 @@
+# Deployment overlay for a run WITHOUT Hub access: the 64 Repair, Assembly and Sequencing tasks, which need no
+# credentials. Prepare the entry with those families only, then pass this overlay instead of `harbor_sandbox.yaml`:
+#
+#   AGENTIC_VBENCH_HARBOR_FAMILIES=repair,assembly,sequencing python -m benchmarks.agentic_vbench.prepare_harbor_env
+#   gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
+#     --config environments/harbor/agentic_vbench/harbor_sandbox_no_judge.yaml ...
+#
+# Same server and harness settings as `harbor_sandbox.yaml` (separate verification of the tasks that declare
+# artifacts, the episode cap, the harness's `image_input`) without the judge secret, which only the Repurpose tasks
+# read. With Repurpose prepared, use `harbor_sandbox.yaml`: its secret has no empty default, so the server refuses
+# to start without a key rather than score a judged task 0 for want of one.
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      separate_verifier_for_artifacts: true
+      max_concurrent_episodes: 12
+      queue_timeout_seconds: 43200
+      sandbox_ready_timeout_s: 1800
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      image_input: true

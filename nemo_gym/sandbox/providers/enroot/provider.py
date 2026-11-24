@@ -31,6 +31,7 @@ import posixpath
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import tempfile
 import uuid
@@ -49,7 +50,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
 
 LOGGER = logging.getLogger(__name__)
@@ -59,6 +62,11 @@ CONTAINER_NAME_PREFIX = "nemo-gym-"
 # Portable init: keep the container alive without relying on `sleep infinity`,
 # which busybox `sleep` rejects. A shell loop works on any image with `sh`.
 DEFAULT_INIT_COMMAND = "while true; do sleep 86400; done"
+# Enroot's command script owns execution of the argv supplied after the
+# container name. Replacing an image-generated /etc/rc with an empty file would
+# therefore exit successfully without launching the requested init. This
+# minimal script bypasses image ENTRYPOINT/CMD behavior while preserving argv.
+ENTRYPOINT_BYPASS_RC = 'if [ "$#" -gt 0 ]; then\n    exec "$@"\nfi\nexec /bin/sh\n'
 READY_PROBE_COMMAND = (
     f"printf enroot-sandbox-ready > {DEFAULT_MOUNT_POINT}/.nemo-gym-ready && printf enroot-sandbox-ready"
 )
@@ -114,12 +122,17 @@ def _find_container_init_pid(base_init: str, marker: str) -> int | None:
     concurrency. The ``enroot start`` wrapper also carries the marker but its cmdline
     starts with the enroot binary, not ``sh -c ``, so it is excluded.
     """
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit():
-            continue
-        cmd = _read_proc_cmdline(int(entry.name))
-        if cmd.startswith("sh -c ") and marker in cmd and base_init in cmd:
-            return int(entry.name)
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        return None
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            cmd = _read_proc_cmdline(int(entry.name))
+            if cmd.startswith("sh -c ") and marker in cmd and base_init in cmd:
+                return int(entry.name)
     return None
 
 
@@ -245,6 +258,15 @@ def _translate_docker_uri(image: str) -> str:
     non-JSON and the import fails. Dropping them lets enroot use its configured
     Hub default (e.g. ``docker://swebench/foo:tag``).
     """
+    # Enroot before 4.0 reads the text before '@' as a registry user, so an OCI
+    # digest reference fails to import. Enroot 3.1 and later accept the digest
+    # where the tag goes, as the manifest reference. A digest supersedes a tag.
+    # Only a sha256 digest after the last '@' counts; Enroot's own USER@ prefix stays.
+    repository, digest_separator, digest = image.rpartition("@")
+    if digest_separator and digest.startswith("sha256:"):
+        if repository.rfind(":") > repository.rfind("/"):
+            repository = repository.rsplit(":", 1)[0]
+        image = f"{repository}:{digest}"
     first, sep, rest = image.partition("/")
     if sep and first in DOCKER_HUB_HOSTS:
         return f"docker://{rest}"
@@ -360,6 +382,9 @@ class EnrootProvider:
                     proc.communicate(input=stdin),
                     timeout=timeout_s,
                 )
+            except asyncio.CancelledError:
+                await kill_cancelled_command(proc)
+                raise
             except asyncio.TimeoutError as e:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -492,10 +517,17 @@ class EnrootProvider:
         # (e.g. ENTRYPOINT ["python"]) don't wrap the init and exit immediately.
         # Enroot bakes the ENTRYPOINT into /etc/rc inside the rootfs during
         # `enroot create`; the only way to bypass it at start time is --rc,
-        # which replaces /etc/rc entirely. We pass an empty script so the init
-        # command (argv after the container name) runs directly.
+        # which replaces /etc/rc entirely. Enroot requires --rc to name a
+        # regular file, so /dev/null is not a valid sentinel. The replacement
+        # must also exec the supplied argv; an empty script exits without
+        # starting the init. Keep the pass-through script in the private
+        # per-sandbox staging directory. Enroot copies it before the init starts
+        # and it is removed with staging.
         if self._create_config.bypass_entrypoint:
-            argv += ["--rc", "/dev/null"]
+            bypass_rc_path = staging_dir / ".nemo-gym-bypass-entrypoint-rc"
+            bypass_rc_path.write_text(ENTRYPOINT_BYPASS_RC)
+            bypass_rc_path.chmod(0o400)
+            argv += ["--rc", str(bypass_rc_path)]
         argv += list(self._create_config.extra_start_args)
         # Tag the init with the (unique) container name so the nested-in-pyxis PID
         # fallback can find THIS container's init process in /proc unambiguously. The
@@ -641,8 +673,16 @@ class EnrootProvider:
                 await asyncio.sleep(probe.stable_delay_s)
 
     def _kill_start_group(self, instance: _EnrootInstance) -> None:
-        """Best-effort SIGTERM then SIGKILL of the detached start's process group."""
+        """Best-effort SIGTERM then SIGKILL of the detached start's process group.
+
+        A handle rebuilt by ``connect()`` has no ``proc`` and never reaped the
+        group, so it signals the group only while its leader still carries the
+        container marker; a process-group ID reused after the creator stopped
+        is left alone.
+        """
         if instance.start_pgid is None:
+            return
+        if instance.proc is None and not self._pid_has_container_marker(instance.start_pgid, instance.name):
             return
         for sig in (signal.SIGTERM, signal.SIGKILL):
             with contextlib.suppress(ProcessLookupError):
@@ -672,6 +712,91 @@ class EnrootProvider:
         the wrong namespace.
         """
         return name in _read_proc_cmdline(pid)
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, object]:
+        """Share a running sandbox with another worker on the same host and UID.
+
+        The descriptor belongs to the trusted control plane. Both workers must
+        use the same Enroot data/runtime directories. The creator retains
+        ownership; a borrower releases its client with ``disconnect()``.
+        ``scope`` does not grant a separate lease for this local provider.
+
+        The sandbox environment stays out of the descriptor because it may hold
+        task secrets. ``enroot exec`` builds each command's environment from the
+        init process's ``/proc/<pid>/environ``, so a borrower still sees it.
+        """
+        instance = handle.raw
+        if instance.container_pid is None or not self._pid_has_container_marker(instance.container_pid, instance.name):
+            raise RuntimeError(f"Enroot sandbox {instance.name!r} is no longer running")
+        return {
+            "provider": self.name,
+            "sandbox_id": instance.name,
+            "hostname": socket.gethostname(),
+            "uid": os.getuid(),
+            "data_path": self._enroot_env["ENROOT_DATA_PATH"],
+            "runtime_path": self._enroot_env["ENROOT_RUNTIME_PATH"],
+            "container_pid": instance.container_pid,
+            "start_pgid": instance.start_pgid,
+            "staging_dir": str(instance.staging_dir),
+            "mount_point": instance.mount_point,
+            "sqsh_path": str(instance.sqsh_path),
+            "image": instance.image,
+        }
+
+    async def connect(self, descriptor: Mapping[str, object]) -> SandboxHandle:
+        """Rebuild a handle to a running sandbox from a :meth:`serialize_handle` descriptor.
+
+        Nothing is created or restarted. The descriptor must come from this host
+        and UID with the same Enroot data and runtime paths, and its staging
+        directory must still exist. Release the handle with
+        ``AsyncSandbox.disconnect()``; ``stop()`` would tear down the creator's
+        sandbox.
+
+        Raises:
+            ValueError: the descriptor is malformed or was made on another host,
+                UID or set of Enroot paths.
+            RuntimeError: the container init has exited or its PID was reused.
+        """
+        if descriptor.get("provider") != self.name:
+            raise ValueError("Enroot requires a full serialized descriptor, not a bare sandbox id")
+        if descriptor.get("hostname") != socket.gethostname() or descriptor.get("uid") != os.getuid():
+            raise ValueError("Enroot reconnect requires the same host and UID as the creator")
+        for key in ("data_path", "runtime_path"):
+            if descriptor.get(key) != self._enroot_env[f"ENROOT_{key.upper()}"]:
+                raise ValueError(f"Enroot reconnect requires the creator's {key}")
+        for key in ("sandbox_id", "staging_dir", "mount_point", "sqsh_path", "image"):
+            if not isinstance(descriptor.get(key), str) or not descriptor[key]:
+                raise ValueError(f"Enroot descriptor requires a non-empty {key}")
+        name = str(descriptor["sandbox_id"])
+        if not name.startswith(CONTAINER_NAME_PREFIX):
+            raise ValueError(f"Enroot descriptor sandbox_id {name!r} is not a Gym container name")
+        pid = descriptor.get("container_pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            raise ValueError("Enroot descriptor requires a positive container_pid")
+        if not self._pid_has_container_marker(pid, name):
+            raise RuntimeError(f"Enroot sandbox {name!r} is no longer running (PID {pid} stale or reused)")
+        staging = Path(str(descriptor["staging_dir"]))
+        if not staging.is_absolute() or not staging.is_dir():
+            raise ValueError("Enroot staging directory is unavailable")
+        mount_point = str(descriptor["mount_point"])
+        if not mount_point.startswith("/"):
+            raise ValueError("Invalid Enroot mount point")
+        pgid = descriptor.get("start_pgid")
+        if pgid is not None and (not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0):
+            raise ValueError("Enroot descriptor start_pgid must be a positive integer or null")
+        return SandboxHandle(
+            sandbox_id=name,
+            provider_name=self.name,
+            raw=_EnrootInstance(
+                name=name,
+                sqsh_path=Path(str(descriptor["sqsh_path"])),
+                staging_dir=staging,
+                mount_point=mount_point,
+                image=str(descriptor["image"]),
+                container_pid=pid,
+                start_pgid=pgid,
+            ),
+        )
 
     async def exec(
         self,
@@ -864,7 +989,7 @@ class EnrootProvider:
             remove_error = e
 
         try:
-            shutil.rmtree(instance.staging_dir, ignore_errors=False)
+            _remove_writable_tree(instance.staging_dir)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", instance.staging_dir, e)
 

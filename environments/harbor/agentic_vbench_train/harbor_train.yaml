@@ -1,0 +1,42 @@
+# Training overlay for Agentic-VBench tasks on the Harbor task shape (the generic `harbor` environment server with
+# Gym's `opencode_agent`). Pass it after `--sandbox <provider>` to `gym dataset validate` and `gym eval run`, and list
+# it in a NeMo RL run's `env.nemo_gym.config_paths` after the generated `run_config_opencode_agent.yaml` (README).
+#
+# Same deployment settings as the benchmark entry's `harbor_sandbox.yaml` (judge key as a verifier-only secret,
+# separate verification of the judged and repair tasks, the episode cap, `image_input`), plus what training needs:
+# training-token capture of OpenCode's model calls (the run-wide store and the harness opt-in; the model server must be
+# `vllm_model_for_training.yaml` or the training framework's) and the model budgets OpenCode is told.
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      secrets:
+        NVINFERENCE_API_KEY: ${oc.env:NVINFERENCE_API_KEY,${oc.env:INFERENCE_API_KEY,null}}
+      separate_verifier_for_artifacts: true
+      max_concurrent_episodes: ${oc.select:agentic_vbench_concurrency,12}
+      queue_timeout_seconds: 43200
+      # Prebuilt task images still take minutes to pull into the sandbox provider.
+      sandbox_ready_timeout_s: 1800
+
+# Both halves are required: the run-wide store and the harness opt-in. A training framework that configures the
+# store itself (NeMo RL does) keeps its own values; these are the local-run defaults.
+token_id_capture:
+  enabled: true
+  dir: ${oc.env:NEMO_GYM_TOKEN_ID_CAPTURE_DIR,/tmp/nemo_gym_token_id_captures}
+  delta_records: true
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      token_id_capture: true
+      # The tasks need the model to look at frames it extracts.
+      image_input: true
+      # A ceiling: each row's agent_timeout_sec (the task's [steps.agent].timeout_sec) applies.
+      timeout: 1800
+      # The policy's real context and per-call output limit, so OpenCode compacts before the engine overflows. The
+      # defaults are the Super 3.5 training recipe's; set `agentic_vbench_context_tokens` and
+      # `agentic_vbench_output_tokens` for another policy.
+      context_window: ${oc.select:agentic_vbench_context_tokens,49152}
+      max_output_tokens: ${oc.select:agentic_vbench_output_tokens,8192}
+      opencode_config:
+        compaction:
+          auto: true

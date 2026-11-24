@@ -32,7 +32,9 @@ from nemo_gym.environment.validation import (
     "name",
     [
         "terminal_bench_4/miniswe",
+        "terminal_bench_4/miniswe_legacy_agent",
         "terminal_bench_science/miniswe",
+        "terminal_bench_science/miniswe_legacy_agent",
         "terminal_bench_science/codex",
         "deepsearchqa",
         "widesearch",
@@ -40,6 +42,8 @@ from nemo_gym.environment.validation import (
         "moldetox",
         "scicodepile",
         "partner_if",
+        # Its user simulator's endpoint is a deployment setting, so composition resolves without it.
+        "bird_interact",
     ],
 )
 def test_current_benchmark_manifests_match_runtime_composition(name: str) -> None:
@@ -52,6 +56,72 @@ def test_current_benchmark_manifests_match_runtime_composition(name: str) -> Non
         resolve_manifest_config_path(path, manifest), dataset_owner=manifest.dataset_owner
     )
     assert _mirror_differences(manifest, composition) == {}
+
+
+def test_static_wiring_fills_an_auxiliary_models_endpoint_but_no_other_missing_value() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.environment.validation import _StaticWiringParser
+
+    config = OmegaConf.create(
+        {
+            "user_model_base_url": "???",
+            "user_model_api_key": "???",
+            "user_model_name": "???",
+            "unrelated_setting": "???",
+            "user_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "base_url": "${user_model_base_url}",
+                        "api_key": "${user_model_api_key}",
+                        "model": "${user_model_name}",
+                    }
+                }
+            },
+        }
+    )
+
+    _StaticWiringParser()._recursively_swap_keys(config)
+
+    assert OmegaConf.to_container(config.user_model, resolve=True) == {
+        "responses_api_models": {
+            "vllm_model": {
+                "base_url": "https://model.invalid/v1",
+                "api_key": "static-validation",
+                "model": "static-validation",
+            }
+        }
+    }
+    assert OmegaConf.is_missing(config, "unrelated_setting")
+
+
+def test_static_wiring_keeps_a_supplied_model_setting() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.environment.validation import _StaticWiringParser
+
+    config = OmegaConf.create(
+        {
+            "user_model_base_url": "https://simulator.example/v1",
+            "user_model": {"responses_api_models": {"vllm_model": {"base_url": "${user_model_base_url}"}}},
+        }
+    )
+
+    _StaticWiringParser()._recursively_swap_keys(config)
+
+    assert config.user_model.responses_api_models.vllm_model.base_url == "https://simulator.example/v1"
+
+
+def test_manifest_resolves_dataset_interpolation_against_its_config(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _asset(tmp_path)
+    config = path.with_name("config.yaml")
+    text = config.read_text().replace(
+        "jsonl_fpath: environments/demo/data/example.jsonl", "jsonl_fpath: ${fixture_data_path}"
+    )
+    config.write_text("fixture_data_path: environments/demo/data/example.jsonl\n" + text)
+    report = validate_environment(path)
+    assert report.datasets[0].rows == 1
 
 
 @pytest.mark.parametrize("source", ["prepared", "agent"])
@@ -94,6 +164,154 @@ def test_prepared_prompt_source_rejects_rows_without_input(tmp_path: Path) -> No
     path.write_text(yaml.safe_dump(raw))
     with pytest.raises(EnvironmentValidationError, match="prepared.*input"):
         validate_environment(path)
+
+
+def _benchmark_rows(
+    tmp_path: Path,
+    rows: list[dict],
+    *,
+    prompt_source: str = "prepared",
+    environment_server: str | None = "single_agent_turn",
+) -> Path:
+    """A benchmark whose dataset holds ``rows``; taskset ``demo`` routes to an ``environment_server`` server."""
+    path = _asset(tmp_path, kind="benchmark")
+    if prompt_source != "template":
+        raw = yaml.safe_load(path.read_text())
+        raw["prompt_source"] = prompt_source
+        raw.pop("standard_prompt_config")
+        path.write_text(yaml.safe_dump(raw))
+    if environment_server is not None:
+        config_path = path.with_name("config.yaml")
+        config = yaml.safe_load(config_path.read_text())
+        config["demo_task_environment_server"] = {
+            "environment_servers": {
+                environment_server: {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+                    "resources_server": {"type": "resources_servers", "name": "demo_resources"},
+                }
+            }
+        }
+        config["environment_server_routes"] = {"demo": "demo_task_environment_server"}
+        config_path.write_text(yaml.safe_dump(config))
+    (path.parent / "data/example.jsonl").write_text("".join(f"{json.dumps(row)}\n" for row in rows))
+    return path
+
+
+def _task_row(task_id: str = "1", **task_input: object) -> dict:
+    task_input.setdefault("responses_create_params", {"input": [{"role": "user", "content": "What is 1 + 1?"}]})
+    task_input.setdefault("task_data", {"expected_answer": "2"})
+    return {"task_id": {"taskset": "demo", "task_id": task_id}, "task_input": task_input}
+
+
+@pytest.mark.parametrize("environment_server", ["single_agent_turn", "single_agent_turn_legacy"])
+def test_prepared_materialized_task_rows_are_valid_rollout_inputs(tmp_path: Path, environment_server: str) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row("1"), _task_row("2")], environment_server=environment_server)
+
+    report = validate_environment(path)
+
+    assert report.datasets[0].rows == 2
+
+
+@pytest.mark.parametrize("prompt_source", ["prepared", "agent"])
+@pytest.mark.parametrize("environment_server", ["swe_together", None])
+def test_tasks_of_another_environment_server_are_checked_as_task_envelopes(
+    tmp_path: Path, prompt_source: str, environment_server: str | None
+) -> None:
+    # As swe_together's prepare writes them: the server builds the request, so the task input holds task_data only.
+    row = {"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": {"task_data": {"instance_id": "1"}}}
+    path = _benchmark_rows(tmp_path, [row], prompt_source=prompt_source, environment_server=environment_server)
+
+    report = validate_environment(path)
+
+    assert report.datasets[0].rows == 1
+
+
+@pytest.mark.parametrize("environment_server", ["single_agent_turn", "swe_together", None])
+@pytest.mark.parametrize(
+    ("row", "location"),
+    [
+        ({"task_id": {"taskset": "demo"}, "task_input": {"task_data": {}}}, "task_id.task_id"),
+        ({"task_id": {"taskset": "demo", "task_id": "2"}, "task_input": "not an object"}, "task_input"),
+    ],
+)
+def test_a_broken_task_envelope_fails_whatever_server_its_taskset_routes_to(
+    tmp_path: Path, environment_server: str | None, row: dict, location: str
+) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row(), row], prompt_source="agent", environment_server=environment_server)
+
+    with pytest.raises(
+        EnvironmentValidationError, match=rf"^Dataset 'example' row 2 is not a valid task at {location}:"
+    ):
+        validate_environment(path)
+
+
+def test_prepared_materialized_task_row_without_input_names_the_dataset_and_row(tmp_path: Path) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row("1"), _task_row("2", responses_create_params={"input": []})])
+
+    with pytest.raises(EnvironmentValidationError) as raised:
+        validate_environment(path)
+
+    assert str(raised.value) == (
+        "Benchmark dataset 'example' row 2 declares prepared prompts but has no task_input.responses_create_params.input."
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "location"),
+    [
+        ({"task_id": {"taskset": "demo"}, "task_input": _task_row()["task_input"]}, "task_id.task_id"),
+        (_task_row(task_data="not an object"), "task_input.task_data"),
+        (
+            _task_row(responses_create_params={"input": "Hi", "temperature": "warm"}),
+            "task_input.responses_create_params",
+        ),
+    ],
+)
+def test_materialized_task_rows_are_checked_as_the_environment_server_reads_them(
+    tmp_path: Path, row: dict, location: str
+) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row(), row], prompt_source="agent")
+
+    with pytest.raises(
+        EnvironmentValidationError, match=rf"^Dataset 'example' row 2 is not a valid task at {location}"
+    ):
+        validate_environment(path)
+
+
+def test_prompt_templates_are_refused_for_materialized_task_rows(tmp_path: Path) -> None:
+    path = _benchmark_rows(tmp_path, [_task_row()], prompt_source="template")
+
+    with pytest.raises(EnvironmentValidationError) as raised:
+        validate_environment(path)
+
+    assert str(raised.value) == (
+        "Benchmark dataset 'example' row 1 is a materialized task, and prompt templates are not supported for "
+        "materialized task rows."
+    )
+
+
+@pytest.mark.parametrize(
+    ("row", "message"),
+    [
+        (
+            {"responses_create_params": {"input": []}},
+            "Benchmark dataset 'example' row 1 declares prepared prompts but has no responses_create_params.input.",
+        ),
+        (
+            {"responses_create_params": {"input": "Hi", "temperature": "warm"}},
+            "Dataset 'example' row 1 is not a valid rollout input at responses_create_params.temperature: "
+            "Input should be a valid number, unable to parse string as a number",
+        ),
+    ],
+)
+def test_flat_rows_keep_their_checks_and_messages(tmp_path: Path, row: dict, message: str) -> None:
+    path = _benchmark_rows(tmp_path, [row])
+
+    with pytest.raises(EnvironmentValidationError) as raised:
+        validate_environment(path)
+
+    assert str(raised.value) == message
 
 
 def test_manifest_selects_named_config_and_dataset_owner(tmp_path: Path) -> None:
@@ -956,6 +1174,111 @@ def test_custom_driver_is_checked_without_scaffolding(tmp_path: Path) -> None:
         validate_environment(manifest_path)
 
 
+HARBOR_HARNESSES = {
+    "mini_swe_agent": (
+        "responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml",
+        {"step_limit": 500},
+    ),
+    # Its shipped template leaves `resources_server.name` for benchmark composition; the Harbor run clears it.
+    "terminus_2_sandboxed_agent": (
+        "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
+        {},
+    ),
+}
+
+
+def _harbor_asset(
+    tmp_path: Path, *, config_target: str, manifest_target: str | None = None, harness: str = "mini_swe_agent"
+) -> Path:
+    directory = tmp_path / "benchmarks" / "harbor_demo"
+    directory.mkdir(parents=True)
+    shipped, settings = HARBOR_HARNESSES[harness]
+    config = {
+        "harbor_target": config_target,
+        "config_paths": [shipped],
+        harness: {"responses_api_agents": {harness: settings}},
+    }
+    (directory / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    manifest = _manifest(kind="benchmark", profile="custom-gym-agent-loop")
+    manifest.update(
+        name="harbor_demo",
+        harbor_target=manifest_target or config_target,
+        resources_server=None,
+        agent_server=harness,
+        datasets=[],
+        prompt_source="agent",
+        grading_mode=None,
+    )
+    manifest.pop("standard_prompt_config")
+    path = directory / "manifest.yaml"
+    path.write_text(dump_manifest(manifest), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("harness", sorted(HARBOR_HARNESSES))
+def test_harbor_backed_manifest_validates_its_harness_and_target(tmp_path: Path, harness: str) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4", harness=harness)
+    report = validate_environment(path)
+    assert report.datasets == ()
+    assert [(c.role, c.name) for c in report.components] == [
+        ("agent_server", harness),
+        ("model_server", "policy_model"),
+    ]
+    assert report.components[0].implementation == harness
+    assert resolve_config_servers(path.parent / "config.yaml") == (None, harness)
+
+
+def test_dataset_owner_does_not_apply_to_a_harbor_target(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    manifest = yaml.safe_load(path.read_text())
+    manifest["dataset_owner"] = "mini_swe_agent"
+    path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="dataset_owner does not apply to harbor_target"):
+        validate_environment(path)
+
+
+def test_a_harbor_target_only_an_include_sets_is_refused(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    config = path.parent / "config.yaml"
+    base = path.parent / "base.yaml"
+    base.write_text(config.read_text(), encoding="utf-8")
+    config.write_text(yaml.safe_dump({"config_paths": [str(base)]}), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="set `harbor_target` in the benchmark file itself"):
+        validate_environment(path)
+
+
+def test_harbor_target_is_mirrored_from_the_config(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4", manifest_target="terminal_bench_2_1")
+    with pytest.raises(EnvironmentValidationError, match="harbor_target"):
+        validate_environment(path)
+
+
+def test_harbor_target_must_resolve_without_a_fetch(tmp_path: Path) -> None:
+    with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
+        validate_environment(_harbor_asset(tmp_path, config_target="no_such_harbor_entry"))
+    folder = tmp_path / "tasks"
+    folder.mkdir()
+    assert validate_environment(_harbor_asset(tmp_path / "local", config_target=str(folder))).datasets == ()
+
+
+@pytest.mark.parametrize("target", ["harbor:", "harbor:org/name/extra"])
+def test_a_malformed_harbor_reference_is_refused(tmp_path: Path, target: str) -> None:
+    with pytest.raises(EnvironmentValidationError):
+        validate_environment(_harbor_asset(tmp_path, config_target=target))
+
+
+def test_a_well_formed_harbor_reference_is_accepted_without_a_fetch(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="harbor:terminal-bench/terminal-bench@4.0.0")
+    assert validate_environment(path).datasets == ()
+
+
+def test_a_file_is_not_a_task_folder_target(tmp_path: Path) -> None:
+    task_file = tmp_path / "task.toml"
+    task_file.write_text("")
+    with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
+        validate_environment(_harbor_asset(tmp_path / "file", config_target=str(task_file)))
+
+
 def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: Path) -> None:
     manifest_path = _asset(tmp_path, kind="benchmark")
     (manifest_path.parent / "data/example.jsonl").unlink()
@@ -968,3 +1291,110 @@ def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: P
     _replace_manifest(manifest_path, resources_server="wrong_server")
     with pytest.raises(EnvironmentValidationError, match="composition is stale"):
         validate_environment(manifest_path, validate_datasets=False)
+
+
+@pytest.mark.parametrize("selected_input", [None, "benchmarks/demo/data/selected.jsonl"])
+def test_manifest_composition_resolves_dynamic_dataset_defaults(tmp_path: Path, selected_input: str | None) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    config_path = manifest_path.with_name("config.yaml")
+    config_path.write_text(
+        config_path.read_text().replace(
+            "jsonl_fpath: benchmarks/demo/data/example.jsonl",
+            "jsonl_fpath: ${oc.select:prepare_script_args.input,benchmarks/demo/data/example.jsonl}",
+        )
+    )
+    expected_path = "benchmarks/demo/data/example.jsonl"
+    expected_rows = 1
+    if selected_input is not None:
+        config_path.write_text(config_path.read_text() + f"\nprepare_script_args:\n  input: {selected_input}\n")
+        manifest = load_manifest(manifest_path)
+        _replace_manifest(
+            manifest_path,
+            datasets=[manifest.datasets[0].model_copy(update={"jsonl_fpath": selected_input})],
+        )
+        original_data = (manifest_path.parent / "data/example.jsonl").read_text()
+        (manifest_path.parent / "data/selected.jsonl").write_text(original_data * 2)
+        expected_path = selected_input
+        expected_rows = 2
+
+    report = validate_environment(manifest_path)
+
+    assert Path(report.datasets[0].path) == tmp_path / expected_path
+    assert report.datasets[0].rows == expected_rows
+
+
+@pytest.mark.parametrize("value", ["${undefined_key}", "${oc.env:LAB_TEST_UNSET_VARIABLE}"])
+def test_dataset_path_resolution_uses_validation_error(
+    tmp_path: Path, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("LAB_TEST_UNSET_VARIABLE", raising=False)
+    manifest = _asset(tmp_path, kind="benchmark")
+    config = manifest.with_name("config.yaml")
+    config.write_text(
+        config.read_text().replace("jsonl_fpath: benchmarks/demo/data/example.jsonl", f"jsonl_fpath: {value}")
+    )
+    with pytest.raises(ConfigInterpolationError):
+        validate_environment(manifest)
+
+
+def test_dataset_validation_ignores_undeclared_runtime_fields(tmp_path: Path) -> None:
+    manifest = _asset(tmp_path, kind="benchmark")
+    config = manifest.with_name("config.yaml")
+    from omegaconf import OmegaConf
+
+    raw = OmegaConf.load(config)
+    raw.demo_agent.responses_api_agents.simple_agent.datasets[0].ignored = "${runtime_only_value}"
+    OmegaConf.save(raw, config)
+
+    assert validate_environment(manifest).datasets[0].rows == 1
+
+
+@pytest.mark.parametrize("mutation", [None, "missing_params", "empty_id", "extra_envelope"])
+def test_catalog_validates_materialized_single_agent_turn_rows(tmp_path, mutation):
+    from nemo_gym.environment.manifest import ManifestDataset
+    from nemo_gym.environment.validation import _validate_dataset
+
+    row = {
+        "task_id": {"taskset": "environment:codex", "task_id": "task-1"},
+        "task_input": {
+            "responses_create_params": {"input": [{"role": "user", "content": "Prepared prompt"}]},
+            "task_data": {"private_reference": "verifier-owned"},
+        },
+    }
+    if mutation == "missing_params":
+        row["task_input"].pop("responses_create_params")
+    elif mutation == "empty_id":
+        row["task_id"]["task_id"] = ""
+    elif mutation == "extra_envelope":
+        row["responses_create_params"] = {"input": "must not fall back to flat"}
+    path = tmp_path / "tasks.jsonl"
+    original = json.dumps(row) + "\n"
+    path.write_text(original)
+    dataset = ManifestDataset(name="example", type="example", jsonl_fpath=str(path))
+    routing = {"environment:codex": "single_agent_turn"}
+    if mutation is None:
+        report = _validate_dataset(
+            dataset, standard_prompt_config=None, prompt_source="prepared", taskset_environment_servers=routing
+        )
+        assert report.rows == 1 and path.read_text() == original
+    else:
+        with pytest.raises(EnvironmentValidationError, match="valid task"):
+            _validate_dataset(
+                dataset, standard_prompt_config=None, prompt_source="prepared", taskset_environment_servers=routing
+            )
+
+
+@pytest.mark.parametrize("task_input", ["bad", [1], 42, True, None])
+def test_prepared_benchmark_rejects_non_mapping_task_input_with_row_context(tmp_path, task_input):
+    from nemo_gym.environment.manifest import ManifestDataset
+    from nemo_gym.environment.validation import _validate_dataset
+
+    prepare = tmp_path / "prepare.py"
+    prepare.write_text("from pathlib import Path\ndef prepare(output: Path) -> Path:\n    return output\n")
+    data = tmp_path / "tasks.jsonl"
+    data.write_text(json.dumps({"task_id": {"taskset": "demo", "task_id": "1"}, "task_input": task_input}) + "\n")
+    dataset = ManifestDataset(
+        name="bad-nested-row", type="benchmark", jsonl_fpath=str(data), prepare_script=str(prepare)
+    )
+    with pytest.raises(EnvironmentValidationError, match="bad-nested-row.*row 1.*task_input"):
+        _validate_dataset(dataset, standard_prompt_config=None, prompt_source="prepared")

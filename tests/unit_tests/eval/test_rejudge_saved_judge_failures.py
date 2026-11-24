@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The in-place re-judgment of a run's saved judge failures at the end of its collection."""
 
+import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -15,17 +17,29 @@ from nemo_gym.eval.rollout_reverification import (
     bind_judge_failures,
     due_judge_failures,
     rejudge_saved_judge_failures,
+    settle_rejudgments,
 )
-from nemo_gym.rollouts.rollout_records import logical_rollout_id, materialized_path_for
-from nemo_gym.rollouts.rollout_recovery import RunManifest
+from nemo_gym.rollouts.rollout_records import (
+    is_rejudgment_failure_of,
+    is_rejudgment_of,
+    logical_rollout_id,
+    materialized_path_for,
+)
+from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from tests.unit_tests.rollouts.test_rollout_store import snapshot
 
 
 ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}
 
 
 def _run(
-    tmp_path: Path, *, judge_failures: int, rollouts: int = 3, evidence: dict | None = None
+    tmp_path: Path,
+    *,
+    judge_failures: int,
+    rollouts: int = 3,
+    evidence: dict | None = None,
+    failure_fields: dict | Callable[[int], dict] | None = None,
 ) -> tuple[Path, list[dict]]:
     """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
@@ -51,6 +65,7 @@ def _run(
                         "response": ANSWER,
                     }
                     | (evidence or {})
+                    | (failure_fields(index) if callable(failure_fields) else failure_fields or {})
                 )
                 store.record_outcome(failure)
                 failures.append(failure)
@@ -108,6 +123,55 @@ def test_a_settled_row_keeps_the_evidence_of_the_judge_failure_it_settles(tmp_pa
     assert settled["_ng_rejudged_failure_observations"]["ng_perf"] == evidence["ng_perf"]
 
 
+# A verdict that did not parse is saved under its own kind; the producer's routing class stays in the legacy field.
+JUDGE_CLASSES = [
+    {"_ng_failure_class": "judge_failed"},
+    {"_ng_failure_class": "judge_unparseable", "_ng_failure_legacy_class": "judge_failed"},
+]
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_every_due_judge_failure_is_bound_and_settled(tmp_path, classes):
+    output, [failure] = _run(tmp_path, judge_failures=1, evidence=classes)
+    identity = logical_rollout_id(failure)
+    assert due_judge_failures(output) == [identity]
+    assert list(bind_judge_failures(output)["failures"]) == [identity]
+
+    _settle(output, failure, 0.5)
+
+    assert due_judge_failures(output) == []
+    assert sorted(row["reward"] for row in RolloutStore.read(output).selected("success")) == [0.5, 1.0, 1.0]
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_a_rejudgment_that_fails_again_spends_a_failure_attempt(tmp_path, classes):
+    output, [failure] = _run(tmp_path, judge_failures=1, evidence=classes)
+    identity = logical_rollout_id(failure)
+    spent = RolloutStore.read(output)._state.failure_count(identity)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        again = failure | {
+            "_ng_failure_id": "judge-0-again",
+            "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+        }
+        assert store.record_rejudgment(failure, again)
+        store.close_rejudgment(identity, pending.operation_id)
+
+    assert RolloutStore.read(output)._state.failure_count(identity) == spent + 1
+
+
+@pytest.mark.parametrize("classes", JUDGE_CLASSES)
+def test_a_spent_judge_failure_is_refused_whichever_class_names_it(tmp_path, monkeypatch, classes):
+    """The budget check is the binding's other single-field comparison, which neither case above reaches."""
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    output, _ = _run(tmp_path, judge_failures=1, evidence=classes)
+    with pytest.raises(ConfigError, match="has spent its 1 saved failure attempts"):
+        bind_judge_failures(output)
+    assert bind_judge_failures(output, skip_spent=True)["failures"] == {}
+
+
 async def test_a_run_with_nothing_due_runs_no_pass(tmp_path, monkeypatch):
     output, _ = _run(tmp_path, judge_failures=0)
     before = output.read_bytes()
@@ -140,6 +204,96 @@ def test_a_spent_judge_failure_is_left_out_of_the_binding_only_when_asked(tmp_pa
             judge_failed_only=True,
             skip_spent_judge_failures=True,
         )
+
+
+_UNPARSEABLE_JUDGE_FAILURE = {"_ng_failure_class": "judge_unparseable", "_ng_failure_legacy_class": "judge_failed"}
+
+
+def test_the_binding_takes_the_judge_failures_the_ordinary_selection_takes(tmp_path):
+    # A judge failure whose canonical class is judge_unparseable keeps judge_failed as its retained classification.
+    output, failures = _run(tmp_path, judge_failures=4, rollouts=6, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+    expected = sorted(logical_rollout_id(failure) for failure in failures)
+    assert due_judge_failures(output) == expected  # the ordinary selection takes all four
+    assert sorted(bind_judge_failures(output)["failures"]) == expected  # and so does the binding
+
+
+def test_a_spent_judge_failure_with_a_retained_classification_is_still_spent(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    output, _ = _run(tmp_path, judge_failures=1, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+    assert due_judge_failures(output) == []
+    with pytest.raises(ConfigError, match="has spent its 1 saved failure attempts"):
+        bind_judge_failures(output)
+    assert bind_judge_failures(output, skip_spent=True)["failures"] == {}
+
+
+async def test_a_pass_settles_judge_failures_of_both_classes_in_one_batch(tmp_path, monkeypatch):
+    output, failures = _run(
+        tmp_path, judge_failures=2, failure_fields=lambda index: _UNPARSEABLE_JUDGE_FAILURE if index == 1 else {}
+    )
+
+    async def reply(task, json):
+        return json | {"reward": 1.0}
+
+    posted = _verifier(monkeypatch, reply)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 2
+
+    assert sorted(posted) == [0, 1]
+    scored, failed, pending = _state(output)  # reopened from disk: both grades were saved
+    assert all(scored[logical_rollout_id(failure)] == 1.0 for failure in failures)
+    assert pending == {}
+    assert due_judge_failures(output) == []
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert sorted(posted) == [0, 1]  # a second pass makes no verifier call
+
+
+async def test_a_repeat_judge_failure_with_a_retained_classification_is_saved_and_counted(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+    output, (failure,) = _run(tmp_path, judge_failures=1, rollouts=1, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+
+    async def reply(task, json):
+        # The judge fails again: the same saved answer, a fresh failure, the canonical class and the retained one.
+        event = {"event_id": "judge-again", "boundary": "resources_server", "failure_kind": "judge_failed"}
+        return json | {
+            "_ng_failure_events": {"judge-again": event},
+            "_ng_failure_id": "judge-again",
+            "_ng_failure_class": "judge_unparseable",
+            "_ng_failure_legacy_class": "judge_failed",
+            "failure_kind": "judge_failed",
+            "mask_sample": True,
+            "reward": 0.0,
+        }
+
+    posted = _verifier(monkeypatch, reply)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert posted == [0]
+    store = RolloutStore.read(output, import_legacy=False)  # reopened from disk
+    (saved,) = store.failures()
+    assert saved["_ng_failure_id"] == "judge-again"  # the new failure persisted, it was not withdrawn
+    assert saved["_ng_rejudged_failure_id"] == failure["_ng_failure_id"]
+    assert len(store.failures()) == 1 and store.manifest.pending_rejudge == {}
+    assert due_judge_failures(output) == []  # both attempts are spent
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert posted == [0]  # a second pass makes no verifier call
+
+
+@pytest.mark.parametrize("fields", [{}, _UNPARSEABLE_JUDGE_FAILURE], ids=["judge_failed", "judge_unparseable"])
+def test_a_judge_failure_of_either_class_binds_its_rejudgment_and_a_repeat_failure(tmp_path, fields):
+    _, (first, *_) = _run(tmp_path, judge_failures=1, failure_fields=fields)
+    run = {"_ng_run_id": "run-1", "_ng_attempt_index": 0}
+    failure = first | run
+    scored = {k: v for k, v in failure.items() if not k.startswith("_ng_failure")} | {
+        "failure_kind": None,
+        "mask_sample": False,
+        "reward": 1.0,
+        "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+    }
+    again = failure | {"_ng_failure_id": "judge-again", "_ng_rejudged_failure_id": failure["_ng_failure_id"]}
+    assert is_rejudgment_of(failure, scored)
+    assert is_rejudgment_failure_of(failure, again)
+    classless = {k: v for k, v in failure.items() if not k.startswith("_ng_failure")}
+    assert not is_rejudgment_failure_of(classless, again)  # a classless saved result is not a judge failure
 
 
 async def test_a_run_without_due_judge_failures_judges_nothing(tmp_path, monkeypatch):
@@ -308,12 +462,12 @@ def _decision(job: Path, live_job: bool | None = False):
     import subprocess
     import sys
 
-    from nemo_gym.orchestration.recovery import (
+    from nemo_gym.eval.recovery.evidence import (
         COLLECT_SCRIPT,
         CollectedEvidence,
-        decide_from_collected,
         select_managed_evidence,
     )
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     raw = subprocess.run([sys.executable, "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True)
     collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
@@ -328,7 +482,7 @@ def _state(output: Path) -> tuple[dict, list[str], dict]:
 
 
 async def test_a_pass_that_fails_after_admitting_leaves_the_judge_failure_for_reverify(tmp_path, monkeypatch):
-    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.eval.recovery.decision import RecoveryAction
 
     job, output, (identity,) = _job(tmp_path, judge_failures=1)
 
@@ -351,7 +505,7 @@ async def test_a_regrade_that_answered_is_settled_when_a_later_one_disconnects(t
 
     from aiohttp import ServerDisconnectedError
 
-    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.eval.recovery.decision import RecoveryAction
 
     job, output, (answered, lost) = _job(tmp_path, judge_failures=2)
 
@@ -377,12 +531,12 @@ async def test_a_failed_pass_records_what_it_settled_and_is_not_counted_as_settl
 
     from aiohttp import ServerDisconnectedError
 
+    from nemo_gym.eval.recovery.decision import failed_judge_jobs_blocking
     from nemo_gym.eval.rollout_reverification import (
         RolloutReverificationConfig,
         RolloutReverificationHelper,
         write_settle_receipt,
     )
-    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
 
     _, output, (answered, lost) = _job(tmp_path, judge_failures=2)
 
@@ -460,8 +614,8 @@ def _settling_pass(helper, output: Path, tmp_path: Path):
 
 
 async def test_a_grade_saved_before_the_coverage_write_failed_counts_as_settled(tmp_path, monkeypatch):
+    from nemo_gym.eval.recovery.decision import failed_judge_jobs_blocking
     from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper
-    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
 
     _, output, identities = _job(tmp_path, judge_failures=2)
 
@@ -537,7 +691,7 @@ async def test_a_failed_pass_counts_each_withdrawn_admission_once(tmp_path, monk
     ],
 )
 def test_the_note_on_a_failed_judge_job_says_what_it_settled_and_withdrew(counts, says):
-    from nemo_gym.orchestration.recovery import judge_job_note
+    from nemo_gym.eval.recovery.gate import judge_job_note
 
     job = {"job_id": "1", "state": "failed", "ended_at": "2026-01-01T00:00:00Z", "error": "OSError: disk full"}
     assert judge_job_note(job | counts) == f"judge-only job 1 failed: OSError: disk full; {says}"
@@ -628,3 +782,124 @@ def test_the_recovery_pass_withdraws_an_admission_whose_pass_died(tmp_path):
             judge_failed_only=True,
             withdraw_unresolved_admissions=True,
         )
+
+
+def _admit_binding(output: Path) -> dict:
+    binding = bind_judge_failures(output)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        binding["admitted"] = {
+            identity: store.admit_rejudgment(failure) for identity, failure in binding["failures"].items()
+        }
+    binding["admitted_monotonic"] = time.monotonic()
+    return binding
+
+
+def _judged_answer(failure: dict) -> dict:
+    return {
+        "_ng_task_index": failure["_ng_task_index"],
+        "_ng_rollout_index": failure["_ng_rollout_index"],
+        "agent_ref": failure["agent_ref"],
+        "response": ANSWER,
+        "reward": 0.5,
+    }
+
+
+@pytest.mark.parametrize(
+    ("invalid", "message"),
+    [
+        ("duplicate", "name a rollout more than once"),
+        ("unbound", "not a bound judge failure"),
+        ("foreign_run", "not the bound value"),
+        ("foreign_attempt", "not the bound value"),
+    ],
+)
+def test_settlement_validates_the_entire_batch_before_saving_any_grade(tmp_path, invalid, message):
+    output, failures = _run(tmp_path, judge_failures=2)
+    binding = _admit_binding(output)
+    valid = [_judged_answer(failure) for failure in failures]
+    rejected = [dict(row) for row in valid]
+    if invalid == "duplicate":
+        rejected[1] = dict(rejected[0])
+    elif invalid == "unbound":
+        rejected[1]["_ng_task_index"] = 999
+    elif invalid == "foreign_run":
+        rejected[1]["_ng_run_id"] = "another-run"
+    else:
+        rejected[1]["_ng_attempt_index"] = failures[1]["_ng_attempt_index"] + 1
+    before = snapshot(output)
+
+    with pytest.raises(ConfigError, match=message):
+        settle_rejudgments(output, rejected, binding)
+
+    assert snapshot(output) == before
+    assert settle_rejudgments(output, valid, binding) == 2
+    store = RolloutStore.read(output, import_legacy=False)
+    settled = {logical_rollout_id(row): row for row in store.selected("success")}
+    for failure in failures:
+        row = settled[logical_rollout_id(failure)]
+        assert row["reward"] == 0.5 and row["response"] == ANSWER
+        assert row["_ng_run_id"] == failure["_ng_run_id"]
+        assert row["_ng_attempt_index"] == failure["_ng_attempt_index"]
+    assert store.manifest.pending_rejudge == {}
+
+
+def test_settlement_refuses_an_admission_withdrawn_after_binding(tmp_path):
+    output, [failure] = _run(tmp_path, judge_failures=1)
+    binding = _admit_binding(output)
+    identity = logical_rollout_id(failure)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        store.withdraw_rejudgment(identity, binding["admitted"][identity].operation_id, unsaved_judge_failure=True)
+    before = snapshot(output)
+
+    with pytest.raises(ConfigError, match="changed between re-judgment and settlement"):
+        settle_rejudgments(output, [_judged_answer(failure)], binding)
+
+    assert snapshot(output) == before
+    assert due_judge_failures(output) == [identity]
+
+
+@pytest.mark.parametrize("recover", ["bind", "settle"])
+def test_saved_rejudgment_is_closed_after_an_interruption_without_being_counted_twice(tmp_path, recover):
+    output, [failure] = _run(tmp_path, judge_failures=1)
+    binding = _admit_binding(output)
+    identity = logical_rollout_id(failure)
+    pending = binding["admitted"][identity]
+    result = _judged_answer(failure) | {
+        "_ng_run_id": failure["_ng_run_id"],
+        "_ng_attempt_index": failure["_ng_attempt_index"],
+        "_ng_rejudged_failure_id": failure["_ng_failure_id"],
+        "_ng_rejudge_operation_id": pending.operation_id,
+        "_ng_rejudge_admitted_at": pending.admitted_at,
+    }
+    with RolloutStore.open_for_rejudgment(output) as store:
+        assert store.record_rejudgment(failure, result)
+    # The outcome is durable, but the pass stopped before closing its admission.
+    saved = output.read_bytes()
+    assert RolloutStore.read(output, import_legacy=False).manifest.pending_rejudge
+
+    if recover == "bind":
+        assert bind_judge_failures(output)["failures"] == {}
+    else:
+        binding["settled_operations"] = {pending.operation_id}
+        assert settle_rejudgments(output, [result], binding) == 0
+        after = snapshot(output)
+        assert settle_rejudgments(output, [result], binding) == 0
+        assert snapshot(output) == after
+
+    assert output.read_bytes() == saved
+    assert RolloutStore.read(output, import_legacy=False).manifest.pending_rejudge == {}
+    assert due_judge_failures(output) == []
+
+
+def test_judge_only_binding_refuses_a_saved_run_without_a_failure_cap(tmp_path):
+    output, _ = _run(tmp_path, judge_failures=1)
+    path = manifest_path_for(output)
+    manifest = orjson.loads(path.read_bytes())
+    manifest.pop("max_rollout_attempts")
+    path.write_bytes(orjson.dumps(manifest))
+    before = snapshot(output)
+
+    with pytest.raises(ConfigError, match="no saved failure cap"):
+        bind_judge_failures(output)
+
+    assert snapshot(output) == before

@@ -24,7 +24,7 @@ from resources_servers.agentic_if_realworld.app import (
 from resources_servers.agentic_if_realworld.benchmark import scoring
 from resources_servers.agentic_if_realworld.benchmark.core import digest, read, write
 from resources_servers.agentic_if_realworld.benchmark.synthetic import delivery, review
-from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
+from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError, gym_response_completion
 
 
 @pytest.fixture
@@ -80,7 +80,8 @@ def test_judge_startup_requires_key_only_when_serving(monkeypatch):
         server.setup_webserver()
 
 
-def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, monkeypatch):
+@pytest.mark.parametrize("status", [401, 403])
+def test_http_verify_rejected_credentials_preserves_saved_answer(verifier, monkeypatch, status):
     from resources_servers.agentic_if_realworld.tests.test_transport import Response
 
     calls = []
@@ -88,7 +89,7 @@ def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, mon
     async def request(*args, **kwargs):
         calls.append(1)
         if len(calls) == 1:
-            return Response(401, {"error": "bad credentials"})
+            return Response(status, {"error": "bad credentials"})
         payload = json.loads(kwargs["json"]["messages"][0]["content"].split("UNTRUSTED_EVALUATION_PAYLOAD:\n", 1)[1])
         return Response(
             200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(payload))}}]}
@@ -112,7 +113,8 @@ def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, mon
     saved = {path: path.read_bytes() for path in (verifier.receipt_dir / "model").iterdir()}
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         response = client.post("/verify", json=body)
-        assert response.status_code == 500 and len(calls) == 1
+        assert response.status_code == status and len(calls) == 1
+        assert f"http_status={status}" in response.json()["detail"] and "attempt0.json" in response.json()["detail"]
         assert not list(verifier.receipt_dir.glob("judges/*/result.json"))
         monkeypatch.setenv("SYNTHETIC", "corrected-key")
         response = client.post("/verify", json=body)
@@ -413,6 +415,8 @@ def test_native_response_rewards_without_model_receipts(native, text, verdict, r
         "native_action",
         "two_messages",
         "error",
+        "native_finish_reason",
+        "native_stop_reason",
     ],
 )
 def test_native_technical_failures_are_masked(native, damage):
@@ -447,7 +451,11 @@ def test_native_technical_failures_are_masked(native, damage):
         response["output"].append(deepcopy(response["output"][0]))
     elif damage == "error":
         response["error"] = {"code": "server_error", "message": "Unavailable"}
-    result = asyncio.run(verifier.verify(VerifyRequest.model_validate(body)))
+    elif damage in {"native_finish_reason", "native_stop_reason"}:
+        response[damage] = "repetition" if damage == "native_finish_reason" else "repetition_detected"
+    request = VerifyRequest.model_validate(body)
+    assert gym_response_completion(request.response)["choices"][0]["finish_reason"] == "incomplete"
+    result = asyncio.run(verifier.verify(request))
     assert (result.scoring_status, result.reward, result.mask_sample) == (
         "not_scored",
         0,

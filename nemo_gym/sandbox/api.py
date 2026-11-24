@@ -25,9 +25,12 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
+
+import anyio
 
 from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.sandbox.failures import sandbox_failure
@@ -43,14 +46,18 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxBackgroundServices,
+    SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
     SupportsSandboxIndependentUploads,
+    SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     SupportsSandboxSidecars,
+    SupportsSandboxSnapshot,
     create_provider,
 )
+from nemo_gym.sandbox.providers.base import SupportsSandboxExecScopedProcesses
 from nemo_gym.sandbox.resource_telemetry import (
     ResourceProvider,
     ResourceSampler,
@@ -143,6 +150,19 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
         return_code=int(exit_text) if parsed else SANDBOX_PTY_RUNTIME_RETURN_CODE,
         error_type=None if parsed else "pty",
     )
+
+
+STOP_TIMEOUT_S = 120.0
+"""How long :meth:`AsyncSandbox.stop` and :meth:`AsyncSandbox.disconnect` may take by default."""
+
+
+async def _close_private_session(session: SandboxPtySession) -> None:
+    """Close a terminal session a one-shot exec opened, even when its request is being cancelled.
+
+    Otherwise a cancelled request would leave the session, and the process it runs, in the sandbox.
+    """
+    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
+        await session.close()
 
 
 class SandboxPty:
@@ -342,7 +362,7 @@ class SandboxPty:
         except (TimeoutError, asyncio.TimeoutError):
             return _pty_timeout_result(command, timeout_s, reusable=True)
         finally:
-            await session.close()
+            await _close_private_session(session)
         return SandboxExecResult(
             stdout=stdout.decode(errors="replace"),
             stderr=None if pty else stderr.decode(errors="replace"),
@@ -389,7 +409,7 @@ class SandboxPty:
             return _pty_timeout_result(command, timeout_s, reusable=False)
         finally:
             if private:
-                await session.close()
+                await _close_private_session(session)
             else:
                 try:
                     await session.reattach()  # no-op unless a timeout left it detached
@@ -560,12 +580,53 @@ class AsyncSandbox:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
+    @property
+    def provider(self) -> SandboxProvider:
+        """The provider this sandbox runs on."""
+        return self._provider
+
+    @property
+    def owns_provider(self) -> bool:
+        """Whether ``stop()`` also closes the provider; false for a sandbox on a provider shared with others."""
+        return self._owns_provider
+
+    @property
+    def started(self) -> bool:
+        """Whether the sandbox is started or connected and not yet stopped, so its operations can be called."""
+        return self._handle is not None and not self._stopped
+
+    def checkpoint_exec_polling(self) -> AbstractContextManager[None]:
+        """Poll this sandbox's running commands for completion often while a harness in it stops for a checkpoint.
+
+        A no-op scope on providers without the capability. It changes how soon a command's end is seen, not
+        process signals, command deadlines or what a checkpoint waits for.
+        """
+        handle = self._require_handle()
+        if isinstance(self._provider, SupportsSandboxCheckpointPolling):
+            return self._provider.checkpoint_exec_polling(handle)
+        return nullcontext()
+
+    def parked_exec_polling(self) -> AbstractContextManager[None]:
+        """Hold completion checks of this sandbox's commands while a harness in it is paused for a checkpoint.
+
+        A provider that polls command status stops asking a sandbox that a snapshot may leave unresponsive, and
+        asks again once the scope exits; other providers use a no-op scope. The scope does not extend a command's
+        time limit: one whose limit runs out inside it fails then. Do not wait inside the scope for a command of
+        this sandbox.
+        """
+        handle = self._require_handle()
+        if isinstance(self._provider, SupportsSandboxParkedPolling):
+            return self._provider.parked_exec_polling(handle)
+        return nullcontext()
+
     async def start(
         self,
         spec: SandboxSpec | None = None,
         *,
+        snapshot_id: str | None = None,
         span_attributes: Mapping[str, Any] | None = None,
     ) -> "AsyncSandbox":
+        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image."""
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
         if self._handle is not None and not self._stopped:
@@ -576,6 +637,14 @@ class AsyncSandbox:
         if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
+        if snapshot_id is not None and not isinstance(self._provider, SupportsSandboxSnapshot):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
+
+        async def create() -> SandboxHandle:
+            if snapshot_id is None:
+                return await self._provider.create(requested_spec)
+            return await self._provider.create_from_snapshot(snapshot_id, requested_spec)
 
         if is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
@@ -591,14 +660,14 @@ class AsyncSandbox:
                 "gym.sandbox.start",
                 **{**self._resource_attributes, **requested_attributes(requested_spec)},
             ) as span:
-                handle = await self._provider.create(requested_spec)
+                handle = await create()
                 if span is not None:
                     safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
             record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
             record_sandbox_active(1, provider=provider_name)
             self._counted_active = True
         else:
-            handle = await self._provider.create(requested_spec)
+            handle = await create()
         self._handle = handle
         self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
@@ -750,6 +819,11 @@ class AsyncSandbox:
         """The user an exec runs as when it names none: ``SandboxSpec.user``, else the provider's own default."""
         return self._spec.user if self._spec is not None else None
 
+    @property
+    def default_workdir(self) -> str | None:
+        """The directory an exec runs in when it names none: ``SandboxSpec.workdir``, else the provider's own."""
+        return self._spec.workdir if self._spec is not None else None
+
     def set_default_user(self, user: str | int | None) -> None:
         """Change the default exec user of a running sandbox.
 
@@ -797,6 +871,16 @@ class AsyncSandbox:
         if name not in declared:
             raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
         return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
+
+    async def exec_processes_terminated(self) -> bool:
+        """True only when the provider proves that no process of any exec of this sandbox can still run.
+
+        Providers without exec-scoped processes (``SupportsSandboxExecScopedProcesses``)
+        cannot prove it and always return False.
+        """
+        if not isinstance(self._provider, SupportsSandboxExecScopedProcesses):
+            return False
+        return await self._provider.exec_processes_terminated(self._require_handle())
 
     async def status(self) -> SandboxStatus:
         if self._handle is None:
@@ -849,7 +933,39 @@ class AsyncSandbox:
             raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
         await provider.resume(handle)
 
-    async def stop(self) -> None:
+    async def snapshot(self, *, name: str | None = None) -> str:
+        """Start a snapshot of this sandbox and return its id at once; the sandbox keeps running.
+
+        The snapshot may not be usable yet: the provider's ``wait_snapshot_ready`` returns once it can create
+        sandboxes, and ``start(snapshot_id=...)`` creates one from it. ``name`` is stored with the snapshot, which
+        the provider's ``list_snapshots`` finds it by. Raises ``NotImplementedError`` on a provider without
+        snapshots.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxSnapshot):
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
+        return await provider.snapshot(handle, name=name)
+
+    async def stop(self, *, timeout_s: float | None = STOP_TIMEOUT_S) -> None:
+        """Stop the sandbox and release its client; a no-op once stopped, so a caller may repeat it.
+
+        The stop is shielded from anyio cancellation, which is how a client that disconnects cancels its request, so
+        a request cut short still stops the sandbox instead of leaving it to its ``ttl_s``. ``timeout_s`` bounds it, so
+        a hung provider cannot hold the caller; ``None`` means no limit. The shield does not hold against a native
+        ``task.cancel()``, such as ``asyncio.timeout``, ``asyncio.wait_for`` or a checkpoint retire, and an enclosing
+        anyio deadline is held off like any other cancellation: only ``timeout_s`` bounds the stop.
+
+        Raises:
+            TimeoutError: The stop did not finish within ``timeout_s``. Like any failed stop, it leaves the sandbox
+                to be stopped again: an owner keeps it and retries at its next close or its shutdown.
+            Exception: Whatever the provider raised.
+        """
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
+            await self._stop()
+
+    async def _stop(self) -> None:
         if self._closed:
             return
         # A failed remote stop is retryable. Do not close its client or mark the
@@ -890,16 +1006,27 @@ class AsyncSandbox:
                 raise
         self._closed = True
 
-    async def disconnect(self) -> None:
+    async def disconnect(self, *, timeout_s: float | None = STOP_TIMEOUT_S) -> None:
         """Release this client without stopping a borrowed sandbox.
 
         Use this only for a sandbox rebuilt with :meth:`connect`.
         The component that created the sandbox remains responsible for stopping it.
+        Shielded from anyio cancellation and bounded by ``timeout_s`` like :meth:`stop`, so a cancelled request
+        still releases the client.
         """
+        with anyio.CancelScope(shield=True), anyio.fail_after(timeout_s):
+            await self._disconnect()
+
+    async def _disconnect(self) -> None:
         if self._closed:
             return
         if not self._connected:
             raise RuntimeError("disconnect() is valid only for a sandbox rebuilt with connect()")
+        # Some providers allocate a client per attachment. Release that client
+        # even when the provider itself is shared across many episodes.
+        detach = getattr(self._provider, "disconnect_handle", None)
+        if detach is not None and self._handle is not None:
+            await detach(self._handle)
         if self._owns_provider:
             await self._provider.aclose()
         self._handle = None
@@ -1033,6 +1160,10 @@ class _AsyncLoopRunner:
         try:
             return future.result(timeout=self._wait_timeout_s)
         except FutureTimeoutError as e:
+            # FutureTimeoutError is the builtin TimeoutError on Python 3.11+, so a finished
+            # future here means the operation itself raised it (or finished just now).
+            if future.done():
+                return future.result()
             future.cancel()
             raise TimeoutError(
                 f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
@@ -1058,13 +1189,7 @@ class _AsyncLoopRunner:
     def run(self, operation: str, awaitable_factory: Callable[[], Awaitable[T]]) -> T:
         self._ensure_can_block(operation)
         future = asyncio.run_coroutine_threadsafe(awaitable_factory(), self._loop)
-        try:
-            return future.result(timeout=self._wait_timeout_s)
-        except FutureTimeoutError as e:
-            future.cancel()
-            raise TimeoutError(
-                f"Sandbox.{operation}() timed out waiting for the sync loop after {self._wait_timeout_s:g}s"
-            ) from e
+        return self._wait_for_result(operation, future)
 
     def close(self) -> None:
         if self._closed:

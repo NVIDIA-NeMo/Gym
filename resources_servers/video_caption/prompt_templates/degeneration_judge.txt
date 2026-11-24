@@ -1,0 +1,12 @@
+Determine whether the input text is a well-formed, non-degenerated video caption.
+
+# Caption Quality Evaluation
+1. **No degeneration or excessive repetition.** The caption remains meaningful throughout, without repetitive loops, excessive restatement of the same information, or breakdown into garbled or disconnected text.
+2. **Coherent and relevant video description.** The caption is understandable, logically organized, internally consistent, and focused on describing the video. It does not drift into unrelated commentary or filler.
+3. **No exposed reasoning or drafting.** The caption presents a finished description directly. It does not include the writer's thinking process, deliberation about what to say, or commentary about composing or revising the answer.
+
+Evaluate writing quality, not factual accuracy or coverage of video events. Length alone is not a failure, and coherent descriptions of repeated actions are acceptable.
+Return pass if the caption meets these criteria; return fail if it clearly violates any of them.
+
+# Output Format
+Return only a JSON object, either {"verdict": "pass"} or {"verdict": "fail"}. Do not include explanations, additional fields, or Markdown fences.

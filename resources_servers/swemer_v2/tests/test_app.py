@@ -25,6 +25,8 @@ multi-worker entrypoint with no module-level `app`. Both looked fine locally and
 failed once real traffic hit them, so the same tests are written here from the start.
 """
 
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -143,7 +145,7 @@ class TestDropTestPatchFiles:
 
 class _FakeSandbox:
     def __init__(self, stdout: str) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=0)
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=0)
 
     async def exec(self, command: str, timeout_s=None):
         return self._result
@@ -331,7 +333,9 @@ class TestAntiCheating:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v2.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v2_legacy_agent.yaml").read_text()
+        )
         assert config["swemer_v2_resources_server"]["resources_servers"]["swemer_v2"]["apply_anti_cheating"] is True
 
 
@@ -358,10 +362,30 @@ class TestMultiWorkerEntrypoint:
 
         import yaml
 
-        config = yaml.safe_load((Path(__file__).resolve().parent.parent / "configs" / "swemer_v2.yaml").read_text())
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swemer_v2_legacy_agent.yaml").read_text()
+        )
         for name, block in config.items():
             workers = block["resources_servers"]["swemer_v2"].get("num_workers")
             if workers and workers > 1:
                 assert "is_nemo_gym_fastapi_entrypoint(__file__)" in self._source(), (
                     f"{name} sets num_workers={workers} but the entrypoint has no module-level app"
                 )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order(tmp_path) -> None:
+    """Providers return a command's stdout and stderr apart: the script's redirect puts both on stdout, in order."""
+    header, found, _ = build_eval_script(_inputs()).partition("\ncd ")
+    assert found, "the eval script no longer begins its work with a cd line; update this split"
+    # Only the redirect may run here: never the real script, which resets a checkout.
+    assert [line for line in header.splitlines() if line and not line.startswith("#")] == ["exec 2>&1"]
+    result = subprocess.run(
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=30,
+    )
+    assert result.stdout.splitlines() == ["first", "second", "third"]
+    assert result.stderr == ""

@@ -197,6 +197,9 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     result_file_cmd = _result_file_read_command(result_file) if result_file else "true"
 
     return f"""#!/bin/bash
+# Test runners report on stderr as often as on stdout. One ordered stream keeps the graded region between the
+# markers whole on every provider: E2B returns a command's stdout and stderr apart.
+exec 2>&1
 cd {shlex.quote(inputs.workdir)} || exit 97
 set +e
 mkdir -p /workspace/test-results 2>/dev/null
@@ -328,6 +331,17 @@ async def run_verification(
                 pass
 
         await asyncio.to_thread(_persist)
+
+    if result.error_type is not None:
+        return VerificationResult(
+            # Candidate code can hang the test command; that consumes its grading budget.
+            completed=result.error_type == "timeout",
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=f"Test execution did not complete: {result.error_type}",
+        )
 
     if result.return_code == 97:
         return VerificationResult(

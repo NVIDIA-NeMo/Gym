@@ -3,12 +3,14 @@
 
 import asyncio
 import json
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import ClientResponseError
+from fastapi.testclient import TestClient
 
 from environment_servers.swe_together import app, evaluation
 from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnvironmentServer, memory_mib
@@ -83,6 +85,29 @@ def server(tmp_path, **updates):
         **updates,
     )
     return SWETEnvironmentServer.model_construct(config=config)
+
+
+@pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
+def test_run_rejects_unsupported_agent_context_before_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: object, nested: bool
+) -> None:
+    environment = server(tmp_path)
+    environment.server_client = SimpleNamespace(global_config_dict={})
+    run = AsyncMock()
+    monkeypatch.setattr(SWETEnvironmentServer, "run", run)
+    body = request().model_dump(mode="json")
+    task_input = body["task"]["task_input"]
+    target = task_input["task_data"] if nested else task_input
+    target["agent_context"] = context
+
+    with TestClient(environment.setup_webserver()) as client:
+        response = client.post("/run", json=body)
+
+    assert response.status_code == 422, response.text
+    location = ["body", "task", "task_input", *(["task_data"] if nested else []), "agent_context"]
+    assert any(error["loc"] == location and error["type"] == "extra_forbidden" for error in response.json()["detail"])
+    run.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -196,6 +221,24 @@ async def test_already_expired_budget_stops_without_snapshot_or_simulator(tmp_pa
     value.snapshots.capture.assert_not_awaited()
     llm.call.assert_not_awaited()
     assert value.messages == []
+
+
+@pytest.mark.asyncio
+async def test_context_limit_stops_without_snapshot_or_simulator(tmp_path):
+    value, llm = state(tmp_path, [])
+    turn = activation()
+    turn.response = turn.response.model_copy(
+        update={
+            "status": "incomplete",
+            "_ng_agent_observations": {
+                "records": [{"kind": "agent_invocation", "status": "incomplete", "error_type": "context_limit"}]
+            },
+        }
+    )
+    result = await server(tmp_path)._next_user_turn(value, turn)
+    assert result.kind == "stop" and result.stop_reason == "context_limit"
+    value.snapshots.capture.assert_not_awaited()
+    llm.call.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -839,6 +882,60 @@ async def test_cleanup_timeout_after_verification_keeps_the_verdict(tmp_path, mo
     assert result.result.cleanup_receipts["post_verification_error"] == "TimeoutError: "
     # The release timed out once in the protocol, and final cleanup tried it again.
     assert len(releases) == 2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_releases_the_runtime_bundle_after_its_sandboxes_stop(tmp_path, monkeypatch):
+    """The shutdown sweep starts every cleanup at once, so the bundle's release waits for the sandbox stops."""
+    environment = server(tmp_path, cleanup_timeout_seconds=1)
+    order = []
+    activated = asyncio.Event()
+
+    async def release(session_id):
+        order.append("runtime released")
+
+    async def prepare(self, value):
+        value.sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+        value.judge_sandbox = SimpleNamespace()
+        value.runtime = SimpleNamespace(release=release)
+        value.task_metadata = {"agent_kwargs": {}}
+        value.prompt = "first instruction"
+
+    async def stop(self, value, role):
+        await asyncio.sleep(0.05)
+        order.append(role + " sandbox stopped")
+
+    async def post(name, path, *, json, cookies, headers=None, _control=False):
+        if path == "/v1/agent_sessions":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            data = {"agent_session_id": json.agent_session_id, "cleanup_confirmed": True}
+        else:
+            activated.set()
+            await asyncio.Event().wait()
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    async def payload(response):
+        return response.payload
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", payload)
+    environment.server_client = SimpleNamespace(post=post)
+    episode = asyncio.create_task(environment.run_request(request()))
+    await asyncio.wait_for(activated.wait(), 5)
+
+    await environment.finish_running_cleanups()
+    episode.cancel()
+    await asyncio.gather(episode, return_exceptions=True)
+
+    assert sorted(order[:2]) == ["candidate sandbox stopped", "judge sandbox stopped"]
+    assert order[2:] == ["runtime released"]
 
 
 @pytest.mark.parametrize(

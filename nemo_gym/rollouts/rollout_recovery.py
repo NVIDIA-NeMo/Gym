@@ -42,7 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.secret_utils import mask_url_passwords
+from nemo_gym.config.secret_utils import is_credential_name, mask_url_passwords
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     AGENT_TIMEOUT,
@@ -61,6 +61,7 @@ from nemo_gym.core.failure_kinds import (
     FailureClassificationConfig,
     FailureStage,
     classify_failure,
+    is_namespaced,
     is_registered,
     is_server_status,
 )
@@ -136,6 +137,16 @@ def has_recorded_grade(row: Mapping[str, Any]) -> bool:
     return row.get("evaluation_completed") is True
 
 
+def unsettled_masked_note(coverage: Mapping[str, Any]) -> str:
+    """Why infrastructure-masked results are not settled, for an incomplete-run message; empty when none is."""
+    if not coverage.get("masked_exhausted"):
+        return ""
+    return (
+        f"{coverage['masked_exhausted']} infrastructure-masked result(s) spent their attempt budget "
+        "(masked_exhausted): continue with gym eval resubmit --recover --extend-attempts N."
+    )
+
+
 def _row_failure_kind(row: Mapping[str, Any]) -> Any:
     """The selected failure event's kind when the row selects one (None when that event is missing), else the row's."""
     events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")
@@ -166,7 +177,7 @@ def is_answered_agent_deadline(
 
 
 # The collector's minimal projection of a saved row's captured model calls (``COLLECT_SCRIPT`` in
-# ``nemo_gym.orchestration.recovery`` writes it in ``captured_model_calls``'s normalized shape).
+# ``nemo_gym.eval.recovery.planner`` writes it in ``captured_model_calls``'s normalized shape).
 COLLECTED_MODEL_CALLS_KEY = "_ng_collected_model_calls"
 # Faulted model calls own an agent's deadline when they took at least this share of its window.
 AGENT_TIMEOUT_FAULT_SHARE = 0.25
@@ -427,8 +438,9 @@ def _masked_evaluation_side_kind(
 
     The rules ``masked_infrastructure_kind`` and ``masked_kept_answer_kind`` share, all but the saved answer: the row
     is masked by the Environment Server that graded it, is no failure row, omitted stand-in or re-judgment, and its
-    ``failure_kind`` is registered, evaluation-side through the shared classifier, not one whose saved answer is graded
-    again (``_MASKED_REGRADE_KINDS``) and not a ``transport_*`` verify call.
+    ``failure_kind`` is registered, or namespaced with the ``retry`` action its owner recorded and no model
+    attribution. The kind is evaluation-side through the shared classifier (or carries a recorded ``retry``), not one
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``) and not a built-in ``transport_*`` verify call.
     """
     if (
         row.get("mask_sample") is not True
@@ -453,12 +465,14 @@ def _masked_evaluation_side_kind(
             http_status=status,
             config=classification,
         )
+    retry_declared = row.get("failure_outcome_action") == OutcomeAction.RETRY
+    namespaced_retry = retry_declared and row.get("failure_outcome_attribution") != FailureClass.MODEL
     if (
         not isinstance(kind, str)
-        or not is_registered(kind)
-        or (selected_class != FailureClass.EVALUATION and row.get("failure_outcome_action") != OutcomeAction.RETRY)
+        or not (is_registered(kind) or (is_namespaced(kind) and namespaced_retry))
+        or (selected_class != FailureClass.EVALUATION and not retry_declared)
         or kind in _MASKED_REGRADE_KINDS
-        or kind.startswith("transport_")
+        or (not is_namespaced(kind) and kind.startswith("transport_"))
     ):
         return None
     return kind
@@ -471,11 +485,14 @@ def masked_infrastructure_kind(
 
     A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
     reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
-    run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action (honored
-    whatever the attribution), the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
-    model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
-    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result. So does a
-    saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its verifier could grade of it.
+    run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action,
+    the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed
+    attempt and a later attempt supersedes it. A recorded ``retry`` is honored for a registered kind whatever its
+    attribution, but for a namespaced kind only when it is not attributed to the model. A model-class kind, no kind,
+    an unregistered kind, a namespaced kind without a recorded ``retry`` or attributed to the model, and the kinds
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a built-in ``transport_*`` verify call)
+    keep the masked row as the result. So does a saved answer (``_keeps_saved_answer``): it is never sampled again,
+    whatever its verifier could grade of it.
     """
     kind = _masked_evaluation_side_kind(row, classification=classification)
     return None if kind is None or _keeps_saved_answer(row) else kind
@@ -499,10 +516,16 @@ def _keeps_saved_answer(row: Mapping[str, Any]) -> bool:
 
     Same facts as recovery's saved-answer test: a collector projection's own flag, else the retained generation of the
     response (``has_saved_generation``, which leaves out a no-generation placeholder) or of a native partial response.
+    A recorded grade (``has_recorded_grade``) always keeps it. An agent-stage fault whose owner recorded ``retry`` and
+    has no grade keeps no answer: its response is the failed attempt's partial transcript, whatever its status.
     """
+    if has_recorded_grade(row):
+        return True  # A graded result stays the result, whatever the collector's flag or the stage's retry says.
     flag = row.get("_ng_collected_saved_answer")
     if isinstance(flag, bool):
         return flag
+    if failure_stage(row) == "agent" and row.get("failure_outcome_action") == OutcomeAction.RETRY:
+        return False
     answer = row.get("response") if "response" in row else row.get("_ng_failure_partial_response")
     return has_saved_generation({"response": answer}) or keeps_partial_response(row)
 
@@ -611,6 +634,7 @@ _COLLECTION_OPTIONS = frozenset(
         "checkpoint_timeout_s",
         "dispatch_budget_s",
         "drain_margin_s",
+        "dispatch_reservation_interval_s",
         "dispatch_longest_first",
         "retry_terminal_timeouts",
         "allow_unsafe_resume",
@@ -838,6 +862,37 @@ def _without_runtime_options(value: Any) -> Any:
     return result
 
 
+def _is_nested_interpolation(text: str, start: int) -> bool:
+    """Whether the match at ``start`` sits inside an unclosed ``${`` interpolation.
+
+    A reference nested in another interpolation (an ``oc.select`` default, a URL
+    template) must stay valid OmegaConf grammar when a marker replaces it.
+    """
+    depth = 0
+    index = 0
+    while index < start:
+        if text.startswith("${", index):
+            depth += 1
+            index += 2
+        elif text[index] == "}" and depth:
+            depth -= 1
+            index += 1
+        else:
+            index += 1
+    return depth > 0
+
+
+def _grammar_safe_marker(marker: str, match: re.Match[str]) -> str:
+    """``marker`` as-is at the top level, single-quoted when nested in an interpolation.
+
+    A bare ``<runtime:x>`` / ``<redacted>`` marker is a plain string on its own, but breaks
+    OmegaConf's grammar inside another ``${...}`` (``token recognition error at: '<'``).
+    Quoting makes the surrounding resolver read it as a string literal that resolves to the
+    same text. The top-level form is byte-identical, so already-persisted identities are unchanged.
+    """
+    return f"'{marker}'" if _is_nested_interpolation(match.string, match.start()) else marker
+
+
 def _normalize_runtime_references(value: Any) -> Any:
     """Keep recognized connection references stable wherever clients nest them.
 
@@ -856,33 +911,18 @@ def _normalize_runtime_references(value: Any) -> Any:
             operational = reference in _SERVER_RUNTIME_OPTIONS or (
                 len(parts) == 4 and parts[1] in _SERVER_KINDS and parts[3] in _SERVER_RUNTIME_OPTIONS
             )
-            return f"<runtime:{reference}>" if operational else match[0]
+            return _grammar_safe_marker(f"<runtime:{reference}>", match) if operational else match[0]
 
         return re.sub(r"\$\{([^{}]+)\}", normalize, value)
     return value
 
 
-# A setting holding a credential, matched on its name lower-cased with `-`, `.`, spaces and case changes as `_`:
-# `exa_api_key`, `X-Api-Key`, `service_key`, `Authorization`, `X-Session`, `X_TOKEN`, `my_service_pw`, but not
-# `max_tokens`, `author`, `reference_key` or `record_terminal_session`. A `..._key` counts only after a word that names
-# an account or a service, since other `..._key` settings (`metric_key`, `reference_key`) select what is measured.
-_CREDENTIAL_NAME = re.compile(
-    r"api_?key|secret|passw(or)?d|credential|private_?key|access_?key|cookie"
-    r"|(^|_)(token|pw|pwd|pass|bearer|o?auth)$|(^|_)o?auth(orization|entication)?(_|$)"
-    r"|(^|_)(service|client|signing|license|master|account|subscription|encryption|session|app)_key$"
-    r"|^(x_)?session(_id)?$"
-)
 _REDACTED = "<redacted>"
 # An environment variable or config reference by name, a `NAME=value` assignment, and an HTTP credential scheme.
 _ENV_REFERENCE = re.compile(r"\$\{oc\.env:\s*([A-Za-z_][A-Za-z0-9_]*)[^{}]*\}")
 _CONFIG_REFERENCE = re.compile(r"\$\{([A-Za-z_][\w.\-]*)\}")
 _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$", re.DOTALL)
 _HTTP_CREDENTIAL = re.compile(r"(?i)^(bearer|basic)\s+\S+$")
-
-
-def _is_credential_name(name: object) -> bool:
-    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name))
-    return bool(_CREDENTIAL_NAME.search(re.sub(r"[\s.\-]", "_", normalized).lower()))
 
 
 def _credential_safe(value: Any, *, secret: bool = False) -> Any:
@@ -895,9 +935,9 @@ def _credential_safe(value: Any, *, secret: bool = False) -> Any:
     """
     if isinstance(value, dict):
         named = value.get("name", value.get("key"))
-        pair = isinstance(named, str) and _is_credential_name(named)
+        pair = isinstance(named, str) and is_credential_name(named)
         return {
-            key: _credential_safe(item, secret=secret or _is_credential_name(key) or (pair and key == "value"))
+            key: _credential_safe(item, secret=secret or is_credential_name(key) or (pair and key == "value"))
             for key, item in value.items()
         }
     if isinstance(value, list):
@@ -908,10 +948,14 @@ def _credential_safe(value: Any, *, secret: bool = False) -> Any:
         return _REDACTED
     if not isinstance(value, str):
         return value
-    value = _ENV_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1]) else m[0], value)
-    value = _CONFIG_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1].split(".")[-1]) else m[0], value)
+    value = _ENV_REFERENCE.sub(
+        lambda m: _grammar_safe_marker(_REDACTED, m) if is_credential_name(m[1]) else m[0], value
+    )
+    value = _CONFIG_REFERENCE.sub(
+        lambda m: _grammar_safe_marker(_REDACTED, m) if is_credential_name(m[1].split(".")[-1]) else m[0], value
+    )
     assignment = _ASSIGNMENT.match(value)
-    if assignment and _is_credential_name(assignment[1]):
+    if assignment and is_credential_name(assignment[1]):
         return f"{assignment[1]}={_REDACTED}"
     credential = _HTTP_CREDENTIAL.match(value)
     return f"{credential[1]} {_REDACTED}" if credential else mask_url_passwords(value)
@@ -1202,7 +1246,7 @@ _SEMANTIC_ASSET_PATH = re.compile(r"(^|_)(prompt|prompts|template|templates|rubr
 def _is_semantic(key: str) -> bool:
     segments = key.split(".")
     # A credential is redacted, so only its presence can differ; the key used does not change what is measured.
-    if any(_is_credential_name(segment) for segment in segments):
+    if any(is_credential_name(segment) for segment in segments):
         return False
     # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
     if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
@@ -1368,7 +1412,7 @@ class RunManifest(BaseModel):
         """Whether a saved configuration digest names this configuration, in this or an earlier recorded form."""
         return saved_digest == self.config_digest or saved_digest in _LEGACY_CONFIG_DIGESTS.get(self.config_digest, {})
 
-    def write(self, path: Path) -> None:
+    def write(self, path: Path, *, write_config_identity: bool = True) -> None:
         # Publish a complete manifest, or leave the previous one intact. An empty pending_rejudge is omitted so a
         # manifest without admissions keeps the version-2 shape that readers without the field accept.
         value = self.model_dump(mode="json")
@@ -1377,7 +1421,7 @@ class RunManifest(BaseModel):
         atomic_write_json(path, value)
         # The identity behind config_digest, so a later resume can name the settings that differ. Readers trust it only
         # while its digest is the manifest's config_digest.
-        if self.config_digest in _CONFIG_IDENTITIES:
+        if write_config_identity and self.config_digest in _CONFIG_IDENTITIES:
             atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[self.config_digest], mode=0o600)
 
     @classmethod
