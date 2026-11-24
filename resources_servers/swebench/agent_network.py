@@ -62,7 +62,7 @@ class AgentNetworkConfig(BaseModel):
                 raise ValueError(
                     "enforce_agent_no_network needs sandbox_model_server, the model server the agent calls"
                 )
-            if "network_policy" in self.sandbox_config.get("provider_options", {}):
+            if "network_policy" in (self.sandbox_config.get("provider_options") or {}):
                 raise ValueError(
                     "Set enforce_agent_no_network or sandbox_config.provider_options.network_policy, not both"
                 )
@@ -80,7 +80,8 @@ class AgentNetworkConfig(BaseModel):
         A model server on a loopback host cannot be reached from the sandbox; that refuses the
         seed with ``ResourcesSeedRejectedError`` (HTTP 422), so it fails once instead of being retried.
         """
-        options = dict(self.sandbox_config.get("provider_options", {}))
+        # A YAML `provider_options:` key whose children are all commented out loads as null.
+        options = dict(self.sandbox_config.get("provider_options") or {})
         if for_agent and self.enforce_agent_no_network:
             (provider_name,) = provider_config
             try:

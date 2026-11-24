@@ -126,6 +126,16 @@ async def test_other_provider_options_are_kept(make_server) -> None:
     assert "network_policy" not in sandbox_config["provider_options"], "the shared config must not be mutated"
 
 
+@pytest.mark.parametrize("enforce", [False, True], ids=["off", "on"])
+async def test_null_provider_options_are_no_options(make_server, enforce) -> None:
+    """A YAML `provider_options:` key whose children are all commented out loads as null."""
+    server = make_server(enforce=enforce, sandbox_config={"provider_options": None})
+    agent = await _create(server, AGENT_SANDBOX)
+    evaluation = await _create(server, EVAL_SANDBOX)
+    assert ("network_policy" in agent.spec.provider_options) is enforce
+    assert evaluation.spec.provider_options == {}
+
+
 async def test_unreachable_model_host_refuses_the_seed(make_server) -> None:
     server = make_server(model_url="http://127.0.0.1:8000")
     with pytest.raises(HTTPException) as refused:
