@@ -154,6 +154,7 @@ from nemo_gym.rollouts.rollout_records import (
     NG_TRANSPORT_RESENDS_KEY,
     RUN_ID_KEY,
     RolloutRecord,
+    _transport_resends,
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
@@ -3433,8 +3434,9 @@ def _failure_export_metrics(
     landed: set,
     *,
     histories: Sequence[RolloutStore] = (),
+    rows: Iterable[Mapping[str, Any]] = (),
 ) -> Dict[str, int]:
-    """Failure and retry counts for exporters, read from the failures sidecars.
+    """Failure, retry and transport resend counts for exporters, read from the failures sidecars.
 
     The sidecars hold every failed attempt of the run, across resumes, so these are run totals rather
     than one job's. ``identity`` keys a sidecar row the way ``landed`` keys the rollouts that have a row.
@@ -3445,11 +3447,14 @@ def _failure_export_metrics(
     current cap for a row written before the cap was recorded. ``retries/max_attempts`` is that cap, and is
     left out when the rollouts were collected with different caps. A ``record_omitted_rollouts`` row is no failed
     attempt; an interrupted one is still the rollout's latest execution, so an older failure's class is not counted.
+    ``transport/resends`` and ``transport/attempts_counted`` add up the counts that the sidecars and ``rows`` (the
+    shards' own rows) carry, one per saved attempt, as ``RolloutStore.failure_export_metrics`` does for a shard with
+    attempt history; both are left out when no row carries one.
     """
     if histories:
         parts = [history.failure_export_metrics() for history in histories]
         if failures_fpaths:
-            parts.append(_failure_export_metrics(failures_fpaths, identity, landed))
+            parts.append(_failure_export_metrics(failures_fpaths, identity, landed, rows=rows))
         merged: Counter[str] = Counter()
         for part in parts:
             merged.update({key: value for key, value in part.items() if key != "retries/max_attempts"})
@@ -3463,6 +3468,9 @@ def _failure_export_metrics(
     latest_failure: Dict[Any, Dict[str, Any]] = {}
     # Every class the sidecars name starts at 0: a reopened tracking run keeps a class's last value until it is sent.
     failed: Counter = Counter()
+    # By saved attempt. A failed /run kept as evidence counts only for an attempt no other row saved.
+    resends: Dict[Any, Optional[int]] = {}
+    evidence_resends: Dict[Any, Optional[int]] = {}
     for fpath in failures_fpaths:
         if not fpath.exists():
             continue
@@ -3472,8 +3480,11 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
+                attempt = (identity(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0))
                 if is_non_superseding_rollout_row(row):
+                    evidence_resends[attempt] = _transport_resends(row)
                     continue
+                resends[attempt] = _transport_resends(row)
                 latest[identity(row)] = row
                 if is_omitted_rollout_row(row):
                     continue
@@ -3488,6 +3499,9 @@ def _failure_export_metrics(
         if key not in landed and not is_omitted_rollout_row(row)
     )
     recorded_caps = set(caps.values()) or {current_cap}
+    for row in rows:
+        resends[(identity(row), row.get(ATTEMPT_INDEX_KEY_NAME, 0))] = _transport_resends(row)
+    counted = [count for count in {**evidence_resends, **resends}.values() if count is not None]
     return {
         "retries/attempts": sum(attempts.values()),
         # A rollout that landed after n failed attempts was dispatched n + 1 times.
@@ -3495,6 +3509,7 @@ def _failure_export_metrics(
         "retries/at_cap": sum(1 for key, n in attempts.items() if key not in landed and n >= caps[key]),
         **({"retries/max_attempts": recorded_caps.pop()} if len(recorded_caps) == 1 else {}),
         **{f"coverage/failed/{name}": count for name, count in sorted(failed.items())},
+        **({"transport/resends": sum(counted), "transport/attempts_counted": len(counted)} if counted else {}),
     }
 
 
@@ -7304,6 +7319,7 @@ class RolloutAggregationHelper(BaseModel):
                 lambda row: _identity_key(row, group),
                 {_identity_key(r, group) for r in results} if failures_fpaths else set(),
                 histories=histories,
+                rows=legacy_results,
             )
             metrics = {
                 **failure_metrics,

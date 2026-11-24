@@ -375,7 +375,9 @@ that produced it.
 The run's exported metrics add these up over every saved attempt, failed and omitted ones included:
 `transport/resends` is the total and `transport/attempts_counted` the number of attempts that carried a count.
 Both are left out when no attempt carried one, and shards written by Gym versions that did not record resends add
-nothing to either.
+nothing to either. Aggregating shards adds up the counts in their rows and failures sidecars, with or without attempt
+history. A merged file holds only the shards' scored rows, so aggregating it alone counts only those attempts;
+aggregate the shards to include failed and omitted ones.
 
 ## Run Provenance
 

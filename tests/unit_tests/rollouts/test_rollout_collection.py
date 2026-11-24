@@ -14997,6 +14997,41 @@ class TestFailureExportMetrics:
     def test_no_sidecar_rows_export_no_class(self, tmp_path: Path) -> None:
         assert self._counts(tmp_path, [], set()) == {}
 
+    def test_transport_resends_count_once_per_saved_attempt(self, tmp_path: Path) -> None:
+        from nemo_gym.rollouts.rollout_collection import (
+            NG_OMITTED_ROLLOUT_KEY,
+            NG_TRANSPORT_RESENDS_KEY,
+            NG_UNROUTED_RUN_ERROR_KEY,
+        )
+
+        def attempt(task: int, index: int, resends: int, **fields) -> dict:
+            return {
+                TASK_INDEX_KEY_NAME: task,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: index,
+                NG_TRANSPORT_RESENDS_KEY: resends,
+                **fields,
+            }
+
+        evidence = {NG_OMITTED_ROLLOUT_KEY: True, NG_UNROUTED_RUN_ERROR_KEY: True}
+        sidecar = tmp_path / "rollouts_failures.jsonl"
+        sidecar.write_bytes(
+            b"".join(
+                orjson.dumps(row) + b"\n"
+                for row in (
+                    attempt(0, 0, 1, **{NG_FAILURE_CLASS_KEY: "agent_run_error"}),
+                    # Kept as evidence for an attempt another row saved: that row's count stands.
+                    attempt(0, 0, 5, **evidence),
+                    # Kept as evidence for an attempt nothing else saved: counted.
+                    attempt(1, 0, 3, **evidence),
+                )
+            )
+        )
+        identity = lambda row: (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+        metrics = _failure_export_metrics([sidecar], identity, {(0, 0)}, rows=[attempt(0, 1, 2, reward=1.0)])
+
+        assert (metrics["transport/resends"], metrics["transport/attempts_counted"]) == (6, 3)
+
 
 class TestRecordedAttemptCap:
     """Review finding 4338960587 (follow-up to #4852): at_cap uses the cap the run collected with."""
