@@ -185,7 +185,7 @@ _TESTED_OUTCOME_VERSION = "1.17.11"
 # Error classification of OpenCode 2 (its errors translated by opencode2.store) is validated on this release.
 _TESTED_OPENCODE2_OUTCOME_VERSION = OPENCODE_V2_VERSION
 # Restore outcomes that are expected rather than faults: the checkpoint was taken before the launch's relay started,
-# or the launch holds episode MCP tool grants, which only a relaunch renders for the replacement attempt. They are
+# or the launch or its replacement attempt has MCP tools, which only a relaunch renders for that attempt. They are
 # logged at INFO; every other reason a launch cannot resume in place, a launch without a relay included, at WARNING:
 # the relay runs on OpenCode's own binary, so every image can run it. ``relay_gone`` is also what the check answers
 # for a relay that died or was restarting when the snapshot was taken, which it cannot tell apart.
@@ -1615,7 +1615,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         if state.keeps_processes:
             try:
-                await self._check_restored_launch(state, saved_session)
+                await self._check_restored_launch(state, saved_session, replacement=body)
             except BaseException:
                 # The seed is retried, and the retry must decide again: a session left re-bound would skip the
                 # check and relaunch beside the launch the restore brought back.
@@ -1629,7 +1629,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         state.restored = None
         return state
 
-    async def _check_restored_launch(self, state: OpenCodeSandboxSession, saved: Mapping[str, Any]) -> None:
+    async def _check_restored_launch(
+        self, state: OpenCodeSandboxSession, saved: Mapping[str, Any], *, replacement: AgentSeedSessionRequest
+    ) -> None:
         """Decide what becomes of the launch a process-keeping restore brought back: take it over, or end it.
 
         Only a launch whose supervisor held a confirmed pause at the checkpoint can still run. It is taken over
@@ -1637,6 +1639,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         ended (its cleanup receipt is there): the take-over then just collects what it left, without the relay.
         Otherwise it is ended, without letting it run again, and the next launch reprompts the saved conversation as
         after a files-only restore. A check that cannot run twice fails the re-bind, so the retried seed checks again.
+        So does a stop or an abandon that cannot be confirmed, so nothing is relaunched beside the launch.
+        ``replacement`` is the seed of the attempt that continues the session.
         """
         pause_seq, identity = saved.get("pause_seq"), saved.get("supervisor_identity")
         if pause_seq is None or identity is None:
@@ -1677,11 +1681,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     f"{verdict.detail}"
                 ),
             )
-        # The running OpenCode keeps the MCP servers, with their URLs and credentials, of the attempt that launched
-        # it (``state.request`` until the re-bind ends). A relaunch renders the replacement attempt's grants.
+        # A running OpenCode keeps the MCP servers, with their URLs and credentials, it was launched with: the
+        # configured ones overlaid by the grants of the attempt that launched it (``state.request`` until the re-bind
+        # ends). Only a relaunch renders the replacement attempt's, so a launch with MCP tools on either side, old or
+        # replacement, is relaunched rather than taken over.
         reason, detail = (verdict.reason, verdict.detail) if isinstance(verdict, NotResumable) else (None, None)
-        if reason is None and any(access.kind == "mcp" for access in state.request.tool_accesses):
-            reason, detail = "mcp_tool_grants", "the launch holds the previous attempt's MCP tool grants"
+        if reason is None and any(
+            access.kind == "mcp"
+            for request in (state.request, replacement)
+            for access in self.effective_tool_accesses(request)
+        ):
+            reason, detail = "mcp_tool_grants", "the launch or its replacement attempt has MCP tools"
         if reason is None or reason == "launch_finished":
             state.adoption = RestoredLaunch(pause_seq=pause_seq, identity=identity)
             state.adoption_ended = reason == "launch_finished"
@@ -1700,7 +1710,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
         Such a launch cannot be taken over: no supervisor is named. Its supervisor may still wait in the old launch
         directory, for example holding the launch for a pause it was asked before it started, so it is told to stop
-        before the relaunch. A launch that had ended answers from its receipt.
+        before the relaunch. A launch that had ended answers from its receipt. A stop that cannot be confirmed is
+        logged and raises: the re-bind fails, rather than relaunch beside the launch, and its retry stops it again.
         """
         session = state.require_session()
         timeout = self.config.session_close_timeout_seconds
@@ -1715,6 +1726,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 )
         except Exception:
             LOG.exception("OpenCode could not stop the restored launch of session %s", state.request.agent_session_id)
+            raise
 
     async def _abandon_restored_launch(self, state: OpenCodeSandboxSession, identity: str, *, reason: str) -> None:
         """End a restored launch that will not be taken over, so nothing of it runs beside its relaunch.

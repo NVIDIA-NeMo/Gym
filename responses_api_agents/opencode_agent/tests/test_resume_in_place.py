@@ -420,7 +420,9 @@ async def test_a_restored_launch_is_taken_over_or_ended(
     monkeypatch.setattr(opencode_app, "check_restored", check)
     monkeypatch.setattr(opencode_app, "abandon_launch", abandon)
 
-    await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+    await agent._check_restored_launch(
+        state, {"pause_seq": 3, "supervisor_identity": "10.20"}, replacement=state.request
+    )
 
     assert checks[0]["pause_seq"] == 3 and checks[0]["relay_status_path"].endswith("/launch-1/relay-status.json")
     assert (state.adoption == RestoredLaunch(pause_seq=3, identity="10.20")) is adopted
@@ -436,7 +438,9 @@ async def test_a_restored_session_without_a_held_pause_has_nothing_to_take_over(
     state = _restored_state(agent)
     monkeypatch.setattr(opencode_app, "check_restored", MagicMock(side_effect=AssertionError("not checked")))
 
-    await agent._check_restored_launch(state, {"session_root": "/s", "session_dir": "/s", "launch_started": True})
+    await agent._check_restored_launch(
+        state, {"session_root": "/s", "session_dir": "/s", "launch_started": True}, replacement=state.request
+    )
 
     assert state.adoption is None
 
@@ -459,12 +463,14 @@ async def test_a_restored_launch_without_a_held_pause_is_stopped_before_its_rela
     monkeypatch.setattr(opencode_app, "check_restored", MagicMock(side_effect=AssertionError("not checked")))
     saved = {"session_root": "/s", "session_dir": "/s", "launch_started": True}
 
-    await agent._check_restored_launch(state, saved)
+    await agent._check_restored_launch(state, saved, replacement=state.request)
 
     assert [call["session_dir"] for call in stops] == ["/sessions/s/launch-1"] and stops[0]["harness"] == "OpenCode"
     assert state.adoption is None
-    # A stop that fails is reported and the session relaunches all the same.
-    await agent._check_restored_launch(state, saved)
+    # A stop that fails is reported and fails the re-bind: the restored supervisor may still run, so nothing is
+    # relaunched beside it until a retried seed has stopped it.
+    with pytest.raises(RuntimeError, match="cleanup receipt missing"):
+        await agent._check_restored_launch(state, saved, replacement=state.request)
     assert len(stops) == 2 and "could not stop the restored launch of session s" in caplog.text
 
 
@@ -482,24 +488,60 @@ async def test_a_restored_launch_check_that_could_not_run_is_made_once_more(
     monkeypatch.setattr(opencode_app, "abandon_launch", MagicMock(side_effect=AssertionError("not abandoned")))
     caplog.set_level(logging.WARNING)
 
-    await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+    await agent._check_restored_launch(
+        state, {"pause_seq": 3, "supervisor_identity": "10.20"}, replacement=state.request
+    )
 
     assert verdicts == [] and state.adoption == RestoredLaunch(pause_seq=3, identity="10.20")
     assert "restored-launch check failed for session s (exit 255); checking once more" in caplog.text
 
 
+def _mcp_grant(url: str) -> MCPToolAccess:
+    return MCPToolAccess.model_validate(
+        {"kind": "mcp", "name": "task_tools", "required": True, "connection": {"url": url}}
+    )
+
+
 @pytest.mark.parametrize(
-    "verdict, adopted",
-    [(RestoredLaunch(pause_seq=3, identity="10.20"), False), (NotResumable("launch_finished"), True)],
-    ids=["running", "ended"],
+    "configured, launched_with, replacement, verdict, adopted",
+    [
+        # The launch's own attempt granted MCP tools: the process holds that attempt's URL and credentials.
+        (None, "http://a1.example/mcp", "http://a2.example/mcp", RestoredLaunch(pause_seq=3, identity="10.20"), False),
+        # Only the replacement attempt grants them: the running process never loaded them.
+        (None, None, "http://a2.example/mcp", RestoredLaunch(pause_seq=3, identity="10.20"), False),
+        # A configured MCP server the replacement attempt overrides: the process keeps the configured one.
+        (
+            "http://cfg.example/mcp",
+            None,
+            "http://a2.example/mcp",
+            RestoredLaunch(pause_seq=3, identity="10.20"),
+            False,
+        ),
+        # Configured alone and unchanged: relaunched as well, since only a relaunch is sure to match the attempt.
+        ("http://cfg.example/mcp", None, None, RestoredLaunch(pause_seq=3, identity="10.20"), False),
+        # A launch that had ended makes no more tool calls: its result is collected as it is.
+        (None, "http://a1.example/mcp", "http://a2.example/mcp", NotResumable("launch_finished"), True),
+    ],
+    ids=["launched_with_grants", "replacement_adds_grants", "configured_overridden", "configured_only", "ended"],
 )
-async def test_a_restored_launch_with_episode_mcp_grants_is_relaunched_unless_it_ended(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, verdict: Any, adopted: bool
+async def test_a_restored_launch_with_mcp_tools_on_either_side_is_relaunched_unless_it_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    configured: str | None,
+    launched_with: str | None,
+    replacement: str | None,
+    verdict: Any,
+    adopted: bool,
 ) -> None:
     agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    if configured is not None:
+        agent.config = agent.config.model_copy(update={"tool_accesses": [_mcp_grant(configured)]})
     state = _restored_state(agent)
-    grant = {"kind": "mcp", "name": "task_tools", "required": True, "connection": {"url": "http://r.example/mcp"}}
-    state.request = state.request.model_copy(update={"tool_accesses": [MCPToolAccess.model_validate(grant)]})
+    state.request = state.request.model_copy(
+        update={"tool_accesses": [_mcp_grant(launched_with)] if launched_with else []}
+    )
+    seed = state.request.model_copy(update={"tool_accesses": [_mcp_grant(replacement)] if replacement else []})
     ended: list[str] = []
 
     async def check(sandbox: Any, session_dir: str, **kwargs: Any) -> Any:
@@ -513,10 +555,9 @@ async def test_a_restored_launch_with_episode_mcp_grants_is_relaunched_unless_it
     monkeypatch.setattr(opencode_app, "abandon_launch", abandon)
     caplog.set_level(logging.INFO)
 
-    await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+    await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"}, replacement=seed)
 
-    # The running OpenCode keeps the previous attempt's MCP URLs and credentials: only a relaunch renders the new
-    # grants. A launch that had ended makes no more tool calls, so its result is collected as it is.
+    # A running OpenCode keeps the MCP servers it was launched with; only a relaunch renders the replacement's.
     assert (state.adoption is not None) is adopted and ended == ([] if adopted else ["10.20"])
     assert ("cannot resume in place: session s, reason mcp_tool_grants" in caplog.text) is not adopted
 
@@ -536,7 +577,9 @@ async def test_a_restored_launch_check_that_cannot_run_twice_fails_the_re_bind(
     monkeypatch.setattr(opencode_app, "abandon_launch", MagicMock(side_effect=AssertionError("not abandoned")))
 
     with pytest.raises(NgFailureEvent, match="could not check the restored launch of session s: exit 255"):
-        await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+        await agent._check_restored_launch(
+            state, {"pause_seq": 3, "supervisor_identity": "10.20"}, replacement=state.request
+        )
 
     # Nothing is known about the launch: it is neither taken over nor ended, and the retried seed checks again.
     assert len(checks) == 2 and state.adoption is None and not state.adoption_ended
@@ -561,7 +604,9 @@ async def test_a_restored_launch_that_cannot_be_ended_fails_the_re_bind(
     caplog.set_level(logging.WARNING)
 
     with pytest.raises(RuntimeError, match="left no receipt"):
-        await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+        await agent._check_restored_launch(
+            state, {"pause_seq": 3, "supervisor_identity": "10.20"}, replacement=state.request
+        )
 
     # The abandon kills and is safe to repeat: it is tried twice, then reported, and the re-bind fails, so nothing is
     # relaunched beside a launch that may still run; the retried seed checks it again.
@@ -1112,7 +1157,9 @@ async def test_only_expected_restore_fallbacks_are_logged_at_info(
     monkeypatch.setattr(opencode_app, "abandon_launch", abandon)
     caplog.set_level(logging.INFO)
 
-    await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+    await agent._check_restored_launch(
+        state, {"pause_seq": 3, "supervisor_identity": "10.20"}, replacement=state.request
+    )
 
     [cannot] = [r for r in caplog.records if "cannot resume in place" in r.getMessage()]
     [abandoned] = [r for r in caplog.records if "abandoned a restored launch" in r.getMessage()]
