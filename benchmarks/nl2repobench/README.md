@@ -5,11 +5,17 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
 ## Datasets (pick one config family)
 | Dataset | Tasks | Configs | Notes |
 |---|---|---|---|
-| Upstream NL2RepoBench | 104 | `benchmarks/nl2repobench/opencode.yaml` | pinned per-task grading images (ghcr); tests run in the agent's own workspace |
+| Upstream NL2RepoBench | 104 | `benchmarks/nl2repobench/opencode.yaml` (`opencode_sandboxed_agent.yaml` to reproduce published runs) | pinned per-task grading images (ghcr); tests run in the agent's own workspace |
 | Internal held-out sets (verified-50, legacy 75-task) | 50 / 75 | not in Gym: kept in the internal nl2repo repo (`benchmarks/`), linked into `Gym/benchmarks/` by its launchers | same resources server and configs layout |
 
 ## Harnesses (pick one config per dataset)
-- **opencode** (`responses_api_agents/opencode_sandboxed_agent`): no compaction and no pruning (`compaction.auto: false`, `prune: false` in `opencode.yaml`), so a conversation that outgrows the declared 524288-token window (`opencode_max_context_window`) ends the run with a context error instead of being summarised. It continues an idle session with `idle_nudge` (finish with `TASK_COMPLETE`), ends a looping one with `stuck_detector`, and holds OpenCode's 500-step cap as one budget across resumes.
+- **opencode** (`opencode.yaml`, `responses_api_agents/opencode_agent` on agent sessions): the resources server lends the
+  agent sandbox and `single_agent_turn_legacy` runs the episode. Same step cap (500) and no compaction as below, but one
+  activation: `opencode_agent` has no idle nudge or stuck detector yet, so a reply without a tool call ends the run.
+  The restricted modes need the OpenCode runtime staged in the lent sandbox, which this preset does not do yet: run it in
+  `official` (or another open-egress mode) until it does.
+- **opencode, legacy relay** (`opencode_sandboxed_agent.yaml`, deprecated `responses_api_agents/opencode_sandboxed_agent`
+  behind `legacy_agent`): kept to reproduce the runs below. No compaction and no pruning (`compaction.auto: false`, `prune: false` in `opencode.yaml`), so a conversation that outgrows the declared 524288-token window (`opencode_max_context_window`) ends the run with a context error instead of being summarised. It continues an idle session with `idle_nudge` (finish with `TASK_COMPLETE`), ends a looping one with `stuck_detector`, and holds OpenCode's 500-step cap as one budget across resumes.
 
 ## Network modes (`++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=<mode>`)
 | Mode | Agent sandbox | Egress | Reference-lookup protection |
@@ -18,6 +24,10 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
 | `block_target` | generic image | open | legacy pip/git/curl wrappers matching the task id only (kept unchanged for reproducing old runs; ineffective on vahid_1016 ids) |
 | `block_target_v2` | generic image | source-hosting domains denied (GitHub etc.), PyPI open | `guard_v2.py`: real package/repo identifiers, subcommand-aware pip/git/curl/uv/apt wrappers, python/node code inspection, no `-m venv` |
 | `no_internet_preinstalled` | per-task image with dependencies preinstalled | deny-all except the model host | reference repo wiped before the first turn; its editable-install metadata and same-named cargo crates scrubbed |
+
+The modes that deny egress (`no_internet_preinstalled`, and `official` with `enforce_agent_no_network: true`) need the
+`opensandbox` provider, which applies the policy, and a `sandbox_model_server`. With any other provider, or without a
+model server, the seed is refused (HTTP 422) instead of running the agent with open egress or with no model.
 
 For `no_internet_preinstalled` on the upstream 104, also set `scrub_workspace_installs=true` and `scrub_target_installs=true` (both off by default). An audit of all 104 images (2026-11-02) found the real implementation in 13 of them beyond what the default wipe reaches, and agents copied it into `/workspace`:
 - pip/uv caches holding the target's wheel (arxiv-mcp-server): `scrub_workspace_installs`.
@@ -30,8 +40,8 @@ Four targets ship vendored inside pip or setuptools in their images (six, tenaci
 
 On vahid_1016 tasks the guard identifiers come from the clone URL in `test_commands.json`; upstream tasks have no clone URL, so `block_target_v2` falls back to the task id there (the egress deny rules still apply).
 
-## OpenCode runtime in the sandbox
-`opencode.yaml` sets no runtime paths, so the OpenCode agent downloads the installer from `opencode.ai`. That works in the modes with open egress (`official`, `block_target`, `block_target_v2`) and needs no staging.
+## OpenCode runtime in the sandbox (legacy relay preset)
+`opencode_sandboxed_agent.yaml` sets no runtime paths, so the OpenCode agent downloads the installer from `opencode.ai`. That works in the modes with open egress (`official`, `block_target`, `block_target_v2`) and needs no staging.
 
 `no_internet_preinstalled` has no egress, so supply a pinned runtime the sandbox can read and make the agent refuse to start without it, so nothing is downloaded and a missing runtime fails at startup, before any sandbox is seeded or model called:
 

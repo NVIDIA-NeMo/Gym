@@ -18,16 +18,16 @@ from pathlib import Path
 from shutil import rmtree
 from time import monotonic
 from traceback import format_exc
-from typing import Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.core import SESSION_LOST, VERIFIER_ERROR, NgFailureEvent
 from nemo_gym.core.failure_kinds import JUDGE_SKIPPED
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -35,9 +35,14 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
 from resources_servers.nl2repobench.guard_v2 import derive_identifiers, install_guard_v2, network_policy_for_v2
@@ -345,11 +350,31 @@ _WORKSPACE_EXCLUDES = "--exclude=.git --exclude=__pycache__ --exclude=.venv --ex
 # positional args (-C DIR .) — it must precede them or it's silently ignored
 # (older tar) or rejected outright (newer tar, exit code 2).
 _COLLECT_COMMAND = f"tar czf /tmp/workspace.tar.gz {_WORKSPACE_EXCLUDES} -C /workspace ."
+# Printed by the collect command after the archive: its size, read in the sandbox so an oversized archive is refused
+# before any byte reaches this server.
+_COLLECT_SIZE_MARKER = "NL2REPOBENCH_WORKSPACE_TAR_BYTES="
 
 
 def _collect_command(workdir: str) -> str:
-    """_COLLECT_COMMAND for a task's own project directory (identical for /workspace)."""
-    return _COLLECT_COMMAND.replace("-C /workspace .", f"-C {shlex.quote(workdir)} .")
+    """_COLLECT_COMMAND for a task's own project directory, then the archive's size (identical for /workspace).
+
+    The archive must be a regular file the tar just wrote: a path the agent planted (a symlink to /dev/zero, say) would
+    otherwise make the download unbounded.
+    """
+    tar = _COLLECT_COMMAND.replace("-C /workspace .", f"-C {shlex.quote(workdir)} .")
+    return (
+        f"rm -f /tmp/workspace.tar.gz && {tar} && test -f /tmp/workspace.tar.gz && test ! -L /tmp/workspace.tar.gz "
+        f"&& printf '{_COLLECT_SIZE_MARKER}%s\\n' \"$(stat -c %s /tmp/workspace.tar.gz)\""
+    )
+
+
+def _collected_size(stdout: str | None) -> int | None:
+    """The archive size the collect command printed, or None when its last marker line is missing or malformed."""
+    for line in reversed((stdout or "").splitlines()):
+        if line.startswith(_COLLECT_SIZE_MARKER):
+            value = line[len(_COLLECT_SIZE_MARKER) :].strip()
+            return int(value) if value.isdigit() else None
+    return None
 
 
 # Upstream NL2RepoBench runs the agent in a generic, task-agnostic OpenHands
@@ -714,6 +739,8 @@ def _raise_on_sandbox_error(result: Any, what: str, *, timeout_is_infrastructure
 class NL2RepoBenchResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: NL2RepoBenchResourcesServerConfig
+    # An Environment Server's typed seed carries the flat task row as task_data; the base validates it into this.
+    seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = NL2RepoBenchSeedSessionRequest
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -754,6 +781,14 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             return options
         # mode == "no_internet_preinstalled", or mode == "official" with
         # enforce_agent_no_network=True: deny-all except the policy_model host below.
+        provider_name = next(iter(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())))
+        if provider_name != "opensandbox":
+            # Only OpenSandbox applies network_policy; any other provider would silently give the agent open egress,
+            # so the seed is refused instead (422, not retried).
+            raise ResourcesSeedRejectedError(
+                f"agent_network_mode={mode!r} restricts egress, which sandbox provider {provider_name!r} cannot "
+                "apply; use the opensandbox provider or an open-egress mode"
+            )
 
         # Deny-all except the model host, whatever provider_options inherited: an allow-all default or any allow rule
         # would break that contract, so the policy is rebuilt. Inherited deny rules are redundant but harmless; kept.
@@ -765,8 +800,13 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             raise TypeError("NL2RepoBench sandbox network_policy.egress must be a list")
         egress = [rule for rule in inherited_egress if isinstance(rule, dict) and rule.get("action") == "deny"]
         model_egress_target = self._model_egress_target()
-        if model_egress_target is not None:
-            egress.append({"action": "allow", "target": model_egress_target})
+        if model_egress_target is None:
+            # Deny-all with no model rule: every model call from the sandbox would fail, attempt after attempt.
+            raise ResourcesSeedRejectedError(
+                f"agent_network_mode={mode!r} allows the agent sandbox only the model server, so it needs "
+                "sandbox_model_server"
+            )
+        egress.append({"action": "allow", "target": model_egress_target})
         options["network_policy"] = {"defaultAction": "deny", "egress": egress}
 
         return options
@@ -784,7 +824,8 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             return None
 
         if target in {"0.0.0.0", "127.0.0.1", "::", "::1", "localhost"}:
-            raise ValueError(
+            # A configuration error no retry fixes: 422, not a 500 that re-dispatches the episode.
+            raise ResourcesSeedRejectedError(
                 f"NL2RepoBench task sandboxes cannot reach loopback model host {target!r}; "
                 "set NEMO_GYM_SANDBOX_MODEL_BASE_URL or launch Gym with use_absolute_ip=true"
             )
@@ -1155,11 +1196,32 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             self._unstopped_sandboxes.pop(id(sandbox), None)
 
     async def seed_session(
-        self, request: Request, body: NL2RepoBenchSeedSessionRequest
-    ) -> NL2RepoBenchSeedSessionResponse:
-        # The base binds the cookie session, releases a previous run and calls initialize_session_state.
-        await super().seed_session(body, request=request)
-        session = self._agent_sessions[str(request.session[SESSION_ID_KEY])]
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[NL2RepoBenchSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> ResourcesSeedSessionResponse | NL2RepoBenchSeedSessionResponse:
+        # The base binds the session, releases a previous run and calls initialize_session_state.
+        response = await super().seed_session(body, request=request)
+        session = self._agent_sessions.get(str(request.session[SESSION_ID_KEY]))
+        if session is None:
+            # A typed seed retried after verify released the sandbox: the episode is over.
+            raise ResourcesSessionConflictError("NL2RepoBench session's agent sandbox was already released")
+        if isinstance(body, ResourcesSeedSessionRequest):
+            # An Environment Server episode lends the agent sandbox to the session harness. The operate scope lets
+            # the harness run commands and move files but not stop the sandbox: this server stops it after collecting
+            # the workspace at verify, or at close.
+            return response.model_copy(
+                update={
+                    "sandbox_access": SandboxAccess(
+                        connection=DirectSandboxConnection(
+                            provider_config_ref=self.config.sandbox_provider,
+                            descriptor=await session.sandbox.serialize(scope="operate"),
+                        ),
+                        workdir=session.workdir,
+                    )
+                }
+            )
         return NL2RepoBenchSeedSessionResponse(
             sandbox_handle=session.sandbox_handle,
             sandbox_descriptor=session.sandbox_descriptor,
@@ -1177,22 +1239,32 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
 
         result = await sandbox.exec(_collect_command(workdir), cwd="/", timeout_s=WORKSPACE_COLLECT_TIMEOUT_S)
         error_type = getattr(result, "error_type", None)
-        if error_type not in (None, "timeout"):
+        if error_type is not None:
+            # The collect command is this server's own step, so a timeout of it, like any other provider error, says
+            # nothing about the agent's work (see _raise_on_sandbox_error).
             raise WorkspaceCollectionInfrastructureError(
                 f"Workspace collection could not run: the sandbox provider reported {error_type!r}"
             )
         if result.return_code != 0:
             details = ((result.stderr or "") + (result.stdout or "")).strip()
             return None, f"Workspace collection exited with code {result.return_code}: {details[-4000:]}"
+        size = _collected_size(result.stdout)
+        if size is None:
+            raise WorkspaceCollectionInfrastructureError("Workspace collection did not report the archive size")
+        if size > self.config.workspace_tar_max_bytes:
+            # Refused in the sandbox: an oversized archive never reaches this server's disk or memory.
+            return None, (
+                f"Collected workspace tar ({size} bytes) exceeds workspace_tar_max_bytes "
+                f"({self.config.workspace_tar_max_bytes} bytes)"
+            )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-nl2repobench-collect-") as temporary_dir:
             local_tar_path = Path(temporary_dir) / "workspace.tar.gz"
             await sandbox.download("/tmp/workspace.tar.gz", local_tar_path)
             tar_bytes = local_tar_path.read_bytes()
-        if len(tar_bytes) > self.config.workspace_tar_max_bytes:
-            return None, (
-                f"Collected workspace tar ({len(tar_bytes)} bytes) exceeds workspace_tar_max_bytes "
-                f"({self.config.workspace_tar_max_bytes} bytes)"
+        if len(tar_bytes) != size:
+            raise WorkspaceCollectionInfrastructureError(
+                f"Workspace download returned {len(tar_bytes)} bytes, but the archive in the sandbox has {size}"
             )
         return tar_bytes, None
 
@@ -1229,12 +1301,11 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             extract_result, "restoring the workspace in the verifier sandbox", timeout_is_infrastructure=True
         )
         if extract_result.return_code != 0:
-            return VerifierResult(
-                evaluation_completed=False,
-                reward=0.0,
-                verifier_exit_code=extract_result.return_code,
-                verifier_error=f"Failed to extract workspace tar: {extract_result.stderr or ''}",
-                test_case_count=task.test_case_count,
+            # The server's own restore of an archive it wrote itself, like the mkdir above: raise into the bounded
+            # retry-then-mask path instead of scoring the row 0 (a truncated transfer or a full verifier disk).
+            raise RuntimeError(
+                f"Failed to restore the workspace in the verifier sandbox (exit {extract_result.return_code}): "
+                f"{(extract_result.stderr or '')[-2000:]}"
             )
 
         output_parts: list[str] = []
@@ -1354,11 +1425,19 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                         "failure_reason": f"NL2RepoBench could not collect the agent's workspace: {workspace_error}",
                     }
                 except Exception as error:
+                    # Any other failure here is this server's (a download error, a mismatched verify request), not
+                    # the agent's: masked like the provider failures above, never scored 0.
                     print(
                         f"Failed to collect NL2RepoBench workspace for {current_task_id}: {format_exc()}",
                         file=sys.stderr,
                     )
                     workspace_error = f"{type(error).__name__}: {error}"
+                    masked = {
+                        "reward": 0.0,
+                        "mask_sample": True,
+                        "failure_kind": VERIFIER_ERROR,
+                        "failure_reason": f"NL2RepoBench could not collect the agent's workspace: {workspace_error}",
+                    }
                 finally:
                     workspace_collection_time_s = monotonic() - started
                     try:

@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 
-OPENCODE_CONFIG = Path(__file__).resolve().parents[3] / "benchmarks/nl2repobench/opencode.yaml"
+OPENCODE_CONFIG = Path(__file__).resolve().parents[3] / "benchmarks/nl2repobench/opencode_sandboxed_agent.yaml"
 
 
 def test_the_shipped_preset_references_no_private_runtime() -> None:

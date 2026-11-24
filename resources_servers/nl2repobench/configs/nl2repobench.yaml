@@ -1,7 +1,7 @@
 nl2repobench_resources_server:
   resources_servers:
     nl2repobench:
-      allowed_agents: [opencode_sandboxed_agent]
+      allowed_agents: [opencode_agent, opencode_sandboxed_agent]
       entrypoint: app.py
       domain: coding
       verified: false
@@ -11,7 +11,10 @@ nl2repobench_resources_server:
 
       sandbox_provider: sandbox
       enforce_agent_no_network: true
-      sandbox_model_server: null
+      # The restricted modes allow the agent sandbox only this server; they refuse to seed without it.
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
       # official: reproduces today's behavior exactly (honors enforce_agent_no_network/
       #   sandbox_model_server above as-is).
       # no_internet_preinstalled: agent boots from the pinned per-task image (deps pre-installed,
