@@ -18,6 +18,7 @@ import sys
 import tarfile
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -25,10 +26,13 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from scripts.harbor_conversion_checks import scan
+from scripts.harbor_conversion_checks import check, scan
 from scripts.harbor_conversion_checks.__main__ import main
 from scripts.harbor_conversion_checks.fake_model import FakeModelServer
 from scripts.harbor_conversion_checks.messages import message_text, unquote_argv
+
+from nemo_gym.data.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
+from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
 
 
 def _write_jsonl(path, rows):
@@ -819,6 +823,110 @@ def test_hidden_value_in_environment_env_or_a_step_instruction_fails(tmp_path, c
     (dataset / "t2" / "steps" / "one" / "instruction.md").write_text(f"Now say {ANSWER}.\n")
     assert _check(dataset, rows, "--hidden", "expected") == 1
     assert "t2/steps/one/instruction.md contains expected value" in capsys.readouterr().out
+
+
+def _multi_step(dataset):
+    """Make t2 a valid two-step task: each step with its instruction, workdir/, tests/ and solution/."""
+    task = dataset / "t2"
+    (task / "task.toml").write_text('version = "1.0"\n[[steps]]\nname = "one"\n[[steps]]\nname = "two"\n')
+    (task / "tests" / "test.sh").write_text("exit 0\n")
+    for step in ("one", "two"):
+        for part in ("workdir", "tests", "solution"):
+            (task / "steps" / step / part).mkdir(parents=True)
+        (task / "steps" / step / "instruction.md").write_text(f"Step {step}.\n")
+        (task / "steps" / step / "workdir" / "notes.txt").write_text("Some notes.\n")
+    return task
+
+
+def test_hidden_value_in_a_step_workdir_fails_and_step_verifier_files_are_excluded(tmp_path, capsys):
+    dataset, rows = _dataset(tmp_path)
+    task = _multi_step(dataset)
+    # Clean: a hidden value in the steps' (and the task's) tests/ and solution/ stays with the verifier and oracle.
+    for folder in (task / "steps" / "one" / "tests", task / "steps" / "two" / "solution", task / "solution"):
+        folder.mkdir(exist_ok=True)
+        (folder / "answer.txt").write_text(ANSWER)
+    assert _check(dataset, rows, "--hidden", "expected") == 0
+    assert _statuses(capsys)["hidden-values"] == "PASS"
+
+    plain = task / "steps" / "two" / "workdir" / "answer.txt"
+    plain.write_text(ANSWER)
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert f"t2/steps/two/workdir/answer.txt contains expected value {ANSWER!r}" in capsys.readouterr().out
+    plain.write_text("nothing here\n")
+
+    filler = "\n".join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(60))
+    member = f"{ANSWER}\n{filler}\n".encode()
+    bundle = io.BytesIO()
+    with tarfile.open(fileobj=bundle, mode="w:gz") as tar:
+        info = tarfile.TarInfo("data/answer.txt")
+        info.size = len(member)
+        tar.addfile(info, io.BytesIO(member))
+    (task / "steps" / "one" / "workdir" / "setup.sh").write_text(
+        f"base64 -d > seed.tgz <<'EOF'\n{base64.encodebytes(bundle.getvalue()).decode()}EOF\n"
+    )
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert "t2/steps/one/workdir/setup.sh[base64 at " in capsys.readouterr().out
+
+
+def test_hidden_value_in_a_dataset_env_override_fails_as_in_task_toml(tmp_path, capsys):
+    dataset, rows = _dataset(tmp_path)
+    (dataset / "dataset.toml").write_text(f'[gym.tasks.t1.environment.env]\nEXPECTED = "{ANSWER}"\n')
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert f'dataset.toml [gym.tasks."t1".environment].env contains expected value {ANSWER!r}' in (
+        capsys.readouterr().out
+    )
+    # A benign override passes, and one that replaces (or empties) the task's own variable leaves nothing to find.
+    (dataset / "t1" / "task.toml").write_text(f'version = "1.0"\n[environment.env]\nEXPECTED = "{ANSWER}"\n')
+    for value in ("benign value", ""):
+        (dataset / "dataset.toml").write_text(
+            f'[gym.tasks.t1.environment]\ndocker_image = "python:3.12"\n[gym.tasks.t1.environment.env]\n'
+            f'EXPECTED = "{value}"\nOTHER = "fine"\n'
+        )
+        assert _check(dataset, rows, "--hidden", "expected") == 0
+        assert _statuses(capsys)["hidden-values"] == "PASS"
+    # An override of another variable merges over the task's own, which still reaches the agent.
+    (dataset / "dataset.toml").write_text('[gym.tasks.t1.environment.env]\nOTHER = "fine"\n')
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert "t1/task.toml [environment].env contains expected value" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "dataset_toml",
+    [
+        "[gym.tasks.t1.environment]\nenv = 3\n",
+        "[gym.tasks.t1.environment.env]\nEXPECTED = 3\n",
+        "[gym.tasks.t1]\nenvironment = 3\n",
+        "[gym]\ntasks = 3\n",
+        "[gym.tasks\n",
+    ],
+)
+def test_a_dataset_override_of_a_shape_not_modeled_is_not_scanned(tmp_path, capsys, dataset_toml):
+    dataset, rows = _dataset(tmp_path)
+    (dataset / "dataset.toml").write_text(dataset_toml)
+    assert _check(dataset, rows, "--hidden", "expected") == 1
+    assert "not scanned" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("task_toml", "dataset_toml"),
+    [
+        ('[environment.env]\nA = "task"\nB = "kept"\n', '[gym.tasks.t.environment.env]\nA = "override"\n'),
+        ('[environment.env]\nA = "task"\n', '[gym.tasks.t.environment.env]\nA = ""\n'),
+        ("", '[gym.tasks.t.environment.env]\nA = "added"\n'),
+        ('[environment.env]\nA = "task"\n', "[gym.tasks.t.environment]\ncpus = 2\n"),
+        ('[environment.env]\nA = "task"\n', '[gym.tasks.other.environment.env]\nA = "elsewhere"\n'),
+        ('[environment.env]\nA = "task"\n', "[gym.defaults]\nresource_multiplier = 2.0\n"),
+    ],
+)
+def test_effective_environment_env_matches_gyms_dataset_merge(tmp_path, task_toml, dataset_toml):
+    print(check.__file__)
+    (tmp_path / "dataset.toml").write_text(dataset_toml)
+    task = tomllib.loads('version = "1.0"\n' + task_toml)
+    runtime = apply_dataset_config(HarborTaskConfig.model_validate(task), "t", read_dataset_config(tmp_path))
+    overrides, problem = check._task_overrides(tmp_path)
+    environment, _, applied = check.effective_environment(task.get("environment", {}), overrides.get("t"))
+    assert problem is None and applied
+    assert (environment.get("env") or {}) == runtime.environment.env
 
 
 def test_json_escaped_hidden_values_in_environment_fail(tmp_path, capsys):

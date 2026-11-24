@@ -348,12 +348,52 @@ def _environment_table(folder: Path) -> object:
     return config.get("environment") or {}
 
 
-def _environment_settings(folder: Path) -> set[str]:
-    """What configures the agent's own environment, visible by design: the values of task.toml's `[environment]`
+def _task_overrides(base: Path) -> tuple[dict, str | None]:
+    """The `[gym.tasks]` table of `<base>/dataset.toml` (Gym's per-task overrides, keyed by task folder name), and a
+    problem when the file has a shape Gym would not load, so that its overrides are not scanned."""
+    path = base / "dataset.toml"
+    if not path.is_file():
+        return {}, None
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return {}, f"{path.relative_to(base)}: cannot be read ({exc}): its overrides are not scanned"
+    gym = data.get("gym") or {}
+    tasks = gym.get("tasks", {}) if isinstance(gym, dict) else None
+    if not isinstance(tasks, dict):
+        return {}, f"{path.relative_to(base)}: [gym] or [gym.tasks] is not a table: its overrides are not scanned"
+    return tasks, None
+
+
+def effective_environment(environment: object, override: object) -> tuple[object, set[str], bool]:
+    """task.toml's `[environment]` table with a dataset.toml `[gym.tasks."<id>"]` override applied as Gym's loader
+    applies it (`apply_dataset_config`): the override's `environment.env` merges over the task's own `env` (a
+    variable it names takes its value, an empty string included; none is removed) and every other key of its
+    `environment` replaces the task's. Returns the table, the `env` variables the override set, and whether the
+    override was applied: False when its shape is one the loader refuses or this does not model."""
+    if override is None:
+        return environment, set(), True
+    table = override.get("environment", {}) if isinstance(override, dict) else None
+    env = table.get("env") if isinstance(table, dict) else None
+    own = environment.get("env") if isinstance(environment, dict) else None
+    if (
+        not isinstance(table, dict)
+        or not isinstance(environment, dict)
+        or (env is not None and not (isinstance(env, dict) and all(isinstance(v, str) for v in env.values())))
+        or not isinstance(own or {}, dict)
+    ):
+        return environment, set(), False
+    merged = dict(environment)
+    for key, value in table.items():
+        merged[key] = dict(own or {}) | value if key == "env" else value
+    return merged, set(env or {}), True
+
+
+def _environment_settings(folder: Path, environment: object) -> set[str]:
+    """What configures the agent's own environment, visible by design: the values of the effective `[environment]`
     table but `env` (the working directory, `docker_image`) and the images `FROM` lines of environment/Dockerfile name.
     An image pinned by digest also counts without it (`<image>@sha256:<hex>` names `<image>`). The `env` variables are
     scanned instead: the agent reads them, and they are where an adapter could put a reference answer."""
-    environment = _environment_table(folder)
     if isinstance(environment, dict):
         environment = {key: value for key, value in environment.items() if key != "env"}
     settings = {leaf.strip() for leaf in leaves(environment)}
@@ -375,6 +415,9 @@ def _check_hidden_values(
     failures, problems, scanned, short, allowed_matches = [], [], 0, 0, []
     absent: dict[str, int] = {}
     with_row = 0
+    overrides, problem = _task_overrides(base)
+    if problem:
+        problems.append(problem)
     for task_id, folder in tasks.items():
         row = rows.get(task_id)
         if row is None:
@@ -383,7 +426,10 @@ def _check_hidden_values(
         system, users = _prompt_parts(row)
         tools = (row.get("responses_create_params") or {}).get("tools") or []
         shown = "\n".join([prefix, *system, *users, *leaves(tools)])
-        settings = _environment_settings(folder)
+        environment, overridden, applied = effective_environment(_environment_table(folder), overrides.get(task_id))
+        if not applied:
+            problems.append(f'dataset.toml [gym.tasks."{task_id}"]: a shape Gym does not load: not scanned')
+        settings = _environment_settings(folder, environment)
         found: dict[str, str] = {}
         for name in fields:
             try:
@@ -397,19 +443,32 @@ def _check_hidden_values(
         scanned += len(found)
         if not found:
             continue
-        environment = _environment_table(folder)
-        env = "\n".join(leaves(environment.get("env") or {})) if isinstance(environment, dict) else ""
-        env_label = f"{(folder / 'task.toml').relative_to(base)} [environment].env"
-        for text, name in sorted(found.items()):
-            if text in env:
-                failures.append(f"{env_label} contains {name} value {text[:60]!r}")
+        env = (environment.get("env") or {}) if isinstance(environment, dict) else {}
+        if not isinstance(env, dict):
+            env = {"": env}
+        sources = {
+            f"{(folder / 'task.toml').relative_to(base)} [environment].env": [
+                value for key, value in env.items() if key not in overridden
+            ],
+            f'dataset.toml [gym.tasks."{task_id}".environment].env': [
+                value for key, value in env.items() if key in overridden
+            ],
+        }
+        for env_label, values in sources.items():
+            joined = "\n".join(leaves(values))
+            for text, name in sorted(found.items()):
+                if text in joined:
+                    failures.append(f"{env_label} contains {name} value {text[:60]!r}")
         # A JSON file in environment/ holds a value escaped: quotes, backslashes, newlines and (by default) non-ASCII.
         forms = {
             text: {text.encode(), json.dumps(text)[1:-1].encode(), json.dumps(text, ensure_ascii=False)[1:-1].encode()}
             for text in found
         }
         instructions = [folder / "instruction.md", *sorted((folder / "steps").glob("*/instruction.md"))]
-        visible = instructions + sorted(p for p in (folder / "environment").rglob("*") if p.is_file())
+        # A step's workdir/ is uploaded into the agent's working directory before its turn; its tests/ and
+        # solution/ stay with the verifier and the oracle.
+        staged = [folder / "environment", *sorted((folder / "steps").glob("*/workdir"))]
+        visible = instructions + [p for root in staged for p in sorted(root.rglob("*")) if p.is_file()]
         for path in visible:
             if not path.is_file():
                 continue

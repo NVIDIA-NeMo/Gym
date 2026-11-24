@@ -60,8 +60,12 @@ runs after G2. The checks:
   CRLF (GitHub issue bodies) reaches the model with LF; such a task fails with "differs only in line endings" until
   you pass `--normalize-newlines`, which counts those tasks in the detail line. Record it as a difference.
 - `hidden-values` (needs `--hidden FIELD` or `--hidden-from task_data.py`): fails when a hidden native value is in
-  `instruction.md`, a `steps/<name>/instruction.md`, the `[environment].env` variables of `task.toml` or a file under
-  `environment/`. Every file goes through one traversal: each base64 run of 1024+ characters (one line, or wrapped
+  `instruction.md`, a `steps/<name>/instruction.md`, the effective `[environment].env` variables (`task.toml`'s with
+  the dataset's `dataset.toml` `[gym.tasks."<task>".environment.env]` merged over them, as Gym's loader merges them),
+  or a file under `environment/` or a `steps/<name>/workdir/` (uploaded into the agent's working directory before its
+  turn). The `tests/` and `solution/` folders, the task's and each step's, stay with the verifier and the oracle and
+  are not scanned. A `dataset.toml` that Gym would not load, or an override of a shape this does not model, fails as
+  not scanned. Every file goes through one traversal: each base64 run of 1024+ characters (one line, or wrapped
   as `base64` wraps) is decoded, a gzip is gunzipped (every member of the stream) and a tar is untarred, and each of
   those layers is traversed the same way, so a base64 bundle and the same file on disk are scanned alike. A zip, xz
   or bz2 file, base64 payload or tar member is reported as not scanned. JSON-escaped copies
@@ -115,13 +119,14 @@ so the count can be lower than the number of hidden leaves:
 
 - it occurs in the row's prompt or in the `tools` the row offers (tool names and descriptions), so pass rows that
   still carry their `tools` for a tool environment;
-- it equals a value of the task's `[environment]` table in `task.toml` (the working directory, `docker_image`) or an
+- it equals a value of the task's effective `[environment]` table (`task.toml`'s, with a `dataset.toml` override
+  applied: the working directory, `docker_image`) or an
   image a `FROM` line of `environment/Dockerfile` names, with or without its `@sha256:` digest. The `[environment].env`
   variables are not exempt: the agent reads them, so they are scanned.
 
 A short generic value can also occur by coincidence in the code the adapter ships (a test named `continue` inside a
 vendored module). Read each match, and list the ones that are not row data in a file passed as `--allow-values` (one
-value per line, `#` comments): their matches under `environment/` are printed as `allowed:` lines and counted, not
+value per line, `#` comments): their matches under `environment/` or a step's `workdir/` are printed as `allowed:` lines and counted, not
 failed. A match can sit in a base64 bundle inside `environment/Dockerfile`, reported as
 `<task>/environment/Dockerfile[base64 at N]:<member>`, so a common test name such as `continue` matches the vendored
 seed code. A match in an `instruction.md` or in `[environment].env` always fails. Keep the file with the evidence.
