@@ -80,9 +80,12 @@ def hash_skill_dir(root: Path) -> str:
     Walks files in sorted relative-path order, folding each file's relative path and bytes
     into the digest. Including the relative path means renaming or adding/removing files also
     changes the hash -- a skill *is* its file layout, not just ``SKILL.md``'s bytes.
+
+    Directory symlinks are followed, as ``stage_skills`` follows them when copying, so a skill
+    linked in from elsewhere is hashed by the files the agent receives.
     """
     h = hashlib.sha256()
-    for file_path in sorted(p for p in root.rglob("*") if p.is_file()):
+    for file_path in sorted(p for p in root.rglob("*", recurse_symlinks=True) if p.is_file()):
         h.update(file_path.relative_to(root).as_posix().encode())
         h.update(b"\0")
         h.update(file_path.read_bytes())

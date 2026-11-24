@@ -21,7 +21,7 @@ from responses_api_agents.openhands_agent.conversion import (
 MODEL = ModelServerRef(type="responses_api_models", name="policy_model")
 
 
-# Shapes copied from OpenHands SDK 1.59.0 event JSON.
+# Shapes copied from OpenHands SDK 1.59.0 event JSON; unchanged at 1.62.0.
 def action(call_id, response_id, *, tool="terminal", command="ls", thought="", reasoning=None):
     return {
         "kind": "ActionEvent",
@@ -134,7 +134,8 @@ def test_output_items_keep_order_and_turn_the_finish_message_into_text():
 
 
 def test_tool_results_hold_the_text_the_model_read():
-    # OpenHands 1.59.0 TerminalObservation content and to_llm_message text for a command that was still running.
+    # OpenHands TerminalObservation content and to_llm_message text for a command that was still running, copied
+    # at 1.59.0 and unchanged at 1.62.0.
     notice = (
         "[Below is the output of the previous command.]\n\n[The command has no new output after 30 seconds.]"
         "\n[Current working directory: /app]"
