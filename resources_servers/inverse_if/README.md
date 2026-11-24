@@ -179,9 +179,11 @@ inverse_if:
 
 | Setting | Default | Behavior |
 |---------|---------|----------|
-| `fail_on_unparseable_judge_response` | `true` | When enabled, a judge reply without a PASS or FAIL verdict raises `JudgeError` with failure kind `judge_unparseable`. The row is masked (`mask_sample: true`) and goes to the failures sidecar, so recovery can judge it again. When disabled, such a reply receives `FAIL`. |
+| `fail_on_unparseable_judge_response` | `true` | When enabled, a judge reply without a PASS or FAIL verdict, or a reply cut at the judge's output limit, raises `JudgeError` with failure kind `judge_unparseable`. The row is masked (`mask_sample: true`) and goes to the failures sidecar, so recovery can judge it again. When disabled, such a reply receives `FAIL`. |
 
 An empty final answer (no text after reasoning is removed) scores 0 without a judge call. The row stays in training.
+If the judge server refuses the prompt for its length (a reply cut before any output token), the criterion receives
+`FAIL`.
 
 ## Data Format
 

@@ -263,6 +263,12 @@ def _extract_verdict(judge_text: str) -> tuple[str | None, str]:
     return None, ""
 
 
+def _judge_refused_prompt(judge_response: NeMoGymResponse) -> bool:
+    """Whether the judge server refused the prompt for its length: a reply cut before any output token."""
+    usage = judge_response.usage
+    return judge_response.incomplete_details is not None and usage is not None and usage.output_tokens == 0
+
+
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
@@ -407,8 +413,18 @@ class InverseIFServer(SimpleResourcesServer):
         )
         judge_text = _extract_text_from_response(judge_response, exclude_thinking=True)
 
+        # The answer, which the policy controls, did not fit the judge's window: the criterion fails. This check runs
+        # before the cut-reply check, which masks the row.
+        refused = _judge_refused_prompt(judge_response)
+        if (
+            not refused
+            and self.config.fail_on_unparseable_judge_response
+            and (judge_response.status == "incomplete" or judge_response.incomplete_details is not None)
+        ):
+            raise JudgeError("judge reply was cut off before its verdict", failure_kind=JUDGE_UNPARSEABLE)
+
         # Extract verdict
-        verdict, explanation = _extract_verdict(judge_text)
+        verdict, explanation = ("FAIL", "") if refused else _extract_verdict(judge_text)
         if verdict is None:
             if self.config.fail_on_unparseable_judge_response:
                 raise JudgeError(f"unparseable judge response: {judge_text[:200]!r}", failure_kind=JUDGE_UNPARSEABLE)
