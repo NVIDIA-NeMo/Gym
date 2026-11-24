@@ -84,7 +84,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -93,10 +93,11 @@ import anyio
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
-from nemo_gym.config.global_config import get_first_server_config_dict, get_global_config_dict
+from nemo_gym.config.global_config import SERVER_TYPE_KEYS, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
 from nemo_gym.sandbox.config import (
+    NetworkRuleOptions,
     OwnerConcurrency,
     SandboxConfig,
     resolve_provider_config,
@@ -511,6 +512,51 @@ def rule_hosts(config: SandboxConfig, global_config: Mapping[str, Any]) -> list[
     return [*hosts, *config.allowed_hosts]
 
 
+def sandbox_blocks(value: Any, path: str = "config") -> Iterator[tuple[str, SandboxConfig]]:
+    """Every ``SandboxConfig`` in a server's config, at any depth, with its dotted path.
+
+    Only models, dicts, lists and tuples are walked: an OmegaConf node is not, since reading it can resolve an
+    interpolation the server never reads.
+    """
+    if isinstance(value, SandboxConfig):
+        yield path, value
+    elif isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            yield from sandbox_blocks(getattr(value, name, None), f"{path}.{name}")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from sandbox_blocks(item, f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            yield from sandbox_blocks(item, f"{path}[{index}]")
+
+
+def servers_sharing_hosts(config: SandboxConfig, global_config: Mapping[str, Any]) -> dict[str, list[str]]:
+    """For each host ``config``'s rule allows for its model and tool servers, the other servers in ``global_config``
+    that listen on that host too: a rule allows a whole host, so a sandbox reaches them as well."""
+    named = {*([config.model_server] if config.model_server else []), *config.tool_servers}
+    if not named:
+        return {}
+    hosts_of: dict[str, str] = {}
+    for name, instance in global_config.items():
+        if not isinstance(name, str) or not isinstance(instance, Mapping):
+            continue
+        if not any(key in instance for key in SERVER_TYPE_KEYS):
+            continue
+        try:
+            server_config = get_first_server_config_dict(global_config, name)
+            hosts_of[name] = reachable_host(f"http://{server_config['host']}:{server_config['port']}")
+        except (KeyError, IndexError, TypeError, AttributeError, ValueError):
+            continue  # no host yet, or one no sandbox reaches: not reachable through the rule either
+    shared: dict[str, list[str]] = {}
+    for server in sorted(named):
+        host = hosts_of.get(server)
+        others = sorted(other for other, other_host in hosts_of.items() if other_host == host and other not in named)
+        if host is not None and others:
+            shared[host] = others
+    return shared
+
+
 def _suggested_rule(config: SandboxConfig) -> str:
     """The typed rule that keeps what a block without one does today, for the deprecation warning."""
     policy = config.provider_options.get("network_policy")
@@ -770,7 +816,9 @@ class OwnedSandboxes:
         # The rule reaches the provider through its options: provider_options["network_policy"] on OpenSandbox, run_args
         # on Docker.
         global_config = self._global_config if self._global_config is not None else get_global_config_dict()
-        options = provider.network_options(rule, rule_hosts(config, global_config), config.provider_options)
+        options = NetworkRuleOptions(
+            rule, provider.network_options(rule, rule_hosts(config, global_config), config.provider_options)
+        )
         return config.spec(
             provider_block,
             image=image,

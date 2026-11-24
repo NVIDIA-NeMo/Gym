@@ -1253,6 +1253,26 @@ class _TypedConfig(_Config):
 
 class _TypedServer(_Server):
     config: _TypedConfig
+    owned_sandbox_blocks = {"sandbox_config": "sandbox_provider", "grader_sandbox_config": "sandbox_provider"}
+
+
+class _UndeclaredServer(_Server):
+    """Starts its sandboxes some other way, so nothing applies a rule its blocks set."""
+
+    config: _TypedConfig
+
+
+class _NestedConfig(_Config):
+    tools: _TypedConfig
+
+
+class _NestedServer(_Server):
+    config: _NestedConfig
+
+
+class _GpuTypedServer(_Server):
+    config: _TypedConfig
+    owned_sandbox_blocks = {"sandbox_config": "gpu_sandbox_provider"}
 
 
 class _LendingServer(_Server):
@@ -1303,6 +1323,82 @@ class TestStartupCheck:
 
         assert providers == {}
 
+    def test_a_restricted_rule_in_a_block_the_server_does_not_declare_fails_the_startup(self) -> None:
+        server = _UndeclaredServer(
+            config=_TypedConfig(
+                name="my_server",
+                host="",
+                port=0,
+                entrypoint="",
+                sandbox_provider="rules",
+                sandbox_config=SandboxConfig(network="no_network"),
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        with pytest.raises(ValueError, match=r"no_network' in config.sandbox_config, but _UndeclaredServer does not"):
+            server.check_sandbox_provider()
+
+    def test_a_nested_undeclared_block_is_found(self) -> None:
+        nested = _TypedConfig(
+            name="tools", host="", port=0, entrypoint="", grader_sandbox_config=SandboxConfig(network="no_network")
+        )
+        server = _NestedServer(
+            config=_NestedConfig(name="my_server", host="", port=0, entrypoint="", tools=nested),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        with pytest.raises(ValueError, match=r"config.tools.grader_sandbox_config"):
+            server.check_sandbox_provider()
+
+    def test_an_undeclared_block_that_keeps_the_providers_egress_passes(self) -> None:
+        server = _UndeclaredServer(
+            config=_TypedConfig(name="my_server", host="", port=0, entrypoint="", sandbox_provider="plain"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        server.check_sandbox_provider()
+
+    @pytest.mark.parametrize(
+        ("sandbox_provider", "gpu_sandbox_provider", "refused"),
+        [
+            ("plain", "rules", False),
+            ("rules", "plain", True),
+        ],
+    )
+    def test_a_declared_block_is_checked_against_the_provider_its_field_names(
+        self, sandbox_provider: str, gpu_sandbox_provider: str, refused: bool
+    ) -> None:
+        server = _GpuTypedServer(
+            config=_TypedConfig(
+                name="my_server",
+                host="",
+                port=0,
+                entrypoint="",
+                sandbox_provider=sandbox_provider,
+                gpu_sandbox_provider=gpu_sandbox_provider,
+                sandbox_config=SandboxConfig(network="no_network"),
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        if refused:
+            with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+                server.check_sandbox_provider()
+        else:
+            server.check_sandbox_provider()
+
+    def test_a_declared_block_without_its_provider_field_fails_the_startup(self) -> None:
+        server = _GpuTypedServer(
+            config=_TypedConfig(
+                name="my_server", host="", port=0, entrypoint="", sandbox_config=SandboxConfig(network="no_network")
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        with pytest.raises(ValueError, match="sets a network rule but no gpu_sandbox_provider"):
+            server.check_sandbox_provider()
+
 
 class _OwnNetworkConfig(SandboxConfig):
     """A server's block with its own network setting, as partner_if's tool sandbox has until it moves."""
@@ -1340,13 +1436,19 @@ class TestStartupCheckResolvesWhatItCan:
         with pytest.raises(ValueError, match="sandbox-reachable host"):
             server.check_sandbox_provider()
 
-    def test_with_two_provider_fields_a_block_is_checked_where_it_is_used(self) -> None:
-        # The block may be meant for the GPU provider, which applies the rule; startup cannot tell.
-        server = self._typed(
-            SandboxConfig(network="no_network"), sandbox_provider="plain", gpu_sandbox_provider="rules"
-        )
+    def test_a_rule_that_allows_a_host_other_servers_share_is_logged(self, caplog) -> None:
+        server = self._typed(SandboxConfig(network="model_only", model_server="policy"), sandbox_provider="rules")
+        server.server_client.global_config_dict = {
+            "policy": {"responses_api_models": {"vllm_model": {"host": "10.0.0.5", "port": 8000}}},
+            "judge": {"resources_servers": {"judge": {"host": "10.0.0.5", "port": 9000}}},
+            "elsewhere": {"resources_servers": {"other": {"host": "10.0.0.6", "port": 9000}}},
+        }
 
-        server.check_sandbox_provider()
+        with caplog.at_level("WARNING", logger="nemo_gym.server_runtime.base_server"):
+            server.check_sandbox_provider()
+
+        assert "allows host 10.0.0.5, where judge also listen" in caplog.text
+        assert "elsewhere" not in caplog.text
 
 
 class TestSpecLeavesWhatIsNotATypedRule:
