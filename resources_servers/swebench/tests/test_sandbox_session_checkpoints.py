@@ -548,7 +548,8 @@ async def test_a_close_drops_the_session_from_the_checkpointer_without_waiting_f
         assert (await _post_seed(http, _seed())).status_code == 200
         checkpointer = server._checkpointer()
         path, body = _close_path(_seed())
-        async with checkpointer._semaphore:  # every turn is taken, as while a commit submits its snapshots
+        assert checkpointer._stop_limit is not None
+        async with checkpointer._stop_limit:  # every stop slot is taken, as while other sessions stop theirs
             closed = await asyncio.wait_for(http.post(path, json=body), timeout=10)
 
     assert closed.status_code == 200, closed.text

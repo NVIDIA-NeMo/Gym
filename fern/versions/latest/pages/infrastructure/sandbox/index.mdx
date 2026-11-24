@@ -222,9 +222,11 @@ sandbox_config:
 | `network` | `inherit`, `no_network`, `model_only`, `model_and_tools`, `hosts_only` | The egress rule the sandbox starts with. `inherit` keeps the provider's default. |
 | `model_server` | a server name | The model server `model_only` and `model_and_tools` allow. Required exactly for those two rules. |
 | `tool_servers` | server names | The servers `model_and_tools` also allows. Required exactly for that rule. |
-| `allowed_hosts` | host names | Further hosts any restricted rule allows, such as a dependency proxy. `hosts_only` allows only these. |
+| `allowed_hosts` | host names | Further hosts `model_only`, `model_and_tools` and `hosts_only` allow, such as a dependency proxy. `hosts_only` allows only these; `no_network` takes none. |
 
-A provider that cannot apply a rule refuses it at server startup, so no sandbox starts with open egress in place of the rule: OpenSandbox applies all five, Docker `inherit` and `no_network`, and the other providers `inherit`. A block that sets `network` and also `provider_options.network_policy` is refused. `SandboxConfig.spec()` on its own refuses a restricted rule, since only the owner's `spec()` applies it.
+A provider that cannot apply a rule refuses it, so no sandbox starts with open egress in place of the rule: OpenSandbox applies all five, Docker `inherit` and `no_network`, and the other providers `inherit`. A server whose only provider field is `sandbox_provider` is checked at startup, a dry run included; a server with several provider fields, or a provider block whose own settings conflict with the rule (such as Docker's `create.network`), is refused at its first `spec()`.
+
+A rule allows a server's whole host, every port on it, since providers allow egress by host. With `default_host` set, every Gym server listens on that one address, so `model_only` also reaches the other servers there; give the model server its own address when that matters. The model and tool servers must listen on an address a sandbox can reach: a loopback address is refused. A block that sets `network` and also `provider_options.network_policy` is refused. `SandboxConfig.spec()` on its own refuses a restricted rule, since only the owner's `spec()` applies it.
 
 A block without `network` keeps today's behavior, the provider's default or its `provider_options.network_policy`, and the server logs a deprecation warning naming the rule to switch to. A later release requires `network`.
 

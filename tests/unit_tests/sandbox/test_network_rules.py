@@ -7,9 +7,12 @@ from typing import Literal
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.sandbox import SandboxCapabilities, SandboxConfig, get_provider_class
+from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.providers import registry
+from nemo_gym.sandbox.providers.base import SandboxCapabilities
 from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+from nemo_gym.sandbox.providers.registry import get_provider_class
 
 
 class TestSandboxConfigNetwork:
@@ -54,25 +57,10 @@ class TestSandboxConfigNetwork:
 class TestProviderCapabilities:
     def test_the_defaults_are_what_every_provider_supports(self) -> None:
         assert SandboxCapabilities() == SandboxCapabilities(
-            snapshot_keeps=frozenset(), network_rules=frozenset({"inherit"}), reconnect="always", close_by_label=False
+            snapshot_keeps=frozenset(), network_rules=frozenset({"inherit"}), reconnect="always"
         )
 
-    @pytest.mark.parametrize(
-        ("name", "rules", "reconnect"),
-        [
-            ("opensandbox", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
-            ("docker", {"inherit", "no_network"}, "same_host"),
-            ("e2b", {"inherit"}, "always"),
-            ("local", {"inherit"}, "never"),
-        ],
-    )
-    def test_the_providers_declare_what_the_design_lists(self, name: str, rules: set, reconnect: str) -> None:
-        capabilities = get_provider_class(name).capabilities
-
-        assert capabilities.network_rules == rules
-        assert capabilities.reconnect == reconnect
-
-    def test_only_opensandbox_snapshots_keep_files(self) -> None:
+    def test_opensandbox_snapshots_keep_files_and_docker_takes_none(self) -> None:
         assert OpenSandboxProvider.capabilities.snapshot_keeps == {"files"}
         assert DockerProvider.capabilities.snapshot_keeps == frozenset()
 
@@ -156,20 +144,27 @@ def test_a_subclass_with_its_own_network_setting_keeps_its_own_checks() -> None:
     assert _OwnNetwork(allowed_hosts=["pypi.org"]).allowed_hosts == ["pypi.org"]
 
 
-@pytest.mark.parametrize(
-    ("name", "rules", "reconnect"),
-    [
-        ("opensandbox", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
-        ("docker", {"inherit", "no_network"}, "same_host"),
-        ("e2b", {"inherit"}, "always"),
-        ("openshell", {"inherit"}, "always"),
-        ("daytona", {"inherit"}, "always"),
-        ("apptainer", {"inherit"}, "same_host"),
-        ("enroot", {"inherit"}, "same_host"),
-        ("local", {"inherit"}, "never"),
-        ("ecs_fargate", {"inherit"}, "never"),
-    ],
-)
+TABLE = [
+    ("opensandbox", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
+    ("docker", {"inherit", "no_network"}, "same_host"),
+    ("e2b", {"inherit"}, "always"),
+    ("openshell", {"inherit"}, "always"),
+    ("daytona", {"inherit"}, "never"),
+    ("apptainer", {"inherit"}, "same_host"),
+    ("bwrap", {"inherit"}, "same_host"),
+    ("enroot", {"inherit"}, "same_host"),
+    ("local", {"inherit"}, "never"),
+    ("ecs_fargate", {"inherit"}, "same_host"),
+]
+BUILT_IN_PROVIDERS = sorted(registry._BUILTIN_PROVIDER_LOADERS)
+
+
+def test_the_design_table_lists_every_built_in_provider() -> None:
+    # A new built-in provider has to declare what it can do, and be added to the table.
+    assert {name for name, _, _ in TABLE} == set(BUILT_IN_PROVIDERS)
+
+
+@pytest.mark.parametrize(("name", "rules", "reconnect"), TABLE)
 def test_every_built_in_provider_declares_the_design_tables_values(name: str, rules: set, reconnect: str) -> None:
     capabilities = get_provider_class(name).capabilities
 
@@ -177,15 +172,21 @@ def test_every_built_in_provider_declares_the_design_tables_values(name: str, ru
     assert capabilities.reconnect == reconnect
 
 
-@pytest.mark.parametrize(
-    "name", ["opensandbox", "docker", "e2b", "openshell", "daytona", "apptainer", "enroot", "local", "ecs_fargate"]
-)
+@pytest.mark.parametrize("name", BUILT_IN_PROVIDERS)
 def test_a_provider_declares_snapshots_exactly_when_it_takes_them(name: str) -> None:
     provider_class = get_provider_class(name)
 
     takes_snapshots = all(hasattr(provider_class, method) for method in ("snapshot", "wait_snapshot_ready"))
     assert bool(provider_class.capabilities.snapshot_keeps) == takes_snapshots
     assert bool(provider_class.capabilities.network_rules - {"inherit"}) == hasattr(provider_class, "network_options")
+
+
+@pytest.mark.parametrize("name", BUILT_IN_PROVIDERS)
+def test_a_provider_declares_reconnect_exactly_when_another_process_can_connect(name: str) -> None:
+    provider_class = get_provider_class(name)
+
+    connects = hasattr(provider_class, "serialize_handle") and hasattr(provider_class, "connect")
+    assert (provider_class.capabilities.reconnect != "never") == connects
 
 
 class TestDockerAppliesNoNetworkOnce:
