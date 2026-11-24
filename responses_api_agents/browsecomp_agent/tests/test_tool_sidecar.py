@@ -124,7 +124,7 @@ def test_token_count_callback_cannot_be_enabled_with_tool_sidecar():
 
 @pytest.mark.parametrize(
     "url",
-    ["http://localhost/v1", "http://user:secret@model/v1", "http://model/v1?key=secret", "http://model/v1#fragment"],
+    ["http://localhost/v1", "http://user@model/v1", "http://model/v1?key=secret", "http://model/v1#fragment"],
 )
 def test_direct_model_url_rejects_credentials_and_ambiguous_origins(url):
     with pytest.raises(ValidationError):
