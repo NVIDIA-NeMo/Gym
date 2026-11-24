@@ -246,14 +246,23 @@ _CONTEXT_WINDOW_SIZE = re.compile(
 )
 # How an engine states the prompt's length in a length refusal: vLLM's "(N in the messages, M in the completion)",
 # vLLM 0.29's "your prompt contains N input tokens", "your request has N input tokens", the prompt-only checks'
-# "Input length (N)" and "decoder prompt (length N)", and NeMo RL's chat engine's "Prompt length (N) fills or exceeds".
+# "Input length (N)" and "decoder prompt (length N)", NeMo RL's chat engine's "Prompt length (N) fills or exceeds",
+# SGLang's "Input length (N tokens)" and "N tokens from the input messages", and a Dynamo frontend's "your messages
+# resulted in N tokens" and "would use N prompt tokens" (not "your request resulted in N tokens", a total).
 _PROMPT_TOKEN_COUNT = re.compile(
     r"(\d+) (?:tokens )?in the messages"
     r"|(?:prompt contains|request has) (\d+) input tokens"
-    r"|Input length \((\d+)\)"
+    r"|Input length \((\d+)(?: tokens)?\)"
     r"|decoder prompt \(length (\d+)\)"
     r"|Prompt length \((\d+)\)"
+    r"|(\d+) tokens from the input messages"
+    r"|messages resulted in (\d+) tokens"
+    r"|would use (\d+) prompt tokens"
 )
+# How vLLM states only a lower bound on the prompt, having stopped counting past its limit: "your prompt contains at
+# least N input tokens" and "N characters (more than M characters, which is the upper bound for K input tokens)", a
+# prompt of more than K tokens. Enough to show that a prompt fills the window, never a count to refit a budget to.
+_PROMPT_TOKEN_FLOOR = re.compile(r"prompt contains at least (\d+) input tokens|upper bound for (\d+) input tokens")
 # Tokens a refitted request leaves unused in the window, against small differences between the prompt count the
 # server obtains and the one the engine checks.
 _REFIT_MARGIN_TOKENS = 16
@@ -368,6 +377,18 @@ def _stated_prompt_tokens(message: str) -> int | None:
     return None if match is None else int(next(group for group in match.groups() if group is not None))
 
 
+def _prompt_tokens_floor(message: str) -> int | None:
+    """The fewest tokens a length refusal shows the prompt to have: its stated length, else vLLM's lower bound."""
+    stated = _stated_prompt_tokens(message)
+    if stated is not None:
+        return stated
+    match = _PROMPT_TOKEN_FLOOR.search(message)
+    if match is None:
+        return None
+    at_least, upper_bound = match.groups()
+    return int(at_least) if at_least is not None else int(upper_bound) + 1
+
+
 def _length_refusal_category(
     error: ClientResponseError, outbound: Dict[str, Any], *, completions_api: bool = False
 ) -> str:
@@ -375,9 +396,9 @@ def _length_refusal_category(
     fills all of it, so that no prompt fits; otherwise ``context_length_exceeded``.
 
     The budget is the one the engine received: on chat, ``max_completion_tokens`` before ``max_tokens``. A message that
-    names no window does not prove the budget wrong, so that refusal stays an overflow. Neither does one that states a
-    prompt that alone fills the window: no budget would make that prompt fit, and NeMo RL's chat engine behind a Dynamo
-    frontend refuses such a prompt before it applies the output cap.
+    names no window does not prove the budget wrong, so that refusal stays an overflow. Neither does one that shows a
+    prompt that alone fills the window, by its length or by vLLM's lower bound on it: no budget would make that prompt
+    fit, and NeMo RL's chat engine behind a Dynamo frontend refuses such a prompt before it applies the output cap.
     """
     key = _effective_budget_key(outbound, _COMPLETIONS_BUDGET_KEYS if completions_api else _CHAT_BUDGET_KEYS)
     budget = None if key is None else outbound[key]
@@ -386,7 +407,7 @@ def _length_refusal_category(
     if window is None:
         return "context_length_exceeded"
     window_tokens = int(window.group(1))
-    prompt_tokens = _stated_prompt_tokens(message)
+    prompt_tokens = _prompt_tokens_floor(message)
     if prompt_tokens is not None and prompt_tokens >= window_tokens:
         return "context_length_exceeded"
     # A budget equal to the window is at fault too: it leaves no token for a prompt, however short.

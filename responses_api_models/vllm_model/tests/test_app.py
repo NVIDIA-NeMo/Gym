@@ -123,7 +123,9 @@ from responses_api_models.vllm_model.app import (
     _append_transport_io,
     _ContextErrorMiddleware,
     _is_context_length_error,
+    _prompt_tokens_floor,
     _redacted_error_repr,
+    _stated_prompt_tokens,
     _transport_images,
     _transport_log_context,
     apply_sampling_overrides,
@@ -5828,6 +5830,41 @@ _DYNAMO_PROMPT_FILLS_WINDOW_8192 = json.dumps(
         "No room for output tokens."
     }
 )
+# vLLM 0.32's refusals of a prompt past the window: it stops tokenizing one token past the limit, and a prompt with
+# more characters than the limit's tokens can hold is refused before it is tokenized.
+_VLLM_032_PROMPT_AT_LEAST_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, your prompt contains at least 32769 "
+        "input tokens, which exceeds this limit even without any output tokens. Please reduce the length of the input "
+        "prompt."
+    }
+)
+_VLLM_032_PROMPT_CHARACTERS_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, your prompt contains 3276900 "
+        "characters (more than 3276800 characters, which is the upper bound for 32768 input tokens). Please reduce "
+        "the length of the input prompt."
+    }
+)
+_SGLANG_INPUT_OVER_WINDOW_32767 = json.dumps(
+    {
+        "message": "Input length (32800 tokens) exceeds the maximum allowed length (32767 tokens). This model's "
+        "maximum context length is 32767 tokens on this server. Use a shorter input or enable --allow-auto-truncate."
+    }
+)
+_DYNAMO_FRONTEND_MESSAGES_OVER_WINDOW_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, your messages resulted in 32800 "
+        "tokens. Please reduce the length of the messages."
+    }
+)
+# A request total, not a prompt length.
+_DYNAMO_FRONTEND_REQUEST_TOTAL_32768 = json.dumps(
+    {
+        "message": "This model's maximum context length is 32768 tokens. However, your request resulted in 40000 "
+        "tokens. Please reduce the length of the messages or the requested output."
+    }
+)
 
 
 @mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
@@ -5865,6 +5902,11 @@ _DYNAMO_PROMPT_FILLS_WINDOW_8192 = json.dumps(
         ({"max_tokens": 32767}, _WINDOW_32768, ("context_length_exceeded",) * 2),
         ({"max_tokens": 8192}, _DYNAMO_PROMPT_FILLS_WINDOW_8192, ("context_length_exceeded",) * 2),
         ({"max_tokens": 40000}, _PROMPT_OVER_WINDOW_32768, ("context_length_exceeded",) * 2),
+        ({"max_tokens": 32768}, _VLLM_032_PROMPT_AT_LEAST_32768, ("context_length_exceeded",) * 2),
+        ({"max_tokens": 32768}, _VLLM_032_PROMPT_CHARACTERS_32768, ("context_length_exceeded",) * 2),
+        ({"max_tokens": 32768}, _SGLANG_INPUT_OVER_WINDOW_32767, ("context_length_exceeded",) * 2),
+        ({"max_tokens": 32768}, _DYNAMO_FRONTEND_MESSAGES_OVER_WINDOW_32768, ("context_length_exceeded",) * 2),
+        ({"max_tokens": 32768}, _DYNAMO_FRONTEND_REQUEST_TOTAL_32768, ("invalid_output_token_parameter",) * 2),
         ({}, _WINDOW_32768, ("context_length_exceeded",) * 2),
         (
             {"max_tokens": 40000},
@@ -5882,6 +5924,11 @@ _DYNAMO_PROMPT_FILLS_WINDOW_8192 = json.dumps(
         "budget-below-window",
         "dynamo-prompt-fills-window-budget-equal",
         "prompt-over-window-budget-over",
+        "vllm-0.32-prompt-at-least-budget-equal",
+        "vllm-0.32-prompt-characters-budget-equal",
+        "sglang-input-over-window-budget-over",
+        "dynamo-frontend-messages-over-window-budget-equal",
+        "dynamo-frontend-request-total-budget-equal",
         "no-budget",
         "no-window-named",
     ],
@@ -5896,8 +5943,8 @@ async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
 ) -> None:
     """No prompt fits a budget as large as the whole window the engine names, so the budget is at fault. The budget
     is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens. A
-    refusal that states a prompt that alone fills the window is an overflow whatever the budget, since no lower budget
-    would make that prompt fit."""
+    refusal that shows a prompt that alone fills the window, by its length or by vLLM's lower bound on it, is an
+    overflow whatever the budget, since no lower budget would make that prompt fit."""
     monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
     monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
     model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
@@ -5927,6 +5974,104 @@ async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
     execution = request.state.nemo_gym_model_execution
     assert execution["error_category"] == category
     assert execution["local_response_reason"] == (None if propagate else category)
+
+
+@mark.parametrize(
+    ("message", "stated", "floor"),
+    [
+        (
+            "This model's maximum context length is 32768 tokens. However, you requested 72800 tokens (32800 in the "
+            "messages, 40000 in the completion). Please reduce the length of the messages or completion.",
+            32800,
+            32800,
+        ),
+        (
+            "This model's maximum context length is 32768 tokens. However, your request has 32800 input tokens. "
+            "Please reduce the length of the input messages.",
+            32800,
+            32800,
+        ),
+        (
+            "This model's maximum context length is 32768 tokens. However, you requested 8192 output tokens and your "
+            "prompt contains 32800 input tokens, for a total of 40992 tokens. Please reduce the length of the input "
+            "prompt or the number of requested output tokens.",
+            32800,
+            32800,
+        ),
+        (
+            "This model's maximum context length is 32768 tokens. However, you requested 8192 output tokens and your "
+            "prompt contains at least 24577 input tokens, for a total of at least 32769 tokens. Please reduce the "
+            "length of the input prompt or the number of requested output tokens.",
+            None,
+            24577,
+        ),
+        (
+            "This model's maximum context length is 262144 tokens. However, you requested 262144 output tokens and "
+            "your prompt contains 102 characters (more than 0 characters, which is the upper bound for 0 input "
+            "tokens). Please reduce the length of the input prompt or the number of requested output tokens.",
+            None,
+            1,
+        ),
+        (json.loads(_VLLM_032_PROMPT_AT_LEAST_32768)["message"], None, 32769),
+        (json.loads(_VLLM_032_PROMPT_CHARACTERS_32768)["message"], None, 32769),
+        ("Input length (32800) exceeds model's maximum context length (32768).", 32800, 32800),
+        (
+            "The decoder prompt (length 32800) is longer than the maximum model length of 32768. Make sure that "
+            "`max_model_len` is no smaller than the number of text tokens.",
+            32800,
+            32800,
+        ),
+        (json.loads(_DYNAMO_PROMPT_FILLS_WINDOW_8192)["message"], 8200, 8200),
+        (json.loads(_SGLANG_INPUT_OVER_WINDOW_32767)["message"], 32800, 32800),
+        (
+            "Requested token count exceeds the model's maximum context length of 32768 tokens. You requested a total "
+            "of 40000 tokens: 32800 tokens from the input messages and 7200 tokens for the completion. Please reduce "
+            "the number of tokens in the input messages or the completion to fit within the limit.",
+            32800,
+            32800,
+        ),
+        (json.loads(_DYNAMO_FRONTEND_MESSAGES_OVER_WINDOW_32768)["message"], 32800, 32800),
+        (
+            "This model's maximum context length is 8192 tokens. However, your request would use 8191 prompt tokens "
+            "plus at least one output token, which leaves no room for output. Please reduce the length of the "
+            "messages or the requested output.",
+            8191,
+            8191,
+        ),
+        (
+            "This model's maximum context length was exceeded. Your messages resulted in 32800 tokens. Please reduce "
+            "the length of the messages.",
+            32800,
+            32800,
+        ),
+        (json.loads(_DYNAMO_FRONTEND_REQUEST_TOTAL_32768)["message"], None, None),
+    ],
+    ids=[
+        "vllm-0.28-in-the-messages",
+        "vllm-request-has-input-tokens",
+        "vllm-0.29-prompt-contains",
+        "vllm-0.29-prompt-at-least",
+        "vllm-0.29-prompt-characters",
+        "vllm-0.32-prompt-at-least",
+        "vllm-0.32-prompt-characters",
+        "vllm-input-length",
+        "vllm-decoder-prompt",
+        "nemo-rl-prompt-length",
+        "sglang-scheduler-input-length",
+        "sglang-tokens-from-the-input-messages",
+        "dynamo-frontend-messages-resulted-in",
+        "dynamo-frontend-would-use-prompt-tokens",
+        "megatron-messages-resulted-in",
+        "dynamo-frontend-request-total",
+    ],
+)
+def test_a_length_refusal_states_the_prompt_length_or_a_lower_bound(
+    message: str, stated: int | None, floor: int | None
+) -> None:
+    """Each engine's statement of the prompt's length is an exact count, which a refit may use. vLLM's lower bounds,
+    from a prompt it stopped counting, only show that the prompt fills the window. A request total is neither."""
+    assert _stated_prompt_tokens(message) == stated
+    assert _prompt_tokens_floor(message) == floor
 
 
 @mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
