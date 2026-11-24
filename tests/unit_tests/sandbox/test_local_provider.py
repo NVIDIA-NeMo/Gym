@@ -453,9 +453,9 @@ async def test_a_command_that_waited_for_the_exec_limit_reports_the_limit_and_it
         }
 
     assert [result.return_code for result in results] == [0, 0]
-    assert [point.value for point in exported[concurrency.LIMIT_INSTRUMENT] if dict(point.attributes) == attributes] == [
-        1
-    ]
+    assert [
+        point.value for point in exported[concurrency.LIMIT_INSTRUMENT] if dict(point.attributes) == attributes
+    ] == [1]
     (wait,) = [
         point
         for point in exported[gym_metrics.CONCURRENCY_QUEUE_WAIT_INSTRUMENT]

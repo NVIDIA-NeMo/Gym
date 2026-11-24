@@ -3000,7 +3000,9 @@ class TestRolloutReverificationRunFromConfig:
                 pass
 
         exporter = _CapturingExporter()
-        provider = MeterProvider(metric_readers=[PeriodicExportingMetricReader(exporter, export_interval_millis=10**9)])
+        provider = MeterProvider(
+            metric_readers=[PeriodicExportingMetricReader(exporter, export_interval_millis=10**9)]
+        )
 
         class _Handle:
             is_exporting = True
