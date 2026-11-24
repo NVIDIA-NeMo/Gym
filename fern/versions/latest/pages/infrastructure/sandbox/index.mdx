@@ -229,11 +229,11 @@ class MyResourcesServer(SimpleResourcesServer):
     owned_sandbox_blocks = {"sandbox_config": "sandbox_provider"}
 ```
 
-A provider that cannot apply a rule refuses it, so no sandbox starts with open egress in place of the rule: OpenSandbox and E2B apply all five, Docker `inherit` and `no_network`, and the other providers `inherit`. Startup, a dry run included, checks each listed block against the provider its field names, and refuses a restricted rule in any `SandboxConfig` of the server's config that is not listed, since nothing would apply it there. A provider block whose own settings conflict with the rule (such as Docker's `create.network`) is refused at the block's first `spec()`.
+E2B supports all five rules. OpenSandbox supports `inherit` by default and the four restricted rules when the operator declares packet-level enforcement for that deployment. Docker supports `inherit` and `no_network`. The other providers support `inherit`. See [OpenSandbox Network Policy](/infrastructure/sandbox/opensandbox#network-policy) for the deployment setting. Startup, a dry run included, checks each listed block against the provider its field names, and refuses a restricted rule in any `SandboxConfig` of the server's config that is not listed, since nothing would apply it there. A provider block whose own settings conflict with the rule (such as Docker's `create.network`) is refused at the block's first `spec()`.
 
 A rule allows a server's whole host, every port on it, since providers allow egress by host. With `default_host` set, every Gym server listens on that one address, so `model_only` also reaches the other servers there; startup logs which servers share a host a rule allows, and you can give the model server its own address when that matters. The model and tool servers must listen on an address a sandbox can reach: a loopback address is refused. A block that sets `network` and also `provider_options.network_policy` is refused. `SandboxConfig.spec()` on its own refuses a restricted rule, since only the owner's `spec()` applies it.
 
-A block without `network` keeps today's behavior, the provider's default or its `provider_options.network_policy`, and the server logs a deprecation warning naming the rule to switch to. A later release requires `network`.
+A block without `network` keeps today's behavior, the provider's default or its `provider_options.network_policy`, and the server logs a deprecation warning. For a legacy policy with ordered allow and deny rules, review the policy manually before migrating. A later release requires `network`.
 
 ## Lifecycle
 

@@ -659,6 +659,7 @@ class AsyncSandbox:
         *,
         snapshot_id: str | None = None,
         span_attributes: Mapping[str, Any] | None = None,
+        _owner_rolls_back: bool = False,
     ) -> "AsyncSandbox":
         """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image."""
         if self._closed:
@@ -727,7 +728,9 @@ class AsyncSandbox:
                             source_path.write_text(contents, encoding="utf-8")
                         await self.upload(source_path, target_path)
         except BaseException as error:
-            await _stop_after_failed_start(self, error)
+            # An owner that tracks the handle rolls it back under its own provider concurrency limit.
+            if not _owner_rolls_back:
+                await _stop_after_failed_start(self, error)
             raise
 
         return self
