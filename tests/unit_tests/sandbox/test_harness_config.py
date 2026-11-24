@@ -4,12 +4,12 @@
 
 import pytest
 
-from nemo_gym.agents.utils.agent_sandbox_config import AgentSandboxConfig
+from nemo_gym.sandbox.harness_config import HarnessSandboxConfig
 
 
-class TestAgentSandboxConfig:
+class TestHarnessSandboxConfig:
     def test_the_keys_agent_recipes_set_today_load(self) -> None:
-        config = AgentSandboxConfig.model_validate(
+        config = HarnessSandboxConfig.model_validate(
             {
                 "image": "harness:1",
                 "workdir": "/app",
@@ -22,7 +22,7 @@ class TestAgentSandboxConfig:
                 "env": {"A": "1"},
                 "metadata": {"team": "gym"},
                 "provider_options": {"volumes": []},
-                "network": "inherit",
+                "network_access": "inherit",
             }
         )
 
@@ -30,10 +30,10 @@ class TestAgentSandboxConfig:
 
     def test_an_unknown_key_is_refused(self) -> None:
         with pytest.raises(ValueError, match="extra"):
-            AgentSandboxConfig.model_validate({"imagee": "harness:1"})
+            HarnessSandboxConfig.model_validate({"imagee": "harness:1"})
 
     def test_the_spec_carries_the_agents_own_image_files_and_entrypoint(self) -> None:
-        config = AgentSandboxConfig(
+        config = HarnessSandboxConfig(
             image="harness:1",
             workdir="/app",
             files={"/app/a": "a"},
@@ -52,11 +52,11 @@ class TestAgentSandboxConfig:
 
     def test_the_cpu_caps_are_off_unless_asked_for(self) -> None:
         # Most agents set no CPU caps today, so moving onto this config must not add them.
-        spec = AgentSandboxConfig(resources={"cpu": 2}).spec({"fake": {}})
+        spec = HarnessSandboxConfig(resources={"cpu": 2}).spec({"fake": {}})
 
         assert spec.env == {}
 
     def test_the_user_and_ports_reach_the_spec(self) -> None:
-        spec = AgentSandboxConfig(user="agent", ports=[8080]).spec({"fake": {}})
+        spec = HarnessSandboxConfig(user="agent", ports=[8080]).spec({"fake": {}})
 
         assert (spec.user, list(spec.ports)) == ("agent", [8080])

@@ -17,8 +17,7 @@ processes after a natural exit, remain for the sandbox owner to stop. Core sandb
 and providers live in :mod:`nemo_gym.sandbox`.
 """
 
-from nemo_gym.agents.utils.agent_sandbox_config import AgentSandboxConfig
 from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
 
 
-__all__ = ["AgentSandboxConfig", "lifecycle_observation"]
+__all__ = ["lifecycle_observation"]

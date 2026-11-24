@@ -350,12 +350,13 @@ class SandboxConfig(BaseModel):
     ) -> SandboxSpec:
         """Build the spec of one sandbox; ``metadata`` adds to the provider's and the config's metadata.
 
-        ``network_options`` are the provider options that apply the block's ``network_access`` rule, such as OpenSandbox's
+        ``_network_options`` are the provider options that apply the block's ``network_access`` rule, such as OpenSandbox's
         ``network_policy`` or Docker's ``run_args``, built by the owner's ``OwnedSandboxes.spec``. They replace
-        ``provider_options``, and a restricted rule needs them.
+        ``provider_options``, and a restricted rule needs them. This private argument is only for the owner's
+        implementation; callers use ``OwnedSandboxes.spec()``.
 
         Raises:
-            ValueError: For a restricted rule without ``network_options``, so that a block that asks
+            ValueError: For a restricted rule without ``_network_options``, so that a block that asks
                 for restricted egress never starts a sandbox with the provider's default egress.
         """
         provider_options = dict(self.provider_options)
