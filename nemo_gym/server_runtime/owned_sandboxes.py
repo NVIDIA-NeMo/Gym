@@ -485,11 +485,20 @@ class OwnedSandboxes:
         reference = getattr(config, provider_field, None)
         if reference is None:
             raise ValueError(f"{config.name} sets no {provider_field}, so it cannot own sandboxes on it")
-        provider = create_provider(resolve_provider_config(reference, global_config))
+        # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
+        provider_config = resolve_provider_config(reference, global_config)
+        state_dir = checkpoint_state_dir(global_config)
+        if "local" in provider_config:
+            LOGGER.warning(
+                "%s owns sandboxes on the local provider, which runs their commands as processes on this host; "
+                "use a container provider for anything that runs model-generated code",
+                config.name,
+            )
+        provider = create_provider(provider_config)
         suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
         owned = cls(
             provider,
-            state_dir=checkpoint_state_dir(global_config),
+            state_dir=state_dir,
             server_name=f"{config.name}{suffix}",
             provider_config_ref=reference if isinstance(reference, str) else None,
             owns_provider=True,
