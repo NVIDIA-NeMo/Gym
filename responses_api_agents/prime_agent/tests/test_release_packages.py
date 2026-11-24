@@ -99,3 +99,36 @@ def test_installer_rejects_corrupt_release_dependency_before_install(tmp_path: P
     assert f"{asset}: FAILED" in result.stdout
     assert not runtime.exists()
     assert not list(tmp_path.glob("runtime.install.*"))
+
+
+@pytest.mark.parametrize("cache_matches_recipe", [True, False])
+def test_installer_reuses_only_the_matching_runtime_recipe(tmp_path: Path, cache_matches_recipe: bool) -> None:
+    from responses_api_agents.prime_agent import sandbox
+
+    runtime, session = tmp_path / "runtime", tmp_path / "session"
+    (runtime / "bin").mkdir(parents=True)
+    (runtime / "kernel/bin").mkdir(parents=True)
+    session.mkdir()
+    # The real installer executes these health checks before deciding whether to reuse the runtime.
+    node, python = runtime / "bin/node", runtime / "kernel/bin/python3"
+    node.write_text("#!/bin/sh\nprintf '%s\\n' 0.7.0\n")
+    python.write_text("#!/bin/sh\nexit 0\n")
+    node.chmod(0o755)
+    python.chmod(0o755)
+    profile = "1" * 64 + "\n"
+    (session / "runtime-profile.txt").write_text(profile)
+    (runtime / "ready").write_text(profile if cache_matches_recipe else "")
+    installer = session / "install_prime_runtime.sh"
+    shutil.copy2(Path(sandbox.__file__).with_name("install_prime_runtime.sh"), installer)
+    asset = tmp_path / "asset"
+    asset.write_bytes(b"invalid replacement archives must not be needed for a compatible cache")
+    checksum = hashlib.sha256(asset.read_bytes()).hexdigest()
+    result = subprocess.run(
+        ["bash", str(installer), str(runtime), "0.7.0", *[str(asset), checksum] * 3, str(asset)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    # A matching recipe reuses the checked runtime. An empty marker from the old installer must rebuild and fail
+    # on these intentionally invalid archives (or the unsupported host), rather than silently accepting that cache.
+    assert (result.returncode == 0) is cache_matches_recipe, result.stdout + result.stderr

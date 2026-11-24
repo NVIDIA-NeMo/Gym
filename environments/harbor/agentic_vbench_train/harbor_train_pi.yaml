@@ -1,0 +1,44 @@
+# Training overlay for Agentic-VBench tasks on the Harbor task shape with the Pi harness. Pass it instead of
+# `harbor_train.yaml`, which carries the OpenCode harness's block and so loads only with `--agent opencode_agent`, and
+# list it in a NeMo RL run's `env.nemo_gym.config_paths` after the generated `run_config_pi_agent.yaml` (README).
+#
+# The server block and the capture store are `harbor_train.yaml`'s, key for key (a test keeps them equal), plus
+# `request_sampling_to_model_calls`. The
+# harness block sets for Pi what that file sets for OpenCode: the capture opt-in, `image_input`, the time ceiling and
+# the model budgets.
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      secrets:
+        NVINFERENCE_API_KEY: ${oc.env:NVINFERENCE_API_KEY,${oc.env:INFERENCE_API_KEY,null}}
+      separate_verifier_for_artifacts: true
+      max_concurrent_episodes: ${oc.select:agentic_vbench_concurrency,12}
+      queue_timeout_seconds: 43200
+      sandbox_ready_timeout_s: 1800
+      # This harness refuses `temperature`, `top_p` and `max_output_tokens` in a request, since it cannot put them
+      # on each of its model calls. A training framework that writes its sampling values into the row's request,
+      # not beside it as `_ng_model_sampling`, would fail every episode at `stage: agent`. With this on, the
+      # server moves them from the request onto the turn's model calls. A row with `_ng_model_sampling`, or with
+      # no sampling in its request, is unaffected.
+      request_sampling_to_model_calls: true
+
+token_id_capture:
+  enabled: true
+  dir: ${oc.env:NEMO_GYM_TOKEN_ID_CAPTURE_DIR,/tmp/nemo_gym_token_id_captures}
+  delta_records: true
+
+pi_agent:
+  responses_api_agents:
+    pi_agent:
+      token_id_capture: true
+      # The tasks need the model to look at frames it extracts; the prompt itself has no image.
+      image_input: true
+      # A ceiling: each row's agent_timeout_sec (the task's [steps.agent].timeout_sec) applies.
+      timeout: 1800
+      # The policy's real context and per-call output limit, under the same keys as the OpenCode overlay.
+      context_window: ${oc.select:agentic_vbench_context_tokens,49152}
+      max_output_tokens: ${oc.select:agentic_vbench_output_tokens,8192}
+      # A compaction call summarizes the session in a model call of its own, which a training framework cannot join
+      # to the scored chain, and the compaction plugins and the model server's summary recovery are OpenCode's. So
+      # an episode that fills the context ends there; give the policy its whole training context instead.
+      auto_compaction: false

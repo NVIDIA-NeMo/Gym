@@ -18,7 +18,7 @@ from responses_api_agents.openhands_agent.sandbox import RUNNER_SOURCE
 STUB = """
 import json, os, time
 
-__version__ = "1.59.0"
+__version__ = "stub-version"
 LOG = os.environ["STUB_LOG"]
 
 def note(**entry):
@@ -237,7 +237,7 @@ def test_finished_run_records_events_result_and_the_harness_configuration(tmp_pa
     assert (result["status"], result["execution_status"], result["openhands_version"]) == (
         "returned",
         "finished",
-        "1.59.0",
+        "stub-version",
     )
     recorded = events(session)
     assert [event["kind"] for _, event in recorded] == ["MessageEvent", "ActionEvent", "ObservationEvent"]
@@ -334,9 +334,9 @@ GRANTS = {
         "url": "http://resources:8080/mcp",
         "headers": {"x-nemo-gym-mcp-session": "token"},
         "required": True,
-        "timeout": 300,
+        "timeout": 300000,
     },
-    "search": {"url": "http://search:8080/mcp", "headers": {}, "required": False, "timeout": 300},
+    "search": {"url": "http://search:8080/mcp", "headers": {}, "required": False, "timeout": 300000},
 }
 
 
@@ -349,7 +349,7 @@ def test_mcp_grants_reach_openhands_and_required_ones_are_probed_first(tmp_path,
         "url": "http://resources:8080/mcp",
         "transport": "http",
         "headers": {"x-nemo-gym-mcp-session": "token"},
-        "timeout": 300,
+        "timeout": 300000,
     }
     assert set(agent["mcp_config"]) == {"gdpval_resources_server", "search"}
     # Without finish tools, OpenHands keeps its own finish.
