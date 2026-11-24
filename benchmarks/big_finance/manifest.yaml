@@ -1,0 +1,54 @@
+name: big_finance
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: BigFinanceBench public subset, finance research questions answered with
+  web search, SEC EDGAR, URL fetch and Python tools, judged correct by an LLM.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- wowowoxuan1994
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/web_search
+- tool_and_computer_use/multi_step_tool_use
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/multi_source_synthesis
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+domains:
+- finance
+- accounting_audit
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: big_finance
+agent_server: finance_agent
+datasets:
+- name: big_finance
+  type: benchmark
+  jsonl_fpath: benchmarks/big_finance/data/big_finance_public_50.jsonl
+  prepare_script: benchmarks/big_finance/prepare.py
+  num_repeats: 1
+model_server: big_finance_policy_model
+canonical_split: full
+prompt_source: prepared
+adopted_from:
+  source: https://github.com/Rogo-Technologies/big-finance-benchmark
+  ref: d794a65fe583edc6852b44c817b0a2aef33ca831  # pragma: allowlist secret
+  reconciled: '2026-11-06'
+lifecycle: active
