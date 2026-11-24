@@ -481,6 +481,23 @@ def test_a_verification_without_a_verdict_is_masked_after_its_retry(consumer, fa
     assert module.run_verification.await_count == 2, "retried once on a fresh sandbox before it is masked"
 
 
+def test_a_mask_after_a_git_failure_names_the_verifier_s_error(consumer):
+    """Git failed on the agent's repository, so the empty patch is graded. If that grading has no verdict, the mask's
+    reason is the verifier's error, not the capture's."""
+    module, fixtures, server, sandboxes, _ = consumer
+    verification_result = type(module.run_verification.return_value)
+    module.capture_model_patch.side_effect = CaptureCommandError("index.lock exists", return_code=128, error_type=None)
+    module.run_verification.return_value = verification_result(False, False, False, None, "", "image pull failed")
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=fixtures._seed().model_dump(mode="json")).status_code == 200
+        verified = client.post("/verify", json=fixtures._VERIFY)
+    assert verified.status_code == 200, verified.text
+    result = verified.json()
+    assert result["mask_sample"] and result["failure_kind"] == VERIFIER_ERROR
+    assert result["failure_reason"] == "image pull failed"
+    assert result["error"] == "Failed to extract model patch: index.lock exists"
+
+
 @pytest.mark.parametrize("episode", [True, False], ids=["episode", "agent_run"])
 def test_a_row_without_its_grading_spec_is_masked_without_grading(consumer, episode):
     module, fixtures, server, sandboxes, _ = consumer

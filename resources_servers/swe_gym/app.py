@@ -441,7 +441,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             reward=1.0 if result.resolved else 0.0,
             evaluation_completed=result.completed or result.timed_out,
             **(
-                {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": error or "No verdict"}
+                {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": result.error or "No verdict"}
                 if not result.completed and not result.timed_out
                 else {}
             ),
