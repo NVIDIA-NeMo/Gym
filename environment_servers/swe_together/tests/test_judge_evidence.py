@@ -10,6 +10,8 @@ from nemo_gym.agents import AgentCloseSessionResponse
 from nemo_gym.rollouts.harness_capabilities import inspect_record
 from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.trajectory import AgentObservationBundle, ModelCallRef, TrajectoryRecord
+from nemo_gym.trajectory.captured_calls import build_captured_calls
+from nemo_gym.trajectory.trajectory_record import NG_TRAJECTORY_KEY
 
 
 MODEL = {"type": "responses_api_models", "name": "grading"}
@@ -196,6 +198,18 @@ async def test_missing_capture_keeps_candidate_and_exposes_gap(tmp_path):
     assert not result.model_calls
     assert "judge_capture_unavailable" in {gap.code for gap in result.gaps}
     assert "FileNotFoundError" in verification["judge_evidence_error"]
+
+
+async def test_a_missing_judge_capture_leaves_the_captured_call_counts_incomplete(tmp_path):
+    candidate = TrajectoryRecord.model_validate(
+        parent().model_dump(mode="json") | {"model_calls": [{"model_call_id": "candidate-call"}]}
+    )
+    verification = {"judge_capture_episode": "missing", "judge_close": receipt("response").model_dump(mode="json")}
+    result = await collect_judge_evidence(
+        candidate, verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+    captured = build_captured_calls({NG_TRAJECTORY_KEY: result.model_dump(mode="json")})
+    assert (captured["calls"], captured["capture_complete"]) == (1, False)
 
 
 @pytest.mark.parametrize(

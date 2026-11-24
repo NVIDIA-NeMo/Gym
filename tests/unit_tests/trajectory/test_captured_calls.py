@@ -95,10 +95,18 @@ def test_corrupt_capture_records_make_the_summary_incomplete_or_absent() -> None
     assert build_captured_calls(_three_call_trajectory(model_calls=[], gaps=corrupt)) is None
 
 
-def test_a_pending_capture_is_summarized_as_incomplete() -> None:
-    pending = _three_call_trajectory(gaps=[{"code": "model_call_capture_pending"}])
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "model_call_capture_pending",
+        "judge_capture_unavailable",
+        "judge_capture_incomplete",
+        "judge_capture_records_unreadable",
+    ],
+)
+def test_a_pending_capture_or_a_partly_read_judge_capture_is_summarized_as_incomplete(gap: str) -> None:
+    captured = build_captured_calls(_three_call_trajectory(gaps=[{"code": gap}]))
 
-    captured = build_captured_calls(pending)
     assert captured["calls"] == 3 and captured["capture_complete"] is False
 
 

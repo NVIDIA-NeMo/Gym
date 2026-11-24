@@ -21,7 +21,15 @@ CAPTURE_RECORDS_UNREADABLE_GAP = "model_call_capture_records_unreadable"
 # The capture holds no call for the rollout: a missing file and a rollout that made no call look the same.
 NO_CAPTURED_CALLS_GAPS = frozenset({"model_call_capture_no_records", "model_calls_unavailable"})
 CAPTURE_INCOMPLETE_GAPS = frozenset(
-    {"model_call_capture_pending", "model_call_capture_incomplete", CAPTURE_RECORDS_UNREADABLE_GAP}
+    {
+        "model_call_capture_pending",
+        "model_call_capture_incomplete",
+        CAPTURE_RECORDS_UNREADABLE_GAP,
+        # A judge episode captured apart from the rollout (SWE-Together) that could not be read in full.
+        "judge_capture_unavailable",
+        "judge_capture_incomplete",
+        "judge_capture_records_unreadable",
+    }
 )
 
 # Token fields summed per call role, named as in ``ng_perf``.
