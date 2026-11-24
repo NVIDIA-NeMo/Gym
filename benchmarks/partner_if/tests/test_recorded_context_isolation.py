@@ -36,7 +36,7 @@ def test_resolved_benchmark_routes_recorded_context_to_separate_resources(benchm
     ordinary_config = PartnerIFResourcesServerConfig.model_validate(ordinary | {"name": "partner_if"})
     assert ordinary_config.accept_verification_input is False
 
-    routes = settings(benchmark_config, "partner_if_dispatcher")["task_routes"]
+    routes = settings(benchmark_config, "partner_if_environment_server")["task_routes"]
     for task_id in ("pif_001", "pif_028"):
         environment = settings(benchmark_config, routes[task_id]["name"])
         assert environment["resources_server"]["name"] == "partner_if"

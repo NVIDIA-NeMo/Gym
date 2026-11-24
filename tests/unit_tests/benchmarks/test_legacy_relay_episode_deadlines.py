@@ -28,12 +28,6 @@ UNBOUNDED_RELAYS = [
         "resources_servers/terminal_bench_4/configs/terminal_bench_4.yaml",
         "terminal_bench_4_miniswe_environment_server",
     ),
-    # The dispatcher waits for a child environment whose text and tool episodes have no deadline.
-    ("benchmarks/partner_if/config.yaml", "partner_if_dispatcher_environment_server"),
-    (
-        "responses_api_agents/partner_if_dispatcher/configs/partner_if_dispatcher.yaml",
-        "partner_if_dispatcher_environment_server",
-    ),
 ]
 
 
@@ -51,19 +45,23 @@ def test_the_relay_opts_out_of_the_default_episode_deadline(path: str, instance:
     assert config.default_episode_timeout_seconds is None
 
 
-def test_partner_if_children_keep_their_null_deadlines() -> None:
-    config = yaml.safe_load((ROOT / "benchmarks/partner_if/config.yaml").read_text())
-    children = [
-        name
-        for name, value in config.items()
-        if isinstance(value, dict) and "single_agent_turn_legacy" in value.get("environment_servers", {})
+@pytest.mark.parametrize(
+    "path", ["benchmarks/partner_if/config.yaml", "environment_servers/partner_if/configs/partner_if.yaml"]
+)
+def test_partner_if_environments_keep_their_null_deadlines(path: str) -> None:
+    # The partner_if server waits for routed episodes whose text and tool turns have no deadline.
+    config = yaml.safe_load((ROOT / path).read_text())
+    environments = [
+        block
+        for value in config.values()
+        if isinstance(value, dict)
+        for implementation, block in (value.get("environment_servers") or {}).items()
+        if implementation in ("partner_if", "single_agent_turn_legacy")
     ]
 
-    assert children
-    for name in children:
-        assert (
-            config[name]["environment_servers"]["single_agent_turn_legacy"]["default_episode_timeout_seconds"] is None
-        )
+    assert any("task_routes" in block for block in environments)
+    for block in environments:
+        assert block["default_episode_timeout_seconds"] is None
 
 
 def test_an_ordinary_relay_keeps_the_six_hour_default() -> None:

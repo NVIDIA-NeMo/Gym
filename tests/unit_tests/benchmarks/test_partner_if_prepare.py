@@ -77,7 +77,7 @@ def test_routes_cover_the_release_and_name_its_environments():
     runtime = prepare_module.BENCHMARK_DIR / "config_recorded_context.yaml"
     assert "benchmarks/partner_if/config_recorded_context.yaml" in config["config_paths"]
     config |= yaml.safe_load(runtime.read_text())
-    routes = config["partner_if_dispatcher"]["responses_api_agents"]["partner_if_dispatcher"]["task_routes"]
+    routes = config["partner_if_environment_server"]["environment_servers"]["partner_if"]["task_routes"]
     assert list(routes) == RELEASE_TASK_IDS
     assert len(RELEASE_TASK_IDS) == prepare_module.ROW_COUNT
     environments = {
