@@ -10,36 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from omegaconf import OmegaConf
 
-from nemo_gym.config import GlobalConfigDictParser, maybe_get_server_instance_config
 from nemo_gym.data import TaskDataValidator, load_task_data_schema
-from nemo_gym.environment import BenchmarkConfig, discover_environment_catalog
-from nemo_gym.environment.benchmarks import _is_benchmark_config
 from resources_servers.swe_atlas_qa import prepare
-
-
-def test_benchmark_catalog_discovery_and_single_dataset_composition() -> None:
-    root = prepare.PACKAGE_DIR.parents[1]
-    config_path = root / "benchmarks/swe_atlas_qa/config.yaml"
-    assert _is_benchmark_config(config_path)
-    entries = [entry for entry in discover_environment_catalog() if entry.name == "swe_atlas_qa"]
-    assert [(entry.kind, entry.config_path.resolve()) for entry in entries] == [("benchmark", config_path)]
-    benchmark = BenchmarkConfig.from_config_path(config_path, strict=False)
-    assert benchmark.name == "swe_atlas_qa"
-    _, configs = GlobalConfigDictParser().load_extra_config_paths([str(config_path)])
-    resolved = OmegaConf.merge(*configs)
-    agent = resolved.swe_atlas_qa_agent.responses_api_agents.harness_agent
-    standalone = OmegaConf.load(prepare.PACKAGE_DIR / "configs/swe_atlas_qa.yaml")
-    assert len(agent.datasets) == 1
-    standalone_datasets = standalone.swe_atlas_qa_agent.responses_api_agents.harness_agent.datasets
-    assert agent.datasets == [dataset for dataset in standalone_datasets if dataset.type == "benchmark"]
-    assert [dataset.type for dataset in standalone_datasets] == ["example", "benchmark"]
-    assert agent.resources_server.name == "swe_atlas_qa_resources_server"
-    assert agent.agent == "opencode"
-    model, error = maybe_get_server_instance_config(name="policy_model", server_type_config_dict=resolved.policy_model)
-    assert error is None
-    assert model.get_inner_run_server_config().port == 8000
 
 
 @pytest.fixture

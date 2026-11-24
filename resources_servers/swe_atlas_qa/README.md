@@ -1,10 +1,12 @@
 # SWE Atlas Q&A resources server
 
-Serves SWE Atlas Codebase Q&A for `harness_agent`. See the [benchmark README](../../benchmarks/swe_atlas_qa/README.md)
-to prepare data and run evaluations.
+This resources server retains data preparation and the upstream rubric evaluator for SWE Atlas Codebase Q&A.
+Run `python resources_servers/swe_atlas_qa/prepare.py` from the repository root to materialize the evaluation
+rows from the pinned upstream source. The [benchmark README](../../benchmarks/swe_atlas_qa/README.md) records
+historical results from the retired run presets.
 
-`/seed_session` creates the task sandbox from the task's pinned image with `/app` as its working directory, and
-`harness_agent` attaches to it. `/verify` collects `/logs/agent/answer.txt`, closes the agent sandbox, and runs the
+`/seed_session` creates the task sandbox from the task's pinned image with `/app` as its working directory.
+`/verify` collects `/logs/agent/answer.txt`, closes the agent sandbox, and runs the
 upstream evaluator in a separate sandbox. Rubrics, reference answers, and judge credentials never enter the agent
 sandbox, and agent network access is limited to the policy-model host.
 

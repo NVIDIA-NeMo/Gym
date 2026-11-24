@@ -8,15 +8,9 @@
 > `workspace_bench` configs do this through `single_agent_turn_legacy`. Sandbox handling stays shared on that path:
 > the resources server starts, lends and stops the task sandbox (`SandboxSessionResourcesServer`), the environment
 > server orders seed, turn, verify and close, and each agent launches and stops its CLI in the lent sandbox through
-> the shared helpers in `nemo_gym/agents/utils/`. The `swe_atlas_qa` and `rna_design` configs still run on this agent
-> until they move, and `harness_exa_search` still builds on its agent registry:
+> the shared helpers in `nemo_gym/agents/utils/`.
 >
-> - Every `swe_atlas_qa` harness has a session agent that works in a sandbox the resources server lends (`deepagents`
->   and `mini_swe` through `langchain_deepagents_agent` and `mini_swe_agent`, without the Fabric adapters), but the
->   `swe_atlas_qa` resources server does not lend its task sandbox yet.
-> - `rna_design` forwards its MCP tools to Claude Code, and `claude_code_agent` does not accept required remote tools.
->
-> Existing configs keep working; the agent logs a deprecation warning when it starts.
+> The agent logs a deprecation warning at startup. Gym no longer ships a preset for it.
 
 Runs any gym agent harness in a sandbox with any resources server.
 

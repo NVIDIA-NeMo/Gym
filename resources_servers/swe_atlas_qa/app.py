@@ -180,7 +180,7 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                 model_config = get_first_server_config_dict(
                     self.server_client.global_config_dict, self.config.model_server.name
                 )
-                # harness_agent calls the Gym model server, not the policy endpoint behind it (`base_url`).
+                # Allow egress to the Gym model server that proxies the policy endpoint.
                 model_url = self.server_client._build_server_base_url(model_config)
             if isinstance(model_url, (list, ListConfig)):
                 model_url = model_url[0]

@@ -1,2 +1,2 @@
 config_paths:
-- resources_servers/rna_design/configs/rna_design.yaml
+- environments/rna_design/custom_agent.yaml
