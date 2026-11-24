@@ -405,3 +405,102 @@ class TestAnswerExtraction:
         assert extract(response_of("\\boxed{a  b}")) == "a  b"
         assert extract(response_of("\\boxed{\n    x\n      y\n}")) == "x\n  y"
         assert extract(response_of("first message", "", "   ")) == "first message"
+
+
+# Tasks whose reasoning_gym 0.1.25 scorer runs the answer as Python: the first five pass it to sympy's parse_expr,
+# which eval()s it with Python's builtins in scope, and the last four eval() it to read a Python list.
+_CODE_RUNNING_SCORER_TASKS = [
+    "countdown",
+    "puzzle24",
+    "simple_integration",
+    "intermediate_integration",
+    "polynomial_multiplication",
+    "binary_matrix",
+    "spiral_matrix",
+    "string_insertion",
+    "n_queens",
+]
+
+
+class TestScorersDoNotRunAnswers:
+    @pytest.fixture
+    def server(self) -> ReasoningGymResourcesServer:
+        config = ReasoningGymResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="")
+        return ReasoningGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task_name", _CODE_RUNNING_SCORER_TASKS)
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "plain",
+            # Python reads identifiers in NFKC form, so full-width letters still name __import__.
+            "full_width",
+        ],
+    )
+    async def test_python_in_the_answer_does_not_run(self, server, task_name, spelling, tmp_path):
+        sentinel = tmp_path / "answer_ran"
+        importer = "__import__" if spelling == "plain" else "__ｉｍｐｏｒｔ__"
+        payload = f"{importer}('pathlib').Path({str(sentinel)!r}).touch()"
+        entry = reasoning_gym.create_dataset(task_name, size=1, seed=42)[0]
+
+        result = await server.verify(_verify_request(entry, [_message(0, f"<answer>{payload}</answer>")]))
+
+        assert not sentinel.exists(), f"the {task_name} scorer ran the answer"
+        assert result.extracted_answer == payload
+        # Scored like an answer the task cannot read.
+        assert result.reward == reasoning_gym.get_score_answer_fn(task_name)(answer=None, entry=entry)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task_name", _CODE_RUNNING_SCORER_TASKS)
+    async def test_gold_answers_keep_full_marks(self, server, task_name):
+        for seed in range(5):
+            entry = reasoning_gym.create_dataset(task_name, size=1, seed=seed)[0]
+            result = await server.verify(_verify_request(entry, [_message(0, f"<answer>{entry['answer']}</answer>")]))
+            assert result.reward == 1.0, (task_name, seed, entry["answer"])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "rewrite",
+        [
+            # Other spellings of a correct antiderivative: Euler's number as E, and other names for the constant,
+            # which parse_expr reads as new symbols.
+            lambda gold: gold.replace("exp(x)", "E**x"),
+            lambda gold: gold.replace("+ C", "+ K"),
+            lambda gold: f"({gold.replace(' + C', '')}) + c_1",
+        ],
+    )
+    async def test_rewritten_antiderivatives_keep_full_marks(self, server, rewrite):
+        entry = reasoning_gym.create_dataset("intermediate_integration", size=1, seed=0)[0]
+        answer = rewrite(entry["answer"])
+        assert answer != entry["answer"]
+        result = await server.verify(_verify_request(entry, [_message(0, f"<answer>{answer}</answer>")]))
+        assert result.reward == 1.0, answer
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("task_name", ["simple_integration", "intermediate_integration"])
+    async def test_unevaluated_integral_does_not_score(self, server, task_name):
+        # sympy differentiates Integral(f, x) back to f, so copying the integrand into it scored 1.0 on every task.
+        entry = reasoning_gym.create_dataset(task_name, size=1, seed=0)[0]
+        answer = f"Integral({entry['metadata']['integrand']}, {entry['metadata']['variable']}) + C"
+        result = await server.verify(_verify_request(entry, [_message(0, f"<answer>{answer}</answer>")]))
+        assert result.reward == 0.0, answer
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "task_name, as_python_literal, partial_credit",
+        [
+            ("binary_matrix", lambda gold: str([[int(v) for v in row.split()] for row in gold.splitlines()]), 0.1),
+            ("spiral_matrix", lambda gold: str([int(v) for v in gold.split()]), 0.1),
+            ("string_insertion", lambda gold: str(list(gold)), 0.1),
+            ("n_queens", lambda gold: str([row.split() for row in gold.splitlines()]), 0.5),
+        ],
+    )
+    async def test_python_literal_answers_keep_partial_credit(
+        self, server, task_name, as_python_literal, partial_credit
+    ):
+        # These scorers read a Python list for partial credit; a literal must still be read.
+        entry = reasoning_gym.create_dataset(task_name, size=1, seed=42)[0]
+        answer = as_python_literal(entry["answer"])
+        result = await server.verify(_verify_request(entry, [_message(0, f"<answer>{answer}</answer>")]))
+        assert result.reward == partial_credit, answer
