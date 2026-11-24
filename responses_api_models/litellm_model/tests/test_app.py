@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.trajectory import extract_cache_write_tokens
 from responses_api_models.litellm_model.app import (
     LiteLLMModelServer,
     LiteLLMModelServerConfig,
@@ -206,6 +207,33 @@ class TestNormalizeToResponse:
 
         assert result["usage"]["input_tokens_details"] == {"cached_tokens": 100, "cache_write_tokens": 60}
         assert NeMoGymResponse.model_validate(result).usage.input_tokens_details.cache_write_tokens == 60
+
+    @pytest.mark.parametrize(
+        ("usage", "expected"),
+        [
+            (
+                {
+                    "input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 0},
+                    "cache_creation_input_tokens": 60,
+                },
+                60,
+            ),
+            ({"input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": "60"}}, None),
+            ({"input_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 60}}, 60),
+            ({"input_tokens_details": {"cached_tokens": 100}}, None),
+        ],
+        ids=["anthropic wins over a canonical zero", "malformed canonical", "canonical", "none reported"],
+    )
+    def test_native_response_cache_writes_match_the_model_call_record(self, usage, expected) -> None:
+        data = deepcopy(NATIVE_RESPONSE)
+        data["usage"] = {"input_tokens": 300, "output_tokens": 20, "total_tokens": 320} | deepcopy(usage)
+
+        result = _normalize_to_response(data)
+
+        details = NeMoGymResponse.model_validate(result).usage.input_tokens_details
+        assert (details.cached_tokens, details.cache_write_tokens) == (100, expected)
+        # The model-call record of the same payload counts the same writes.
+        assert extract_cache_write_tokens(usage) == expected
 
     def test_hybrid_response_cache_writes_reach_the_response_usage(self) -> None:
         data = deepcopy(HYBRID_RESPONSE)

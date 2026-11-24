@@ -97,6 +97,7 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
         if "total_tokens" not in usage and ("input_tokens" in usage or "output_tokens" in usage):
             usage["total_tokens"] = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
 
+        cache_write_tokens = extract_cache_write_tokens(usage)
         if not isinstance(usage.get("input_tokens_details"), dict):
             cached_tokens = _usage_detail(
                 usage,
@@ -105,9 +106,13 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
                 "cached_input_tokens",
                 "cache_read_input_tokens",
             )
-            usage["input_tokens_details"] = _input_tokens_details(cached_tokens, extract_cache_write_tokens(usage))
-        elif "cached_tokens" not in usage["input_tokens_details"]:
-            usage["input_tokens_details"]["cached_tokens"] = None
+            usage["input_tokens_details"] = _input_tokens_details(cached_tokens, cache_write_tokens)
+        else:
+            details = usage["input_tokens_details"]
+            details.setdefault("cached_tokens", None)
+            # The model-call record reads this payload with the same lookup; serve the count it records.
+            if cache_write_tokens is not None or "cache_write_tokens" in details:
+                details["cache_write_tokens"] = cache_write_tokens
 
         if not isinstance(usage.get("output_tokens_details"), dict):
             reasoning_tokens = _usage_detail(
