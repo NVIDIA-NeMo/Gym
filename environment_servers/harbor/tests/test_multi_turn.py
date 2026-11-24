@@ -31,6 +31,7 @@ from environment_servers.harbor.entrypoint import HealthcheckFailed
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S
 from environment_servers.harbor.steps import HEALTHCHECK_EXEC_GRACE_S
 from environment_servers.harbor.tests.conftest import (
+    DOWNLOAD_ARCHIVE_PREFIX,
     IMAGE_PATH,
     OK,
     TASK_TOML,
@@ -2442,7 +2443,8 @@ class ArtifactSandbox(ScriptedSandbox):
 
     async def download(self, remote_path, local_path):
         source = self.archived[-1] if self.archived else None
-        if source in self.archives:
+        # A reward read (one file, not an archive the sandbox packed) is the base fake's.
+        if source in self.archives and remote_path.startswith(DOWNLOAD_ARCHIVE_PREFIX):
             Path(local_path).write_bytes(self.archives[source])
             return
         await super().download(remote_path, local_path)

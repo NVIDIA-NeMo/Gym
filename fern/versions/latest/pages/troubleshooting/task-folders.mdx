@@ -178,7 +178,7 @@ A row's `failure_kind` says why the verifier gave no reward, or why the row is l
 | `failure_kind` | Meaning | Scored |
 | --- | --- | --- |
 | `harbor:missing_reward` | `test.sh` wrote neither `reward.txt` nor `reward.json`. A Python verifier that raised lands here. | Yes, as 0 |
-| `harbor:invalid_reward` | The reward file could not be read as a finite number. | Yes, as 0 |
+| `harbor:invalid_reward` | The reward file could not be read as a finite number, is not a regular file (on Docker, bwrap, Apptainer and enroot: a link, a directory, a FIFO), or exceeds 1 MiB. | Yes, as 0 |
 | `harbor:verifier_timeout` | `test.sh` ran past its timeout without a reward. | Yes, as 0 |
 | `harbor:verifier_unavailable` | A separately run `test.sh` exited 75 (`EX_TEMPFAIL`) and wrote no valid reward: a judge service or asset download it depends on was unavailable (in shared mode the code is ignored and the turn is measured). `gym eval resubmit --recover` keeps the row masked and stops with "the run is not complete"; a fresh run measures it once the service is back. | No, masked |
 | `harbor:task_deadline` | The episode ran past its task's budget. | No, retried |
@@ -187,7 +187,8 @@ A row's `failure_kind` says why the verifier gave no reward, or why the row is l
 | `harbor:overlay_failed` | An overlay-mode `RUN` line failed in the verifier's own sandbox. | No, masked |
 
 Other masked kinds come from Gym's shared list: `provider_unavailable` (a sandbox operation failed during
-verification), `verifier_error` (`test.sh` could not run) and `persistence_failed` (Gym could not create the
+verification, including a reward read that did not finish within 120 seconds), `verifier_error` (`test.sh` could
+not run; checked before the run: `timeout` or `bash` missing) and `persistence_failed` (Gym could not create the
 verifier log folder).
 
 When the harness marks its own failed response with a cause, the server's `agent_outcome_policy` decides whether

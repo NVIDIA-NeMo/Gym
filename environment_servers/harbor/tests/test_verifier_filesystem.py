@@ -54,7 +54,8 @@ class LocalSandbox:
         shutil.copyfile(source, target)
 
     async def download(self, source, target):
-        shutil.copyfile(source, target)
+        # A link travels as a link, as `docker cp` copies one; an absent source raises FileNotFoundError.
+        shutil.copyfile(source, target, follow_symlinks=False)
 
 
 @pytest.fixture
@@ -371,12 +372,11 @@ async def test_timeout_retains_logs_and_is_measured_zero(tmp_path, monkeypatch):
 async def test_optional_diagnostic_transfer_failure_preserves_score(tmp_path, monkeypatch):
     server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
     download = sandbox.download
-    calls = 0
+    sources = []
 
     async def fail_diagnostics(source, target):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+        sources.append(source)
+        if len(sources) == 3:
             raise RuntimeError("diagnostic transfer failed")
         await download(source, target)
 
@@ -384,13 +384,18 @@ async def test_optional_diagnostic_transfer_failure_preserves_score(tmp_path, mo
     outcome = await server._run_verifier(
         SimpleNamespace(task=task, sandbox=sandbox, workdir="/app", entrypoint=None), TRAJECTORY
     )
-    assert calls == 2
+    # The two reward reads (reward.json absent, then reward.txt), then the optional logs archive, which failed.
+    assert sources[:2] == ["/logs/verifier/reward.json", "/logs/verifier/reward.txt"] and len(sources) == 3
+    assert sources[2].startswith("/tmp/.nemo-gym-download-")
     assert outcome["reward"] == 1 and not outcome.get("mask_sample", False)
     await server.shutdown()
 
 
-@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
-async def test_unsafe_reward_link_still_masks_transfer_failure(tmp_path, monkeypatch, verifier_tree):
+async def test_a_reward_link_to_a_host_file_is_measured_invalid_and_never_followed(
+    tmp_path, monkeypatch, verifier_tree
+):
+    """A reward.txt the tests made a link is delivered as a link (as docker cp does) and refused on this host: a
+    measured invalid reward, never the linked file's 1, never a mask."""
     root, logs, _ = verifier_tree
     outside = root / "untrusted-reward"
     outside.write_text("1")
@@ -401,9 +406,120 @@ async def test_unsafe_reward_link_still_masks_transfer_failure(tmp_path, monkeyp
     outcome = await server._run_verifier(
         SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
     )
-    assert outcome["reward"] == 0 and outcome["mask_sample"] is True
+    assert outcome["reward"] == 0 and not outcome.get("mask_sample", False)
+    assert outcome["failure_kind"] == "harbor:invalid_reward"
     assert not list(server._artifacts_dir.rglob("reward.txt"))
     await server.shutdown()
+
+
+SHELLS = [
+    pytest.param(shell, marks=pytest.mark.skipif(shutil.which(shell.split()[0]) is None, reason=f"{shell} is absent"))
+    for shell in ("bash", "dash", "busybox sh")
+]
+
+
+def _run_command(budget: int, out: Path, script: Path) -> str:
+    """The production run command with its two sandbox paths moved under a pytest-owned folder."""
+    return (
+        verifier_command(budget)
+        .replace(verifier.VERIFIER_STDOUT, str(out))
+        .replace(f"{verifier.TESTS_DIR}/test.sh", str(script))
+    )
+
+
+def _shell(shell: str, command: str):
+    import subprocess
+
+    return subprocess.run([*shell.split(), "-c", command], capture_output=True, timeout=60)
+
+
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="timeout is required")
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_run_command_holds_no_provider_pipe_while_tests_run(tmp_path, shell):
+    """While the tests run, fds 1 and 2 of `timeout` and of the shell running the command point at test-stdout.txt,
+    never at the provider's pipes: tests cannot write a provider error marker into the exec's output. (BusyBox's
+    own `timeout` applet execs the command in its own process, so there test.sh's parent is the shell itself.)"""
+    out, script, record = tmp_path / "test-stdout.txt", tmp_path / "test.sh", tmp_path / "fds"
+    script.write_text(
+        "pid=$PPID\n"
+        "for _ in 1 2 3 4; do\n"
+        "  cmd=$(tr '\\0' ' ' < /proc/$pid/cmdline)\n"
+        '  case "$cmd" in\n'
+        f"    *{out.name}*) kind=shell ;;\n"
+        "    timeout*) kind=timeout ;;\n"
+        "    *) kind= ;;\n"
+        "  esac\n"
+        f'  if [ -n "$kind" ]; then echo "$kind $(readlink /proc/$pid/fd/1) $(readlink /proc/$pid/fd/2)" >> {record}; fi\n'
+        # The shell running the command is the last process of the run; above it is the provider (here, pytest).
+        '  if [ "$kind" = shell ]; then break; fi\n'
+        "  read -r _ _ _ pid _ < /proc/$pid/stat\n"
+        "done\n"
+        "echo from-the-tests\n"
+    )
+    done = _shell(shell, _run_command(30, out, script))
+    assert done.returncode == 0 and done.stdout == b"" and done.stderr == b""
+    seen = [line.split() for line in record.read_text().splitlines()]
+    assert "shell" in [kind for kind, *_ in seen]
+    assert all(fds == [str(out), str(out)] for _, *fds in seen), seen
+    assert out.read_text() == "from-the-tests\n"
+
+
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="timeout is required")
+@pytest.mark.parametrize("shell", SHELLS)
+def test_the_run_command_relays_75_127_and_the_timer_as_137(tmp_path, shell):
+    """The shell parent relays test.sh's own code and turns the timer's self-kill into a plain 137, never a signal
+    death of the provider's direct child."""
+    out, script = tmp_path / "test-stdout.txt", tmp_path / "test.sh"
+    for code in (75, 127, 0):
+        script.write_text(f"exit {code}\n")
+        assert _shell(shell, _run_command(30, out, script)).returncode == code
+    script.write_text("sleep 5\n")
+    assert _shell(shell, _run_command(1, out, script)).returncode == 137
+
+
+FORGED_PROGRAMS = ("tar", "gzip", "head", "date", "rm", "cat", "find", "chmod", "cp", "base64")
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+async def test_tests_that_replace_tar_gzip_date_and_rm_on_path_cannot_forge_the_reward(
+    tmp_path, monkeypatch, verifier_tree
+):
+    """The red team's route in CI form: test.sh writes 0, then replaces the programs Gym ran after the tests (the
+    exit record's `date`, the reward archive's `tar`/`gzip`/`head`, the cleanup's `rm`, and others a provider might
+    run) with scripts that write a reward of 1 and then run the real program. The reward is read before any of them
+    runs, so the score stays 0."""
+    root, logs, _ = verifier_tree
+    planted = tmp_path / "planted-bin"
+    planted.mkdir()
+    reward_txt, reward_json = logs / "verifier" / "reward.txt", logs / "verifier" / "reward.json"
+    forgers = []
+    for name in FORGED_PROGRAMS:
+        real = shutil.which(name)
+        if real is None:
+            continue
+        body = (
+            f"#!/bin/sh\necho 1 > {shlex.quote(str(reward_txt))}\n"
+            f'echo \'{{"reward": 1}}\' > {shlex.quote(str(reward_json))}\nexec {shlex.quote(real)} "$@"\n'
+        )
+        forgers.append(f"printf %s {shlex.quote(body)} > {planted}/{name}; chmod +x {planted}/{name}")
+
+    class PlantedPath(LocalSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+            env = {**(env or {}), "PATH": f"{planted}:{os.environ['PATH']}"}
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    (task.path / "tests" / "test.sh").write_text(
+        f"#!/bin/bash\necho 0 > {shlex.quote(str(reward_txt))}\n" + "\n".join(forgers) + "\nexit 1\n"
+    )
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=PlantedPath(), workdir=str(root), entrypoint=None), TRAJECTORY
+    )
+    await server.shutdown()
+    assert reward_json.read_text().strip() == '{"reward": 1}'  # the planted programs did run afterwards
+    assert outcome["reward"] == 0 and not outcome.get("mask_sample", False), outcome
+    host = Path(outcome["verifier_logs_dir"])
+    assert (host / "reward.txt").read_text() == "0\n" and not (host / "reward.json").exists()
 
 
 @pytest.mark.parametrize("identifier", ["normal", "dots", "long"])

@@ -3,12 +3,12 @@
 
 """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
-The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
-``reward_components``) and turns the exit into a measured or masked sample. Module level are the
-in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
-record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
-and separate mode. The mixin holds the shared and separate verification choreography unchanged,
+The verifier runs Harbor's tests/test.sh under a timeout wrapper, reads reward.json or reward.txt
+through the provider's file download before anything else runs in that sandbox, applies the reward rule
+(``reward`` key, else the keys summed as ``reward_components``) and turns the exit status the provider
+reports, timed on this host, into a measured or masked sample. Module level are the in-sandbox paths the
+protocol uses, the failure kinds, the wrapper command, the reward parsers, the timeout rule, and the choice
+of image and user the verifier runs as in shared and separate mode. The mixin holds the shared and separate verification choreography unchanged,
 the reward and log collection, the collect hooks and artifact download, and the scoring methods.
 Creating the verifier sandbox stays with the other provisioning code in sandboxes.py.
 """
@@ -25,6 +25,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -62,11 +63,13 @@ from nemo_gym.data.tasks.harbor import (
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxExecResult,
+    SandboxFileRefused,
     SandboxProbeError,
     SandboxTransferError,
     download_dir,
     download_path,
     exec_as_root,
+    read_file_bytes,
     remote_kind,
     upload_archive,
     upload_dir,
@@ -80,12 +83,22 @@ LOGGER = logging.getLogger(__name__)
 TESTS_DIR = "/tests"
 
 VERIFIER_STDOUT = f"{VERIFIER_LOGS_DIR}/test-stdout.txt"
-# Written by the verifier wrapper once `timeout` returns: the exit code and the start and end times
-# (epoch seconds) of the run, so the server can tell the timer firing from a test.sh that exits 137.
+# The name of the exit record earlier versions of the wrapper wrote after test.sh. Nothing writes or reads it now:
+# the exit status comes from the run exec's result. It stays a reserved name under /logs/verifier for a release
+# (`VERIFIER_OUTPUT_NAMES`), so a dataset that declared it is not suddenly accepted.
 EXIT_RECORD_NAME = ".ng-exit"
-# Runs before any redirection: an image without `timeout` (or `bash`) exits 127 here, leaving neither a
-# stdout file nor an exit record, which is how the caller tells it from a script that exits 127 itself.
+# Run as its own exec before the run (`_check_verifier_tools`): an image without `timeout` (or `bash`) exits 127
+# here, before test.sh starts, which is how a missing wrapper is told from a test.sh that exits 127 itself.
 TIMEOUT_WRAPPER_GUARD = "command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1 || exit 127"
+# The reward files are read through the provider's file download, bounded in size and in time on this host.
+# A Harbor reward.json with a details block is kilobytes; a read that takes longer than the limit cannot be told
+# from a slow provider and masks.
+REWARD_FILE_LIMIT = 1024 * 1024
+REWARD_READ_TIMEOUT_S = 120.0
+REWARD_FILE_NAMES = ("reward.json", "reward.txt")
+# Providers whose file download runs a program inside the sandbox (openshell's `base64`, apptainer's and enroot's
+# `cp` for a path outside their bind mount): there the tests can still change what the read returns.
+EXEC_BASED_DOWNLOAD_PROVIDERS = frozenset({"openshell", "apptainer", "enroot"})
 
 # Namespaced failure kinds for outcomes the shared vocabulary does not name.
 VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
@@ -110,16 +123,21 @@ def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | N
 
 
 def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | None]:
+    return parse_reward_bytes(path.name, path.read_bytes())
+
+
+def parse_reward_bytes(name: str, data: bytes) -> tuple[dict[str, float] | None, str | None]:
+    """The rewards in one reward file's bytes (``name`` is ``reward.json`` or ``reward.txt``), or the problem."""
     # The verifier wrote these bytes; never let a stray non-UTF-8 byte escape as an exception.
-    text = path.read_text(errors="replace").strip()
+    text = data.decode(errors="replace").strip()
     if not text:
-        return None, f"{path.name} is empty"
+        return None, f"{name} is empty"
     try:
-        raw = json.loads(text) if path.suffix == ".json" else {"reward": float(text)}
+        raw = json.loads(text) if name.endswith(".json") else {"reward": float(text)}
     except ValueError as exc:
-        return None, f"{path.name} is not valid: {exc}"
+        return None, f"{name} is not valid: {exc}"
     if not isinstance(raw, dict) or not raw:
-        return None, f"{path.name} must hold a non-empty JSON object"
+        return None, f"{name} must hold a non-empty JSON object"
     rewards: dict[str, float] = {}
     # With a numeric `reward`, the other keys are metrics: a verifier that writes a nested object or a string beside
     # it (a `details` block, a `reason`) keeps its score, as Harbor keeps the file as written and reads `reward`.
@@ -129,24 +147,27 @@ def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | N
         if not isinstance(value, (int, float)):
             if scored:
                 continue
-            return None, f"{path.name}: {key!r} is not a finite number"
+            return None, f"{name}: {key!r} is not a finite number"
         try:
             value = float(value)
         except OverflowError:
-            return None, f"{path.name}: {key!r} is not a finite number"
+            return None, f"{name}: {key!r} is not a finite number"
         if not math.isfinite(value):
-            return None, f"{path.name}: {key!r} is not a finite number"
+            return None, f"{name}: {key!r} is not a finite number"
         rewards[str(key)] = value
     return rewards, None
 
 
 def verifier_command(budget: int) -> str:
-    """One in-container run of ``tests/test.sh`` under ``timeout``, with the exit record written after it."""
-    return (
-        f"{TIMEOUT_WRAPPER_GUARD}; start=$(date +%s); "
-        f"timeout -s KILL {budget} bash {TESTS_DIR}/test.sh > {VERIFIER_STDOUT} 2>&1; rc=$?; "
-        f'echo "$rc $start $(date +%s)" > {VERIFIER_LOGS_DIR}/{EXIT_RECORD_NAME}; exit $rc'
-    )
+    """One in-container run of ``tests/test.sh`` under ``timeout``, with nothing from the sandbox run after it.
+
+    The shell first sends its own output to ``test-stdout.txt`` for good (``exec >``), so neither it nor the tests
+    hold the provider's stdout or stderr pipe while they run, then runs ``test.sh`` under ``timeout`` and after it
+    only the builtin ``exit``: no program from the sandbox's disk runs between the tests and the reward read. The
+    shell parent turns the timer's self-kill into a plain 137 on every provider (``timeout`` signals its own process
+    group), which a ``timeout`` run as the provider's direct child would report as a signal death instead.
+    """
+    return f"exec > {VERIFIER_STDOUT} 2>&1; timeout -s KILL {budget} bash {TESTS_DIR}/test.sh; exit $?"
 
 
 def _uploads_task_tests(task: HarborTask) -> bool:
@@ -172,38 +193,33 @@ async def _make_test_script_executable(sandbox: AsyncSandbox) -> None:
     await exec_as_root(sandbox, f"chmod +x {TESTS_DIR}/test.sh", timeout_s=60)
 
 
-def parse_exit_record(directory: Path) -> tuple[int, int | None] | None:
-    """``(exit code, elapsed seconds)`` from the wrapper's record, or None when the wrapper never finished.
+async def _check_verifier_tools(
+    sandbox: AsyncSandbox, *, user: str | int | None, env: dict[str, str] | None, cwd: str | None
+) -> str | None:
+    """Check, in an exec of its own before the run, that ``timeout`` and ``bash`` exist for the verifier's user.
 
-    The elapsed time is None when the record carries no usable timestamps (an image without ``date``).
+    Returns why the sample is masked, or None when both are there. A missing one is the image's fault, never the
+    task's, and is told here from a ``test.sh`` that exits 127 itself, which the run then measures.
     """
-    path = directory / EXIT_RECORD_NAME
-    if not path.is_file():
-        return None
-    parts = path.read_text(errors="replace").split()
-    try:
-        return_code = int(parts[0])
-    except (IndexError, ValueError):
-        return None
-    try:
-        return return_code, int(parts[2]) - int(parts[1])
-    except (IndexError, ValueError):
-        return return_code, None
+    result = await sandbox.exec(TIMEOUT_WRAPPER_GUARD, cwd=cwd, env=env, timeout_s=60, user=user)
+    if result.error_type is not None:
+        return f"could not check for timeout and bash: {result.error_type}"
+    if result.return_code != 0:
+        return f"test.sh could not be started: timeout wrapper or bash missing (exit {result.return_code})"
+    return None
 
 
-def verifier_timed_out(result: SandboxExecResult, exit_record: tuple[int, int | None] | None, budget: int) -> bool:
+def verifier_timed_out(result: SandboxExecResult, run_seconds: float, budget: int) -> bool:
     """Whether the timer stopped test.sh: the provider gave up first, or ``timeout`` killed it at the budget.
 
-    GNU ``timeout -s KILL`` exits 137 when the timer fired, but so does a script whose own helper was
-    killed; the timer is the cause only once the run has lasted the whole budget. An image without
-    ``date`` leaves no elapsed time, and 137 then means the timer.
+    GNU and BusyBox ``timeout -s KILL`` exit 137 (through the shell parent of :func:`verifier_command`) when the
+    timer fired, but so does a script whose own helper was killed; the timer is the cause only once the run has
+    lasted the whole budget. ``run_seconds`` is this host's clock around the run exec, never a time the sandbox
+    reported, and is at least the time the tests ran.
     """
     if result.error_type == "timeout":
         return True
-    if exit_record is None or exit_record[0] != 137:
-        return False
-    elapsed = exit_record[1]
-    return elapsed is None or elapsed >= budget
+    return result.return_code == 137 and run_seconds >= budget
 
 
 def select_reward(rewards: dict[str, float]) -> float | None:
@@ -595,30 +611,58 @@ class HarborVerificationMixin:
         logs_dir: Path,
         *,
         entrypoint_log: str | None = None,
-    ) -> tuple[tuple[int, int | None] | None, dict[str, float] | None, str | None]:
-        """Download the reward files and the wrapper's exit record, then whatever else the verifier wrote.
+    ) -> tuple[dict[str, float] | None, str | None]:
+        """Read the reward file the verifier wrote, then collect whatever else it wrote.
 
-        The reward and the exit record are the required transfer, whatever the exit code: a grader may
-        have written its reward before a late exit, and a timed-out run's partial logs are still worth
-        keeping. Optional diagnostics cannot invalidate a measured score. With ``entrypoint_log``, the
-        sandbox's entrypoint output lands under that name too. Returns the exit record (None when the
-        wrapper never reached its end), the rewards and the reward problem.
+        The reward is read first, whatever the exit code (a grader may have written it before a late exit), through
+        the provider's own file download (:func:`read_file_bytes`): no program from the sandbox runs between test.sh
+        and this read, so tests that replaced ``tar`` or ``sh`` cannot change it. ``reward.json`` wins whenever it
+        exists, even malformed; ``reward.txt`` is read only when it does not. The scored bytes are written to the
+        host logs from memory, and the later best-effort log collection may not replace them, so the host copy is
+        what was scored. A reward path that is not a regular file or exceeds :data:`REWARD_FILE_LIMIT` is the
+        task's doing and is an invalid reward; a read past :data:`REWARD_READ_TIMEOUT_S` or a provider error
+        raises and masks. Optional diagnostics cannot invalidate a measured score. With ``entrypoint_log``, the
+        sandbox's entrypoint output lands under that name too. Returns the rewards and the reward problem.
         """
-        await download_dir(
-            sandbox,
-            VERIFIER_LOGS_DIR,
-            logs_dir,
-            names=("reward.json", "reward.txt", EXIT_RECORD_NAME),
-        )
-        exit_record = parse_exit_record(logs_dir)
-        rewards, problem = parse_reward_file(logs_dir)
+        if getattr(sandbox, "provider_name", None) in EXEC_BASED_DOWNLOAD_PROVIDERS:
+            LOGGER.warning(
+                "%s: reward read through an in-sandbox program on %s; separate mode does not protect the score "
+                "from the tests here",
+                task.task_id,
+                sandbox.provider_name,
+            )
+        rewards: dict[str, float] | None = None
+        problem: str | None = "no reward.json or reward.txt was written"
+        for name in REWARD_FILE_NAMES:
+            try:
+                data = await read_file_bytes(
+                    sandbox,
+                    f"{VERIFIER_LOGS_DIR}/{name}",
+                    max_bytes=REWARD_FILE_LIMIT,
+                    timeout_s=REWARD_READ_TIMEOUT_S,
+                )
+            except SandboxFileRefused as exc:
+                problem = f"{name} {exc.reason}"
+                break
+            if data is None:
+                continue
+            rewards, problem = parse_reward_bytes(name, data)
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            (logs_dir / name).write_bytes(data)
+            break
         try:
-            await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True, protect=SERVER_OWNED_LOG_NAMES)
+            await download_dir(
+                sandbox,
+                VERIFIER_LOGS_DIR,
+                logs_dir,
+                skip_unsafe=True,
+                protect=SERVER_OWNED_LOG_NAMES + REWARD_FILE_NAMES,
+            )
         except Exception:
             LOGGER.warning("Could not collect optional verifier logs for %s", task.task_id, exc_info=True)
         if entrypoint_log is not None:
             await self._collect_entrypoint_log(sandbox, task, logs_dir / entrypoint_log)
-        return exit_record, rewards, problem
+        return rewards, problem
 
     async def _run_separate_verifier(
         self, session: HarborSession, trajectory: bytes, *, response: NeMoGymResponse | None = None
@@ -802,35 +846,40 @@ class HarborVerificationMixin:
             # A sub-second task budget still gets one whole second: `timeout 0` would mean no limit.
             budget = max(1, math.ceil(settings.timeout_sec))
             await _make_test_script_executable(verifier)
+            run_cwd, run_env, run_user = (
+                task.workdir if overlaid else None,
+                self._verifier_env(settings),
+                _verifier_user(task),
+            )
+            missing = await _check_verifier_tools(verifier, user=run_user, env=run_env, cwd=run_cwd)
+            if missing is not None:
+                return self._masked(failure_kinds.VERIFIER_ERROR, missing)
             # An overlaid verifier sandbox was created without the task workdir, as the agent's is (see
             # `_create_verifier_sandbox`), so its default directory is the base image's own: test.sh is sent to the
             # task workdir made above, as the shared verifier's exec is sent to the session's. Harbor's exec passes
             # `[environment].workdir` whenever task.toml sets one and lands in the built image's WORKDIR otherwise,
             # which is what `task.workdir` resolves. Every other verifier sandbox starts in the directory its spec
             # named, or its image's own.
+            # The exit status and the time the run took come from this one exec's result and this host's clock;
+            # nothing the sandbox writes after test.sh is read for them.
+            run_started = monotonic()
             result = await verifier.exec(
                 verifier_command(budget),
-                cwd=task.workdir if overlaid else None,
-                env=self._verifier_env(settings),
+                cwd=run_cwd,
+                env=run_env,
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=_verifier_user(task),
+                user=run_user,
             )
+            run_seconds = monotonic() - run_started
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            exit_record, rewards, problem = await self._collect_reward(
+            rewards, problem = await self._collect_reward(
                 verifier,
                 task,
                 logs_dir,
                 entrypoint_log=VERIFIER_ENTRYPOINT_LOG_NAME if verifier_entrypoint is not None else None,
             )
-            if exit_record is None and result.error_type != "timeout":
-                # The wrapper never reached its end: the guard found no `timeout` or `bash` (exit 127
-                # before any redirection), or the shell itself could not run. test.sh never started.
-                return self._masked(
-                    failure_kinds.VERIFIER_ERROR,
-                    f"test.sh could not be started: timeout wrapper or bash missing (exit {result.return_code})",
-                )
-            timed_out = verifier_timed_out(result, exit_record, budget)
+            timed_out = verifier_timed_out(result, run_seconds, budget)
         except HTTPException:
             raise
         except HarborOverlayError as exc:
@@ -1154,29 +1203,31 @@ class HarborVerificationMixin:
             budget = max(1, math.ceil(settings.timeout_sec))
             # The verifier's own user, not the agent's: the sandbox's default may be [agent].user. The fallback is the
             # shared rule's whatever the task's own mode (a step of a separate-mode task may opt out into this path).
+            run_env = self._verifier_env(settings)
+            run_user = settings.user if settings.user is not None else _verifier_user(_shared_verifier_task(task))
+            # In the agent's sandbox the agent may have removed `timeout` or `bash`; that still masks here, as an image
+            # without them must, and shared mode cannot tell the two apart.
+            missing = await _check_verifier_tools(sandbox, user=run_user, env=run_env, cwd=session.workdir)
+            if missing is not None:
+                return self._masked(failure_kinds.VERIFIER_ERROR, missing)
+            run_started = monotonic()
             result = await sandbox.exec(
                 verifier_command(budget),
                 cwd=session.workdir,
-                env=self._verifier_env(settings),
+                env=run_env,
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=settings.user if settings.user is not None else _verifier_user(_shared_verifier_task(task)),
+                user=run_user,
             )
+            run_seconds = monotonic() - run_started
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
-            exit_record, rewards, problem = await self._collect_reward(
+            rewards, problem = await self._collect_reward(
                 sandbox,
                 task,
                 logs_dir,
                 entrypoint_log=ENTRYPOINT_LOG_NAME if session.entrypoint is not None else None,
             )
-            if exit_record is None and result.error_type != "timeout":
-                # The wrapper never reached its end: the guard found no `timeout` or `bash` (exit 127
-                # before any redirection), or the shell itself could not run. test.sh never started.
-                return self._masked(
-                    failure_kinds.VERIFIER_ERROR,
-                    f"test.sh could not be started: timeout wrapper or bash missing (exit {result.return_code})",
-                )
-            timed_out = verifier_timed_out(result, exit_record, budget)
+            timed_out = verifier_timed_out(result, run_seconds, budget)
         except HTTPException:
             raise
         except Exception as exc:
@@ -1240,8 +1291,8 @@ class HarborVerificationMixin:
                 | extras
             )
         if rewards is None:
-            exit_record = parse_exit_record(logs_dir)
-            unavailable = exit_record is not None and exit_record[0] == VERIFIER_UNAVAILABLE_EXIT_CODE
+            # The code the run exec reported, read once; a record the sandbox wrote later is never consulted.
+            unavailable = result.error_type is None and result.return_code == VERIFIER_UNAVAILABLE_EXIT_CODE
             if unavailable and separate:
                 # The verifier said it could not grade: the sample is masked like a lost sandbox, not scored 0.
                 # A malformed reward file beside the code is the verifier's own, so it does not change that.

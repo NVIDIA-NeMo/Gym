@@ -53,6 +53,11 @@ R5  The host-execution provider (``local``) is never selected by a shipped Harbo
     name is ``sandbox``), so no block a config names in either key, under whatever name, has a ``local`` key, and
     neither has any ``sandbox*``-named block (the name the shipped provider configs use). Self-tested on synthetic
     configs that select a ``local`` block under another name, directly and from a nested server block.
+R6  The reward is read before anything else runs in the verifier's sandbox: in every function that runs
+    ``verifier_command(...)``, the next call that reaches the sandbox is ``_collect_reward(...)``; no ``.exec`` call
+    and no transfer helper that runs a command there (``exec_as_root``, ``download_dir`` and the like) sits between
+    them, so a program the tests replaced cannot run before Gym holds the reward. Self-tested on a snippet that
+    must be flagged.
 """
 
 import ast
@@ -421,6 +426,73 @@ def test_r3_the_verifier_wrapper_is_only_handed_to_a_sandbox_exec():
                 f"{path.relative_to(ROOT)}:{call.lineno} hands verifier_command(...) to {name}, not a sandbox exec"
             )
     assert seen >= 2, "the shared and the separate verifier each run test.sh through one sandbox exec"
+
+
+# R6: the calls that run a command in a sandbox (an exec, or a transfer helper built on one).
+SANDBOX_COMMAND_CALLS = {
+    "exec",
+    "exec_as_root",
+    "download_dir",
+    "download_path",
+    "remote_kind",
+    "remote_size_bytes",
+    "upload_dir",
+    "upload_path",
+    "upload_archive",
+}
+
+
+def r6_offenders(tree: ast.AST, label: str) -> tuple[int, list[str]]:
+    """``(runs seen, offenders)``: a run of ``verifier_command(...)`` followed, before ``_collect_reward(...)``, by
+    a call that runs a command in a sandbox, or never followed by ``_collect_reward(...)`` at all."""
+    runs, offenders = 0, []
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        ordered = sorted(
+            ((call, name) for call, name in calls(function)), key=lambda item: (item[0].lineno, item[0].col_offset)
+        )
+        for index, (call, _) in enumerate(ordered):
+            if not any(isinstance(a, ast.Call) and dotted(a.func) == "verifier_command" for a in call.args):
+                continue
+            runs += 1
+            following = [(c, (n or "").rsplit(".", 1)[-1]) for c, n in ordered[index + 1 :]]
+            collect = next((i for i, (_, last) in enumerate(following) if last == "_collect_reward"), None)
+            if collect is None:
+                offenders.append(f"{label}:{call.lineno} runs test.sh without reading the reward after it")
+                continue
+            for between, last in following[:collect]:
+                if last in SANDBOX_COMMAND_CALLS:
+                    offenders.append(f"{label}:{between.lineno} runs {last}(...) between test.sh and the reward read")
+    return runs, offenders
+
+
+def test_r6_the_reward_is_read_before_anything_else_runs_after_test_sh():
+    seen = 0
+    for path in ENV_SERVER.glob("*.py"):
+        runs, offenders = r6_offenders(ast.parse(path.read_text(), filename=str(path)), str(path.relative_to(ROOT)))
+        assert offenders == []
+        seen += runs
+    assert seen >= 2, "the shared and the separate verifier each run test.sh once"
+
+
+@pytest.mark.parametrize(
+    "between",
+    [
+        "await sandbox.exec('date')",
+        "await exec_as_root(sandbox, 'true', timeout_s=1)",
+        "await download_dir(sandbox, a, b)",
+    ],
+)
+def test_r6_flags_a_sandbox_command_between_the_run_and_the_reward_read(between: str):
+    snippet = (
+        "async def verify(self, sandbox):\n"
+        "    result = await sandbox.exec(verifier_command(5))\n"
+        f"    {between}\n"
+        "    rewards = await self._collect_reward(sandbox)\n"
+    )
+    runs, offenders = r6_offenders(ast.parse(snippet), "snippet")
+    assert runs == 1 and len(offenders) == 1 and "between test.sh and the reward read" in offenders[0]
 
 
 def test_r4_no_routes_of_its_own_and_only_the_base_routes():
