@@ -1,7 +1,7 @@
-# BiomniBench-DA environment
+# BiomniBench-DA: Terminus 2 preset
 
 [BiomniBench-DA](https://huggingface.co/datasets/phylobio/BiomniBench-DA) data-analysis
-tasks, run through the [Harbor Agent](../../responses_api_agents/harbor_agent) bridge
+tasks, run through the [Harbor Agent](../../../responses_api_agents/harbor_agent) bridge
 (Harbor manages the sandboxed environment + verifier; the Harbor agent bridges that to
 NeMo Gym). Materialized task trees live under `data/` (gitignored — see `prepare.py`).
 
@@ -10,6 +10,11 @@ writes `trace.md` (its analysis) and `answer.txt` (its final answer) inside the
 container, and an OpenAI-compatible LLM judge scores the trace/answer against a
 per-task rubric (upstream-faithful scoring, see `prepare.py`'s embedded
 `llm_judge.py`).
+
+This is a run preset of the [`biomnibench_da` benchmark](../README.md), with no manifest of its own.
+It runs the same upstream dataset with Terminus 2 through `harbor_agent` and Gym's model server,
+instead of the benchmark's OpenCode adapter, and `prepare.py` adds its own seeded train/test
+partition.
 
 Use Gym's venv from the repo root for all commands below.
 
@@ -29,13 +34,13 @@ image, then materializes the Harbor task directory under `--output-dir` and writ
 task and `instance_id` form `biomnibench_da::<task_name>`.
 
 ```bash
-python environments/biomnibench_da/prepare.py \
+python benchmarks/biomnibench_da/terminus_2/prepare.py \
   --download \
   --build-docker-image \
   --environment-type docker \
   --tasks da-10-1 \
   --include-singletons --include-uncovered \
-  --output-dir environments/biomnibench_da/data/example \
+  --output-dir benchmarks/biomnibench_da/terminus_2/data/example \
   --overwrite
 # -> data/example/rollout_input.jsonl  (1 row)
 ```
@@ -43,9 +48,9 @@ python environments/biomnibench_da/prepare.py \
 Override the rollout-input path with `--rollout-input-fpath` if needed.
 
 For HPC, use `--environment-type singularity` and
-`--output-dir environments/biomnibench_da/data/example_singularity` instead.
+`--output-dir benchmarks/biomnibench_da/terminus_2/data/example_singularity` instead.
 
-See `python environments/biomnibench_da/prepare.py --help` for the full flag set
+See `python benchmarks/biomnibench_da/terminus_2/prepare.py --help` for the full flag set
 (train/test split controls, `--limit`, `--papers`, `--max-data-mb`, `--n-repeats`,
 `--judge-model`, `--docker-image`, etc.). The full dataset is prepared
 the same way, just without `--tasks`/`--include-singletons`/`--include-uncovered`.
@@ -90,21 +95,21 @@ an opaque `500`.
 
 ## 5) Launch Gym and collect the example rollout
 
-`config.yaml` points `harbor_datasets.biomnibench_da.local_dataset_path` at
-`environments/biomnibench_da/data/example`. If you materialize to a different
-`--output-dir`, either update `config.yaml` or override
+`harbor_docker.yaml` points `harbor_datasets.biomnibench_da.local_dataset_path` at
+`benchmarks/biomnibench_da/terminus_2/data/example`. If you materialize to a different
+`--output-dir`, either update `harbor_docker.yaml` or override
 `+harbor_agent.responses_api_agents.harbor_agent.harbor_datasets.biomnibench_da.local_dataset_path`
 when starting the server.
 
 Recommended CLI:
 
 ```bash
-gym env start --environment biomnibench_da --model-type vllm_model &
+gym env start --config benchmarks/biomnibench_da/terminus_2/harbor_docker.yaml --model-type vllm_model &
 ./scripts/wait_for_servers.sh $!
 
 gym eval run --no-serve \
     --agent harbor_agent \
-    --input environments/biomnibench_da/data/example/rollout_input.jsonl \
+    --input benchmarks/biomnibench_da/terminus_2/data/example/rollout_input.jsonl \
     --output ./example_rollout.jsonl \
     --concurrency 1
 ```
@@ -112,18 +117,18 @@ gym eval run --no-serve \
 The legacy `ng_run` / `ng_collect_rollouts` commands are equivalent:
 
 ```bash
-ng_run "+config_paths=[environments/biomnibench_da/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
+ng_run "+config_paths=[benchmarks/biomnibench_da/terminus_2/harbor_docker.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
 ./scripts/wait_for_servers.sh $!
 
 ng_collect_rollouts +agent_name=harbor_agent \
-  +input_jsonl_fpath=environments/biomnibench_da/data/example/rollout_input.jsonl \
+  +input_jsonl_fpath=benchmarks/biomnibench_da/terminus_2/data/example/rollout_input.jsonl \
   +output_jsonl_fpath=./example_rollout.jsonl \
   +num_samples_in_parallel=1
 ```
 
 Rollout JSONL uses `instance_id` in the form `biomnibench_da::<task_name>` (for
 example `biomnibench_da::da-1-3-r001`). For HPC/Singularity, swap in
-`environments/biomnibench_da/config_singularity.yaml` and the
+`benchmarks/biomnibench_da/terminus_2/harbor_singularity.yaml` and the
 `example_singularity` dataset path.
 
 **Important:** export the `JUDGE_*` vars from step 3 in the same shell before running
@@ -164,7 +169,7 @@ nothing is lost. This was a real gap (now fixed) where `harbor_agent`'s
 checkout, pass `+disable_aggregation=true` to `ng_collect_rollouts`/`gym eval run`
 as a workaround, then run `gym eval aggregate` once all shards finish.
 
-See the [Harbor Agent README](../../responses_api_agents/harbor_agent/README.md) for
+See the [Harbor Agent README](../../../responses_api_agents/harbor_agent/README.md) for
 details on the underlying Harbor bridge (custom agents/environments, NeMo RL
 training notes, and rollout storage layout), which applies to any Harbor-backed
 environment, not just BiomniBench-DA.

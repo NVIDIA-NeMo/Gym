@@ -268,10 +268,10 @@ jq -C . responses_api_agents/harbor_agent/example/example_output.jsonl | less -R
 ## Other datasets through this bridge
 
 Datasets that need their own materialization/download pipeline (rather than a
-checked-in `example/*.jsonl`) live under `environments/<name>/` and reuse this same
+checked-in `example/*.jsonl`) live in a folder of their own and reuse this same
 Harbor agent bridge — only the dataset alias in `harbor_datasets` and the
 `--environment-type`/config differ. See
-[`environments/biomnibench_da`](../../environments/biomnibench_da) for a worked
+[`benchmarks/biomnibench_da/terminus_2`](../../benchmarks/biomnibench_da/terminus_2) for a worked
 example (BiomniBench-DA data-analysis tasks): dataset download + materialization
 script, docker/singularity configs, and an LLM-judge verifier, all wired to this
 agent via `harbor_agent_import_path`/`harbor_datasets` the same way as the Quick

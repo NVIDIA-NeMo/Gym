@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from environments.biomnibench_da import prepare
+from benchmarks.biomnibench_da.terminus_2 import prepare
 
 
-ENV_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = ENV_ROOT.parents[1]
-PREPARE = ENV_ROOT / "prepare.py"
+PRESET_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = PRESET_DIR.parents[2]
+PREPARE = PRESET_DIR / "prepare.py"
 
 
 def _write_minimal_source_task(task_root: Path, task_id: str) -> None:
@@ -166,6 +166,6 @@ def test_build_docker_image_uses_requested_tag(monkeypatch: pytest.MonkeyPatch) 
         "custom-runtime:test",
         "-f",
         prepare.DEFAULT_DOCKERFILE,
-        str(prepare.ENV_ROOT),
+        str(prepare.PRESET_DIR),
     ]
     assert calls[0][1]["check"] is True

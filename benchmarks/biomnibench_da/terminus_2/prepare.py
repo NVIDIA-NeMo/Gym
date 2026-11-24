@@ -14,21 +14,21 @@ deployment profiles via ``--environment-type``:
 Examples::
 
   # Download (if needed) + materialize an example, docker profile
-  python environments/biomnibench_da/prepare.py \\
+  python benchmarks/biomnibench_da/terminus_2/prepare.py \\
     --download \\
     --build-docker-image \\
     --environment-type docker \\
     --tasks da-10-1 \\
     --include-singletons --include-uncovered \\
-    --output-dir environments/biomnibench_da/data/example \\
+    --output-dir benchmarks/biomnibench_da/terminus_2/data/example \\
     --overwrite
 
   # Materialize the full default (train+test) split, singularity profile,
   # assuming the dataset was already downloaded to --local-dir
-  python environments/biomnibench_da/prepare.py \\
-    --local-dir environments/biomnibench_da/data/source \\
+  python benchmarks/biomnibench_da/terminus_2/prepare.py \\
+    --local-dir benchmarks/biomnibench_da/terminus_2/data/source \\
     --environment-type singularity \\
-    --output-dir environments/biomnibench_da/data/tasks_singularity \\
+    --output-dir benchmarks/biomnibench_da/terminus_2/data/tasks_singularity \\
     --overwrite
 
 Also writes ``<output-dir>/rollout_input.jsonl`` — one ``ng_collect_rollouts`` row per
@@ -60,9 +60,9 @@ DEFAULT_CONTAINER_DATA_DIR = "/app/data"
 DEFAULT_DOCKER_IMAGE = "biomnibench-da-runtime:smoke"
 DEFAULT_ROLLOUT_INPUT_NAME = "rollout_input.jsonl"
 DEFAULT_AGENT_NAME = "harbor_agent"
-ENV_ROOT = Path(__file__).resolve().parent
-DEFAULT_LOCAL_DIR = ENV_ROOT / "data" / "source"
-DEFAULT_DOCKERFILE = str(ENV_ROOT / "docker" / "biomnibench-da-runtime.Dockerfile")
+PRESET_DIR = Path(__file__).resolve().parent
+DEFAULT_LOCAL_DIR = PRESET_DIR / "data" / "source"
+DEFAULT_DOCKERFILE = str(PRESET_DIR / "docker" / "biomnibench-da-runtime.Dockerfile")
 
 SINGULARITY_SETUP_SH = """#!/bin/bash
 # BiomniBench-DA Singularity bootstrap: Harbor server deps + task data staging.
@@ -215,7 +215,7 @@ def requested_download_patterns(args: argparse.Namespace) -> list[str] | None:
 
 def build_docker_image(image: str) -> None:
     subprocess.run(
-        ["docker", "build", "-t", image, "-f", DEFAULT_DOCKERFILE, str(ENV_ROOT)],
+        ["docker", "build", "-t", image, "-f", DEFAULT_DOCKERFILE, str(PRESET_DIR)],
         check=True,
     )
 
@@ -1293,7 +1293,7 @@ def main() -> None:
     manifest = {
         "schema_version": "biomnibench_da_materialization_manifest.v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "generator": "environments/biomnibench_da/prepare.py",
+        "generator": "benchmarks/biomnibench_da/terminus_2/prepare.py",
         "generation_command": " ".join(shlex.quote(arg) for arg in sys.argv),
         "options": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "variant": "upstream_faithful",
