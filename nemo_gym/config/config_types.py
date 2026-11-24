@@ -1074,8 +1074,9 @@ class AggregateMetrics(BaseModel):
     perf_summary: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Cross-rollout efficiency stats aggregated from each rollout's ng_perf field. "
-            "Absent (not null-valued keys) when no rollout in this batch carried ng_perf, "
+            "Cross-rollout efficiency stats aggregated from each rollout's ng_perf field, with "
+            "captured_calls from each rollout's ng_captured_calls. "
+            "Absent (not null-valued keys) when no rollout in this batch carried either, "
             "i.e. observability was disabled for the whole run."
         ),
     )
