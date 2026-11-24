@@ -269,6 +269,25 @@ class TestDiscoverBenchmarksInDir:
         err = capsys.readouterr().err
         assert "Warning" in err and "bad" in err
 
+    def test_a_config_a_manifest_points_at_is_listed_under_its_catalog_name(self, tmp_path: Path) -> None:
+        # `--benchmark` selects a manifest by its catalog name, so the listing must print that name, not the path.
+        from nemo_gym.environment.benchmarks import BenchmarkConfig, _discover_benchmarks_in_dir
+        from tests.unit_tests.environment.test_registry import _manifest, _write_manifest
+
+        benchmark = "agent:\n  datasets:\n  - type: benchmark\n"
+        data = _manifest("suite/verified", "benchmark", config_path="../opencode.yaml")
+        _write_manifest(tmp_path, "benchmarks", "suite/verified", data, with_config=False)
+        (tmp_path / "benchmarks" / "draft").mkdir()
+        (tmp_path / "benchmarks" / "draft" / "manifest.yaml").write_text("name: [invalid\n", encoding="utf-8")
+        for config in ("suite/opencode.yaml", "suite/hermes.yaml", "draft/config.yaml"):
+            (tmp_path / "benchmarks" / config).write_text(benchmark, encoding="utf-8")
+
+        with patch.object(BenchmarkConfig, "from_config_path", return_value=MagicMock()):
+            result = _discover_benchmarks_in_dir(tmp_path / "benchmarks")
+
+        # A config without a loadable manifest keeps its path name.
+        assert set(result) == {"suite/verified", "suite/hermes", "draft"}
+
     def test_suite_resolving_to_many_benchmarks_is_skipped_not_aliased(self, tmp_path: Path, capsys) -> None:
         # Resolving `config_paths` can surface several benchmark datasets even when the file itself declares
         # one. Reporting the first would publish the suite under another benchmark's name, agent, and repeat
