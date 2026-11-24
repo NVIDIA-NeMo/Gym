@@ -16,6 +16,21 @@ _FAILURE_CODES = frozenset({_COMPILE_ERROR, _ASSERTION_FAILED, _TIME_LIMIT, _RUN
 _MAX_ERROR_CHARS = 300
 
 
+class InvalidAssertionTests(ValueError):
+    """The supplied task suite contains a statement that cannot be compiled."""
+
+
+def _compile_tests(tests: list[str]) -> tuple[types.CodeType, ...]:
+    compiled = []
+    for index, test in enumerate(tests):
+        try:
+            # Preserve asserts independently of the sandbox interpreter's optimization level.
+            compiled.append(compile(test, f"<test {index}>", "exec", optimize=0))
+        except (SyntaxError, ValueError) as error:
+            raise InvalidAssertionTests(f"Invalid assertion test at index {index}: {error}") from error
+    return tuple(compiled)
+
+
 class _AssertionTimeout(BaseException):
     """A BaseException, so candidate code that catches Exception cannot swallow the time limit."""
 
@@ -43,7 +58,7 @@ def _run_assertions(generation, tests, time_limit_s, memory_limit_mb, result, me
     metadata: dict[str, object] = {}
     # Bound before the candidate runs, so replacing these builtins cannot skip or empty the suite.
     execute, compile_source = exec, compile
-    indexed_tests = enumerate(tests)
+    compiled_tests = _compile_tests(tests)
     signal.signal(signal.SIGALRM, _timeout_handler)
     signal.setitimer(signal.ITIMER_REAL, time_limit_s)
     try:
@@ -54,8 +69,8 @@ def _run_assertions(generation, tests, time_limit_s, memory_limit_mb, result, me
             metadata = _error_metadata(_COMPILE_ERROR, "Compilation Error", error)
         else:
             execute(candidate, module.__dict__)
-            for index, test in indexed_tests:
-                execute(compile_source(test, f"<test {index}>", "exec"), module.__dict__)
+            for test in compiled_tests:
+                execute(test, module.__dict__)
                 results.append(True)
     except _AssertionTimeout:
         results.append(_TIME_LIMIT)
@@ -94,7 +109,11 @@ def check_assertions(
     """Run *generation*, then the assertion *tests* in order, in a child process; stop at the first failure.
 
     *time_limit_s* covers the candidate and all its tests; *deadline_s* bounds the child process.
+    Invalid task syntax raises ``InvalidAssertionTests`` before the worker starts.
     """
+    # Validate in the runner so bad task syntax masks the sample before any candidate runs.
+    # Workers compile again because code objects cannot be pickled by multiprocessing spawn.
+    _compile_tests(tests)
     # Fails here, in the runner, so a sandbox that cannot measure memory masks the sample.
     address_space_bytes()
     manager = multiprocessing.Manager()

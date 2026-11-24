@@ -39,9 +39,14 @@ Confirmed timeouts return `-3`. `metadata.stage` identifies `compilation` (inclu
 `test`, `preparation`, or the overall `grading` deadline. A worker that exits early without a result returns
 `-1` with stage `worker` and its `exit_code`; it is not reported as a timeout.
 
+All assertion statements are compiled before candidate execution and held in an immutable tuple. A syntax
+error in any supplied statement invalidates the task: the runner fails and verification masks the sample with
+`failure_kind: verifier_error`. Candidate syntax errors remain ordinary compilation failures.
+
 Assertions run in a child process the same way (`assertion_harness/`): the candidate's code, then each statement of
 `tests` in one `__main__` module, under one timer and the same memory cap, stopping at the first failure. Exiting
-before the last statement fails. Results use the harness's codes (`-1` compile, `-2` assertion, `-3` time, `-4` runtime).
+before the last statement fails. Tests are compiled with `optimize=0`, so assertions remain active even when
+the sandbox interpreter uses `-O`, `-OO`, or `PYTHONOPTIMIZE`. Results use the harness's codes (`-1` compile, `-2` assertion, `-3` time, `-4` runtime).
 
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)

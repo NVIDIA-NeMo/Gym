@@ -371,8 +371,13 @@ _STATEFUL_SOLUTION = (
             ["assert False"],
             [-2],
         ),
-        # Candidate code that emptied the suite or left a partial result still fails.
-        ("import sys\nsys._getframe(1).f_locals['tests'].clear()", ["assert False"], [-4]),
+        # Changing the source list cannot change the already compiled suite; partial results still fail.
+        ("import sys\nsys._getframe(1).f_locals['tests'].clear()", ["assert False"], [-2]),
+        (
+            "import sys\nsys._getframe(1).f_locals['tests'][:] = ['pass']",
+            ["assert False"],
+            [-2],
+        ),
         (
             "import os, sys\nsys._getframe(1).f_locals['result'].append([True])\nos._exit(0)",
             ["assert False"],
@@ -414,3 +419,38 @@ def test_only_well_formed_assertion_results_are_accepted(results, metadata, ok) 
     assert (checked == (results, metadata)) is ok
     if not ok:
         assert checked[0] == [-4]
+
+
+@pytest.mark.parametrize("provider, config", _ASSERTION_PROVIDERS)
+@pytest.mark.parametrize("optimization", ["1", "2"])
+async def test_assertions_remain_active_in_optimized_sandbox(tmp_path, provider, config, optimization) -> None:
+    config = config.model_copy(update={"env": {**config.env, "PYTHONOPTIMIZE": optimization}})
+    result, metadata = await check_assertions_in_sandbox(
+        "answer = 0",
+        ["assert answer == 42"],
+        time_limit_s=1,
+        memory_limit_mb=256,
+        provider=provider,
+        config=config,
+        metadata={},
+        work_dir=str(tmp_path / "work"),
+    )
+    assert result == [-2], metadata
+    assert metadata["error_code"] == -2
+
+
+@pytest.mark.parametrize("tests", [["assert answer =="], ["assert False", "assert answer =="]])
+async def test_invalid_assertion_syntax_is_verifier_error(tmp_path, tests) -> None:
+    # Syntax validation runs before Linux memory measurement, so this also works on macOS.
+    with pytest.raises(SandboxVerificationError, match="Invalid assertion test at index") as info:
+        await check_assertions_in_sandbox(
+            "answer = 42",
+            tests,
+            time_limit_s=1,
+            memory_limit_mb=256,
+            provider={"local": {}},
+            config=SandboxVerificationConfig(python=sys.executable),
+            metadata={},
+            work_dir=str(tmp_path / "work"),
+        )
+    assert info.value.failure_kind == VERIFIER_ERROR

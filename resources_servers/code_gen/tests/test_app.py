@@ -453,7 +453,7 @@ class TestSandboxVerify:
         assert tests == ["assert f(1) == 1"]
         assert (kwargs["time_limit_s"], kwargs["memory_limit_mb"]) == (time_limit_s, memory_limit_mb)
         assert res.reward == 1.0
-        assert res.limits == {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb}
+        assert res.limits.model_dump() == {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb}
 
     @pytest.mark.parametrize(
         "unit_tests",
@@ -477,6 +477,18 @@ class TestSandboxVerify:
         with pytest.raises(ValidationError):
             await self._sandbox_server().verify(request)
         assert calls == []
+
+    async def test_invalid_assertion_syntax_masks_the_sample(self, tmp_path) -> None:
+        # Exercise the actual local provider, runner, and server error translation.
+        server = self._sandbox_server()
+        server._sandbox_target = ({"local": {}}, {})
+        server.config.sandbox_config.python = sys.executable
+        request = _verify_request("answer = 42")
+        request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert False", "assert answer =="]}
+        response = await server.verify(request)
+        assert response.mask_sample is True
+        assert response.failure_kind == VERIFIER_ERROR
+        assert "Invalid assertion test at index 1" in response.failure_reason
 
     async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
         async def _failing(*args, **kwargs):
