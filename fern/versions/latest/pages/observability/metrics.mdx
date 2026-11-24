@@ -216,7 +216,7 @@ A wait duration shows that work waited, not why. These metrics show the state of
 | `gym.concurrency.admission_cancelled_total` | Counter | count | Waits cancelled before a slot was free, for example because the caller's request was cancelled. |
 | `gym.concurrency.queue_wait_duration_ms` | Histogram | ms | How long one admitted caller waited for a slot. Only callers that had to queue record a sample; a wait that timed out or was cancelled is in the two totals above instead. |
 
-Every point carries `nemo.gym.concurrency.component`, `nemo.gym.concurrency.limit_name`, and, for a limit that belongs to a server, `nemo.gym.server.name`. Limits with the same attributes in one process are summed, and separate processes, such as the Uvicorn workers of one server, export their own points. These limits report today:
+Every point carries `nemo.gym.concurrency.component`, `nemo.gym.concurrency.limit_name`, and, for a limit that belongs to a server, `nemo.gym.server.name`. A sandbox provider's limit carries no `nemo.gym.server.name`, even inside a server; when Gym set up the process's telemetry, the server name is a resource attribute instead. Limits with the same attributes in one process are summed, and separate processes, such as the Uvicorn workers of one server, export their own points. These limits report today:
 
 | Component | `limit_name` | Configured by | Admission timeout |
 | --- | --- | --- | --- |
@@ -225,16 +225,16 @@ Every point carries `nemo.gym.concurrency.component`, `nemo.gym.concurrency.limi
 | `environment_server` | `episodes` | `max_concurrent_episodes` | `queue_timeout_seconds` |
 | `resources_server` (`math_with_judge`) | `library_verifier` | `library_verifier_max_concurrency` | None |
 | `rollout_driver` | `reverifications` | `num_samples_in_parallel` of `gym eval reverify` | None |
-| `sandbox_provider` | `docker_exec`, `enroot_exec`, `apptainer_exec`, `local_exec` | the provider's exec `concurrency` | None |
+| `sandbox_provider` | `docker_exec`, `enroot_exec`, `apptainer_exec`, `local_exec` | `exec.concurrency` of the Docker, Enroot or Apptainer provider; `local.concurrency` of the Local provider | None |
 
-A component without a configured limit reports no series at all, not a limit of zero. Agent servers, the other model and resources servers, and the `bwrap` and remote sandbox providers keep their own limits, which these metrics do not report yet. No Gym limit rejects work when it is full, so there is no rejection count.
+The Docker, Enroot and Apptainer limits bound every CLI command the provider runs, including the ones that create and remove a sandbox, not only commands run inside it. A component without a configured limit reports no series at all, not a limit of zero. Agent servers, the other model and resources servers, and the `bwrap` and remote sandbox providers keep their own limits, which these metrics do not report yet. No Gym limit rejects work when it is full, so there is no rejection count.
 
 How to read them:
 
 - `active` equal to `limit` with a growing `queue_depth` means the limit is the bottleneck. Raising it helps only if the work behind it, such as the model endpoint, has capacity to spare.
-- `active` below `limit` with slow requests means the time goes elsewhere. Compare `gym.event_loop.lag_ms` and the HTTP connection-pool metrics.
+- For a single limit, `active` below `limit` with slow requests means the time goes elsewhere. Compare `gym.event_loop.lag_ms` and the HTTP connection-pool metrics. A summed series can hide a full limit: a resources server that creates one sandbox provider per sandbox, such as ViBench, sums their slots, so one full provider beside idle ones shows `active` below `limit`. A positive `queue_depth` still shows that callers are waiting.
 - A rising `admission_timeouts_total` means callers gave up waiting. For a model server, these are the requests that fail with "Timed out acquiring an upstream provider slot"; for an environment server, the episodes that fail at the `admission` stage.
-- `queue_wait_duration_ms` shows how long the callers that queued waited, per limit. For the rollout driver, `gym.driver.admission_duration_ms` also gives the wait per rollout, including rollouts that did not queue, and `gym.concurrency.queue_depth` the number waiting right now.
+- `queue_wait_duration_ms` shows how long the callers that queued waited, per limit. For rollout collection, `gym.driver.admission_duration_ms` also gives the wait per rollout, including rollouts that did not queue; a reverification pass records only `queue_wait_duration_ms`. `gym.concurrency.queue_depth` gives the number waiting right now.
 
 A free slot costs a few integer updates and no OpenTelemetry call; a caller that queued records one histogram sample when it gets its slot. The exporter's background thread reads the totals, and they are reported whenever metrics are exported. A reverification pass, from `gym eval reverify` or the re-judge pass that follows a collection, exports once more before it ends, so a pass shorter than one export interval still reports its `reverifications` limit.
 
