@@ -53,7 +53,12 @@ from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
-from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
 from nemo_gym.server_runtime.base_server import (
     RUN_SESSION_SECRET_ENV_PREFIX,
     BaseServer,
@@ -1459,6 +1464,9 @@ class TestRunWebserverProxyKwargs:
         class TestSimpleServer(server_type):
             ray_enabled = ray_setting
             routes_sessions_to_owner = routes_sessions
+
+            async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+                return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
             def owned_session_routing(self) -> dict:
                 return {}
