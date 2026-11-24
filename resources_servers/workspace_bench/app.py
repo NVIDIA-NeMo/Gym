@@ -102,8 +102,9 @@ class WorkspaceBenchVerifyResponse(BaseVerifyResponse):
 class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
     """Serves Workspace-Bench tasks in a task sandbox the agent works in, and judges its ``/workspace/output``.
 
-    An Environment Server seeds an episode session and lends the agent the sandbox through ``sandbox_access``;
-    ``harness_agent``'s ``/run`` seeds with the row and gets the sandbox descriptor. The task's input files are
+    An Environment Server seeds an episode session and lends the agent the sandbox through ``sandbox_access``.
+    An external ``/run`` caller that seeds directly with a row receives the sandbox descriptor instead; no Gym agent
+    seeds this way. The task's input files are
     frozen on this server at seed, so the judge compares the output against the files the agent started from.
     """
 

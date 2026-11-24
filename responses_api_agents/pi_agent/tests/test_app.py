@@ -112,10 +112,10 @@ class TestSanity:
         assert agent.sem._value == 4
 
 
-@pytest.mark.parametrize("with_scope", [True, False], ids=["anyswe-anyterminal", "harness-agent"])
+@pytest.mark.parametrize("with_scope", [True, False], ids=["anyswe-anyterminal", "harness-exa-search"])
 async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope: bool) -> None:
     # AnySWE/AnyTerminal pass sampling fields in both config and the request;
-    # HarnessAgent forwards the entire Responses body using a scope-less request.
+    # harness_exa_search's runner forwards the entire Responses body using a scope-less request.
     agent = _make_agent(model="configured-model", max_output_tokens=128, system_prompt="config")
     body = NeMoGymResponseCreateParamsNonStreaming(
         input=[{"role": "user", "content": "fix the code"}],

@@ -170,9 +170,9 @@ Sandbox sessions live in the memory of the worker that seeded them. With several
 
 Training and evaluation use Hermes v0.23.2 (`ae2a81ccc00e`), pinned in this agent's `pyproject.toml`. The Gym server uses its own Python environment. The Hermes worker uses the same Python 3.14.7 on the host and in the sandbox, alongside the upstream release's frozen dependency lock, including MCP. On the first host run, the server fetches the pinned source into Gym's cache and runs `uv sync`.
 
-Presets that run this agent's host path inside a task image (`harness_agent` with `agent: hermes`, the AnySWE,
-AnyTerminal and CVDP bundles) need that worker beside the image's Gym interpreter, at `<sys.prefix>/hermes-runtime`.
-The AnySWE, AnyTerminal and CVDP deps scripts build it. For a `harness_agent` image or bundle, run
+The AnySWE, AnyTerminal and CVDP bundles and `harness_exa_search` with `agent: hermes` run this agent's host path
+inside a task image and need that worker beside the image's Gym interpreter, at `<sys.prefix>/hermes-runtime`.
+The AnySWE, AnyTerminal and CVDP deps scripts build it. For a `harness_exa_search` image or another bundle, run
 `python -m responses_api_agents.hermes_agent.scripts.prepare_portable --prefix <that interpreter's sys.prefix>
 --target x86_64-unknown-linux-gnu` from a Gym checkout. Without it, every rollout installs Hermes on first use, which
 needs `git`, `uv`, and network access in the task sandbox. The previous pin only needed Gym's dependencies there. The

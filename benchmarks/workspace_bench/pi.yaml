@@ -20,7 +20,7 @@ workspace_bench_pi_agent:
       model: ${policy_model_name}
       thinking: high
       timeout: 7200
-      # harness_agent set no per-command limit; keep long document conversions within the agent's budget.
+      # Allow a document conversion to use the full episode budget.
       sandbox_bash_timeout_seconds: 7200
       pi_version: 0.80.2
       context_window: 262144

@@ -1727,7 +1727,7 @@ def test_cleanup_receipt_is_required():
         parse_cleanup_receipt({"return_code": 0, "error": None})
 
 
-async def test_harness_agent_request_without_scope_keeps_local_path(setup):
+async def test_exa_search_runner_request_without_scope_keeps_local_path(setup):
     agent, sandbox = setup
     request = SimpleNamespace(path_params={})
     body = NeMoGymResponseCreateParamsNonStreaming(input="task")

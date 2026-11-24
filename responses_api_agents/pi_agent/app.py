@@ -1784,7 +1784,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise AgentSessionConflictError("Pi sandbox sessions support one activation; retry the same request")
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
-        # AnySWE, AnyTerminal and HarnessAgent pass generic Responses fields here.
+        # AnySWE, AnyTerminal and harness_exa_search's runner pass generic Responses fields here.
         # Preserve their local CLI contract; only agent sessions enforce the new
         # request boundary. Legacy model selection and caps remain config-owned.
         path_params = getattr(request, "path_params", None)
