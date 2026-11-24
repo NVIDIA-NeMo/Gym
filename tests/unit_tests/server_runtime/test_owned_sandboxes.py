@@ -499,6 +499,39 @@ class TestTrackedBeforeStart:
         assert owned.keys == []
         await owned.create("session", _spec())
 
+    async def test_a_start_is_not_exposed_while_its_files_are_uploading(self) -> None:
+        provider = FakeSnapshotProvider()
+        owned = _owned(provider, provider_config_ref="sandbox")
+        uploading, release = asyncio.Event(), asyncio.Event()
+        real_upload = provider.upload_file
+
+        async def gated_upload(*args: Any, **kwargs: Any) -> None:
+            uploading.set()
+            await release.wait()
+            await real_upload(*args, **kwargs)
+
+        provider.upload_file = gated_upload  # type: ignore[method-assign]
+        creating = asyncio.create_task(
+            owned.create("session", SandboxSpec(image="image", ttl_s=60, files={"/task": "ready"}))
+        )
+        try:
+            await asyncio.wait_for(uploading.wait(), timeout=5)
+            assert _states(provider) == ["running"]
+            assert owned.keys == ["session"]
+            assert owned.get("session") is None
+            assert "session" not in owned
+            with pytest.raises(KeyError, match="has no running sandbox"):
+                await owned.access("session", workdir="/work")
+            release.set()
+            sandbox = await creating
+            assert owned.get("session") is sandbox
+            assert "session" in owned
+            await owned.access("session", workdir="/work")
+        finally:
+            release.set()
+            await creating
+            await owned.aclose()
+
     async def test_a_start_cancelled_by_its_request_is_stopped(self) -> None:
         provider = FakeSnapshotProvider()
         owned = _owned(provider)
