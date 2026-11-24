@@ -196,7 +196,7 @@ class NoSnapshotProvider(FakeSnapshotProvider):
     list_snapshots = None  # type: ignore[assignment]
 
 
-SPEC = SandboxSpec(image="img:1", workdir="/work", env={"A": "1"}, resources={"cpu": 2}, ports=[8080])
+SPEC = SandboxSpec(image="img:1", ttl_s=3600, workdir="/work", env={"A": "1"}, resources={"cpu": 2}, ports=[8080])
 # What a checkpoint record keeps of SPEC: the snapshot stands in for the image.
 RESTORED_SPEC = dataclasses.replace(SPEC, image=None)
 
@@ -1231,11 +1231,12 @@ async def test_discarded_keys_can_be_restored_again_while_their_stops_fail_and_a
 async def test_a_stop_of_a_key_whose_sandbox_already_stopped_does_not_wait_for_a_turn(state_dir: Path) -> None:
     """Its caller may be cancelled while it waits, and would then leave a key with nothing left to stop."""
     provider = FakeSnapshotProvider()
-    checkpointer = await seeded(provider, state_dir, "s1", "s2", parallelism=1)
+    checkpointer = await seeded(provider, state_dir, "s1", "s2", max_concurrent_stops=1)
     # The owner stopped the sandbox itself, as a server does before it drops the key.
     await checkpointer._entries["s1"].sandbox.stop()
 
-    async with checkpointer._semaphore:  # every turn is taken, as while a commit submits its snapshots
+    assert checkpointer._stop_limit is not None
+    async with checkpointer._stop_limit:  # every stop slot is taken, as while other sessions stop theirs
         await asyncio.wait_for(checkpointer.stop("s1"), timeout=5)
         waiting = asyncio.create_task(checkpointer.stop("s2"))
         await asyncio.sleep(0.05)

@@ -395,6 +395,28 @@ def _optional_semaphore(limit: Optional[int]) -> Optional[asyncio.Semaphore]:
     return asyncio.Semaphore(limit) if limit is not None else None
 
 
+async def _start_to_the_end(sandbox: AsyncSandbox) -> None:
+    """Start ``sandbox``; if the caller is cancelled meanwhile, let the start finish before the cancellation goes on.
+
+    The wait is shielded and bounded by ``STOP_TIMEOUT_S``, so the caller's rollback has a handle to stop instead of
+    a provider create cut short in the middle. A start still running after that is cancelled.
+    """
+    start = asyncio.ensure_future(sandbox.start())
+    try:
+        await asyncio.shield(start)
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            with anyio.move_on_after(STOP_TIMEOUT_S):
+                await asyncio.wait({start})
+            if not start.done():
+                start.cancel()
+                await asyncio.wait({start})
+        if not start.cancelled() and start.exception() is not None:
+            # Retrieved so it is not reported as never retrieved; the caller's cancellation is what goes on.
+            LOGGER.info("a cancelled create's start failed: %r", start.exception())
+        raise
+
+
 def check_network_rule(provider: object, rule: NetworkRule) -> None:
     """Refuse ``rule`` unless ``provider``, a provider or its class, can apply it when it creates a sandbox.
 
@@ -603,8 +625,19 @@ class OwnedSandboxes:
         state_dir: str | os.PathLike[str] | None,
         server_name: str,
     ) -> "OwnedSandboxes":
-        """Build an instance from a server's ``SandboxCheckpointConfig``; the rest as in the constructor."""
-        return cls(provider, state_dir=state_dir, server_name=server_name, **config.model_dump())
+        """Build an instance from a server's ``SandboxCheckpointConfig``; the rest as in the constructor.
+
+        ``parallelism`` also bounds its starts, forks and stops, as it did before they had limits of their own, since
+        such a server has no ``owner_concurrency`` to set them.
+        """
+        return cls(
+            provider,
+            state_dir=state_dir,
+            server_name=server_name,
+            max_concurrent_starts=config.parallelism,
+            max_concurrent_stops=config.parallelism,
+            **config.model_dump(),
+        )
 
     @classmethod
     def for_server(
@@ -632,12 +665,21 @@ class OwnedSandboxes:
         reference = getattr(config, provider_field, None)
         if reference is None:
             raise ValueError(f"{config.name} sets no {provider_field}, so it cannot own sandboxes on it")
-        provider = create_provider(resolve_provider_config(reference, global_config))
+        # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
+        provider_config = resolve_provider_config(reference, global_config)
         concurrency = resolve_provider_owner_concurrency(reference, global_config)
+        state_dir = checkpoint_state_dir(global_config)
+        if "local" in provider_config:
+            LOGGER.warning(
+                "%s owns sandboxes on the local provider, which runs their commands as processes on this host; "
+                "use a container provider for anything that runs model-generated code",
+                config.name,
+            )
+        provider = create_provider(provider_config)
         suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
         owned = cls(
             provider,
-            state_dir=checkpoint_state_dir(global_config),
+            state_dir=state_dir,
             server_name=f"{config.name}{suffix}",
             provider_config_ref=reference if isinstance(reference, str) else None,
             owns_provider=True,
@@ -795,16 +837,21 @@ class OwnedSandboxes:
         The key is taken from the first moment, so a second create for it is refused while the first is starting. A
         create of a key that an export is snapshotting waits for that export; creates of other keys do not.
 
-        The sandbox is tracked before it starts. A start that fails or is cancelled after the provider returned the
-        sandbox is stopped here, shielded from the cancellation. If that stop fails too, the key stays tracked, so the
+        The sandbox is tracked before it starts. A start that fails or is cancelled is stopped here, shielded from the
+        cancellation. A start cancelled before the provider returned the sandbox is first let finish, shielded and
+        bounded by ``STOP_TIMEOUT_S``: a provider create cut short can leave a sandbox with no handle to stop, and not
+        every provider applies ``ttl_s`` (Enroot does not). Only a start still running after that is cut short, and
+        the spec's ``ttl_s`` is all that reclaims what it made. If the stop fails too, the key stays tracked, so the
         next :meth:`stop` of the key or :meth:`aclose` stops it again, an export leaves it out, and the start's error
-        is raised with the stop's as its context. The start itself is not shielded: one cancelled before the provider
-        returned the sandbox leaves nothing here to stop, and the spec's ``ttl_s`` reclaims what the provider made.
+        is raised with the stop's as its context.
 
         Raises:
-            ValueError: If ``key`` already has a sandbox, or one is starting.
+            ValueError: If ``key`` already has a sandbox, or one is starting, or ``spec`` sets no ``ttl_s``.
         """
         self._require_open()
+        if spec.ttl_s is None:
+            # The shutdown sweep is bounded and a crash runs none: ttl_s is what ends a sandbox its owner never stops.
+            raise ValueError(f"the sandbox of {key!r} needs a ttl_s, so the provider ends it if its owner never does")
         if key in self._entries or key in self._pending:
             raise ValueError(f"{key!r} already has a sandbox")
         self._take_keys([key])
@@ -815,7 +862,9 @@ class OwnedSandboxes:
                 self._entries[key] = entry
                 try:
                     async with self._start_slot():
-                        await sandbox.start()
+                        # A create queued for a slot when the shutdown began starts nothing.
+                        self._require_open()
+                        await _start_to_the_end(sandbox)
                 except BaseException as error:
                     entry.exportable = False
                     try:
@@ -863,14 +912,16 @@ class OwnedSandboxes:
         ``provider_config_ref`` defaults to the one this instance was built with.
 
         Raises:
-            KeyError: If ``key`` has no sandbox.
+            KeyError: If ``key`` has no running sandbox: none, one still starting, or one whose start failed and whose
+                stop failed too.
             ValueError: If neither this call nor the instance names the provider's config block, as for a server
                 whose ``sandbox_provider`` is an inline block rather than a named one.
         """
         check_lending(self._provider)
         entry = self._entries.get(key)
-        if entry is None:
-            raise KeyError(f"{key!r} has no sandbox")
+        # A key is tracked from before its start, so being tracked does not mean there is a sandbox to lend.
+        if entry is None or not entry.sandbox.started or not entry.exportable:
+            raise KeyError(f"{key!r} has no running sandbox")
         provider_config_ref = provider_config_ref or self._provider_config_ref
         if provider_config_ref is None:
             raise ValueError("lending needs provider_config_ref: the borrower resolves the provider by that name")
@@ -1314,14 +1365,17 @@ class OwnedSandboxes:
         """Stop and forget ``key``'s sandbox; a no-op for a key without one, so a retire may repeat it.
 
         It first waits for a create, an export or a restore of the same key to finish, and stops the fork a restore
-        installed. The whole stop, those waits and the wait for a stop slot included, is shielded from the caller's
-        cancellation, so a client that disconnects cannot leave the sandbox running, and bounded by
-        ``STOP_TIMEOUT_S``. If the stop fails, or times out and raises ``TimeoutError``, the key stays tracked, so a
-        retried retire stops it again. The sandbox's snapshots stay: a checkpoint the controller may still restore
-        can name them, and only a release knows which.
+        installed. The whole stop is shielded from the caller's cancellation, so a client that disconnects cannot
+        leave the sandbox running. The wait for the key's lock is bounded by ``STOP_TIMEOUT_S``, and so is the
+        provider's stop once it has a stop slot; the wait for a slot has no limit of its own, since every stop ahead
+        holds its slot for at most ``STOP_TIMEOUT_S``. If the stop fails, or times out and raises ``TimeoutError``,
+        the key stays tracked, so a retried retire stops it again. The sandbox's snapshots stay: a checkpoint the
+        controller may still restore can name them, and only a release knows which.
         """
-        with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
-            async with self._key_locks.locked(key):
+        with anyio.CancelScope(shield=True):
+            async with contextlib.AsyncExitStack() as held:
+                with anyio.fail_after(STOP_TIMEOUT_S):
+                    await held.enter_async_context(self._key_locks.locked(key))
                 await self._stop_key(key)
 
     async def _stop_key(self, key: str) -> None:
@@ -1347,9 +1401,10 @@ class OwnedSandboxes:
         await self._stop_forks()
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
-        # Shielded and bounded as a whole, the wait for a stop slot included: a cancelled request cannot leave the
-        # sandbox running, and a stop that cannot get a slot in time fails like a stop that hangs.
-        with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
+        # Shielded, so a cancelled request cannot leave the sandbox running. The provider's stop is bounded once it has
+        # its slot (AsyncSandbox.stop shields and bounds itself); the wait for the slot is not, so a stop queued behind
+        # others under load is not cut short and left to ttl_s.
+        with anyio.CancelScope(shield=True):
             async with self._stop_slot():
                 await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
 

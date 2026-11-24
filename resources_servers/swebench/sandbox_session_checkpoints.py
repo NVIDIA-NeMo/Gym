@@ -58,10 +58,10 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import (
     CheckpointMode,
+    OwnedSandboxes,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionLocks,
-    OwnedSandboxes,
     SandboxCheckpointConfig,
     checkpoint_state_dir,
     next_attempt,
