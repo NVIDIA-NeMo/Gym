@@ -13,11 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+from unittest.mock import MagicMock
+
 import pytest
 
+from nemo_gym.client import ServerClient
+from nemo_gym.core import JUDGE_UNPARSEABLE, NeMoGymResponse
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.inverse_if.app import (
     AggregationMode,
     InverseIFConfig,
+    InverseIFServer,
+    InverseIFVerifyRequest,
     RubricEvaluation,
     _extract_verdict,
 )
@@ -68,11 +76,53 @@ class TestExtractVerdict:
         verdict, _ = _extract_verdict(text)
         assert verdict == "FAIL"
 
-    def test_default_to_fail(self):
-        """When nothing is extractable, default to FAIL."""
-        text = "I'm not sure what to say here."
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "C1 fails because no passenger capacity is given. C2 fails. The response scores 0.",
+            "The passport number is missing from the response.",
+            "Passing this criterion needs a date.",
+            "0 out of 3 passed",
+            "FAIL, but it would PASS with a date.",
+            "C6 fails because no date is given.\nSince 5 of 6 criteria pass, the response is mostly fine.",
+            "The response does not follow the rule, so it would fail.",
+            "Result: Pass",
+        ],
+        ids=[
+            "passenger",
+            "passport",
+            "passing",
+            "passed",
+            "both-words",
+            "lowercase-pass",
+            "lowercase-fail",
+            "mixed-case",
+        ],
+    )
+    def test_keyword_fallback_reads_only_a_whole_verdict_word(self, text):
+        """A word that only contains PASS or FAIL is no verdict, and neither is a line that names both. Matching is
+        case-sensitive, so a lowercase or mixed-case word is no verdict either."""
         verdict, _ = _extract_verdict(text)
-        assert verdict == "FAIL"
+        assert verdict is None
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("The response gives the date in the required format.\nPASS", "PASS"),
+            ("The passenger count is missing.\nVerdict: FAIL", "FAIL"),
+            ("The criteria pass and fail in turn.\nFinal: PASS", "PASS"),
+        ],
+    )
+    def test_keyword_fallback_reads_a_whole_verdict_word(self, text, expected):
+        verdict, _ = _extract_verdict(text)
+        assert verdict == expected
+
+    @pytest.mark.parametrize("text", ["I'm not sure what to say here.", ""], ids=["prose", "empty-reply"])
+    def test_no_verdict(self, text):
+        """When nothing is extractable, there is no verdict; the server decides between masking and FAIL."""
+        verdict, explanation = _extract_verdict(text)
+        assert verdict is None
+        assert explanation == ""
 
     def test_case_insensitive_json(self):
         """JSON result field should work with different casing."""
@@ -283,3 +333,186 @@ class TestAggregation:
         for mode in AggregationMode:
             config.aggregation_mode = mode
             assert server._aggregate_scores(evaluations) == 1.0, f"Failed for mode {mode}"
+
+
+# ---------------------------------------------------------------------------
+# Judge replies without a verdict
+# ---------------------------------------------------------------------------
+
+
+def _response(text: str) -> NeMoGymResponse:
+    return NeMoGymResponse.model_validate(
+        {
+            "id": "response",
+            "created_at": 0,
+            "model": "model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "message",
+                    "content": [{"annotations": [], "text": text, "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "none",
+            "tools": [],
+        }
+    )
+
+
+def _server(**overrides) -> InverseIFServer:
+    from nemo_gym.config import ModelServerRef
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+    config = InverseIFConfig(
+        host="",
+        port=0,
+        entrypoint="",
+        name="test",
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        default_judge_prompt_template="",
+        default_judge_system_prompt="",
+        aggregation_mode=AggregationMode.ALL,
+        **overrides,
+    )
+    return InverseIFServer.model_construct(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _request(candidate: str) -> InverseIFVerifyRequest:
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+    return InverseIFVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=_response(candidate),
+        prompt="Answer exactly.",
+        rubric=[{"id": "C1", "criteria": 'Say "yes" only.'}],
+        reference_response="",
+        judge_prompt_template="Response: {model_response}\nCriteria: {criteria}",
+        judge_system_prompt="judge system",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judge_text", ["I'm not sure what to say here.", ""], ids=["prose", "empty-reply"])
+async def test_default_verification_masks_an_unparseable_judge_reply(monkeypatch, judge_text):
+    # Before, this reply scored FAIL and the row was trained at 0.
+    server = _server()
+    calls = []
+
+    async def fake_call_judge(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _response(judge_text)
+
+    monkeypatch.setattr("resources_servers.inverse_if.app.call_judge", fake_call_judge)
+    request = _request("candidate")
+    with pytest.raises(JudgeError) as raised:
+        await server.verify(request)
+    assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+    assert len(calls) == 1
+
+    # Served through judge_failsafe, as the base server serves /verify: a masked row.
+    result = json.loads((await judge_failsafe(server.verify)(body=request)).body)
+    assert result["mask_sample"] is True
+    assert result["failure_kind"] == JUDGE_UNPARSEABLE
+    assert result["_ng_failure_class"] == "judge_failed"
+
+
+@pytest.mark.asyncio
+async def test_disabled_fail_on_unparseable_scores_an_unparseable_judge_reply_as_fail(monkeypatch):
+    server = _server(fail_on_unparseable_judge_response=False)
+
+    async def fake_call_judge(*args, **kwargs):
+        return _response("I'm not sure what to say here.")
+
+    monkeypatch.setattr("resources_servers.inverse_if.app.call_judge", fake_call_judge)
+    result = await server.verify(_request("candidate"))
+
+    assert result.reward == 0.0
+    [evaluation] = result.rubric_evaluations
+    assert evaluation.verdict == "FAIL"
+    assert evaluation.score == 0.0
+
+
+@pytest.mark.asyncio
+async def test_default_verification_keeps_a_parsed_fail_verdict_trained(monkeypatch):
+    server = _server()
+
+    async def fake_call_judge(*args, **kwargs):
+        return _response('{"result": "FAIL", "explanation": "Missing the required format."}')
+
+    monkeypatch.setattr("resources_servers.inverse_if.app.call_judge", fake_call_judge)
+    result = await server.verify(_request("candidate"))
+
+    assert result.reward == 0.0
+    assert result.mask_sample is False
+    [evaluation] = result.rubric_evaluations
+    assert evaluation.verdict == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_empty_answer_scores_zero_without_a_judge_call(monkeypatch):
+    # The model's own failure: trained at 0, not masked, and never judged.
+    server = _server()
+    calls = []
+
+    async def fake_call_judge(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _response('{"result": "PASS", "explanation": "Nothing forbidden appears."}')
+
+    monkeypatch.setattr("resources_servers.inverse_if.app.call_judge", fake_call_judge)
+    result = await server.verify(_request("<think>reasoning that never reached an answer</think>"))
+
+    assert calls == []
+    assert result.reward == 0.0
+    assert result.mask_sample is False
+    assert result.generated_response == ""
+
+
+@pytest.mark.asyncio
+async def test_default_verification_masks_a_judge_reply_cut_at_its_output_limit(monkeypatch):
+    cut_reply = NeMoGymResponse.model_validate(
+        _response("Checking the criterion.\nA bare yes would PASS, however the").model_dump()
+        | {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+    )
+
+    async def fake_call_judge(*args, **kwargs):
+        return cut_reply
+
+    monkeypatch.setattr("resources_servers.inverse_if.app.call_judge", fake_call_judge)
+    with pytest.raises(JudgeError, match="cut off") as raised:
+        await _server().verify(_request("Yes, and here is more."))
+    assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_on_unparseable", [True, False])
+async def test_a_prompt_the_judge_refused_for_its_length_fails_the_criterion(monkeypatch, fail_on_unparseable):
+    # vllm_model answers a prompt longer than the judge's window with an empty reply cut before any output token.
+    refused = NeMoGymResponse.model_validate(
+        _response("").model_dump()
+        | {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+    )
+
+    async def fake_call_judge(*args, **kwargs):
+        return refused
+
+    monkeypatch.setattr("resources_servers.inverse_if.app.call_judge", fake_call_judge)
+    result = await _server(fail_on_unparseable_judge_response=fail_on_unparseable).verify(_request("Yes. " * 200))
+
+    assert (result.reward, result.mask_sample) == (0.0, False)
+    [evaluation] = result.rubric_evaluations
+    assert (evaluation.verdict, evaluation.score) == ("FAIL", 0.0)

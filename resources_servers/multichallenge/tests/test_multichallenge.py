@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -22,12 +23,13 @@ import yaml
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.verification import JudgeError
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.multichallenge.app import (
     AggregationMode,
     MultiChallengeConfig,
@@ -124,6 +126,32 @@ class TestMultiChallenge:
         response = "The model did well.\nYES"
         verdict = _extract_verdict(response, "[[YES]]", "[[NO]]")
         assert verdict == "YES"
+
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            ("Reasoning.\n**No**", "NO"),
+            ("Reasoning.\nVerdict: yes", "YES"),
+            ("Reasoning.\n[NO].", "NO"),
+        ],
+    )
+    def test_extract_verdict_bare_last_line(self, response, expected):
+        assert _extract_verdict(response, "[[YES]]", "[[NO]]") == expected
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            "",
+            "The response does not mention the allergy.",
+            "I cannot determine whether the criterion is met.",
+            "Analysis of the response follows, but it is unknown",
+            "Reasoning.\nNot enough information to decide.",
+            "Reasoning.\nNOTE: the response is unclear",
+        ],
+    )
+    def test_extract_verdict_without_a_verdict_is_none(self, response):
+        """A reply without a verdict is not a NO: substrings such as NOT, CANNOT or UNKNOWN are not verdicts."""
+        assert _extract_verdict(response, "[[YES]]", "[[NO]]") is None
 
     def test_extract_verdict_last_wins(self):
         """Test that last label wins when both present."""
@@ -297,3 +325,102 @@ async def test_verify_propagates_judge_failure(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(JudgeError, match="RuntimeError: judge unavailable"):
         await make_server().verify(request)
+
+
+@pytest.mark.parametrize(
+    "judge_text",
+    ["I cannot determine whether the response makes the claim.", ""],
+    ids=["prose-without-verdict", "empty-reply"],
+)
+async def test_verify_masks_a_judge_reply_without_a_verdict(monkeypatch: pytest.MonkeyPatch, judge_text: str) -> None:
+    # Before, this reply defaulted to NO and passed the NO-criterion rubric item (reward 1.0, trained).
+    judge = AsyncMock(return_value=make_response(judge_text))
+    monkeypatch.setattr("resources_servers.multichallenge.app.call_judge", judge)
+    server = make_server()
+    request = MultiChallengeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=make_response("I did not make the prohibited claim."),
+        context="Earlier conversation",
+        rubric=[{"question": "Did the response make the prohibited claim?", "pass_criteria": "NO"}],
+    )
+
+    with pytest.raises(JudgeError) as raised:
+        await server.verify(request)
+    assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+
+    # Served through judge_failsafe, as the base server serves /verify: a masked row.
+    result = json.loads((await judge_failsafe(server.verify)(body=request)).body)
+    assert result["mask_sample"] is True
+    assert result["failure_kind"] == JUDGE_UNPARSEABLE
+    assert result["_ng_failure_class"] == "judge_failed"
+
+
+async def test_verify_empty_answer_is_zero_without_judge_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The model's own failure: trained at 0, not masked, and never judged (a NO-criterion item would pass it).
+    judge = AsyncMock(return_value=make_response("[[NO]]"))
+    monkeypatch.setattr("resources_servers.multichallenge.app.call_judge", judge)
+    request = MultiChallengeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=make_response("<think>reasoning that never reached an answer</think>"),
+        context="Earlier conversation",
+        rubric=[{"question": "Did the response make the prohibited claim?", "pass_criteria": "NO"}],
+    )
+
+    result = await make_server().verify(request)
+
+    assert result.reward == 0.0
+    assert result.mask_sample is False
+    assert result.generated_response == ""
+    judge.assert_not_awaited()
+
+
+async def test_verify_masks_a_judge_reply_cut_at_its_output_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    cut_reply = NeMoGymResponse.model_validate(
+        make_response("If it never recommends peanuts, the answer is [[NO]]. But line 3 says").model_dump()
+        | {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+    )
+    monkeypatch.setattr("resources_servers.multichallenge.app.call_judge", AsyncMock(return_value=cut_reply))
+    request = MultiChallengeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=make_response("Peanut butter crackers are a great snack."),
+        context="I am allergic to peanuts.",
+        rubric=[{"question": "Did the response recommend peanuts?", "pass_criteria": "NO"}],
+    )
+
+    with pytest.raises(JudgeError, match="cut off") as raised:
+        await make_server().verify(request)
+    assert raised.value.failure_kind == JUDGE_UNPARSEABLE
+
+
+async def test_verify_scores_a_prompt_the_judge_refused_for_its_length_as_a_failed_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # vllm_model answers a prompt longer than the judge's window with an empty reply cut before any output token.
+    refused = NeMoGymResponse.model_validate(
+        make_response("").model_dump()
+        | {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+    )
+    monkeypatch.setattr("resources_servers.multichallenge.app.call_judge", AsyncMock(return_value=refused))
+    request = MultiChallengeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=make_response("Peanut butter crackers are a great snack. " * 50),
+        context="I am allergic to peanuts.",
+        rubric=[{"question": "Did the response recommend peanuts?", "pass_criteria": "NO"}],
+    )
+
+    result = await make_server().verify(request)
+
+    # Before this rule, the empty reply read as NO and passed this NO-criterion item.
+    assert (result.reward, result.mask_sample) == (0.0, False)
+    [evaluation] = result.rubric_evaluations
+    assert (evaluation.verdict, evaluation.score) == ("", 0.0)

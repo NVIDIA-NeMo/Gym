@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -55,7 +56,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import call_judge
+from nemo_gym.verification import JudgeError, call_judge
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +123,14 @@ class InverseIFConfig(BaseResourcesServerConfig):
     parallel_evaluation: bool = Field(
         default=True,
         description="Whether to evaluate rubric criteria in parallel",
+    )
+
+    fail_on_unparseable_judge_response: bool = Field(
+        default=True,
+        description=(
+            "Raise JudgeError(judge_unparseable) for a judge reply without a verdict, which masks the row: the "
+            "judge's failure is not the policy's. Set to false to score such a reply as FAIL instead."
+        ),
     )
 
 
@@ -202,7 +211,10 @@ def _extract_text_from_response(response: NeMoGymResponse, exclude_thinking: boo
     return ""
 
 
-def _extract_verdict(judge_text: str) -> tuple[str, str]:
+_FALLBACK_VERDICT_WORD = re.compile(r"\b(PASS|FAIL)\b")
+
+
+def _extract_verdict(judge_text: str) -> tuple[str | None, str]:
     """
     Extract PASS/FAIL verdict and explanation from judge response.
 
@@ -215,7 +227,7 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
     3. Fallback to scanning for PASS/FAIL keywords
 
     Returns:
-        (verdict, explanation) where verdict is "PASS" or "FAIL".
+        (verdict, explanation) where verdict is "PASS", "FAIL", or None when the reply has no verdict.
     """
     # Strategy 1: Extract from fenced code block
     json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", judge_text, re.DOTALL)
@@ -241,17 +253,28 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
         except (json.JSONDecodeError, AttributeError):
             pass
 
-    # Strategy 3: Keyword fallback — scan last few lines
+    # Strategy 3: Keyword fallback: the whole word PASS or FAIL, in capitals, on one of the last few lines, latest line
+    # first. A word that only contains one ("passenger", "passport", "passing", "passed") is not a verdict. Matching is
+    # case-sensitive: a lowercase "pass" or "fail" is prose ("5 of 6 criteria pass") and can describe other criteria
+    # than the one asked, so "Result: Pass" in mixed case also gives no verdict. A line that names both words ("FAIL,
+    # but it would PASS with a date") is ambiguous: neither word wins, so the reply has no verdict and the caller
+    # masks the row, as it does for any reply without a verdict.
     lines = judge_text.strip().split("\n")
     for line in reversed(lines[-5:]):
-        upper = line.strip().upper()
-        if "PASS" in upper:
-            return "PASS", ""
-        if "FAIL" in upper:
-            return "FAIL", ""
+        words = set(_FALLBACK_VERDICT_WORD.findall(line))
+        if len(words) == 1:
+            return words.pop(), ""
+        if words:
+            return None, ""
 
-    # Default to FAIL if we can't determine the verdict
-    return "FAIL", ""
+    # No verdict: the caller decides between masking the row and scoring FAIL.
+    return None, ""
+
+
+def _judge_refused_prompt(judge_response: NeMoGymResponse) -> bool:
+    """Whether the judge server refused the prompt for its length: a reply cut before any output token."""
+    usage = judge_response.usage
+    return judge_response.incomplete_details is not None and usage is not None and usage.output_tokens == 0
 
 
 # ---------------------------------------------------------------------------
@@ -300,8 +323,11 @@ class InverseIFServer(SimpleResourcesServer):
             if not rubric:
                 rubric = body.metadata.get("rubric", [])
 
-        # Evaluate each criterion
-        if self.config.parallel_evaluation and len(rubric) > 1:
+        # Evaluate each criterion. An empty final answer scores 0 without a judge call: judged, it would pass
+        # criteria that only forbid something.
+        if not generated_response:
+            evaluations = []
+        elif self.config.parallel_evaluation and len(rubric) > 1:
             import asyncio
 
             evaluations = await asyncio.gather(
@@ -395,8 +421,22 @@ class InverseIFServer(SimpleResourcesServer):
         )
         judge_text = _extract_text_from_response(judge_response, exclude_thinking=True)
 
+        # The answer, which the policy controls, did not fit the judge's window: the criterion fails. This check runs
+        # before the cut-reply check, which masks the row.
+        refused = _judge_refused_prompt(judge_response)
+        if (
+            not refused
+            and self.config.fail_on_unparseable_judge_response
+            and (judge_response.status == "incomplete" or judge_response.incomplete_details is not None)
+        ):
+            raise JudgeError("judge reply was cut off before its verdict", failure_kind=JUDGE_UNPARSEABLE)
+
         # Extract verdict
-        verdict, explanation = _extract_verdict(judge_text)
+        verdict, explanation = ("FAIL", "") if refused else _extract_verdict(judge_text)
+        if verdict is None:
+            if self.config.fail_on_unparseable_judge_response:
+                raise JudgeError(f"unparseable judge response: {judge_text[:200]!r}", failure_kind=JUDGE_UNPARSEABLE)
+            verdict = "FAIL"
         score = 1.0 if verdict == "PASS" else 0.0
 
         return RubricEvaluation(

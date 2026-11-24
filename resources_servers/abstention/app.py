@@ -38,6 +38,7 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -216,26 +217,42 @@ def extract_text_from_response(response: NeMoGymResponse) -> str:
     return ""
 
 
-def parse_judge_grade(judge_text: str) -> str:
+# The judge is told to answer with a bare "A", "B" or "C" (A: CORRECT, B: INCORRECT, C: NOT_ATTEMPTED). A reply that is
+# not bare is read by explicit forms only. The earlier fallback, `if letter in cleaned` in A, B, C order, matched any
+# capital A anywhere: "C: NOT_ATTEMPTED" (the A inside ATTEMPTED) or "A" used as an article both graded CORRECT.
+_GRADE_LEADING = re.compile(r"^[*_`\"'(\[\s]*([ABC])[*_`\"')\]]*(?:\s*[:.)\-]|\s*$)")
+_GRADE_STATED = re.compile(r"\b(?i:grade)\s*(?:(?i:is)|:|=)?\s*(?:an?\s+)?\(?([ABC])\b")
+# Label words, longest first so INCORRECT and NOT_ATTEMPTED are not read as CORRECT.
+_GRADE_LABEL = re.compile(r"(?<![Nn][Oo][Tt]\s)(?<!n't\s)\b(NOT_ATTEMPTED|INCORRECT|CORRECT)\b")
+_LABEL_TO_GRADE = {"CORRECT": "A", "INCORRECT": "B", "NOT_ATTEMPTED": "C"}
+
+
+def parse_judge_grade(judge_text: str) -> str | None:
     """Parse the single-letter grade (A/B/C) from the judge's response.
 
-    Returns "A", "B", or "C". Falls back to "B" (INCORRECT) when the
-    output cannot be reliably parsed.
+    Accepted, in order: the bare letter; a last or first line that starts with the letter ("C", "C: NOT_ATTEMPTED",
+    "(A)"); a stated grade ("The grade is A"); a single label word (CORRECT, INCORRECT, NOT_ATTEMPTED). Anything else,
+    including a reply that names two different labels, has no grade: None.
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C"):
         return cleaned
 
-    last_line = cleaned.rsplit("\n", 1)[-1].strip()
-    for letter in ("A", "B", "C"):
-        if last_line == letter:
-            return letter
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    for line in (lines[-1:] + lines[:1]) if lines else []:
+        match = _GRADE_LEADING.match(line)
+        if match:
+            return match.group(1)
 
-    for letter in ("A", "B", "C"):
-        if letter in cleaned:
-            return letter
+    stated = _GRADE_STATED.findall(cleaned)
+    if stated:
+        return stated[-1].upper()
 
-    return "B"
+    labels = set(_GRADE_LABEL.findall(cleaned))
+    if len(labels) == 1:
+        return _LABEL_TO_GRADE[labels.pop()]
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +336,8 @@ class AbstentionServer(SimpleResourcesServer):
             json=request_params,
             response_model=NeMoGymResponse,
         )
+        if judge_response.status == "incomplete" or judge_response.incomplete_details is not None:
+            raise JudgeError("judge reply was cut off before its grade", failure_kind=JUDGE_UNPARSEABLE)
         return extract_text_from_response(judge_response)
 
     async def verify(self, body: AbstentionVerifyRequest) -> AbstentionVerifyResponse:
@@ -336,6 +355,13 @@ class AbstentionServer(SimpleResourcesServer):
             verdict = "abstain"
             reward = self.config.abstention_reward
             judge_text = None
+        elif not extracted.strip():
+            # No final answer (e.g. a reply that ends right after its reasoning). Judged, it would most likely be graded
+            # NOT_ATTEMPTED and earn the abstention reward, paying for an empty reply as if it were an explicit
+            # abstention (the abstention_token). It is scored as incorrect instead, without a judge call.
+            verdict = "incorrect"
+            reward = self.config.incorrect_reward
+            judge_text = None
         else:
             judge_prompt = self.config.judge_prompt_template.format(
                 question=body.question or "",
@@ -348,6 +374,12 @@ class AbstentionServer(SimpleResourcesServer):
                 raise JudgeError("empty judge response")
 
             grade = parse_judge_grade(judge_text)
+            if grade is None:
+                # A reply without a grade is the judge's failure, not the policy's: mask the row rather than score
+                # it INCORRECT.
+                raise JudgeError(
+                    f"judge reply has no A/B/C grade: {judge_text[-500:]!r}", failure_kind=JUDGE_UNPARSEABLE
+                )
             if grade == "A":
                 verdict = "correct"
                 reward = self.config.correct_reward

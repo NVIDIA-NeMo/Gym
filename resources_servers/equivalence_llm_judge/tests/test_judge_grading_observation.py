@@ -10,6 +10,7 @@ import pytest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -17,6 +18,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
+from nemo_gym.verification import JudgeError
 from resources_servers.equivalence_llm_judge.app import (
     LLMJudgeResourcesServer,
     LLMJudgeResourcesServerConfig,
@@ -98,20 +100,30 @@ async def test_a_parsed_correct_or_wrong_verdict_completes_and_binds(texts, rewa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("texts", [["no verdict here"], ["[[A=B]] then [[A!=B]]"], [""]])
-async def test_a_missing_or_conflicting_verdict_stays_unknown(texts):
-    result, invocation = await _verify(texts)
+async def test_a_conflicting_verdict_stays_unknown():
+    result, invocation = await _verify(["[[A=B]] then [[A!=B]]"])
     assert result.reward == 0.0
     (operation,) = invocation.grading_operations
     assert operation.outcome == "unknown"
 
 
 @pytest.mark.asyncio
-async def test_a_swap_pass_without_a_verdict_leaves_the_whole_grade_unknown():
+@pytest.mark.parametrize("texts", [["no verdict here"], [""]])
+async def test_a_missing_verdict_is_a_failed_grading_the_failsafe_masks(texts):
+    result, invocation = await _verify(texts)
+    assert isinstance(result, JudgeError) and result.failure_kind == JUDGE_UNPARSEABLE
+    (operation,) = invocation.grading_operations
+    assert operation.outcome == "failed"
+    assert [d.response_id for d in operation.dependencies] == ["judge-0"]
+
+
+@pytest.mark.asyncio
+async def test_a_swap_pass_without_a_verdict_fails_the_whole_grade():
     result, invocation = await _verify(["[[A=B]]", "unparseable"], swap=True)
+    assert isinstance(result, JudgeError) and result.failure_kind == JUDGE_UNPARSEABLE
     (operation,) = invocation.grading_operations
     assert [d.response_id for d in operation.dependencies] == ["judge-0", "judge-1"]
-    assert operation.outcome == "unknown"
+    assert operation.outcome == "failed"
 
 
 @pytest.mark.asyncio
@@ -124,10 +136,11 @@ async def test_a_failed_judge_transport_is_a_failed_grading():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text,reward", [("[[A=B]]", 1.0), ("[[A!=B]]", 0.0)])
-async def test_truncated_reply_with_valid_label_keeps_score_but_not_completed_grading(text, reward):
+@pytest.mark.parametrize("text", ["[[A=B]]", "[[A!=B]]", "Reasoning: the answers"])
+async def test_a_reply_cut_at_the_judge_output_limit_is_a_failed_grading_even_with_a_label(text):
     result, invocation = await _verify([text], incomplete=True)
-    assert result.reward == reward
+    assert isinstance(result, JudgeError) and result.failure_kind == JUDGE_UNPARSEABLE
+    assert "cut off (max_output_tokens)" in str(result)
     (operation,) = invocation.grading_operations
-    assert operation.outcome == "unknown"
+    assert operation.outcome == "failed"
     assert [d.response_id for d in operation.dependencies] == ["judge-0"]

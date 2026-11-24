@@ -289,7 +289,8 @@ def assert_judge_failure(status, body, reason, *, persisted=False):
     else:
         validated = BaseVerifyResponse.model_validate(body)
         assert validated.mask_sample is True and validated.failure_kind == "judge_failed"
-        assert body["reward"] == 0  # Failsafe placeholder; never a scored result.
+        # Failsafe placeholder, never a scored result: GenRM's neutral default_score, not the failsafe's usual 0.
+        assert body["reward"] == 3.0
 
 
 async def test_judge_failure_preserves_answer_and_diagnostics_through_run(services):

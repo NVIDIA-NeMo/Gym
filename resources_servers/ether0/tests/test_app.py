@@ -173,12 +173,37 @@ class TestVerify:
         result = await server.verify(req)
         assert result.reward == 0.0
         assert result.extracted_answer is None
+        # A missing answer is the model's own failure: trained as 0, not masked.
+        assert (result.mask_sample, result.failure_kind) == (False, None)
 
-    async def test_malformed_solution(self) -> None:
+    async def test_an_invalid_molecule_is_trained_as_zero(self) -> None:
+        req = _make_request("<answer>C1CC</answer>", "formula_eval!:!CCO!:!molecule-formula", "molecule-formula")
+        result = await _make_server().verify(req)
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, False, None)
+
+    async def test_malformed_solution_is_masked(self) -> None:
         server = _make_server()
         req = _make_request("<answer>CCO</answer>", "bad_format", "")
         result = await server.verify(req)
-        assert result.reward == 0.0
+        # The row has no usable expected-output spec: the zero is not a measurement of the answer.
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
+        assert result.failure_reason.startswith("malformed_solution: ")
+
+    async def test_unknown_eval_function_is_masked(self) -> None:
+        req = _make_request("<answer>CCO</answer>", "no_such_eval!:!CCO!:!molecule", "molecule")
+        result = await _make_server().verify(req)
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
+        assert result.failure_reason == "unknown_eval_function: 'no_such_eval'"
+
+    async def test_a_grader_exception_is_masked(self) -> None:
+        # functional_group_eval parses its answer_info with ast.literal_eval; a malformed one raises in the grader.
+        req = _make_request(
+            "<answer>CCO</answer>", "functional_group_eval!:!not a tuple!:!functional-group", "functional-group"
+        )
+        result = await _make_server().verify(req)
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
+        assert result.failure_reason.startswith("functional_group_eval raised ")
+        assert result.extracted_answer == "CCO"
 
     async def test_boxed_correct(self) -> None:
         server = _make_server()
@@ -282,6 +307,19 @@ class TestOracleRows:
             )
         assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
         assert result.failure_reason == "model failed"
+
+    async def test_masked_when_a_remote_oracle_client_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Remote oracle clients raise their own transport errors, not OracleError.
+        monkeypatch.setenv(local_oracles.REMOTE_ORACLES_ENV_VAR, "http://example.invalid")
+        with (
+            patch.object(graders.rewards, "is_reasonable_molecule", return_value=True),
+            patch.object(graders.rewards, "fetch_solubility", side_effect=ConnectionError("oracle unreachable")),
+        ):
+            result = await _make_server().verify(
+                _make_request("<answer>CCO</answer>", self.SOLUTION, "oracle-solubility/scaffold")
+            )
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
+        assert result.failure_reason == "sol_eval raised ConnectionError: oracle unreachable"
 
     @pytest.mark.parametrize(
         ("prediction", "reward", "masked"),

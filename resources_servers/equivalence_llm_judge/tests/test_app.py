@@ -25,6 +25,8 @@ from pytest import approx, fixture, mark, raises
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
+    JUDGE_UNPARSEABLE,
+    VERIFIER_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
@@ -33,7 +35,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import ReverifyMode
-from nemo_gym.verification import exercise_verifier_fixture, judge_failsafe
+from nemo_gym.verification import JudgeError, exercise_verifier_fixture, judge_failsafe
 from resources_servers.equivalence_llm_judge.app import (
     VERIFIER_FIXTURE,
     LLMJudgeResourcesServer,
@@ -312,13 +314,30 @@ class TestApp:
         assert res.reward == approx(0.0)
         assert len(res.judge_evaluations) == 1
 
-    async def test_unexpected_judge_output_defaults_to_not_equal(self, config: LLMJudgeResourcesServerConfig) -> None:
+    @mark.parametrize("case", ["no label", "cut with a label", "swap pass cut"])
+    async def test_a_judge_reply_without_a_usable_verdict_masks_the_row(
+        self, config: LLMJudgeResourcesServerConfig, case: str
+    ) -> None:
         server_mock = MagicMock(spec=ServerClient)
+        cut = {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+        replies = {
+            "no label": [("no label present", {})],
+            # A label in a reply cut at the judge's output limit is not trusted either.
+            "cut with a label": [("[[A=B]] so far", cut)],
+            "swap pass cut": [("[[A=B]]", {}), ("[[A=B]]", cut)],
+        }[case]
+        if case == "swap pass cut":
+            config.check_twice_swap = True
         rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
 
-        post_mock = MagicMock()
-        post_mock.read = AsyncMock(return_value=self._create_response("f", self._msg("no label present")))
-        server_mock.post = AsyncMock(return_value=post_mock)
+        def reply(text: str, fields: dict) -> MagicMock:
+            post = MagicMock()
+            post.read = AsyncMock(
+                return_value=json.dumps(json.loads(self._create_response("f", self._msg(text))) | fields)
+            )
+            return post
+
+        server_mock.post = AsyncMock(side_effect=[reply(text, fields) for text, fields in replies] * 2)
 
         req = LLMJudgeVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -334,8 +353,89 @@ class TestApp:
             ),
             expected_answer="x",
         )
+        with raises(JudgeError, match="cut off" if "cut" in case else "no verdict") as error:
+            await rs.verify(req)
+        assert error.value.failure_kind == JUDGE_UNPARSEABLE
+        assert server_mock.post.await_count == len(replies)
+
+        # The verify endpoint's failsafe masks the row, keeps the policy's response, and leaves it for re-judging.
+        row = json.loads((await judge_failsafe(rs.verify)(req)).body)
+        assert (row["reward"], row["mask_sample"], row["failure_kind"]) == (0.0, True, JUDGE_UNPARSEABLE)
+        assert row["_ng_failure_class"] == "judge_failed"
+        assert row["response"] == req.response.model_dump(mode="json")
+
+    async def test_a_prompt_the_judge_refused_for_its_length_scores_zero(
+        self, config: LLMJudgeResourcesServerConfig
+    ) -> None:
+        # vllm_model answers a prompt longer than the judge's window with an empty reply cut before any output token.
+        refused = json.loads(self._create_response("f", self._msg(""))) | {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(return_value=MagicMock(read=AsyncMock(return_value=json.dumps(refused))))
+        rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse.model_validate_json(self._create_response("policy", self._msg("text"))),
+            expected_answer="x",
+        )
+
         res = await rs.verify(req)
-        assert res.reward == approx(0.0)
+
+        assert (res.reward, res.mask_sample) == (0.0, False)
+        assert server_mock.post.await_count == 1
+
+    async def test_a_rescue_pass_without_a_verdict_keeps_the_first_pass_zero(
+        self, config: LLMJudgeResourcesServerConfig
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        replies = []
+        for text in ("[[A!=B]]", "no label present"):
+            reply = MagicMock()
+            reply.read = AsyncMock(return_value=self._create_response("f", self._msg(text)))
+            replies.append(reply)
+        server_mock.post = AsyncMock(side_effect=replies)
+        rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse.model_validate_json(self._create_response("policy", self._msg("text"))),
+            expected_answer="x",
+            template_metadata={"output_regex": r"ANSWER: (.*)"},
+        )
+
+        res = await rs.verify(req)
+
+        assert (res.reward, res.mask_sample) == (0.0, False)
+        assert [evaluation.verdict_label for evaluation in res.judge_evaluations] == ["[[A!=B]]"]
+        assert server_mock.post.await_count == 2
+
+    @mark.parametrize("expected_answer", [None, ""])
+    async def test_a_row_without_its_expected_answer_is_masked_without_calling_the_judge(
+        self, config: LLMJudgeResourcesServerConfig, expected_answer
+    ) -> None:
+        client = MagicMock(spec=ServerClient)
+        client.post = AsyncMock()
+        server = LLMJudgeResourcesServer(config=config, server_client=client)
+        request = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse.model_validate_json(self._create_response("policy", self._msg("42"))),
+            expected_answer=expected_answer,
+        )
+
+        result = await server.verify(request)
+
+        client.post.assert_not_awaited()
+        assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, VERIFIER_ERROR)
+        assert result.failure_reason.startswith("missing_expected_answer")
+        assert result.response.model_dump() == request.response.model_dump()
 
     @mark.parametrize("case", ["missing", "reasoning_only", "empty", "whitespace", "no_text", "last_empty"])
     async def test_empty_final_answer_skips_judge_and_preserves_response(
@@ -375,6 +475,8 @@ class TestApp:
         client.post.assert_not_awaited()
         assert result.reward == 0
         assert result.failure_reason == "empty_final_answer"
+        # An empty final answer is the model's own failure: trained as 0, not masked.
+        assert result.mask_sample is False
         assert result.judge_evaluations == []
         assert result.response.model_dump() == before["response"]
         assert request.model_dump() == before

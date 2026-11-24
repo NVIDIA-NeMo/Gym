@@ -98,9 +98,19 @@ class Ether0ResourcesServer(SimpleResourcesServer):
 
         try:
             reward_info = RewardFunctionInfo.model_validate(solution_str)
-        except Exception:
+        except Exception as error:
             logger.warning("Malformed solution string: %r", solution_str)
-            return _response(body, 0.0, None, None, problem_type)
+            # Without its solution the row cannot be graded: the zero would measure the task data, not the answer.
+            return _response(
+                body,
+                0.0,
+                None,
+                None,
+                problem_type,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=f"malformed_solution: {type(error).__name__}: {str(error)[:500]}",
+            )
 
         eval_fn_name = reward_info.fxn_name
         answer_info = reward_info.answer_info
@@ -117,7 +127,16 @@ class Ether0ResourcesServer(SimpleResourcesServer):
         eval_fn = EVAL_FUNCTIONS.get(eval_fn_name)
         if eval_fn is None:
             logger.warning("Unknown eval function %r", eval_fn_name)
-            return _response(body, 0.0, answer, eval_fn_name, problem_type)
+            return _response(
+                body,
+                0.0,
+                answer,
+                eval_fn_name,
+                problem_type,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=f"unknown_eval_function: {eval_fn_name!r}",
+            )
 
         if eval_fn_name in local_oracles.ORACLE_EVAL_FUNCTIONS and not (
             self.config.local_oracles or os.environ.get(local_oracles.REMOTE_ORACLES_ENV_VAR)
@@ -150,9 +169,20 @@ class Ether0ResourcesServer(SimpleResourcesServer):
                 failure_kind=VERIFIER_ERROR,
                 failure_reason=str(error),
             )
-        except Exception:
+        except Exception as error:
+            # The graders score an invalid or wrong answer 0 themselves; an exception is the grader's own failure
+            # (malformed answer_info, an oracle client error), so the zero would not be a measurement.
             logger.exception("Error in %r for problem_type=%r", eval_fn_name, problem_type)
-            reward = 0.0
+            return _response(
+                body,
+                0.0,
+                answer,
+                eval_fn_name,
+                problem_type,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=f"{eval_fn_name} raised {type(error).__name__}: {str(error)[:500]}",
+            )
 
         return _response(body, reward, answer, eval_fn_name, problem_type)
 
