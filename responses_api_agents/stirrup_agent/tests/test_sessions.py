@@ -361,6 +361,96 @@ def test_a_stop_before_the_runner_starts_answers_without_a_model_call(
     assert closed.json()["resources_cookies"] == {"session": "seeded"}
 
 
+def test_a_run_stopped_before_it_starts_answers_as_an_empty_stopped_run(agent, root, monkeypatch):
+    """A rollout stop that arrives after the seed and before the run ends the runner before launch."""
+    resources = _Resources(_resources_app([]))
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft"}))])
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    try:
+        with TestClient(agent.setup_webserver()) as client:
+            _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
+            stop = client.post(
+                f"/rollouts/{_EPISODE.capture_key}/stop", json={"reason": "task_ended", "completed": True}
+            )
+            response = client.post(
+                f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+                json={"input": [{"role": "user", "content": "Write the report."}], "model": "policy", "tools": _TOOLS},
+            )
+            closed = _close(client)
+    finally:
+        model.close()
+        resources.close()
+
+    assert stop.json()["stopped"]
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["output"]) == ("completed", [])
+    assert json.loads(body["metadata"][ROLLOUT_STOP_METADATA_KEY]) == {"reason": "task_ended", "completed": True}
+    assert model.requests == []
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["agent_observations"]["gaps"] == []
+
+
+@pytest.mark.parametrize("ended_by", ["stop", "deadline"])
+def test_a_runner_ended_during_its_start_is_a_stopped_run_only_when_a_stop_ended_it(
+    agent, root, tmp_path, monkeypatch, ended_by
+):
+    """The supervisor can end the runner during its start, before the runner handles SIGTERM, so it writes no report.
+    A rollout stop that ended it answers as an empty stopped run. A deadline with no stop stays a failure."""
+    # The request names no tools, so no finish tool either.
+    agent.config.finish_tool_names = None
+    started = tmp_path / "runner-started"
+    fake_python = tmp_path / "python"
+    # Only the runner is replaced, by a start that never ends; the supervisor runs on the real interpreter.
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = -c ] && exit 0\n'
+        f"case \"$1 $2 $3\" in '-E -s '*sandbox_runner.py) touch {started}; exec sleep 60;; esac\n"
+        f'exec {sys.executable} "$@"\n'
+    )
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(sandbox, "SANDBOX_PYTHON", str(fake_python))
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: "http://policy.invalid/v1")
+    if ended_by == "deadline":
+        agent.config.sandbox_runner_timeout_seconds = 2
+    responses, errors = [], []
+
+    def activate(client: TestClient) -> None:
+        try:
+            responses.append(_respond(client))
+        except Exception as error:
+            errors.append(error)
+
+    with TestClient(agent.setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(str(root)))
+        activation = threading.Thread(target=activate, args=(client,))
+        activation.start()
+        deadline = time.monotonic() + 60
+        while not started.exists():
+            assert time.monotonic() < deadline and not errors and not responses, f"the runner never started: {errors}"
+            time.sleep(0.05)
+        if ended_by == "stop":
+            stop = client.post(f"/rollouts/{_EPISODE.capture_key}/stop", json={"reason": "budget"})
+            assert stop.json()["stopped"], stop.text
+        activation.join(120)
+        closed = _close(client)
+
+    assert closed.status_code == 200, closed.text
+    if ended_by == "deadline":
+        # The agent route failure, raised from the runner's missing report
+        (error,) = errors
+        assert "Stirrup sandbox runner exited without output" in str(error.__cause__)
+        return
+    assert errors == []
+    (response,) = responses
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["output"]) == ("incomplete", [])
+    assert json.loads(body["metadata"][ROLLOUT_STOP_METADATA_KEY]) == {"reason": "budget"}
+    assert "stop_reason" not in body["metadata"]
+
+
 def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, monkeypatch):
     resources = _Resources(_resources_app([]))
     model = _ModelServer([_call("fetch_web_page", json.dumps({"url": "x"}))])

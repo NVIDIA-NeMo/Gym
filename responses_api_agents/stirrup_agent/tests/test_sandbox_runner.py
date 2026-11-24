@@ -21,7 +21,7 @@ from stirrup.clients.utils import to_openai_tools
 from responses_api_agents.stirrup_agent import nemo_agent as runner_agent
 from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
-from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES, _stopped_before_launch
+from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES, _stopped_without_output
 from responses_api_agents.stirrup_agent.sandbox_runner import (
     InvocationStatus,
     LocalShell,
@@ -254,8 +254,9 @@ def test_a_run_stopped_around_a_compaction_ends_with_its_completed_turn(tmp_path
     assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
 
 
-def test_the_report_of_a_run_stopped_before_launch_has_the_runners_shape(tmp_path, resources):
-    """The agent server reads the report it makes for a run that a stop kept from starting as it reads the runner's."""
+def test_the_report_of_a_run_stopped_without_output_has_the_runners_shape(tmp_path, resources):
+    """The agent server reads the report it makes for a run that a stop ended before any output as it reads the
+    runner's."""
     workdir = tmp_path / "root"
     workdir.mkdir()
     model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
@@ -264,7 +265,7 @@ def test_the_report_of_a_run_stopped_before_launch_has_the_runners_shape(tmp_pat
     finally:
         model.close()
 
-    report = _stopped_before_launch({"session": "seeded"})
+    report = _stopped_without_output({"session": "seeded"})
     assert set(report) == set(output)
     assert {key: report[key] for key in ("observations", "usages")} == Observer().report(InvocationStatus.INCOMPLETE)
     assert (report["stop_reason"], report["resources_cookies"]) == ("wall_time", {"session": "seeded"})
@@ -743,4 +744,3 @@ async def test_compaction_observer_retains_all_summary_attempts_without_policy_c
     assert event["outcome"] == ("failed" if failed else "completed")
     assert event["summary"] == (None if failed else "Retain the changes.")
     assert event["trigger"] == "automatic"
-

@@ -33,11 +33,13 @@ _PACKAGE_DIR = f"{RUNTIME_DIR}/harness/responses_api_agents/stirrup_agent"
 HARNESS_FILES = ("nemo_agent.py", "nemo_client.py", "stirrup_utils.py", "sandbox_runner.py")
 
 
-def _stopped_before_launch(resources_cookies: dict[str, str]) -> dict[str, Any]:
-    """The runner's report for a run that a rollout stop kept from starting: no model call and no turn.
+def _stopped_without_output(resources_cookies: dict[str, str]) -> dict[str, Any]:
+    """The runner's report for a run that a rollout stop ended before the runner saved anything: no turn.
 
-    It ends as at the time limit, so the agent server reports the stop (``report_rollout_stop``). The observations
-    and usages have the shape of ``Observer.report`` in ``sandbox_runner.py``.
+    A stop before launch keeps the runner from starting, and a stop during its start ends it before it handles SIGTERM.
+    The run ends as at the time limit, so the agent server reports the stop (``report_rollout_stop``). The keys and the
+    invocation ID are those of the report ``sandbox_runner.run`` writes, which the agent server does not import: that
+    import changes its ``sys.path``.
     """
     return {
         "input_items": [],
@@ -97,10 +99,14 @@ class StirrupSessionState(AgentSessionState):
         async def collect() -> dict[str, Any]:
             if self.session.expired_before_launch:
                 # A rollout stop arrived before launch, so the runner never ran and wrote no output.
-                return _stopped_before_launch(self.resources_cookies)
+                return _stopped_without_output(self.resources_cookies)
             try:
                 return json.loads(await read_text(self.session.sandbox, path=output_path))
             except Exception as error:
+                # Only a stop the supervisor acted on (``expired``): a crash, or a deadline that ended the runner
+                # before it wrote its report, stays a failure.
+                if self.session.expired and await self._output_absent(output_path):
+                    return _stopped_without_output(self.resources_cookies)
                 logs = await self.session.read_output_log()
                 raise RuntimeError(f"Stirrup sandbox runner exited without output: {logs}") from error
 
@@ -111,6 +117,14 @@ class StirrupSessionState(AgentSessionState):
             raise RuntimeError(f"Stirrup sandbox runner failed: {output['error']}\n{output.get('traceback', '')}")
         self.resources_cookies = output["resources_cookies"]
         return output
+
+    async def _output_absent(self, path: str) -> bool:
+        """Whether the runner left no output file, as opposed to a read that failed."""
+        try:
+            probe = await self.session.sandbox.exec(f"[ -e {quote(path)} ] || echo absent", cwd="/", timeout_s=10)
+        except Exception:
+            return False
+        return probe.return_code == 0 and probe.error_type is None and (probe.stdout or "").strip() == "absent"
 
     async def close(self, timeout: float) -> None:
         """Stop the harness and release the sandbox before cancelling the HTTP activation."""
