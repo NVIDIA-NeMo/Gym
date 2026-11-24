@@ -293,6 +293,11 @@ def _user_flag(user: str | int) -> str:
     return "0" if user == "root" or user == 0 else str(user)
 
 
+def _picks_network(args: Sequence[str]) -> bool:
+    """Whether ``docker run`` arguments put the container on a network themselves."""
+    return any(arg in ("--network", "--net") or arg.startswith(("--network=", "--net=")) for arg in args)
+
+
 class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
@@ -313,15 +318,20 @@ class DockerProvider:
         Raises:
             ValueError: For a rule that allows hosts, which Docker cannot express per container, for ``no_network``
                 when the provider config already puts every container on another network, or when the sandbox's own
-                ``run_args`` pick a network.
+                ``run_args`` or the provider's ``create.extra_run_args`` pick a network.
         """
         if rule == "inherit":
             return dict(provider_options)
         if rule != "no_network":
             raise ValueError(f"the Docker provider cannot restrict egress to a list of hosts ({rule!r})")
         run_args = _coerce_str_list(provider_options.get("run_args"), "run_args")
-        if any(arg in ("--network", "--net") or arg.startswith(("--network=", "--net=")) for arg in run_args):
+        if _picks_network(run_args):
             raise ValueError("the sandbox's run_args pick a network themselves; set only network: no_network")
+        if _picks_network(self._create_config.extra_run_args):
+            raise ValueError(
+                "the Docker provider's create.extra_run_args pick a network for every container, so it cannot also "
+                "start one with no network"
+            )
         if self._create_config.network == "none":
             return dict(provider_options)
         if self._create_config.network is not None:
