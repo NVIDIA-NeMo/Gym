@@ -26,8 +26,8 @@ from nemo_gym.trajectory import AgentObservationBundle
 
 LOG = logging.getLogger(__name__)
 
-OPENHANDS_VERSION = "1.59.0"
-# openhands-tools pins func-timeout 4.3.5, which publishes only an sdist. The runtime installs wheels only, and
+OPENHANDS_VERSION = "1.62.0"
+# openhands-tools depends on func-timeout, which publishes only an sdist. The runtime installs wheels only, and
 # builds a requirement given as a direct URL from source on the Agent Server host; uv checks the URL's sha256.
 _FUNC_TIMEOUT_REQUIREMENT = (
     "func-timeout @ https://files.pythonhosted.org/packages/"
@@ -43,9 +43,11 @@ RUNTIME = SandboxPythonRuntime(
     ),
     # The imports the runner needs, at the pinned version.
     import_check=(
+        "from importlib.metadata import version; "
         "import openhands.sdk, openhands.tools.file_editor, openhands.tools.task_tracker, openhands.tools.terminal, "
         f"openhands.tools.preset.default; assert openhands.sdk.__version__ == {OPENHANDS_VERSION!r}, "
-        "openhands.sdk.__version__"
+        "openhands.sdk.__version__; "
+        f"assert version('openhands-tools') == {OPENHANDS_VERSION!r}, version('openhands-tools')"
     ),
 )
 # The runtime directory's name ends with a key of its inputs; the seed refuses a workdir under any of them.

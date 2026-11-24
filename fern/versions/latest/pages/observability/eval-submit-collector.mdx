@@ -39,6 +39,8 @@ otel:
   vllm_traces: false                  # one span per request from each vLLM service, joined to the rollout trace
   gpu_metrics_port: 9400              # dcgm-exporter on the node; null to skip
   node_metrics_port: 9100             # node_exporter on the node; null to skip
+  local_node_metrics: [...]           # node_exporter metrics kept in the local metrics.jsonl (see below); null keeps all
+  local_node_metrics_extra: []        # more patterns kept on top of local_node_metrics
   scrape_interval_seconds: 15
   health_check_timeout_seconds: 300
 ```
@@ -101,7 +103,7 @@ that is not Gym's is left alone, and an id the span already carries is never ove
 | `dcgm-exporter`, `node_exporter` | Prometheus scrape on the node when the ports are set | per-GPU activity, memory and power; CPU, memory, network |
 | vLLM request spans (`vllm_traces: true`) | `vllm serve --otlp-traces-endpoint` to the collector's OTLP/HTTP port | one `llm_request` span per request with queue, prefill, decode and end-to-end time, time to first token and token counts; a child of the Gym model server's call, so it sits inside the rollout's trace. Needs the OpenTelemetry SDK in the vLLM image (the `vllm/vllm-openai` images have it); off by default because it roughly doubles a run's span volume |
 | Gym's servers (nemo-lens) | OTLP on `localhost:4317` (gRPC) and `:4318` (HTTP) | `gym.rollout.duration_ms`, `gym.verify.*`, FastAPI request metrics, one trace per rollout, log records with trace ids; see [Metrics](/main/observability/metrics) and [Span Groups](/main/observability/span-groups) |
-| Spans, as metrics | `span_metrics` connector | every span becomes a duration histogram and a call counter (`traces_span_metrics_*`) keyed by span name, producer and, for sandboxes, provider, so sandbox start/exec latency and error rates need no metric of their own |
+| Spans, as metrics | `span_metrics` connector | every span becomes a duration histogram and a call counter (`traces_span_metrics_*`) keyed by span name, producer and, for sandboxes, provider, so sandbox start/exec latency and error rates need no metric of their own. Remote export only: the local `traces.jsonl` holds the spans themselves |
 
 Every batch carries resource attributes the dashboards filter on: `user`, `run_id` (the gym job id),
 `slurm_job_id`, `benchmark`, `cluster` and `model`, plus `service.name` set to the routing identity when configured
@@ -112,8 +114,44 @@ defaults), and the node scrapes carry `dcgm` and `node`.
 Telemetry is always written to `<job dir>/otel/{metrics,traces,logs}.jsonl` while the collector is enabled, so a run can be
 inspected without backend access. The collector writes them node-local and its step appends them to the job directory
 when it stops, once per Slurm job, so a resumed run's segments follow one another in the same files. Node `/tmp` must
-hold a whole job's files: in one measured run `metrics.jsonl` alone grew by about 23 MB a minute. The rendered
-collector configuration is at `<job dir>/otel/collector.yaml`; `gym eval submit --dry-run` prints it without submitting.
+hold a whole job's files. The rendered collector configuration is at `<job dir>/otel/collector.yaml`;
+`gym eval submit --dry-run` prints it without submitting.
+
+## The local metrics file
+
+`metrics.jsonl` keeps less than the remote export. Without a filter, node_exporter made up about 90% of its bytes:
+several GiB per run, mostly per-port InfiniBand error counters, systemd unit states, NFS mount statistics, CPU
+governors and hardware sensors, scraped every interval. Those are node-health signals, not benchmark performance,
+and they stay in the remote export, where the node dashboards read them. Locally, Gym keeps:
+
+- every metric from DCGM, the model services, and Gym's own servers, unfiltered;
+- the node_exporter metrics in `local_node_metrics`. By default these are `node_cpu_seconds_total`,
+  `node_load{1,5,15}`, `node_memory_{MemTotal,MemAvailable,MemFree,Cached,Buffers,Shmem,SwapTotal,SwapFree}_bytes`,
+  `node_pressure_*`, `node_network_{receive,transmit}_bytes_total`,
+  `node_infiniband_port_data_{received,transmitted}_bytes_total` and `up`. That is CPU, memory and pressure stall
+  for the host, plus network and fabric throughput.
+
+Span metrics are not written locally either, because the same call counts and durations come from the spans in
+`traces.jsonl`. In the runs measured, dropping span metrics and the node_exporter series left `metrics.jsonl` at 11–17% of its
+former size, with nothing lost for analysing the benchmark's performance.
+
+The filter applies to every series of the `node` scrape job, on every node it scrapes. Patterns are regular
+expressions matched against the whole metric name. To keep more locally:
+
+```yaml
+otel:
+  local_node_metrics_extra: ["node_disk_.*", "node_filesystem_avail_bytes"]  # add to the default list
+  # local_node_metrics: null                                               # or keep every node_exporter metric
+```
+
+With `remote_export: false`, the `span_metrics` connector is left out entirely.
+
+### Compression
+
+The collector's file exporter can also compress its output (`compression: zstd`), which makes `metrics.jsonl`
+about 40 times smaller again. Gym does not turn it on: without the exporter's `exporter.file.nativeCompression`
+feature gate, which recent collector releases add, each batch is compressed on its own and written length-prefixed.
+`zstd -d`, `jq` and line-based readers can't read such a file without a small decoder.
 
 ## The token
 

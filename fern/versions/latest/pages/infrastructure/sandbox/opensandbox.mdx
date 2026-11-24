@@ -578,6 +578,8 @@ The neutral `user` argument to `exec()` maps onto OpenSandbox command options:
 | Integer uid | Pass the uid through the OpenSandbox command options. |
 | Other string | Wrap the command with `su -s /bin/sh -c ... <user>`. |
 
+A command given as a list of strings goes to execd as its `argv` and runs without a shell; it needs `opensandbox>=1.1.0`, the first SDK that sends one. With an older SDK the provider's `exec_takes_argv()` is false, so `exec()` raises `SandboxExecArgvUnsupportedError` for a list, and the provider logs the requirement once. It takes `user` as `None`, `"root"` or a uid only, since a user name needs `su`, and raises `SandboxExecArgvUnsupportedError` otherwise.
+
 Commands with a reported exit status return `SandboxExecResult`. A missing or contradictory final outcome raises `NgFailureEvent` with `provider_command_outcome_unknown`. A signal death near the configured deadline does not establish that the command timer fired, so its reported exit code is preserved. Gym observes its own deadline directly. For session commands it records `provider_command_timeout`, performs cleanup and returns the existing timeout result. For background commands (`operations.background_exec: true`) it records `provider_command_timeout`, interrupts a command still running at the deadline and returns code `124` with `error_type="timeout"`; execd's own timer is set `command_timeout_headroom_s / 2` later and only stops a command whose interrupt was refused. A client request timeout instead reports `provider_io_timeout`; it does not establish that the remote command stopped.
 
 If background status reads keep reporting `running=True` until Gym's overall client wait expires, Gym reports
