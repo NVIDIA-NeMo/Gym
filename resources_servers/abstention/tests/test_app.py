@@ -146,6 +146,10 @@ class TestParseJudgeGrade:
         assert parse_judge_grade("A careful reading shows the prediction is INCORRECT") == "B"
         assert parse_judge_grade("Made a guess without evidence") is None
 
+    def test_a_reply_naming_two_labels_has_no_grade(self) -> None:
+        assert parse_judge_grade("The prediction is INCORRECT. It would be CORRECT only if it named Paris.") is None
+        assert parse_judge_grade("It is CORRECT in part and INCORRECT in part.") is None
+
 
 class TestExtractTextFromResponse:
     def _make_response(self, text: str) -> NeMoGymResponse:
@@ -455,3 +459,24 @@ class TestAbstentionServer:
         assert result.verdict == "incorrect"
         assert result.mask_sample is False
         server_mock.post.assert_not_awaited()
+
+    async def test_verify_masks_a_judge_reply_cut_at_its_output_limit(self, config: AbstentionConfig) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        server = AbstentionServer(config=config, server_client=server_mock)
+        cut_reply = self._make_judge_response("The prediction says Lyon. At first glance that looks CORRECT but") | {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+        }
+        response_mock = AsyncMock()
+        response_mock.read = AsyncMock(return_value=orjson.dumps(cut_reply))
+        server_mock.post = AsyncMock(return_value=response_mock)
+        request = AbstentionVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response("The answer is \\boxed{Lyon}"),
+            question="What is the capital of France?",
+            answer="Paris",
+        )
+
+        with pytest.raises(JudgeError, match="cut off") as raised:
+            await server.verify(request)
+        assert raised.value.failure_kind == JUDGE_UNPARSEABLE
