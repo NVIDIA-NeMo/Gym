@@ -8,7 +8,8 @@ and replaces only the episode loop.
 That server is the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server in an agent
 session: it serves the row's tools behind the session's direct HTTP grant, and sends the row's harness with the seed, in
 its `agent_context`. A session seeded without such a grant or harness, or with `execute_tools: false` (the agent plays
-the whole turn, so it has no unresolved calls to hand back), is refused (422). On the deprecated `/run` relay it is the configured
+the whole turn, so it has no unresolved calls to hand back), is refused (422). So is a lent sandbox, before anything
+else in the seed is checked: no operation of a turn runs in one. On the deprecated `/run` relay it is the configured
 `resources_server`, with the cookies its `/seed_session` set, through its `/harness` and `/simulate_tool_call`. A turn
 on the relay logs a deprecation warning once per process; see
 [Migrating from the legacy_agent relay](../../environment_servers/agent_arena/README.md#migrating-from-the-legacy_agent-relay).

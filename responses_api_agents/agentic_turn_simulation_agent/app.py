@@ -387,6 +387,18 @@ class AgenticTurnSimulationAgent(SimpleAgent):
     # The row's harness, which the agent_arena environment server sends with the seed; the seed validates it (422).
     agent_context_model = TurnHarnessContext
 
+    def parse_agent_context(self, request: AgentSeedSessionRequest) -> TurnHarnessContext | None:
+        """The row's harness from the seed's context, refused (422) when missing or malformed. A lent sandbox is refused
+        first: the seed checks the context before `_seed_agent_session_state`, and an environment server that lends
+        one gets the sandbox refusal whatever context it sent. No operation of a turn runs in a sandbox: the row's
+        tools are simulated behind the grant."""
+        if request.sandbox_access is not None:
+            raise AgentSeedRejectedError(
+                "agentic_turn_simulation_agent does not support sandbox access: the row's tools are simulated behind "
+                "the grant"
+            )
+        return super().parse_agent_context(request)
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
         """simple_agent's session, refused (422) without a direct HTTP grant: the row's tools are reached only through
         it, so every turn of such a session would fail. Refused too with ``execute_tools=false``: this agent plays the

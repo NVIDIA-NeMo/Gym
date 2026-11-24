@@ -26,6 +26,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.core.failure_kinds import ENVIRONMENT_PROTOCOL_VIOLATION
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import TOOL_CALL_ID_HEADER, AgentContext, DirectHTTPToolAccess
 from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationVerifyRequest
 from resources_servers.agentic_turn_simulation.cline_xml import NO_TOOLS_USED
@@ -1034,6 +1035,24 @@ class TestAgentSessions:
         )
         reply = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
         assert reply.status_code == 422 and detail in reply.text
+        assert script.model_calls == []
+
+    @pytest.mark.parametrize("with_harness", [True, False])
+    def test_a_lent_sandbox_is_refused_before_the_harness_is_checked(self, with_harness: bool) -> None:
+        # An environment server that lends a sandbox gets the sandbox refusal, whatever context its seed carries.
+        agent, script = _agent()
+        client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+        seed = _seed(
+            tool_accesses=[_grant()],
+            sandbox_access=SandboxAccess(
+                connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}), workdir="/work"
+            ),
+        )
+        if not with_harness:
+            seed = seed.model_copy(update={"agent_context": None})
+        reply = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+        assert reply.status_code == 422
+        assert "does not support sandbox access" in reply.json()["detail"]
         assert script.model_calls == []
 
     @pytest.mark.parametrize(
