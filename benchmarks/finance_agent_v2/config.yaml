@@ -24,6 +24,8 @@ finance_agent_v2_benchmark_resources_server:
       retrieval_max_output_tokens: null
       # Unset to match Vals, whose only limit is the agent's max_time_seconds.
       max_rollout_time_seconds: null
+      # Unset to match Vals: retrieve_information sends the prompt alone, with no system message.
+      retrieval_system_prompt_fpath: null
 
 # Benchmark agent — inherits the finance_agent_v2 instance, overrides the dataset
 # to the frozen benchmark split and points at the isolated resources server above.

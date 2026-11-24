@@ -6,6 +6,11 @@ config_paths:
 
 frontier_finance_benchmark_resources_server:
   _inherit_from: frontier_finance_resources_server
+  resources_servers:
+    finance_agent_v2:
+      # Unset to match the paper's Vals Finance Agent v2 harness: retrieve_information sends
+      # the prompt alone, with no system message.
+      retrieval_system_prompt_fpath: null
 
 frontier_finance_benchmark_agent:
   _inherit_from: frontier_finance_agent

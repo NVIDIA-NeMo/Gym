@@ -571,6 +571,21 @@ class TestToolDispatch:
             assert body["max_output_tokens"] == expected
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "overrides, expected_roles",
+        [
+            ({}, ["system", "user"]),
+            ({"retrieval_system_prompt_fpath": None}, ["user"]),
+            ({"retrieval_system_prompt_fpath": None, "retrieval_system_prompt": "Inline."}, ["system", "user"]),
+        ],
+    )
+    async def test_retrieval_system_message(self, overrides, expected_roles) -> None:
+        server = _make_server(**overrides)
+        body = await self._sent_retrieval_body(server)
+        assert [message["role"] for message in body["input"]] == expected_roles
+        assert body["input"][-1]["content"] == "prompt"
+
+    @pytest.mark.asyncio
     async def test_retrieve_missing_key_errors(self) -> None:
         server = _make_server()
         out = await server._dispatch_tool(
