@@ -65,7 +65,8 @@ is its renaming of the week clips, whose file names (wall-clock start times) the
 ## Running
 
 ```bash
-gym eval run --benchmark mm_lifelong_v1_1_agentic \
+gym eval run --benchmark mm_lifelong_v1_1_agentic --model-type vllm_model --split benchmark \
+    --output results/mm_lifelong_v1_1_agentic.jsonl \
     ++mm_lifelong_v1_1_agentic_data_dir=<data_dir> ++mm_lifelong_v1_1_agentic_media_dir=<media_dir> \
     ++policy_base_url=<vLLM URL> ++policy_model_name=<served model>
 ```
