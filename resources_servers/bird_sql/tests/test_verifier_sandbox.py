@@ -112,7 +112,8 @@ class TestRunner:
 
         monkeypatch.setattr(sandbox_runner, "execute_and_compare", too_large)
         request = {"database": str(database), "gold_sql": "SELECT 1", "pred_sql": "SELECT 1", "timeout_s": 1.0}
-        assert asyncio.run(sandbox_runner._grade(request)) == {"match": False, "error": "pred_sql_error"}
+        result = asyncio.run(sandbox_runner._grade(request))
+        assert (result["match"], result["error"]) == (False, "pred_sql_error")
 
     def test_gold_query_failure_is_reported_as_such(self, tmp_path, database):
         _, result = run_runner(tmp_path, database, pred_sql="SELECT x FROM t", gold_sql="SELECT missing FROM t")
