@@ -227,7 +227,7 @@ Every point carries `nemo.gym.concurrency.component`, `nemo.gym.concurrency.limi
 | `rollout_driver` | `reverifications` | `num_samples_in_parallel` of `gym eval reverify` | None |
 | `sandbox_provider` | `docker_exec`, `enroot_exec`, `apptainer_exec`, `local_exec` | `exec.concurrency` of the Docker, Enroot or Apptainer provider; `local.concurrency` of the Local provider | None |
 
-The Docker, Enroot and Apptainer limits bound every CLI command the provider runs, including the ones that create and remove a sandbox, not only commands run inside it. A component without a configured limit reports no series at all, not a limit of zero. Agent servers, the other model and resources servers, and the `bwrap` and remote sandbox providers keep their own limits, which these metrics do not report yet. No Gym limit rejects work when it is full, so there is no rejection count.
+The Docker, Enroot and Apptainer limits bound the CLI commands the provider waits for, including the ones that create and remove a sandbox, not only commands run inside it. Two long-lived processes run outside their limit: the `docker exec -it` client of a Docker interactive session, and Enroot's `enroot start`, which stays in the foreground for the sandbox's lifetime. A component without a configured limit reports no series at all, not a limit of zero. Agent servers, the other model and resources servers, and the `bwrap` and remote sandbox providers keep their own limits, which these metrics do not report yet. No Gym limit rejects work when it is full, so there is no rejection count.
 
 How to read them:
 
