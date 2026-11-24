@@ -24,6 +24,45 @@ ASSETS = {
 }
 
 
+# Selector flags whose names are catalog names; each flag is also the catalog kind it selects.
+_CATALOG_FLAGS = frozenset({"benchmark", "environment"})
+
+
+def _manifest_config_path(root: Path, flag: str, value: str) -> Path | None:
+    """The config that the manifest named ``value`` points at in one root, or None when the root has none.
+
+    The catalog lists a manifest under its folder path, whether or not its config sits in that folder
+    (``config_path: ../opencode.yaml``), so the selector reads the manifest the same way the catalog does. A manifest
+    that fails to load is skipped, as the catalog skips it, and the config paths below decide instead.
+    """
+    tree_dir = root / ASSETS[flag][0]
+    manifest_path = tree_dir / value / "manifest.yaml"
+    if not manifest_path.is_file():
+        return None
+    # Imported here: the registry pulls in config parsing that the CLI does not otherwise load at startup.
+    from nemo_gym.environment.manifest import ManifestError
+    from nemo_gym.environment.registry import _manifest_entry
+
+    try:
+        return _manifest_entry(tree_dir, manifest_path, flag).config_path
+    except ManifestError as error:
+        logger.warning(f"`--{flag} {value}` ignores manifest `{manifest_path}`, which does not load: {error}")
+        return None
+
+
+def _config_in_root(root: Path, flag: str, value: str, path: str) -> Path | None:
+    """The config ``--<flag> <value>`` selects in one root: its manifest's config, then ``<value>/config.yaml``,
+    then the ``<server>/<flavor>.yaml`` path every asset flag accepts."""
+    if flag in _CATALOG_FLAGS:
+        if (manifest_config := _manifest_config_path(root, flag, value)) is not None:
+            return manifest_config
+        nested = root / ASSETS[flag][0] / value / "config.yaml"
+        if "/" in value and nested.is_file():
+            return nested
+    candidate = root / path
+    return candidate if candidate.exists() else None
+
+
 def asset_config_path(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
@@ -33,6 +72,11 @@ def asset_config_path(flag: str, value: str) -> str:
     (as in `gym list`), with a warning. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
     in ``main``). Searching the install root is what lets built-ins resolve by name from an arbitrary cwd
     (e.g. a wheel install), not just inside the repo checkout.
+
+    A benchmark or environment name is first looked up as a catalog name: ``<parent>/<name>/manifest.yaml`` selects
+    the config its ``config_path`` names, which may live outside that folder. Within each root the manifest comes
+    first, then ``<parent>/<name>/config.yaml``, then ``<parent>/<server>/<flavor>.yaml``, matching the order in
+    which `gym list` claims a name.
     """
     parent, subdir, default_flavor = ASSETS[flag]
     server_name, _, config_flavor = value.partition("/")
@@ -42,29 +86,10 @@ def asset_config_path(flag: str, value: str) -> str:
 
     roots = component_search_roots()
     matches: list[Path] = []
-
-    if "/" in value and flag in {"benchmark", "environment"}:
-        nested_matches: list[Path] = []
-        for root in roots:
-            candidate = root / parent / value / "config.yaml"
-            resolved = candidate.resolve()
-            if candidate.is_file() and resolved not in nested_matches:
-                nested_matches.append(resolved)
-        if nested_matches:
-            if len(nested_matches) > 1:
-                shadowed = ", ".join(f"`{path}`" for path in nested_matches[1:])
-                logger.warning(
-                    f"`--{flag} {value}` matches multiple configs; using `{nested_matches[0]}` from the "
-                    f"highest-priority root and ignoring {shadowed}. Pass `--config <path>` to select a different one."
-                )
-            return str(nested_matches[0])
-
     for root in roots:
-        candidate = root / path
-        if candidate.exists():
-            resolved = candidate.resolve()
-            if resolved not in matches:
-                matches.append(resolved)
+        candidate = _config_in_root(root, flag, value, path)
+        if candidate is not None and (resolved := candidate.resolve()) not in matches:
+            matches.append(resolved)
 
     if len(matches) > 1:
         shadowed = ", ".join(f"`{m}`" for m in matches[1:])
@@ -79,13 +104,19 @@ def asset_config_path(flag: str, value: str) -> str:
     if flag == "benchmark":
         # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
         # the generic one-level flavor/sibling search below can't see them.
-        # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
+        # Enumerate their real config names (the same values `gym list benchmarks` prints) and catalog names instead.
         from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
+        from nemo_gym.environment.registry import _manifest_paths
 
         config_names = {
             _benchmark_config_name(p.relative_to(root / parent))
             for root in roots
             for p in _benchmark_config_paths(root / parent)
+        } | {
+            p.parent.relative_to(root / parent).as_posix()
+            for root in roots
+            for p in _manifest_paths(root / parent)
+            if p.parent != root / parent
         }
         # A bare directory that only groups benchmarks (e.g. `livecodebench`) is not itself selectable, so point
         # at the config names under it; otherwise fall back to a fuzzy match across every token.
