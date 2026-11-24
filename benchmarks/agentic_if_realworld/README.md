@@ -170,13 +170,14 @@ The driver supplies each seed through the client's existing `metadata.extra_body
 interface. Configure maximum reasoning through `chat_template_kwargs`; reasoning
 stays in Responses reasoning items, separate from the final answer.
 
-The `single_agent_turn_legacy` Environment Server accepts the existing flat rows
+In both adaptive profiles (`config.yaml` and `raw_receipt.yaml`), the
+`single_agent_turn_legacy` Environment Server accepts the existing flat rows
 and runs the typed Resources and agent-session lifecycle. It grants no tools,
 keeps `execute_tools: false`, skips inline verification, and closes both sessions
 after each attempt. The adaptive driver selects the first complete answer and
 judges it separately.
 
-This profile pins the policy client to one upstream attempt, disables the agent's
+`config.yaml` pins the policy client to one upstream attempt, disables the agent's
 model retries and both output-budget refitting options, and rejects sampling
 overrides. The collector does not replay a disconnected `/run`. A policy dispatch
 with no observed response requires reconciliation before resume; it cannot advance
@@ -196,10 +197,13 @@ schedule: a native Responses provider without seed support cannot reproduce that
 protocol. Select the model client and its normal settings in the usual Gym way.
 Client interoperability does not authorize training on this evaluation-only data.
 
-`raw_receipt.yaml` retains the former `agentic_if_text` configuration for the raw
-streaming transport. Existing EFB pins and historical run directories retain their
-original runtime, configuration and receipt format. Start a new run directory for
-this refactor; do not migrate journals between profiles or runtime revisions.
+`raw_receipt.yaml` retains the former `agentic_if_text` model client for the raw
+streaming transport. Like `config.yaml`, it runs each attempt through agent sessions,
+not through Simple Agent's own `/run`. Existing EFB pins and historical run directories retain their
+original runtime, configuration and receipt format. A run directory started before this
+profile moved to agent sessions does not resume under it, since the Gym revision is part of
+the run fingerprint. Start a new run directory for this refactor; do not migrate journals
+between profiles or runtime revisions.
 
 ## Run
 
@@ -303,8 +307,8 @@ gym eval aggregate --config benchmarks/agentic_if_realworld/native.yaml \
 
 Aggregation reads saved results only. Keep the judge configuration available for
 server startup validation. The stock model config satisfies Gym's reference
-validation; aggregation never calls its placeholder endpoint. The adaptive profile's legacy relay remains unchanged;
-use the native profile above for the standalone aggregation command.
+validation; aggregation never calls its placeholder endpoint. The adaptive profiles aggregate through their own
+driver; use the native profile above for the standalone aggregation command.
 
 ## Architecture review
 
