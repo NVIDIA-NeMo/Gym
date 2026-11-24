@@ -14,8 +14,8 @@ config_paths:
   - resources_servers/deepswe/configs/deepswe.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-# NOOA calls the model server from inside the task sandbox.
-use_absolute_ip: true
+# NOOA calls the model server from inside the task sandbox, so launch Gym with ++use_absolute_ip=true. The preset does
+# not set it: a top-level key applies to every server of the run, including other benchmarks composed with this one.
 
 # This recipe binds its own environment instead of the generic NOOA environment.
 nooa_environment_server: null
@@ -63,3 +63,9 @@ deepswe_nooa_environment_server:
         name: deepswe_nooa_agent
       # NOOA's run (10800) plus seed, runtime installation and verification, within the agent sandbox's ttl_s (18000).
       default_episode_timeout_seconds: 18000
+      # Every agent sandbox first receives NOOA's offline runtime (the wheelhouse and Python, about 450 MB), staged at
+      # most two at a time per agent worker and then uploaded, while its episode's deadline runs. An episode waits for
+      # admission before its deadline starts, so admitting 128 at once bounds how long the last of a full burst waits.
+      max_concurrent_episodes: 128
+      # Longer than a whole run takes 128 at a time, even if every episode used its full 18,000 seconds.
+      queue_timeout_seconds: 259200

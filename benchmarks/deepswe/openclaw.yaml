@@ -3,9 +3,10 @@
 
 # DeepSWE with OpenClaw in place of OpenCode: the same resources server, no-network agent sandbox and fresh verifier
 # as opencode.yaml. The agent sandbox cannot download OpenClaw's Node runtime, so the resources server copies a
-# prebuilt one into it: build it on an x86_64 Linux host with network, then point DEEPSWE_OPENCLAW_RUNTIME at it.
+# prebuilt one into it: build it on an x86_64 Linux host with network, at the path it has in the sandbox, then copy
+# that directory to the resources server's host and point DEEPSWE_OPENCLAW_RUNTIME at the copy.
 #
-#   bash responses_api_agents/openclaw_agent/install_openclaw_runtime.sh /path/to/openclaw-runtime 2026.6.11
+#   bash responses_api_agents/openclaw_agent/install_openclaw_runtime.sh /tmp/nemo-gym-deepswe/openclaw 2026.6.11
 #   export DEEPSWE_OPENCLAW_RUNTIME=/path/to/openclaw-runtime
 config_paths:
   - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml

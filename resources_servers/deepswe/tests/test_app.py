@@ -2147,14 +2147,22 @@ def test_each_harness_recipe_admits_every_episode_at_once(
 
 
 @pytest.mark.parametrize(
-    "harness,agent_type", [("openclaw", "openclaw_agent"), ("pi", "pi_agent"), ("codex", "codex_agent")]
+    "harness,agent_type,budget_key",
+    [
+        ("openclaw", "openclaw_agent", "timeout"),
+        ("pi", "pi_agent", "timeout"),
+        ("codex", "codex_agent", "timeout"),
+        # NOOA installs its offline runtime (wheelhouse and Python) in every agent sandbox, staged two at a time per
+        # agent worker.
+        ("nooa", "nooa_agent", "sandbox_runner_timeout_seconds"),
+    ],
 )
 def test_each_runtime_copying_preset_admits_episodes_before_their_deadline_starts(
-    harness: str, agent_type: str
+    harness: str, agent_type: str, budget_key: str
 ) -> None:
-    # Every agent sandbox receives the harness runtime, at most two uploads at a time per resources server, while its
-    # episode's deadline runs. An episode waits for admission before its deadline starts, so the admission limit bounds
-    # how long the last copy of a full burst waits.
+    # Every agent sandbox receives the harness runtime, at most two at a time, while its episode's deadline runs. An
+    # episode waits for admission before its deadline starts, so the admission limit bounds how long the last copy of a
+    # full burst waits.
     recipe = yaml.safe_load((_DEEPSWE_BENCHMARKS / f"{harness}.yaml").read_text(encoding="utf-8"))
     base = yaml.safe_load(
         (Path(__file__).resolve().parents[1] / "configs" / "deepswe.yaml").read_text(encoding="utf-8")
@@ -2166,7 +2174,7 @@ def test_each_runtime_copying_preset_admits_episodes_before_their_deadline_start
 
     # At 40 s per copy (Codex's archive is about 370 MB), the last copy leaves the agent's whole budget and an hour for
     # sandbox start, patch collection and verification.
-    assert admitted / 2 * 40 + agent["timeout"] + 3600 <= episode
+    assert admitted / 2 * 40 + agent[budget_key] + 3600 <= episode
     # The queue outlasts a whole run, one full admission at a time, even if every episode used its full bound.
     rows = (
         base["deepswe_resources_server"]["resources_servers"]["deepswe"]["expected_task_count"]

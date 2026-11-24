@@ -3,9 +3,10 @@
 
 # DeepSWE with Codex in place of OpenCode: the same resources server, no-network agent sandbox and fresh verifier as
 # opencode.yaml. The agent sandbox cannot download Codex's Node runtime, so the resources server copies a prebuilt
-# one into it: build it on an x86_64 Linux host with network, then point DEEPSWE_CODEX_RUNTIME at it.
+# one into it: build it on an x86_64 Linux host with network, at the path it has in the sandbox, then copy that
+# directory to the resources server's host and point DEEPSWE_CODEX_RUNTIME at the copy.
 #
-#   bash responses_api_agents/codex_agent/install_codex_runtime.sh /path/to/codex-runtime 0.144.4
+#   bash responses_api_agents/codex_agent/install_codex_runtime.sh /tmp/nemo-gym-deepswe/codex 0.144.4
 #   export DEEPSWE_CODEX_RUNTIME=/path/to/codex-runtime
 config_paths:
   - responses_api_agents/codex_agent/configs/codex_agent.yaml

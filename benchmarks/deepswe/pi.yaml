@@ -3,10 +3,16 @@
 
 # DeepSWE with Pi in place of OpenCode: the same resources server, no-network agent sandbox and fresh verifier as
 # opencode.yaml. The agent sandbox cannot download Pi's Node runtime, so the resources server copies a prebuilt one
-# into it: build it on an x86_64 Linux host with network, then point DEEPSWE_PI_RUNTIME at it.
+# into it: build it on an x86_64 Linux host with network, at the path it has in the sandbox, then copy that directory
+# to the resources server's host and point DEEPSWE_PI_RUNTIME at the copy.
 #
-#   bash responses_api_agents/pi_agent/install_pi_runtime.sh /path/to/pi-runtime 0.80.2
+#   bash responses_api_agents/pi_agent/install_pi_runtime.sh /tmp/nemo-gym-deepswe/pi 0.80.2
 #   export DEEPSWE_PI_RUNTIME=/path/to/pi-runtime
+#
+# With Gym's vLLM model server, also pass the following, so a context-length error reaches Pi, which then compacts its
+# history (see the DeepSWE README):
+#
+#   ++policy_model.responses_api_models.vllm_model.propagate_context_overflow_errors=true
 config_paths:
   - responses_api_agents/pi_agent/configs/pi_agent.yaml
   - resources_servers/deepswe/configs/deepswe.yaml

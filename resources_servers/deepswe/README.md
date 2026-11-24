@@ -147,7 +147,9 @@ has no manifest; the resources server's `allowed_agents` (`configs/deepswe.yaml`
 preset binds its own resources server, agent and `single_agent_turn_legacy` Environment Server instances
 (`deepswe_<harness>_*`), narrows that resources server's `allowed_agents` to its harness, and lets the agent sandbox
 reach the policy model server's host (`sandbox_model_server`) and nothing else. Each harness keeps the three-hour agent
-budget and the 18,000-second episode bound of the OpenCode benchmark.
+budget and the 18,000-second episode bound of the OpenCode benchmark. Every harness calls the model server from inside
+the agent sandbox, so launch Gym with `++use_absolute_ip=true`; the presets leave it out because a top-level key
+applies to every server of the run, including other benchmarks composed with them.
 
 Select a harness with its preset (`--benchmark deepswe/<harness>`), not with `--agent-type` on the OpenCode benchmark.
 These harnesses are session agents, which run only where a config binds them, and the preset also sets the harness's
@@ -182,14 +184,20 @@ bash responses_api_agents/codex_agent/install_codex_runtime.sh /tmp/nemo-gym-dee
 The task images are Debian with glibc, so a runtime built on a glibc host runs there. One way to get such a host is
 a sandbox of a task image with network, from which the directory is downloaded. Each runtime is a few hundred
 megabytes, and every agent sandbox receives its copy, at most two uploads at a time per resources server, while its
-episode's deadline runs. So these presets admit at most 128 episodes at once (`max_concurrent_episodes`), and the
-others wait for admission before their deadline starts. At high concurrency, a runtime mounted read-only into the
-sandboxes avoids that cost.
+episode's deadline runs. NOOA's offline runtime (the wheelhouse and Python, about 450 MB) likewise goes into every
+agent sandbox inside the deadline, staged at most two at a time per agent worker. So the OpenClaw, Pi, Codex and NOOA
+presets admit at most 128 episodes at once (`max_concurrent_episodes`), and the others wait for admission before
+their deadline starts. At high concurrency, a runtime mounted read-only into the sandboxes avoids that cost.
 
 ```bash
 export DEEPSWE_PI_RUNTIME=/path/to/pi-runtime
 gym eval run --benchmark deepswe/pi --split benchmark \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-  --config responses_api_models/<model>/configs/<model>.yaml \
-  -o results/deepswe-pi/rollouts.jsonl ++use_absolute_ip=true
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  -o results/deepswe-pi/rollouts.jsonl ++use_absolute_ip=true \
+  ++policy_model.responses_api_models.vllm_model.propagate_context_overflow_errors=true
 ```
+
+`propagate_context_overflow_errors=true` passes the model server's context-length error to Pi, which then compacts
+its history and continues. By default `vllm_model` returns an empty, length-capped completion instead, and Pi ends the
+run at the context limit. With `openai_model`, set `propagate_upstream_http_status_codes: [400]`.
