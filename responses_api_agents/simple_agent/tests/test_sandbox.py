@@ -22,7 +22,17 @@ from packaging.requirements import Requirement
 from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
-from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    FailureEvent,
+    FailureHeader,
+    FailureReport,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    RequestFailureLog,
+    TaskId,
+    failure_report_for,
+)
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult
 from responses_api_agents.simple_agent import sandbox as sandbox_module
 from responses_api_agents.simple_agent import sandbox_runner
@@ -162,7 +172,14 @@ def _loop_arguments() -> dict[str, Any]:
     ],
 )
 async def test_the_sandboxed_loop_returns_what_the_in_process_loop_returns(replies: list) -> None:
-    body = NeMoGymResponseCreateParamsNonStreaming(input="Which option?", temperature=0.2)
+    metadata = {
+        "baseline_response": "Reference answer",
+        "baseline_model": "reference-model",
+        "baseline_dataset_file": "references.jsonl",
+        "baseline_row_index": "1",
+        "task": "quiz",
+    }
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Which option?", temperature=0.2, metadata=metadata)
     async with _model_server(replies) as (port, seen):
         in_process = SimpleAgent(config=_config(), server_client=_client(port))
         expected = await in_process._create_session_episode(
@@ -213,7 +230,8 @@ async def test_the_sandboxed_loop_returns_what_the_in_process_loop_returns(repli
         "sandboxed",
     }
     assert payload["model_server"] == {"host": "127.0.0.1", "port": port}
-    assert payload["body"] == {"input": "Which option?", "temperature": 0.2}
+    assert payload["body"] == {"input": "Which option?", "temperature": 0.2, "metadata": {"task": "quiz"}}
+    assert body.metadata == metadata
     assert "activation" not in payload["loop"]
 
 
@@ -305,6 +323,8 @@ def test_the_runtime_holds_every_distribution_the_loop_imports() -> None:
     """Importing the runner loads only the runtime's requirements and their dependencies, never numpy or pandas."""
     probe = (
         "import json, sys\n"
+        # The sandbox uses Gym's no-op instrumentation even when the test host has optional nemo-lens installed.
+        "sys.modules['nemo.lens'] = None\n"
         "import responses_api_agents.simple_agent.sandbox_runner\n"
         "import responses_api_agents.simple_agent.app\n"
         "print(json.dumps(sorted({m.__file__ for m in list(sys.modules.values()) if getattr(m, '__file__', None)})))\n"
@@ -381,12 +401,23 @@ def test_a_model_servers_http_error_comes_back_from_the_sandbox_as_it_was_raised
     from yarl import URL
 
     url = URL(f"http://10.0.0.5:8000{MODEL_PATH}")
+    selected = FailureEvent(
+        boundary="model",
+        failure_kind="model_request_error",
+        failure_reason="Model response body read failed",
+        operation="model_request",
+        http_status=200,
+    )
+    earlier = FailureEvent(boundary="model", failure_kind="model_request_error", http_status=503)
+    report = FailureReport(
+        failure_id=selected.event_id, events={selected.event_id: selected, earlier.event_id: earlier}
+    )
     raised = ClientResponseError(
         RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url),
         (),
         status=502,
         message="Bad Gateway",
-        headers=CIMultiDictProxy(CIMultiDict([("x-ng-failure", "report"), ("x-other", "1")])),
+        headers=CIMultiDictProxy(CIMultiDict(FailureHeader.encode(report) | {"x-other": "1"})),
     )
     raised.response_content = b'{"detail": "upstream"}'
     try:
@@ -394,11 +425,15 @@ def test_a_model_servers_http_error_comes_back_from_the_sandbox_as_it_was_raised
     except ClientResponseError as error:
         output = json.loads(json.dumps(sandbox_runner.error_output(error)))
 
-    again = sandbox_module.loop_error(output)
+    with RequestFailureLog.capture() as log:
+        again = sandbox_module.loop_error(output)
 
     assert isinstance(again, ClientResponseError)
     assert (again.status, again.message, again.request_info.method) == (502, "Bad Gateway", "POST")
-    assert again.headers["x-ng-failure"] == "report"
+    assert FailureHeader.decode(again.headers) == report
+    assert again.headers["x-other"] == "1"
+    assert failure_report_for(again).failure_id == selected.event_id
+    assert log.reply_report(again) == report
     assert again.response_content == b'{"detail": "upstream"}'
     assert isinstance(
         sandbox_module.loop_error({"error": "ValueError: bad", "error_type": "ValueError"}), RuntimeError

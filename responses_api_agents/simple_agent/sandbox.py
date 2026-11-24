@@ -30,6 +30,7 @@ from yarl import URL
 
 import nemo_gym
 from nemo_gym.agents import SandboxCommand, SandboxPythonRuntime, SandboxSession
+from nemo_gym.core import FailureHeader, RequestFailureLog, rebuild_failure
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.server_runtime import BorrowedSandbox
 
@@ -146,6 +147,11 @@ def loop_error(output: dict[str, Any]) -> Exception:
         )
         if http.get("content") is not None:
             error.response_content = http["content"].encode()
+        report = FailureHeader.decode(error.headers)
+        if report is not None:
+            error.__cause__ = rebuild_failure(report)
+            if (log := RequestFailureLog.current()) is not None:
+                log.add(report)
         return error
     return RuntimeError(
         f"Simple Agent agent loop failed in the sandbox: {output['error']}\n{output.get('traceback', '')}"
