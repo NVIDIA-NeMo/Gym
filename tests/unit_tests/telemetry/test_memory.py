@@ -545,7 +545,7 @@ def test_the_profiler_adds_each_servers_cpu_time_since_its_previous_sample(colle
     profiler.sample_once()
     profiler.sample_once()
 
-    points = {point.attributes["cpu.mode"]: point for point in collected_metrics()["gym.server.cpu.time"]}
+    points = {point.attributes["cpu.mode"]: point for point in collected_metrics()["gym.server.cpu.time_total"]}
     assert points["user"].value == pytest.approx(6.0)  # 2, then +3 and the new child's 1
     assert points["system"].value == pytest.approx(1.5)
     assert points["user"].attributes["nemo.gym.server.name"] == "judge"

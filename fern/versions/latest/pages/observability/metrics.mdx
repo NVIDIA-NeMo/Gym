@@ -291,10 +291,10 @@ The same profiler reports CPU, with the same switch and the same process trees:
 
 | Metric | Type | Attributes | Meaning |
 | --- | --- | --- | --- |
-| `gym.server.cpu.time` | Counter | server name and type, `cpu.mode` (`user`, `system`) | CPU seconds a server and its descendants used, such as the sandbox, unpacking and harness children that do the real work. Use `rate()` for cores in use. See below for how processes that exit between samples are counted. |
+| `gym.server.cpu.time_total` | Counter | server name and type, `cpu.mode` (`user`, `system`) | CPU seconds a server and its descendants used, such as the sandbox, unpacking and harness children that do the real work. Use `rate()` for cores in use. See below for how processes that exit between samples are counted. |
 | `gym.host.cpu.logical` | Gauge | | Logical CPUs on the host. |
 | `gym.host.cpu.physical` | Gauge | | Physical CPU cores on the host. |
-| `gym.host.cpu.allowed` | Gauge | | CPUs the supervisor's main thread may run on (its CPU affinity). Under Slurm or a container cpuset that is usually the allocation; compare summed `rate(gym.server.cpu.time)` with it. |
+| `gym.host.cpu.allowed` | Gauge | | CPUs the supervisor's main thread may run on (its CPU affinity). Under Slurm or a container cpuset that is usually the allocation; compare summed `rate(gym.server.cpu.time_total)` with it. |
 
 Each process's CPU time includes the children it waited for (`cutime` and `cstime` in `/proc/<pid>/stat`), so a short command that starts and exits between two samples is counted once its parent waits for it. Processes are tracked by pid and start time, and time a child already reported, or a process that drops out of a single walk, is not counted again. The counter is a lower bound where an exited process's time cannot reach a process still in the tree:
 

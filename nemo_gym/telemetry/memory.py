@@ -233,7 +233,7 @@ def advance_cpu_baseline(
 
 
 def record_server_cpu(target: ServerMemoryTarget, used: ProcessCpuTimes) -> None:
-    """Add a server process tree's CPU time since the previous sample to ``gym.server.cpu.time``."""
+    """Add a server process tree's CPU time since the previous sample to ``gym.server.cpu.time_total``."""
     from nemo_gym.telemetry.setup import get_telemetry
 
     telemetry = get_telemetry()
@@ -476,7 +476,7 @@ def _get_instruments(meter) -> dict:
                 description="Total host memory.",
             ),
             "cpu_time": meter.create_counter(
-                name="gym.server.cpu.time",
+                name="gym.server.cpu.time_total",
                 unit="s",
                 description="CPU time used by a Gym server and its descendants, by cpu.mode.",
             ),
