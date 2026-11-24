@@ -46,7 +46,7 @@ import tarfile
 import tempfile
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,8 +105,11 @@ from resources_servers.cvdp.testbench_runner import TestbenchRunner
 _helpers = ModelHelpers()
 logger = logging.getLogger(__name__)
 
-# The files an agent session harvests by default: the RTL and testbench sources it may write.
-DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
+# The files an agent session harvests by default, as cvdp_agent's agentic flavor collects them: every changed text
+# file under the project directories. Each task adds the top-level root of its context files.
+DEFAULT_HARVEST_GLOBS = ["docs/**/*", "rtl/**/*", "verif/**/*"]
+# Directories a simulation creates in the workspace: never graded, as on the agentic flavor.
+_GENERATED_WORKSPACE_DIRS = {"rundir", "__pycache__", ".cache", ".pytest_cache"}
 # The harvest command's exit code when the workspace holds none of the harvested paths. GNU tar exits 1 when a
 # file changed while it was read (the archive is complete) and 2 on a fatal error (a full disk), after which the
 # archive may be missing files, so this must differ from both.
@@ -286,12 +289,41 @@ def _seeded_files(meta: CVDPVerifierMetadata) -> Dict[str, str]:
     }
 
 
+def _harvest_globs(globs: List[str], context_files: Iterable[str]) -> List[str]:
+    """The configured globs plus the top-level root of every visible context file, as cvdp_agent's agentic flavor
+    tracks the project: a helper file the agent adds beside a context file is graded with it."""
+    tracked = list(globs)
+    for rel in context_files:
+        if _safe_rel(rel) and not _is_harness_path(rel) and not rel.startswith("."):
+            pattern = rel.split("/", 1)[0] + "/**/*" if "/" in rel else rel
+            if pattern not in tracked:
+                tracked.append(pattern)
+    return tracked
+
+
+def _generated(rel: str) -> bool:
+    return any(part in _GENERATED_WORKSPACE_DIRS for part in Path(rel).parts)
+
+
+def _kept_context(context_files: Dict[str, str], present: set[str]) -> Dict[str, str]:
+    """The context files the grader stages under the agent's files: those still in the workspace.
+
+    A starting file the agent deleted is not restored, as on cvdp_agent's agentic flavor. Hidden harness files, paths
+    outside the workspace, dot files and generated directories are never harvested, so they are always kept.
+    """
+    return {
+        rel: content
+        for rel, content in context_files.items()
+        if not _safe_rel(rel) or _is_harness_path(rel) or rel.startswith(".") or _generated(rel) or rel in present
+    }
+
+
 def _harvest_roots(globs: List[str], target_files: List[str]) -> List[str]:
-    """The workspace paths to archive: each glob's top directory, plus target files outside them."""
+    """The workspace paths to archive: each glob's top directory or file, plus target files outside them."""
     roots = set()
     for pattern in globs:
         top = pattern.split("/")[0]
-        if "/" not in pattern or any(char in top for char in "*?["):
+        if any(char in top for char in "*?["):
             return ["."]
         roots.add(top)
     return sorted(roots) + sorted({t for t in target_files if _safe_rel(t) and t.split("/")[0] not in roots})
@@ -321,11 +353,12 @@ def _harvest_command(workdir: str, roots: List[str], archive: str) -> str:
 
 def _collect_harvest(
     archive: Path, dest: Path, globs: List[str], seeded: Dict[str, str], target_files: List[str]
-) -> Dict[str, str]:
-    """Unpack the regular files of the workspace archive and return the ones to grade.
+) -> tuple[Dict[str, str], set[str]]:
+    """Unpack the regular files of the workspace archive; return the ones to grade and every path it holds.
 
     Glob matches count only when they differ from what seed staged, so unchanged context files are not graded as
-    the agent's work; a declared target file counts whenever it exists. Files that are not UTF-8 text are skipped.
+    the agent's work; a declared target file counts whenever it exists. Files that are not UTF-8 text, hidden harness
+    paths and generated directories are skipped.
     """
     with tarfile.open(archive) as tar:
         regular = {m.name for m in tar.getmembers() if m.isreg() and _safe_rel(m.name)}
@@ -336,6 +369,7 @@ def _collect_harvest(
             if m.name in regular or (m.islnk() and _safe_rel(m.name) and m.linkname in regular)
         ]
         tar.extractall(dest, members=members, filter="data")
+    present = {member.name for member in members}
 
     def read(path: Path) -> Optional[str]:
         try:
@@ -355,7 +389,7 @@ def _collect_harvest(
     for pattern in globs:
         for path in sorted(dest.glob(pattern)):
             rel = path.relative_to(dest).as_posix()
-            if not utf8_name(rel):
+            if not utf8_name(rel) or _is_harness_path(rel) or _generated(rel):
                 continue
             content = read(path)
             if rel in produced or content is None or seeded.get(rel) == content:
@@ -364,7 +398,7 @@ def _collect_harvest(
     for rel in target_files:
         if rel not in produced and _safe_rel(rel) and (content := read(dest / rel)) is not None:
             produced[rel] = content
-    return produced
+    return produced, present
 
 
 class _HarvestUnavailable(RuntimeError):
@@ -396,6 +430,8 @@ class _AgentSession:
     # The harvested files, set once a verify has harvested. A provider failure leaves it unset and the sandbox
     # running, so a resent verify can harvest again.
     harvested: Optional[Dict[str, str]] = None
+    # The context files still in the workspace at the harvest, which the grader stages under the harvested files.
+    kept_context: Optional[Dict[str, str]] = None
 
 
 # ----------------------------
@@ -629,7 +665,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
         await asyncio.gather(*(release(session_id, session) for session_id, session in list(self._sessions.items())))
         self._fences.clear()
 
-    async def _harvest(self, session: _AgentSession) -> Dict[str, str]:
+    async def _harvest(self, session: _AgentSession) -> tuple[Dict[str, str], Dict[str, str]]:
         """Copy the files the agent wrote out of the task sandbox, then stop the sandbox.
 
         The first verify that harvests stops the sandbox; later ones grade the same files. A workspace with none of
@@ -641,9 +677,10 @@ class CVDPResourcesServer(SimpleResourcesServer):
         """
         if session.harvested is None:
             workdir = self.config.agent_workdir.rstrip("/")
-            # In the workspace, not /tmp: Apptainer binds the host's /tmp into every sandbox.
+            # In the workspace, which the provider reads directly, not in the sandbox's /tmp.
             remote_archive = f"{workdir}/.cvdp-harvest-{uuid.uuid4().hex}.tar"
-            roots = _harvest_roots(self.config.harvest_globs, session.meta.target_files)
+            globs = _harvest_globs(self.config.harvest_globs, session.meta.context_files)
+            roots = _harvest_roots(globs, session.meta.target_files)
             try:
                 result = await session.sandbox.exec(
                     _harvest_command(workdir, roots, remote_archive), cwd="/", timeout_s=self.config.harvest_timeout_s
@@ -667,11 +704,11 @@ class CVDPResourcesServer(SimpleResourcesServer):
                     except Exception as error:
                         raise _harvest_unavailable("transfer the workspace archive", error) from error
                     try:
-                        files = await asyncio.to_thread(
+                        files, present = await asyncio.to_thread(
                             _collect_harvest,
                             local,
                             Path(scratch) / "workspace",
-                            self.config.harvest_globs,
+                            globs,
                             session.seeded,
                             session.meta.target_files,
                         )
@@ -681,7 +718,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
                         ) from error
             elif result.return_code == _NOTHING_TO_HARVEST_EXIT:
                 logging.warning("The agent left none of the harvested paths: %s", output)
-                files = {}
+                files, present = {}, set()
             elif result.return_code == _WORKSPACE_MISSING_EXIT:
                 raise _HarvestUnavailable(
                     VERIFIER_ERROR, f"The task sandbox has no workspace at {workdir}: {output[:2000]}"
@@ -696,13 +733,14 @@ class CVDPResourcesServer(SimpleResourcesServer):
                     VERIFIER_ERROR, f"The harvest command exited {result.return_code}: {output[:2000]}"
                 )
             session.harvested = files
+            session.kept_context = _kept_context(session.meta.context_files, present)
             try:
                 await self._release_sandbox(session)
             except Exception:
                 # The files are already out, so a failed stop must not cost their grade. The sandbox stays on the
                 # session, and close stops it, raising if that fails too so the caller can retry.
                 logging.exception("Failed to stop the task sandbox after the harvest")
-        return session.harvested
+        return session.harvested, session.kept_context
 
     @staticmethod
     def _ungraded(body: CVDPVerifyRequest, masked: Dict[str, Any]) -> CVDPVerifyResponse:
@@ -738,7 +776,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 # Closed while this verify waited for the lock.
                 return self._lost(body)
             try:
-                files = await self._harvest(session)
+                files, kept_context = await self._harvest(session)
             except _HarvestUnavailable as error:
                 logging.warning("Masking the verify of %s: %s", session.meta.task_id, error)
                 return self._ungraded(
@@ -750,8 +788,16 @@ class CVDPResourcesServer(SimpleResourcesServer):
                         "failure_reason": str(error),
                     },
                 )
-        # No files falls back to parsing RTL out of the response text, as the legacy agentic path did.
-        return await self._grade(body.model_copy(update={"rtl_files": dict(files) or None}))
+        # No files falls back to parsing RTL out of the response text, as the legacy agentic path did. Either way the
+        # grader stages only the context files still in the workspace, so a deleted starting file is not restored.
+        return await self._grade(
+            body.model_copy(
+                update={
+                    "rtl_files": dict(files) or None,
+                    "verifier_metadata": body.verifier_metadata | {"context_files": kept_context},
+                }
+            )
+        )
 
     # ---------------------------------------------------------------- grading
 

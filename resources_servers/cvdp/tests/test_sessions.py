@@ -93,13 +93,22 @@ def _server(root: Path, **extra) -> CVDPResourcesServer:
     return CVDPResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
+class _Runs(list):
+    """The files each grading run received, and in ``context_files`` the context files it staged under them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.context_files: list[dict[str, str]] = []
+
+
 @pytest.fixture
-def graded(monkeypatch) -> list[dict[str, str]]:
+def graded(monkeypatch) -> _Runs:
     """The files each grading run received; every run passes."""
-    graded: list[dict[str, str]] = []
+    graded = _Runs()
 
     async def run(self, *, rtl_files, harness_files, task_id, context_files=None):
         graded.append(dict(rtl_files))
+        graded.context_files.append(dict(context_files or {}))
         return 0, "", []
 
     monkeypatch.setattr(app_module.TestbenchRunner, "run", run)
@@ -193,23 +202,25 @@ def test_verify_grades_the_files_the_agent_changed_and_stops_the_sandbox(server,
 
     assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
     assert "Masking" not in caplog.text, "a graded verify logs no lost session"
-    # Unchanged context files, files outside the globs and non-RTL files are not graded.
-    assert graded == [{"rtl/top.sv": TOP, "verif/tb.sv": TESTBENCH + "// more checks\n"}]
+    # As on cvdp_agent's agentic flavor: every changed text file under the project roots, but not unchanged context
+    # files or files outside the roots (notes.txt).
+    assert graded == [{"rtl/top.sv": TOP, "verif/tb.sv": TESTBENCH + "// more checks\n", "verif/sim.out": "compiled"}]
     assert verified["extracted_rtl"] == graded[0]
     assert (verified["task_id"], verified["category"]) == ("cvdp_agentic_codec_0001", "cid005")
     assert len(stopped) == 1, "verify stops the sandbox once the files are out"
 
 
-def test_a_target_outside_the_harvested_directories_is_graded(root, graded):
-    server = _server(root, harvest_globs=["rtl/**/*.sv"])
+def test_a_target_outside_the_project_roots_is_graded(root, graded):
+    server = _server(root)
+    metadata = _metadata() | {"target_files": ["top.sv"]}
     client = TestClient(server.setup_webserver())
-    _post_seed(client, _seed())
-    _solve(root)
-    (root / "verif" / "tb.sv").write_text("edited, but not harvested")
+    _post_seed(client, _seed(task_data={"verifier_metadata": metadata}))
+    (root / "top.sv").write_text(TOP)
+    (root / "notes.txt").write_text("outside every root, and not a target")
 
-    _verify(client)
+    _verify(client, _verify_body() | {"verifier_metadata": metadata})
 
-    assert graded == [{"rtl/top.sv": TOP}]
+    assert graded == [{"top.sv": TOP}]
 
 
 def test_an_agent_that_wrote_nothing_is_graded_on_its_response_text(server, root, stopped, graded):
@@ -233,7 +244,7 @@ def test_a_response_with_no_text_still_grades_the_files(server, root, stopped, g
     verified = _verify(client, _verify_body(""))
 
     assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
-    assert graded == [{"rtl/top.sv": TOP, "verif/tb.sv": TESTBENCH + "// more checks\n"}]
+    assert graded == [{"rtl/top.sv": TOP, "verif/tb.sv": TESTBENCH + "// more checks\n", "verif/sim.out": "compiled"}]
 
 
 def test_a_repeated_verify_grades_the_harvested_files_again(server, root, stopped, graded):
@@ -345,7 +356,7 @@ def test_a_file_name_that_is_not_utf8_is_left_out_instead_of_failing_the_verify(
     verified = _verify(client)
 
     assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
-    assert graded == [{"rtl/top.sv": TOP}]
+    assert graded == [{"rtl/top.sv": TOP, "verif/tb.sv": TESTBENCH + "// more checks\n", "verif/sim.out": "compiled"}]
 
 
 def test_files_that_changed_while_tar_read_them_still_grade(server, root, stopped, graded, monkeypatch):
@@ -408,12 +419,56 @@ def test_files_the_agent_made_unreadable_neither_fail_nor_mask_the_harvest(
     # The harvest makes them readable again, so even the unreadable target is graded.
     assert graded == [
         {
+            "rtl/scratch.bin": "\0",
             "rtl/sub/extra.sv": "module extra; endmodule\n",
             "rtl/top.sv": top,
+            "verif/sim.out": "compiled",
             "verif/tb.sv": TESTBENCH + "// more checks\n",
         }
     ]
     assert len(stopped) == 1
+
+
+def test_the_grader_does_not_restore_a_context_file_the_agent_deleted(server, root, stopped, graded):
+    # As on cvdp_agent's agentic flavor: the grader rebuilds the workspace from the context files still there plus
+    # the harvested ones, so a starting file the agent deleted or renamed stays gone, and a helper file it added
+    # beside the target is graded with it.
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    (root / "rtl" / "encoder.sv").unlink()
+    (root / "rtl" / "top.sv").write_text(TOP)
+    (root / "rtl" / "defs.svh").write_text("`define WIDTH 8\n")
+
+    verified = _verify(client)
+
+    assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+    assert graded == [{"rtl/defs.svh": "`define WIDTH 8\n", "rtl/top.sv": TOP}]
+    # Hidden harness files and paths outside the workspace are never harvested, so they are always kept.
+    assert set(graded.context_files[0]) == {
+        "docs/specification.md",
+        "verif/tb.sv",
+        "src/test_top.py",
+        "docker-compose.yml",
+        "../escape.sv",
+    }
+
+
+def test_a_context_root_outside_the_default_globs_is_harvested(root, graded):
+    server = _server(root)
+    metadata = _metadata()
+    metadata["context_files"] = metadata["context_files"] | {"include/defs.vh": "`define WIDTH 4\n"}
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed(task_data={"verifier_metadata": metadata}))
+    _solve(root)
+    (root / "include" / "defs.vh").write_text("`define WIDTH 8\n")
+    (root / "rtl" / "rundir").mkdir()
+    (root / "rtl" / "rundir" / "sim.log").write_text("simulator output")
+
+    _verify(client, _verify_body() | {"verifier_metadata": metadata})
+
+    assert graded[0]["include/defs.vh"] == "`define WIDTH 8\n"
+    assert "rtl/rundir/sim.log" not in graded[0], "generated directories are never graded"
+    assert graded.context_files[0]["include/defs.vh"] == "`define WIDTH 4\n"
 
 
 def test_a_target_tar_stores_as_a_hard_link_is_graded(root, graded):
@@ -441,11 +496,12 @@ def test_the_harvest_keeps_hard_links_only_to_files_it_extracts(tmp_path):
             link.type, link.linkname = tarfile.LNKTYPE, target
             tar.addfile(link)
 
-    files = app_module._collect_harvest(
+    files, present = app_module._collect_harvest(
         archive, tmp_path / "workspace", ["rtl/**/*.sv"], {}, ["top.sv", "out.sv", "abs.sv"]
     )
 
     assert files == {"rtl/top.sv": TOP, "top.sv": TOP}
+    assert present == {"rtl/top.sv", "top.sv"}
 
 
 def test_a_workspace_with_none_of_the_harvested_paths_grades_the_response_text(server, root, stopped, graded):
