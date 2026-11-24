@@ -2190,21 +2190,41 @@ def test_a_command_is_told_where_to_write_and_how_to_reach_the_policy(tmp_path):
     assert "NEMO_GYM_POLICY_MODEL_NAME=super" in script
     assert "NEMO_GYM_POLICY_API_KEY=dummy" in script
     # The capture directory `gym eval run` would get; the command's own Gym processes read it as their default.
-    assert f"NEMO_GYM_MODEL_CALL_CAPTURE_DIR={bench_dir / 'model-calls'}" in script
+    assert _driver_step_env(tmp_path, script, "NEMO_GYM_MODEL_CALL_CAPTURE_DIR") == str(bench_dir / "model-calls")
+
+
+def _driver_step_env(tmp_path, script, name):
+    """`name` as the driver step's `srun` receives it, from the rendered driver line run with a stub `srun`."""
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
+    # The step's entrypoint continues on the following lines; what precedes `srun` sets the step's environment.
+    driver_env, found, _ = driver_line.partition(" srun ")
+    assert found, driver_line
+    bin_dir = tmp_path / "driver-step-bin"
+    bin_dir.mkdir()
+    (bin_dir / "srun").write_text(f'#!/bin/bash\n[[ -v {name} ]] || exit 3\nprintf %s "${name}"\n')
+    (bin_dir / "srun").chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", f"{driver_env} srun"],
+        env={"PATH": f"{bin_dir}:/usr/bin:/bin", "SLURM_JOB_ID": "1"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode in (0, 3), result.stderr
+    return result.stdout if result.returncode == 0 else None
 
 
 @pytest.mark.parametrize(
     ("declared", "exported"),
     [
-        pytest.param("lit:", {"", "''"}, id="empty removes the default"),
-        pytest.param("lit:/scratch/calls", {"/scratch/calls"}, id="a declared directory wins"),
+        pytest.param("lit:", "", id="empty removes the default"),
+        pytest.param("lit:/scratch/calls", "/scratch/calls", id="a declared directory wins"),
     ],
 )
 def test_a_command_driver_env_overrides_the_capture_dir(tmp_path, declared, exported):
     script = _render_command(tmp_path, "harness", env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": declared})
 
-    values = re.findall(r"\bNEMO_GYM_MODEL_CALL_CAPTURE_DIR=(\S*)", script)
-    assert values and set(values) <= exported
+    assert _driver_step_env(tmp_path, script, "NEMO_GYM_MODEL_CALL_CAPTURE_DIR") == exported
 
 
 def test_a_run_benchmark_gets_no_capture_dir_variable(tmp_path):
