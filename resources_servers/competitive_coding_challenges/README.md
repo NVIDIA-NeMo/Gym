@@ -177,6 +177,11 @@ A failure of the sandbox itself, not of the submission, returns `mask_sample: tr
 runner failed or produced no valid result), and `failure_reason` holding the details. Gym's
 aggregate metrics leave masked samples out; whether training skips them is up to the trainer.
 
+What the sandbox protects: the host, the network (where the provider enforces the policy) and other
+rollouts. It does not protect the grade from the submission. The runner and the submission run as the
+same user, and each test's expected output sits in the directory the submission runs in. A submission
+that kills the runner fails the verification, which is masked as `verifier_error`, so watch that rate.
+
 ## Migrating from the NeMo Skills sandbox
 
 Earlier versions sent every compile and test run to a NeMo Skills sandbox over HTTP by default, and
