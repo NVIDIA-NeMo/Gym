@@ -24,6 +24,7 @@ import math
 import random
 import re
 import shlex
+import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -90,9 +91,12 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
+    SandboxUsageSample,
+    SandboxUsageUnavailable,
     clamp_resource_requests,
 )
 from nemo_gym.sandbox.providers.opensandbox.failures import opensandbox_failure
+from nemo_gym.sandbox.providers.usage import IN_SANDBOX_CGROUP_COMMAND, parse_in_sandbox_cgroup
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 from nemo_gym.sandbox.resource_telemetry import ResourceAllocation
 from nemo_gym.sandbox.utils import rewrite_image
@@ -105,6 +109,8 @@ from nemo_gym.utils.network_policy import allowlist_policy
 
 
 LOGGER = logging.getLogger(__name__)
+# Bounds one in-sandbox usage read; the owner's sample timeout bounds it again.
+USAGE_READ_TIMEOUT_S = 5
 logging.getLogger("opensandbox").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -1335,6 +1341,8 @@ class OpenSandboxProvider:
         self._deleted_with_sidecars_left: set[str] = set()
         # Sidecars that no longer existed when `connect` reattached their main sandbox, by its id.
         self._gone_sidecars: dict[str, set[str]] = {}
+        # Sandboxes whose in-sandbox cgroup read showed it cannot measure them; later reads skip the exec.
+        self._usage_not_cgroup_root: set[str] = set()
 
     def uploads_independent_of_execs(self) -> bool:
         """A foreground command holds one of the shared HTTP pool's connections for as long as it runs, so
@@ -3377,6 +3385,30 @@ class OpenSandboxProvider:
             return parse_allocation(body.decode("utf-8"), scope=scope)
         finally:
             response.release()
+
+    async def usage(self, handle: SandboxHandle) -> tuple[SandboxUsageSample, ...]:
+        """The sandbox's own cgroup v2 counters, read from inside it.
+
+        Each sandbox has a private cgroup namespace whose root is the sandbox's cgroup, so the read is exact for
+        the sandbox and includes its own few milliseconds. It runs through this provider's exec, not
+        ``AsyncSandbox.exec()``, so it is neither an exec span nor a tool call, and from ``/`` as the image's user,
+        since the cgroup files are world-readable and a sandbox may not switch identity. A sandbox whose read does
+        not see its own cgroup (``/proc/self/cgroup`` other than ``0::/``) cannot be measured this way, and is not
+        read again.
+        """
+        if handle.sandbox_id in self._usage_not_cgroup_root:
+            raise SandboxUsageUnavailable("not_cgroup_root")
+        result = await self._exec(
+            handle, IN_SANDBOX_CGROUP_COMMAND, cwd="/", timeout_s=USAGE_READ_TIMEOUT_S, retries=0
+        )
+        if result.return_code != 0 or result.error_type is not None:
+            return ()
+        try:
+            sample = parse_in_sandbox_cgroup(result.stdout or "", sampled_at=time.time())
+        except SandboxUsageUnavailable:
+            self._usage_not_cgroup_root.add(handle.sandbox_id)
+            raise
+        return (sample,) if sample is not None else ()
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Return the current OpenSandbox lifecycle status."""

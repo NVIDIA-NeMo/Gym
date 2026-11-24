@@ -437,6 +437,22 @@ class SandboxUsageMeasurement(ObservationModel):
     memory_file_bytes: Optional[int] = Field(default=None, ge=0)
     includes_page_cache: Optional[bool] = None
     process_count: Optional[int] = Field(default=None, ge=0)
+    cpu_throttled_usec_total: int | None = Field(
+        default=None, ge=0, description="Time the CPU quota throttled the cgroup (cpu.stat throttled_usec)."
+    )
+    cpu_throttled_usec_delta: int | None = Field(default=None, ge=0)
+    cpu_throttled_periods_total: int | None = Field(
+        default=None, ge=0, description="Quota periods in which the cgroup was throttled (cpu.stat nr_throttled)."
+    )
+    cpu_throttled_periods_delta: int | None = Field(default=None, ge=0)
+    cpu_pressure_some_usec_total: int | None = Field(
+        default=None, ge=0, description="Time at least one runnable task waited for a CPU (cpu.pressure some total)."
+    )
+    cpu_pressure_some_usec_delta: int | None = Field(default=None, ge=0)
+    cpu_pressure_full_usec_total: int | None = Field(
+        default=None, ge=0, description="Time every runnable task waited for a CPU (cpu.pressure full total)."
+    )
+    cpu_pressure_full_usec_delta: int | None = Field(default=None, ge=0)
     final_read: Optional[bool] = Field(
         default=None,
         description="Whether the read at close measured this source; without it the totals and peak are null. "

@@ -25,7 +25,7 @@ def sampling_enabled() -> bool:
     return os.getenv("NEMO_GYM_SANDBOX_USAGE", "1").strip().lower() not in ("0", "false", "off", "no")
 
 
-CGROUP_FILES = ("cpu.stat", "memory.current", "memory.peak", "memory.stat")
+CGROUP_FILES = ("cpu.stat", "cpu.pressure", "memory.current", "memory.peak", "memory.stat")
 # How long one scan of /proc serves every sandbox in this process; bounds scans to one per second however many
 # sandboxes sample.
 NAMESPACE_SCAN_TTL_S = 1.0
@@ -49,6 +49,19 @@ def _keyed(text: str | None) -> dict[str, int]:
     return values
 
 
+def _pressure_totals(text: str | None) -> dict[str, int]:
+    """The cumulative stall time in microseconds of each PSI line (``some``, ``full``), from its ``total=``."""
+    totals = {}
+    for line in (text or "").splitlines():
+        kind, _, fields = line.partition(" ")
+        for field_text in fields.split():
+            name, _, value = field_text.partition("=")
+            parsed = _int_or_none(value) if name == "total" else None
+            if parsed is not None:
+                totals[kind] = parsed
+    return totals
+
+
 def parse_cgroup_v2(
     texts: Mapping[str, str | None], *, scope: SandboxUsageScope, sampled_at: float
 ) -> SandboxUsageSample | None:
@@ -59,6 +72,8 @@ def parse_cgroup_v2(
     if cpu is None and current is None and peak is None:
         return None
     stat = _keyed(texts.get("memory.stat"))
+    cpu_stat = _keyed(texts.get("cpu.stat"))
+    pressure = _pressure_totals(texts.get("cpu.pressure"))
     return SandboxUsageSample(
         source="cgroup_v2",
         scope=scope,
@@ -71,6 +86,10 @@ def parse_cgroup_v2(
         memory_anon_bytes=stat.get("anon"),
         memory_file_bytes=stat.get("file"),
         includes_page_cache=True if current is not None or peak is not None else None,
+        cpu_throttled_usec_total=cpu_stat.get("throttled_usec"),
+        cpu_throttled_periods_total=cpu_stat.get("nr_throttled"),
+        cpu_pressure_some_usec_total=pressure.get("some"),
+        cpu_pressure_full_usec_total=pressure.get("full"),
     )
 
 

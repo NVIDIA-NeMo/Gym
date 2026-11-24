@@ -748,6 +748,12 @@ class SandboxUsageSample:
     for the namespaces that selected the process tree; ``exec_rusage`` for the CPU of completed execs.
     ``sampled_at`` is Unix time on the clock named by ``clock``. Memory values are bytes, and include page cache
     when ``includes_page_cache``.
+
+    The CPU contention counters are cumulative, like ``cpu_usage_usec_total``. ``cpu_throttled_usec_total`` and
+    ``cpu_throttled_periods_total`` are the time the CPU quota throttled the cgroup and the number of quota periods
+    in which it did (``cpu.stat`` ``throttled_usec`` and ``nr_throttled``). ``cpu_pressure_some_usec_total`` and
+    ``cpu_pressure_full_usec_total`` are the pressure stall time during which at least one, or every, runnable task
+    waited for a CPU (``cpu.pressure`` ``total=``), absent where the kernel has no pressure accounting.
     """
 
     source: str
@@ -763,6 +769,10 @@ class SandboxUsageSample:
     memory_file_bytes: int | None = None
     includes_page_cache: bool | None = None
     process_count: int | None = None
+    cpu_throttled_usec_total: int | None = None
+    cpu_throttled_periods_total: int | None = None
+    cpu_pressure_some_usec_total: int | None = None
+    cpu_pressure_full_usec_total: int | None = None
 
 
 class SandboxUsageUnavailable(Exception):

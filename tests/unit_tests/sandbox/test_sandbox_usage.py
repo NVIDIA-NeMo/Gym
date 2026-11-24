@@ -26,6 +26,12 @@ CPU_STAT = "usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\n"
 MEMORY_STAT = "anon 104857600\nfile 52428800\nkernel 1024\n"
 
 
+CONTENDED_CPU_STAT = CPU_STAT + "nr_periods 400\nnr_throttled 37\nthrottled_usec 912000\n"
+CPU_PRESSURE = (
+    "some avg10=1.50 avg60=0.80 avg300=0.20 total=3400000\nfull avg10=0.40 avg60=0.10 avg300=0.00 total=700000\n"
+)
+
+
 def _write_cgroup(directory: Path, *, peak: bool = True) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "cpu.stat").write_text(CPU_STAT)
@@ -64,6 +70,21 @@ def test_a_directory_without_counters_is_no_sample(tmp_path: Path) -> None:
         parse_cgroup_v2({"cpu.stat": "nr_periods 0\n", "memory.current": "max"}, scope="container", sampled_at=1)
         is None
     )
+
+
+def test_a_cgroup_read_reports_throttling_and_cpu_pressure_as_counters(tmp_path: Path) -> None:
+    directory = _write_cgroup(tmp_path / "cg")
+    (directory / "cpu.stat").write_text(CONTENDED_CPU_STAT)
+    (directory / "cpu.pressure").write_text(CPU_PRESSURE)
+
+    sample = cgroup_v2_sample(directory, scope="container")
+
+    assert sample is not None
+    assert (sample.cpu_throttled_usec_total, sample.cpu_throttled_periods_total) == (912_000, 37)
+    assert (sample.cpu_pressure_some_usec_total, sample.cpu_pressure_full_usec_total) == (3_400_000, 700_000)
+    # Without the quota counters or pressure accounting, those values are unknown, not zero.
+    plain = cgroup_v2_sample(_write_cgroup(tmp_path / "plain"), scope="container")
+    assert plain is not None and plain.cpu_throttled_usec_total is None and plain.cpu_pressure_some_usec_total is None
 
 
 def _in_sandbox_output(cgroup_line: str) -> str:
@@ -438,6 +459,30 @@ def test_a_summary_keeps_the_last_counter_the_largest_peak_and_the_window_delta(
     assert summary.cpu_usage_usec_total == 9000 and summary.cpu_usage_usec_delta == 8000
     assert summary.memory_peak_bytes == 80 and summary.memory_current_bytes == 60
     assert summarize([_sample("container", 1.0, 1000, 50)]).cpu_usage_usec_delta is None
+
+
+def test_a_summary_reports_contention_counters_as_lifetime_totals_and_window_deltas() -> None:
+    def contended(at: float, throttled: int, some: int) -> SandboxUsageSample:
+        return SandboxUsageSample(
+            source="cgroup_v2",
+            scope="container",
+            sampled_at=at,
+            cpu_usage_usec_total=1000,
+            cpu_kind="counter",
+            cpu_throttled_usec_total=throttled,
+            cpu_throttled_periods_total=throttled // 100,
+            cpu_pressure_some_usec_total=some,
+        )
+
+    samples = [contended(1.0, 1000, 5000), contended(2.0, 4000, 9000)]
+    summary = summarize(samples)
+
+    assert (summary.cpu_throttled_usec_total, summary.cpu_throttled_usec_delta) == (4000, 3000)
+    assert (summary.cpu_throttled_periods_total, summary.cpu_throttled_periods_delta) == (40, 30)
+    assert (summary.cpu_pressure_some_usec_total, summary.cpu_pressure_some_usec_delta) == (9000, 4000)
+    assert summary.cpu_pressure_full_usec_total is None and summary.cpu_pressure_full_usec_delta is None
+    missed = summarize(samples, final_read=False, unavailable_reason="final_read_failed")
+    assert missed.cpu_throttled_usec_total is None and missed.cpu_pressure_some_usec_delta is None
 
 
 class UsageProvider:
@@ -942,3 +987,53 @@ async def test_a_cancelled_cli_call_kills_its_process_group(
             return
         await asyncio.sleep(0.02)
     pytest.fail(f"the {runtime} CLI's child {child} outlived the cancelled call")
+
+
+async def test_opensandbox_reads_its_own_cgroup_from_inside_and_stops_reading_where_it_cannot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    from nemo_gym.sandbox.providers.base import SandboxExecResult
+    from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
+
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 1})
+    contended = (
+        f"==cpu.stat\n{CONTENDED_CPU_STAT}==cpu.pressure\n{CPU_PRESSURE}==memory.current\n157286400\n"
+        f"==memory.peak\n314572800\n==memory.stat\n{MEMORY_STAT}==cgroup\n0::/\n"
+    )
+    outputs = {
+        "own": SandboxExecResult(stdout=contended, stderr=None, return_code=0),
+        "host": SandboxExecResult(stdout=_in_sandbox_output("0::/kubepods/pod1/abc"), stderr=None, return_code=0),
+        "failed": SandboxExecResult(stdout=None, stderr="unreachable", return_code=-1, error_type="timeout"),
+    }
+    calls: list[tuple[str, str, dict]] = []
+
+    async def fake_exec(handle: SandboxHandle, command: str, **kwargs: object) -> SandboxExecResult:
+        calls.append((handle.sandbox_id, command, kwargs))
+        return outputs[handle.sandbox_id]
+
+    monkeypatch.setattr(provider, "_exec", fake_exec)
+
+    (sample,) = await provider.usage(SandboxHandle("own", "opensandbox", None))
+    assert (sample.source, sample.scope, sample.cpu_kind, sample.peak_kind) == (
+        "cgroup_v2",
+        "container",
+        "counter",
+        "counter",
+    )
+    assert (sample.cpu_usage_usec_total, sample.memory_peak_bytes, sample.includes_page_cache) == (
+        2_500_000,
+        314_572_800,
+        True,
+    )
+    assert (sample.cpu_throttled_usec_total, sample.cpu_pressure_full_usec_total) == (912_000, 700_000)
+    # The provider's own exec from the root, as the image's user, without its retries: no exec span, no tool call.
+    assert calls[0][1] == IN_SANDBOX_CGROUP_COMMAND
+    assert calls[0][2]["cwd"] == "/" and calls[0][2]["retries"] == 0 and "user" not in calls[0][2]
+
+    for _ in range(2):
+        with pytest.raises(SandboxUsageUnavailable, match="not_cgroup_root"):
+            await provider.usage(SandboxHandle("host", "opensandbox", None))
+    assert [call[0] for call in calls].count("host") == 1  # a sandbox it cannot measure is not read again
+
+    assert await provider.usage(SandboxHandle("failed", "opensandbox", None)) == ()
