@@ -20,7 +20,7 @@ from pathlib import Path
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import BenchmarkDatasetConfig, DatasetConfig, ModelServerRef, ResourcesServerRef
 from responses_api_agents.nooa_agent.invocation import (
     NOOAInvocationAdapter as NOOAInvocationAdapter,
 )
@@ -48,6 +48,10 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Dataset/schema discovery metadata; runtime access comes from environment session grants.",
     )
     model_server: ModelServerRef
+    datasets: list[DatasetConfig | BenchmarkDatasetConfig] | None = Field(
+        default=None,
+        description="Rows rollout collection reads for this agent, such as a Harbor taskset's; this server does not.",
+    )
     runtime_wheelhouse: Path | None = Field(
         default=None,
         description="Controller-prepared offline runtime bundle; when set, task setup uses no package-network access.",

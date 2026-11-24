@@ -32,7 +32,7 @@ from nemo_gym.trajectory import (
 
 # Compaction format compatibility: tested with Codex 0.144.4.
 # This covers native compacted records and summary wrappers here, plus request
-# metadata and completed SSE responses in sandbox_transport.py; revalidate them together.
+# metadata and completed SSE responses in sandbox_launcher.mjs; revalidate them together.
 # Source: https://github.com/openai/codex/tree/rust-v0.144.4/codex-rs/core/src
 # (compact.rs and responses_metadata.rs).
 # The prefix below wraps the persisted summary. Strip it only after a structured
@@ -49,6 +49,16 @@ _COMPACTION_PREFIX = (
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)
 LOG = logging.getLogger(__name__)
 TESTED_CODEX_VERSION = "0.144.4"
+# Codex writes U+2028 and similar unescaped inside JSON strings, so str.splitlines() would cut a record in two.
+_LINE_END = re.compile(r"\r\n|\n|\r")
+
+
+def _jsonl_lines(text: str) -> list[str]:
+    """Split session records as the sandbox snapshot does: only \\n, \\r\\n and \\r end a line."""
+    lines = _LINE_END.split(text)
+    if lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def _token_usage(payload: dict) -> NeMoGymResponseUsage | None:
@@ -80,7 +90,7 @@ def parse_codex_usage(transcript: str | None) -> NeMoGymResponseUsage | None:
     These totals already include cached input and reasoning output. As in the CLI
     parser, zero detail counters cannot distinguish absent provider measurements.
     """
-    for line in reversed((transcript or "").splitlines()):
+    for line in reversed(_jsonl_lines(transcript or "")):
         usage_record = False
         try:
             event = json.loads(line)
@@ -104,14 +114,161 @@ def read_codex_observations(
     """Use native call IDs; never join CLI display item IDs to calls by ordering."""
     files = sorted(home.glob("sessions/**/*.jsonl"))
     return parse_codex_observations(
-        "\n".join(line for path in files for line in path.read_text(errors="replace").splitlines()) if files else None,
+        "\n".join(line for path in files for line in _jsonl_lines(path.read_text(errors="replace")))
+        if files
+        else None,
         invocation_id,
         returncode=returncode,
         timed_out=timed_out,
     )
 
 
+def _session_transcripts(transcript: str | None) -> list[tuple[dict, str]] | None:
+    sessions = []
+    metadata = None
+    lines = []
+    for line in _jsonl_lines(transcript or ""):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = None
+        if isinstance(event, dict) and event.get("type") == "session_meta":
+            if metadata is not None:
+                sessions.append((metadata, "\n".join(lines)))
+            elif lines:
+                return None  # No reliable boundary for the preceding records.
+            metadata = event.get("payload")
+            if not isinstance(metadata, dict) or not isinstance(metadata.get("id"), str) or not metadata["id"]:
+                return None
+            lines = []
+        lines.append(line)
+    if metadata is not None:
+        sessions.append((metadata, "\n".join(lines)))
+    return sessions
+
+
+def _parent_thread(metadata: dict) -> str | None:
+    source = metadata.get("source")
+    if isinstance(source, dict):
+        subagent = source.get("subagent")
+        spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+        if isinstance(spawn, dict) and isinstance(spawn.get("parent_thread_id"), str):
+            return spawn["parent_thread_id"]
+    return None
+
+
+def _child_status(transcript: str) -> Literal["completed", "incomplete", "unknown"]:
+    status = "unknown"
+    for line in _jsonl_lines(transcript):
+        try:
+            event = json.loads(line)
+            if event.get("type") != "event_msg":
+                continue
+            kind = event["payload"].get("type")
+            if kind == "task_complete":
+                status = "completed"
+            elif kind in {"task_started", "turn_aborted"}:
+                status = "incomplete"
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+    return status
+
+
 def parse_codex_observations(
+    transcript: str | None,
+    invocation_id: str,
+    *,
+    returncode: int | None,
+    timed_out: bool,
+    status: Literal["completed", "failed", "incomplete", "unknown"] | None = None,
+    error_type: str | None = None,
+    gaps: list[ObservationGap] | None = None,
+) -> AgentObservationBundle:
+    """Keep Codex thread contexts separate and link children using session metadata."""
+    sessions = _session_transcripts(transcript)
+    roots = [meta["id"] for meta, _ in (sessions or []) if meta.get("source") in ("exec", "cli")]
+    ids = [meta["id"] for meta, _ in (sessions or [])]
+    if len(roots) != 1 or len(set(ids)) != len(ids):
+        fallback_gaps = list(gaps or [])
+        if (sessions is None or sessions) and not any(
+            gap.code == "subagent_hierarchy_unavailable" for gap in fallback_gaps
+        ):
+            fallback_gaps.append(ObservationGap(code="subagent_hierarchy_unavailable"))
+        return _parse_codex_transcript(
+            transcript,
+            invocation_id,
+            returncode=returncode,
+            timed_out=timed_out,
+            status=status,
+            error_type=error_type,
+            gaps=fallback_gaps,
+        )
+    root = roots[0]
+    names = {identity: invocation_id if identity == root else f"{invocation_id}.{identity}" for identity in ids}
+    result = AgentObservationBundle(
+        source="codex",
+        records=[],
+        gaps=[gap for gap in (gaps or []) if gap.code != "subagent_hierarchy_unavailable"],
+    )
+    parents = {}
+    for metadata, text in sessions:
+        identity = metadata["id"]
+        is_root = identity == root
+        parent = _parent_thread(metadata)
+        if not is_root and (parent not in names or parent == identity):
+            result.gaps.append(ObservationGap(code="subagent_hierarchy_unavailable", invocation_id=names[identity]))
+        parsed = _parse_codex_transcript(
+            text,
+            names[identity],
+            returncode=returncode if is_root else None,
+            timed_out=timed_out if is_root else False,
+            status=status if is_root else _child_status(text),
+            error_type=error_type if is_root else None,
+        )
+        invocation = next(record for record in parsed.records if isinstance(record, AgentInvocation))
+        invocation.parent_invocation_id = names.get(parent) if not is_root else None
+        parents[identity] = (parent, invocation)
+        result.records.extend(parsed.records)
+        result.gaps.extend(parsed.gaps)
+    for identity, (parent, invocation) in parents.items():
+        ancestor, visited = identity, set()
+        while ancestor != root and ancestor in parents and ancestor not in visited:
+            visited.add(ancestor)
+            ancestor = parents[ancestor][0]
+        if ancestor != root:
+            invocation.parent_invocation_id = None
+            result.gaps.append(ObservationGap(code="subagent_hierarchy_unavailable", invocation_id=names[identity]))
+            continue
+        if parent not in parents:
+            continue
+        conversation = parents[parent][1].conversation or []
+        spawn_calls = {
+            item.call_id for item in conversation if item.type == "function_call" and item.name == "spawn_agent"
+        }
+        matches = []
+        for item in conversation:
+            if (
+                item.type != "function_call_output"
+                or item.call_id not in spawn_calls
+                or not isinstance(item.output, str)
+            ):
+                continue
+            try:
+                output = json.loads(item.output)
+            except ValueError:
+                continue
+            if isinstance(output, dict) and output.get("agent_id") == identity:
+                matches.append(item.call_id)
+        if len(matches) == 1:
+            invocation.spawned_by_tool_call_id = matches[0]
+        else:
+            result.gaps.append(
+                ObservationGap(code="subagent_spawn_reference_unavailable", invocation_id=names[identity])
+            )
+    return result
+
+
+def _parse_codex_transcript(
     transcript: str | None,
     invocation_id: str,
     *,
@@ -130,7 +287,7 @@ def parse_codex_observations(
     # A record that could not be read may have been a tool call, unless it is a native event (token usage, a patch
     # outcome): then the tool history read is not complete, and its timing is unknown.
     tool_history_complete = True
-    for line in (transcript or "").splitlines():
+    for line in _jsonl_lines(transcript or ""):
         native_event = False
         try:
             event = json.loads(line)

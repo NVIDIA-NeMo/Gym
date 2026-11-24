@@ -32,6 +32,8 @@ from responses_api_agents.speed_bench_agent.app import SpeedBenchAgent, SpeedBen
 
 
 TWO_TURNS = {"input": [{"role": "user", "content": "first"}, {"role": "user", "content": "second"}]}
+# The seed's episode is attempt 1 of "rollout", whose capture key the Environment Server activates on.
+ACTIVATION_PATH = "/ng-rollout/rollout-a1/v1/responses"
 SPEC = {
     "num_spec_steps": 2,
     "num_draft_tokens": 4,
@@ -151,7 +153,7 @@ def test_a_session_activation_replays_each_turn_once() -> None:
     client = TestClient(make_agent(transport).setup_webserver())
     assert client.post("/v1/agent_sessions", json=seed_request().model_dump(mode="json")).status_code == 200
 
-    reply = client.post("/ng-rollout/rollout/v1/responses", json=TWO_TURNS, headers={AGENT_ACTIVATION_HEADER: "1"})
+    reply = client.post(ACTIVATION_PATH, json=TWO_TURNS, headers={AGENT_ACTIVATION_HEADER: "1"})
 
     assert reply.status_code == 200, reply.text
     body = reply.json()
@@ -160,11 +162,11 @@ def test_a_session_activation_replays_each_turn_once() -> None:
     assert len(body["metrics"]["requests"]) == 2
     assert body["metrics"]["generation_duration"] >= 0
     # Model calls keep the rollout's capture prefix; the session cookie is not handed back.
-    assert [path for path, _ in transport.model_calls] == ["/ng-rollout/rollout/v1/responses"] * 2
+    assert [path for path, _ in transport.model_calls] == [ACTIVATION_PATH] * 2
     assert "model" not in reply.cookies
 
     # A retried activation gets the replay it already ran, not new timed model calls.
-    again = client.post("/ng-rollout/rollout/v1/responses", json=TWO_TURNS, headers={AGENT_ACTIVATION_HEADER: "1"})
+    again = client.post(ACTIVATION_PATH, json=TWO_TURNS, headers={AGENT_ACTIVATION_HEADER: "1"})
     assert again.json() == body
     assert len(transport.model_calls) == 2
 
@@ -173,8 +175,9 @@ def test_a_session_activation_replays_each_turn_once() -> None:
         json={"agent_session_id": "agent-session", "episode_id": seed_request().episode_id.model_dump()},
     )
     assert close.status_code == 200, close.text
-    # The replay records no invocations, and close says so instead of returning no evidence.
-    assert [gap["code"] for gap in close.json()["agent_observations"]["gaps"]] == ["observation_capture_failed"]
+    # With model-call capture off there is no evidence to return.
+    assert close.json()["agent_observations"] is None
+    assert "trajectory" not in close.json()
 
 
 def test_a_call_without_a_session_still_propagates_cookies() -> None:

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from time import monotonic
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
@@ -20,21 +21,39 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     AgentSessionState,
+    NothingCapturedError,
     SandboxCommand,
     SandboxSession,
+    exec_idempotent,
+    prefer_oom_kill_setup,
     shell_assignments,
 )
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import SandboxExecResult, read_text, upload_text
+from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import SandboxExecResult, read_text, stage_media, upload_text
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
-from responses_api_agents.opencode_agent.runtime import TASK_ENVIRONMENT_PLUGIN_FILE, TASK_ENVIRONMENT_PLUGIN_SOURCE
-from responses_api_agents.opencode_agent.snapshot import snapshot, stored_sessions
+from responses_api_agents.opencode_agent.opencode2 import LABEL_FILE as OPENCODE2_LABEL_FILE
+from responses_api_agents.opencode_agent.opencode2.store import message_labels, translate_store
+from responses_api_agents.opencode_agent.runtime import (
+    REQUIRED_MCP_PLUGIN_FILE,
+    REQUIRED_MCP_PLUGIN_SOURCE,
+    TASK_ENVIRONMENT_PLUGIN_FILE,
+    TASK_ENVIRONMENT_PLUGIN_SOURCE,
+)
+from responses_api_agents.opencode_agent.snapshot import NoRootSessionError, snapshot, stored_sessions
 
 
 LOG = logging.getLogger(__name__)
+
+# Reads of the conversation a relaunch may reprompt: how many, and the wait before the second (doubled for the third).
+_CONVERSATION_READ_ATTEMPTS = 3
+_CONVERSATION_READ_RETRY_DELAY_S = 2.0
+
+
+class UnparsableConversationError(Exception):
+    """The saved OpenCode conversation was downloaded from the sandbox but cannot be parsed."""
 
 
 def format_error_message(message: str, *, output: str = "", stderr: str = "") -> str:
@@ -149,28 +168,46 @@ set -- "$4.json" "$2/$3.json"
     + _PUBLISH
     + 'rm -f -- "$1"\n'
 )
+# OpenCode 2 exports with `session export`; `--standalone` keeps it from starting a background OpenCode service.
+_EXPORT_OPENCODE2_SESSION = _EXPORT_SESSION.replace('"$1" export "$3"', '"$1" session export --standalone "$3"')
 
 
 @dataclass
 class OpenCodeSandboxSession(AgentSessionState):
-    """Keep OpenCode HOME/history under ``conversation_directory`` across launches.
+    """Keep OpenCode HOME/history under ``persistent_directory`` across launches.
 
     ``session.session_dir`` holds only the current supervisor and input/output
-    files. ``persistent_directory`` selects that original session root for legacy
-    one-shot calls and the retained conversation root for continuation calls.
+    files. ``persistent_directory`` is the session root, where legacy one-shot
+    calls run and continuation calls retain their conversation.
     SandboxSession owns finalization and removal of the entire directory tree.
+
+    A ``checkpointed`` session pauses its harness in place at a checkpoint, and relaunches it in
+    ``launch-K`` directories under the same root when a pause failed or a crash interrupted it,
+    reprompting the conversation kept in the root. A session a restore installed has no sandbox
+    connection (``session`` is ``None``) until its replacement attempt's seed re-binds it;
+    ``restored`` keeps what the checkpoint exported until then.
     """
 
-    session: SandboxSession[str]
+    session: SandboxSession[str] | None
     runtime: str
     sandbox_id: str | None = None
     model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
+    # All retained activations use this same sandbox clock. A new session gets a
+    # separate domain; neither model-server clocks nor imported DBs are equated.
+    agent_instance: str = field(default_factory=lambda: f"opencode-agent:{uuid4().hex}", init=False)
+    tool_clock_domain: str = field(default_factory=lambda: f"opencode-wall:{uuid4().hex}", init=False)
     observations: AgentObservationBundle | None = None
     stderr: str = ""
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
-    conversation_directory: str | None = None
+    # The latest validated continuation request with its prompt, system text and decoded media.
+    # Activation takes it, so it holds at most one request's media.
+    validated_input: tuple[NeMoGymResponseCreateParamsNonStreaming, str, str, list[MediaFile]] | None = field(
+        default=None, repr=False
+    )
+    # Whether an activation of this session has declared image input; later activations keep declaring it.
+    declares_image_input: bool = False
     harness_session_id: str | None = None
     message_ids: list[str] = field(default_factory=list)
     system_instructions: str | None = None
@@ -183,7 +220,32 @@ class OpenCodeSandboxSession(AgentSessionState):
     export_dir: str | None = None
     # POSIX sh that gives OpenCode's import and export their environment (see ``cli_environment``).
     opencode_environment: str = ""
+    # Whether the session runs OpenCode 2: its store is translated (``opencode2.store``) before it is read.
+    opencode2: bool = False
+    # Whether the OpenCode 2 plugin records model-call labels, which it does with model-call capture on.
+    model_call_labels: bool = False
     _export_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
+    # Gaps of the latest capture's store translation, added to that capture's observations.
+    _capture_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
+    # Every model-call label read so far; the label file only grows, so an earlier read stays valid.
+    _labels: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
+    checkpointed: bool = False
+    # Whether the last launch reprompted the saved conversation with ``reprompt_opencode.sh`` instead of running
+    # ``opencode run``.
+    reprompted_conversation: bool = False
+    # Tool calls that relaunches found unfinished in the conversation they reprompted, counted once each by ID.
+    # OpenCode told the model each was interrupted; the session's observations carry a gap for them.
+    interrupted_tool_calls: int = 0
+    interrupted_tool_call_ids: list[str] = field(default_factory=list)
+    # Launches of the harness so far, and what each ended with, for the checkpoint and the reply's evidence.
+    launch_count: int = 0
+    launch_records: list[dict[str, JsonValue]] = field(default_factory=list)
+    # The activation this session completed, its reply, and the SHA-256 of the request that produced it. The reply
+    # is given again to a caller that sends the same request again; a different one is a conflict.
+    completed_activation: int = 0
+    completed_reply: dict[str, JsonValue] | None = None
+    completed_request_digest: str | None = None
+    restored: dict[str, JsonValue] | None = None
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -202,7 +264,91 @@ class OpenCodeSandboxSession(AgentSessionState):
     @property
     def persistent_directory(self) -> str:
         """Private OpenCode session storage that survives process activations."""
-        return self.conversation_directory or self.session.session_dir
+        return self.session.root_dir
+
+    def require_session(self) -> SandboxSession[str]:
+        """The sandbox session; a restored session gets one when its replacement attempt's seed re-binds it."""
+        if self.session is None:
+            raise RuntimeError(
+                "OpenCode session was restored from a checkpoint and has not been re-bound to a sandbox"
+            )
+        return self.session
+
+    async def prepare_launch(self, launch: int, *, timeout: float) -> None:
+        """Rearm the supervisor in ``launch-K`` under the session root, keeping the conversation in the root."""
+        assert self.checkpointed and launch > 1
+        directory = f"{self.persistent_directory}/launch-{launch}"
+        await self.session.begin_activation(session_dir=directory, timeout=timeout)
+        # Safe to run twice, and a sandbox a restore just forked can refuse its first command.
+        result = await exec_idempotent(
+            self.session.sandbox,
+            f"mkdir -p -- {quote(directory)}",
+            what="OpenCode launch directory preparation",
+            cwd="/",
+            timeout_s=timeout,
+        )
+        if result.error_type == "timeout":
+            raise TimeoutError("OpenCode launch directory preparation timed out")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot prepare OpenCode launch directory: {result.stderr}")
+
+    async def inspect_conversation(self, *, timeout: float) -> dict[str, JsonValue] | None:
+        """Export the conversation OpenCode saved in this session's root, or ``None`` when there is none.
+
+        A conversation that cannot be downloaded is not a missing one: the read is repeated, then raises, so the
+        caller does not set aside a conversation that may be intact. One that was downloaded and cannot be parsed
+        raises ``UnparsableConversationError``: reading it again would not help, and the caller starts afresh.
+        """
+        with tempfile.TemporaryDirectory(prefix="opencode-reprompt-") as directory:
+            for attempt in range(1, _CONVERSATION_READ_ATTEMPTS + 1):
+                try:
+                    async with asyncio.timeout(timeout):
+                        names = await self.list_store(timeout=timeout)
+                        if "opencode.db" not in names:
+                            return None
+                        await self.download_store(names, Path(directory))
+                    break
+                except Exception as error:
+                    # Reading is safe to repeat, and a sandbox a restore just forked can refuse its first commands.
+                    if attempt == _CONVERSATION_READ_ATTEMPTS:
+                        raise RuntimeError(f"Cannot read the saved OpenCode conversation: {error}") from error
+                    LOG.warning(
+                        "Reading the saved OpenCode conversation failed (attempt %d/%d): %r",
+                        attempt,
+                        _CONVERSATION_READ_ATTEMPTS,
+                        error,
+                    )
+                    await asyncio.sleep(_CONVERSATION_READ_RETRY_DELAY_S * attempt)
+
+            def export() -> dict[str, JsonValue]:
+                # Off the event loop as a whole: the export and its decoding grow with the conversation.
+                snapshot(
+                    Path(directory) / "opencode.db", Path(directory), harness_session_id=None, previous_message_ids=()
+                )
+                return json.loads((Path(directory) / "export.json").read_text())
+
+            try:
+                return await asyncio.to_thread(export)
+            except NoRootSessionError:
+                LOG.info("OpenCode had saved no conversation yet in %s", self.persistent_directory)
+                return None
+            except Exception as error:
+                LOG.warning("The saved OpenCode conversation cannot be parsed", exc_info=True)
+                raise UnparsableConversationError(repr(error)) from error
+
+    async def set_conversation_aside(self, *, timeout: float) -> None:
+        """Set the saved conversation aside, so the next launch starts afresh in an empty data directory."""
+        data = f"{self.persistent_directory}/data"
+        # Moving it only if present, so running it again is safe.
+        result = await exec_idempotent(
+            self.session.sandbox,
+            f"if [ -e {quote(data)} ]; then mv -- {quote(data)} {quote(data)}.set-aside-{self.launch_count}; fi",
+            what="Setting the saved OpenCode conversation aside",
+            cwd="/",
+            timeout_s=timeout,
+        )
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot set the saved OpenCode conversation aside: {result.stderr}")
 
     async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
         """Keep one conversation while rearming the supervised execution lifecycle."""
@@ -213,8 +359,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         self.activation_trajectory = None
         self.runtime_info = None
         self.stderr = ""
-        self.conversation_directory = self.persistent_directory
-        directory = f"{self.conversation_directory}/activation-{activation_id}"
+        directory = f"{self.persistent_directory}/activation-{activation_id}"
         await self.session.begin_activation(session_dir=directory, timeout=timeout)
         result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
         if result.error_type == "timeout":
@@ -260,6 +405,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         self._retained_activations[self.activation_id] = (self.activation_observations, self.activation_trajectory)
         bundles = [bundle for bundle, _ in self._retained_activations.values()]
         self.observations = AgentObservationBundle(
+            schema_version="2.0",
             source="opencode",
             records=[record for bundle in bundles for record in bundle.records],
             gaps=[gap for bundle in bundles for gap in bundle.gaps],
@@ -303,38 +449,69 @@ class OpenCodeSandboxSession(AgentSessionState):
         self,
         payload: dict[str, JsonValue],
         *,
+        media: Sequence[MediaFile] = (),
         timeout: float,
         close_timeout: float,
         deadline: float | None = None,
+        pause_allowance_s: float = 0.0,
     ) -> str:
         """Run through the common lifecycle; the adapter validates terminal events."""
         artifacts = await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(payload, media=media),
             collect=lambda: self.collect_artifacts(timeout=close_timeout),
             timeout=timeout,
             close_timeout=close_timeout,
             deadline=deadline,
+            pause_allowance_s=pause_allowance_s,
         )
         if self.session.closing:
             raise asyncio.CancelledError
         return artifacts
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
-        """Stage the invocation and return the OpenCode worker command."""
+    async def stage_activation(
+        self, payload: dict[str, JsonValue], *, media: Sequence[MediaFile] = ()
+    ) -> SandboxCommand:
+        """Stage the invocation and return the OpenCode worker command.
+
+        Staging runs inside the session's execute, so close fences it. A continuation activation's deadline also
+        bounds it.
+        """
         if payload.get("instructions"):
             await upload_text(
                 self.session.sandbox, path=f"{self.session.session_dir}/instructions.md", text=payload["instructions"]
             )
-        if self.is_continuation:
+        # OpenCode 2 loads the Gym plugin from the session's private storage, staged at seed.
+        if (self.is_continuation or self.session.session_dir != self.persistent_directory) and not self.opencode2:
             await self.session.sandbox.upload(
                 TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{self.session.session_dir}/{TASK_ENVIRONMENT_PLUGIN_FILE}"
             )
         directory = self.session.session_dir
+        if payload.get("mcp_grants") is not None:
+            if not self.opencode2:
+                await self.session.sandbox.upload(
+                    REQUIRED_MCP_PLUGIN_SOURCE, f"{directory}/{REQUIRED_MCP_PLUGIN_FILE}"
+                )
+            await upload_text(
+                self.session.sandbox, path=f"{directory}/mcp-grants.json", text=json.dumps(payload["mcp_grants"])
+            )
+            # null until the plugin checks the grants before the first model call of this activation.
+            await upload_text(self.session.sandbox, path=f"{directory}/mcp-status.json", text=json.dumps(None))
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        command = list(payload["command"])
+        # OpenCode shows each attached file's path to the model, so stage_media names files by content:
+        # rollouts of one task then get the same prompt.
+        if media:
+            for path in await stage_media(self.session.sandbox, media):
+                command.extend(["--file", path])
+        if payload.get("reprompt") is not None:
+            # The request body reprompt_opencode.sh re-posts: the saved last user message, with no new parts.
+            await upload_text(
+                self.session.sandbox, path=f"{directory}/reprompt.json", text=json.dumps(payload["reprompt"])
+            )
         env = payload["env"]
         params = {
             "cwd": payload["cwd"],
-            "command": payload["command"],
+            "command": command,
             "env": env,
             "stdin": f"{directory}/prompt.txt",
             "stdout": f"{directory}/stdout.jsonl",
@@ -344,10 +521,25 @@ class OpenCodeSandboxSession(AgentSessionState):
         if payload.get("path_prefix"):
             # Preinstalled runtime tools come first; the task's own PATH still follows.
             params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"
+        if payload.get("raise_oom_score_adj"):
+            # OpenCode and its tools inherit the score; execd and the supervisor keep the sandbox's own.
+            params["setup"] += prefer_oom_kill_setup()
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(
             argv=["bash", f"{self.persistent_directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"]
         )
+
+    def _interruption_gaps(self) -> list[ObservationGap]:
+        """The gap that marks a rollout whose relaunches interrupted tool calls; empty when none did."""
+        if not self.interrupted_tool_calls:
+            return []
+        return [
+            ObservationGap(
+                code="tool_call_interrupted_by_relaunch",
+                detail=f"{self.interrupted_tool_calls} tool call(s) were running when a launch ended; "
+                "OpenCode reported them to the model as interrupted",
+            )
+        ]
 
     def take_export_gaps(self) -> list[ObservationGap]:
         """Hand over export failures recorded since the last call, so each is reported once."""
@@ -413,7 +605,8 @@ class OpenCodeSandboxSession(AgentSessionState):
                     continue
                 command = self.opencode_environment + (
                     f"set -- {quote(f'{self.runtime}/opencode')} {quote(self.export_dir)} {session_id} "
-                    f"{quote(f'{self.session.session_dir}/export-{session_id}')}\n{_EXPORT_SESSION}"
+                    f"{quote(f'{self.session.session_dir}/export-{session_id}')}\n"
+                    f"{_EXPORT_OPENCODE2_SESSION if self.opencode2 else _EXPORT_SESSION}"
                 )
                 result = await self._exec_until(command, deadline)
                 if result is None:
@@ -498,6 +691,10 @@ class OpenCodeSandboxSession(AgentSessionState):
                 if "opencode.db" not in names:
                     raise RuntimeError("OpenCode left no session store")
                 await self.download_store(names, directory)
+        if self.opencode2:
+            # The capture translated the store it copied; a fresh copy is translated here.
+            translated = directory / "sessions.db"
+            database = translated if translated.is_file() else await self.readable_store(directory)
         return await asyncio.to_thread(stored_sessions, database)
 
     async def _collect_artifacts(self, directory: Path, *, timeout: float) -> str:
@@ -509,13 +706,22 @@ class OpenCodeSandboxSession(AgentSessionState):
             LOG.warning("OpenCode stderr log unavailable", exc_info=True)
         try:
             await self.snapshot(directory, timeout)
+        except NoRootSessionError as error:
+            if self._launch_failed():
+                raise await self._nothing_captured(str(error)) from None
+            error = RuntimeError(f"OpenCode transcript capture failed: {error}")
+            if self.stderr:
+                raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
+            raise error
         except Exception as error:
             if self.stderr:
                 raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
             raise
+        if self._launch_failed() and not (directory / "export.json").exists():
+            raise await self._nothing_captured("OpenCode sandbox runner returned no valid result: no session database")
         # Messages that predate this activation (earlier activations, an imported prefix) are history, not output.
         scoped = self.is_continuation or bool(self.message_ids)
-        if self.is_continuation:
+        if self.is_continuation or self.checkpointed:
             export_text = await self._read_export(directory)
             export = json.loads(export_text)
             harness_session_id = export.get("session_id")
@@ -524,7 +730,9 @@ class OpenCodeSandboxSession(AgentSessionState):
             if self.harness_session_id is not None and harness_session_id != self.harness_session_id:
                 raise RuntimeError("OpenCode resumed a different OpenCode session")
             self.harness_session_id = harness_session_id
-            self.message_ids = export["message_ids"]
+            if self.is_continuation:
+                # A one-activation session's reply covers the whole conversation, across every launch.
+                self.message_ids = export["message_ids"]
         elif scoped:
             export = json.loads(await self._read_export(directory))
         try:
@@ -544,7 +752,10 @@ class OpenCodeSandboxSession(AgentSessionState):
                 self.request.episode_id.capture_key,
                 trajectory,
                 require_terminal_finish=True,
+                observation_schema_version="2.0",
                 model_ref=self.model_ref,
+                clock_domain=self.tool_clock_domain,
+                agent_instance=self.agent_instance,
                 message_ids=set(export.get("activation_message_ids", [])) if scoped else None,
             )
             lifecycle = json.dumps(
@@ -563,6 +774,8 @@ class OpenCodeSandboxSession(AgentSessionState):
             for gap in trajectory.gaps:
                 if gap.code == "turns_unavailable":
                     gap.detail = (gap.detail or "") + "; capture_lifecycle=" + lifecycle
+            observations.gaps.extend(self._capture_gaps)
+            observations.gaps.extend(self._interruption_gaps())
             if self.is_continuation:
                 assert self.activation_id is not None
                 scope_opencode_activation(
@@ -579,10 +792,13 @@ class OpenCodeSandboxSession(AgentSessionState):
         except Exception:
             LOG.exception("Failed to parse OpenCode observations")
             observations = AgentObservationBundle(
+                schema_version="2.0",
                 source="opencode",
                 gaps=[
                     ObservationGap(code="agent_artifact_unavailable"),
                     ObservationGap(code="observation_capture_failed"),
+                    *self._capture_gaps,
+                    *self._interruption_gaps(),
                 ],
             )
             if self.is_continuation:
@@ -611,7 +827,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 and (previous_session_id is None or self.harness_session_id == previous_session_id)
                 and self.session.cleanup is not None
                 and self.session.cleanup["cleanup_confirmed"]
-                and self.session.cleanup["timed_out"]
+                and (self.session.cleanup["timed_out"] or self.session.cleanup.get("stopped", False))
                 and export.get("activation_message_ids") == []
                 and export.get("messages") == []
             ):
@@ -666,10 +882,85 @@ class OpenCodeSandboxSession(AgentSessionState):
         for name in names:
             await self.session.sandbox.download(f"{self.store_directory}/{name}", directory / name)
 
+    async def readable_store(self, directory: Path, *, capture: bool = False) -> Path:
+        """The downloaded store in ``directory`` with OpenCode 1 tables, which every reader of the store parses.
+
+        An OpenCode 2 store is translated into ``sessions.db`` beside it. For a ``capture``, the assistant messages
+        that the Gym plugin labeled are named by their labels, so captured model calls join to them, and what the
+        translation could not carry becomes gaps of the capture's observations.
+
+        A reply keeps the ID an earlier capture gave it, whatever the label file says now: the snapshot tells earlier
+        replies from new output by ID, so a renamed reply would count twice. When the label file cannot be read,
+        the labels read before still apply, and the gap ``model_call_labels_unavailable`` says this capture's calls
+        may not join.
+        """
+        database = directory / "opencode.db"
+        if not self.opencode2:
+            return database
+        gaps: list[ObservationGap] = []
+        if capture and self.model_call_labels:
+            try:
+                async with asyncio.timeout(30):
+                    text = await read_text(
+                        self.session.sandbox, path=f"{self.persistent_directory}/{OPENCODE2_LABEL_FILE}"
+                    )
+                self._labels.update(message_labels(text))
+            except Exception as error:
+                LOG.warning("OpenCode 2 model-call labels unavailable", exc_info=True)
+                gaps.append(
+                    ObservationGap(
+                        code="model_call_labels_unavailable", detail=f"{type(error).__name__}: {error}"[:2000]
+                    )
+                )
+        earlier = set(self.message_ids)
+        labels = {key: label for key, label in self._labels.items() if key[1] not in earlier} if capture else {}
+        translated = directory / "sessions.db"
+        untranslated = await asyncio.to_thread(translate_store, database, translated, labels=labels)
+        if untranslated:
+            LOG.warning("OpenCode 2 store records were not translated: %s", untranslated)
+            gaps.append(ObservationGap(code="harness_records_untranslated", detail="; ".join(untranslated)[:2500]))
+        if capture:
+            self._capture_gaps = gaps
+        return translated
+
     async def snapshot(self, directory: Path, timeout: float) -> None:
         """Copy SQLite out after CLI completion and export it here; borrowed task services may remain alive."""
+        self._capture_gaps = []
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
+        if not await self._download_database(directory, timeout):
+            return  # No export: collection reports the missing result with the CLI logs.
+        try:
+            await asyncio.to_thread(
+                snapshot,
+                await self.readable_store(directory, capture=True),
+                directory,
+                harness_session_id=self.harness_session_id,
+                previous_message_ids=self.message_ids,
+            )
+        except NoRootSessionError:
+            raise
+        except Exception as error:
+            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
+
+    def _launch_failed(self) -> bool:
+        """Whether the launch ended without OpenCode finishing: a failure, a stop, or no receipt at all."""
+        cleanup = self.session.cleanup
+        return cleanup is None or cleanup["return_code"] != 0 or bool(cleanup.get("stopped"))
+
+    async def _nothing_captured(self, detail: str) -> NothingCapturedError:
+        """The capture error of a launch that ended before OpenCode saved anything, with the runner's log for why."""
+        cleanup = self.session.cleanup or {}
+        message = (
+            f"OpenCode left nothing to capture after its launch ended without finishing "
+            f"(exit {cleanup.get('return_code')}, stopped {bool(cleanup.get('stopped'))}): {detail}"
+        )
+        return NothingCapturedError(
+            format_error_message(message, output=await self.session.read_output_log(), stderr=self.stderr)
+        )
+
+    async def _download_database(self, directory: Path, timeout: float) -> bool:
+        """Copy OpenCode's database, with its write-ahead log, into ``directory``; ``False`` when there is none."""
         deadline = asyncio.get_running_loop().time() + timeout
         try:
             async with asyncio.timeout_at(deadline):
@@ -677,20 +968,11 @@ class OpenCodeSandboxSession(AgentSessionState):
         except Exception as error:
             raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
         if "opencode.db" not in names:
-            return  # No export: collection reports the missing result with the CLI logs.
+            return False
         try:
             async with asyncio.timeout_at(deadline):
                 await self.download_store(names, directory)
         except Exception:
             LOG.warning("OpenCode session database unavailable", exc_info=True)
-            return
-        try:
-            await asyncio.to_thread(
-                snapshot,
-                directory / "opencode.db",
-                directory,
-                harness_session_id=self.harness_session_id,
-                previous_message_ids=self.message_ids,
-            )
-        except Exception as error:
-            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
+            return False
+        return True

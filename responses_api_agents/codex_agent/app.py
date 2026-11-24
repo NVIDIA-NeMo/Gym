@@ -23,11 +23,11 @@ import shutil
 import signal
 import tempfile
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
-from time import time
+from time import monotonic, time
 from typing import Any, ClassVar, Literal, Mapping, Optional
 from uuid import uuid4
 
@@ -36,7 +36,8 @@ from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_vali
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
-    RUNNER_FILE,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -64,6 +65,7 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -75,6 +77,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    UnsupportedContentError,
+    split_text_and_media,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -82,10 +86,12 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
     create_provider,
+    media_path,
     resolve_provider_config,
 )
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     associate_codex_compaction_calls,
@@ -93,8 +99,15 @@ from responses_api_agents.codex_agent.observability import (
     parse_codex_usage,
     read_codex_observations,
 )
-from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession, harness_kill_evidence
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
+from responses_api_agents.codex_agent.tool_host import (
+    codex_config_overrides,
+    environments_toml,
+    setup_failure_hint,
+    tool_host_paths,
+    tool_host_setup_command,
+)
 from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 
@@ -188,24 +201,9 @@ def _terminal_model_error(
 
 
 def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
-    validate = """
-from pathlib import Path
-import sys
-workdir = Path(sys.argv[1]).resolve(strict=True)
-if not workdir.is_dir():
-    raise ValueError("Codex workdir must be an existing directory")
-# The root holds every path: a task image without WORKDIR runs there, as Harbor starts it.
-contains = workdir != Path("/")
-for value in sys.argv[2:]:
-    owned = Path(value).resolve()
-    if workdir == owned or (contains and workdir in owned.parents) or owned in workdir.parents:
-        raise ValueError("Codex task workdir and adapter paths must be disjoint after resolving symlinks")
-"""
-    # The task may provide neither the Python worker runtime nor the Bash installer runtime.
-    # This bootstrap must remain POSIX sh so Alpine can install Bash before using it.
+    # Keep the bootstrap POSIX sh: Bash must exist before its installer can run.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "Codex in the task sandbox requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -220,10 +218,28 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
-    return (
-        bootstrap + f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
-        f"{shlex.quote(directory)} {shlex.quote(runtime)} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
-    )
+    # Positional parameters WORKDIR SESSION_DIR RUNTIME. Resolve symlinks on the sandbox filesystem, not the
+    # agent server's; an adapter path that does not exist yet resolves through its nearest existing ancestor.
+    validate = """
+[ -d "$1" ] || { echo "Codex workdir must be an existing directory: $1" >&2; exit 1; }
+workdir=$(cd "$1" && pwd -P) || exit 1
+# Both paths drop a trailing slash, so the root is empty.
+workdir=${workdir%/}
+shift
+for owned in "$@"; do
+    path=$owned rest=
+    until [ -d "${path:-/}" ]; do rest=/${path##*/}$rest path=${path%/*}; done
+    owned=$(cd "${path:-/}" && pwd -P) || exit 1
+    owned=${owned%/}$rest
+    overlap=
+    # The root holds every path: a task image without WORKDIR runs there, as Harbor starts it.
+    if [ -n "$workdir" ]; then case "$owned/" in "$workdir/"*) overlap=1 ;; esac; fi
+    case "$workdir/" in "$owned/"*) overlap=1 ;; esac
+    [ -z "$overlap" ] || { echo "Codex task workdir and adapter paths must be disjoint after resolving symlinks" >&2; exit 1; }
+done
+"""
+    check_paths = f"(set -- {shlex.join([workdir, directory, runtime])}{validate})"
+    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
 
 
 def _redact(text: str, values: list[str]) -> str:
@@ -334,7 +350,6 @@ def parse_exec_jsonl(
     *,
     structured_reasoning: bool = False,
     include_partial: bool = False,
-    conservative_usage_details: bool = False,
 ) -> tuple[list[Any], dict]:
     """Convert ``codex exec --json`` JSONL stdout into (output_items, metadata).
 
@@ -344,15 +359,18 @@ def parse_exec_jsonl(
     successful retry. Tool-shaped items are mapped to a
     ``function_call`` + ``function_call_output`` pair so verifiers see one uniform trajectory
     shape across agent harnesses; reasoning is buffered and prepended to the next assistant
-    message inside ``<think>`` tags (mirroring the Claude Code agent). Sandbox session callers use
-    ``conservative_usage_details`` because the pinned CLI defaults absent backend cache/reasoning
-    counters to zero: only positive integers establish measured details in this artifact.
+    message inside ``<think>`` tags (mirroring the Claude Code agent). The pinned CLI defaults absent
+    backend cache/reasoning counters to zero, so only positive integers establish measured details;
+    otherwise ``cached_input_tokens`` and ``reasoning_tokens`` are None.
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
-    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
-    if conservative_usage_details:
-        metadata.update(cached_input_tokens=None, reasoning_tokens=None)
+    metadata: dict[str, Any] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": None,
+        "reasoning_tokens": None,
+    }
     usage_seen = False
     errors: list[str] = []
     unfinished: dict[str, dict[str, Any]] = {}
@@ -396,14 +414,11 @@ def parse_exec_jsonl(
                 ("reasoning_output_tokens", "reasoning_tokens"),
             ):
                 value = usage.get(source)
-                if conservative_usage_details:
-                    # Zero is ambiguous in Codex JSONL, not a known backend measurement.
-                    if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
-                        metadata[target] = None
-                    else:
-                        metadata[target] = (metadata[target] or 0) + value
+                # Zero is ambiguous in Codex JSONL, not a known backend measurement.
+                if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
+                    metadata[target] = None
                 else:
-                    metadata[target] += int(value or 0)
+                    metadata[target] = (metadata[target] or 0) + value
             usage_seen = True
             continue
 
@@ -594,6 +609,10 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+# The tool-host probe's output kept in a seed failure's message.
+_TOOL_HOST_DETAIL_CHARS = 4000
+
+
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
@@ -684,6 +703,17 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    # Agent-host directory where a failed sandboxed activation keeps the session's supervisor and
+    # Codex logs (output.log, stderr.log, events.jsonl, ...) before the sandbox is released. None: off.
+    failure_artifacts_dir: Optional[str] = None
+    # Task-sandbox sessions only (ignored on the local /run path): run Codex's tool commands in a nested pid
+    # namespace (bwrap) so they
+    # cannot see or signal the supervisor, the runner or the Codex CLI (see tool_host.py). The
+    # session fails at seed if the namespace cannot be created.
+    tool_pid_namespace: bool = False
+    # Agent-host path of the bwrap binary uploaded for that namespace. None: the bwrap sandbox
+    # provider's own bwrap_path.
+    tool_pid_namespace_bwrap_path: Optional[str] = None
 
     @field_validator("sandbox_logs_dir")
     @classmethod
@@ -770,12 +800,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def _require_agent_session(self, agent_session_id: str) -> CodexSandboxSession:
         state = super()._require_agent_session(agent_session_id)
         if not isinstance(state, CodexSandboxSession):
-            raise HTTPException(409, "Invalid Codex session state")
+            raise AgentSessionConflictError("Invalid Codex session state")
         return state
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, CodexSandboxSession):
-            raise HTTPException(409, "Invalid Codex session state")
+            raise AgentSessionConflictError("Invalid Codex session state")
         await state.close(self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -857,7 +887,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if self.config.sandbox_mode != "danger-full-access":
             raise HTTPException(422, "Codex in the task sandbox requires danger-full-access inside the task sandbox")
 
-        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        tool_bwrap = self._tool_namespace_bwrap(provider_config) if self.config.tool_pid_namespace else None
+        provider = create_provider(provider_config)
         if owns_sandbox:
             try:
                 spec = restrict_sandbox_network(
@@ -915,26 +947,29 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"error_type={prepared.error_type}; {prepared.stderr or prepared.stdout}"
                 )
             if self.config.sandbox_runtime_dir:
-                # The installer checks Python and isolates Codex's own check; a preinstalled runtime gets the same.
+                # Check the preinstalled runtime with its private Node, without requiring task-image Python.
                 # CODEX_HOME keeps the check out of the task's HOME, where Codex would otherwise create ~/.codex.
                 version_home = f"{directory}/codex-version-home"
                 checked = await sandbox.exec(
-                    "python3 -c 'import sys; assert sys.version_info >= (3, 8), \"Codex needs Python 3.8 or newer\"' && "
                     f"mkdir -p {shlex.quote(version_home)} && CODEX_HOME={shlex.quote(version_home)} "
                     f"{shlex.quote(runtime + '/node/bin/node')} "
                     f"{shlex.quote(runtime + '/codex/node_modules/@openai/codex/bin/codex.js')} --version",
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
-                reported = (checked.stdout or "").strip()
+                # OpenSandbox may merge stderr warnings into stdout. Match the exact version
+                # record without treating those diagnostics as part of the version string.
+                reported = [
+                    line.strip() for line in (checked.stdout or "").splitlines() if line.startswith("codex-cli ")
+                ]
                 if checked.error_type:
                     # A transport failure or timeout may pass on another attempt.
                     raise RuntimeError(
                         f"Codex could not check the runtime in {runtime} (error_type={checked.error_type}); "
                         f"stdout={checked.stdout}; stderr={checked.stderr}"
                     )
-                if checked.return_code != 0 or reported != f"codex-cli {self.config.codex_version}":
-                    # A missing runtime, another version or no usable Python fails the same way every time.
+                if checked.return_code != 0 or reported != [f"codex-cli {self.config.codex_version}"]:
+                    # A missing runtime or another version fails the same way every time.
                     raise AgentSeedRejectedError(
                         f"Codex runtime in {runtime} does not run codex_version {self.config.codex_version} "
                         f"(exit {checked.return_code}); stdout={checked.stdout}; stderr={checked.stderr}"
@@ -958,9 +993,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         f"Codex installer exited {installed.return_code}, command={install_command}, "
                         f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                     )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
-            # The runner loads the transport from beside itself under this name.
-            await sandbox.upload(Path(__file__).with_name("sandbox_transport.py"), f"{directory}/sandbox_transport.py")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+            await sandbox.upload(Path(__file__).with_name(LAUNCHER_FILE), f"{directory}/{LAUNCHER_FILE}")
+            if tool_bwrap is not None:
+                await self._prepare_tool_host(sandbox, directory=directory, runtime=runtime, bwrap=tool_bwrap)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -969,7 +1005,48 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
-    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _tool_namespace_bwrap(self, provider_config: Any) -> Path:
+        """The agent-host bwrap binary to upload for the tool pid namespace."""
+        path = self.config.tool_pid_namespace_bwrap_path
+        if path is None and isinstance(provider_config, Mapping) and isinstance(provider_config.get("bwrap"), Mapping):
+            path = provider_config["bwrap"].get("bwrap_path")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise HTTPException(
+                422, "tool_pid_namespace needs tool_pid_namespace_bwrap_path or a bwrap sandbox provider"
+            )
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            raise HTTPException(422, f"tool_pid_namespace: bwrap {path!r} is not an executable file on the agent host")
+        return Path(path)
+
+    async def _preserve_failure_artifacts(self, state: CodexSandboxSession, detail: dict[str, Any]) -> None:
+        """Keep a failed activation's logs, bounded by the close budget so a slow read never holds the failure."""
+        try:
+            async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                await state.preserve_failure_artifacts(self.config.failure_artifacts_dir, detail)
+        except TimeoutError:
+            LOG.warning("Codex failure artifacts not preserved within %s s", self.config.session_close_timeout_seconds)
+
+    async def _prepare_tool_host(self, sandbox: AsyncSandbox, *, directory: str, runtime: str, bwrap: Path) -> None:
+        """Upload bwrap and prove that it can create the tool namespace before the episode starts."""
+        uploaded, _ = tool_host_paths(directory)
+        await sandbox.upload(bwrap, uploaded)
+        command = tool_host_setup_command(directory, runtime)
+        result = await sandbox.exec(command, timeout_s=60)
+        if result.return_code != 0 or result.error_type:
+            detail = f"{result.stderr or ''}{result.stdout or ''}".strip()
+            if len(detail) > _TOOL_HOST_DETAIL_CHARS:
+                detail = "..." + detail[-_TOOL_HOST_DETAIL_CHARS:]
+            message = (
+                f"Cannot create the Codex tool pid namespace (tool_pid_namespace): exit={result.return_code}, "
+                f"error_type={result.error_type}; {detail}.{setup_failure_hint(detail)}"
+            )
+            if "platform Codex binary not found" in detail:
+                # The runtime lacks the binary: every fresh sandbox fails the same way, so do not retry.
+                raise AgentSeedRejectedError(message)
+            # Others (a per-node namespace limit, the 60 s exec timing out) may pass on another attempt.
+            raise RuntimeError(message)
+
+    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
         """Validate and normalize input before consuming the session's activation."""
         unsupported = (
             "max_output_tokens",
@@ -1018,26 +1095,31 @@ class CodexAgent(SimpleResponsesAPIAgent):
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"], ["developer", "user"]):
             raise HTTPException(
-                422, "Codex in the task sandbox accepts one text user prompt with an optional system message"
+                422, "Codex in the task sandbox accepts one user prompt with an optional system message"
             )
+        media: list[MediaFile] = []
+        texts: list[str] = []
         for item in items:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
-                for part in item.content
-            ):
-                raise HTTPException(422, "Codex in the task sandbox only supports text input")
-
-        def text(item):
-            return (
+            try:
+                _, decoded = split_text_and_media(item.content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"Codex: {error}") from error
+            if decoded and item.role != "user":
+                raise HTTPException(422, "Codex accepts images only in the user prompt")
+            media.extend(decoded)
+            # Keep the existing text concatenation; the CLI places all attached images before it.
+            texts.append(
                 item.content
                 if isinstance(item.content, str)
-                else "".join(part["text"] if isinstance(part, dict) else part.text for part in item.content)
+                else "".join(
+                    part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")
+                    for part in item.content
+                )
             )
-
-        prompt = text(items[-1])
-        input_system = text(items[0]) if len(items) == 2 else None
+        prompt = texts[-1]
+        input_system = texts[0] if len(items) == 2 else None
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
-        return prompt, system
+        return prompt, system, media
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
@@ -1062,15 +1144,20 @@ class CodexAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: Sequence[MediaFile] = (),
     ) -> NeMoGymResponse:
         mcp_servers, skipped_grants = self._granted_mcp_servers(state.request)
         invocation_id = state.request.episode_id.capture_key
         base_url = self._resolve_call_base_url(invocation_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
-        await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
-        command = self._build_command("-", state.session.workdir)
+        if self.config.tool_pid_namespace:
+            config = _deep_merge(config, codex_config_overrides())
+        # Codex's forced stdin prompt rejects empty text; an explicit empty argument accepts image-only input.
+        command = self._build_command("" if media and not prompt.strip() else "-", state.session.workdir)
+        image_args = [arg for file in media for arg in ("--image", media_path(file))]
+        command[command.index("--") : command.index("--")] = image_args
         command.remove("--ephemeral")
         command[0:1] = [
             f"{state.runtime}/node/bin/node",
@@ -1096,8 +1183,22 @@ class CodexAgent(SimpleResponsesAPIAgent):
         failure = None
         try:
             async with self.sem:
+                # The configuration can carry the MCP grant headers. Staging it inside the session's execute lets
+                # close cancel the upload before it releases the sandbox.
                 raw = await state.execute(
-                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                    payload,
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                    files={
+                        "home/.codex/config.toml": toml_dumps(config),
+                        **(
+                            {"home/.codex/environments.toml": environments_toml(state.session.session_dir)}
+                            if self.config.tool_pid_namespace
+                            else {}
+                        ),
+                    },
+                    media=media,
+                    deadline=monotonic() + timeout,
                 )
         except BaseException as exc:
             failure = exc
@@ -1106,12 +1207,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
             else:
                 LOG.warning("Codex event transcript unavailable after interrupted activation")
         events = []
-        for line in raw.splitlines():
+        # The runner copies event lines verbatim; JSON may hold U+2028 and similar inside a string.
+        for line in raw.split("\n"):
+            if not line.strip():
+                continue
             try:
                 observed_at, event = json.loads(line)
                 if isinstance(event, dict):
                     events.append((float(observed_at), event))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, RecursionError):
                 LOG.warning("Skipping malformed Codex event record")
         cleanup = state.session.cleanup
         runtime = state.runtime_info
@@ -1157,7 +1261,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "\n".join(json.dumps(event) for event in parse_events),
             structured_reasoning=True,
             include_partial=True,
-            conservative_usage_details=True,
         )
         error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
@@ -1187,6 +1290,26 @@ class CodexAgent(SimpleResponsesAPIAgent):
         completed = any(event.get("type") == "turn.completed" for _, event in events)
         if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
             error = error or "Codex ended without turn.completed"
+        # Nobody stopped the harness, yet a harness process died: often a tool command signalled it
+        # (pkill -f python, kill -9 -1, ...), but also the OOM killer or a crash. Label it so summaries can
+        # count it apart; blame the agent only on positive evidence: stop signals its tools sent the supervisor.
+        harness_kill = None
+        harness_kill_code = (
+            "agent_killed_harness"
+            if not self.config.tool_pid_namespace and (cleanup or {}).get("foreign_signals")
+            else "harness_killed"
+        )
+        if failure is None and error:
+            harness_kill = harness_kill_evidence(
+                cleanup=cleanup,
+                cleanup_receipt_missing=state.session.cleanup_receipt_missing,
+                launch_return_code=state.session.launch_return_code,
+            )
+            if harness_kill:
+                error = f"{harness_kill_code}: {harness_kill}; {error}"
+        foreign_signals = {
+            name: count for name, count in (("supervisor", (cleanup or {}).get("foreign_signals", 0)),) if count
+        }
         status = "failed" if error else "incomplete" if cleanup["timed_out"] or output_limited else "completed"
         # A reported provider failure keeps its classified outcome, so the Environment Server decides it. A run
         # that never started a turn did no work to grade, and its stderr explains the failure (see below).
@@ -1200,6 +1323,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
         )
+        if gradable_limit and not completed and (started or output or state.model_attempts):
+            # Codex (0.144.4 and 0.154.0) records no usage for an output-limited (incomplete) response and writes a
+            # call's token_count only after its tools finish. A run stopped at its output or wall-time budget can
+            # therefore have calls missing from both the CLI total and the session-file total, so its usage is unknown.
+            response_usage = None
         # A failed run that may be scored can have done model work after the CLI's last usage total.
         if (reported_model_error or gradable) and not completed:
             native_usage = parse_codex_usage(state.native_transcript)
@@ -1208,7 +1336,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
             elif output or not state.model_attempts or any(a["status"] == 200 for a in state.model_attempts):
                 # Prior work without a usage artifact is unknown, not a zero-token run.
                 response_usage = None
-        conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+        # Native transcript items below remain authoritative. Keep supplied images in the fallback evidence too.
+        user_content = (
+            [
+                *({"type": "input_image", "image_url": file.to_data_uri(), "detail": "auto"} for file in media),
+                {"type": "input_text", "text": prompt},
+            ]
+            if media
+            else prompt
+        )
+        conversation = [NeMoGymEasyInputMessage(role="user", content=user_content)]
         if system:
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
@@ -1250,8 +1387,28 @@ class CodexAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup is not None and cleanup["return_code"] is None:
             gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
+        if state.session.cleanup_receipt_missing:
+            gaps.append(
+                ObservationGap(
+                    code="cleanup_receipt_missing",
+                    detail=(
+                        f"supervisor exited ({state.session.launch_return_code}) without a cleanup receipt; "
+                        "the sandbox provider confirmed that no sandboxed process remains"
+                    ),
+                )
+            )
         if failure is not None:
             gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
+        if harness_kill:
+            gaps.append(ObservationGap(code=harness_kill_code, detail=harness_kill))
+        if foreign_signals:
+            gaps.append(
+                ObservationGap(
+                    code="harness_signals_ignored",
+                    detail="stop signals from inside the sandbox, ignored: "
+                    + ", ".join(f"{name} {count}" for name, count in foreign_signals.items()),
+                )
+            )
         if not events:
             gaps.append(ObservationGap(code="agent_transcript_unavailable"))
         invocation_status = "incomplete" if failure else status
@@ -1269,6 +1426,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
             state.observations = associate_codex_compaction_calls(
                 state.observations, state.model_attempts or [], model_ref=self.config.model_server
             )
+            if media and status != "failed" and not cleanup["timed_out"]:
+                # Codex replaces images it cannot decode with text and continues without them.
+                invocation = state.observations.records[0]
+                image_count = max(
+                    (
+                        sum(
+                            (part.get("type") if isinstance(part, dict) else getattr(part, "type", None))
+                            == "input_image"
+                            for part in item.content
+                        )
+                        for item in invocation.conversation
+                        if getattr(item, "role", None) == "user" and isinstance(item.content, list)
+                    ),
+                    default=0,
+                )
+                if image_count < len(media):
+                    error = f"Codex attached {image_count} of {len(media)} prompt images"
+                    invocation.status = "failed"
         else:
             gaps.append(ObservationGap(code="compaction_observations_unavailable"))
             gaps.append(ObservationGap(code=_MODEL_CALL_JOIN_GAP, detail="CLI events omit model response IDs"))
@@ -1341,6 +1516,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 error = f"{error}; stderr: {stderr}"
                 # Environment Servers keep the observations, not the 502 body, in their failure records.
                 state.observations.gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
+        # Decided before a graded failure clears ``error``: a graded harness kill keeps its logs too.
+        artifact_error = error
         graded_error = None
         if gradable:
             # The observations are stored first, so a close during the liveness probe still finds them.
@@ -1352,6 +1529,27 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 for record in state.observations.records:
                     if isinstance(record, AgentInvocation) and record.invocation_id == invocation_id:
                         record.status = status
+        if (
+            failure is not None or artifact_error or state.session.cleanup_receipt_missing
+        ) and self.config.failure_artifacts_dir:
+            # Before raising: close releases the sandbox and deletes these files.
+            await self._preserve_failure_artifacts(
+                state,
+                {
+                    "failure": repr(failure) if failure is not None else None,
+                    "error": artifact_error or None,
+                    "graded": graded_error is not None,
+                    "cleanup": dict(cleanup) if cleanup is not None else None,
+                    "cleanup_receipt_missing": state.session.cleanup_receipt_missing,
+                    "launch_return_code": state.session.launch_return_code,
+                    "capture_error": repr(state.session.capture_error) if state.session.capture_error else None,
+                    "events": len(events),
+                    "terminal_events": terminal_events,
+                    "classification": harness_kill_code if harness_kill else None,
+                    "harness_kill": harness_kill,
+                    "foreign_signals": foreign_signals,
+                },
+            )
         if failure is not None:
             raise failure
         if error and not reported_model_error:
@@ -1754,6 +1952,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        if any(
+            isinstance(getattr(item, "content", None), list)
+            and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) == "input_image"
+                for part in item.content
+            )
+            for item in body.input
+        ):
+            raise HTTPException(422, "Codex prompt images require an agent session")
         user_message, input_system = _extract_instruction(body.input)
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
@@ -1801,13 +2008,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(
-                    cached_tokens=usage.get("cached_input_tokens", 0)
-                ),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(
-                    reasoning_tokens=usage.get("reasoning_tokens", 0)
-                ),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
                 total_tokens=input_tokens + output_tokens,
             ),
             metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
@@ -1829,22 +2032,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(session_id)
             rollout_id = request.path_params.get("rollout_id")
             if state.request.episode_id.capture_key != rollout_id:
-                raise HTTPException(409, "Codex activation does not match the seeded session and rollout route")
+                raise AgentSessionConflictError("Codex activation does not match the seeded session and rollout route")
             if state.session.closing:
-                raise HTTPException(409, "Codex session is closing")
-            prompt, system = self._sandbox_input(body)
+                raise AgentSessionConflictError("Codex session is closing")
             if state.task is None:
+                prompt, system, media = self._sandbox_input(body)
                 state.activation_request = body.model_copy(deep=True)
-                state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
+                state.task = asyncio.create_task(
+                    self._sandbox_response(state, body, prompt=prompt, system=system, media=media)
+                )
             elif body != state.activation_request:
-                raise HTTPException(409, "Codex sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("Codex sessions support one activation; retry the same request")
             # The invocation belongs to the session; a disconnected waiter cannot cancel it.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body)
 
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         if self._session_marker(request) is not None:
-            raise HTTPException(409, "Use the agent session responses and close routes")
+            raise AgentSessionConflictError("Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Legacy /run requires resources_server")
         async with self.sem:
@@ -1908,3 +2113,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     CodexAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CodexAgent.run_webserver()  # noqa: F401

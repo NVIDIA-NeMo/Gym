@@ -180,6 +180,15 @@ class RequestFailureLog:
         """The log of the request being served, or ``None`` outside a Gym server request."""
         return cls._current.get()
 
+    def add_saved(self, saved: object) -> None:
+        """Observe a body-carried report; malformed diagnostics must not fail the operation."""
+        try:
+            report = _report_keeping_unknown_kinds(saved)
+        except (ValueError, TypeError, RecursionError):
+            LOGGER.warning("Invalid failure_report in a reply body; its failure events are omitted")
+            report = FailureReport(omitted=True)
+        self.add(report)
+
     def add(self, report: FailureReport) -> None:
         """Add ``report``'s events as observations; the log never has a ``failure_id`` of its own."""
         kept = self.report.events

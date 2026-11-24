@@ -124,6 +124,23 @@ def test_config_uses_package_paths_and_hf_artifacts() -> None:
 ########################################
 
 
+def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
+    with pytest.raises(ValueError, match="supports only retry or fail"):
+        _make_config(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
+
+
+def test_retry_for_a_kind_classified_as_the_model_is_refused() -> None:
+    # Recovery does not rerun a row attributed to the model, so the pairing would save a retry that never happens.
+    kind = "vcqa_agent:artifact_unavailable"
+    with pytest.raises(ValueError, match="cannot be retried at the agent stage while it is classified as"):
+        _make_config(
+            outcome_policy={
+                "classification": {"by_stage": {"agent": {"by_failure_kind": {kind: "model"}}}},
+                "by_stage": {"agent": {"default_action": "retry"}},
+            }
+        )
+
+
 class TestPathResolution:
     def test_relative_path_resolves_under_codebase(self) -> None:
         assert tools_mod._resolve_under_codebase("src/foo.py") == f"{CODEBASE_PATH}/src/foo.py"
@@ -690,6 +707,55 @@ class TestRunFailureIsolation:
         assert "RuntimeError" in (result.error or "")
         assert "download failed" in (result.error or "")
         assert result.must_total is None or result.must_total == 0
+        assert result.failure_kind == "vcqa_agent:artifact_unavailable"
+        assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("retry", "evaluation")
+
+    @pytest.mark.parametrize(
+        "failure_class,action",
+        [("evaluation", "retry"), ("evaluation", "fail"), ("model", "fail")],
+    )
+    async def test_the_saved_decision_follows_the_configured_policy(
+        self, monkeypatch: pytest.MonkeyPatch, failure_class: str, action: str
+    ) -> None:
+        from fastapi import Request
+
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+        from responses_api_agents.vcqa_agent.app import VcqaAgentRunRequest
+
+        async def boom(**kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("download failed")
+
+        monkeypatch.setattr("responses_api_agents.vcqa_agent.app.materialize_working_tree", boom)
+        kind = "vcqa_agent:artifact_unavailable"
+        agent = VcqaAgent(
+            config=_make_config(
+                outcome_policy={
+                    "classification": {"by_stage": {"agent": {"by_failure_kind": {kind: failure_class}}}},
+                    "by_stage": {"agent": {"default_action": action}},
+                }
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        body = VcqaAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "anything"}]
+            ),
+            verifier_metadata={
+                "task_id": "isolation-1",
+                "dataset_kind": "fileset",
+                "artifact_key": "missing.tar.gz",
+                "rubric": {"judge": [{"category": "must_have", "description": "X"}]},
+            },
+        )
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+
+        result = await agent.run(request=request, response=MagicMock(), body=body)
+
+        # The observed kind and the originating stage do not depend on the action or its attribution.
+        assert result.failure_kind == kind and result.mask_sample is True
+        assert (result.failure_outcome_action, result.failure_outcome_attribution) == (action, failure_class)
+        assert result.model_extra["_ng_failure_stage"] == "agent"
 
 
 ########################################
@@ -2157,4 +2223,5 @@ async def test_tool_loop_sums_usage_and_details_across_turns(second_usage: dict,
     )
 
     assert steps == 2
+    expected = expected | {"input_tokens_details": expected["input_tokens_details"] | {"cache_write_tokens": None}}
     assert result.usage.model_dump(mode="json") == expected

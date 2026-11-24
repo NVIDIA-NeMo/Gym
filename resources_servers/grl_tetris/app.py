@@ -23,6 +23,7 @@ from pydantic import Field
 
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import BaseResourcesServerConfig
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.grl_tetris.tetris_env import TetrisEnv
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
@@ -175,3 +176,6 @@ class GrlTetrisResourcesServer(GymnasiumServer):
 
 if __name__ == "__main__":
     GrlTetrisResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GrlTetrisResourcesServer.run_webserver()  # noqa: F401

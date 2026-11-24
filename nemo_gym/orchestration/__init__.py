@@ -12,23 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Submitting a run to a cluster and looking after it afterwards, and recovering a submitted run from its saved evidence.
 
-# Public API
-from typing import TYPE_CHECKING
+The modules, by role:
 
-from nemo_gym._public_api import lazy_exports
-
-
-if TYPE_CHECKING:
-    from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
-
-
-# What code outside the library, such as servers, imports from this package. Each name's submodule loads
-# on first use. Code inside nemo_gym imports the submodules directly.
-_PUBLIC_API = {
-    "get_venv_path": "server_venv",
-    "run_command": "server_venv",
-    "setup_env_command": "server_venv",
-}
-__getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
-__all__ = sorted(_PUBLIC_API)
+    api.py                     input schema: what to submit (SubmitConfig and its parts)
+    jobs.py                    output schema: what was submitted and what is happening (records, statuses)
+    operations.py              what you do with a submission: status, info, cancel, logs (no executor imports)
+    submit.py                  entry points: submit, resubmit and the wrappers the CLI calls; the only module
+                               that knows which executors exist
+    executors/base.py          BaseExecutor: the one method a new executor must implement
+    executors/capabilities.py  the opt-in interfaces an executor adds, and `require`
+    executors/<name>/          one scheduler
+"""

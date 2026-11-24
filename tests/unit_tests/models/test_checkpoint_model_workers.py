@@ -20,6 +20,7 @@ from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.models._checkpoint import GenerationCutRecord, ModelRecord, PolicyGate, _Ticket
 from nemo_gym.models._checkpoint_workers import PolicyCoordinator, PolicyWorkerLink
 from nemo_gym.models.token_capture.lineage import FileLineageStore
+from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.models.token_capture.sink import CaptureContext
 from nemo_gym.models.token_capture.staging.records import GenerationCutContinuation
 from nemo_gym.server_runtime._checkpoint.control import (
@@ -74,13 +75,16 @@ async def deployment(
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def worker_link(socket_path: str, lost: Optional[list[str]] = None) -> PolicyWorkerLink:
+def worker_link(
+    socket_path: str, lost: list[str] | None = None, *, ledger: FileLineageStore | None = None
+) -> PolicyWorkerLink:
     # The real callback terminates the worker process, which here would be the test runner.
     return PolicyWorkerLink(
         socket_path=socket_path,
         server_name="policy",
         cut_requester=None,
         on_coordinator_lost=lambda: (lost if lost is not None else []).append("lost"),
+        ledger=ledger,
     )
 
 
@@ -136,7 +140,7 @@ async def test_commit_leaves_out_undelivered_calls_on_every_worker(tmp_path: Pat
         await coordinator.controller.commit(
             CommitRequest(**control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]))
         )
-        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")])
+        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")], checkpoint_id="c")
 
     assert [row["model_call_id"] for row in record.rows] == ["c1"]
 
@@ -195,13 +199,13 @@ async def test_a_worker_lost_between_readiness_and_snapshot_fails_the_commit(tmp
         await coordinator.controller.prepare(CheckpointRequest(**control()))
         export = participant.export
 
-        async def export_after_the_worker_left(episode_ids: Optional[list[EpisodeId]]) -> list:
+        async def export_after_the_worker_left(episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list:
             # The commit has checked readiness; the worker leaves before the snapshot.
             await second.disconnect()
             async with asyncio.timeout(5):
                 while len(participant.workers) > 1:
                     await asyncio.sleep(0.01)
-            return await export(episode_ids)
+            return await export(episode_ids, checkpoint_id=checkpoint_id)
 
         participant.export = export_after_the_worker_left
         commit = CommitRequest(**control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]))
@@ -294,7 +298,7 @@ async def test_a_worker_call_that_used_a_restored_cut_never_gives_it_back_to_a_r
             continued = cutting.restored_cuts.take(resumed, "r-a1", "e" * 64)
             # The next checkpoint cuts the resumed call further; then the call ends before its response starts.
             await participant.close_admission(CheckpointRequest(**control("c2")))
-            [exported] = await participant.export([EpisodeId(rollout_id="r", attempt=1)])
+            [exported] = await participant.export([EpisodeId(rollout_id="r", attempt=1)], checkpoint_id="c")
             await participant.open_admission()
             await cutting.gate.exit(resumed)
             retry = held_call(cutting.gate, "r-a1", "c4", [])
@@ -585,7 +589,7 @@ async def test_each_worker_publishes_a_call_s_ledger_row_only_once_its_response_
         await coordinator.controller.commit(
             CommitRequest(**control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]))
         )
-        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")])
+        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")], checkpoint_id="c")
         await coordinator.controller.resume(CheckpointRequest(**control()))
         await asyncio.wait_for(call, timeout=5)
 
@@ -595,6 +599,38 @@ async def test_each_worker_publishes_a_call_s_ledger_row_only_once_its_response_
         delivered[0].model_call_id,
         held[0].model_call_id,
     ]
+
+
+async def test_a_worker_deletes_the_rows_of_a_call_that_ended_while_held_when_it_reopens(tmp_path: Path) -> None:
+    def call_ids() -> list[str]:
+        return [row["model_call_id"] for row in ledger.export_rows("r")]
+
+    ledger = FileLineageStore(tmp_path / "ledger")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    # What a call that ends before its response starts leaves in the live ledger:
+    # its intent row and, if it had no commit coordinates, a failure row.
+    await ledger.begin_call("r", "c2")
+    await ledger.record_failure("r", "c2", UNCOMMITTED_CALL_REASON)
+    async with deployment(workers=1, expected=2, ledger=ledger) as (coordinator, _):
+        # A worker with its own view of the shared ledger, as each worker process has.
+        link = worker_link(coordinator.socket_path, ledger=FileLineageStore(tmp_path / "ledger"))
+        await link.connect()
+        try:
+            ticket = held_call(link.gate, "r", "c2", [USER_1, ASSISTANT_1, USER_2])
+            await coordinator.controller.prepare(CheckpointRequest(**control()))
+            # The call ends while admission is closed, before its response started.
+            await link.gate.exit(ticket)
+            recorded = dict(link.gate.disconnected)
+            rows_while_closed = call_ids()
+            await coordinator.controller.resume(CheckpointRequest(**control()))
+            # The worker's ``open_local`` deletes the rows.
+            await wait_until(lambda: call_ids() == ["c1"])
+        finally:
+            await link.disconnect()
+
+    assert recorded == {"c2": "r"}
+    assert rows_while_closed == ["c1", "c2", "c2"]
+    assert link.gate.disconnected == {}, "cleared for the next checkpoint"
 
 
 async def crash(link: PolicyWorkerLink) -> None:

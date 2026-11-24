@@ -33,6 +33,7 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.conversational_tool_use_policy_tool_generation.generation import PolicyToolGenerator
 from responses_api_agents.conversational_tool_use_policy_tool_generation.models import (
     CallPhase,
@@ -103,7 +104,8 @@ class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
             model_server = self.config.policy_model_server if role == "policy" else self.config.judge_model_server
             model_response = await self.server_client.post(
                 server_name=model_server.name,
-                url_path=self.url_path_for_run("/v1/chat/completions", body),
+                # A training framework trains the policy, not the judge, which keeps its own sampling.
+                url_path=self.url_path_for_run("/v1/chat/completions", body, trained=role == "policy"),
                 json=message_only_payload(prompt),
                 cookies=request.cookies,
             )
@@ -146,3 +148,6 @@ class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     PolicyToolGenerationAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = PolicyToolGenerationAgent.run_webserver()  # noqa: F401

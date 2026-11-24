@@ -18,6 +18,7 @@ import sys
 import tempfile
 import venv
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -51,7 +52,10 @@ def _server(test_data_fpath=None, **config_overrides):
         **config_overrides,
     )
     # Most server tests isolate grading behavior from external scientific dependencies.
-    with patch.object(app, "preflight_grading_interpreter", return_value=None):
+    with (
+        patch.object(app, "preflight_grading_interpreter", return_value=None),
+        patch.object(app, "ensure_grading_env", return_value=Path(sys.executable)),
+    ):
         server = ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         server._resolve_grading_interpreters()
     return server
@@ -408,7 +412,10 @@ class TestApp:
 
     def test_preflight_runs_once_per_resolved_interpreter(self):
         config = ScicodeResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="", timeout_secs=1800.0)
-        with patch.object(app, "preflight_grading_interpreter", return_value=None) as checked:
+        with (
+            patch.object(app, "preflight_grading_interpreter", return_value=None) as checked,
+            patch.object(app, "ensure_grading_env", return_value=Path(sys.executable)),
+        ):
             server = ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
             server._resolve_grading_interpreters()
             server._resolve_grading_interpreters()
@@ -736,7 +743,7 @@ class TestApp:
         assert [o["step_number"] for o in result.step_outputs] == ["1.1", "1.2"]
         assert [o["passed"] for o in result.step_outputs] == [True, False]
         ok, bad = result.step_outputs
-        assert ok["environment"] == "current" and bad["environment"] == "current"
+        assert ok["environment"] == "scicode" and bad["environment"] == "scicode"
         assert ok["status"] == "executed" and ok["returncode"] == 0 and ok["stdout_tail"] == "ok\n"
         assert bad["status"] == "executed" and bad["returncode"] == 1 and bad["timed_out"] is False
         assert bad["exception_class"] == "ValueError" and "ValueError" in bad["stderr_tail"]
@@ -785,7 +792,7 @@ class TestApp:
             {
                 "step_id": "1.1",
                 "step_number": "1.1",
-                "environment": "current",
+                "environment": "scicode",
                 "status": "executed",
                 "passed": False,
                 "returncode": None,
@@ -883,3 +890,69 @@ class TestApp:
         assert result.step_environment_results == [{"py_a": False, "py_b": True}, {"py_a": False, "py_b": False}]
         assert [o["environment"] for o in result.step_outputs] == ["py_b", "py_b"]
         assert [o["passed"] for o in result.step_outputs] == [True, False]
+
+
+class TestGradingEnvironment:
+    def test_sandbox_startup_does_not_prepare_local_environment(self):
+        config = ScicodeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            test_data_fpath="/image-only/test_data.h5",
+            test_data_md5="0" * 32,
+            sandbox={"image": "test-image"},
+            grading_interpreters=[{"name": "pinned", "python_executable": "/image-only/bin/python"}],
+        )
+        with (
+            patch.object(app, "ensure_grading_env", side_effect=AssertionError("local environment setup")),
+            patch.object(app, "preflight_grading_interpreter", side_effect=AssertionError("local preflight")),
+        ):
+            server = ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            assert server._resolve_grading_interpreters() == [("pinned", "/image-only/bin/python")]
+            assert server._resolve_test_data() == "/image-only/test_data.h5"
+
+    def test_pinned_environment_selected_at_startup(self, tmp_path):
+        python = tmp_path / "bin" / "python"
+        config = ScicodeResourcesServerConfig(
+            host="0.0.0.0", port=8080, entrypoint="", name="", grading_venv_path=str(tmp_path)
+        )
+        with (
+            patch.object(app, "ensure_grading_env", return_value=python) as setup,
+            patch.object(app, "preflight_grading_interpreter", return_value=None),
+        ):
+            server = ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        setup.assert_called_once_with(tmp_path)
+        assert server._resolve_grading_interpreters() == [("scicode", str(python))]
+
+
+def test_a_saved_answer_can_be_graded_again():
+    from resources_servers.scicode.app import ScicodeResourcesServerConfig
+
+    assert ScicodeResourcesServerConfig.REVERIFY_MODE.value == "stateless"
+
+
+@pytest.mark.asyncio
+async def test_a_regrade_payload_carries_the_solutions_the_original_verify_saw():
+    from aiohttp import ClientResponseError
+
+    from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_route_failure
+    from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
+
+    original = _request(solutions={"1.1": "x = 1", "1.2": "x = 1\ny = 2"}).model_dump()
+    original["token_usage_version"] = 1
+    original["step_usage"] = [{"step_number": "1.1", "status": "generated", "usage": None}]
+    error = ClientResponseError(MagicMock(real_url="http://verifier/verify"), (), status=500, message="boom")
+    failure = verify_route_failure(error, operation_id="op", attempt=1)
+    failure.__cause__ = error
+    masked_row = masked_verify_failure(original, failure)
+    materialized = {k: original[k] for k in ("responses_create_params", "problem_id", "sub_steps")}
+
+    payload = _build_verify_payload(InputRolloutPair(input=materialized, rollout=masked_row))
+
+    assert {k: payload[k] for k in ("solutions", "token_usage_version", "step_usage")} == {
+        k: original[k] for k in ("solutions", "token_usage_version", "step_usage")
+    }
+    with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
+        result = await _server(h5.name).verify(ScicodeVerifyRequest.model_validate(payload))
+    assert (result.reward, result.num_steps_total) == (1.0, 2)

@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from copy import deepcopy
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -290,7 +291,9 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
                 f"bash {installer} /tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11 2026.6.11"
             )
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
+            started = monotonic()
             result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "Fix the code"})
+            elapsed = monotonic() - started
             assert result.status_code == 200, result.text
             body = result.json()
             assert body["status"] == "completed"
@@ -308,7 +311,10 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             payload = staged(sandbox)
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
-            assert "--timeout 900" in sandbox.launch.await_args.kwargs["command"]
+            supervisor = shlex.split(sandbox.launch.await_args.kwargs["command"])
+            remaining = float(supervisor[supervisor.index("--timeout") + 1])
+            assert 0 < remaining <= 900
+            assert remaining >= 900 - elapsed
             assert "timeout" not in payload
             assert "PATH" not in payload["env"]
             assert payload["env"]["OPENCLAW_NO_RESPAWN"] == "1"
@@ -498,7 +504,7 @@ def test_request_allowlist_rejects_future_fields_but_accepts_defaults(setup):
         future_control: str | None = None
 
     agent, sandbox = setup
-    assert agent._sandbox_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "")
+    assert agent._sandbox_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "", [])
     with pytest.raises(HTTPException, match="future_control") as error:
         agent._sandbox_input(ExtendedRequest(input="task", future_control="unsupported"))
     assert error.value.status_code == 422
@@ -677,7 +683,7 @@ async def test_local_and_sandbox_prompts_include_the_same_instructions(setup):
         input=[{"role": "system", "content": "input system"}, {"role": "user", "content": "task"}],
     )
     expected = ("task", "configured system\n\nrequest instructions\n\ninput system")
-    assert agent._sandbox_input(body) == expected
+    assert agent._sandbox_input(body) == (*expected, [])
     with patch.object(agent, "_run_openclaw", AsyncMock(return_value=([], {}, "test-model"))) as run:
         await agent._create_response(body)
     assert run.await_args.args == expected
@@ -845,7 +851,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
 
-    async def disconnect():
+    async def disconnect(**_):
         clock[0] = 200.0
 
     sandbox.disconnect.side_effect = disconnect
@@ -862,7 +868,7 @@ async def test_concurrent_closes_share_the_saved_reply(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -992,7 +998,7 @@ async def test_close_start_prevents_activation(setup):
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def disconnect():
+    async def disconnect(**_):
         entered.set()
         await release.wait()
 
@@ -1075,7 +1081,7 @@ def test_sandbox_usage_details_preserve_positive_counts_and_treat_defaulted_zero
             "input_tokens": expected_input,
             "output_tokens": 5,
             "total_tokens": expected_input + 5,
-            "input_tokens_details": {"cached_tokens": expected_cache},
+            "input_tokens_details": {"cached_tokens": expected_cache, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": None},
         }
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
@@ -1100,7 +1106,7 @@ def test_missing_call_usage_keeps_sandbox_cache_aggregate_unknown(setup, second_
             "input_tokens": 12,
             "output_tokens": 3,
             "total_tokens": 15,
-            "input_tokens_details": {"cached_tokens": None},
+            "input_tokens_details": {"cached_tokens": None, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": None},
         }
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
@@ -2237,7 +2243,7 @@ async def test_close_retains_capture_after_provider_release(setup, tmp_path, own
         await asyncio.wait_for(sandbox.started.wait(), 2)
         assert f"{directory}/process_supervisor.sh" in sandbox.files
 
-        async def release():
+        async def release(**_: object):
             assert state.session.cleanup["cleanup_confirmed"] is True
             assert state.session.artifacts is not None
             sandbox.files.clear()
@@ -2297,12 +2303,16 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
         session_id = created.json()["agent_session_id"]
+        started = monotonic()
         response = client.post(
             "/ng-rollout/openclaw-smoke-a2/v1/responses", json=body.model_dump(mode="json", exclude_unset=True)
         )
+        elapsed = monotonic() - started
         assert response.status_code == 200, response.text
         command = shlex.split(sandbox.launch.await_args.kwargs["command"])
-        assert float(command[command.index("--timeout") + 1]) == expected
+        remaining = float(command[command.index("--timeout") + 1])
+        assert 0 < remaining <= expected
+        assert remaining >= expected - elapsed
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
         payload = staged(sandbox)

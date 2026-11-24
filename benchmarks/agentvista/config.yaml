@@ -1,0 +1,63 @@
+agentvista_dataset_path: ${oc.env:AGENTVISTA_GYM_DATASET,benchmarks/agentvista/data/agentvista_benchmark.jsonl}
+agentvista_output_root: ${oc.env:AGENTVISTA_OUTPUT_ROOT,outputs/agentvista}
+
+agentvista_agent:
+  responses_api_agents:
+    agentvista_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: agentvista_resources
+      source_root: ${oc.env:AGENTVISTA_ROOT,/opt/agentvista/source}
+      dataset: ${oc.env:AGENTVISTA_DATASET,/data/agentvista/datasets/val.json}
+      image_folder: ${oc.env:AGENTVISTA_IMAGES,/data/agentvista/datasets}
+      task_selector: ${oc.env:AGENTVISTA_TASKS,all}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${policy_model_name}
+      output_root: ${agentvista_output_root}
+      worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON,/opt/agentvista-worker/bin/python}
+      harness: ${oc.select:agentvista_harness,opencode}
+      default_max_turns: ${oc.select:agentvista_default_max_turns,30}
+      default_max_images: ${oc.select:agentvista_default_max_images,100}
+      command: ${oc.env:AGENTVISTA_OPENCODE,opencode}
+      opencode_version: 1.17.11
+      concurrency: ${oc.select:agentvista_concurrency,1}
+      max_steps: ${oc.select:agentvista_max_steps,150}
+      mcp_timeout_ms: 180000
+      agent_timeout: 5400
+      episode_timeout: 6000
+      context_tokens: ${oc.select:agentvista_context_tokens,65536}
+      output_tokens: ${oc.select:agentvista_output_tokens,8192}
+      datasets:
+        - name: agentvista
+          type: benchmark
+          jsonl_fpath: ${agentvista_dataset_path}
+          prompt_config: null
+          prepare_script: benchmarks/agentvista/prepare.py
+          num_repeats: 1
+agentvista_resources:
+  resources_servers:
+    agentvista:
+      entrypoint: app.py
+      source_root: ${oc.env:AGENTVISTA_ROOT,/opt/agentvista/source}
+      dataset: ${oc.env:AGENTVISTA_DATASET,/data/agentvista/datasets/val.json}
+      image_folder: ${oc.env:AGENTVISTA_IMAGES,/data/agentvista/datasets}
+      output_root: ${agentvista_output_root}
+      worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON,/opt/agentvista-worker/bin/python}
+      harness: ${oc.select:agentvista_harness,opencode}
+      domain: agent
+      verified: false
+      description: Original AgentVista answer judge and metrics
+agentvista_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: agentvista_agent
+      resources_server:
+        type: resources_servers
+        name: agentvista_resources
+      default_episode_timeout_seconds: null

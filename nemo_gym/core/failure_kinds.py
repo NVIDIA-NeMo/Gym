@@ -90,6 +90,7 @@ AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
 AGENT_LIMIT = "agent_limit"
 AGENT_INVALID_OUTPUT = "agent_invalid_output"
+GIT_WORKTREE_COMMIT_REJECTED = "git_worktree_commit_rejected"
 
 # --- model: requests made to a model endpoint ---------------------------------------- #
 # Preserve the upstream HTTP status separately; it is not a retry policy.
@@ -97,6 +98,9 @@ MODEL_REQUEST_ERROR = "model_request_error"
 MODEL_TRANSPORT_ERROR = "model_transport_error"
 # A policy-model operation whose observed attempts all timed out after a confirmed upload.
 MODEL_POLICY_RESPONSE_TIMEOUT = "model_policy_response_timeout"
+# A policy response timeout whose every attempt ended while the model server had requests waiting in its queue:
+# the server's capacity, not the model, held the request back.
+MODEL_SERVER_QUEUE_TIMEOUT = "model_server_queue_timeout"
 # Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
 MODEL_CONTEXT_LIMIT = "model_context_limit"
 
@@ -176,6 +180,9 @@ COHORT_INCOMPLETE = "cohort_incomplete"
 SERVER_SPINUP_TIMEOUT = "server_spinup_timeout"
 # The driver step of an orchestrated job could not install Gym (the uv installer, the checkout or the package install).
 DRIVER_INSTALL_FAILED = "driver_install_failed"
+# A benchmark's data preparation (its script, its dependencies or its isolated environment) failed; the next
+# segment would fail the same way, so a job chain stops instead of retrying it.
+ENVIRONMENT_PREPARE_FAILED = "environment_prepare_failed"
 # Collection refused to resume saved rollouts whose input and configuration identity does not verify.
 COLLECTION_RESUME_REFUSED = "collection_resume_refused"
 # A rollout was in flight when its allocation ended (a walltime cut, a preemption, a node failure or a driver that
@@ -228,9 +235,11 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         ENVIRONMENT_PROTOCOL_VIOLATION,
         AGENT_LIMIT,
         AGENT_INVALID_OUTPUT,
+        GIT_WORKTREE_COMMIT_REJECTED,
         MODEL_REQUEST_ERROR,
         MODEL_TRANSPORT_ERROR,
         MODEL_POLICY_RESPONSE_TIMEOUT,
+        MODEL_SERVER_QUEUE_TIMEOUT,
         MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
@@ -248,6 +257,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         COHORT_INCOMPLETE,
         SERVER_SPINUP_TIMEOUT,
         DRIVER_INSTALL_FAILED,
+        ENVIRONMENT_PREPARE_FAILED,
         COLLECTION_RESUME_REFUSED,
         ROLLOUT_ALLOCATION_ENDED,
         AGENT_ROUTE_FAILED,
@@ -331,6 +341,7 @@ _DEFAULT_CLASSIFICATION.update(
             SERVER_START_FAILED,
             MODEL_TRANSPORT_ERROR,
             MODEL_SERVER_ERROR,
+            MODEL_SERVER_QUEUE_TIMEOUT,
             AGENT_TIMEOUT_INFRASTRUCTURE,
             *PROVIDER_FAILURE_KINDS,
         ),

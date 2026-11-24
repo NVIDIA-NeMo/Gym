@@ -251,7 +251,7 @@ class TestPrepareDependencies:
         assert os.environ["VIRTUAL_ENV"] == str(tmp_path / "parent venv")
 
     def test_absolute_script_loads_and_executes_without_a_prepare_project(self, tmp_path):
-        from nemo_gym.cli._prepare_worker import load_preparer
+        from nemo_gym.server_runtime.supervisor._prepare_worker import load_preparer
 
         output = tmp_path / "data.jsonl"
         script = tmp_path / "prepare.py"
@@ -282,7 +282,7 @@ class TestPrepareDependencies:
             "    import agents.function_schema\n"
             f"    p = Path({str(output)!r}); p.write_text('ok'); return p\n"
         )
-        worker = Path(importlib.util.find_spec("nemo_gym.cli._prepare_worker").origin)
+        worker = Path(importlib.util.find_spec("nemo_gym.server_runtime.supervisor._prepare_worker").origin)
         (tmp_path / "args.json").write_text("{}")
         subprocess.run(
             [
@@ -311,10 +311,11 @@ class TestPrepareDependencies:
         (tmp_path / "wrong_preparer.py").write_text(
             "from pathlib import Path\ndef prepare(): return Path('wrong.jsonl')\n"
         )
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(benchmark_preparation.PreparationFailedError) as stopped:
             benchmark_preparation._run_isolated_prepare(
                 Path(sys.executable), "wrong_preparer", "prepare", tmp_path / "expected", {}
             )
+        assert isinstance(stopped.value.__cause__, subprocess.CalledProcessError)
 
 
 class TestLockedPrepareSearchRoots:
@@ -375,3 +376,132 @@ def test_isolated_prepare_receives_hf_config_and_structured_arguments(tmp_path, 
     )
     assert result == {"output": str(output)}
     assert output.read_text() == "prepared"
+
+
+def test_a_failed_isolated_preparer_is_a_typed_terminal_stop(tmp_path, monkeypatch) -> None:
+    import subprocess
+
+    from nemo_gym.environment import benchmark_preparation as preparation
+
+    script = tmp_path / "prepare.py"
+    script.write_text("")
+
+    def failing_worker(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args[0])
+
+    monkeypatch.setattr(preparation.subprocess, "run", failing_worker)
+
+    with pytest.raises(preparation.PreparationFailedError) as stopped:
+        preparation._run_isolated_prepare(
+            tmp_path / "python", str(script), "prepare", tmp_path / "out.jsonl", {}, config={}
+        )
+
+    assert str(stopped.value).startswith("EVAL STOPPED: data preparation failed for ")
+    assert (stopped.value.failure_kind, stopped.value.stop_exit_code) == ("environment_prepare_failed", 76)
+
+
+def test_the_cli_exits_76_and_leaves_the_kind_for_the_chain_guard(tmp_path, monkeypatch) -> None:
+    from nemo_gym.cli.utils import exit_cleanly_on_config_error
+    from nemo_gym.environment.benchmark_preparation import PreparationFailedError
+    from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
+
+    failure_file = tmp_path / ".gym_driver_failure.100"
+    monkeypatch.setenv(DRIVER_FAILURE_ENV, str(failure_file))
+
+    @exit_cleanly_on_config_error
+    def prepare() -> None:
+        raise PreparationFailedError("benchmarks.example.prepare", "prepare", "exit status 1")
+
+    with pytest.raises(SystemExit) as exited:
+        prepare()
+
+    assert exited.value.code == 76
+    assert failure_file.read_text() == "environment_prepare_failed\n"
+
+
+def test_an_in_process_preparer_that_raises_is_a_typed_terminal_stop(tmp_path) -> None:
+    script = tmp_path / "prepare.py"
+    script.write_text("def prepare(**kwargs):\n    raise ValueError('bad row')\n")
+    benchmark = SimpleNamespace(name="demo", dataset=SimpleNamespace(jsonl_fpath=str(tmp_path / "out.jsonl")))
+
+    with pytest.raises(benchmark_preparation.PreparationFailedError) as stopped:
+        benchmark_preparation._multiprocess_benchmark_prepare_fn((benchmark, str(script), {}, None))
+
+    assert "ValueError: bad row" in str(stopped.value)
+    assert stopped.value.stop_exit_code == 76
+
+
+def test_a_preparation_stop_survives_pickling_across_a_worker_boundary() -> None:
+    import pickle
+
+    original = benchmark_preparation.PreparationFailedError("benchmarks.example.prepare", "prepare", "KeyError: 'foo'")
+
+    restored = pickle.loads(pickle.dumps(original))
+
+    assert type(restored) is benchmark_preparation.PreparationFailedError
+    assert str(restored) == str(original)
+    assert (restored.failure_kind, restored.stop_exit_code) == ("environment_prepare_failed", 76)
+
+
+def test_a_failing_worker_in_the_parallel_pool_stops_with_76_instead_of_hanging(tmp_path, monkeypatch) -> None:
+    import signal
+
+    for name in ("first", "second"):
+        script = tmp_path / f"{name}_prepare.py"
+        script.write_text(
+            """
+def prepare(**kwargs):
+    raise ValueError("bad row")
+"""
+        )
+    failure_file = tmp_path / "driver_failure"
+    monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(failure_file))
+    # Fork from a standalone driver, as the CLI does, rather than a pytest
+    # thread that can inherit locks held by the test runner's other threads.
+    driver = tmp_path / "prepare_driver.py"
+    driver.write_text(
+        """from pathlib import Path
+from types import SimpleNamespace
+import sys
+
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.config.config_types import BenchmarkDatasetConfig
+from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, prepare_datasets
+
+
+@exit_cleanly_on_config_error
+def prepare():
+    root = Path(sys.argv[1])
+    benchmarks = [
+        SimpleNamespace(name=name, dataset=BenchmarkDatasetConfig(
+            name=name, type="benchmark", jsonl_fpath=root / f"{name}.jsonl",
+            prepare_script=root / f"{name}_prepare.py",
+        ))
+        for name in ("first", "second")
+    ]
+    prepare_datasets(benchmarks, PrepareBenchmarkConfig(uv_venv_dir=root, num_prepare_benchmark_processes=2))
+
+
+if __name__ == "__main__":
+    prepare()
+"""
+    )
+    with subprocess.Popen(
+        [sys.executable, str(driver), str(tmp_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    ) as worker:
+        try:
+            stdout, stderr = worker.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            if hasattr(os, "killpg"):
+                os.killpg(worker.pid, signal.SIGKILL)
+            else:
+                worker.kill()
+            worker.communicate()
+            pytest.fail("the preparation driver did not exit within 60 seconds")
+    assert worker.returncode == 76, stdout + stderr
+    assert failure_file.read_text() == "environment_prepare_failed\n"

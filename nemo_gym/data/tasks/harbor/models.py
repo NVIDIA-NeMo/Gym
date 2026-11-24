@@ -361,10 +361,11 @@ class HarborTaskConfig(HarborSettings):
     # A task with steps runs them in order as turns in one sandbox; ``mean`` is Harbor's default roll-up.
     steps: list[HarborTaskStep] = Field(default_factory=list)
     multi_step_reward_strategy: Literal["mean", "final"] = "mean"
-    # The dataset's `[gym.defaults].timeout_multiplier` once `apply_dataset_config` has scaled this task's budgets by
-    # it (not a task.toml key): the default a step inherits for a budget it does not name reads scaled by it too,
-    # like the budgets the task names (`step_verifier_timeout_sec`).
-    _timeout_multiplier: float = PrivateAttr(default=1.0)
+    # The factor the dataset's `[gym.defaults]` scaled this task's verifier budgets by (`timeout_multiplier` times
+    # `verifier_timeout_multiplier`) once `apply_dataset_config` has applied it (not a task.toml key): the default a
+    # step inherits for a verifier budget it does not name reads scaled by it too, like the budgets the task names
+    # (`step_verifier_timeout_sec`).
+    _verifier_timeout_multiplier: float = PrivateAttr(default=1.0)
 
     @model_validator(mode="before")
     @classmethod
@@ -396,8 +397,8 @@ class HarborTaskConfig(HarborSettings):
         if step.verifier.timeout_sec is not None:
             return step.verifier.timeout_sec
         # Harbor's `_step_verifier_timeout_sec` feeds that default through `_resolve_timeout_sec`, so it scales by
-        # the dataset's `timeout_multiplier` like every budget the task names (`apply_dataset_config` carries it).
-        return HARBOR_STEP_VERIFIER_TIMEOUT_SEC * self._timeout_multiplier
+        # the dataset's multipliers like every verifier budget the task names (`apply_dataset_config` carries them).
+        return HARBOR_STEP_VERIFIER_TIMEOUT_SEC * self._verifier_timeout_multiplier
 
     @property
     def is_shared_verifier(self) -> bool:

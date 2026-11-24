@@ -113,6 +113,7 @@ claude_code_agent:
       claude_code_version: null
       thinking: null
       max_thinking_tokens: null
+      fold_thinking: null
       bare: true
       mcp_config: null
       settings: null
@@ -130,6 +131,7 @@ claude_code_agent:
 - `claude_code_version`: npm version to pin on auto-install (null means latest)
 - `thinking`: passed to `--thinking` (`disabled`, `adaptive`, or `enabled`)
 - `max_thinking_tokens`: passed to `--max-thinking-tokens` to cap thinking token usage
+- `fold_thinking`: whether thinking is folded into the assistant message text as `<think>...</think>`. `null` (default) folds it unless training-token capture is on. `false` returns the capture-style transcript without capture: thinking as separate `reasoning` items, so the final message holds only the answer (useful when a judge grades the final message). `true` is rejected under capture
 - `bare`: when `true` (default), pass `--bare` to skip auto-discovery of hooks, skills, plugins, MCP servers, memory, and CLAUDE.md. Set to `false` to let Claude Code discover those from `CLAUDE_CONFIG_DIR` and the working directory
 - `mcp_config`: path to an MCP server config file, passed to `--mcp-config`. Explicit, so it works regardless of `bare`
 - `settings`: path to a settings JSON layered into the per-run `CLAUDE_CONFIG_DIR/settings.json`. Top-level keys override the defaults; the `env` block is shallow-merged so telemetry stays disabled unless you override it
@@ -208,8 +210,26 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   `function_call` items with `status="incomplete"` when the CLI times out. These witnesses let Gym
   attribute the parent transcript without assigning its reward to a subagent's captured chain.
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
-  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
+  transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted, unless
+  `fold_thinking: false` selects the capture-style transcript.
 - `turns_used` counts assistant messages, not tool calls.
+- Token usage covers every model call the CLI made, its subagents' included. Input counts the
+  prompt cache's reads and writes, and `cached_tokens` is the cache reads, or null when no cache
+  count was reported; `reasoning_tokens` is null, since Anthropic reports none. A run that ends on
+  its own takes it from the result event's `modelUsage` (its `usage` covers the main conversation
+  only). A run cut off at the timeout has no result event; it counts each call once by message id,
+  from Claude Code's session transcripts and its stream: a call that finished counts its final
+  usage, and a call cut off in flight counts the input it was sent with but no output, which is
+  reported only when a call ends. A call cut off before Claude Code recorded it, seconds after it
+  started, is in neither and is not counted. Context compaction is missing, since Claude Code leaves
+  it out of its transcripts (each compaction is one call over the whole context, about 0.5% of a
+  long run's input).
+- Through a Gym model server, the Anthropic Messages responses carry the cache reads in
+  `cache_read_input_tokens`, so Claude Code counts them as against an Anthropic endpoint.
+- Usage is Claude Code's own count. Against vLLM it counts a call's prompt twice when the call's
+  final usage reports no uncached input: Claude Code then keeps the prompt total it was sent when
+  the call started and adds the cache reads and writes to it. With DeepSeek V4.1 Flash that is
+  about 1 call in 135, or 0.7% extra input.
 - Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
   command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it
   exits, so a backgrounded command would hold the run open after the final answer.
@@ -348,14 +368,32 @@ in `sandbox_config.image`; set other `sandbox_config` keys under the profile's o
 It sets `network_access: model_only`, so the sandbox reaches only the model server; the image must
 include `bash`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+### Task-container settings
+
+These settings are off by default. They run Claude Code the way a harness started in the task
+container runs it, for benchmarks that grade such a harness.
+
+- `instruction_on_stdin` (sandbox sessions): pass the instruction on the CLI's stdin, as Harbor 0.24's
+  claude-code agent pipes it, instead of as an argument. It then never appears on a command line that an
+  agent's `pkill -f <word from its task>` could match.
+- `reasoning_effort`: passed to `--effort` (`low`, `medium`, `high`, `xhigh` or `max`), as Harbor passes
+  its reasoning effort.
+- `max_output_tokens`: the per-call output cap, as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (null keeps the CLI's
+  default).
+- `extra_env`: further client environment, e.g. `{API_TIMEOUT_MS: "3600000", CLAUDE_CODE_AUTO_COMPACT_WINDOW:
+  "1000000"}`. The variables the agent sets itself (endpoint, credentials, model, `CLAUDE_CONFIG_DIR`, the
+  output cap) are rejected.
+- `allow_root_workdir` (sandbox sessions): accept a task working directory of `/` (images without a
+  `WORKDIR`); the runtime and session files stay under `/tmp`, as a harness's own files do there.
+- `harbor_system_dependencies` (sandbox sessions): before installing Claude Code, run Harbor 0.24's
+  system-dependency step for its claude-code agent: curl, bash, nodejs, npm and procps, each installed with
+  the first package manager found (apt-get, dnf, yum, apk) when its commands are missing. Agents under
+  Harbor therefore have `node`, `npm`, `ps` and `pkill` even where the task image lacks them. As in
+  Harbor, a failed install (a nonzero package-manager exit, or the step's time limit,
+  `system_dependencies_timeout_seconds`, default 1800) fails session setup, so the episode is retried rather
+  than graded without those tools. With no supported package manager, Harbor only warns, and so does this
+  step.

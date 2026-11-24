@@ -80,7 +80,7 @@ def record(sandbox):
         return await run(command, **kwargs)
 
     sandbox.exec.side_effect = exec_
-    sandbox.disconnect.side_effect = lambda: events.append("disconnect")
+    sandbox.disconnect.side_effect = lambda **_: events.append("disconnect")
     return events
 
 
@@ -363,6 +363,8 @@ async def test_export_failure_is_a_gap_that_keeps_the_result_and_release(setup, 
 
 async def test_hanging_export_is_bounded_by_the_collection_budget(setup, tmp_path):
     agent, sandbox = setup
+    # The close budget bounds the collection; keep it short so the hanging export exhausts it.
+    agent.config.session_close_timeout_seconds = 1
     agent.config.export_dir = EXPORT_DIR
     capture_observations(sandbox, tmp_path)
     never = asyncio.Event()
@@ -578,6 +580,17 @@ async def test_pinned_ripgrep_is_staged_where_opencode_looks_and_replaces_the_pa
     assert params["env"]["XDG_CACHE_HOME"] == f"{directory}/cache"
 
 
+async def test_ripgrep_download_lets_the_installer_go_on_without_rg(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_ripgrep_download = True
+    events = record(sandbox)
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    assert events[index(events, "install_opencode_runtime.sh")].startswith(
+        "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1 bash "
+    )
+
+
 async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directory(setup, tmp_path):
     agent, sandbox = setup
     agent.config.sandbox_plugin_dependencies_path = "/mnt/cache/opencode-plugin-dependencies.tar.gz"
@@ -596,8 +609,10 @@ async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directo
     assert positional(events[unpack]) == [f"{directory}/config/.pinned-opencode", f"{directory}/config/opencode"]
     params, _ = launch_config(sandbox)
     assert params["env"]["XDG_CONFIG_HOME"] == f"{directory}/config"
-    # Without a pinned rg the installer keeps its best-effort ripgrep install.
-    assert not any(event.startswith("NG_OPENCODE_SKIP_RIPGREP") for event in events)
+    # Without a pinned rg the installer installs ripgrep itself and fails without it.
+    assert not any(
+        event.startswith(("NG_OPENCODE_SKIP_RIPGREP", "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD")) for event in events
+    )
 
 
 def test_a_dependency_archive_that_leaves_its_folder_refuses_the_seed(setup, tmp_path):

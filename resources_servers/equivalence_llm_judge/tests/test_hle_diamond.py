@@ -27,7 +27,7 @@ from omegaconf import OmegaConf
 from pydantic import TypeAdapter, ValidationError
 
 import benchmarks.hle_diamond.prepare as prepare_module
-import benchmarks.hle_diamond.prepare_opencode as prepare_opencode_module
+import benchmarks.hle_diamond.prepare_opencode_legacy as prepare_opencode_legacy_module
 import benchmarks.hle_diamond.prepare_text as prepare_text_module
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
@@ -37,13 +37,14 @@ from nemo_gym.config import (
     is_almost_server,
     maybe_get_server_instance_config,
 )
+from nemo_gym.config.config_types import AlmostServerError
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.data import fill_prompt, load_prompt_config
+from nemo_gym.data import build_image_input, fill_prompt, load_prompt_config
 from nemo_gym.environment import BENCHMARKS_DIR, BenchmarkConfig, load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.environment.discovery import _parse_no_environment_tolerating_unset_values
@@ -73,6 +74,7 @@ UPSTREAM_SYSTEM_PROMPT = (
 )
 IMAGE_DATA_URI = "data:image/png;base64,iVBORw0KGgo="
 ROW_FIELDS = [
+    "task_id",
     "question",
     "expected_answer",
     "answer_type",
@@ -185,6 +187,7 @@ class TestPrepare:
         ]
         rows = _read_rows(output)
         assert [list(row) for row in rows] == [ROW_FIELDS + ["responses_create_params"]] * 4
+        assert all(row["task_id"] == row["uuid"] for row in rows)
         by_id = {row["uuid"]: row for row in rows}
 
         image_row = by_id["q-reasoning-image"]
@@ -212,9 +215,9 @@ class TestPrepare:
         assert "Wrote 4 problems" in capsys.readouterr().out
 
     def test_opencode_prompt_keeps_every_row_in_one_user_turn_with_the_image_block(self, prepared_env, capsys):
-        """The OpenCode adapter forwards only the user turn, so the full set for opencode_full.yaml folds the
-        instruction after the question (prompts/opencode.yaml) and carries the image in that same turn."""
-        output = prepare_opencode_module.prepare()
+        """The OpenCode adapter forwards only the user turn, so the full set for opencode_full.yaml
+        folds the instruction after the question (prompts/opencode.yaml) and carries the image in that same turn."""
+        output = prepare_opencode_legacy_module.prepare()
 
         assert output == prepare_module.OUTPUT_OPENCODE_FPATH
         rows = _read_rows(output)
@@ -241,11 +244,11 @@ class TestPrepare:
         assert "Wrote 4 problems" in written and "(1 with an image)" in written
         assert prepare_module.OUTPUT_FPATH.exists() is False  # the default file is not touched
 
-        assert [row["uuid"] for row in _read_rows(prepare_opencode_module.main(["--limit", "1"]))] == [
+        assert [row["uuid"] for row in _read_rows(prepare_opencode_legacy_module.main(["--limit", "1"]))] == [
             "q-reasoning-text"
         ]
         with pytest.raises(SystemExit):
-            prepare_opencode_module.main(["--prompt", "opencode"])
+            prepare_opencode_legacy_module.main(["--prompt", "opencode"])
         assert "unrecognized arguments: --prompt" in capsys.readouterr().err
 
     def test_text_only_drops_image_rows_and_keeps_raw_fields(self, prepared_env):
@@ -255,6 +258,7 @@ class TestPrepare:
         rows = _read_rows(output)
         assert [row["uuid"] for row in rows] == ["q-reasoning-text", "q-knowledge-mc", "q-knowledge-text"]
         assert [list(row) for row in rows] == [ROW_FIELDS] * 3
+        assert all(row["task_id"] == row["uuid"] for row in rows)
         assert all(row["has_image"] is False for row in rows)
         assert IMAGE_DATA_URI not in output.read_text(encoding="utf-8")
 
@@ -392,12 +396,34 @@ LISTED_BENCHMARKS = {
         "benchmarks/hle_diamond/prompts/opencode.yaml",
     ),
     "hle_diamond/pi": ("hle_diamond_text", "hle_diamond_pi_agent", "benchmarks/hle_diamond/prompts/opencode.yaml"),
-    "hle_diamond/opencode_full": ("hle_diamond_opencode_full", "hle_diamond_opencode_agent", None),
     # Restates the dataset (Gym's _inherit_from is a single-step rename), so it is listed unlike opencode_search.
     "hle_diamond/opencode_reference": (
         "hle_diamond_text",
         "hle_diamond_opencode_reference_agent",
         "benchmarks/hle_diamond/prompts/opencode.yaml",
+    ),
+    # The deprecated relay presets keep their agent names.
+    "hle_diamond/opencode_legacy_agent": (
+        "hle_diamond_text",
+        "hle_diamond_opencode_agent",
+        "benchmarks/hle_diamond/prompts/opencode.yaml",
+    ),
+    "hle_diamond/pi_legacy_agent": (
+        "hle_diamond_text",
+        "hle_diamond_pi_agent",
+        "benchmarks/hle_diamond/prompts/opencode.yaml",
+    ),
+    "hle_diamond/opencode_reference_legacy_agent": (
+        "hle_diamond_text",
+        "hle_diamond_opencode_reference_agent",
+        "benchmarks/hle_diamond/prompts/opencode.yaml",
+    ),
+    "hle_diamond/opencode_full": ("hle_diamond_opencode_full", "hle_diamond_opencode_full_agent", None),
+    # The session preset over the full set declares the dataset too, so it is listed unlike opencode_hle_tools.
+    "hle_diamond/opencode_hle_tools_full": (
+        "hle_diamond_opencode_full",
+        "hle_diamond_opencode_reference_agent",
+        None,
     ),
 }
 FULL_OPENCODE_DATASET = {
@@ -405,11 +431,18 @@ FULL_OPENCODE_DATASET = {
     "type": "benchmark",
     "jsonl_fpath": "benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl",
     "prompt_config": None,
-    "prepare_script": "benchmarks/hle_diamond/prepare_opencode.py",
+    "prepare_script": "benchmarks/hle_diamond/prepare_opencode_legacy.py",
     "num_repeats": 1,
 }
 JUDGE_SERVER = "hle_diamond_equivalence_llm_judge_resources_server"
 REFERENCE_AGENT = "hle_diamond_opencode_reference_agent"
+FULL_AGENT = "hle_diamond_opencode_full_agent"
+OPENCODE_SCIENCE_DOCKERFILE = (
+    REPO_ROOT / "responses_api_agents" / "opencode_sandboxed_agent" / "offline_science_image" / "Dockerfile"
+)
+PI_SCIENCE_PACKAGE = (
+    REPO_ROOT / "responses_api_agents" / "pi_sandboxed_agent" / "offline_science_image" / "package.json"
+)
 REFERENCE_IMAGE_DIR = REPO_ROOT / "responses_api_agents" / "opencode_sandboxed_agent" / "hle_reference_image"
 ENVIRONMENT_NOTE = "/tmp/nemo-gym-environment.txt"
 ACK_ENV = "HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS"
@@ -455,14 +488,141 @@ class TestConfigs:
         tavily = get_first_server_config_dict(_resolve(f"{variant}.yaml"), "tavily")
         assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
 
+    def test_hle_tools_preset_wires_exactly_the_upstream_tool_server(self, monkeypatch):
+        """opencode_hle_tools: opencode_reference.yaml's agent session (the reference image under upstream's
+        egress policy) with one tool server, the hle_web_tools instance over MCP, and no Tavily resource; the
+        reference agent's knobs (egress, address exposure, MCP timeout, image) are the same, and only the tool
+        server and the note differ. The note is the reference note with the two tools named as OpenCode shows
+        them (<grant>_<tool>)."""
+        monkeypatch.delenv("OPENCODE_REFERENCE_SANDBOX_IMAGE", raising=False)
+        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / "opencode_hle_tools.yaml", strict=False)
+        assert (benchmark.name, benchmark.agent_name, benchmark.num_repeats) == (
+            "hle_diamond_text",
+            REFERENCE_AGENT,
+            1,
+        )
+
+        resolved = _resolve("opencode_hle_tools.yaml")
+        assert list(resolved[REFERENCE_AGENT]["responses_api_agents"]) == ["opencode_agent"]
+        # Only the reference agent and the web_tools server are started: no search agent, no Tavily resource.
+        assert resolved["hle_diamond_opencode_agent"] is None and resolved["tavily"] is None
+        env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]["environment_servers"]
+        assert list(env_server) == ["single_agent_turn_legacy"]
+        assert env_server["single_agent_turn_legacy"]["agent_server"]["name"] == REFERENCE_AGENT
+        agent = get_first_server_config_dict(resolved, REFERENCE_AGENT)
+        assert agent["tool_servers"] == [{"type": "resources_servers", "name": "web_tools"}]
+        assert (agent["network_access"], agent["sandbox_provider"]) == ("model_and_tools", "sandbox")
+        # The sandbox reaches the tool server by address, so the Resources servers leave loopback too.
+        assert list(resolved["absolute_ip_server_types"]) == ["responses_api_models", "resources_servers"]
+        assert agent["mcp_tool_timeout_seconds"] == 300  # web_fetch of a long page or PDF
+        assert agent["sandbox_config"]["image"] == "gym-opencode-hle-reference:local"
+        note = agent["system_prompt"]
+        assert "disabled" in note and "no downloads and no package installation" in note and "Tavily" not in note
+        assert "web_search" in note and "web_fetch" in note
+        assert "web_tools_web_search" in note and "web_tools_web_fetch" in note  # the names the model sees
+        assert "files" not in agent["sandbox_config"]  # the note is the prompt
+        # The effort travels on the model server's extra_body (TestReasoningEffort), not on an OpenCode option.
+        assert "provider" not in agent["opencode_config"]
+        assert list(resolved["web_tools"]["resources_servers"]) == ["hle_web_tools"]
+        tools = get_first_server_config_dict(resolved, "web_tools")
+        assert tools["expose_tools_over_mcp"] is True
+        assert "blocklist_file_path" not in tools  # the server's pinned upstream copy, not a per-preset list
+
+        # Everything but the tool server and the note is opencode_reference.yaml's.
+        reference = OmegaConf.to_container(
+            get_first_server_config_dict(_resolve("opencode_reference.yaml"), REFERENCE_AGENT)
+        )
+        agent_dict = OmegaConf.to_container(agent)
+        differing = {key for key in set(agent_dict) | set(reference) if agent_dict.get(key) != reference.get(key)}
+        assert differing - {"port"} == {"tool_servers", "system_prompt"}
+
+    @pytest.mark.parametrize("default_host", [None, "192.0.2.20"], ids=["resolved_address", "explicit_default_host"])
+    def test_hle_tools_sandbox_reaches_exactly_the_model_server_and_the_tool_server(self, monkeypatch, default_host):
+        """`absolute_ip_server_types` moves every model and Resources server to the routable address, and an
+        explicit `default_host` moves every server without a host of its own; the egress policy then opens that
+        address on every port. The judge resources server (config.yaml), the judge model (judge_openai.yaml) and
+        the Environment Server (preset) pin their own loopback host, and a server's own host wins either way, so
+        the sandbox reaches exactly two servers: the model server and web_tools."""
+        import nemo_gym.config.global_config as global_config
+        from nemo_gym.config import GlobalConfigDictParser
+
+        for name, value in {
+            "TAVILY_API_KEY": "unused",
+            "OPENSANDBOX_API_KEY": "unused",
+            "OPENSANDBOX_DOMAIN": "unused.invalid",
+        }.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv("HLE_DIAMOND_JUDGE_MODEL", raising=False)
+        monkeypatch.setattr(global_config, "gethostbyname", MagicMock(return_value="192.0.2.20"))
+        monkeypatch.setattr(global_config, "_find_open_port_using_range", MagicMock(side_effect=range(12000, 13000)))
+        initial = OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            {
+                "config_paths": [
+                    "benchmarks/hle_diamond/opencode_hle_tools.yaml",
+                    "benchmarks/hle_diamond/judge_openai.yaml",
+                ]
+            },
+            {"default_host": default_host} if default_host else {},
+        )
+        # The full parse (not the offline listing parse, which skips the use_absolute_ip host lookup).
+        config = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                dotenv_path=None,
+            )
+        )
+
+        # Every started server, not a list of names: a server added to the composition must not take the routable
+        # address unnoticed.
+        hosts = {
+            instance.name: instance.get_inner_run_server_config_dict()["host"]
+            for instance in GlobalConfigDictParser().filter_for_server_instance_configs(config)
+        }
+        assert {name for name, host in hosts.items() if host != "127.0.0.1"} == {"policy_model", "web_tools"}
+        assert hosts["policy_model"] == hosts["web_tools"] == "192.0.2.20"
+        assert {JUDGE_SERVER, "hle_diamond_judge_model", REFERENCE_AGENT} <= set(hosts)
+        assert config["head_server"]["host"] == "127.0.0.1"
+
+    def test_hle_tools_judge_reads_the_bare_question_under_upstreams_output_cap(self):
+        """Upstream's judge sees question['question'] and runs under max_completion_tokens=4096. The opencode
+        prompt folds the answer-format instruction after the question in the one user message, so the preset's
+        regex cuts it off; a bare question (the default prompt's user message) passes through unchanged."""
+        from resources_servers.equivalence_llm_judge.app import _extract_question_text
+
+        judge = get_first_server_config_dict(_resolve("opencode_hle_tools.yaml"), JUDGE_SERVER)
+        assert OmegaConf.to_container(judge["judge_responses_create_params"]) == {
+            "input": [],
+            "max_output_tokens": 4096,
+        }
+        regex = judge["question_extract_regex"]
+        question = "What is 2+2?\n\nAnswer in words: is it four?"
+        for prompt_file in ("opencode.yaml", "default.yaml"):
+            prompt = load_prompt_config(str(HLE_DIAMOND_PROMPTS / prompt_file))
+            params = NeMoGymResponseCreateParamsNonStreaming(input=fill_prompt(prompt, {"question": question}))
+            assert _extract_question_text(params, regex) == question, prompt_file
+        # opencode_hle_tools_full inherits the regex over the materialized full set, whose image rows carry the
+        # same user text as an input_text part next to the input_image block.
+        materialized = build_image_input(load_prompt_config(str(HLE_DIAMOND_PROMPTS / "opencode.yaml")), question, "x")
+        assert [part["type"] for part in materialized[0]["content"]] == ["input_text", "input_image"]
+        assert _extract_question_text(NeMoGymResponseCreateParamsNonStreaming(input=materialized), regex) == question
+        # The other presets keep the judge's defaults (the whole last user message, no output cap).
+        reference = get_first_server_config_dict(_resolve("opencode_reference.yaml"), JUDGE_SERVER)
+        assert reference["question_extract_regex"] is None
+        assert OmegaConf.to_container(reference["judge_responses_create_params"]) == {"input": []}
+
     @pytest.mark.parametrize(
-        ("config_file", "with_search"), [("opencode_full.yaml", False), ("opencode_search_full.yaml", True)]
+        ("config_file", "with_search"),
+        [("opencode_full.yaml", False), ("opencode_search_full.yaml", True)],
     )
     def test_full_presets_swap_only_the_dataset_of_the_opencode_agent(self, config_file, with_search):
-        """The 1000-row variants carry the composed preset's agent (effort, tools, network policy) over the
+        """The deprecated 1000-row variants keep opencode_sandboxed_agent (the session preset over the full set is
+        opencode_hle_tools_full, below) with the relay presets' effort, tools and network policy over the
         OpenCode-prompted full set with no rollout-time prompt; only opencode_full declares the dataset."""
         resolved = _resolve(config_file)
-        agent = get_first_server_config_dict(resolved, "hle_diamond_opencode_agent")
+        agent = get_first_server_config_dict(resolved, FULL_AGENT)
 
         assert [dict(dataset) for dataset in agent["datasets"]] == [FULL_OPENCODE_DATASET]
         assert agent["opencode_config"]["provider"]["nemo_gym"]["models"]["dummy_model"]["options"] == {
@@ -474,13 +634,79 @@ class TestConfigs:
             assert "Tavily" in agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
             tavily = get_first_server_config_dict(resolved, "tavily")
             assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
+            # opencode_search_full restates the session preset's Tavily server and note; keep the
+            # copies equal.
+            search = _resolve("opencode_search.yaml")
+
+            def settings(server):  # host and port are assigned per resolve
+                return {key: value for key, value in server.items() if key not in ("host", "port")}
+
+            assert settings(tavily) == settings(get_first_server_config_dict(search, "tavily"))
+            assert (
+                agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+                == (get_first_server_config_dict(search, "hle_diamond_opencode_agent")["system_prompt"])
+            )
         else:
             assert "tool_servers" not in agent and agent["network_access"] == "model_only"
         benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / config_file, strict=False)
         assert (benchmark.name, benchmark.agent_name, benchmark.dataset.prompt_config) == (
             "hle_diamond_opencode_full",
-            "hle_diamond_opencode_agent",
+            FULL_AGENT,
             None,
+        )
+        # Still behind the legacy_agent /run relay, and the session agent of the text presets is not composed.
+        assert list(resolved[FULL_AGENT]["responses_api_agents"]) == ["opencode_sandboxed_agent"]
+        env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]["environment_servers"]
+        assert (
+            list(env_server) == ["legacy_agent"] and env_server["legacy_agent"]["agent_server"]["name"] == FULL_AGENT
+        )
+        assert "hle_diamond_opencode_agent" not in resolved
+
+    def test_hle_tools_full_preset_swaps_only_the_dataset_of_the_reference_agent(self, monkeypatch):
+        """opencode_hle_tools_full: opencode_hle_tools over the OpenCode-prompted full set (all 1000 rows, the image
+        rows with their input_image block, no rollout-time prompt) on the same session agent, for the denominator
+        of the published numbers. Everything but the dataset is opencode_hle_tools': the agent (image, egress,
+        tools, note), the judge as upstream runs it, the tool server and the environment server; declaring the
+        dataset makes the preset listed."""
+        monkeypatch.delenv("OPENCODE_REFERENCE_SANDBOX_IMAGE", raising=False)
+        resolved, base = _resolve("opencode_hle_tools_full.yaml"), _resolve("opencode_hle_tools.yaml")
+        agent = get_first_server_config_dict(resolved, REFERENCE_AGENT)
+        assert [dict(dataset) for dataset in agent["datasets"]] == [FULL_OPENCODE_DATASET]
+
+        def settings(server):  # host and port are assigned per resolve
+            return {key: value for key, value in OmegaConf.to_container(server).items() if key not in ("host", "port")}
+
+        agent_dict, base_dict = settings(agent), settings(get_first_server_config_dict(base, REFERENCE_AGENT))
+        differing = {key for key in set(agent_dict) | set(base_dict) if agent_dict.get(key) != base_dict.get(key)}
+        assert differing == {"datasets"}
+        for instance in (JUDGE_SERVER, "web_tools", "hle_diamond_equivalence_llm_judge_environment_server"):
+            assert settings(get_first_server_config_dict(resolved, instance)) == settings(
+                get_first_server_config_dict(base, instance)
+            ), instance
+        assert resolved["tavily"] is None and resolved["hle_diamond_opencode_agent"] is None
+        # sandbox_docker_local.yaml addresses the agent by name, so the acknowledged Docker composition is the
+        # same as opencode_hle_tools' apart from the dataset (the refusal without the acknowledgement is held by
+        # TestReferencePreset over this preset too).
+        monkeypatch.setenv(ACK_ENV, "egress-not-restricted")
+        docker = get_first_server_config_dict(
+            _resolve("opencode_hle_tools_full.yaml", "sandbox_docker_local.yaml"), REFERENCE_AGENT
+        )
+        docker_agent = settings(docker)
+        docker_base = settings(
+            get_first_server_config_dict(
+                _resolve("opencode_hle_tools.yaml", "sandbox_docker_local.yaml"), REFERENCE_AGENT
+            )
+        )
+        assert {
+            key for key in set(docker_agent) | set(docker_base) if docker_agent.get(key) != docker_base.get(key)
+        } == {"datasets"}
+        assert (docker["sandbox_provider"], docker["network_access"]) == ("sandbox_docker", "inherit")
+        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / "opencode_hle_tools_full.yaml", strict=False)
+        assert (benchmark.name, benchmark.agent_name, benchmark.dataset.prompt_config, benchmark.num_repeats) == (
+            "hle_diamond_opencode_full",
+            REFERENCE_AGENT,
+            None,
+            1,
         )
 
     @pytest.mark.parametrize(
@@ -494,6 +720,12 @@ class TestConfigs:
             "opencode_search_full.yaml",
             "pi.yaml",
             "pi_search.yaml",
+            "opencode_legacy_agent.yaml",
+            "opencode_search_legacy_agent.yaml",
+            "pi_legacy_agent.yaml",
+            "pi_search_legacy_agent.yaml",
+            "opencode_hle_tools.yaml",
+            "opencode_hle_tools_full.yaml",
         ],
     )
     def test_every_preset_shares_the_hle_judge_prompt_labels_and_partition_slices(self, config_file):
@@ -528,8 +760,8 @@ class TestConfigs:
             get_first_server_config_dict(resolved, "hle_diamond_judge_model")["openai_model"] == "vendor/other-judge"
         )
 
-    def test_judge_knobs_default_off_and_only_hle_diamond_enables_them(self):
-        """The shared judge server's slice hook and case-insensitive labels stay off for hle and hle_verified."""
+    def test_judge_knobs_default_off_and_benchmarks_opt_in(self):
+        """Benchmarks choose slice fields independently of verdict-label matching."""
         fields = LLMJudgeResourcesServerConfig.model_fields
         assert fields["report_slice_fields"].default_factory() == []
         assert fields["judge_labels_case_insensitive"].default is False
@@ -537,9 +769,11 @@ class TestConfigs:
             (REPO_ROOT / "resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml").read_text()
         )["equivalence_llm_judge"]["resources_servers"]["equivalence_llm_judge"]
         assert not {"report_slice_fields", "judge_labels_case_insensitive"} & set(base)
+        assert "judge_labels_case_insensitive" not in str(base)
         for sibling in ("hle", "hle_verified"):
             sibling_text = (REPO_ROOT / "benchmarks" / sibling / "config.yaml").read_text(encoding="utf-8")
-            assert "judge_labels_case_insensitive" not in sibling_text and "report_slice_fields" not in sibling_text
+            assert "judge_labels_case_insensitive: true" in sibling_text
+            assert "report_slice_fields: [category, raw_subject, modality]" in sibling_text
 
         shipped = yaml.safe_load((HLE_DIAMOND_DIR / "config.yaml").read_text())[JUDGE_SERVER]["resources_servers"][
             "equivalence_llm_judge"
@@ -561,26 +795,189 @@ class TestConfigs:
 
 class TestReasoningEffort:
     """D4 on the sandboxed path: Gym's ++responses_create_params.reasoning.effort decorates only Gym's run
-    request, so each harness has to request high effort in its own model call."""
+    request, and OpenCode and Pi build their own model calls inside the sandbox."""
 
-    @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_search.yaml"])
-    def test_opencode_presets_make_opencode_request_high_reasoning_effort(self, config_file):
-        opencode_config = get_first_server_config_dict(_resolve(config_file), "hle_diamond_opencode_agent")[
-            "opencode_config"
-        ]
+    @pytest.mark.parametrize(
+        ("config_file", "agent_name"),
+        [
+            ("opencode.yaml", "hle_diamond_opencode_agent"),
+            ("opencode_search.yaml", "hle_diamond_opencode_agent"),
+            ("opencode_hle_tools.yaml", REFERENCE_AGENT),
+            ("opencode_reference.yaml", REFERENCE_AGENT),
+            ("pi.yaml", "hle_diamond_pi_agent"),
+            ("pi_search.yaml", "hle_diamond_pi_agent"),
+        ],
+    )
+    def test_session_presets_leave_the_effort_to_the_model_server(self, config_file, agent_name):
+        """Neither session agent can put an effort on its harness's calls (OpenCode's session config takes no
+        model options; Pi's generated provider declares no reasoning_effort support, so --thinking never leaves
+        the sandbox), so the README documents the model server's extra_body instead."""
+        agent = get_first_server_config_dict(_resolve(config_file), agent_name)
 
-        assert opencode_config["provider"]["nemo_gym"]["models"]["dummy_model"]["options"]["reasoningEffort"] == "high"
-        # Merged into the inherited OpenCode config, not substituted for it.
-        assert list(opencode_config["instructions"]) == ["/tmp/nemo-gym-environment.txt"]
-        assert opencode_config["permission"]["webfetch"] == "deny"
+        assert not {"reasoning_effort", "thinking", "provider_compat"} & set(agent)
+        readme = README.read_text(encoding="utf-8")
+        for model_type in ("vllm_model", "litellm_model"):
+            assert f"++policy_model.responses_api_models.{model_type}.extra_body.reasoning_effort=high" in readme
 
-    @pytest.mark.parametrize("config_file", ["pi.yaml", "pi_search.yaml"])
-    def test_pi_presets_pass_thinking_high(self, config_file):
-        agent = get_first_server_config_dict(_resolve(config_file), "hle_diamond_pi_agent")
+    @pytest.mark.parametrize(
+        ("config_file", "agent_name"),
+        [
+            ("opencode.yaml", "hle_diamond_opencode_agent"),
+            ("opencode_search.yaml", "hle_diamond_opencode_agent"),
+            ("opencode_hle_tools.yaml", REFERENCE_AGENT),
+            ("opencode_reference.yaml", REFERENCE_AGENT),
+        ],
+    )
+    def test_opencode_session_presets_deny_subagents_and_web_tools(self, config_file, agent_name):
+        agent = get_first_server_config_dict(_resolve(config_file), agent_name)
 
-        # Pi's --thinking levels are off, minimal, low, medium, high, xhigh, max.
-        assert agent["thinking"] == "high"
-        assert agent["model_server"]["name"] == "policy_model"  # inherited preset keys survive
+        # Subagents and web tools off, as in the sandboxed benchmark profile. OpenCode applies the last matching
+        # rule, so the denies must follow the inherited "*": allow, and no `tools` map may precede them.
+        assert set(agent["opencode_config"]) == {"permission"}
+        permission = agent["opencode_config"]["permission"]
+        rules = list(permission)
+        for tool in ("task", "webfetch", "websearch"):
+            assert permission[tool] == "deny" and rules.index(tool) > rules.index("*"), tool
+
+
+SESSION_PRESETS = [
+    # config file, agent, harness
+    ("opencode.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
+    ("opencode_search.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
+    ("opencode_hle_tools.yaml", REFERENCE_AGENT, "opencode_agent"),
+    ("opencode_hle_tools_full.yaml", REFERENCE_AGENT, "opencode_agent"),
+    ("opencode_reference.yaml", REFERENCE_AGENT, "opencode_agent"),
+    ("pi.yaml", "hle_diamond_pi_agent", "pi_agent"),
+    ("pi_search.yaml", "hle_diamond_pi_agent", "pi_agent"),
+]
+
+
+class TestAgentSessions:
+    """The text presets run opencode_agent / pi_agent in agent sessions through single_agent_turn_legacy, each
+    session in a sandbox the agent creates under the egress policy of the sandboxed presets they replace."""
+
+    @pytest.mark.parametrize(("config_file", "agent_name", "harness"), SESSION_PRESETS)
+    def test_session_presets_route_episodes_through_the_environment_server(self, config_file, agent_name, harness):
+        resolved = _resolve(config_file)
+        assert list(resolved[agent_name]["responses_api_agents"]) == [harness]
+        env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]["environment_servers"]
+        assert list(env_server) == ["single_agent_turn_legacy"]
+        assert env_server["single_agent_turn_legacy"]["agent_server"]["name"] == agent_name
+        assert env_server["single_agent_turn_legacy"]["resources_server"]["name"] == JUDGE_SERVER
+        # The judge serves no tools, so the server grants none (a session harness refuses a direct_http grant).
+        assert "direct_http" not in env_server["single_agent_turn_legacy"].get("resources_tool_transports", [])
+        # No relay, no simple agent, and no unbound copy of the harness's own instance left to start.
+        for absent in ("hle_diamond_equivalence_llm_judge_simple_agent", harness, "opencode_benchmark_agent"):
+            assert absent not in resolved or resolved[absent] is None
+
+        agent = get_first_server_config_dict(resolved, agent_name)
+        assert agent["resources_server"]["name"] == JUDGE_SERVER
+        # The sandbox TTL starts at the seed and the run budget after it, so the TTL leaves room for the ready wait;
+        # a sandbox lost before the deadline would make the row an execution error instead of a graded run.
+        assert agent["sandbox_config"]["ttl_s"] >= agent["timeout"] + agent["sandbox_config"]["ready_timeout_s"]
+
+    @pytest.mark.parametrize(("config_file", "agent_name", "harness"), SESSION_PRESETS)
+    def test_session_agents_validate_against_their_harness_config(self, config_file, agent_name, harness, monkeypatch):
+        from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+        from responses_api_agents.pi_agent.app import PiAgentConfig
+
+        monkeypatch.setenv("OPENCODE_SANDBOX_IMAGE", "gym-opencode-science:local")
+        monkeypatch.setenv("PI_SANDBOX_IMAGE", "gym-pi-science:local")
+        agent = OmegaConf.to_container(get_first_server_config_dict(_resolve(config_file), agent_name), resolve=True)
+        config_class = {"opencode_agent": OpenCodeAgentConfig, "pi_agent": PiAgentConfig}[harness]
+        config_class.model_validate(agent | {"name": agent_name})
+
+    @pytest.mark.parametrize(
+        ("config_file", "agent_name", "hle_agent_name"),
+        [
+            ("opencode.yaml", "hle_diamond_opencode_agent", "hle_opencode_agent"),
+            ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_opencode_agent"),
+            ("pi.yaml", "hle_diamond_pi_agent", "hle_pi_agent"),
+            ("pi_search.yaml", "hle_diamond_pi_agent", "hle_pi_agent"),
+        ],
+    )
+    def test_session_agents_are_the_hle_agents_on_the_hle_diamond_judge_and_dataset(
+        self, config_file, agent_name, hle_agent_name
+    ):
+        """Both benchmarks compose the shared offline_science profile; HLE-Diamond restates only its judge and its
+        dataset, so the harness settings cannot drift from benchmarks/hle's presets."""
+        agent = OmegaConf.to_container(get_first_server_config_dict(_resolve(config_file), agent_name))
+        hle = OmegaConf.to_container(
+            get_first_server_config_dict(_resolve_paths([f"benchmarks/hle/{config_file}"]), hle_agent_name)
+        )
+
+        differing = {key for key in set(agent) | set(hle) if agent.get(key) != hle.get(key)}
+        assert differing - {"port"} == {"resources_server", "datasets"}
+        assert [dataset["name"] for dataset in agent["datasets"]] == ["hle_diamond_text"]
+
+    @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_reference.yaml"])
+    def test_restricted_opencode_sandboxes_run_the_images_pinned_binary(self, config_file):
+        """A sandbox limited to the model and tool servers cannot download OpenCode, so the presets run the
+        binary that the science and reference images install, at the digest their Dockerfiles check."""
+        agent_name = REFERENCE_AGENT if config_file == "opencode_reference.yaml" else "hle_diamond_opencode_agent"
+        agent = get_first_server_config_dict(_resolve(config_file), agent_name)
+        dockerfile = (
+            REFERENCE_IMAGE_DIR / "Dockerfile"
+            if config_file == "opencode_reference.yaml"
+            else OPENCODE_SCIENCE_DOCKERFILE
+        ).read_text(encoding="utf-8")
+        digest, path = re.search(r"echo '([0-9a-f]{64})  (/\S+/opencode)' \| sha256sum -c", dockerfile).groups()
+        assert (agent["sandbox_executable_path"], agent["sandbox_executable_sha256"]) == (path, digest)
+        from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+
+        version = re.search(r"releases/download/v([0-9.]+)/opencode-linux", dockerfile).group(1)
+        assert agent.get("opencode_version", OPENCODE_VERSION) == version
+
+    def test_restricted_pi_sandboxes_run_the_images_runtime(self):
+        """The preset runs the Pi runtime that pi_sandboxed_agent's science image installs, at the version the
+        image pins."""
+        agent = get_first_server_config_dict(_resolve("pi.yaml"), "hle_diamond_pi_agent")
+        pinned = json.loads(PI_SCIENCE_PACKAGE.read_text(encoding="utf-8"))["dependencies"]
+        assert agent["pi_version"] == pinned["@earendil-works/pi-coding-agent"]
+
+
+LEGACY_PRESETS = [
+    "opencode_legacy_agent.yaml",
+    "opencode_search_legacy_agent.yaml",
+    "opencode_reference_legacy_agent.yaml",
+    "pi_legacy_agent.yaml",
+    "pi_search_legacy_agent.yaml",
+]
+
+
+class TestLegacyAgentPresets:
+    """The deprecated sandboxed agents behind the legacy_agent relay stay selectable as *_legacy_agent until the
+    relay is removed."""
+
+    def test_reference_legacy_agent_is_the_search_legacy_agent_on_the_reference_image(self, monkeypatch):
+        monkeypatch.delenv("OPENCODE_REFERENCE_SANDBOX_IMAGE", raising=False)
+        resolved = _resolve("opencode_reference_legacy_agent.yaml")
+        reference = get_first_server_config_dict(resolved, REFERENCE_AGENT)
+        search = get_first_server_config_dict(
+            _resolve("opencode_search_legacy_agent.yaml"), "hle_diamond_opencode_agent"
+        )
+
+        # The restated block (see the preset header) must not drift from opencode_search_legacy_agent.yaml: the
+        # two agents differ only in the image and the environment note (ports are per-instance placeholders).
+        reference_dict, search_dict = OmegaConf.to_container(reference), OmegaConf.to_container(search)
+        differing = {k for k in set(reference_dict) | set(search_dict) if reference_dict.get(k) != search_dict.get(k)}
+        assert differing - {"port"} == {"sandbox_config"}
+        differing_sandbox = {
+            k
+            for k in set(reference_dict["sandbox_config"]) | set(search_dict["sandbox_config"])
+            if reference_dict["sandbox_config"].get(k) != search_dict["sandbox_config"].get(k)
+        }
+        assert differing_sandbox == {"image", "files"}
+        assert reference["sandbox_config"]["image"] == "gym-opencode-hle-reference:local"
+        assert resolved["hle_diamond_opencode_agent"] is None
+
+    @pytest.mark.parametrize("config_file", LEGACY_PRESETS)
+    def test_docker_override_does_not_compose_with_the_text_legacy_presets(self, config_file, monkeypatch):
+        """They keep the session presets' agent names on a relay agent, so the override's session blocks would
+        add a second harness to the agent; composing fails instead of starting a mixed agent."""
+        monkeypatch.setenv(ACK_ENV, "egress-not-restricted")
+        with pytest.raises(AlmostServerError):
+            _resolve(config_file, "sandbox_docker_local.yaml")
 
 
 class TestLocalDockerOverride:
@@ -593,8 +990,8 @@ class TestLocalDockerOverride:
         [
             ("opencode.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
-            ("opencode_full.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
-            ("opencode_search_full.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("opencode_full.yaml", FULL_AGENT, "hle_diamond_opencode_agent"),
+            ("opencode_search_full.yaml", FULL_AGENT, "hle_diamond_opencode_agent"),
             ("pi.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
             ("pi_search.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
         ],
@@ -615,22 +1012,41 @@ class TestLocalDockerOverride:
         assert instance is None and error is not None
         assert not is_almost_server(block)
 
-    def test_override_tells_the_model_the_truth_about_egress_and_keeps_the_preset_knobs(self):
-        opencode = get_first_server_config_dict(
-            _resolve("opencode_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_opencode_agent"
-        )
-        note = opencode["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
-        assert "NOT restricted" in note and "disabled" not in note
-        assert opencode["sandbox_config"]["ttl_s"] == 14400  # the rest of the inherited sandbox_config survives
-        assert opencode["opencode_config"]["provider"]["nemo_gym"]["models"]["dummy_model"]["options"] == {
-            "reasoningEffort": "high"
-        }
+    def test_override_tells_the_model_the_truth_about_egress_and_keeps_the_preset_knobs(self, monkeypatch):
+        def agents(config_file, agent_name):
+            return (
+                get_first_server_config_dict(_resolve(config_file, "sandbox_docker_local.yaml"), agent_name),
+                get_first_server_config_dict(_resolve(config_file), agent_name),
+            )
 
-        pi = get_first_server_config_dict(
-            _resolve("pi_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_pi_agent"
+        opencode, preset = agents("opencode_search.yaml", "hle_diamond_opencode_agent")
+        note = opencode["system_prompt"]
+        assert "NOT restricted" in note and "disabled" not in note
+        # The rest of the inherited sandbox_config and the OpenCode config survive the override.
+        assert opencode["sandbox_config"]["ttl_s"] == preset["sandbox_config"]["ttl_s"]
+        assert opencode["opencode_config"] == preset["opencode_config"]
+
+        # opencode_hle_tools runs on the reference agent, so it composes only once acknowledged (TestReferencePreset);
+        # the reference agent's note serves it and names no backend, and the tool grant and MCP timeout survive.
+        monkeypatch.setenv(ACK_ENV, "egress-not-restricted")
+        web_tools, preset = agents("opencode_hle_tools.yaml", REFERENCE_AGENT)
+        reference, _ = agents("opencode_reference.yaml", REFERENCE_AGENT)
+        assert web_tools["system_prompt"] == reference["system_prompt"] and "Tavily" not in web_tools["system_prompt"]
+        assert "NOT restricted" in web_tools["system_prompt"] and "SageMath" not in web_tools["system_prompt"]
+        assert (
+            web_tools["tool_servers"] == preset["tool_servers"] == [{"type": "resources_servers", "name": "web_tools"}]
         )
+        assert web_tools["mcp_tool_timeout_seconds"] == preset["mcp_tool_timeout_seconds"]
+
+        full, preset = agents("opencode_search_full.yaml", FULL_AGENT)
+        note = full["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+        assert "NOT restricted" in note and "disabled" not in note
+        assert full["sandbox_config"]["ttl_s"] == preset["sandbox_config"]["ttl_s"]
+        assert full["opencode_config"] == preset["opencode_config"]
+
+        pi, preset = agents("pi_search.yaml", "hle_diamond_pi_agent")
         assert "NOT restricted" in pi["system_prompt"] and "disabled" not in pi["system_prompt"]
-        assert pi["thinking"] == "high"
+        assert pi["output_token_policy"] == preset["output_token_policy"]
 
     def test_override_is_not_a_benchmark_and_documents_the_local_recipe(self):
         text = self.OVERRIDE.read_text(encoding="utf-8")
@@ -649,26 +1065,33 @@ class TestLocalDockerOverride:
             "config.yaml",
             "text.yaml",
             "opencode.yaml",
-            "opencode_full.yaml",
             "pi.yaml",
             "opencode_reference.yaml",
+            "opencode_legacy_agent.yaml",
+            "pi_legacy_agent.yaml",
+            "opencode_reference_legacy_agent.yaml",
+            "opencode_full.yaml",
+            "opencode_hle_tools_full.yaml",
         }
 
 
 def _network_access_type():
-    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 
-    return TypeAdapter(OpenCodeSandboxedAgentConfig.model_fields["network_access"].annotation)
+    return TypeAdapter(OpenCodeAgentConfig.model_fields["network_access"].annotation)
 
 
 class TestReferencePreset:
     """opencode_reference.yaml: opencode_search.yaml on the reference image under upstream's egress policy
     (docs/evaluation-with-tools.md), which sandbox_docker_local.yaml may lift only when acknowledged."""
 
+    # The presets on the reference agent: the Tavily tools, upstream's web_tools, and web_tools over the full set.
+    PRESETS = ["opencode_reference.yaml", "opencode_hle_tools.yaml", "opencode_hle_tools_full.yaml"]
+
     @staticmethod
-    def _agents(monkeypatch, *files: str):
+    def _agents(monkeypatch, *files: str, preset: str = "opencode_reference.yaml"):
         monkeypatch.delenv("OPENCODE_REFERENCE_SANDBOX_IMAGE", raising=False)
-        resolved = _resolve("opencode_reference.yaml", *files)
+        resolved = _resolve(preset, *files)
         return resolved, get_first_server_config_dict(resolved, REFERENCE_AGENT)
 
     def test_reference_agent_is_the_search_agent_on_the_reference_image_with_enforced_egress(self, monkeypatch):
@@ -679,13 +1102,13 @@ class TestReferencePreset:
         # differ only in the image and the environment note (ports are per-instance placeholders).
         reference_dict, search_dict = OmegaConf.to_container(reference), OmegaConf.to_container(search)
         differing = {k for k in set(reference_dict) | set(search_dict) if reference_dict.get(k) != search_dict.get(k)}
-        assert differing - {"port"} == {"sandbox_config"}
+        assert differing - {"port"} == {"sandbox_config", "system_prompt"}
         differing_sandbox = {
             k
             for k in set(reference_dict["sandbox_config"]) | set(search_dict["sandbox_config"])
             if reference_dict["sandbox_config"].get(k) != search_dict["sandbox_config"].get(k)
         }
-        assert differing_sandbox == {"image", "files"}
+        assert differing_sandbox == {"image"}
         assert (reference["network_access"], reference["sandbox_provider"]) == ("model_and_tools", "sandbox")
         assert [t["name"] for t in reference["tool_servers"]] == ["tavily"]
         assert reference["sandbox_config"]["image"] == "gym-opencode-hle-reference:local"
@@ -701,11 +1124,12 @@ class TestReferencePreset:
         # Only the reference agent is started: the search preset's agent is removed, the environment server retargeted.
         assert resolved["hle_diamond_opencode_agent"] is None
         env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]
-        assert env_server["environment_servers"]["legacy_agent"]["agent_server"]["name"] == REFERENCE_AGENT
+        assert env_server["environment_servers"]["single_agent_turn_legacy"]["agent_server"]["name"] == REFERENCE_AGENT
 
-    def test_reference_note_states_only_what_the_reference_image_provides(self, monkeypatch):
-        _, reference = self._agents(monkeypatch)
-        note = reference["sandbox_config"]["files"][ENVIRONMENT_NOTE]
+    @pytest.mark.parametrize("preset", PRESETS)
+    def test_reference_note_states_only_what_the_reference_image_provides(self, monkeypatch, preset):
+        _, reference = self._agents(monkeypatch, preset=preset)
+        note = reference["system_prompt"]
 
         assert "disabled" in note and "Python 3.11" in note
         # The packages named are exactly upstream's pinned list, read from the image's verbatim copy.
@@ -715,9 +1139,10 @@ class TestReferencePreset:
         for absent in ("SageMath", "Lean", "Mathlib", "/opt/science", "Tavily"):
             assert absent not in note
 
-    def test_docker_override_refuses_the_reference_preset_unless_egress_is_acknowledged(self, monkeypatch):
+    @pytest.mark.parametrize("preset", PRESETS)
+    def test_docker_override_refuses_the_reference_presets_unless_egress_is_acknowledged(self, monkeypatch, preset):
         monkeypatch.delenv(ACK_ENV, raising=False)
-        resolved, refused = self._agents(monkeypatch, "sandbox_docker_local.yaml")
+        resolved, refused = self._agents(monkeypatch, "sandbox_docker_local.yaml", preset=preset)
 
         # Composed onto the Docker provider, but with a network_access the agent config rejects at start.
         assert list(resolve_provider_config(refused["sandbox_provider"], resolved)) == ["docker"]
@@ -727,20 +1152,24 @@ class TestReferencePreset:
         monkeypatch.setenv(ACK_ENV, "yes")  # only the exact label counts
         with pytest.raises(ValidationError):
             _network_access_type().validate_python(
-                self._agents(monkeypatch, "sandbox_docker_local.yaml")[1]["network_access"]
+                self._agents(monkeypatch, "sandbox_docker_local.yaml", preset=preset)[1]["network_access"]
             )
 
         monkeypatch.setenv(ACK_ENV, "egress-not-restricted")
-        resolved, acknowledged = self._agents(monkeypatch, "sandbox_docker_local.yaml")
+        resolved, acknowledged = self._agents(monkeypatch, "sandbox_docker_local.yaml", preset=preset)
         assert _network_access_type().validate_python(acknowledged["network_access"]) == "inherit"
         assert (acknowledged["sandbox_provider"], acknowledged["sandbox_config"]["image"]) == (
             "sandbox_docker",
             "gym-opencode-hle-reference:local",
         )
-        note = acknowledged["sandbox_config"]["files"][ENVIRONMENT_NOTE]
+        note = acknowledged["system_prompt"]
         assert "NOT restricted" in note and "disabled" not in note
         assert "Python 3.11" in note and "SageMath" not in note and "Lean" not in note
-        assert acknowledged["sandbox_config"]["ttl_s"] == 14400  # the inherited sandbox_config survives
+        # The inherited sandbox_config survives.
+        assert (
+            acknowledged["sandbox_config"]["ttl_s"]
+            == self._agents(monkeypatch, preset=preset)[1]["sandbox_config"]["ttl_s"]
+        )
         # The other presets are untouched by the knob: their override block stays unconditional.
         monkeypatch.delenv(ACK_ENV)
         search = get_first_server_config_dict(
@@ -853,7 +1282,7 @@ class TestDocumentedCommands:
             agent = get_first_server_config_dict(resolved, agent_name)
             assert (agent["sandbox_provider"], agent["network_access"]) == ("sandbox_docker", "inherit")
             assert list(resolve_provider_config(agent["sandbox_provider"], resolved)) == ["docker"]
-            note = agent["sandbox_config"]["files"].get("/tmp/nemo-gym-environment.txt") or agent["system_prompt"]
+            note = agent["sandbox_config"].get("files", {}).get(ENVIRONMENT_NOTE) or agent["system_prompt"]
             assert "NOT restricted" in note and "disabled" not in note
 
     @pytest.mark.parametrize(
@@ -876,7 +1305,7 @@ class TestDocumentedCommands:
         else:
             agent = get_first_server_config_dict(resolved, "hle_diamond_opencode_agent")
             assert agent["network_access"] == "model_and_tools"
-            assert "disabled" in agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+            assert "disabled" in agent["system_prompt"]
 
     def test_every_documented_run_line_carries_split_and_the_raw_override_token(self):
         lines = _documented_command_lines()

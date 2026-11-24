@@ -293,3 +293,66 @@ def test_non_linux_hosts_are_refused_before_binding(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(uvicorn_reuse_port, "_bind_reuse_port_socket", bind)
     with pytest.raises(RuntimeError, match="needs Linux"):
         run_with_reuse_port(app="pid_app:app", host="127.0.0.1", port=_free_port(), workers=4)
+
+
+class _RecordingSupervisor:
+    """Stands in for uvicorn's Multiprocess: records how it was built and runs nothing."""
+
+    built: list[dict] = []
+
+    def run(self) -> None:
+        pass
+
+
+class _SupervisorWithTarget(_RecordingSupervisor):
+    """Uvicorn's Multiprocess in versions that run a target in each worker."""
+
+    def __init__(self, config: object, target: object, sockets: list) -> None:
+        self.built.append({"target": target, "sockets": sockets})
+
+
+class _SupervisorWithoutTarget(_RecordingSupervisor):
+    """Uvicorn's Multiprocess in versions that build each worker's server inside its Process (0.51 and later)."""
+
+    def __init__(self, config: object, sockets: list) -> None:
+        self.built.append({"sockets": sockets})
+
+
+@pytest.mark.parametrize("supervisor", [_SupervisorWithTarget, _SupervisorWithoutTarget])
+def test_workers_are_reuse_port_servers_whichever_way_uvicorn_builds_them(
+    monkeypatch: pytest.MonkeyPatch, supervisor: type
+) -> None:
+    # The swap below replaces uvicorn's Process class; monkeypatch puts the original back afterwards.
+    monkeypatch.setattr(
+        uvicorn_reuse_port.uvicorn_multiprocess, "Process", uvicorn_reuse_port.uvicorn_multiprocess.Process
+    )
+    monkeypatch.setattr(uvicorn_reuse_port, "Multiprocess", supervisor)
+    monkeypatch.setattr(supervisor, "built", [])
+
+    run_with_reuse_port(app="pid_app:app", host="127.0.0.1", port=_free_port(), workers=2)
+
+    [built] = supervisor.built
+    try:
+        if supervisor is _SupervisorWithTarget:
+            assert isinstance(built["target"].__self__, uvicorn_reuse_port._ReusePortWorker)
+        else:
+            assert uvicorn_reuse_port.uvicorn_multiprocess.Process is uvicorn_reuse_port._ReusePortProcess
+    finally:
+        for sock in built["sockets"]:
+            sock.close()
+
+
+def test_a_worker_process_builds_its_server_as_a_reuse_port_server() -> None:
+    config = uvicorn_reuse_port._ReusePortUvicornConfig(
+        app="pid_app:app", host="127.0.0.1", port=_free_port(), workers=2
+    )
+    # Without uvicorn's __init__, which would start the worker subprocess.
+    process = object.__new__(uvicorn_reuse_port._ReusePortProcess)
+    process.config = config
+    process._server = None
+
+    server = process.server
+
+    assert isinstance(server, uvicorn_reuse_port._ReusePortWorker)
+    assert server.config is config
+    assert process.server is server

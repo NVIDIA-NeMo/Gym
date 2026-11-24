@@ -2,21 +2,42 @@
 # SPDX-License-Identifier: Apache-2.0
 """Install official SkillsBench skills into a prebuilt OpenSandbox task image."""
 
+from __future__ import annotations
+
 import json
 import os
+import shlex
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-from harbor.models.task.config import NetworkMode, NetworkPolicy
 
+if TYPE_CHECKING:
+    from harbor.environments.base import ExecResult
+    from harbor.models.task.config import NetworkPolicy
+
+from benchmarks.skillsbench.observations import VERIFIER_EXECUTION_FILE, verifier_command
 from responses_api_agents.harbor_agent.custom_envs.nemo_gym_sandbox.environment import NemoGymSandboxEnvironment
+
+
+# Java tasks download from Maven Central during verification, and parallel sandboxes get HTTP 429.
+# This is the read-through Google mirror the SWE servers already use; artifacts are identical.
+MAVEN_MIRROR_SETTINGS = (
+    Path(__file__).resolve().parents[2] / "responses_api_agents" / "swe_agents" / "maven_mirror" / "settings.xml"
+)
+MAVEN_SETTINGS_PATH = "/root/.m2/settings.xml"
+# OpenJDK 7 in this task cannot download from the mirror at all; it keeps Maven Central.
+MAVEN_MIRROR_SKIPPED_TASKS = frozenset({"fix-build-google-auto"})
 
 
 class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
     """Use upstream task images and stage skills when a sandbox starts."""
 
-    def __init__(self, *args, skill_mode: str = "with-skill", **kwargs):
+    def __init__(self, *args, skill_mode: str = "with-skill", maven_mirror: bool = True, **kwargs):
         if skill_mode not in {"with-skill", "no-skill"}:
             raise ValueError(f"Invalid SkillsBench skill mode: {skill_mode!r}")
         self._skill_mode = skill_mode
+        self._maven_mirror = maven_mirror
         if "sandbox_provider" not in kwargs:
             # Passed only to the Ray task, never serialized into Harbor job/trial configs.
             kwargs["sandbox_provider"] = json.loads(os.environ["SKILLSBENCH_SANDBOX_CONFIG"])
@@ -24,7 +45,7 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
 
     def validate_network_policy_support(self, network_policy: NetworkPolicy | None = None) -> None:
         policy = network_policy or self.network_policy
-        if policy.network_mode == NetworkMode.NO_NETWORK and self._allow_unenforced_internet_isolation:
+        if policy.network_mode == "no-network" and self._allow_unenforced_internet_isolation:
             self.logger.warning("SkillsBench no-network task is running with unenforced isolation by explicit opt-in")
             return
         super().validate_network_policy_support(policy)
@@ -32,10 +53,49 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
     async def start(self, force_build: bool) -> None:
         await super().start(force_build)
         try:
+            if self._maven_mirror and self.environment_name not in MAVEN_MIRROR_SKIPPED_TASKS:
+                await self._install_maven_mirror()
             await self._stage_skills()
         except BaseException:
             await self.stop(delete=True)
             raise
+
+    async def exec(self, command: str, *args, **kwargs) -> ExecResult:
+        # The agent executor wraps every action in its own shell. Only Harbor's
+        # direct verifier invocation matches this command, including redirection.
+        # Keep the witness on the host, outside downloaded sandbox log trees.
+        verifying = command == verifier_command()
+        if verifying:
+            witness = self.trial_paths.result_path.parent / VERIFIER_EXECUTION_FILE
+            witness.unlink(missing_ok=True)
+        started = time.time()
+        result = await super().exec(command, *args, **kwargs)
+        if verifying and result.return_code == -1:
+            await self.stop(delete=True)
+            raise RuntimeError("Verifier command outcome is unknown; remote termination is unconfirmed")
+        if verifying:
+            witness.write_text(
+                json.dumps(
+                    {
+                        "command": command,
+                        "return_code": result.return_code,
+                        "started_at": started,
+                        "finished_at": time.time(),
+                    }
+                )
+            )
+        return result
+
+    async def _install_maven_mirror(self) -> None:
+        # A settings file from the task image or the sandbox provider wins.
+        target = shlex.quote(MAVEN_SETTINGS_PATH)
+        result = await self.exec(
+            f"[ -e {target} ] || {{ mkdir -p /root/.m2 && printf '%s' "
+            f"{shlex.quote(MAVEN_MIRROR_SETTINGS.read_text())} > {target}; }}",
+            timeout_sec=60,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"Failed to install the Maven mirror: {result.stderr or result.stdout}")
 
     async def _stage_skills(self) -> None:
         if self._skill_mode == "no-skill":

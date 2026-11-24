@@ -64,8 +64,9 @@ Known differences between Gym benchmarks and the published methods they follow, 
 
 ## AA-Omniscience (`benchmarks/omniscience`)
 
-- The dataset revision is pinned. The default judge is `openai/gpt-oss-20b` at temperature 0, with 8 repeats. A different judge model gives different scores.
-- The grader expects the judge to reply with a single letter. When neither the reply nor its last line is a bare letter, it looks for A, B, C and D in that order anywhere in the reply, so any capital A (even in `Answer: B`) reads as CORRECT; with no letter at all it returns B. Check a sample of judge replies before trusting a surprising number.
+- Uses the AA-Omniscience v1.1 public set (300 questions). Scores are not comparable with runs on the v1 public set (600 questions, a different question per id), and Artificial Analysis publishes scores on its 3,000-question set.
+- The dataset revision is pinned. The default judge is GPT-5.6 Luna at medium reasoning effort and temperature 0, with a 32,768-token judge output cap and 8 repeats. A different judge model gives different scores. The earlier default, `openai/gpt-oss-20b`, was retired on `integrate.api.nvidia.com` on 2026-11-18; its numbers are not comparable with Luna's.
+- The grader expects the judge to reply with a single letter. It also accepts a bare letter on the last line and an explicit verdict at the start of a line (`Grade: A`, `NOT_ATTEMPTED`, `C: PARTIAL_ANSWER`) followed by nothing, closing punctuation or a short reason. A bare letter on the last line wins over earlier grades, unless leftover think tags are present. Without one, conflicting explicit verdicts, a verdict line whose other letters contradict the grade, or no accepted verdict make a `judge_failed` row: it is masked and graded again once from the saved answer at the end of the run, not counted as incorrect. A row that fails again stays out of every metric, so the run is incomplete: `gym eval run` exits 0 with `complete: false` in the coverage file, and a strict run (`gym eval submit` by default) stops with no aggregate. Many `judge_failed` rows mean the judge does not follow the prompt; read the rejected replies in `failure_reason` of `<output>_failures.jsonl` (their first 200 characters) before trusting the score.
 
 ## AA-LCR (`benchmarks/aalcr`)
 

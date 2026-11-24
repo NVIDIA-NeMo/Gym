@@ -36,7 +36,6 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
-from anyio import CancelScope
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
@@ -79,8 +78,10 @@ from nemo_gym.core import (
     NeMoGymSummary,
     NgFailureEvent,
     SandboxFailureDetails,
+    agent_route_failure,
     observe_failure,
 )
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -90,6 +91,7 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+    sandbox_failure,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.trajectory import (
@@ -123,9 +125,10 @@ DEPRECATION_WARNING = (
     "DEPRECATED: opencode_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
     "after the environment-server migration. Where the resources server returns sandbox_access, switch to a session "
     "harness in its allowed_agents under an environment server: opencode_agent where listed (Terminal Bench 2.1), "
-    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro). Setups with no session path yet keep "
-    "working here: SWE resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others), "
-    "the HLE search presets (tool_servers) and vibench_agent. "
+    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro); for vibench_agent, that is "
+    "resources_servers/vibench/configs/vibench.yaml. Setups with no session path yet keep working here: SWE "
+    "resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others) and the HLE search "
+    "presets (tool_servers). "
     "See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
 )
 
@@ -141,6 +144,8 @@ _RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
 _RIPGREP_UPLOAD_MAX_CONCURRENT = 2
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+# Written by stable-date.js once it pins a date; must match its MARKER.
+STABLE_DATE_MARKER = "/tmp/nemo-gym-stable-date-active"
 # Image parts of the user turn are uploaded here and handed to `opencode run -f`. Outside the task
 # workdir on purpose (see the export path below) and fixed because each rollout owns its sandbox.
 _REMOTE_ATTACHMENTS_DIR = "/tmp/nemo-gym-attachments"
@@ -571,6 +576,10 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
+    opencode_provider_id: str = "nemo_gym"
+    opencode_model_id: str = "dummy_model"
+    sandbox_upload_roots: List[str] = Field(default_factory=list)
+    sandbox_row_option_keys: List[str] = Field(default_factory=list)
 
     # Environment variables exported in front of `opencode run` inside the sandbox.
     #
@@ -621,6 +630,8 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
+    sandbox_provider_options: Dict[str, Any] = Field(default_factory=dict)
+    sandbox_uploads: Dict[str, str] = Field(default_factory=dict)
 
 
 def _build_remote_opencode_install_command(
@@ -727,6 +738,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
     opencode_failed: bool = False
     # Images of the user turn uploaded into the sandbox and attached with `opencode run -f`.
     opencode_attachment_count: int = 0
+    # The last assistant message stopped on length: the session ended on a full context.
+    opencode_context_limited: bool = False
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -748,7 +761,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
-    async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
+    async def _start_sandbox(
+        self,
+        sandbox_id: Optional[str] = None,
+        workdir: Optional[str] = None,
+        provider_options: Optional[Dict[str, Any]] = None,
+    ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -765,6 +783,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
+
+        row_options = provider_options or {}
+        if disallowed := sorted(set(row_options) - set(self.config.sandbox_row_option_keys)):
+            raise ValueError(f"sandbox_provider_options {disallowed} are not listed in sandbox_row_option_keys")
+        if "network_policy" in row_options and self.config.network_access != "inherit":
+            raise ValueError("sandbox_provider_options.network_policy cannot be set when network_access is restricted")
 
         resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
         # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
@@ -786,7 +810,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             },
             resources=resources,
             entrypoint=self.config.sandbox_config.get("entrypoint"),
-            provider_options=deepcopy(self.config.sandbox_config.get("provider_options", {})),
+            provider_options=deepcopy(self.config.sandbox_config.get("provider_options", {})) | deepcopy(row_options),
         )
 
         if self.config.network_access != "inherit":
@@ -797,13 +821,25 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 urls.extend(
                     sandbox_server_url(server.name, require_reachable=True) for server in self.config.tool_servers
                 )
-            sandbox_spec.provider_options["network_policy"] = restricted_network_policy(
-                resolved_sandbox_provider.name, urls
-            )
+            policy = restricted_network_policy(resolved_sandbox_provider.name, urls)
+            configured = sandbox_spec.provider_options.get("network_policy") or {}
+            if configured:
+                if configured.get("defaultAction", "deny") != "deny":
+                    raise ValueError("network_access with a network_policy needs defaultAction: deny")
+                policy["egress"] = list(configured.get("egress") or []) + policy["egress"]
+            sandbox_spec.provider_options["network_policy"] = policy
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
         return sandbox
+
+    async def _upload_inputs(self, sandbox: AsyncSandbox, uploads: Dict[str, str]) -> None:
+        roots = [Path(root).resolve() for root in self.config.sandbox_upload_roots]
+        for remote, local in uploads.items():
+            source = Path(local).resolve()
+            if not source.is_file() or not any(source.is_relative_to(root) for root in roots):
+                raise ValueError(f"sandbox upload {local!r} is not a file under sandbox_upload_roots")
+            await sandbox.upload(source, remote)
 
     async def _stage_ripgrep(self, sandbox: AsyncSandbox, source_path: Path) -> str:
         """Retry an ambiguous upload timeout without reusing its remote path."""
@@ -898,6 +934,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             policy_plugins.append("remaining-context.js")
         if self.config.tool_servers:
             policy_plugins.append("required-mcp.js")
+        if self._token_id_capture_enabled():
+            # Source-history capture links calls by exact prompt text; keep the date stable.
+            policy_plugins.append("stable-date.js")
         uploads.extend((Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}") for name in policy_plugins)
         return uploads
 
@@ -952,6 +991,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         forwards attached images instead of replacing them with "this model does not support image input"
         (``unsupportedParts`` in OpenCode's provider/transform.ts reads ``capabilities.input.image``, which
         provider.ts derives from the model's ``modalities.input``)."""
+        for provider_id, provider in (self.config.opencode_config.get("provider") or {}).items():
+            if provider_id != self.config.opencode_provider_id:
+                raise ValueError(f"opencode_config.provider.{provider_id} is not opencode_provider_id")
+            for model_id in (provider or {}).get("models", {}) or {}:
+                if model_id != self.config.opencode_model_id:
+                    raise ValueError(f"opencode_config model {model_id} is not opencode_model_id")
         base_url = (
             self.base_url_for_run(
                 base_url=sandbox_server_url(
@@ -962,10 +1007,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             + "/v1"
         )
         config: Dict[str, Any] = {
-            "model": "nemo_gym/dummy_model",
+            "model": f"{self.config.opencode_provider_id}/{self.config.opencode_model_id}",
             "$schema": "https://opencode.ai/config.json",
             "provider": {
-                "nemo_gym": {
+                self.config.opencode_provider_id: {
                     # TODO @bxyu-nvidia: We should use @ai-sdk/openai here but there is some /v1/responses streaming error.
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
@@ -977,7 +1022,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         else False,  # milliseconds
                     },
                     "models": {
-                        "dummy_model": {
+                        self.config.opencode_model_id: {
                             "temperature": True,
                             "limit": {
                                 "context": self.config.opencode_max_context_window,
@@ -993,7 +1038,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if image_input:
             # Only when the turn carries images: with it, OpenCode would also send any image the agent's
             # Read tool opens during the run, which a text-only model cannot take.
-            config["provider"]["nemo_gym"]["models"]["dummy_model"]["modalities"] = {
+            config["provider"][self.config.opencode_provider_id]["models"][self.config.opencode_model_id][
+                "modalities"
+            ] = {
                 "input": ["text", "image"],
                 "output": ["text"],
             }
@@ -1094,6 +1141,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if pool and not env.get("EXA_API_KEY"):
             digest = hashlib.sha256(query.encode("utf-8")).digest()
             env["EXA_API_KEY"] = pool[int.from_bytes(digest[:8], "big") % len(pool)]
+        env["NEMO_GYM_OPENCODE_PROVIDER_ID"] = self.config.opencode_provider_id
         return env
 
     def _opencode_export_to_usages(self, opencode_export: Dict[str, Any]) -> List[NeMoGymResponseUsage]:
@@ -1365,7 +1413,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
-        && rm -f /tmp/nemo-gym-mcp-setup-error
+        && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER}
         """
         agent_command = f"""
         {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
@@ -1481,17 +1529,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ) from error
 
         if result.error_type != "timeout" and (result.error_type is not None or result.return_code == -1):
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                failure_reason=self._agent_sandbox_facts(
+            # The provider returned a result that does not say how the command ended: an error type, or the -1
+            # signal-death sentinel. That is sandbox evidence, not a contradiction inside the harness, so it keeps
+            # the registered provider kind (an environment fault, ungraded and rerun under the attempt cap) and the
+            # harness failure only routes it. Neither value is an observed process exit, so no exit code is recorded.
+            handle = getattr(sandbox, "_handle", None)
+            provider = getattr(handle, "provider_name", None)
+            sandbox_id = getattr(handle, "sandbox_id", None)
+            provider_failure = sandbox_failure(
+                operation="exec",
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason=self._agent_sandbox_facts(
                     sandbox,
                     exit_code=result.return_code,
                     reason=result.error_type if isinstance(result.error_type, str) else None,
                 )
                 + "Sandbox command outcome cannot be classified",
-                operation="opencode.execute",
+                provider=provider if isinstance(provider, str) else None,
+                sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+                provider_status_reason=result.error_type if isinstance(result.error_type, str) else None,
             )
+            raise agent_route_failure(
+                provider_failure, operation="opencode.execute", stage="agent"
+            ) from provider_failure
         result_stdout = result.stdout or ""
         stdout_parts = result_stdout.rsplit("Shell: ", maxsplit=1)
         if len(stdout_parts) < 2:
@@ -1524,6 +1584,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     operation="opencode.setup",
                     stage="seed",
                     failure_reason="Required Gym MCP tools could not be initialized",
+                )
+        if self._token_id_capture_enabled() and result is not None and result.return_code == 0:
+            # A finished run made model calls; without the marker the date pin did not apply.
+            marker_check = await sandbox.exec(command=f"test -f {STABLE_DATE_MARKER}", timeout_s=30)
+            if marker_check.return_code != 0 or marker_check.error_type:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.capture",
+                    failure_reason="OpenCode stable-date plugin did not pin the system prompt date",
                 )
 
         export_fname = "export.json"
@@ -1729,7 +1799,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ]
             length_limited = bool(assistant_infos and assistant_infos[-1].get("finish") == "length")
             terminal_error = assistant_infos[-1].get("error") if assistant_infos else None
-            if terminal_error and not run_error_type:
+            # The sandbox's exec timeout outranks the error the killed session left in its export,
+            # so rules that match opencode_error_type == "timeout" still see it.
+            if terminal_error and not run_error_type and getattr(result, "error_type", None) is None:
                 run_error_type = (
                     terminal_error.get("name", "OpenCodeError")
                     if isinstance(terminal_error, dict)
@@ -1820,6 +1892,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # so an empty string means the run ended some other way (answered, or infra failure).
             "opencode_terminal_reason": _terminal_reason(run_output),
             "opencode_attachment_count": len(attachments),
+            "opencode_context_limited": length_limited,
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
@@ -1871,6 +1944,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
             workdir=seed_session_result.get("workdir"),
+            provider_options=body.sandbox_provider_options,
         )
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
@@ -1881,6 +1955,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request.state._ng_observation_invocation_id = rollout_id
         observations = None
         try:
+            if seed_session_result.get("sandbox_handle") and body.sandbox_provider_options:
+                raise ValueError("sandbox_provider_options cannot apply to a seed-supplied sandbox")
+            await self._upload_inputs(sandbox, body.sandbox_uploads)
             response = await self.responses(request, body.responses_create_params)
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
             observations = run_result.pop("_ng_agent_observations", None)
@@ -1931,17 +2008,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             del request.state._ng_observation_invocation_id
             del request.state._ng_opencode_mcp
             # A server cancels its handler when the caller disconnects, and OpenCode keeps running
-            # in its pod regardless: only stopping the sandbox ends it. Shielded because the
-            # cancellation is re-delivered at every await until the handler exits, so an unshielded
-            # stop would itself be cancelled and leave the pod generating until its TTL.
-            with CancelScope(shield=True):
-                try:
-                    await sandbox.stop()
-                except Exception:
-                    print("Failed to stop sandbox", format_exc(), file=sys.stderr)
-                finally:
-                    self._sandbox_id_to_sandbox.pop(session_key, None)
-                    self._sandbox_id_to_run_result.pop(session_key, None)
+            # in its pod regardless: only stopping the sandbox ends it. AsyncSandbox.stop is shielded
+            # from that cancellation and bounded in time, so the pod does not generate until its TTL.
+            try:
+                await sandbox.stop()
+            except Exception:
+                print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            finally:
+                self._sandbox_id_to_sandbox.pop(session_key, None)
+                self._sandbox_id_to_run_result.pop(session_key, None)
 
         response_dict |= run_result
         if trajectory is not None:

@@ -1,13 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DeepSWE v1.1 resources server."""
+"""DeepSWE v1.1 resources server.
+
+The server serves two kinds of seed. An Environment Server such as ``single_agent_turn_legacy`` seeds an episode
+session with a ``ResourcesSeedSessionRequest`` and hands the agent sandbox to the agent through ``sandbox_access``;
+the session lifecycle (verify once, close, expiry, shutdown) is ``SandboxSessionResourcesServer``'s. An agent that
+runs the episode itself through ``/run`` seeds with the flat task row and gets the sandbox handle back.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import logging
+import shlex
 import sys
 import tempfile
 import uuid
@@ -15,22 +23,25 @@ from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
+from random import uniform
 from shutil import rmtree
 from time import monotonic
 from traceback import format_exc
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
+    PROVIDER_IO_TIMEOUT,
     PROVIDER_OOM_KILLED,
     SESSION_LOST,
     VERIFIER_ERROR,
     FailureBoundary,
+    FailureClass,
     FailureReport,
     FailureReportRow,
     NgFailureEvent,
@@ -38,11 +49,13 @@ from nemo_gym.core import (
     RequestFailureLog,
     SandboxFailureDetails,
     StageOutcomePolicyConfig,
+    StagePolicyConfig,
     choose_stage_outcome,
     current_verifier_invocation_id,
     failure_kinds,
     observe_failure,
 )
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -56,9 +69,12 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     ReverifyMode,
-    SimpleResourcesServer,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
@@ -73,10 +89,18 @@ from resources_servers.deepswe.task_store import (
     task_solution_patch_path,
     task_verifier_files,
 )
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
+# The task repository in every DeepSWE image; the agent works and commits here.
+AGENT_WORKDIR = "/app"
+# Where agent_ripgrep_path lands in the agent sandbox, readable and executable by every user.
+AGENT_RUNTIME_DIR = "/tmp/nemo-gym-deepswe"
+AGENT_RIPGREP = f"{AGENT_RUNTIME_DIR}/rg"
+_RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
+LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_repo_path(path: Path) -> Path:
@@ -92,6 +116,58 @@ _MAX_FAILURE_REASON_CHARS = 2000
 _NO_VERDICT_FILE = "Verifier did not produce /logs/verifier/reward.json"
 
 
+# The failure kind of a model patch whose tests the in-sandbox timeout stopped at the task's limit (see
+# ``_verifier_command``).
+TEST_DEADLINE = "deepswe:test_deadline"
+
+
+declare_action_kind(TEST_DEADLINE)
+
+
+def _default_outcome_policy() -> StageOutcomePolicyConfig:
+    """The shared defaults, plus a confirmed test deadline classified as the model's."""
+    return StageOutcomePolicyConfig(
+        classification={"by_stage": {"verification": {"by_failure_kind": {TEST_DEADLINE: FailureClass.MODEL}}}}
+    )
+
+
+def _with_deadline_default(override: object) -> object:
+    """Add this server's boundary default for a confirmed test deadline: it counts as a zero.
+
+    The default is only a default. A rule the deployment wrote for the deadline itself wins, and so does an explicit
+    ``fail`` as the verification stage's default action or for the model's class, which leaves the deadline ungraded.
+    A ``retry`` there is the shared default for inconclusive attempts; a confirmed deadline is never run again, so it
+    does not apply to it.
+    """
+    if isinstance(override, StageOutcomePolicyConfig):
+        override = override.model_dump(exclude_unset=True)
+    if not isinstance(override, dict):
+        return override
+    stages = override.get("by_stage", {})
+    rules = stages.get("verification", {}) if isinstance(stages, dict) else {}
+    if isinstance(rules, StagePolicyConfig):
+        rules = rules.model_dump(exclude_unset=True)
+    if not isinstance(rules, dict):
+        return override
+    kinds = rules.get("by_failure_kind", {})
+    classes = rules.get("by_failure_class", {})
+    if (
+        TEST_DEADLINE in kinds
+        or rules.get("default_action") == OutcomeAction.FAIL
+        or classes.get(FailureClass.MODEL) == OutcomeAction.FAIL
+    ):
+        return override
+    default_rule = {
+        "verification": {**rules, "by_failure_kind": {**kinds, TEST_DEADLINE: OutcomeAction.COUNT_AS_ZERO}}
+    }
+    return {**override, "by_stage": {**stages, **default_rule}}
+
+
+def _overlay_on_defaults(override: object) -> object:
+    """An override on this server's own defaults: the shared ones, the deadline's classification and its zero."""
+    return StageOutcomePolicyConfig.overlay(_default_outcome_policy(), _with_deadline_default(override))
+
+
 class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE = ReverifyMode.UNSUPPORTED
 
@@ -100,12 +176,18 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
-    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=StageOutcomePolicyConfig)
+    outcome_policy: StageOutcomePolicyConfig = Field(
+        default_factory=lambda: StageOutcomePolicyConfig.model_validate(_overlay_on_defaults({}))
+    )
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
     enforce_agent_no_network: bool = True
     sandbox_model_server: ModelServerRef | None = None
+    # A host ripgrep copied into every agent sandbox as AGENT_RIPGREP; a relative path is under the Gym root.
+    # benchmarks/deepswe/opencode.yaml stages OpenCode's ripgrep this way, since the agent sandbox has no network, and
+    # opencode_agent checks the copy against its pinned digest.
+    agent_ripgrep_path: Path | None = None
 
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
@@ -115,6 +197,12 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # a reported command deadline and a conclusive result are not run again; a patch that breaks the
     # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
     inconclusive_verification_retries: int = Field(default=2, ge=0)
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this server's defaults."""
+        return _overlay_on_defaults(value)
 
     @field_validator("outcome_policy")
     @classmethod
@@ -127,9 +215,19 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
         }
         for stage, allowed in supported.items():
             rules = policy.by_stage.get(stage, policy.default_policy)
+            kind_rules = dict(rules.by_failure_kind)
+            if stage == "verification":
+                # The deadline's rule: its zero is counted, never retried. The other rules also decide
+                # inconclusive attempts, so they cannot count a zero.
+                deadline = kind_rules.pop(TEST_DEADLINE, None)
+                if deadline not in (None, OutcomeAction.COUNT_AS_ZERO, OutcomeAction.FAIL):
+                    raise ValueError(
+                        f"DeepSWE verification by_failure_kind.{TEST_DEADLINE} supports only count_as_zero, fail: "
+                        "a confirmed test deadline is never run again"
+                    )
             actions = {
                 rules.default_action,
-                *rules.by_failure_kind.values(),
+                *kind_rules.values(),
                 *rules.by_status_code.values(),
                 *rules.by_failure_class.values(),
             }
@@ -176,6 +274,8 @@ class DeepSWEVerifyResponse(BaseVerifyResponse):
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
+    # Set when the tests did not finish within this limit (seconds) on the model's patch, which scores 0.
+    verifier_timeout_s: float | None = None
 
     f2p_total: int = 0
     f2p_passed: int = 0
@@ -206,6 +306,8 @@ class VerifierResult(BaseModel):
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
+    # The test command's limit in seconds when the tests did not finish within it on the model's patch (scored 0).
+    verifier_timeout_s: float | None = None
     test_output: str | None = None
     f2p_total: int = 0
     f2p_passed: int = 0
@@ -237,6 +339,27 @@ def _resolve_task_id(body: DeepSWEInstanceRequest) -> str:
     return task_id
 
 
+# The test limit is enforced inside the verifier sandbox, so that a deadline is confirmed by the process that enforced
+# it and not inferred from a provider's error type: a provider may report "timeout" for a request whose command never
+# ran. GNU timeout's --verbose notice plus its exit status (124, or 137 when it had to send KILL) is the confirmation.
+# An image without timeout runs the tests under the provider's deadline only, and such a deadline stays inconclusive.
+_VERIFIER_KILL_GRACE_S = 30.0
+_VERIFIER_PROVIDER_HEADROOM_S = 60.0
+_TEST_DEADLINE_EXIT_CODES = (124, 137)
+_TEST_DEADLINE_NOTICE = "timeout: sending signal TERM to command"
+
+
+def _verifier_command(limit_s: float) -> str:
+    """The verifier command: the task's test.sh, stopped by GNU timeout at the task's limit where the image has it."""
+    bounded = f"timeout --verbose --kill-after={_VERIFIER_KILL_GRACE_S:g} {limit_s:g} bash /tests/test.sh"
+    return f"if command -v timeout >/dev/null 2>&1; then exec {bounded}; else exec bash /tests/test.sh; fi"
+
+
+def _tests_hit_their_limit(return_code: int | None, output: str) -> bool:
+    """Whether the in-sandbox timeout stopped the tests at the task's limit (see ``_verifier_command``)."""
+    return return_code in _TEST_DEADLINE_EXIT_CODES and _TEST_DEADLINE_NOTICE in output
+
+
 def _inconclusive_reason(result: VerifierResult, error: Exception | None) -> str | None:
     """Why a verifier attempt produced no verdict that a fresh sandbox could still produce, or None.
 
@@ -261,7 +384,13 @@ def _resolve_task(body: DeepSWEInstanceRequest, task_store: DeepSWETaskStore) ->
     return task
 
 
-class DeepSWEResourcesServer(SimpleResourcesServer):
+class DeepSWEResourcesServer(SandboxSessionResourcesServer):
+    """DeepSWE grading of the patch an agent committed in its task sandbox.
+
+    An agent-run seed keeps its sandbox in ``_agent_sessions``. An episode session's sandbox lives in the shared
+    base's ``_session_id_to_sandbox``, with what the seed recorded about it in ``_episode_agent_sandboxes``.
+    """
+
     config: DeepSWEResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
@@ -271,6 +400,16 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             expected_task_count=self.config.expected_task_count,
         )
         self._agent_sessions: dict[str, AgentSandboxSession] = {}
+        self._episode_agent_sandboxes: dict[str, AgentSandboxSession] = {}
+        self._ripgrep_upload_sem = asyncio.Semaphore(2)
+        self._agent_ripgrep = (
+            _resolve_repo_path(self.config.agent_ripgrep_path) if self.config.agent_ripgrep_path else None
+        )
+        if self._agent_ripgrep is not None and not self._agent_ripgrep.is_file():
+            raise ValueError(
+                f"agent_ripgrep_path is missing: {self._agent_ripgrep}; for the benchmark, run "
+                "`gym eval prepare --benchmark deepswe/opencode`"
+            )
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
@@ -311,7 +450,11 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             )
         return target
 
-    async def _create_sandbox(self, task: Task, *, phase: str) -> AsyncSandbox:
+    async def _create_sandbox(self, task: Task, *, phase: str, session_id: str | None = None) -> AsyncSandbox:
+        """Start a sandbox for ``phase``; with ``session_id``, register it as that episode session's task sandbox.
+
+        Registration happens before the start awaits, so a cancelled start stays reachable by the session's cleanup.
+        """
         global_config = get_global_config_dict()
         provider = resolve_provider_config(self.config.sandbox_provider, global_config)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config)
@@ -325,7 +468,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             image=task_image(task),
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
-            workdir="/app",
+            workdir=AGENT_WORKDIR,
             env=dict(self.config.sandbox_config.get("env", {})),
             files={},
             metadata=provider_metadata
@@ -340,6 +483,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             provider_options=self._provider_options(phase=phase),
         )
         sandbox = AsyncSandbox(provider)
+        if session_id is not None:
+            self._session_id_to_sandbox[session_id] = sandbox
 
         async def _run_setup(started: AsyncSandbox) -> None:
             if phase != "agent":
@@ -354,7 +499,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             setup_result = await started.exec(
                 'git config --global user.email "agent@nemo-gym.local"'
                 ' && git config --global user.name "NeMo Gym Agent"'
-                " && git config --global --add safe.directory /app",
+                f" && git config --global --add safe.directory {AGENT_WORKDIR}",
                 timeout_s=60,
             )
             if setup_result.return_code != 0 or setup_result.error_type is not None:
@@ -362,9 +507,61 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     f"DeepSWE agent git setup failed with code {setup_result.return_code}, "
                     f"error_type={setup_result.error_type!r}: {setup_result.stderr or ''}"
                 )
+            if self._agent_ripgrep is not None:
+                await self._stage_agent_ripgrep(started, self._agent_ripgrep)
 
         await sandbox.start_with_setup(spec, _run_setup)
         return sandbox
+
+    async def _stage_agent_ripgrep(self, sandbox: AsyncSandbox, ripgrep: Path) -> None:
+        """Publish executable ripgrep after a bounded upload; ambiguous timeouts never reuse a remote path."""
+        mkdir_result = await sandbox.exec(shlex.join(["mkdir", "-p", AGENT_RUNTIME_DIR]), timeout_s=60)
+        if mkdir_result.return_code != 0 or mkdir_result.error_type is not None:
+            raise RuntimeError(
+                f"DeepSWE could not create {AGENT_RUNTIME_DIR}: return_code={mkdir_result.return_code}, "
+                f"error_type={mkdir_result.error_type!r}: {mkdir_result.stderr or ''}"
+            )
+        for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
+            remote_path = f"{AGENT_RUNTIME_DIR}/.rg-{uuid.uuid4().hex}"
+            started = monotonic()
+            try:
+                async with self._ripgrep_upload_sem:
+                    await sandbox.upload(ripgrep, remote_path)
+            except (TimeoutError, NgFailureEvent) as error:
+                if isinstance(error, NgFailureEvent):
+                    if error.boundary != FailureBoundary.SANDBOX or error.failure_kind != PROVIDER_IO_TIMEOUT:
+                        raise
+                    observe_failure(error)
+                LOGGER.warning(
+                    "DeepSWE ripgrep upload timed out; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    monotonic() - started,
+                )
+                if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                    raise
+                await asyncio.sleep(uniform(15.0, 30.0))
+            else:
+                LOGGER.info(
+                    "DeepSWE ripgrep upload completed; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    monotonic() - started,
+                )
+                promote_result = await sandbox.exec(
+                    shlex.join(["chmod", "0755", AGENT_RUNTIME_DIR, remote_path])
+                    + " && "
+                    + shlex.join(["mv", "-f", "--", remote_path, AGENT_RIPGREP]),
+                    timeout_s=60,
+                )
+                if promote_result.return_code != 0 or promote_result.error_type is not None:
+                    raise RuntimeError(
+                        f"DeepSWE could not stage ripgrep: return_code={promote_result.return_code}, "
+                        f"error_type={promote_result.error_type!r}: {promote_result.stderr or ''}"
+                    )
+                return
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:
@@ -423,7 +620,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
 
     def _verifier_workdir(self, task: Task) -> str:
         """Directory test.sh runs from. DeepSWE tasks live at /app; subclasses may read it from the row."""
-        return "/app"
+        return AGENT_WORKDIR
 
     async def _run_verifier(
         self,
@@ -433,10 +630,11 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         log_dir: Path,
     ) -> VerifierResult:
         await self._stage_verifier(sandbox, task, model_patch)
+        limit_s = task.config.verifier.timeout_sec
         command_result = await sandbox.exec(
-            "bash /tests/test.sh",
+            _verifier_command(limit_s),
             cwd=self._verifier_workdir(task),
-            timeout_s=task.config.verifier.timeout_sec,
+            timeout_s=limit_s + _VERIFIER_KILL_GRACE_S + _VERIFIER_PROVIDER_HEADROOM_S,
         )
 
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -462,6 +660,25 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             name: await self._download_if_present(sandbox, f"/logs/verifier/{name}", path)
             for name, path in artifact_paths.items()
         }
+        if not present["reward.json"] and _tests_hit_their_limit(command_result.return_code, combined_output):
+            if self.config.is_verifying_golden_patch:
+                # The reference patch must finish: a golden patch past the limit means the task itself is broken.
+                return VerifierResult(
+                    evaluation_completed=False,
+                    reward=0.0,
+                    verifier_exit_code=command_result.return_code,
+                    verifier_error=f"Tests did not finish within {limit_s:g}s on the golden patch",
+                    test_output=combined_output,
+                )
+            # The tests did not finish on the model's patch within the task's limit, so the task is not resolved: a
+            # patch that hangs the tests scores 0 like one that fails them.
+            return VerifierResult(
+                evaluation_completed=True,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_timeout_s=limit_s,
+                test_output=combined_output,
+            )
         if not present["reward.json"]:
             return VerifierResult(
                 evaluation_completed=False,
@@ -557,9 +774,31 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             partial=float(reward_data.get("partial", 0.0)),
         )
 
-    async def seed_session(self, request: Request, body: DeepSWESeedSessionRequest) -> DeepSWESeedSessionResponse:
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[DeepSWESeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> DeepSWESeedSessionResponse | ResourcesSeedSessionResponse:
+        """Start the agent sandbox for a task.
+
+        An Environment Server seeds an episode session and gets the sandbox back as ``sandbox_access``. An agent's
+        ``/run`` seeds with the task row and gets the sandbox handle; repeating that seed replaces the sandbox.
+        """
         if self.config.is_verifying_golden_patch:
+            if isinstance(body, ResourcesSeedSessionRequest):
+                raise ResourcesSeedRejectedError("DeepSWE seed_session is unavailable in golden-patch mode")
             raise RuntimeError("DeepSWE seed_session is unavailable in golden-patch mode")
+        if isinstance(body, ResourcesSeedSessionRequest):
+            try:
+                task = _resolve_task(DeepSWEInstanceRequest.model_validate(body.task_data), self._task_store)
+            except (KeyError, ValueError) as error:
+                raise ResourcesSeedRejectedError(f"Invalid DeepSWE task_data: {error}") from error
+            if body.task_id.task_id != task_id(task):
+                raise ResourcesSeedRejectedError(
+                    f"TaskId {body.task_id.task_id!r} does not match DeepSWE task {task_id(task)!r}"
+                )
+            return await self.seed_task_sandbox_session(request, body, DeepSWEInstanceRequest)
 
         task = _resolve_task(body, self._task_store)
         session_id = str(request.session[SESSION_ID_KEY])
@@ -597,7 +836,70 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 await self._stop_sandbox(sandbox, task_id=task_id(task), phase="failed-agent-seed")
             raise
 
+    async def _start_task_sandbox(self, session_id: str, task: BaseModel) -> str:
+        """Start an episode session's agent sandbox and return the repository the agent works in."""
+        resolved = _resolve_task(DeepSWEInstanceRequest.model_validate(task), self._task_store)
+        self._forget_task_sandbox_state(session_id)
+        sandbox = await self._create_sandbox(resolved, phase="agent", session_id=session_id)
+        descriptor = await sandbox.serialize()
+        sandbox_handle = descriptor.get("sandbox_id") if isinstance(descriptor, dict) else None
+        if not isinstance(sandbox_handle, str) or not sandbox_handle:
+            raise RuntimeError("DeepSWE sandbox provider did not return a sandbox_id")
+        self._episode_agent_sandboxes[session_id] = AgentSandboxSession(
+            task_id=task_id(resolved),
+            image=task_image(resolved),
+            sandbox=sandbox,
+            sandbox_handle=sandbox_handle,
+            sandbox_descriptor=dict(descriptor),
+        )
+        return AGENT_WORKDIR
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._episode_agent_sandboxes.pop(session_id, None)
+
+    def _is_episode_session(self, session_id: str) -> bool:
+        """Whether an Environment Server seeded ``session_id``, including after its close or expiry."""
+        record = self._task_sessions.get(session_id)
+        return (record is not None and record.seed is not None) or self._task_session_fences.get(
+            session_id
+        ) is not None
+
     async def verify(self, request: Request, body: DeepSWEVerifyRequest) -> DeepSWEVerifyResponse:
+        """Grade the committed patch of the session's agent sandbox, or the task's golden patch.
+
+        An episode session is verified once: an identical retry replays the verdict, and a verify after close or
+        expiry is masked as a lost session.
+        """
+        session_id = request.session.get(SESSION_ID_KEY)
+        if self.config.is_verifying_golden_patch or session_id is None or not self._is_episode_session(session_id):
+            return await self._verify(request, body)
+        return await self.verify_task_sandbox_session(
+            request,
+            body,
+            verify=lambda: self._verify(request, body),
+            lost_response=lambda reason, failure_kind: self._lost_session_response(body, reason, failure_kind),
+        )
+
+    def _lost_session_response(
+        self, body: DeepSWEVerifyRequest, reason: str, failure_kind: str
+    ) -> DeepSWEVerifyResponse:
+        return DeepSWEVerifyResponse.model_validate(
+            body.model_dump(exclude={"saved_model_patch", "saved_model_patch_sha256"})
+            | {
+                "task_id": _resolve_task_id(body),
+                "evaluation_completed": False,
+                "verifier_error": reason,
+                "model_patch_sha256": hashlib.sha256(b"").hexdigest(),
+                "model_patch_bytes": 0,
+                "log_dir": "",
+                "patch_collection_time_s": 0.0,
+                "sandbox_start_time_s": 0.0,
+                "verification_time_s": 0.0,
+            }
+            | lost_session_verification(reason, failure_kind=failure_kind)
+        )
+
+    async def _verify(self, request: Request, body: DeepSWEVerifyRequest) -> DeepSWEVerifyResponse:
         task = _resolve_task(body, self._task_store)
         current_task_id = task_id(task)
         current_task_image = task_image(task)
@@ -667,10 +969,19 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             model_patch = task_solution_patch_path(task).read_bytes()
         else:
             model_patch = b""
-            agent_session = self._agent_sessions.pop(session_id, None)
+            episode = self._is_episode_session(session_id)
+            captured = False
+            if episode:
+                # The shared base already matched this verify task against the seed. A retry after verify stopped
+                # the sandbox finds no sandbox here and grades the capture the session saved.
+                agent_session = self._episode_agent_sandboxes.get(session_id)
+                record = self._task_sessions.get(session_id)
+                captured = record is not None and record.capture_ready
+            else:
+                agent_session = self._agent_sessions.pop(session_id, None)
             if agent_session is None and agent_oom_observation is not None:
                 raise RuntimeError("Cannot score an agent sandbox OOM without its seeded DeepSWE session")
-            if agent_session is None and body.saved_model_patch is not None:
+            if agent_session is None and not episode and body.saved_model_patch is not None:
                 # A re-verification: the saved patch is verified as itself, never collected again.
                 saved = body.saved_model_patch.encode("utf-8")
                 if hashlib.sha256(saved).hexdigest() != body.saved_model_patch_sha256:
@@ -680,19 +991,20 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     model_patch = saved
                     replayed = True
                     session_id = f"replay-{body.saved_model_patch_sha256[:16]}-{uuid.uuid4().hex[:8]}"
-            elif agent_session is None:
+            elif agent_session is None and not captured:
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
                 failure_kind = SESSION_LOST
             else:
-                sandbox_handle = agent_session.sandbox_handle
+                if agent_session is not None:
+                    sandbox_handle = agent_session.sandbox_handle
                 started = monotonic()
                 try:
-                    if agent_session.task_id != current_task_id:
+                    if agent_session is not None and agent_session.task_id != current_task_id:
                         raise RuntimeError(
                             f"DeepSWE session task {agent_session.task_id!r} does not match verify task "
                             f"{current_task_id!r}"
                         )
-                    if agent_session.image != current_task_image:
+                    if agent_session is not None and agent_session.image != current_task_image:
                         raise RuntimeError(
                             f"DeepSWE session image {agent_session.image!r} does not match verify image "
                             f"{current_task_image!r}"
@@ -712,6 +1024,15 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                             "Agent sandbox was OOM-killed during agent execution; no patch could be collected. "
                             f"{agent_oom_event.failure_reason}"
                         )
+                    elif episode:
+
+                        async def capture() -> tuple[str, bytes]:
+                            return agent_session.sandbox_handle, await self._collect_model_patch(
+                                agent_session.sandbox, task
+                            )
+
+                        # Saved with the session, so a retry after the sandbox stopped grades the same patch.
+                        sandbox_handle, model_patch = await self.capture_task_sandbox_patch(session_id, capture)
                     else:
                         model_patch = await self._collect_model_patch(agent_session.sandbox, task)
                 except Exception as error:
@@ -726,7 +1047,11 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     failure_cause = error
                 finally:
                     patch_collection_time_s = monotonic() - started
-                    await self._stop_sandbox(agent_session.sandbox, task_id=current_task_id, phase="agent")
+                    if episode:
+                        # A failed stop fails this verify and keeps the sandbox registered, so a retry stops it.
+                        await self.stop_task_sandbox_after_capture(session_id)
+                    else:
+                        await self._stop_sandbox(agent_session.sandbox, task_id=current_task_id, phase="agent")
 
         patch_sha256 = hashlib.sha256(model_patch).hexdigest()
         log_dir = _resolve_repo_path(self.config.logs_dir) / current_task_id / session_id
@@ -818,11 +1143,31 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     file=sys.stderr,
                 )
 
+        test_deadline = result.verifier_timeout_s is not None
+        if test_deadline:
+            # The tests were stopped at the task's limit on the model's patch (``_run_verifier``). The verification
+            # policy decides, and its default for this kind counts the zero; ``fail`` leaves the result ungraded and
+            # masked. A confirmed deadline is never run again (the validator refuses ``retry`` for it).
+            decision = choose_stage_outcome(
+                failure_kind=TEST_DEADLINE, http_status=None, stage="verification", config=self.config.outcome_policy
+            )
+            counts_as_zero = decision.action == OutcomeAction.COUNT_AS_ZERO
+            verification_failure_action = decision.action
+            failure_outcome_attribution = decision.attribution
+            failure_kind = TEST_DEADLINE
+            result = result.model_copy(
+                update={
+                    "evaluation_completed": counts_as_zero,
+                    "verifier_error": f"Tests did not finish within {result.verifier_timeout_s:g}s on the model's patch",
+                }
+            )
+
         if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)
             log_dir = ""
 
-        if not result.evaluation_completed and agent_oom_observation is None:
+        reports_failure = test_deadline or not result.evaluation_completed
+        if reports_failure and agent_oom_observation is None:
             # A lost session or failed patch collection happens before verification. Keep that
             # boundary and its cause distinct from an inconclusive verifier result.
             failure = NgFailureEvent(
@@ -877,8 +1222,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "failure_outcome_attribution": failure_outcome_attribution,
                 "failure_kind": PROVIDER_OOM_KILLED
                 if agent_oom_observation is not None
-                else (None if result.evaluation_completed else failure_kind),
-                "failure_reason": None if result.evaluation_completed else result.verifier_error,
+                else (failure_kind if reports_failure else None),
+                "failure_reason": result.verifier_error if reports_failure else None,
             }
             | agent_failure_fields
             | (lost_session_verification(patch_error) if failure_kind == SESSION_LOST else {})
