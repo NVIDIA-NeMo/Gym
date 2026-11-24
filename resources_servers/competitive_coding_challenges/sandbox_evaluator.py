@@ -69,9 +69,11 @@ class _RunnerResult(BaseModel, extra="allow"):
 
 
 def _parse_result(raw: str) -> dict[str, Any]:
-    # Validate the fields the server scores from, but return the runner's full output.
-    _RunnerResult.model_validate_json(raw)
-    return json.loads(raw)
+    # Validate the fields the server scores from, but return the runner's full output. Parse with json first: the
+    # graded answer can hold a lone surrogate from the model, which pydantic's JSON parser rejects.
+    result = json.loads(raw)
+    _RunnerResult.model_validate(result)
+    return result
 
 
 def problem_file(problem_data_dir: str, competition_id: str | None, problem_id: str) -> str:

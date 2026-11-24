@@ -3,7 +3,6 @@
 import asyncio
 import glob
 import json
-import logging
 import os
 import re
 import shlex
@@ -16,9 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, is_dataclass
 from typing import Protocol
 from uuid import uuid4
-
-
-LOG = logging.getLogger(__name__)
 
 
 def nested_dataclass(*args, **kwargs):
@@ -391,12 +387,18 @@ def _compile_solution_once(
         os.makedirs(os.path.join(solution_dir, "graders"), exist_ok=True)
         if precompiled_dir and os.path.isdir(precompiled_dir):
             shutil.copytree(precompiled_dir, solution_dir, dirs_exist_ok=True)
-        if task_type == "SIMULATION":
-            with open(os.path.join(solution_dir, "solution.odo"), "w", encoding="utf-8") as f:
-                f.write(generated_code)
-        else:
-            with open(os.path.join(solution_dir, "graders", f"{problem_id}.cpp"), "w", encoding="utf-8") as f:
-                f.write(generated_code)
+        try:
+            if task_type == "SIMULATION":
+                with open(os.path.join(solution_dir, "solution.odo"), "w", encoding="utf-8") as f:
+                    f.write(generated_code)
+            else:
+                with open(os.path.join(solution_dir, "graders", f"{problem_id}.cpp"), "w", encoding="utf-8") as f:
+                    f.write(generated_code)
+        except UnicodeEncodeError as e:
+            # The submission cannot be written as UTF-8 (a lone surrogate). That is the model's output, so it fails
+            # to compile and scores 0, like any other broken submission, rather than failing the whole grading.
+            shutil.rmtree(solution_dir, ignore_errors=True)
+            return solution_dir, {"process_status": "error", "stdout": "", "stderr": f"submission is not UTF-8: {e}\n"}
 
         sandbox = _get_thread_test_sandbox(sandbox_factory)
         compile_result = _compile_in_sandbox(

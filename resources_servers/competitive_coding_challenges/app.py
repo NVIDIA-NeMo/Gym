@@ -425,9 +425,6 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             LOG.warning("competitive_coding_challenges sandbox verification failed (%s): %s", e.failure_kind, e)
             failure_kind, failure_reason = e.failure_kind, str(e)
             details = {"error": str(e)}
-        except UnicodeEncodeError as e:
-            # The generated code cannot be written as UTF-8 (a lone surrogate): the model's output, so it stays scored.
-            details = {"error": str(e)}
         except ImportError:
             # A provider SDK missing from the server venv is a deployment error; masking it as a verifier error
             # would silently drop every CCC sample.
@@ -479,7 +476,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
     async def _evaluate_in_sandbox(self, entry: dict[str, Any]) -> dict[str, Any]:
         await self._evaluator.load_metadata()
-        # An unknown problem fails here, before a sandbox exists, as it does on the default path.
+        # An unknown problem fails here, before a sandbox exists.
         self._evaluator.get_problem_metadata(entry["problem_id"], entry["competition_id"])
         if not entry["competition_id"]:
             # The row may omit its competition when the problem id is unique, but the problem's file in

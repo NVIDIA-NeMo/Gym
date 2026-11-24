@@ -167,15 +167,60 @@ def test_compile_failure_skips_test_staging_and_sandbox_execution(monkeypatch, t
     assert list(shared_dir.glob("ccc_run_*")) == []
 
 
-def test_generated_code_that_cannot_be_written_as_utf8_fails_before_the_sandbox(monkeypatch, tmp_path):
-    monkeypatch.setattr(ccc_eval, "_exec_sync", lambda *_args, **_kwargs: pytest.fail("sandbox must not be called"))
+def test_generated_code_that_cannot_be_written_as_utf8_is_a_failed_compile(monkeypatch, tmp_path):
+    # A lone surrogate comes from the model: it fails to compile like any broken submission, without a compiler run.
+    monkeypatch.setattr(ccc_eval, "_exec_sync", lambda *_args, **_kwargs: pytest.fail("compiler must not be called"))
 
-    with pytest.raises(UnicodeEncodeError):
-        ccc_eval._compile_solution_once(
-            "toy", "Batch", "int main() { return 0; } // \ud800", "", str(tmp_path), sandbox_factory=object
-        )
+    _, compile_result = ccc_eval._compile_solution_once(
+        "toy", "Batch", "int main() { return 0; } // \ud800", "", str(tmp_path), sandbox_factory=object
+    )
 
+    assert ccc_eval._test_result_from_compile(compile_result)["compile_success"] is False
+    assert "surrogates not allowed" in compile_result["stderr"]
     assert list(tmp_path.glob("ccc_solution_*")) == []
+
+
+def test_a_run_sh_that_fails_is_a_scored_zero_with_its_run_time(monkeypatch, tmp_path):
+    compiled_dir = tmp_path / "ccc_solution"
+    compiled_dir.mkdir()
+    script = compiled_dir / "run.sh"
+    script.write_text("#!/bin/bash\necho garbage\nexit 3\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setattr(ccc_eval, "_exec_sync", _execute_shell)
+    task = {
+        "compiled_solution_dir": str(compiled_dir),
+        "compile_result": {"process_status": "completed", "stdout": "", "stderr": ""},
+        "test_input": "",
+        "test_output": "",
+        "time_scale": 1.0,
+        "shared_dir": str(tmp_path),
+        "sandbox_factory": object,
+    }
+
+    result = ccc_eval.run_test_case(task, worker_id=0)
+
+    assert result["score"] == 0.0
+    assert result["run_time_s"] >= 0.0
+
+
+async def test_tests_that_min_aggregation_drops_still_count_as_run(monkeypatch):
+    # With `min`, results after the first failure in a batch are dropped from `outputs`, but those tests still ran.
+    problem = {
+        "subtasks": {"s1": {"aggregation": "min", "score": 2, "test_names": ["t1", "t2"]}},
+        "all_tests": {"t1": {"input": "", "output": ""}, "t2": {"input": "", "output": ""}},
+    }
+    evaluator = ccc_eval.CCCEvaluator(config={"test_batch_size": 2})
+    evaluator.pool = ccc_eval.ThreadPoolExecutor(max_workers=2)
+    monkeypatch.setattr(ccc_eval, "run_test_case", lambda _task, _idx: {"score": 0.0, "run_time_s": 0.1})
+    try:
+        details = await evaluator._evaluate_compiled_solution(
+            {"name": "toy", "subtask": "s1"}, problem, "/unused", {"process_status": "completed"}, 1.0
+        )
+    finally:
+        evaluator.pool.shutdown()
+
+    assert len(details["test_case_results"]["s1"]["outputs"]) == 1
+    assert details["num_tests_run"] == 2
 
 
 async def test_an_evaluator_without_a_sandbox_factory_cannot_run_tests(tmp_path):

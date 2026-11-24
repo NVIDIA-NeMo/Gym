@@ -450,28 +450,6 @@ async def test_verify_votes_on_the_answer_the_evaluator_graded(monkeypatch: pyte
     assert all(GRADED_ANSWER_KEY not in r["details"] for r in responses)
 
 
-@pytest.mark.asyncio
-async def test_verify_scores_generated_text_that_cannot_be_encoded(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A lone surrogate in the model's code comes from the model, so masking it would remove its penalty. The
-    # sandbox runner reports it as a result with no passing test (see test_sandbox_evaluator.py).
-    server = _make_server()
-    evaluator = MagicMock()
-    evaluator.eval_single = AsyncMock(
-        return_value={"test_case_results": {}, "error": "'utf-8' codec can't encode character: surrogates not allowed"}
-    )
-    evaluator.get_problem_metadata.return_value = {
-        "subtasks": {"samples": {"score": 1.0, "aggregation": "min", "test_names": ["t1"]}}
-    }
-    server._evaluator = _grade_with(evaluator, monkeypatch)
-
-    response = await server.verify(_make_verify_request(text="```cpp\n\ud800\n```"))
-
-    assert response.reward == 0.0
-    assert response.mask_sample is False
-    assert response.failure_kind is None
-    assert "surrogates not allowed" in response.details["error"]
-
-
 # ---------------------------------------------------------------------------
 # Aggregate-metrics path: _score_fn / _lookup_subtask_cap / compute_metrics /
 # get_key_metrics. Bare-instance pattern (model_construct + stub _evaluator)

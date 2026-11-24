@@ -127,10 +127,6 @@ def main(request_path: Path, result_path: Path) -> None:
     )
     try:
         result = asyncio.run(evaluator.eval_single(request["entry"]))
-    except UnicodeEncodeError as e:
-        # The submission cannot be written as UTF-8 (a lone surrogate). That is the model's output, so it is scored
-        # with no passing test rather than failing the runner, which the server would mask.
-        result = {"test_case_results": {}, "error": str(e)}
     finally:
         if evaluator.pool is not None:
             evaluator.pool.shutdown(wait=True)
