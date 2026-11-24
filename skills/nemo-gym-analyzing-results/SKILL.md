@@ -39,7 +39,7 @@ Most reported gaps come from comparing unlike things: different tasks, settings,
 
 Hand off when the main job is different:
 
-- Running, resuming or monitoring an evaluation: the evaluation-running skill (`run-and-babysit-eval` in the Gym repo).
+- Running, resuming or monitoring an evaluation: the evaluation-running skill (`nemo-gym-run-and-babysit-eval`, called `run-and-babysit-eval` in older Gym checkouts).
 - Choosing RL training tasks from reward profiles: `nemo-gym-reward-profiling`.
 - Choosing repeat counts before collecting runs: `nemo-gym-repeat-planning` in the Gym repo.
 - A crash, a stack trace, an empty output file, servers that never start, or a slow run: `nemo-gym-debugging` in the Gym repo.
@@ -77,9 +77,9 @@ A score covers only the rollouts that were measured. Count before comparing:
 - **Planned** is the number of rows in `<stem>_materialized_inputs.jsonl`. **Measured** is the number of rows in `<stem>.jsonl` with a numeric `reward` that are not marked `mask_sample`.
 - **Failed rollouts are left out of the score by default**, not counted as 0. A run that lost its hardest tasks to failures scores higher than it earned. Count the failures by `_ng_failure_class`, including `judge_failed`; a rollout that failed and later succeeded on `--resume` appears in both files and is not failed.
 - Results that the benchmark marked `mask_sample` (not a valid measurement) also leave the score.
-- With failed or missing rollouts, one run's metrics disagree: `mean/reward` weights rollouts, a benchmark's `pass@1[avg-of-k]` keys weight tasks equally, and `pass@k` leaves out tasks with fewer than k measured rollouts, so it can read 100% while some tasks never pass. A gap between `mean/reward` and `pass@1[avg-of-k]` in one report is a sign of missing rollouts.
+- With failed or missing rollouts, one run's metrics disagree: `mean/reward` weights rollouts, a benchmark's `pass@1[avg-of-K]` for the full repeat count K weights tasks equally, and `pass@k` leaves out tasks with fewer than k measured rollouts, so it can read 100% while some tasks never pass. When `pass@1[avg-of-K]` divided by 100 differs from `mean/reward` for the same reward, rollouts are missing unevenly; keys with a smaller k use only each task's first k repeats and differ even in complete runs.
 - `run.artifacts.healthy: true` in `<run_dir>/quality_summary.json` only means that nothing is missing or recorded twice. Failure limits are off by default, so read `run.artifacts.failed` too.
-- A rollout verdict of `unobserved` is not `healthy`: a check could not run for lack of evidence, such as captured model calls. When every rollout is unobserved, the checks for cut-off or empty answers did not run (`run.artifacts.coverage` shows how many rollouts each check evaluated), so they flag nothing.
+- A rollout verdict of `unobserved` is not `healthy`: at least one check lacked the evidence it needs, such as captured model calls. Read each check's `evaluated` count in `run.artifacts.coverage`: a check such as `model_call_runaway_generation` with `evaluated: 0` never ran, so it flagged nothing even if answers were cut off.
 
 `<stem>_coverage.json` and `run.artifacts` hold these counts after 0.7.0. For 0.7.0 runs, which have no coverage file and only record and per-check counts in `run.artifacts`, use the counting snippet in `references/score-comparability.md`. Report coverage next to every score, for example "0.62 over 180 of 192 planned rollouts; 12 failed (`model_request_error`), left out of the score".
 
@@ -134,9 +134,9 @@ Load `references/failure-diagnosis.md` for the full method. In short:
 
 - Start with tasks that sometimes pass. Compare a passing and a failing repeat of the same task and find where they diverge: the answer, its format, where the answer was written, a tool call, or where the output stopped.
 - For a task that never passes, check the verifier before blaming the model. Compare the extracted answer with the expected answer, and look for a correct answer in another format, an answer only in the reasoning, or output cut off at the token limit.
-- Keep infrastructure out of model quality: failure classes, HTTP 429 or 5xx errors, and sandbox errors are not wrong answers.
+- Keep infrastructure out of model quality: retryable failures, HTTP 429 or 5xx errors and sandbox errors are not wrong answers. Some endings are settled as the model's 0 by the benchmark itself, such as a Harbor verifier timeout or an out-of-memory kill during the agent's work; count those separately, and call them model errors or infrastructure only with evidence.
 - Give each failing task one root-cause label with evidence (task and rollout ids, the relevant output, the verifier fields), then map labels to fixes.
-- To size a verifier or answer-extraction fix, re-score the saved rollouts with `gym eval reverify` and count the rollouts and tasks whose reward changes. Both scorings cover the same rollouts, so the difference is exact; the interval from `gym eval compare` assumes independent runs and does not apply.
+- To size a verifier or answer-extraction fix, re-score the saved rollouts with `gym eval reverify` and count the rollouts and tasks whose reward changes. First check that every measured rollout got a valid re-score: re-scores that fail go to the failures file next to the new output. On the same rollouts the difference is exact; the interval from `gym eval compare` assumes independent runs and does not apply.
 
 ### 7. Report
 
@@ -180,7 +180,8 @@ Next step: resume the candidate to finish the 11 rollouts, then compare again. A
 | `gym eval compare` finds no shared agent | The runs used different agent names | Pick them with `--baseline-agent` and `--candidate-agents` |
 | `UserWarning: ... has incomplete or unequal task coverage across repeats` | Some repeats of one run measured fewer tasks: failed or missing rollouts | Check step 2; resume the run before trusting the interval |
 | `gym eval profile` fails with `Missing rollout results for N materialized input rows` | Rollouts failed or are missing | Add `++allow_partial_rollouts=True` and report coverage with the numbers |
-| Many `_ng_failure_class` values starting with `provider_` (after 0.7.0), sandbox errors, or zeros from verification that did not finish (`evaluation_completed: false`, or `failure_kind` `harbor:verifier_timeout`, `harbor:missing_reward` or `harbor:invalid_reward` on Harbor runs) | The sandbox or verifier was not ready, not reachable or too slow while the run scored | Infrastructure, not model quality. Fix the sandbox and resume the run; on benchmarks that score unfinished verification as 0, count those rows separately |
+| Failure rows whose `_ng_failure_class` starts with `provider_` (after 0.7.0), or other sandbox errors | The sandbox was not ready or not reachable | Infrastructure, not model quality. Fix the sandbox; a resume reruns these while `_ng_failure_terminal` is false and attempts remain |
+| Zeros from verification that did not finish (`evaluation_completed: false`, or `failure_kind` `harbor:verifier_timeout`, `harbor:missing_reward` or `harbor:invalid_reward`), or an out-of-memory kill during the agent's work counted as 0 | The benchmark's own settled grade: the run counts these as measured, so a resume does not redo them | Keep them in the score and report how many there are. If the evidence shows a grade is invalid, such as verifier timeouts on an overloaded cluster, re-verify where the benchmark supports it or collect a new run, and report both |
 | `judge_failed` or other failure rows whose `_ng_failure_message` shows HTTP 401 or 403 | A bad or missing API key for the policy or judge endpoint | Fix the key. Rerun judge failures with `gym eval reverify --judge-failed-only`; resume policy failures |
 | `gym eval reverify` cannot reach the judge, or fails with connection errors | The judge endpoint is unreachable or the URL is wrong | Check the judge URL and key in the config passed to `--config`, then rerun with `--resume` |
 | `gym eval health-check` replaced reports in a shared folder | It writes `<run_dir>/quality_summary.json` and `<run_dir>/rollout_verdicts.jsonl` | Copy a shared or read-only run before checking it |

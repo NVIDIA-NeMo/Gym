@@ -15,7 +15,7 @@ Use this reference to explain which tasks fail, why, and what to change, for one
 
 ## Outcome Groups
 
-This sorts every planned task by its measured rewards and lists the repeats of tasks whose reward varies, so passing and failing repeats can be read side by side. It assumes the run wrote `results/rollouts.jsonl`:
+This sorts every planned task by its measured rewards, separately for each agent when several agents ran the same tasks, and lists the repeats of tasks whose reward varies, so passing and failing repeats can be read side by side. It assumes the run wrote `results/rollouts.jsonl`:
 
 ```bash
 python3 - results/rollouts.jsonl <<'EOF'
@@ -35,25 +35,29 @@ def rows(p):
             if isinstance(row, dict):
                 result.append(row)
     return result
-planned = collections.Counter(r.get("_ng_task_index") for r in rows(out.with_name(out.stem + "_materialized_inputs.jsonl")))
+key = lambda r: (r.get("_ng_task_index"), r.get("_ng_rollout_index"))
+# Several agents can run the same task (fan-out), so group by agent as well as by task.
+agent = lambda r: (r.get("agent_ref") or {}).get("name") or r.get("_ng_environment_server") or "-"
+plan = {key(r): agent(r) for r in rows(out.with_name(out.stem + "_materialized_inputs.jsonl"))}
+planned = collections.Counter((a, k[0]) for k, a in plan.items())
 measured = collections.defaultdict(dict)
 for r in rows(out):
     if isinstance(r.get("reward"), (int, float)) and not r.get("mask_sample"):
-        measured[r.get("_ng_task_index")][r.get("_ng_rollout_index")] = r["reward"]
+        measured[(plan.get(key(r), agent(r)), r.get("_ng_task_index"))][r.get("_ng_rollout_index")] = r["reward"]
 groups = collections.defaultdict(list)
-for task in sorted(planned.keys() | measured.keys(), key=lambda t: (t is None, t)):
-    got = measured.get(task, {})
+for a, task in sorted(planned.keys() | measured.keys(), key=lambda k: (str(k[0]), k[1] is None, k[1])):
+    got = measured.get((a, task), {})
     rewards = list(got.values())
-    label = f"{task}{'*' if len(got) < planned.get(task, 0) else ''}"
+    label = f"{task}{'*' if len(got) < planned.get((a, task), 0) else ''}"
     if not rewards:
-        groups["not measured"].append(label)
+        groups[(a, "not measured")].append(label)
     elif min(rewards) == max(rewards):
-        groups[f"same reward {rewards[0]} on every measured repeat"].append(label)
+        groups[(a, f"same reward {rewards[0]} on every measured repeat")].append(label)
     else:
-        groups["reward varies"].append(label)
-        print(f"task {task}: " + ", ".join(f"r{k}={v}" for k, v in sorted(got.items(), key=lambda kv: (kv[0] is None, kv[0]))))
-for name, tasks in groups.items():
-    print(f"{name} ({len(tasks)}): {', '.join(tasks)}")
+        groups[(a, "reward varies")].append(label)
+        print(f"{a} task {task}: " + ", ".join(f"r{k}={v}" for k, v in sorted(got.items(), key=lambda kv: (kv[0] is None, kv[0]))))
+for (a, name), tasks in groups.items():
+    print(f"{a}: {name} ({len(tasks)}): {', '.join(tasks)}")
 print("* = fewer measured repeats than planned")
 EOF
 ```
@@ -97,6 +101,7 @@ Fields to read in a rollout row of `<stem>.jsonl`:
 | The same wrong answer on every repeat | A knowledge gap, or a wrong label | Check the expected answer before calling it a model problem |
 | Different wrong answers across repeats, with occasional passes | Unreliable knowledge | Passing and failing repeats differ in the answer, not in format or tooling |
 | Identical outputs with different rewards | A nondeterministic verifier or environment | Compare rewards of repeated outputs |
+| Zeros marked `harbor:verifier_timeout`, `harbor:missing_reward` or `harbor:invalid_reward`, or `evaluation_completed: false` | Verification that did not finish, settled by the benchmark as 0 | The verifier's logs and timing; a resume does not redo these |
 | Failure rows with HTTP 429 or 5xx, sandbox errors, timeouts | Infrastructure | `_ng_failure_class` and `_ng_failure_message` (or `failure_reason`) in `<stem>_failures.jsonl`; `run.stats` in `<run_dir>/quality_summary.json` counts errors of saved rollouts only |
 | Tool errors, loops, giving up early, ignoring feedback | Agent behavior | Tool calls and their outputs, in order |
 
@@ -128,24 +133,37 @@ Recommend how to measure each fix before rerunning everything; running and resum
       --output results/rescored/rollouts.jsonl
   ```
 
-  It starts every server in the config, so pass one with just the resources server, plus the judge's model server on judged benchmarks, and it refuses servers that do not support re-scoring unless forced. Both scorings cover the same rollouts, so their difference is exact: count the rollouts and tasks whose reward changed rather than reading an interval from `gym eval compare`, which assumes two independent runs.
+  It starts every server in the config, so pass one with just the resources server, plus the judge's model server on judged benchmarks, and it refuses servers that do not support re-scoring unless forced. Re-scores that fail go to the failures file next to the new output, not into it, so check that every measured rollout was re-scored before reporting the effect; the counter below says so. On the same rollouts the difference is exact: count the rollouts and tasks whose reward changed rather than reading an interval from `gym eval compare`, which assumes two independent runs.
 
   ```bash
   python3 - results/rollouts.jsonl results/rescored/rollouts.jsonl <<'EOF'
   import json, sys
-  def rewards(path):
+  from pathlib import Path
+  def scores(path):
+      """Valid, unmasked rewards by (task, rollout); exits when the file is missing."""
+      p = Path(path)
+      if not p.exists():
+          sys.exit(f"missing {p}")
       result = {}
-      with open(path) as f:  # Exits with an error when the file is missing.
-          for line in f:
-              try:
-                  r = json.loads(line)
-              except json.JSONDecodeError:
-                  continue  # Blank lines, and a cut-off last line.
-              result[(r.get("_ng_task_index"), r.get("_ng_rollout_index"))] = r.get("reward")
+      for line in p.open("rb"):
+          try:
+              r = json.loads(line)
+          except (json.JSONDecodeError, UnicodeDecodeError):
+              continue  # Blank lines, and a cut-off last line.
+          if isinstance(r, dict) and isinstance(r.get("reward"), (int, float)) and not r.get("mask_sample"):
+              result[(r.get("_ng_task_index"), r.get("_ng_rollout_index"))] = r["reward"]
       return result
-  old, new = rewards(sys.argv[1]), rewards(sys.argv[2])
-  changed = sorted(k for k in old.keys() & new.keys() if old[k] != new[k])
-  print(f"{len(changed)} of {len(old.keys() & new.keys())} rollouts changed reward, in tasks {sorted({t for t, _ in changed})}")
+  old, new = scores(sys.argv[1]), scores(sys.argv[2])
+  both = old.keys() & new.keys()
+  changed = sorted(k for k in both if old[k] != new[k])
+  print(f"{len(changed)} of {len(both)} re-scored rollouts changed reward, in tasks {sorted({t for t, _ in changed})}")
+  missing = sorted(old.keys() - new.keys())
+  if missing or new.keys() - old.keys():
+      print(f"INCOMPLETE: {len(missing)} of {len(old)} measured rollouts have no valid re-score (see the failures file next to the "
+            f"re-scored output), in tasks {sorted({t for t, _ in missing})}; {len(new.keys() - old.keys())} re-scores match no "
+            "original row. Finish the re-score or report this as a partial result.")
+  else:
+      print("Complete: every measured rollout has a valid re-score.")
   EOF
   ```
 - **Prompt, token limit, sampling or harness.** A rerun with the change on the same tasks and repeats, then a comparison of the two runs.
