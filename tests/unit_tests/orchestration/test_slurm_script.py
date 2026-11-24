@@ -3807,10 +3807,27 @@ def test_shared_allocation_gives_each_benchmark_disjoint_ports_and_its_own_head_
     assert heads == lows
 
 
-def test_shared_allocation_refuses_a_port_range_too_small_to_share():
-    config = _shared_config({"a": {"run": {"port_range_low": 100, "port_range_high": 102}}, "b": {}, "c": {}})
-    with pytest.raises(ValueError, match="too small"):
+@pytest.mark.parametrize(
+    "runs, message",
+    [
+        ([{"port_range_low": 100, "port_range_high": 200}] * 3, "fewer than 64 ports"),
+        ([{}, {"port_range_low": 12000, "port_range_high": 12999}], "must use one port range"),
+        ([{"port_range_low": "${oc.env:LOW}"}, {}], "'b0': a shared allocation needs"),
+    ],
+)
+def test_shared_allocation_refuses_port_ranges_it_cannot_split(runs, message):
+    config = _shared_config({f"b{index}": {"run": dict(run)} for index, run in enumerate(runs)})
+    with pytest.raises(ValueError, match=re.escape(message)):
         _shared_script(config)
+
+
+def test_shared_allocation_splits_the_default_range_and_a_dict_head_server():
+    config = _shared_config({"a": {"run": {"head_server": {"host": "h"}}}, "b": {}})
+    script = _shared_script(config)
+
+    assert re.findall(r"\+port_range_low=(\d+)", script) == ["10001", "15001"]
+    assert "+head_server.host=h" in script and "+head_server.port=10001" in script
+    assert "+head_server.port=15001" in script
 
 
 def test_shared_allocation_runs_each_driver_in_its_own_directory_and_fails_if_any_fails(tmp_path, monkeypatch):
@@ -3840,18 +3857,43 @@ def test_shared_allocation_runs_each_driver_in_its_own_directory_and_fails_if_an
     [
         ({"a": {"resumable": True}, "b": {}}, {}, "resumable"),
         ({"a": {}, "b": {}}, {"lustre_md_stats": True}, "lustre_md_stats"),
+        ({"a": {"command": "echo hi"}, "b": {}}, {}, "command"),
+        ({"otel": {}, "b": {}}, {}, "rename the benchmark(s) otel"),
+        ({"a": {}, "b": {}}, {"type": "kubernetes"}, "needs a Slurm compute"),
     ],
 )
 def test_shared_allocation_refuses_what_it_cannot_share_yet(benchmarks, compute, message):
-    with pytest.raises(ValueError, match=message):
+    cluster = {"type": "slurm", "account": "my-account", "hostname": "foo"}
+    if compute.get("type") == "kubernetes":
+        cluster = {"type": "kubernetes", "pvc_name": "gym-pvc"}
+    else:
+        cluster.update(compute)
+    with pytest.raises(ValueError, match=re.escape(message)):
         SubmitConfig.model_validate(
             {
                 "services": {},
-                "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo", **compute}},
+                "compute": {"cluster": cluster},
                 "driver": {"container": "python:3.12", "shared_allocation": True, "benchmarks": benchmarks},
                 "job": {"output_path": "/remote/jobs"},
             }
         )
+
+
+def test_a_config_without_shared_allocation_saves_the_config_it_always_did():
+    plain = _shared_config({"a": {}}, shared_allocation=False)
+    shared = _shared_config({"a": {}, "b": {}})
+
+    assert "shared_allocation" not in plain.model_dump(mode="json")["driver"]
+    saved = shared.model_dump(mode="json")
+    assert saved["driver"]["shared_allocation"] is True
+    assert SubmitConfig.model_validate(saved).driver.shared_allocation is True
+
+
+def test_shared_allocation_reports_an_exited_service_without_waiting_on_it():
+    script = _shared_script(_shared_config({"a": {}, "b": {}}))
+
+    assert "local status=unknown" in script
+    assert 'wait "$2"' not in script
 
 
 def test_shared_allocation_service_logs_are_one_level_above_each_job_directory():

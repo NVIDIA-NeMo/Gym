@@ -163,6 +163,8 @@ class JudgeJobs:
         job_dir = Path(job.job_dir)
         with get_connection(record.hostname) as conn:
             config = self._saved_config(conn, Path(record.run_dir))
+            if config.driver.shared_allocation:
+                return _stopped(decision, "a benchmark of a shared allocation cannot be rejudged individually yet")
             original = config.driver.benchmarks[benchmark]
             resume = original.resume_config
             compute = config.compute[record.cluster]

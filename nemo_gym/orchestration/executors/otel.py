@@ -181,7 +181,12 @@ def _policy_model_name(config: SubmitConfig) -> str | None:
 
 
 def render_collector_config(
-    config: SubmitConfig, benchmark_name: str, remote_bench_dir: Path, *, node_local: bool = True
+    config: SubmitConfig,
+    benchmark_name: str,
+    remote_bench_dir: Path,
+    *,
+    node_local: bool = True,
+    run_id: str | None = None,
 ) -> str:
     """The collector's YAML for one benchmark job.
 
@@ -265,7 +270,7 @@ def render_collector_config(
     attributes = [
         *([("service.name", obs.service_name, "upsert")] if obs.service_name is not None else []),
         ("user", getpass.getuser(), "upsert"),
-        ("run_id", remote_bench_dir.parent.name, "upsert"),
+        ("run_id", run_id or remote_bench_dir.parent.name, "upsert"),
         ("slurm_job_id", "${env:SLURM_JOB_ID}", "upsert"),
         ("benchmark", benchmark_name, "upsert"),
         ("cluster", next(iter(config.compute)), "upsert"),

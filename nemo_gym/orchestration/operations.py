@@ -151,6 +151,16 @@ def cancel(executor: Terminable, record: SubmissionRecord, benchmark: str) -> Jo
     read `RUNNING`.
     """
     job = record.benchmark_job(benchmark)  # an unknown benchmark names the known ones before anything is asked
+    sharing = [
+        other.benchmark
+        for other in record.benchmarks
+        if other is not job and job.job_id and other.job_id == job.job_id
+    ]
+    if sharing:
+        raise ValueError(
+            f"{benchmark} shares Slurm job {job.job_id} with {', '.join(sharing)} in a shared allocation; "
+            f"cancel the whole submission with --all instead."
+        )
     (before,) = status(executor, [record], [benchmark])
     current = before.jobs[0]
     if current.state in FINISHED_STATES:
@@ -173,11 +183,18 @@ def cancel_submission(executor: Terminable, record: SubmissionRecord, *, confirm
         )
     (before,) = status(executor, [record])
     refused: dict[str, Failure] = {}
+    terminated: set[str] = set()
     for current in before.jobs:
         if current.state in FINISHED_STATES:
             continue
+        job = record.benchmark_job(current.benchmark)
+        # The benchmarks of a shared allocation share one job: stop it once.
+        if job.job_id is not None and job.job_id in terminated:
+            continue
         try:
-            executor.terminate(record, record.benchmark_job(current.benchmark))
+            executor.terminate(record, job)
+            if job.job_id is not None:
+                terminated.add(job.job_id)
         except Exception as error:  # deliberate: one refusal must not stop the other benchmarks
             refused[current.benchmark] = Failure(
                 category=FailureCategory.CANCELLED,

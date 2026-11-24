@@ -19,7 +19,8 @@ One script per host asks Slurm about every job directory of every record at once
 the whole batch, a single `sacct` over every job id any of them has had, and the state files each job
 directory holds. The cost grows with the number of hosts, not with the number of submissions. Jobs are
 found by where they run, not by the recorded id, so a job started by hand, a resumed one, or one
-resubmitted from another machine is still seen.
+resubmitted from another machine is still seen. A shared allocation runs in the run directory, so its
+benchmarks are seen through their recorded id.
 """
 
 import base64

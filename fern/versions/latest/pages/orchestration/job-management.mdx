@@ -143,7 +143,7 @@ gym job logs ID BENCHMARK [--source NAME] [--instance ID] [--tail N]
 gym job resubmit ID BENCHMARK
 ```
 
-`resubmit` queues the benchmark's `job.sh` again from its job directory and prints the new job id. It refuses while a job of that benchmark is still queued or running in that directory, so two jobs never write one run. The record is updated with the new job id.
+`resubmit` queues the benchmark's `job.sh` again from its job directory and prints the new job id. A benchmark of a [shared allocation](/orchestration/configuration#shared-allocation) is refused, since its job runs every benchmark. It refuses while a job of that benchmark is still queued or running in that directory, so two jobs never write one run. The record is updated with the new job id.
 
 `gym job resubmit` is the plain resubmit. It decides nothing from the run's saved evidence, and it resets the budgets. A benchmark that uses the built-in `gym eval run` runner resumes from its saved rollouts and gives every eligible failed rollout a fresh attempt budget; when an auto-resume chain is configured, the queued job also starts with a fresh retry count and walltime budget. A benchmark with a custom `command` runs that command again, so the command has to preserve or resume its own outputs.
 

@@ -696,6 +696,11 @@ class ChainRecovery:
         )
         with get_connection(record.hostname) as conn:
             config = self._saved_config(conn, Path(record.run_dir))
+            if config.driver.shared_allocation:
+                raise ValueError(
+                    f"{benchmark} ran in a shared allocation; its benchmarks cannot be resubmitted individually "
+                    "yet. Submit them again."
+                )
             repin_commands, journals = (
                 self._rerender_commands(
                     record,

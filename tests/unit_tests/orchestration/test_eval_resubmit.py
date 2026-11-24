@@ -1398,3 +1398,19 @@ def test_recover_revalidates_the_collected_accounting_inside_the_resubmit_lock(
     assert not (job_dir / ".gym_resubmit.lock").exists()
     assert (job_dir / ".gym_chain_incomplete").exists() == (change == "incomplete")
     assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
+
+
+def test_resubmit_refuses_a_benchmark_of_a_shared_allocation(tmp_path: Path, slurm_bin: Path) -> None:
+    config = _config(tmp_path)
+    shared = SubmitConfig.model_validate(
+        {
+            **config.model_dump(mode="json"),
+            "driver": {**config.model_dump(mode="json")["driver"], "shared_allocation": True},
+        }
+    )
+    job_dir = _staged_run(tmp_path, config=shared)
+
+    with pytest.raises(ValueError, match="shared allocation"):
+        resubmit(*_handle(job_dir))
+    assert not (slurm_bin / "cwd").exists()
+    assert not list(job_dir.glob(".gym_chain_incomplete*"))

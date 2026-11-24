@@ -909,8 +909,7 @@ _gym_service_exited() {{
         wait "$_gym_driver_pid"
         return
     fi
-    wait "$2"
-    local status=$?
+    {service_status}
     echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."
     kill -TERM "$_gym_driver_pid" 2>/dev/null
     wait "$_gym_driver_pid"
@@ -926,7 +925,7 @@ _gym_run_driver() {{
 _gym_run_driver"""
 
 
-def _render_watched_driver(driver: str, services: list[str]) -> str:
+def _render_watched_driver(driver: str, services: list[str], *, shared: bool = False) -> str:
     """The driver step, ended with TERM if a service it depends on exits first.
 
     A dead service would otherwise leave the driver retrying it until the walltime. The job exits
@@ -936,6 +935,8 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
     `GYM_EVAL_SUCCEEDED_MARKER` as soon as the evaluation succeeds, and from then on a lost service no
     longer ends the driver: the exports do not use it, and a requeue would reload the model for nothing.
     The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
+    In a shared allocation the driver runs in a subshell, which cannot wait on the services its parent started,
+    so the service's exit status is reported as unknown.
     """
     if not services:
         return driver
@@ -943,7 +944,8 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
         f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
         for name in services
     )
-    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
+    service_status = "local status=unknown" if shared else 'wait "$2"\n    local status=$?'
+    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks, service_status=service_status)
 
 
 def _render_lustre_md_stats_start(compute: SlurmComputeConfig, remote_bench_dir: Path, total_nodes: int) -> str:
@@ -1131,22 +1133,49 @@ def _with_resume_flag(run: dict[str, Any], resumable: bool) -> dict[str, Any]:
     return run
 
 
-def _with_port_slice(run: dict[str, Any], index: int, count: int) -> dict[str, Any]:
-    """Give benchmark `index` of `count` in a shared allocation its own slice of the server port range, with its
-    head server on the first port of the slice. Drivers that run side by side on one node then never probe or bind
-    the same port, and Gym keeps each driver's own head port out of the ports it assigns."""
-    low = int(run.get(PORT_RANGE_LOW_KEY_NAME, DEFAULT_PORT_RANGE_LOW))
-    high = int(run.get(PORT_RANGE_HIGH_KEY_NAME, DEFAULT_PORT_RANGE_HIGH))
-    width = (high - low + 1) // count
-    if width < 2:
+# The fewest ports one driver of a shared allocation gets: its head server plus room for every server it starts.
+# Gym's port allocator retries until it finds a free port, so a slice it exhausts would hang the run.
+_MIN_SHARED_PORTS = 64
+
+
+def _shared_port_slices(benchmarks: dict[str, BenchmarkRunConfig]) -> list[tuple[int, int]]:
+    """Split the allocation's one server port range into a disjoint slice per benchmark, in order.
+
+    The range is `port_range_low`/`port_range_high` under the benchmarks' `run`, or Gym's default. Every benchmark
+    must name the same range there: slices of different ranges could overlap. A range set in a benchmark's own
+    config files is not seen here and is replaced by the slice.
+    """
+    ranges = {}
+    for name, benchmark in benchmarks.items():
+        try:
+            ranges[name] = (
+                int(benchmark.run.get(PORT_RANGE_LOW_KEY_NAME, DEFAULT_PORT_RANGE_LOW)),
+                int(benchmark.run.get(PORT_RANGE_HIGH_KEY_NAME, DEFAULT_PORT_RANGE_HIGH)),
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"benchmark {name!r}: a shared allocation needs port_range_low/port_range_high as integers"
+            ) from error
+    if len(set(ranges.values())) > 1:
+        shown = ", ".join(f"{name}={low}-{high}" for name, (low, high) in ranges.items())
+        raise ValueError(f"the benchmarks of a shared allocation must use one port range; got {shown}")
+    low, high = next(iter(ranges.values()))
+    width = (high - low + 1) // len(benchmarks)
+    if width < _MIN_SHARED_PORTS:
         raise ValueError(
-            f"port range {low}-{high} is too small to give each of {count} benchmarks in a shared allocation "
-            "its own ports; widen port_range_low/port_range_high."
+            f"port range {low}-{high} gives each of {len(benchmarks)} benchmarks in a shared allocation fewer "
+            f"than {_MIN_SHARED_PORTS} ports; widen port_range_low/port_range_high."
         )
-    slice_low = low + index * width
+    return [(low + index * width, low + (index + 1) * width - 1) for index in range(len(benchmarks))]
+
+
+def _with_port_slice(run: dict[str, Any], slice_low: int, slice_high: int) -> dict[str, Any]:
+    """Run a benchmark of a shared allocation on its own port slice, with its head server on the first port.
+    Drivers side by side on one node then never probe or bind the same port, and Gym keeps each driver's own
+    head port out of the ports it assigns."""
     sliced = {key: value for key, value in run.items() if key != f"{HEAD_SERVER_KEY_NAME}.port"}
     sliced[PORT_RANGE_LOW_KEY_NAME] = slice_low
-    sliced[PORT_RANGE_HIGH_KEY_NAME] = slice_low + width - 1
+    sliced[PORT_RANGE_HIGH_KEY_NAME] = slice_high
     if isinstance(run.get(HEAD_SERVER_KEY_NAME), dict):
         sliced[HEAD_SERVER_KEY_NAME] = {**run[HEAD_SERVER_KEY_NAME], "port": slice_low}
     else:
@@ -1196,20 +1225,16 @@ def build_shared_allocation_script(config: SubmitConfig, compute: SlurmComputeCo
     members = list(config.driver.benchmarks.items())
     parts = [
         _script_parts(
-            config,
-            name,
-            benchmark,
-            compute,
-            remote_run_dir / name,
-            shared_dir=remote_run_dir,
-            port_slice=(index, len(members)),
+            config, name, benchmark, compute, remote_run_dir / name, shared_dir=remote_run_dir, port_slice=bounds
         )
-        for index, (name, benchmark) in enumerate(members)
+        for (name, benchmark), bounds in zip(members, _shared_port_slices(config.driver.benchmarks))
     ]
+    # The services come from config and compute alone, so they are the same for every benchmark. A prologue
+    # would be dropped here with the functions its driver calls; validation refuses whatever renders one.
+    for (name, _), part in zip(members, parts):
+        if part["resume_prologue"]:
+            raise ValueError(f"benchmark {name!r} needs a job prologue, which a shared allocation cannot run")
     shared_keys = ("ray_prelude", "service_commands", "health_checks")
-    for (name, _), part in zip(members[1:], parts[1:]):
-        if any(part[key] != parts[0][key] for key in shared_keys):
-            raise ValueError(f"benchmark {name!r} would deploy different services than {members[0][0]!r}")
     launches = "\n".join(
         f"(\ncd {shlex.quote(str(remote_run_dir / name))} || exit 1\n{part['driver_command']}\n) &\n"
         "_gym_member_pids+=($!)"
@@ -1247,7 +1272,8 @@ def _script_parts(
 ) -> dict[str, str]:
     """The sections of one benchmark's job script. With `shared_dir`, the benchmark is one of a shared allocation:
     the collector lives in `shared_dir` and its shutdown is left to the shared script, the install gets its own
-    uv, and `port_slice` (index, count) selects the benchmark's share of the server port range."""
+    uv, the service watch cannot wait on the parent's services, and `port_slice` is the benchmark's (low, high)
+    share of the server port range."""
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
 
     resume = benchmark.resume_config
@@ -1532,7 +1558,7 @@ def _script_parts(
         marker_definition
         + (f"{gym_cmd}\n" if gym_cmd else "")
         + (f"_gym_md_stats {SERVICES_READY}\n" if md_stats else "")
-        + _render_watched_driver(driver_srun, watched)
+        + _render_watched_driver(driver_srun, watched, shared=shared_dir is not None)
         + (f"\n_gym_md_stats {DRIVER_END}" if md_stats else "")
     )
     if resume:

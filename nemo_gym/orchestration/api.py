@@ -644,12 +644,36 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
     def _resolve_env_prefixes(cls, v: dict[str, str], info: ValidationInfo) -> dict[str, str]:
         return resolve_env_dict(v, saved_config=bool(info.context and info.context.get(SAVED_CONFIG)))
 
+    @model_serializer(mode="wrap")
+    def _omit_unset_shared_allocation(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # Off, the saved config is the one a launcher without the field writes and can read back.
+        data = handler(self)
+        if not self.shared_allocation:
+            data.pop("shared_allocation", None)
+        return data
+
+
+# Entries a shared allocation keeps in the run directory itself, so no benchmark may take their names.
+_SHARED_ALLOCATION_RESERVED_NAMES = ("job.sh", "logs", "otel")
+
 
 def _validate_shared_allocation(driver: DriverConfig, compute: object) -> None:
     """Refuse what a shared allocation cannot honour yet: the auto-resume chain and Lustre metadata snapshots
-    keep their state per job directory, so they would follow one benchmark and not the others."""
+    keep their state per job directory, so they would follow one benchmark and not the others, and a `command`
+    receives no share of the server port range."""
     if not isinstance(compute, SlurmComputeConfig):
         raise ValueError("driver.shared_allocation needs a Slurm compute.")
+    reserved = sorted(set(driver.benchmarks) & set(_SHARED_ALLOCATION_RESERVED_NAMES))
+    if reserved:
+        raise ValueError(
+            f"driver.shared_allocation keeps {', '.join(_SHARED_ALLOCATION_RESERVED_NAMES)} in the run directory; "
+            f"rename the benchmark(s) {', '.join(reserved)}."
+        )
+    commands = sorted(name for name, benchmark in driver.benchmarks.items() if benchmark.command is not None)
+    if commands:
+        raise ValueError(
+            f"driver.shared_allocation does not support benchmarks with a command yet ({', '.join(commands)})."
+        )
     resumable = sorted(name for name, benchmark in driver.benchmarks.items() if benchmark.resume_config)
     if resumable:
         raise ValueError(

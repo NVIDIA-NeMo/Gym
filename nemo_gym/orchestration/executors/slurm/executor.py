@@ -402,7 +402,9 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
                 print(f"\n{'=' * 60}")
                 print(f"[dry-run] {COLLECTOR_DIR}/{COLLECTOR_CONFIG_NAME} for the shared allocation")
                 print(f"{'=' * 60}")
-                print(render_collector_config(config, SHARED_ALLOCATION_NAME, remote_run_dir))
+                print(
+                    render_collector_config(config, SHARED_ALLOCATION_NAME, remote_run_dir, run_id=remote_run_dir.name)
+                )
             return
         for name, benchmark in config.driver.benchmarks.items():
             script = build_sbatch_script(config, name, benchmark, compute, remote_run_dir / name)
@@ -453,6 +455,6 @@ class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Termi
         if otel_active(config):
             (staging / COLLECTOR_DIR).mkdir()
             (staging / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
-                render_collector_config(config, SHARED_ALLOCATION_NAME, remote_run_dir)
+                render_collector_config(config, SHARED_ALLOCATION_NAME, remote_run_dir, run_id=remote_run_dir.name)
             )
         return staging

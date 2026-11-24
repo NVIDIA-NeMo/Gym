@@ -121,12 +121,12 @@ def test_a_failure_mid_list_does_not_shift_the_benchmarks_after_it():
     assert results["bench_c"] == ("333", None)
 
 
-def _submit_config(tmp_path, benchmarks):
+def _submit_config(tmp_path, benchmarks, **driver):
     return SubmitConfig.model_validate(
         {
             "services": {},
             "compute": {"hsg": {"type": "slurm", "account": "my-account", "hostname": None}},
-            "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}},
+            "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}, **driver},
             "job": {"output_path": str(tmp_path / "jobs")},
             "otel": {"enabled": False},
         }
@@ -581,8 +581,7 @@ def test_a_shared_allocation_submits_one_job_and_records_it_for_every_benchmark(
     conn = _FakeConnection(["__GYM_JOB:shared-allocation:0:555 "])
     _install(monkeypatch, conn)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    config = _submit_config(tmp_path, ["bench_a", "bench_b"])
-    config.driver.shared_allocation = True
+    config = _submit_config(tmp_path, ["bench_a", "bench_b"], shared_allocation=True)
 
     record = SlurmExecutor().run(config)
 
@@ -598,3 +597,24 @@ def test_a_shared_allocation_submits_one_job_and_records_it_for_every_benchmark(
     for name in ("bench_a", "bench_b"):
         assert (run_dir / name / "logs").is_dir() and (run_dir / name / "artifacts").is_dir()
         assert not (run_dir / name / "job.sh").exists()
+
+
+def test_a_shared_allocation_collector_labels_telemetry_with_the_submission_id(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:shared-allocation:0:555 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("TEST_TELEMETRY_KEY", "telemetry-test-value")
+    config = _submit_config(tmp_path, ["bench_a", "bench_b"], shared_allocation=True)
+    config.otel.enabled = True
+    config.otel.remote_export = False
+    config.otel.token_env = "TEST_TELEMETRY_KEY"
+    config.otel.gym_telemetry = False
+
+    record = SlurmExecutor().run(config)
+
+    collector = yaml.safe_load((Path(record.run_dir) / "otel" / "collector.yaml").read_text())
+    attributes = {
+        a["key"]: a["value"] for a in collector["processors"]["resource/local"]["attributes"] if "value" in a
+    }
+    assert attributes["run_id"] == record.gym_job_id
+    assert "exit $DRIVER_RC" in (Path(record.run_dir) / "job.sh").read_text()

@@ -35,9 +35,9 @@ A submit config has four required sections and one optional one:
 Submission works in these steps:
 
 1. **Compose and validate.** Hydra composes the YAML, resolves interpolations and `env` prefixes, and validates it against a strict schema. Unknown keys are errors, so typos fail immediately.
-2. **Render.** One job script is rendered for each entry in `driver.benchmarks`.
+2. **Render.** One job script is rendered for each entry in `driver.benchmarks`, or one for all of them in a [shared allocation](/orchestration/configuration#shared-allocation).
 3. **Stage and copy.** The scripts are staged in a temporary directory and copied to a new run directory on the cluster, `<job.output_path>/gym-job-<timestamp>-<id>/`.
-4. **Queue.** One `sbatch` is issued per benchmark. Each benchmark is its own Slurm job and deploys its own copy of the services.
+4. **Queue.** One `sbatch` is issued per benchmark. Each benchmark is its own Slurm job and deploys its own copy of the services, unless the driver uses a shared allocation, which queues one job for every benchmark.
 5. **Record.** A manifest (`gym-job.json`) and the resolved config are written to the run directory, and a copy of the manifest to a local index on your machine.
 
 See [Slurm Executor](/orchestration/slurm-executor) for what each job script does and [Job Records](/orchestration/job-records) for the files left behind.

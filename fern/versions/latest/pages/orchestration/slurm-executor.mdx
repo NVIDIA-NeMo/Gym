@@ -44,6 +44,8 @@ A benchmark whose `sbatch` fails is recorded with its error and no job ID. The o
     └── .gym_*                   # resume bookkeeping, when resumable
 ```
 
+In a [shared allocation](/orchestration/configuration#shared-allocation), step 3 renders one script and step 6 runs one `sbatch` for every benchmark. The run directory then holds `job.sh`, the service logs under `logs/` and the collector's `otel/`, and each `<benchmark>/` directory holds only its driver log, `artifacts/`, `model-calls/` and exit status.
+
 The staged tree is given mode 0755 so other users can read the run directory, for example a collection job under another account. `job.sh` is the exception: it contains the resolved values of every `host:` environment variable, so it is owner-only. Log files carry the Slurm job ID, so a resumed job in the same directory keeps the earlier jobs' logs.
 
 ## The job script

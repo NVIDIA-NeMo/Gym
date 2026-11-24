@@ -162,11 +162,21 @@ The driver runs the benchmarks against the services.
 
 By default each benchmark is its own Slurm job with its own copy of the services. With `shared_allocation: true`, `gym eval submit` queues one job for the whole of `driver.benchmarks`: it starts and health-checks the services once, then runs every benchmark's driver at the same time against them. Use it for several short benchmarks that would each leave a model deployment mostly idle.
 
-Each benchmark keeps its own `prepare` and `run`, its own job directory, driver log and artifacts, so benchmarks never share a Gym config and their server names, judges and repeat counts cannot collide. All of them use the one `container` and `gym_install`. Each driver gets its own slice of the server port range (`port_range_low` to `port_range_high`, or Gym's default range), with its head server on the slice's first port, and its own `uv`, so drivers on one node do not race for ports or for a shared `uv` binary.
+Each benchmark keeps its own `prepare` and `run`, its own job directory, driver log and artifacts, so benchmarks never share a Gym config and their server names, judges and repeat counts cannot collide. All of them use the one `container` and `gym_install`, and each install gets its own `uv`.
 
-The job ends when the last driver ends. Its status is 1 if any driver failed, else 0, and every benchmark's record names the same Slurm job ID, so cancelling one benchmark cancels the shared job. A service that exits stops every driver. The run directory holds the job's `job.sh`, the service logs and the collector; each benchmark's directory holds its driver log and artifacts.
+**Ports.** The drivers share a node, so the allocation's server port range is split into a disjoint slice per benchmark, with each driver's head server on its slice's first port. The range is `port_range_low`/`port_range_high` under the benchmarks' `run` (the same values for every benchmark), or Gym's default range. Each slice must hold at least 64 ports. A range set in a benchmark's own config files is replaced by its slice.
 
-`resumable` benchmarks and `lustre_md_stats` are not supported in a shared allocation yet, and only the Slurm executor runs one.
+**Load.** Every driver applies its own concurrency settings, and their requests add up against the one deployment.
+
+**Status and control.**
+- The job ends when the last driver ends. Its status is 1 if any driver failed, else 0. A service that exits stops every driver.
+- Every benchmark's record names the same Slurm job ID. `gym job status` reads each benchmark's outcome from its own job directory once the job has ended; until then every benchmark shows the job's state.
+- Cancelling a single benchmark is refused. Cancel the whole submission with `--all`, after which benchmarks that had already finished read `CANCELLED`.
+- `gym job resubmit` and `gym eval resubmit` refuse a benchmark of a shared allocation; submit it again instead.
+
+**Layout.** The run directory holds the job's `job.sh`, the service logs and the collector, whose telemetry carries the benchmark label `shared-allocation`. Each benchmark's directory holds its driver log and artifacts. No benchmark may be named `job.sh`, `logs` or `otel`.
+
+`resumable` benchmarks, benchmarks with a `command`, and `lustre_md_stats` are not supported in a shared allocation yet, and only the Slurm executor runs one.
 
 ### Policy wiring
 
@@ -287,7 +297,7 @@ Schema validation runs when the config is composed, before anything is rendered 
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
-- **Shared allocation** with a `resumable` benchmark, with `lustre_md_stats`, or with a compute other than Slurm is rejected.
+- **Shared allocation** with a `resumable` benchmark, a benchmark with a `command`, a benchmark named `job.sh`, `logs` or `otel`, `lustre_md_stats`, or a compute other than Slurm is rejected. Benchmarks that set different port ranges, or a range too small to give each benchmark 64 ports, are rejected at render time, not by `--resolve-only`.
 - **Benchmark `target`** without an `agent`, `agent` or `sandbox` without a `target`, an empty `target` or `agent`, `target` combined with `command`, or `target` with `only_tasks`, `exclude_tasks` or `skip_unloadable` under `run` (`gym eval run` takes those only as command-line flags) is rejected.
 - **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 

@@ -751,3 +751,27 @@ def test_a_submission_that_recorded_no_log_sources_points_at_the_logs_directory(
 def test_logs_of_a_benchmark_that_is_not_there_name_the_known_ones():
     with pytest.raises(ValueError, match="has no benchmark 'nope'; it has: gsm8k"):
         operations.logs(_Controller(), _logged(), "nope")
+
+
+def _shared(gym_job_id: str, benchmarks=("a", "b")) -> SubmissionRecord:
+    record = _submission(gym_job_id, benchmarks=benchmarks)
+    for job in record.benchmarks:
+        job.job_id = "555"
+    return record
+
+
+def test_cancelling_one_benchmark_of_a_shared_allocation_is_refused_before_anything_is_asked():
+    controller = _Controller({("s", "a"): _state(JobState.RUNNING)})
+
+    with pytest.raises(ValueError, match="shares Slurm job 555 with b"):
+        operations.cancel(controller, _shared("s"), "a")
+    assert controller.events == []
+
+
+def test_cancelling_a_shared_allocation_stops_its_one_job_once():
+    record = _shared("s")
+    controller = _Controller({("s", "a"): _state(JobState.RUNNING), ("s", "b"): _state(JobState.RUNNING)})
+
+    operations.cancel_submission(controller, record, confirm="s")
+
+    assert [event for event in controller.events if event[0] == "terminate"] == [("terminate", "a")]
