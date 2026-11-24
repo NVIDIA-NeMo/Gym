@@ -14,8 +14,8 @@ grades them. Each episode holds one task:
 - the tools: two in c-Interact, nine in a-Interact with their BIRD-COIN budget.
 
 c-Interact follows the [BIRD-Interact ADK](https://github.com/bird-bench/BIRD-Interact/tree/451fe2c3518ee1cf908d8139e2913483bd519381/BIRD-Interact-ADK)
-(revision `451fe2c`): its protocol, its user simulator and its grading, for the query tasks of Lite and Full that
-[auto-ontology-eval](https://github.com/NVIDIA/auto-ontology-eval) runs. [ADK parity](#adk-parity) lists what matches and what differs.
+(revision `451fe2c`): its protocol, its user simulator and its grading, for the query and management tasks of Lite and
+Full. [ADK parity](#adk-parity) lists what matches and what differs.
 
 ## Modes
 
@@ -123,19 +123,62 @@ it runs (an error or a timeout is the debug message's `<error>`); then the submi
 its comments, `DISTINCT` words and `ROUND(...)` calls removed. The results are compared: floats and decimals to two
 places (decimals half-up), dates and timestamps as `YYYY-MM-DD`, JSON values and arrays as sorted JSON; rows in order
 when `conditions.order` is set and as sets otherwise. Each query keeps the rows of its last statement, at most 10,000
-when it starts with `SELECT` or `WITH`, and each statement times out after `sql_timeout_seconds` (default 60).
+when it starts with `SELECT` or `WITH`, and each query times out after `sql_timeout_seconds` (default 60), however
+many statements it holds. If the solution fails after the submission ran, it runs again alone on a fresh copy of the
+episode's database: a submission that broke the state the solution needs is wrong, as in the ADK. A solution that
+fails there too is bad task data: the ADK's `ex_base` returns 0 for it, so the submission is wrong, the episode goes
+on, and the rollout's `solution_errors` lists the error. Only query phases add to it; a management phase's test cases
+decide its grade. `benchmarks/bird_interact/README.md` lists the Lite tasks this affects.
 
-Nothing that grading runs stays in the database: SQLite runs it on a scratch copy, PostgreSQL in a transaction that it
-rolls back. When phase 1 passes and phase 2 follows, its SQL is applied, so phase 2 sees what it changed, as the ADK's
-phase-1 snapshot does.
+Nothing that grading or an exploratory query runs stays in the database. SQLite runs it on a scratch copy and refuses
+`ATTACH`, which could open the episode's file. PostgreSQL runs it on a copy of the episode's database, as the ADK
+resets its task database before each submission: exploratory queries on a working copy, and each submission on a
+fresh copy, after which the working copy starts again from the episode's database. A `COMMIT` in the agent's SQL
+therefore changes only a copy. When phase 1 passes and phase 2 follows, its SQL is applied to the episode's database,
+so phase 2 sees what it changed, as the ADK's phase-1 snapshot does; if applying it fails, the command fails and runs
+again on a fresh sandbox.
+
+On PostgreSQL, the task's setup, the agent's SQL and grading run as the role the image names in
+`BIRD_INTERACT_AGENT_ROLE` (`bird_agent` in `benchmarks/bird_interact`'s image). It is not a superuser. It owns the
+task's tables and what the setup creates, so a management task can change them. It cannot read the server's files or
+logs, run programs, change the server's settings or reach another database. The superuser owns the episode's database
+and its copies and grants the role only `CREATE` and `TEMPORARY` on them, so agent SQL cannot change a database's
+comment or settings, which every copy shares. A role can change its own settings (`ALTER ROLE ... SET`), which every
+database shares too, so the superuser resets them before it makes each copy and before it writes the episode's
+database. Agent SQL therefore cannot carry the solution SQL that grading runs to its next query, or break the next
+grade, through state that the copies share. The copies and these resets are the superuser's only work. The ADK runs
+everything as a superuser, so a task whose solution needs a superuser (`session_replication_role`, `CREATE ROLE`) differs;
+the benchmark's README lists them. An image without the role runs everything as the superuser.
+
+The PostgreSQL image must provide `gosu`, `pg_ctl` and `initdb`, and set `PGDATA`, `PGHOST` and `PGUSER`; `grading.py`
+starts the server as the `postgres` user, so the sandbox runs its commands as root. Docker and OpenSandbox do; a
+provider that runs commands as the launching user, such as Apptainer, cannot start the server.
 
 The ADK's rules, kept for parity, include its edge cases: a comment at the very end, with no line break after it,
 stays; `COUNT(DISTINCT x)` keeps its `DISTINCT`; an array of decimals or dates fails the comparison, because it cannot
 be written as JSON; and a submission that writes runs twice, so a write that cannot run twice fails.
 
-A phase whose `category` is not `Query` and that has `test_cases` runs its custom test cases in the ADK, which this
-server does not do yet, so such a task fails at seed. A query phase is graded as above even when it has test cases.
-In Lite and Full, the management tasks are the only ones with such a phase; every query task's follow-up is a query.
+A query phase is graded as above even when it has test cases. A phase whose `category` is not `Query` and that has
+`test_cases`, a management task's, is graded by its test cases, as in the ADK: Python code from the ground truth that
+defines `test_case(pred_sqls, sol_sqls, db_name, conn)` and raises when the database is wrong. `grading.py` runs it in
+the episode's sandbox, never on the Gym host, on PostgreSQL only: with SQLite (Mini-Interact), the server refuses
+such a task at seed.
+
+- The phase runs on a copy of the episode's database, which `grading.py` drops afterwards. The submission runs first,
+  and its writes stay on the copy for the test cases. An error or a timeout is the debug message's `<error>`.
+- Each test case gets the ADK's six globals: `execute_queries` (each query committed, under the statement timeout;
+  it returns the rows of the last, an error, and whether it timed out), `ex_base` (the default test case's
+  comparison, 1 or 0), `remove_comments`, `remove_distinct` and `remove_round` (on lists of SQL), and
+  `pred_query_result` (the rows the submission returned).
+- The test cases run in order. The first that raises anything fails the phase. As in the ADK, the code's globals
+  are those six names and its locals its own, so a function in it does not see the code's top-level imports. The
+  exception goes to the rollout's `test_case_errors`, not to the agent, so a failing submission can be told apart from
+  a test case that breaks on Gym's helpers. A connection that the code opens itself is the agent role's.
+- A sandbox command has time for the submission, ten queries for each test case and the application of a passing
+  phase 1, each `sql_timeout_seconds`. A submission that passes the test cases but cannot be applied to the episode's
+  database fails, with its error.
+
+In Lite and Full, only the management tasks have such a phase; every query task's follow-up is a query.
 
 ## Harnesses
 
@@ -176,7 +219,7 @@ with a model; the other rows are not results from runs.
 
 `data/example.jsonl` has five tasks on `data/example_databases/bookshop`, a synthetic database written for this
 server. `bookshop_3` and `bookshop_4` have a follow-up question. `bookshop_4` and `bookshop_5` have two critical
-ambiguities each, as most published tasks do, and `bookshop_5` hides no knowledge. `task_data.py` is the row schema.
+ambiguities each, as most published tasks do, and `bookshop_5` hides no knowledge. `task_input.py` is the row schema.
 
 The agent's config declares the file once for each mode's taskset, `bird_interact:c_interact_example` and
 `bird_interact:a_interact_example`, and `environment_server_routes` sends each to its mode's server.
@@ -191,8 +234,8 @@ after the ground truth is merged into the rows. Lite and Full use PostgreSQL.
 
 With `database_engine: postgresql`, a task's database is `<db>_template` in the PostgreSQL server of the sandbox
 image, and each episode starts its own sandbox from that image. `setup` starts the server and applies
-`preprocess_sql`; after that, each query runs in a transaction that is rolled back, except phase 1's passing SQL, so a
-write in one query or episode never reaches another. Each query is sent whole, as the ADK sends it, so it can hold
+`preprocess_sql`; after that, the agent's SQL runs on copies of the database (see [Grading](#grading)), and only
+phase 1's passing SQL is applied to it, so a write in one query or episode never reaches another. Each query is sent whole, as the ADK sends it, so it can hold
 several statements and dollar-quoted bodies. The image holds the release's databases already restored, so an episode
 starts PostgreSQL instead of restoring dumps.
 
@@ -208,12 +251,20 @@ What c-Interact takes from the ADK at revision `451fe2c3518ee1cf908d8139e2913483
 | `orchestrator/cinteract.py`: `max_turn`, the phase-1, debug and follow-up messages, two turns for each phase | `app.py` (`_first_request`, `_next_message`) |
 | `system_agent/agent.py`, `tools.py`, `callbacks_cinteract.py`: the instruction, `ask_user`, `submit_sql`, one submission for each turn | `app.py` (`CInteractTools`) |
 | `db_environment/server.py`: the grader's messages, the rewards by submission, the phase-1 snapshot, the knowledge the agent sees | `app.py` (`submit`), `grading.py` |
-| `shared/db_utils.py`: `test_case_default` and its rewrites | `grading.py` |
+| `shared/db_utils.py`: `test_case_default`, its rewrites, and the helpers of the management test cases | `grading.py` |
 | `user_simulator/`: the two stages, the `v2` prompts, the clause split | `simulator.py` |
 
 The texts (prompts, instruction, tool descriptions and messages) are the ADK's, verbatim, in `adk_prompts.py`; the
-code is Gym's. Two checks back the grading: the tests, and a run of the ADK's own `test_case_default` against
-`grading.py` on six Lite databases, where 863 of 863 submissions got the same verdict.
+code is Gym's. Checks back the grading: the tests, and runs of the ADK's own code against `grading.py` in the Lite
+image. For queries, `test_case_default` on six Lite databases gave the same verdict on 863 of 863 submissions. For
+management phases, the ADK's submit flow and its helpers gave the same verdict in 306 of 306 comparisons: 17
+scenarios with test cases written for the check (writes, views, functions, errors, imports, the helpers, and one task
+across both phases) on each of the 18 Lite databases. Each time, the episode's database was unchanged afterwards.
+The real management test cases arrive with the ground truth.
+
+The ADK's original evaluation (`evaluation/src`) gives a test case more names than the ADK does, such as
+`check_sql_function_usage` and `performance_compare_by_qep`. Gym gives the ADK's six; a test case that calls another
+fails, as in the ADK.
 
 The ADK's agent-side behavior that a Gym harness replaces is not reproduced: its agent stops at 60 model calls in an
 episode, where a Gym harness has its own limit (`simple_agent`'s `max_steps`, for each turn). Read a comparison with the
@@ -229,7 +280,16 @@ ADK's scores with these differences in mind:
 - **A failed simulator or grader masks the sample.** When the ADK's simulator model fails, the agent gets `I'm not sure
   I understand your question.` and the task is scored; when its grader fails, the agent gets `Error: ...` and the
   submission counts as failed. Gym masks the sample instead (`user_simulator_failed`, `sandbox_failed`), so an
-  infrastructure failure does not count as the agent's.
+  infrastructure failure does not count as the agent's. A call cut off by its tool-call deadline
+  (`tool_call_timeout_seconds`) or by the interaction deadline is not masked: the call fails, and a submission cut
+  off so counts as a failed attempt.
+- **One deadline for the whole query.** The ADK sets `statement_timeout` for each statement; Gym cancels the whole
+  query at one deadline, `sql_timeout_seconds`. A script whose statements each finish in time, but not all together,
+  passes in the ADK and times out in Gym.
+- **A passing phase 1 that cannot be applied.** The ADK ignores the result of applying phase 1's SQL for phase 2 and
+  pays the reward. Gym fails the command, runs it again on a fresh sandbox, and then masks the sample
+  (`sandbox_failed`). SQL can pass on the grading copy and fail on the episode's database when it depends on the
+  database's name (the copy is not `<db>_template`), `random()` or `now()`.
 - **The agent's request.** The ADK's agent adds a line that names it (`You are an agent. Your internal name is
   "bird_interact_agent".`) to the instruction; Gym does not. Gym's tools have parameter descriptions and
   `strict: true`; the ADK's have neither.
@@ -242,8 +302,6 @@ ADK's scores with these differences in mind:
 
 ## Not supported yet
 
-- Rows graded by custom `test_cases`: a phase whose category is not `Query` (BIRD-Interact's management tasks). The
-  episode fails at seed, for good.
 - The data and catalog checks that `gym env test` runs for a Resources Server.
 
 ## Running
