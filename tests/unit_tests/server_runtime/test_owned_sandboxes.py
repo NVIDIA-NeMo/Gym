@@ -163,7 +163,7 @@ async def test_a_non_exporting_owner_needs_no_checkpoint_state_dir(providers, mo
 
 
 @pytest.mark.parametrize(
-    "resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency"]
+    "resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency", "resolve_provider_metadata"]
 )
 def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch, resolver: str) -> None:
     def refuse(*args: Any) -> None:
