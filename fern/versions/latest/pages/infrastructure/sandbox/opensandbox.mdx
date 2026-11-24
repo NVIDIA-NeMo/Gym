@@ -385,6 +385,17 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 
 ## Network Policy
 
+OpenSandbox supports the typed `inherit` rule on every deployment. To enable `no_network`, `model_only`, `model_and_tools`, or `hosts_only`, the deployment operator must confirm that the control plane enforces default-deny policies at the packet level, including for direct IP connections, and that deployment-wide exceptions preserve the requested allowlist. For example, check the control plane's `dns+nft` mode and its egress configuration. After confirming enforcement, set the declaration in the shared provider configuration.
+
+```yaml
+sandbox:
+  opensandbox:
+    networking:
+      enforces_network_policy: true
+```
+
+This setting records the operator's declaration in Gym. The OpenSandbox control plane controls enforcement. With the declaration absent or false, Gym rejects a restricted typed rule during startup (including a dry run) and when its owner builds a sandbox spec. Existing raw `provider_options.network_policy` blocks retain their deployment-specific behavior.
+
 A server that owns its sandboxes through `self.sandboxes` sets the typed `network` rule in its sandbox block instead, which becomes this policy (see [Network Rule](/infrastructure/sandbox#network-rule)). `provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.utils.network_policy` (also importable from `nemo_gym.agents`) builds one from endpoint URLs. A harness that creates its own sandbox applies its `network_access` setting with `restrict_sandbox_network` in `nemo_gym.agents.utils.sandbox_network`, which builds that policy for the model and tool endpoints (see [Restrict the egress of an owned sandbox](/main/agent-server/add-or-update-a-harness#restrict-the-egress-of-an-owned-sandbox)). A resources server that lends a sandbox with `LentSandboxes` passes `network_access="model_only"` and `model_server`, and each lent sandbox then reaches only that model server's host. With `network_access="model_and_tools"` and `tool_servers` (the servers whose tools the harness calls over MCP, such as the resources server itself), it also reaches their hosts; the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
 
 ```yaml

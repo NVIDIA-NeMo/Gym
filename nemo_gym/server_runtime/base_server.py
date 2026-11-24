@@ -462,9 +462,11 @@ class SimpleServer(BaseServer):
                 if any(block.network in NETWORK_RULES for block in blocks):
                     raise ValueError(f"{self.config.name} sets a network rule but no {provider_field} to apply it")
                 continue
-            (provider_name,) = resolve_provider_config(reference, global_config)
+            ((provider_name, provider_config),) = resolve_provider_config(reference, global_config).items()
             lends = self.lends_sandboxes and provider_field == "sandbox_provider"
-            check_provider(get_provider_class(provider_name), configs=blocks, lends=lends)
+            check_provider(
+                get_provider_class(provider_name), configs=blocks, lends=lends, provider_config=provider_config
+            )
             for block in blocks:
                 if block.network not in NETWORK_RULES:
                     continue

@@ -20,6 +20,7 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.sandbox.config import SandboxConfig
 from nemo_gym.sandbox.providers.base import NETWORK_RULES, SandboxCapabilities, SandboxSpec
+from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 from nemo_gym.server_runtime import owned_sandboxes as owned_sandboxes_module
 from nemo_gym.server_runtime.base_server import SimpleServer
 from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes, SandboxCheckpointConfig
@@ -1392,6 +1393,30 @@ class _TypedServer(_Server):
     owned_sandbox_blocks = {"sandbox_config": "sandbox_provider", "grader_sandbox_config": "sandbox_provider"}
 
 
+@pytest.mark.parametrize("enforced", [False, True])
+def test_opensandbox_startup_and_owner_require_the_same_deployment_declaration(enforced: bool) -> None:
+    options = {"networking": {"enforces_network_policy": True}} if enforced else {}
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {"runner": {"opensandbox": options}}
+    block = SandboxConfig(network="no_network")
+    server = _TypedServer(
+        config=_TypedConfig(
+            name="env", host="", port=0, entrypoint="", sandbox_provider="runner", sandbox_config=block
+        ),
+        server_client=server_client,
+    )
+    if enforced:
+        server.check_sandbox_provider()
+        assert server.sandboxes.spec(block, image="image", workdir=None).provider_options == {
+            "network_policy": {"defaultAction": "deny", "egress": []}
+        }
+    else:
+        with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+            server.check_sandbox_provider()
+        with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+            server.sandboxes.spec(block, image="image", workdir=None)
+
+
 class _UndeclaredServer(_Server):
     """Starts its sandboxes some other way, so nothing applies a rule its blocks set."""
 
@@ -1615,6 +1640,24 @@ class TestSpecLeavesWhatIsNotATypedRule:
             owned.spec(SandboxConfig(provider_options=options), image="image", workdir=None)
 
         assert suggestion in caplog.text
+
+    def test_a_mixed_legacy_policy_preserves_order_and_requests_manual_migration(self, caplog) -> None:
+        owned = OwnedSandboxes(OpenSandboxProvider(), state_dir=None, server_name="server")
+        options = {
+            "network_policy": {
+                "defaultAction": "deny",
+                "egress": [
+                    {"action": "deny", "target": "private.example"},
+                    {"action": "allow", "target": "*.example"},
+                ],
+            }
+        }
+        with caplog.at_level("WARNING", logger=owned_sandboxes_module.LOGGER.name):
+            spec = owned.spec(SandboxConfig(provider_options=options), image="image", workdir=None)
+
+        assert spec.provider_options == options
+        assert "review the ordered network_policy manually" in caplog.text
+        assert "allowed_hosts" not in caplog.text
 
 
 class _RulesWithoutOptions(FakeSnapshotProvider):

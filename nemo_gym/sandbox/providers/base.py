@@ -365,7 +365,7 @@ NetworkRule = Literal["inherit", "no_network", "model_only", "model_and_tools", 
 ``model_and_tools`` the model server and the tool servers, and ``hosts_only`` only the hosts listed for the sandbox.
 Every restricted rule also allows the listed hosts.
 """
-NETWORK_RULES: frozenset[str] = frozenset(get_args(NetworkRule))
+NETWORK_RULES: frozenset[NetworkRule] = frozenset(get_args(NetworkRule))
 
 # What a snapshot of a sandbox can keep.
 SnapshotContent = Literal["files", "processes"]
@@ -397,8 +397,12 @@ class SandboxCapabilities:
     reconnect: Reconnect = "always"
 
 
-def provider_capabilities(provider: object) -> SandboxCapabilities:
-    """The capabilities ``provider`` declares; the defaults for a provider that declares none."""
+def provider_capabilities(provider: object, *, config: Mapping[str, Any] | None = None) -> SandboxCapabilities:
+    """The provider's effective capabilities, resolved from its deployment config when checking a class at startup."""
+    if config is not None and isinstance(provider, type):
+        resolve = getattr(provider, "capabilities_for_config", None)
+        if resolve is not None:
+            return resolve(config)
     capabilities = getattr(provider, "capabilities", None)
     return capabilities if isinstance(capabilities, SandboxCapabilities) else SandboxCapabilities()
 

@@ -457,13 +457,15 @@ async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, **start_k
         raise
 
 
-def check_network_rule(provider: object, rule: NetworkRule) -> None:
+def check_network_rule(
+    provider: object, rule: NetworkRule, *, provider_config: Mapping[str, Any] | None = None
+) -> None:
     """Refuse ``rule`` unless ``provider``, a provider or its class, can apply it when it creates a sandbox.
 
     Raises:
         ValueError: If it cannot, so no sandbox starts with open egress in place of the rule.
     """
-    capabilities = provider_capabilities(provider)
+    capabilities = provider_capabilities(provider, config=provider_config)
     expressible = rule in capabilities.network_rules and (rule == "inherit" or hasattr(provider, "network_options"))
     if not expressible:
         raise ValueError(
@@ -488,13 +490,19 @@ def check_lending(provider: object) -> None:
         )
 
 
-def check_provider(provider: object, *, configs: Iterable[SandboxConfig] = (), lends: bool = False) -> None:
+def check_provider(
+    provider: object,
+    *,
+    configs: Iterable[SandboxConfig] = (),
+    lends: bool = False,
+    provider_config: Mapping[str, Any] | None = None,
+) -> None:
     """The checks of :meth:`OwnedSandboxes.check_provider`, against a provider or its class, which startup uses so
     that a server checks its provider without creating it."""
     for config in configs:
         # A subclass's own network setting is not a typed rule (see SandboxConfig): its server checks it.
         if config.network in NETWORK_RULES:
-            check_network_rule(provider, config.network)
+            check_network_rule(provider, config.network, provider_config=provider_config)
     if lends:
         check_lending(provider)
 
@@ -570,12 +578,13 @@ def _suggested_rule(config: SandboxConfig) -> str:
     policy = config.provider_options.get("network_policy")
     if not isinstance(policy, Mapping):
         return "network: inherit"
-    targets = [rule.get("target") for rule in policy.get("egress") or [] if isinstance(rule, Mapping)]
-    if policy.get("defaultAction") == "deny" and not targets:
-        return "network: no_network"
-    if policy.get("defaultAction") == "deny":
-        return f"network: hosts_only with allowed_hosts {targets}, or model_only for a model server"
-    return "the rule closest to its network_policy (no typed rule allows by default and denies some hosts)"
+    egress = policy.get("egress", [])
+    if policy.get("defaultAction") == "deny" and isinstance(egress, (list, tuple)):
+        if not egress:
+            return "network: no_network"
+        if all(isinstance(rule, Mapping) and rule.get("action") == "allow" and rule.get("target") for rule in egress):
+            return f"network: hosts_only with allowed_hosts {[rule['target'] for rule in egress]}"
+    return "review the ordered network_policy manually before choosing a typed rule"
 
 
 def _name_of(provider: object) -> str:
@@ -867,7 +876,8 @@ class OwnedSandboxes:
         self._warned_untyped_network.add(warned)
         LOGGER.warning(
             "a %s of server %s sets no network rule, so its sandboxes keep the provider's default egress or the "
-            "network_policy of its provider_options. That is deprecated and a later release requires the rule: set "
+            "network_policy of its provider_options. This is deprecated. A later release requires a typed rule. "
+            "Migration guidance: "
             "%s",
             type(config).__name__,
             self._server_name,

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from nemo_gym.sandbox.config import NetworkRuleOptions, SandboxConfig
 from nemo_gym.sandbox.providers import registry
-from nemo_gym.sandbox.providers.base import SandboxCapabilities
+from nemo_gym.sandbox.providers.base import NETWORK_RULES, NetworkRule, SandboxCapabilities
 from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
 from nemo_gym.sandbox.providers.e2b.provider import E2BProvider
 from nemo_gym.sandbox.providers.e2b.provider import _network_options as e2b_network_options
@@ -68,8 +68,20 @@ class TestProviderCapabilities:
 
 
 class TestOpenSandboxNetworkOptions:
-    def _options(self, rule: str, hosts: list[str], options: dict | None = None) -> dict:
-        return object.__new__(OpenSandboxProvider).network_options(rule, hosts, options or {})
+    def _options(self, rule: NetworkRule, hosts: list[str], options: dict | None = None) -> dict:
+        provider = OpenSandboxProvider(networking={"enforces_network_policy": True})
+        assert provider.capabilities.network_rules == NETWORK_RULES
+        return provider.network_options(rule, hosts, options or {})
+
+    @pytest.mark.parametrize(
+        "networking", [{}, {"enforces_network_policy": False}, {"enforces_network_policy": "true"}]
+    )
+    @pytest.mark.parametrize("rule", sorted(NETWORK_RULES - {"inherit"}))
+    def test_restricted_rules_require_an_operator_declaration(self, networking: dict, rule: NetworkRule) -> None:
+        provider = OpenSandboxProvider(networking=networking)
+        assert provider.capabilities.network_rules == {"inherit"}
+        with pytest.raises(ValueError, match="networking.enforces_network_policy"):
+            provider.network_options(rule, [], {})
 
     def test_a_restricted_rule_denies_by_default_and_allows_only_its_hosts(self) -> None:
         options = self._options("model_only", ["model.internal.", "model.internal", "proxy"], {"volumes": ["v"]})
@@ -89,7 +101,7 @@ class TestOpenSandboxNetworkOptions:
         assert self._options("no_network", [])["network_policy"] == {"defaultAction": "deny", "egress": []}
 
     def test_inherit_changes_nothing(self) -> None:
-        assert self._options("inherit", [], {"volumes": ["v"]}) == {"volumes": ["v"]}
+        assert OpenSandboxProvider().network_options("inherit", [], {"volumes": ["v"]}) == {"volumes": ["v"]}
 
 
 class TestDockerNetworkOptions:
@@ -191,7 +203,7 @@ def test_allowed_hosts_refuse_what_no_egress_rule_would_match(host: str) -> None
 
 
 TABLE = [
-    ("opensandbox", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
+    ("opensandbox", {"inherit"}, "always"),
     ("docker", {"inherit", "no_network"}, "same_host"),
     ("e2b", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
     ("openshell", {"inherit"}, "always"),
@@ -224,7 +236,8 @@ def test_a_provider_declares_snapshots_exactly_when_it_takes_them(name: str) -> 
 
     takes_snapshots = all(hasattr(provider_class, method) for method in ("snapshot", "wait_snapshot_ready"))
     assert bool(provider_class.capabilities.snapshot_keeps) == takes_snapshots
-    assert bool(provider_class.capabilities.network_rules - {"inherit"}) == hasattr(provider_class, "network_options")
+    if provider_class.capabilities.network_rules - {"inherit"}:
+        assert hasattr(provider_class, "network_options")
 
 
 @pytest.mark.parametrize("name", BUILT_IN_PROVIDERS)
