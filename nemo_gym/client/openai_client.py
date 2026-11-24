@@ -26,7 +26,7 @@ import re
 import time
 import uuid
 from asyncio import sleep
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from time import monotonic
@@ -438,6 +438,7 @@ async def alog_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, bo
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
+    before_http_attempt: Callable[[], Awaitable[object]] | None = Field(default=None, exclude=True, repr=False)
     """This is just a stub class that wraps around aiohttp"""
 
     base_url: str
@@ -537,6 +538,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     def validate_timeout_pair(self) -> "NeMoGymAsyncOpenAI":
         if self.connect_timeout_seconds is not None and self.request_timeout_seconds is None:
             raise ValueError("connect_timeout_seconds requires request_timeout_seconds")
+        if self.before_http_attempt is not None and self.max_num_tries != 1:
+            raise ValueError("before_http_attempt requires max_num_tries=1")
         return self
 
     # Spent-key/auth trip: (status, body, url). Later calls raise a fresh exception.
@@ -617,6 +620,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             )
         if self.connection_retry_timeout_s is not None:
             request_kwargs["_connection_retry_window"] = ConnectionRetryWindow(self.connection_retry_timeout_s)
+        if self.before_http_attempt is not None:
+            # A preserved POST body on a 307 or 308 would otherwise send twice.
+            request_kwargs["allow_redirects"] = False
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
@@ -710,6 +716,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         while tries < max_num_tries:
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
+            if self.before_http_attempt is not None:
+                await self.before_http_attempt()
             tries += 1
             try:
                 response = await request(_on_transport_failure=observe_transport_failure, **request_kwargs)

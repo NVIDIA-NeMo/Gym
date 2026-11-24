@@ -650,3 +650,33 @@ async def test_over_real_http_a_slow_provider_spends_the_retry_budget(monkeypatc
 
     assert len(hits) == 1 and raised.value.status == 503  # sleeps alone (0.01 s) never reach 0.025 s
     # The single HTTP attempt proves latency spent the budget; scheduler delays are not a client contract.
+
+
+async def test_provider_attempt_hook_can_refuse_a_send_and_prevents_redirect_replay(stub_provider):
+    base_url, hits, script = stub_provider
+    calls = []
+
+    async def reserve():
+        calls.append(len(hits))
+        if len(calls) > 1:
+            raise RuntimeError("call allowance spent")
+
+    script["answer"] = lambda n: (307, b"{}", {"Location": "/v1/chat/completions"}) if n == 1 else (200, b"{}", {})
+    client = NeMoGymAsyncOpenAI(api_key="k", base_url=base_url, max_num_tries=1, before_http_attempt=reserve)
+    response = await client._request(method="POST", url=f"{base_url}/chat/completions", json=CALL)
+    try:
+        assert response.status == 307
+    finally:
+        response.release()
+    with pytest.raises(RuntimeError, match="call allowance spent"):
+        await client.create_chat_completion(**CALL)
+    assert calls == [0, 1]
+    assert hits == [1]
+
+
+def test_provider_attempt_hook_requires_single_attempt_transport():
+    async def reserve():
+        pass
+
+    with pytest.raises(ValueError, match="before_http_attempt requires max_num_tries=1"):
+        NeMoGymAsyncOpenAI(api_key="k", base_url="http://example.test/v1", before_http_attempt=reserve)
