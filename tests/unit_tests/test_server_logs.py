@@ -106,3 +106,56 @@ def test_earlier_runs_logs_in_a_shared_folder_are_not_this_runs_servers(tmp_path
 
     assert locations["gym_servers"] == {"policy_model": str(logs / "policy_model.log")}
     assert locations["unverified_log_dir_files"] == {"last_weeks_judge": str(logs / "last_weeks_judge.log")}
+
+
+def test_a_collector_that_starts_no_servers_does_not_claim_its_configs_servers(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "policy_model.log").write_text("")
+
+    # `--no-serve` loads the same recipe as the `gym env start` serving it, so its config declares servers.
+    locations = server_log_locations(_config(nemo_gym_log_dir=str(logs)), environ={}, starts_servers=False)
+
+    assert "gym_servers" not in locations and locations["status"] == "unavailable"
+    assert locations["unverified_log_dir_files"] == {"policy_model": str(logs / "policy_model.log")}
+
+
+def test_no_serve_collection_records_this_attempts_log_locations_before_collecting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import nemo_gym.cli.eval as cli_eval
+    import nemo_gym.rollouts.rollout_collection as rollout_collection
+    import nemo_gym.telemetry.setup as telemetry_setup
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "policy_model.log").write_text("")
+    sidecar = tmp_path / "run_server_logs.json"
+    config = _config(
+        input_jsonl_fpath=str(tmp_path / "tasks.jsonl"),
+        output_jsonl_fpath=str(tmp_path / "run.jsonl"),
+        disable_health_check=True,
+        nemo_gym_log_dir=str(logs),
+    )
+    seen: list[dict] = []
+
+    class FakeHelper:
+        async def run_from_config(self, config) -> None:
+            seen.append(json.loads(sidecar.read_text()))
+
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(rollout_collection, "RolloutCollectionHelper", FakeHelper)
+    monkeypatch.setattr(telemetry_setup, "init_telemetry", lambda **kwargs: None)
+    monkeypatch.setattr(telemetry_setup, "shutdown_telemetry", lambda *args, **kwargs: None)
+    monkeypatch.setenv("NEMO_GYM_SERVICE_LOG_DIR", str(logs))
+
+    for job_id in ("123", "456"):
+        (logs / f"driver-{job_id}.log").write_text("")
+        monkeypatch.setenv("SLURM_JOB_ID", job_id)
+        cli_eval.collect_rollouts()
+
+    assert [attempt["services"]["files"] for attempt in seen] == [
+        {"driver": str(logs / "driver-123.log")},
+        {"driver": str(logs / "driver-456.log")},
+    ]
+    assert all("gym_servers" not in attempt for attempt in seen)

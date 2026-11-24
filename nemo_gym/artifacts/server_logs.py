@@ -35,15 +35,20 @@ NO_LOG_LOCATION_REASON = (
 )
 
 
-def server_log_locations(global_config_dict: Mapping[str, Any], environ: Mapping[str, str] = os.environ) -> dict:
+def server_log_locations(
+    global_config_dict: Mapping[str, Any], environ: Mapping[str, str] = os.environ, *, starts_servers: bool = True
+) -> dict:
     """Where this run's model and Gym server logs are, as far as this process knows; unknown locations are absent.
 
-    `gym_servers` are the files the servers this config starts tee their output to when
+    `gym_servers` are the files the servers this process starts tee their output to when
     `nemo_gym_log_dir` is set (`<dir>/<server>.log`, as `gym env start` writes them); other `*.log`
     files already in that folder are listed apart as `unverified_log_dir_files`, since a shared folder
     also holds earlier runs' logs, and do not make the locations available on their own. `services` are the per-step logs of a
     `gym eval submit` job (vLLM and the other services, the driver, the collector), listed from the
     folder submit exports, for the current Slurm job.
+
+    A collector that starts no servers (`starts_servers=False`, `--no-serve`) lists none as `gym_servers`: its
+    config often declares the same servers as the `gym env start` serving it, which may log elsewhere or not at all.
     """
     locations: dict[str, Any] = {"schema_version": SERVER_LOGS_SCHEMA_VERSION}
     log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
@@ -51,7 +56,8 @@ def server_log_locations(global_config_dict: Mapping[str, Any], environ: Mapping
         names = [
             name
             for name, value in global_config_dict.items()
-            if name not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+            if starts_servers
+            and name not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
             and maybe_get_server_instance_config(name=name, server_type_config_dict=value)[0] is not None
         ]
         root = Path(log_dir).expanduser().resolve()
@@ -83,7 +89,9 @@ def server_log_locations(global_config_dict: Mapping[str, Any], environ: Mapping
     return locations
 
 
-def write_server_log_locations(global_config_dict: Mapping[str, Any], output_fpath: Path) -> Path:
+def write_server_log_locations(
+    global_config_dict: Mapping[str, Any], output_fpath: Path, *, starts_servers: bool = True
+) -> Path:
     """Save where the run's server logs are beside its rollouts file as `<stem>_server_logs.json`.
 
     Lets the validation gate and EvalRDL find serving evidence such as vLLM logs. Paths only; no
@@ -93,7 +101,8 @@ def write_server_log_locations(global_config_dict: Mapping[str, Any], output_fpa
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        temporary.write_text(json.dumps(server_log_locations(global_config_dict), indent=2, sort_keys=True) + "\n")
+        locations = server_log_locations(global_config_dict, starts_servers=starts_servers)
+        temporary.write_text(json.dumps(locations, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)

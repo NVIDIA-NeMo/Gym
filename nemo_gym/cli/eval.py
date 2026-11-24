@@ -1244,7 +1244,7 @@ def collect_rollouts():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     config = RolloutCollectionConfig.model_validate(global_config_dict)
     write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
-    write_server_log_locations(global_config_dict, Path(config.output_jsonl_fpath))
+    write_server_log_locations(global_config_dict, Path(config.output_jsonl_fpath), starts_servers=False)
     rch = RolloutCollectionHelper()
     rch._termination_requested = lambda: _terminated
 
