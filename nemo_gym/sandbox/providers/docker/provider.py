@@ -46,6 +46,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.docker import pty as docker_pty
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 
 
 LOGGER = logging.getLogger(__name__)
@@ -393,6 +394,9 @@ class DockerProvider:
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+            except asyncio.CancelledError:
+                await kill_cancelled_command(proc)
+                raise
             except asyncio.TimeoutError as e:
                 with contextlib.suppress(ProcessLookupError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

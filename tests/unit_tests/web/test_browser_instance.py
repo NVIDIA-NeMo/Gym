@@ -255,6 +255,8 @@ def test_launch_rolls_back_xvfb_and_tempdir_if_server_fails(monkeypatch, tmp_pat
         calls.append(args)
         if len(calls) == 2:
             raise OSError("server spawn failed")
+        if "-displayfd" in args[0]:
+            os.write(int(args[0][args[0].index("-displayfd") + 1]), b"321\n")
         return process
 
     monkeypatch.setattr("subprocess.Popen", popen)

@@ -1429,7 +1429,7 @@ def bind_judge_failures(
     spent = set()
     for row in store.failures():
         identity = logical_rollout_id(row)
-        if row.get("_ng_failure_class") == "judge_failed" and store._state.failure_count(identity) >= cap:
+        if _is_judge_failure(row) and store._state.failure_count(identity) >= cap:
             if not skip_spent:
                 raise ConfigError(
                     f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
@@ -1444,7 +1444,7 @@ def bind_judge_failures(
         "failures": {
             logical_rollout_id(row): row
             for row in store.failures()
-            if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
+            if _is_judge_failure(row) and logical_rollout_id(row) not in spent
         }
         | saved_results,
         "saved_results": set(saved_results),
@@ -1604,7 +1604,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         if binding["admitted"][identity].operation_id in done:
             continue  # this pass settled or withdrew it before an error
         if _ungraded_reverification(result) and (
-            identity in saved_results or result.get(NG_FAILURE_CLASS_KEY) != "judge_failed"
+            identity in saved_results or not matches_failure_class(result, {JUDGE_FAILED_FAILURE_CLASS})
         ):
             # The verifier answered without a grade or a judge failure: the bound row stays as it was, and nothing
             # is saved. A judge failure that failed to judge again is saved below as its re-judgment's outcome.

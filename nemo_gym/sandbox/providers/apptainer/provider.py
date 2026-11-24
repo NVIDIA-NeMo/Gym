@@ -43,7 +43,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
 
 LOGGER = logging.getLogger(__name__)
@@ -360,6 +362,9 @@ class ApptainerProvider:
                 )
                 try:
                     await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+                except asyncio.CancelledError:
+                    await kill_cancelled_command(proc)
+                    raise
                 except asyncio.TimeoutError as e:
                     # Graceful timeout: SIGTERM the process group first and give it a short grace period
                     # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
@@ -399,6 +404,9 @@ class ApptainerProvider:
             )
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+            except asyncio.CancelledError:
+                await kill_cancelled_command(proc)
+                raise
             except asyncio.TimeoutError as e:
                 # Graceful timeout: SIGTERM the process group first and give it a short grace period
                 # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
@@ -475,6 +483,14 @@ class ApptainerProvider:
         for bind in extra_binds:
             argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
+        if any(arg in {"--contain", "--containall", "-c", "-C"} for arg in start_args) and not any(
+            arg in {"--workdir", "-W"} or arg.startswith("--workdir=") for arg in start_args
+        ):
+            # Containment must not move large compiler temporaries into Apptainer's small
+            # session tmpfs. Keep /tmp, /var/tmp, and home private and disk-backed instead.
+            private_workdir = staging_dir / ".apptainer-workdir"
+            private_workdir.mkdir(mode=0o700)
+            start_args += ["--workdir", str(private_workdir)]
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
@@ -809,7 +825,7 @@ class ApptainerProvider:
 
         # Always best-effort remove the host staging dir, even if stop failed.
         try:
-            shutil.rmtree(inst.staging_dir, ignore_errors=False)
+            _remove_writable_tree(inst.staging_dir)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
 

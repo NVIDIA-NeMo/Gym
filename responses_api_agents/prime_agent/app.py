@@ -181,7 +181,8 @@ def parse_prime_agent_events(stdout: str, *, timed_out: bool = False) -> tuple[l
         if role == "assistant":
             usage = message.get("usage") or {}
             cache_read = usage.get("cacheRead")
-            input_tokens += int(usage.get("input") or 0) + int(cache_read or 0)
+            # Prime reports uncached input, cache reads, and cache writes separately.
+            input_tokens += int(usage.get("input") or 0) + int(cache_read or 0) + int(usage.get("cacheWrite") or 0)
             output_tokens += int(usage.get("output") or 0)
             # Pi's provider layer also writes cacheRead=0 when the backend reported no cache details, so
             # only positive counts are measurements. One unmeasured call makes the sum unknown.

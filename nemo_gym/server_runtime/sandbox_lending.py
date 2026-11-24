@@ -13,9 +13,8 @@ from nemo_gym.client.server_client import get_server_url
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.episode_types import TaskId
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
-from nemo_gym.sandbox.utils import STOP_TIMEOUT_S, stop_sandbox
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedRejectedError
 from nemo_gym.utils.network_policy import restricted_network_policy
 
@@ -127,14 +126,13 @@ class LentSandboxes:
             )
         sandbox = AsyncSandbox(provider_config)
         try:
-            # start() stops the sandbox itself when delivering the files fails, but not under cancellation.
-            # There its stop is cancelled with the request, so stop_sandbox() below finishes it.
-            # After a stop that did finish, stop_sandbox() does nothing.
+            # start() stops the sandbox itself when delivering the files fails, shielded like every stop. A failure
+            # after it is stopped here, and a stop after one that finished does nothing.
             await sandbox.start(spec)
             access = await self._access(sandbox)
         except BaseException:
             try:
-                await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
+                await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
             except Exception:
                 LOGGER.exception(
                     "Failed to stop the sandbox of a failed seed for resources session %s; a later lend, release or "
@@ -155,7 +153,7 @@ class LentSandboxes:
         sandbox = self._sandboxes.get(resources_session_id)
         if sandbox is None:
             return
-        await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
+        await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
         self._sandboxes.pop(resources_session_id, None)
 
     async def release_all(self) -> None:
@@ -177,7 +175,7 @@ class LentSandboxes:
         sandbox = self._failed_seed_sandboxes.get(resources_session_id)
         if sandbox is None:
             return
-        await stop_sandbox(sandbox, timeout_s=STOP_TIMEOUT_S)
+        await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
         self._failed_seed_sandboxes.pop(resources_session_id, None)
 
     def _restricted_policy(self, provider_config: Mapping[str, object]) -> dict[str, object]:
