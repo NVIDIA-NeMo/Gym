@@ -719,8 +719,8 @@ relaunched when it need not be:
   and its relay is left alone; one that a stop ended, or whose held pause expired before the take-over, is relaunched.
   If the check cannot run twice, the re-bind fails and its retry checks again. Otherwise the launch is killed, nothing
   of it continuing, and relaunched as above; so is a launch that holds episode MCP tool grants, since its process
-  keeps the previous attempt's. A kill that cannot be confirmed fails the re-bind, activation or close that asked, so
-  nothing is relaunched beside the launch.
+  keeps the previous attempt's. A kill that cannot be confirmed fails the re-bind or activation that asked, so nothing
+  is relaunched beside the launch; a close goes on, and the sandbox's owner stops the sandbox.
 - **If the relay does not come up** OpenCode calls the model server directly, and a restore relaunches it; this is logged
   as a warning (`relay_unavailable`), since every image can run the relay.
 - **The wall clock** is the provider's to keep: OpenCode orders a conversation by message IDs it makes from the clock,

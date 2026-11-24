@@ -898,10 +898,10 @@ async def test_a_take_over_cancelled_before_it_started_leaves_the_restored_launc
     assert events == ["abandon 10.20", "close"] and state.adoption is None
 
 
-@pytest.mark.parametrize("interruption", [asyncio.CancelledError(), RuntimeError("left no receipt")])
-async def test_a_close_interrupted_while_it_ends_the_restored_launch_ends_it_on_its_retry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: BaseException
+async def test_a_close_cancelled_while_it_ends_the_restored_launch_ends_it_on_its_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    interruption = asyncio.CancelledError()
     agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
     state = _session_state(agent, tmp_path, keeps_processes=True)
     state.launch_count = 1
@@ -921,13 +921,39 @@ async def test_a_close_interrupted_while_it_ends_the_restored_launch_ends_it_on_
     monkeypatch.setattr(opencode_app, "abandon_launch", abandon)
     monkeypatch.setattr(OpenCodeSandboxSession, "close", close)
 
-    with pytest.raises(type(interruption)):
+    with pytest.raises(asyncio.CancelledError):
         await agent._close_agent_session_state(state)
     # The launch is still the close's to end, and the sandbox is not released before it is.
     assert state.adoption is not None and "close" not in events
     interruptions.clear()
     await agent._close_agent_session_state(state)
     assert events[-2:] == ["abandon 10.20", "close"] and state.adoption is None
+
+
+async def test_a_close_that_cannot_end_the_restored_launch_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _session_state(agent, tmp_path, keeps_processes=True)
+    state.launch_count = 1
+    state.adoption = RestoredLaunch(pause_seq=1, identity="10.20")
+    events: list[str] = []
+
+    async def abandon(sandbox: Any, session_dir: str, *, identity: str, **kwargs: Any) -> dict:
+        events.append(f"abandon {identity}")
+        raise RuntimeError("OpenCode abandoned launch left no receipt")
+
+    async def close(self: OpenCodeSandboxSession, timeout: float) -> None:
+        events.append("close")
+
+    monkeypatch.setattr(opencode_app, "abandon_launch", abandon)
+    monkeypatch.setattr(OpenCodeSandboxSession, "close", close)
+
+    await agent._close_agent_session_state(state)
+
+    # Nothing is relaunched at a close, and the sandbox's owner stops the sandbox: the close reports and goes on.
+    assert events == ["abandon 10.20", "abandon 10.20", "close"] and state.adoption is None
+    assert "could not abandon the restored launch of session s (reason closed)" in caplog.text
 
 
 async def test_closing_a_session_whose_restored_launch_was_not_taken_over_ends_that_launch(

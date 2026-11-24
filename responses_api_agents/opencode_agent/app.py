@@ -1719,9 +1719,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     async def _abandon_restored_launch(self, state: OpenCodeSandboxSession, identity: str, *, reason: str) -> None:
         """End a restored launch that will not be taken over, so nothing of it runs beside its relaunch.
 
-        The abandon kills and is safe to repeat, so a failed one is tried once more. One that still fails raises:
-        whatever of the launch survived could run beside a relaunch, so the re-bind, the activation or the close
-        that asked fails instead, and its retry ends the launch again.
+        The abandon kills and is safe to repeat, so a failed one is tried once more. One that still fails is logged
+        and raises: whatever of the launch survived could run beside a relaunch, so the re-bind or the activation
+        that asked fails instead, and its retry ends the launch again. A close goes on (see its hook).
         """
         session = state.require_session()
         for attempt in (1, 2):
@@ -2321,9 +2321,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 else None,
             )
         if state.adoption is not None:
-            # Never taken over: end it, so nothing of it runs on in the sandbox handed back to its owner. It is
-            # forgotten only once ended, so a close cancelled or failed here ends it on its retry.
-            await self._abandon_restored_launch(state, state.adoption.identity, reason="closed")
+            # Never taken over: end it, so nothing of it runs on in the sandbox handed back to its owner. A close
+            # cancelled here keeps it, and its retry ends it. One that cannot end it goes on, the failure logged:
+            # nothing is relaunched beside it, and the sandbox's owner stops the sandbox.
+            try:
+                await self._abandon_restored_launch(state, state.adoption.identity, reason="closed")
+            except Exception:
+                pass
         state.adoption, state.adoption_ended = None, False
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
