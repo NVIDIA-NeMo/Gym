@@ -55,7 +55,7 @@ flowchart LR
 ```
 
 The GitLab adapter pin will move to
-`f6e8ed5837b263566534bf0dff0d83a7c653ca8b`
+`8e6261cee4bb152e86ea3a5640dda99ae29b046a`
 ([FW-CI-templates PR 631](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/631)).
 The adapter will skip mapped users without active Developer-or-higher project
 membership and report them in `warnings`. Missing identity mappings, empty pools,
@@ -88,8 +88,19 @@ protected `nv-internal-main`. The child inherits the triggering identity and rea
 the project variables in its own `review-pools` environment; the bridge forwards
 neither pipeline nor YAML variables. CPU CI continues to select MR pipelines only.
 
-Failures remain advisory through `allow_failure: true`; inspect the child job
-status and trace rather than relying on the parent pipeline's success status.
+## Required code-owner pools
+
+The same child job runs the adapter with `--require-codeowners`, so enforced
+`.github/CODEOWNERS` lines on GitHub `main` also gate GitLab MRs: for each changed
+file the last matching enforced line wins, and each distinct owner set becomes a
+`github-codeowners: <owners>` approval rule requiring one approval from the live
+members of those GitHub teams. `--codeowners-fallback @nvidia-nemo/gym_maintainers`
+keeps the MR gated by the maintainers when an identity or eligibility problem
+prevents resolving the exact pools; the job then fails with the problems listed and
+converges on a later run. All three review-pool jobs use `allow_failure: false`
+so a failed reconciliation is visible in the trigger pipeline. Enable "Prevent
+editing approval rules in merge requests" on the project so authors cannot remove
+the required rules.
 
 GitLab switches to MR-local approval rules when the first optional pool is
 created. Future project-level regular or any-approver rules will not automatically

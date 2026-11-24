@@ -8,7 +8,7 @@
     name: review-pools
     action: access
   timeout: 15m
-  allow_failure: true
+  allow_failure: false
   variables:
     GIT_STRATEGY: empty
   script:
@@ -16,7 +16,7 @@
     - apt-get install -y --no-install-recommends ca-certificates git nodejs npm gh glab
     - git init ci-templates
     - git -C ci-templates remote add origin https://github.com/NVIDIA-NeMo/FW-CI-templates.git
-    - git -C ci-templates fetch --depth=1 origin f6e8ed5837b263566534bf0dff0d83a7c653ca8b
+    - git -C ci-templates fetch --depth=1 origin 8e6261cee4bb152e86ea3a5640dda99ae29b046a
     - git -C ci-templates checkout --detach FETCH_HEAD
     - npm ci --prefix ci-templates/.github/scripts/review-matcher --ignore-scripts --no-audit --no-fund
     - export GH_TOKEN="$GH_SSO_MANAGMENT_PAT"
@@ -29,5 +29,7 @@
       --github-repository NVIDIA-NeMo/Gym
       --github-ref main
       --gitlab-username-from-email
+      --require-codeowners
+      --codeowners-fallback @nvidia-nemo/gym_maintainers
       --mr "$GYM_REVIEW_MR_IID"
       --apply

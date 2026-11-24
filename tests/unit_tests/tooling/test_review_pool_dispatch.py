@@ -39,11 +39,11 @@ def event(iid: object = 1355) -> dict:
 class ReviewPoolDispatchTests(unittest.TestCase):
     """Exercise the boundary between untrusted webhooks and child CI config."""
 
-    def test_invalid_payload_cannot_create_child_and_failure_is_advisory(self) -> None:
+    def test_invalid_payload_cannot_create_child_and_failure_blocks(self) -> None:
         """Reject malformed payloads without producing runnable child configuration."""
         config = yaml.safe_load((ROOT / ".gitlab/ci/review-pools.yml").read_text())
-        self.assertTrue(config["gym-review-pools-prepare"]["allow_failure"])
-        self.assertTrue(config["gym-review-pools"]["allow_failure"])
+        self.assertFalse(config["gym-review-pools-prepare"]["allow_failure"])
+        self.assertFalse(config["gym-review-pools"]["allow_failure"])
         with tempfile.TemporaryDirectory() as directory:
             payload = Path(directory) / "event.json"
             output = Path(directory) / "child.json"
