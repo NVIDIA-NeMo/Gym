@@ -479,11 +479,13 @@ def installed_runtime(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """The runtime counts as installed unless a test says otherwise; installs are recorded by their timeout."""
     installs: list[float] = []
 
-    async def install(sandbox: Any, *, timeout_s: float) -> None:
+    async def install(runtime: Any, sandbox: Any, *, timeout_s: float) -> None:
         installs.append(timeout_s)
 
-    monkeypatch.setattr(sandbox_module.RUNTIME, "is_installed", lambda sandbox: _resolved(True))
-    monkeypatch.setattr(sandbox_module.RUNTIME, "install", install)
+    # The runtime is a frozen dataclass, so its class's methods are replaced.
+    runtime_class = type(sandbox_module.RUNTIME)
+    monkeypatch.setattr(runtime_class, "is_installed", lambda runtime, sandbox: _resolved(True))
+    monkeypatch.setattr(runtime_class, "install", install)
     return installs
 
 
@@ -511,7 +513,7 @@ async def test_install_unpacks_this_servers_sources_beside_the_runtime_and_check
 async def test_install_builds_a_missing_runtime_and_fails_the_seed_when_the_runner_cannot_import(
     installed_runtime, monkeypatch
 ) -> None:
-    monkeypatch.setattr(sandbox_module.RUNTIME, "is_installed", lambda sandbox: _resolved(False))
+    monkeypatch.setattr(type(sandbox_module.RUNTIME), "is_installed", lambda runtime, sandbox: _resolved(False))
     sandbox = _FakeSandbox(fail="--check")
     loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
 
