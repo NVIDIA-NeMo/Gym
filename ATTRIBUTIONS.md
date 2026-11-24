@@ -67,6 +67,19 @@ Each row records its repository, base commit, upstream task path, image digest a
 The task and verifier files are unmodified; local changes are JSONL packaging and provenance fields.
 The upstream task content is not attributed wholesale to the MIT harness license.
 
+## ARC-AGI-3 example games
+
+`resources_servers/arc_agi_3/data/environment_files/cn04/2fe56bfb/cn04.py` and
+`resources_servers/arc_agi_3/data/environment_files/ls20/9607627b/ls20.py` (with their `metadata.json`) are the
+games `cn04` version `2fe56bfb` and `ls20` version `9607627b` of the
+[ARC Prize 2026 ARC-AGI-3 Kaggle competition data](https://www.kaggle.com/competitions/arc-prize-2026-arc-agi-3/data)
+(`environment_files/<game>/<version>/`), under MIT, Copyright (c) 2026 ARC Prize Foundation. The competition data has
+no commit; the exact revision is the game version and the upstream file's sha256 (`cn04.py`
+`29977e145a0374b5842d360507f045029c3f4b22373612152e713c14691e01dc`, `ls20.py`
+`298c810da2850d557c95d92a2cbd846df29a45d7134e20888617bedf5dafcd92`). The MIT notice in each file is retained; the only
+local change is a provenance comment (source, revision, license) after it. They are committed so that the example
+dataset runs without a download; `resources_servers/arc_agi_3/create_dataset.py` downloads the full set.
+
 ## ether0 reward overrides
 
 `resources_servers/ether0/graders.py` adapts `oracle_solubility_eval` from

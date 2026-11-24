@@ -1,0 +1,29 @@
+# A Qwen reasoning VL model (Qwen3.5-style template with `preserve_thinking`), served as the ARC-AGI-3 Kaggle kit serves
+# its Qwen checkpoints, for arc_agi_3_agent. vLLM v0.32.0, e.g. on one GB200/GB300 node with TP4:
+#   vllm serve <checkpoint> --served-model-name <name> --tensor-parallel-size 4 --trust-remote-code \
+#     --enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser qwen3 \
+#     --chat-template <checkpoint>/chat_template.jinja --default-chat-template-kwargs '{"preserve_thinking": true}' \
+#     --max-model-len 139264 --max-num-seqs 32 --enable-prefix-caching --limit-mm-per-prompt '{"image": 512, "video": 0}'
+# Kit equivalents: the kit's engine runs the same parsers and template kwargs, an engine context of 139264 tokens for the
+# harness window of 131072, and the model's generation config as sampling defaults (vLLM's default
+# `--generation-config auto`). The harness sends `enable_thinking` and `preserve_thinking` with every request.
+# A checkpoint served with a routing override adds it here too, e.g. top-10 experts on a VL config:
+#   --hf-overrides '{"text_config": {"num_experts_per_tok": 10}}'
+# Set policy_base_url (http://<host>:8000/v1), policy_api_key and policy_model_name (= --served-model-name) in env.yaml.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      # vLLM runs the qwen3 reasoning parser; past reasoning is sent back as reasoning_content.
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      # The engine's context-length 400 goes back to the caller (arc_agi_3_agent trims its history and retries).
+      propagate_context_overflow_errors: true
+      # The kit sends no template settings beyond the harness's own (enable_thinking, preserve_thinking).
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}

@@ -14,6 +14,13 @@
       "opencv-python-headless==5.0.0.93"
     ]
   },
+  "resources_servers/arc_agi_3": {
+    "include-dependencies": [
+      "flask",
+      "blinker",
+      "werkzeug"
+    ]
+  },
   "resources_servers/code_fim": {
     "override-dependencies": [
       "pathspec"
@@ -114,6 +121,20 @@
   "responses_api_agents/agentic_mme_agent": {
     "override-dependencies": [
       "opencv-python-headless==5.0.0.93"
+    ]
+  },
+  "responses_api_agents/arc_agi_3_agent": {
+    "include-dependencies": [
+      "flask",
+      "blinker",
+      "werkzeug"
+    ]
+  },
+  "responses_api_agents/arc_agi_3_official_agent": {
+    "include-dependencies": [
+      "flask",
+      "blinker",
+      "werkzeug"
     ]
   },
   "responses_api_agents/harbor_agent": {
