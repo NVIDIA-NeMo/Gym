@@ -6,9 +6,11 @@ Every sandbox has one owner, the server that started it, and only the owner stop
 glossary). A borrower, an agent whose seed carries a ``sandbox_access`` or a Resources Server grading in the sandbox,
 runs commands and transfers files in it, and releases its client when it is done. Lent access is always operate scope.
 
-No provider enforces scope yet, so code that connects to a sandbox some other way can still stop it. Enforcement
-waits on provider leases; until then every borrower should connect through :func:`borrow` (a repository check that
-keeps connections inside :func:`borrow` and ``OwnedSandboxes`` is planned, not in place).
+No provider enforces scope yet, so the refusals are advisory: code that connects to a sandbox some other way, or
+calls the raw provider a borrowed sandbox still exposes as ``.provider`` (its ``close``, ``pause`` and ``snapshot``),
+can still stop it. Enforcement waits on provider leases; until then every borrower should connect through
+:func:`borrow`. Agents that call ``AsyncSandbox.connect`` themselves move onto it one by one, and a repository check
+that keeps connections inside :func:`borrow` and ``OwnedSandboxes`` follows once they have.
 """
 
 import logging
