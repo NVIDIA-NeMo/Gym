@@ -143,6 +143,79 @@ async def test_unsafe_sandbox_requires_recorded_opt_out(setup, monkeypatch, prov
     assert result.model_dump()["allow_unisolated_sandbox"] is True
 
 
+def _model_only_server(config, **overrides):  # noqa: F811
+    fields = {
+        "sandbox_provider": "sandbox",
+        "sandbox_image": "tools",
+        "sandbox_network_access": "model_only",
+        "sandbox_model_server": {"type": "responses_api_models", "name": "policy_model"},
+        **overrides,
+    }
+    return module.GdpPdfSandboxResourcesServer(
+        config=module.GdpPdfSandboxConfig(**config.model_dump(), **fields),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+async def test_model_only_lends_a_sandbox_that_reaches_only_the_model(setup, config, monkeypatch):  # noqa: F811
+    _, sandbox, body, _ = setup
+    server = _model_only_server(config, opensandbox_dns_nft_confirmed=True)
+    _use_provider(monkeypatch, {"opensandbox": {}})
+    monkeypatch.setattr(f"{LENDING}.get_server_url", lambda name: {"policy_model": "http://10.0.0.5:8000"}[name])
+    await server.seed_session(Request({"type": "http", "session": {}}), body)
+    module.subprocess.run.assert_not_called()  # no Docker network to inspect
+    spec = sandbox.start.await_args.args[0]
+    assert spec.provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "10.0.0.5"}],
+    }
+    server._judge_criterion = AsyncMock(return_value=module.CriterionEvaluation(criterion="cap", passed=True))
+    result = await server.verify(_verify_request("The cap is $5M."))
+    assert result.model_dump()["allow_unisolated_sandbox"] is False
+
+
+async def test_model_only_requires_confirmed_ip_egress_or_recorded_opt_out(setup, config, monkeypatch):  # noqa: F811
+    _, sandbox, body, _ = setup
+    server = _model_only_server(config)
+    _use_provider(monkeypatch, {"opensandbox": {}})
+    monkeypatch.setattr(f"{LENDING}.get_server_url", lambda name: {"policy_model": "http://10.0.0.5:8000"}[name])
+    request = Request({"type": "http", "session": {}})
+    with pytest.raises(ResourcesSeedRejectedError, match="opensandbox_dns_nft_confirmed"):
+        await server.seed_session(request, body)
+    sandbox.start.assert_not_awaited()
+
+    server.config.allow_unisolated_sandbox = True
+    await server.seed_session(request, body)
+    assert sandbox.start.await_args.args[0].provider_options["network_policy"]["defaultAction"] == "deny"
+    server._judge_criterion = AsyncMock(return_value=module.CriterionEvaluation(criterion="cap", passed=True))
+    result = await server.verify(_verify_request("The cap is $5M."))
+    assert result.model_dump()["allow_unisolated_sandbox"] is True
+
+
+@pytest.mark.parametrize(
+    "provider,model_url,options",
+    [
+        ({"docker": {"create": {"network": "isolated"}}}, "http://10.0.0.5:8000", {}),  # no network policies
+        ({"opensandbox": {}}, "http://127.0.0.1:8000", {}),  # the sandbox cannot reach a loopback model server
+        ({"opensandbox": {}}, "http://10.0.0.5:8000", {"volumes": ["/tmp:/tmp"]}),
+    ],
+)
+async def test_model_only_fails_closed(setup, config, monkeypatch, provider, model_url, options):  # noqa: F811
+    _, sandbox, body, _ = setup
+    server = _model_only_server(config, opensandbox_dns_nft_confirmed=True)
+    server.config.sandbox_config.provider_options = options
+    _use_provider(monkeypatch, provider)
+    monkeypatch.setattr(f"{LENDING}.get_server_url", lambda name: model_url)
+    with pytest.raises(ResourcesSeedRejectedError):
+        await server.seed_session(Request({"type": "http", "session": {}}), body)
+    sandbox.start.assert_not_awaited()
+
+
+def test_model_only_needs_a_model_server(config):  # noqa: F811
+    with pytest.raises(ValueError, match="model_server"):
+        _model_only_server(config, sandbox_model_server=None)
+
+
 async def test_network_inspection_failure_never_allocates(setup):
     server, sandbox, body, _ = setup
     module.subprocess.run.side_effect = module.subprocess.TimeoutExpired("docker", 10)
