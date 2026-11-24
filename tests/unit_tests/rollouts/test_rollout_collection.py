@@ -1356,7 +1356,9 @@ class TestRolloutCollection:
                     200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
                 )
             if server_name == "beta_environment_server":
-                for _ in range(50):
+                # A file that must appear gets up to 5 s, as a busy runner can take over 0.5 s to write it; a file
+                # that must not appear gets 0.5 s to show up early.
+                for _ in range(500 if expect_alpha_file else 50):
                     if (complete_dir / "alpha.json").exists():
                         break
                     await asyncio.sleep(0.01)
@@ -1680,7 +1682,9 @@ class TestRolloutCollection:
                     200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
                 )
             if server_name == "beta_environment_server":
-                for _ in range(50):
+                # Up to 5 s, as a busy runner can take over 0.5 s to write alpha's file. The loop stops once the file
+                # appears, so only a missing file waits the full 5 s.
+                for _ in range(500):
                     if (complete_dir / "alpha.json").exists():
                         break
                     await asyncio.sleep(0.01)
