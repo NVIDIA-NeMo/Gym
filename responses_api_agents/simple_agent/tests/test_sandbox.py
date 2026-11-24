@@ -226,7 +226,7 @@ async def test_the_runner_unpacked_from_the_harness_archive_runs_the_loop(tmp_pa
         members.extractall(tmp_path, filter="data")
     assert {
         "nemo_gym/__init__.py",
-        "nemo_gym/agents/utils/sandbox_borrow.py",
+        "nemo_gym/server_runtime/sandbox_borrow.py",
         "responses_api_agents/simple_agent/app.py",
         "responses_api_agents/simple_agent/sandbox_runner.py",
     } <= names
