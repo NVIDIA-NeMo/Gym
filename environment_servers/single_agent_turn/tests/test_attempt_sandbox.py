@@ -4,20 +4,23 @@
 
 import asyncio
 import json
+import typing
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
 from omegaconf import OmegaConf
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from environment_servers.single_agent_turn.app import (
     AttemptSandboxConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
+    SingleAgentTurnResult,
 )
 from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.sandbox import (
+    SandboxAccess,
     SandboxCapabilities,
     SandboxCreateError,
     SandboxExecResult,
@@ -25,8 +28,8 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, BaseVerifyRequest, BaseVerifyResponse, OwnedSandboxes
-from tests.helpers.single_agent_turn import _agent_response, _environment_server, _request, _Response
+from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, OwnedSandboxes, SingleAgentTurnResponse
+from tests.helpers.single_agent_turn import _environment_server, _request, _Response
 
 
 MODEL_HOST = "10.0.0.5"
@@ -160,7 +163,7 @@ async def test_an_attempt_borrows_one_model_only_sandbox_for_its_turn_and_its_ve
     paths = [path for _, path, _ in client.calls]
     assert paths.index("/v1/agent_sessions/close") < paths.index("/verify")
     verify_body = client.calls[paths.index("/verify")][2]["json"]
-    lent = BaseVerifyRequest.model_validate(verify_body).sandbox_access
+    lent = SandboxAccess.model_validate(verify_body[NG_SANDBOX_ACCESS_KEY])
     assert lent.connection.descriptor == seed.sandbox_access.connection.descriptor
     # The lent sandbox's access never reaches the stored result, even from a verifier that echoes it.
     assert NG_SANDBOX_ACCESS_KEY not in result.result.model_dump()
@@ -310,22 +313,31 @@ async def test_a_sandbox_that_cannot_be_lent_to_the_verifier_fails_the_attempt_f
     assert provider.running() == []
 
 
-def test_a_verifier_reads_the_lent_sandbox_and_never_echoes_it() -> None:
-    body = {
-        "responses_create_params": {"input": "task"},
-        "response": _agent_response().model_dump(mode="json"),
-        NG_SANDBOX_ACCESS_KEY: {
-            "connection": {"kind": "direct", "provider_config_ref": "attempt_sandboxes", "descriptor": {"id": "sb"}},
-            "workdir": "/workspace",
-        },
-    }
+def test_no_episode_result_type_declares_a_sandbox_field() -> None:
+    """The lent sandbox reaches /verify only on the wire: no verify response or episode result type declares it, so
+    no stored result can carry a sandbox descriptor."""
+    carried: list[str] = []
 
-    request = BaseVerifyRequest.model_validate(body)
-    response = BaseVerifyResponse(**request.model_dump(), reward=1.0)
+    def walk(model: type[BaseModel], prefix: str, seen: set[type]) -> None:
+        if model in seen:
+            return
+        seen.add(model)
+        for name, field in model.model_fields.items():
+            if name in {"sandbox_access", "descriptor", "connection", "provider_config_ref"} or field.alias == (
+                NG_SANDBOX_ACCESS_KEY
+            ):
+                carried.append(f"{prefix}.{name}")
+            stack = [field.annotation]
+            while stack:
+                current = stack.pop()
+                if isinstance(current, type) and issubclass(current, BaseModel):
+                    walk(current, f"{prefix}.{name}", seen)
+                stack.extend(typing.get_args(current))
 
-    assert request.sandbox_access.connection.descriptor == {"id": "sb"}
-    assert NG_SANDBOX_ACCESS_KEY not in response.model_dump(by_alias=True)
-    assert "sandbox_access" not in response.model_dump()
+    walk(SingleAgentTurnResponse, "SingleAgentTurnResponse", set())
+    walk(SingleAgentTurnResult, "SingleAgentTurnResult", set())
+
+    assert carried == []
 
 
 @pytest.mark.parametrize(

@@ -881,7 +881,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         sandbox_field = {}
         if handles.attempt_sandbox:
             # The sandbox this server started for the attempt, lent to the verifier now that the agent has closed
-            # (BaseVerifyRequest.sandbox_access). A sandbox that cannot be described any more is an infrastructure
+            # (NG_SANDBOX_ACCESS_KEY). A sandbox that cannot be described any more is an infrastructure
             # failure: the attempt is retried, never graded without it.
             try:
                 access = await self.sandboxes.access(
