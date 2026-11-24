@@ -124,14 +124,26 @@ def _stat_fields(pid: int) -> list[str]:
     return stat[stat.rindex(")") + 2 :].split()
 
 
-def _read_process_cpu(pid: int) -> tuple[ProcessKey, int, ProcessCpuTimes] | None:
-    """One process's identity, parent pid and CPU times from one ``/proc/<pid>/stat`` read, or ``None`` if unreadable.
+def _has_ended(fields: list[str]) -> bool:
+    """Whether ``/proc/<pid>/stat`` fields describe a process that has exited and has no thread still running.
 
-    The times include ``cutime``/``cstime``: the kernel adds a child's own and children times to its parent's when the
-    parent waits for it, so a child that starts and exits between two samples is still counted.
+    A child being reaped shows ``X`` once its parent's children times already include it, so it is not counted as
+    well. A zombie main thread whose other threads still run is a running process.
+    """
+    return fields[0] in ("Z", "X") and int(fields[17]) <= 1
+
+
+def _read_process_cpu(pid: int) -> tuple[ProcessKey, int, ProcessCpuTimes] | None:
+    """One process's identity, parent pid and CPU times from one ``/proc/<pid>/stat`` read.
+
+    ``None`` if it cannot be read or has exited. The times include ``cutime``/``cstime``: the kernel adds a child's own
+    and children times to its parent's when the parent waits for it, so a child that starts and exits between two
+    samples is still counted.
     """
     try:
         fields = _stat_fields(pid)
+        if _has_ended(fields):
+            return None
         parent_pid, start_ticks = int(fields[1]), int(fields[19])
         user_ticks = int(fields[11]) + int(fields[13])
         system_ticks = int(fields[12]) + int(fields[14])
@@ -150,17 +162,17 @@ def collect_process_tree_cpu(root_pid: int) -> dict[ProcessKey, ProcessCpuTimes]
 
 
 def process_has_exited(key: ProcessKey) -> bool:
-    """Whether the process ``key`` names is confirmed gone: its pid is free or now belongs to a later process.
+    """Whether the process ``key`` names is confirmed gone: its pid is free, belongs to a later process, or is dead.
 
     An entry that cannot be read for another reason (permissions, I/O) is not proof of an exit, so it counts as running.
     """
     try:
-        start_ticks = int(_stat_fields(key[0])[19])
+        fields = _stat_fields(key[0])
+        return int(fields[19]) != key[1] or _has_ended(fields)
     except FileNotFoundError:
         return True
     except (OSError, ValueError, IndexError):
         return False
-    return start_ticks != key[1]
 
 
 def fold_exited_processes(
@@ -399,18 +411,25 @@ def _descendant_pids(root_pid: int) -> list[int]:
         if pid in pids:
             continue
         pids[pid] = None
-        try:
-            with os.scandir(f"/proc/{pid}/task") as task_dirs:
-                for task_dir in task_dirs:
-                    try:
-                        with open(f"{task_dir.path}/children") as children_file:
-                            children = children_file.read().split()
-                    except (OSError, PermissionError):
-                        continue
-                    to_visit.extend(int(child) for child in children if child.isdigit())
-        except (OSError, PermissionError):
-            continue
+        to_visit.extend(_child_pids(pid))
     return list(pids)
+
+
+def _child_pids(pid: int) -> list[int]:
+    """The children of every thread of ``pid`` that can be read; a process that has gone has none."""
+    child_pids: list[int] = []
+    try:
+        with os.scandir(f"/proc/{pid}/task") as task_dirs:
+            for task_dir in task_dirs:
+                try:
+                    with open(f"{task_dir.path}/children") as children_file:
+                        children = children_file.read().split()
+                except (OSError, PermissionError):
+                    continue
+                child_pids.extend(int(child) for child in children if child.isdigit())
+    except (OSError, PermissionError):
+        pass
+    return child_pids
 
 
 def _read_process_memory(pid: int) -> tuple[int, int | None] | None:

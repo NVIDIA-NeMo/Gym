@@ -21,6 +21,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 
 import pytest
 
@@ -444,6 +445,110 @@ def test_reads_own_and_waited_for_children_times_and_the_parent_from_proc_stat(m
         (101, 8): ProcessCpuTimes(4 / clock_ticks, 6 / clock_ticks, parent=(100, 7)),
         (102, 9): ProcessCpuTimes(0.0, 0.0, parent=None),
     }
+
+
+@dataclass
+class _FakeProcess:
+    ppid: int
+    start: int
+    own: float = 0.0
+    children: float = 0.0
+    state: str = "S"
+    threads: int = 1
+    unreadable: bool = False
+    missed_by_walk: bool = False
+
+
+class _FakeProc:
+    """A procfs stand-in for the CPU walk: processes by pid, and the kernel steps that change them."""
+
+    def __init__(self, monkeypatch):
+        self.processes: dict[int, _FakeProcess] = {}
+        self.after_next_read: list = []
+        self.baseline: dict = {}
+        self.counted = 0.0
+        monkeypatch.setattr(memory_telemetry, "_child_pids", self.child_pids)
+        monkeypatch.setattr(memory_telemetry, "_stat_fields", self.stat_fields)
+
+    def spawn(self, pid, ppid, own=0.0):
+        self.processes[pid] = _FakeProcess(ppid=ppid, start=pid, own=own)
+
+    def child_pids(self, pid):
+        return [child for child, p in self.processes.items() if p.ppid == pid and not p.missed_by_walk]
+
+    def stat_fields(self, pid):
+        process = self.processes.get(pid)
+        steps, self.after_next_read = self.after_next_read, []
+        try:
+            if process is None:
+                raise FileNotFoundError(pid)
+            if process.unreadable:
+                raise PermissionError(pid)
+            ticks = memory_telemetry._CLOCK_TICKS
+            return [
+                process.state,
+                str(process.ppid),
+                *["0"] * 9,
+                str(round(process.own * ticks)),
+                "0",
+                str(round(process.children * ticks)),
+                "0",
+                "0",
+                "0",
+                str(process.threads),
+                "0",
+                str(process.start),
+            ]
+        finally:
+            for step in steps:
+                step()
+
+    def begin_reap(self, pid):
+        """``wait_task_zombie`` up to ``release_task``: state ``X``, the total already in the parent's children times."""
+        process = self.processes[pid]
+        process.state = "X"
+        self.processes[process.ppid].children += process.own + process.children
+
+    def reap(self, pid):
+        if self.processes[pid].state != "X":
+            self.begin_reap(pid)
+        del self.processes[pid]
+
+    def sample(self, root):
+        from nemo_gym.telemetry.memory import advance_cpu_baseline, collect_process_tree_cpu
+
+        used, self.baseline = advance_cpu_baseline(self.baseline, collect_process_tree_cpu(root))
+        self.counted += used.user_seconds
+        return self.counted
+
+
+@pytest.mark.parametrize("state", ["X", "Z"], ids=["being reaped", "zombie"])
+def test_a_child_seen_dead_after_its_parent_absorbed_it_is_not_counted_twice(monkeypatch, state):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)
+    proc.spawn(101, ppid=100, own=2.0)
+    assert proc.sample(100) == pytest.approx(2.0)
+
+    proc.processes[101].own = 2.5
+    if state == "X":
+        proc.begin_reap(101)
+    else:
+        proc.processes[101].state = "Z"
+    proc.sample(100)
+    proc.reap(101)
+
+    assert proc.sample(100) == pytest.approx(2.5)
+
+
+def test_a_process_whose_main_thread_exited_while_others_run_is_still_counted(monkeypatch):
+    proc = _FakeProc(monkeypatch)
+    proc.spawn(100, ppid=1)
+    proc.spawn(101, ppid=100, own=1.0)
+    proc.sample(100)
+
+    proc.processes[101].state, proc.processes[101].threads, proc.processes[101].own = "Z", 2, 3.0
+
+    assert proc.sample(100) == pytest.approx(3.0)
 
 
 @pytest.mark.parametrize(
