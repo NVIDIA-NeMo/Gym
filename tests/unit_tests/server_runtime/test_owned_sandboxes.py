@@ -143,19 +143,28 @@ def test_a_server_without_a_sandbox_provider_is_refused(providers) -> None:
         server.sandboxes
 
 
-def test_a_refused_config_builds_no_provider(providers, monkeypatch) -> None:
-    # Checkpointing on without checkpoint.state_dir is refused; a provider built first would never be closed, and a
-    # later self.sandboxes would build another.
+async def test_a_non_exporting_owner_needs_no_checkpoint_state_dir(providers, monkeypatch) -> None:
     def no_state_dir(global_config: Any) -> None:
         raise ValueError("checkpoint.state_dir is required to checkpoint sandboxes")
 
     monkeypatch.setattr(owned_sandboxes_module, "checkpoint_state_dir", no_state_dir)
-    server = _server(sandbox_provider="opensandbox")
+    owned = _server(sandbox_provider="opensandbox").sandboxes
+    await owned.create("session", _spec())
+    assert owned.indexed_snapshots == {}
+    with pytest.raises(ValueError, match="checkpoint.state_dir is required"):
+        await owned.export(["session"], checkpoint_id="checkpoint")
+    assert providers["opensandbox"].snapshots == {}
+    await owned.aclose()
+    assert providers["opensandbox"].client_closed
 
-    for _ in range(2):
-        with pytest.raises(ValueError, match="checkpoint.state_dir is required"):
-            server.sandboxes
 
+def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch) -> None:
+    def refuse(*args: Any) -> None:
+        raise ValueError("unknown provider block")
+
+    monkeypatch.setattr(owned_sandboxes_module, "resolve_provider_config", refuse)
+    with pytest.raises(ValueError, match="unknown provider block"):
+        _server(sandbox_provider="missing").sandboxes
     assert providers == {}
 
 
@@ -224,12 +233,16 @@ async def test_a_provider_stays_open_while_a_sandbox_is_left_to_stop(providers) 
     assert provider.client_closed
 
 
-def test_each_provider_field_has_its_own_snapshot_index(providers, monkeypatch, tmp_path: Path) -> None:
+async def test_each_provider_field_has_its_own_snapshot_index(providers, monkeypatch, tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     monkeypatch.setattr(owned_sandboxes_module, "checkpoint_state_dir", lambda config: state_dir)
     server = _server(sandbox_provider="opensandbox", gpu_sandbox_provider="gpu")
 
     main, gpu = server.sandboxes, server.sandboxes.on("gpu_sandbox_provider")
+
+    assert not state_dir.exists()
+    await main.export([], checkpoint_id="checkpoint")
+    await gpu.delete_snapshots(frozenset())
 
     assert (state_dir / "my_server" / "snapshots").is_dir()
     assert (state_dir / "my_server.gpu_sandbox_provider" / "snapshots").is_dir()
@@ -1032,3 +1045,15 @@ async def test_a_superseded_stop_waiting_for_a_slot_is_bounded(monkeypatch, capl
     assert time.monotonic() - started < 2
     assert "was not stopped" in caplog.text
     owned._stop_limit.release()
+
+
+def test_the_old_checkpointer_name_resolves_with_a_deprecation_warning() -> None:
+    import importlib
+
+    with pytest.warns(DeprecationWarning, match="OwnedSandboxes"):
+        old = getattr(importlib.import_module("nemo_gym.server_runtime"), "SandboxSessionCheckpointer")
+    assert old is OwnedSandboxes
+    with pytest.warns(DeprecationWarning):
+        module = importlib.import_module("nemo_gym.server_runtime._checkpoint.sandbox")
+        old = getattr(module, "SandboxSessionCheckpointer")
+    assert old is OwnedSandboxes
