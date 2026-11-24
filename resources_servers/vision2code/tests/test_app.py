@@ -394,6 +394,17 @@ async def test_reference_root_resolves_relative_reference_paths(setup, tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_absolute_reference_path_ignores_reference_root(setup, tmp_path):
+    server, body, _, judge = setup
+    other = tmp_path / "other"
+    other.mkdir()
+    server.config = app.Vision2CodeConfig(**{**server.config.model_dump(), "reference_root": str(other)})
+    judge.return_value = judge_result(body.verifier_metadata.rubric)
+    result = await server.verify(body)
+    assert not result.mask_sample and result.failure_kind is None
+
+
+@pytest.mark.asyncio
 async def test_relative_reference_path_without_reference_root_is_masked(setup, tmp_path):
     server, body, renderer, judge = setup
     # Unset reference_root: a relative path resolves against the Gym checkout, which has no such file.
