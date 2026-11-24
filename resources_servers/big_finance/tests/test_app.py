@@ -571,8 +571,9 @@ async def test_python_exec_kills_the_child_when_the_call_is_cancelled(tmp_path: 
 
 
 def test_python_exec_copy_matches_the_pinned_upstream_run() -> None:
+    pinned = "2efa1fc991f8f58e913777f9ae8dbdabdf059d9553eae5a7058989b2f9aeed85"  # pragma: allowlist secret
     upstream = hashlib.sha256(inspect.getsource(PythonExecTool.run).encode()).hexdigest()
-    assert upstream == "2efa1fc991f8f58e913777f9ae8dbdabdf059d9553eae5a7058989b2f9aeed85", (
+    assert upstream == pinned, (
         "big-finance-harness changed PythonExecTool.run. Copy the change into ScratchDirPythonExecTool.run, "
         "then record the new hash here."
     )
