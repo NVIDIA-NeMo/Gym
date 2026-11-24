@@ -5,9 +5,16 @@ stages:
   - test
   - report
 
-# This file is mirrored from GitHub but is active only for internal merge requests.
+include:
+  - local: .gitlab/ci/review-pools.yml
+
 workflow:
   rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "trigger" &&
+        $CI_COMMIT_BRANCH == "nv-internal-main" &&
+        $CI_COMMIT_REF_PROTECTED == "true" &&
+        $TRIGGER_PAYLOAD
     - if: >-
         $CI_PIPELINE_SOURCE == "merge_request_event" &&
         $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "nv-internal-main"

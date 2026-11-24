@@ -35,7 +35,7 @@ import socket
 import stat
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
@@ -50,8 +50,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
-from nemo_gym.sandbox.providers.utils import kill_cancelled_command
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command, require_shell_text
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
 
 LOGGER = logging.getLogger(__name__)
@@ -61,6 +62,11 @@ CONTAINER_NAME_PREFIX = "nemo-gym-"
 # Portable init: keep the container alive without relying on `sleep infinity`,
 # which busybox `sleep` rejects. A shell loop works on any image with `sh`.
 DEFAULT_INIT_COMMAND = "while true; do sleep 86400; done"
+# Enroot's command script owns execution of the argv supplied after the
+# container name. Replacing an image-generated /etc/rc with an empty file would
+# therefore exit successfully without launching the requested init. This
+# minimal script bypasses image ENTRYPOINT/CMD behavior while preserving argv.
+ENTRYPOINT_BYPASS_RC = 'if [ "$#" -gt 0 ]; then\n    exec "$@"\nfi\nexec /bin/sh\n'
 READY_PROBE_COMMAND = (
     f"printf enroot-sandbox-ready > {DEFAULT_MOUNT_POINT}/.nemo-gym-ready && printf enroot-sandbox-ready"
 )
@@ -116,12 +122,17 @@ def _find_container_init_pid(base_init: str, marker: str) -> int | None:
     concurrency. The ``enroot start`` wrapper also carries the marker but its cmdline
     starts with the enroot binary, not ``sh -c ``, so it is excluded.
     """
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit():
-            continue
-        cmd = _read_proc_cmdline(int(entry.name))
-        if cmd.startswith("sh -c ") and marker in cmd and base_init in cmd:
-            return int(entry.name)
+    try:
+        entries = os.scandir("/proc")
+    except OSError:
+        return None
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            cmd = _read_proc_cmdline(int(entry.name))
+            if cmd.startswith("sh -c ") and marker in cmd and base_init in cmd:
+                return int(entry.name)
     return None
 
 
@@ -506,10 +517,17 @@ class EnrootProvider:
         # (e.g. ENTRYPOINT ["python"]) don't wrap the init and exit immediately.
         # Enroot bakes the ENTRYPOINT into /etc/rc inside the rootfs during
         # `enroot create`; the only way to bypass it at start time is --rc,
-        # which replaces /etc/rc entirely. We pass an empty script so the init
-        # command (argv after the container name) runs directly.
+        # which replaces /etc/rc entirely. Enroot requires --rc to name a
+        # regular file, so /dev/null is not a valid sentinel. The replacement
+        # must also exec the supplied argv; an empty script exits without
+        # starting the init. Keep the pass-through script in the private
+        # per-sandbox staging directory. Enroot copies it before the init starts
+        # and it is removed with staging.
         if self._create_config.bypass_entrypoint:
-            argv += ["--rc", "/dev/null"]
+            bypass_rc_path = staging_dir / ".nemo-gym-bypass-entrypoint-rc"
+            bypass_rc_path.write_text(ENTRYPOINT_BYPASS_RC)
+            bypass_rc_path.chmod(0o400)
+            argv += ["--rc", str(bypass_rc_path)]
         argv += list(self._create_config.extra_start_args)
         # Tag the init with the (unique) container name so the nested-in-pyxis PID
         # fallback can find THIS container's init process in /proc unambiguously. The
@@ -783,7 +801,7 @@ class EnrootProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -803,6 +821,7 @@ class EnrootProvider:
 
         ``stdin``, when given, is piped to the command's standard input.
         """
+        command = require_shell_text(command, provider=self.name)
         instance = handle.raw
         if instance.container_pid is None or not self._pid_has_container_marker(instance.container_pid, instance.name):
             return SandboxExecResult(
@@ -971,7 +990,7 @@ class EnrootProvider:
             remove_error = e
 
         try:
-            shutil.rmtree(instance.staging_dir, ignore_errors=False)
+            _remove_writable_tree(instance.staging_dir)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", instance.staging_dir, e)
 
