@@ -36,15 +36,19 @@ read as an A1 reference to rows of one tab: `B7`, `Sheet1!A7:C7` or `'Q4 2025'!B
 way the simulator addresses it, and a single row past a named tab's end is the row an append adds. A row whose record
 names nothing, or more than one record (two collections, or a row number without a tab in a sheet with several tabs),
 cannot be graded: the environment logs the count of such rows at load, and a rollout of one ends before its first turn
-with `requester_failed` and `unresolved_records` set, so it is masked. Apps that keep only an action log (Trello, Notion,
+masked as `env_row_invalid`. Each rollout repeats the load checks on the row it receives (Gym sends the row's own
+`info`, which need not come from `tasks_path`), and a row that fails them, or whose setup raises, ends the same way:
+masked, never a server error. Apps that keep only an action log (Trello, Notion,
 Asana, ...) hold no records, so their writes cannot be graded with these two assertions.
 
 A write changes the records it adds, edits or deletes, and only these parents: a calendar event's calendar, a Facebook
 post's page, a Slack message's channel, a sheet row's spreadsheet and tab. Writes an app keeps only in its action log
 name their record through the action's params: a Jira comment its issue, a Google Drive move, rename, copy or delete
-its file, a Pipefy card move or field update its card, an Airtable comment its base. Records that only point at
+its file and the folders it adds to or leaves, a new Drive file its folder, a Pipefy card move or field update its card,
+an Airtable record create, update or comment its base. Records that only point at
 another (an opportunity's account, a ticket's requester) do not act on it. A row written through a URL that names its
-spreadsheet or tab by title is filed under the same key as one written by id.
+spreadsheet or tab by title (in any case, as the simulator reads titles) is filed under, and credits, the same
+spreadsheet and tab as one written by id. A tab is keyed within its spreadsheet.
 
 ## Multi-turn
 
@@ -76,7 +80,7 @@ AutomationBench's headline: a broken guardrail scores 0, otherwise the score is 
 `unavailable_call_break: true`, a call to a tool the agent was not given, or to a service not connected for it (a
 requester-owned app included), also breaks a guardrail.
 
-Metrics: `user_turns`, `requester_failed`, `unresolved_records`, `empty_turn`, `unknown_tool_calls`, `out_of_scope_calls`,
+Metrics: `user_turns`, `requester_failed`, `env_row_invalid`, `empty_turn`, `unknown_tool_calls`, `out_of_scope_calls`,
 `requester_service_calls`, `requester_tool_calls`, `violation`.
 
 `replay(info, calls)` scores a scripted plan against a row, which checks that a task is solvable before training on it.

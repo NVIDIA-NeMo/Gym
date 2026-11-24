@@ -25,8 +25,9 @@ ab_synth:
         # Each requester try ends after this many seconds; after the last failed try the episode ends unscored.
         requester_timeout_s: 300
         unavailable_call_break: false
-      # A rollout whose requester failed is returned with mask_sample=true, so its reward is not counted.
-      mask_sample_metrics: [requester_failed]
+      # A rollout whose requester failed, or whose row cannot be run, is returned with mask_sample=true, so its reward is
+      # not counted.
+      mask_sample_metrics: [requester_failed, env_row_invalid]
       group_size: 1
       max_concurrent_generation: -1
       max_concurrent_scoring: -1

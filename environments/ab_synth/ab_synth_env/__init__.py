@@ -64,17 +64,19 @@ PARENTS = {
     ("google_calendar", "events"): [("calendars", "calendarid")],
     ("facebook_pages", "posts"): [("pages", "page_id")],
     ("slack", "messages"): [("channels", "channel_id")],
-    ("google_sheets", "rows"): [("spreadsheets", "spreadsheet_id"), ("worksheets", "worksheet_id")],
 }
-# Writes an app keeps only in its action log, by (app, action): the collection and the param naming the record acted on.
+# Writes an app keeps only in its action log, by (app, action): the collections and params naming the records acted on.
 ACTION_TARGETS = {
-    ("jira", "add_comment"): ("issues", "issueKey"),
-    ("google_drive", "delete_file"): ("files", "file"),
-    ("google_drive", "move_file"): ("files", "file"),
-    ("google_drive", "copy_file"): ("files", "source_file"),
-    ("pipefy", "move_card"): ("cards", "card_id"),
-    ("pipefy", "update_card_field"): ("cards", "card_id"),
-    ("airtable", "add_comment"): ("bases", "applicationId"),
+    ("jira", "add_comment"): [("issues", "issueKey")],
+    ("google_drive", "create_file"): [("folders", "folder")],
+    ("google_drive", "copy_file"): [("files", "source_file"), ("folders", "folder")],
+    ("google_drive", "move_file"): [("files", "file"), ("folders", "addParents"), ("folders", "removeParents")],
+    ("google_drive", "delete_file"): [("files", "file")],
+    ("pipefy", "move_card"): [("cards", "card_id")],
+    ("pipefy", "update_card_field"): [("cards", "card_id")],
+    ("airtable", "createRecord"): [("bases", "applicationId")],
+    ("airtable", "updateRecord"): [("bases", "applicationId")],
+    ("airtable", "add_comment"): [("bases", "applicationId")],
 }
 # The key field of collections whose records have neither `id` nor `sid`. Records without one (a Zoom participant, a
 # LinkedIn mutual connection, a Slack message without an id) cannot be named by a day assertion.
@@ -160,13 +162,19 @@ def _get(msg, key):
 
 
 def _key(app: str, collection: str, record, sheet_ids: dict | None = None):
-    """A record's key in its collection: `id`, else `sid` (Twilio), else the collection's primary key (Xero). A sheet row's
-    key is (spreadsheet id, worksheet id, row_id), with a spreadsheet or tab that a write named by its title mapped to its
-    id through `sheet_ids` (`_sheet_ids`), so an appended row never takes another's key."""
+    """A record's key in its collection: `id`, else `sid` (Twilio), else the collection's primary key (Xero). A worksheet's
+    key is (spreadsheet id, id), a sheet row's (spreadsheet id, worksheet id, row_id), with a spreadsheet or tab that a
+    write named by its title mapped to its id through `sheet_ids` (`_sheet_ids`), so an appended row never takes
+    another's key."""
+    if (app, collection) == ("google_sheets", "worksheets"):
+        return (_get(record, "spreadsheet_id"), str(_get(record, "id")))
     if (app, collection) == ("google_sheets", "rows"):
-        ids = sheet_ids or {}
-        sheet = ids.get(_get(record, "spreadsheet_id"), _get(record, "spreadsheet_id"))
-        tab = ids.get((sheet, _get(record, "worksheet_id")), _get(record, "worksheet_id"))
+        ids = sheet_ids or {"books": set(), "tabs": set(), "titles": {}}
+        sheet, tab = _get(record, "spreadsheet_id"), _get(record, "worksheet_id")
+        if sheet not in ids["books"]:
+            sheet = ids["titles"].get(str(sheet).casefold(), sheet)
+        if (sheet, tab) not in ids["tabs"]:
+            tab = ids["titles"].get((sheet, str(tab).casefold()), tab)
         return (sheet, tab, _get(record, "row_id"))
     for field in ("id", "sid", PRIMARY_KEYS.get((app, collection))):
         if field and (value := _get(record, field)) is not None:
@@ -175,16 +183,17 @@ def _key(app: str, collection: str, record, sheet_ids: dict | None = None):
 
 
 def _sheet_ids(world: dict) -> dict:
-    """Title -> id for spreadsheets, and (spreadsheet id, title) -> id for tabs, where the title is not itself an id: a
-    write that names a spreadsheet or tab by title files its rows under the title."""
+    """The spreadsheet and tab ids of a world dump, and their titles (case-insensitive, as upstream reads them) mapped
+    to the ids: a write that names a spreadsheet or tab by title files its rows under the title."""
     sheets = world.get("google_sheets") or {}
     books, tabs = sheets.get("spreadsheets", []), sheets.get("worksheets", [])
-    book_ids, tab_ids = {b["id"] for b in books}, {(w["spreadsheet_id"], w["id"]) for w in tabs}
-    ids = {b["title"]: b["id"] for b in books if b.get("title") and b["title"] not in book_ids}
-    ids.update(
-        {(w["spreadsheet_id"], w["title"]): w["id"] for w in tabs if (w["spreadsheet_id"], w["title"]) not in tab_ids}
-    )
-    return ids
+    titles = {str(b.get("title")).casefold(): b["id"] for b in books if b.get("title")}
+    titles.update({(w["spreadsheet_id"], str(w["title"]).casefold()): w["id"] for w in tabs if w.get("title")})
+    return {
+        "books": {b["id"] for b in books},
+        "tabs": {(w["spreadsheet_id"], w["id"]) for w in tabs},
+        "titles": titles,
+    }
 
 
 def _records(world: dict) -> dict:
@@ -230,7 +239,7 @@ def _names(world: dict, events: list[dict]) -> dict:
 
     def add(app, collection, key, record):
         tag = _tag(app, collection, key)
-        names.setdefault(str(key[2] if isinstance(key, tuple) else key), set()).add(tag)
+        names.setdefault(str(key[-1] if isinstance(key, tuple) else key), set()).add(tag)
         alias = "id" if isinstance(key, tuple) else ALIASES.get((app, collection))  # a sheet row also by its own id
         if alias and record.get(alias) is not None:
             names.setdefault(str(record[alias]), set()).add(tag)
@@ -253,7 +262,7 @@ def _sheet_rows(world: dict, ref) -> dict:
     first, last = int(ref["first"]), int(ref["last"] or ref["first"])
     found, sheet_ids = {}, _sheet_ids(world)
     for w in sheets.get("worksheets", []):
-        if ref["tab"] not in (None, w["title"]):
+        if ref["tab"] is not None and ref["tab"].casefold() != str(w["title"]).casefold():
             continue
         keys = [_key("google_sheets", "rows", r, sheet_ids) for r in sheets.get("rows", [])]
         rows = [row_id for sheet, tab, row_id in keys if (sheet, tab) == (w["spreadsheet_id"], w["id"])]
@@ -271,6 +280,36 @@ def _sheet_rows(world: dict, ref) -> dict:
                 _tag("google_sheets", "rows", (w["spreadsheet_id"], w["id"], n)) for n in hits
             }
     return found
+
+
+def row_problems(info: dict, *, requester: bool) -> list[str]:
+    """What makes a row unusable before any rollout, the checks load_environment and each rollout's setup_state share:
+    world assertions on wall-clock fields, a multi-day row without its wait texts or with a time that is not ISO 8601, a
+    multi-turn row without a requester endpoint, a requester service that is no app, a day assertion without a record."""
+    problems = []
+    for a in info.get("assertions", []):
+        if fields := time_fields(a):
+            problems.append(
+                f"assertion {a.get('type')!r} reads date or time fields {fields}. Records the agent creates carry the "
+                "wall-clock time, not simulated time, so grade timing with acted_on_day or not_acted"
+            )
+        if a.get("type") in DAY_ASSERTIONS and not isinstance(a.get("record"), (str, int)):
+            problems.append(f"{a['type']} has no record (got {a.get('record')!r})")
+    if info.get("period_end"):
+        if missing := [k for k in ("wait_tool_description", "wait_until_description") if not info.get(k)]:
+            problems.append(f"a multi-day row needs {missing}")
+        for t in [info["period_end"], *(e.get("at") for e in info.get("events", []))]:
+            try:
+                _time(t)
+            except (TypeError, ValueError):
+                problems.append(f"{t!r} is not an ISO 8601 time")
+    if (info.get("user_card") or info.get("requester_services")) and not requester:
+        problems.append(
+            "multi-turn rows (user_card or requester_services) need requester_base_url and requester_model"
+        )
+    if unknown := [s for s in info.get("requester_services") or [] if s not in WorldState.model_fields]:
+        problems.append(f"requester_services names no app: {unknown}")
+    return problems
 
 
 def resolve_records(info: dict) -> list[str]:
@@ -396,12 +435,20 @@ class Clock:
                 moved = [r for r in o if r not in n] + [r for r in n if r not in o]
                 for parent, field in PARENTS.get(k[:2], ()):
                     targets |= {_tag(k[0], parent, str(r[field])) for r in moved if r.get(field)}
-            done = _actions(before)
+                if k[:2] == ("google_sheets", "rows"):  # a row's spreadsheet and tab, by its key's mapped ids
+                    targets |= {
+                        _tag("google_sheets", "spreadsheets", k[2][0]),
+                        _tag("google_sheets", "worksheets", k[2][:2]),
+                    }
+            done, names = _actions(before), None
             for (app, action, id_), params in _actions(after).items():
-                if (app, action, id_) not in done and (app, action) in ACTION_TARGETS:
-                    collection, param = ACTION_TARGETS[(app, action)]
-                    named = _names(after, []).get(str(params.get(param)), set())
-                    targets |= {t for t in named if json.loads(t)[:2] == [app, collection]}
+                if (app, action, id_) in done:
+                    continue
+                for collection, param in ACTION_TARGETS.get((app, action), []):
+                    names = names or _names(after, [])
+                    values = params.get(param)
+                    for value in values if isinstance(values, list) else [values]:
+                        targets |= {t for t in names.get(str(value), ()) if json.loads(t)[:2] == [app, collection]}
             self.log.append(
                 {
                     "at": now.isoformat(),
@@ -454,7 +501,7 @@ def headline(initial_state: dict, world: WorldState, log: list[dict], assertions
     already true before the agent acts is a guardrail unless `excluded: false` forces it to score. Every `not_acted`
     is a guardrail. A broken guardrail scores the task 0.
     """
-    initial = WorldState(**copy.deepcopy(initial_state))
+    initial = WorldState(**strip_none_values(initial_state))
     passed = total = 0
     for a in assertions:
         if a.get("scored") is False or a.get("excluded") is True:
@@ -562,7 +609,7 @@ def reward(state, **kwargs) -> float:
 
     Synchronous, so verifiers_agent watches it: a row whose assertions make it raise is masked as a verifier error,
     not scored 0."""
-    if state.get("violation") or state.get("unresolved_records"):
+    if state.get("violation") or state.get("env_row_invalid"):
         return 0.0
     return headline(state["initial_state"], state["world"], state["clock"].log, state["info"]["assertions"])
 
@@ -584,7 +631,7 @@ def _state_metric(key: str):
 METRICS = (
     "user_turns",
     "requester_failed",
-    "unresolved_records",
+    "env_row_invalid",
     "empty_turn",
     "unknown_tool_calls",
     "out_of_scope_calls",
@@ -636,13 +683,25 @@ def load_environment(
 
     class ABSynthEnv(AutomationBenchEnv):
         async def setup_state(self, state, **setup_kwargs):
-            state = await super().setup_state(state, **setup_kwargs)
-            info = state["info"]
-            # Gym hands each rollout the row's own info, not the dataset's copy, so the records are resolved here. A row
-            # refused at load still arrives: it ends before the first turn, masked like any dataset fault.
-            if problems := resolve_records(info):
-                state["unresolved_records"] = len(problems)
-                self._requester_failed(state, ValueError(f"day-assertion records cannot be resolved: {problems[:3]}"))
+            # Gym hands each rollout the row's own info (any row, not only the dataset's), so it is checked and its
+            # records resolved here. A row that fails, or a setup that raises, ends before the first turn, masked as
+            # env_row_invalid: never a server error.
+            try:
+                state = await super().setup_state(state, **setup_kwargs)
+                info = state["info"]
+                problems = row_problems(info, requester=bool(requester_base_url and requester_model))
+                if problems or (problems := resolve_records(info)):
+                    return self._invalid_row(state, problems)
+                return self._setup(state, info)
+            except Exception as e:  # noqa: BLE001  a row the environment cannot set up is masked, not a 500
+                return self._invalid_row(state, [f"setup raised {type(e).__name__}: {e}"])
+
+        def _invalid_row(self, state, problems: list[str]):
+            state["env_row_invalid"] = 1
+            logger.warning("ab_synth: row cannot be run, masked as env_row_invalid: %s", problems[:3])
+            return state
+
+        def _setup(self, state, info):
             end = info.get("period_end") or state["world"].meta.current_time.isoformat()
             state["clock"] = Clock(state["world"], copy.deepcopy(info.get("events", [])), end)
             if info.get("period_end"):
@@ -697,13 +756,21 @@ def load_environment(
             logger.warning("ab_synth: episode ends unscored: %s", str(error)[:200])
 
         @vf.stop
-        async def unresolved(self, state) -> bool:
-            """A row whose day-assertion records cannot be resolved ends before the first turn."""
-            return bool(state.get("unresolved_records"))
+        async def invalid_row(self, state) -> bool:
+            """A row that failed its checks or its setup ends before the first turn."""
+            return bool(state.get("env_row_invalid"))
 
         @vf.stop
         async def no_tools_called(self, state) -> bool:
-            """The agent ended its turn: on multi-turn rows let the requester answer, and stop when it has nothing to add."""
+            """The agent ended its turn: on multi-turn rows let the requester answer, and stop when it has nothing to add.
+            A check that raises ends the episode masked as env_row_invalid, not as a server error."""
+            try:
+                return await self._turn_ended(state)
+            except Exception as e:  # noqa: BLE001  masked, not a 500
+                self._invalid_row(state, [f"turn-end check raised {type(e).__name__}: {e}"])
+                return True
+
+        async def _turn_ended(self, state) -> bool:
             if not await super().no_tools_called(state):
                 return False
             info = state["info"]
@@ -836,28 +903,9 @@ def load_environment(
 
     with open(tasks_path) as f:
         rows = [json.loads(line) for line in f if line.strip()]
-    if not (requester_base_url and requester_model) and any(
-        r["info"].get("user_card") or r["info"].get("requester_services") for r in rows
-    ):
-        raise ValueError(
-            "multi-turn rows (user_card or requester_services) need requester_base_url and requester_model"
-        )
     for i, r in enumerate(rows):
-        info = r["info"]
-        for a in info.get("assertions", []):
-            if fields := time_fields(a):
-                raise ValueError(
-                    f"row {i}: assertion {a.get('type')!r} reads date or time fields {fields}. Records the agent creates "
-                    "carry the wall-clock time, not simulated time, so grade timing with acted_on_day or not_acted"
-                )
-        if info.get("period_end"):
-            if missing := [k for k in ("wait_tool_description", "wait_until_description") if not info.get(k)]:
-                raise ValueError(f"row {i}: a multi-day row needs {missing}")
-            for t in [info["period_end"], *(e["at"] for e in info.get("events", []))]:
-                try:
-                    _time(t)
-                except (TypeError, ValueError):
-                    raise ValueError(f"row {i}: {t!r} is not an ISO 8601 time") from None
+        if problems := row_problems(r["info"], requester=bool(requester_base_url and requester_model)):
+            raise ValueError(f"row {i}: {problems[0]}")
     # Resolve the day-assertion records against each seed. A row whose record names nothing or more than one record
     # cannot be graded and is refused; the counts are logged.
     refused = {i: problems for i, r in enumerate(rows) if (problems := resolve_records(r["info"]))}
