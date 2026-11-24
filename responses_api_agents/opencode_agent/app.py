@@ -232,6 +232,27 @@ def _restored_trajectory(saved: Mapping[str, Any], rollout_id: str) -> Trajector
     )
 
 
+# OpenCode keys each MCP tool `<grant>_<tool>`, with every character outside this class of either part written as `_`
+# (McpCatalog.toolName in OpenCode 1.17.11), and a tool under a key already taken replaces the earlier one silently.
+_OPENCODE_TOOL_KEY_UNSAFE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _colliding_mcp_grants(names: Sequence[str]) -> tuple[str, str] | None:
+    """Two MCP grants whose tools OpenCode could register under one key, or ``None``.
+
+    Two keys ``<a>_<tool>`` and ``<b>_<tool'>`` of different grants can be equal only when ``a`` and ``b`` are equal
+    once written as OpenCode writes them, or one is the other followed by ``_``: ``company`` serving ``files_list``
+    and ``company_files`` serving ``list`` both register ``company_files_list``. The grant names decide it, so a seed
+    can refuse such grants without listing their tools.
+    """
+    written = sorted((_OPENCODE_TOOL_KEY_UNSAFE.sub("_", name), name) for name in names)
+    for index, (shorter, first) in enumerate(written):
+        for longer, second in written[index + 1 :]:
+            if longer == shorter or longer.startswith(shorter + "_"):
+                return first, second
+    return None
+
+
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     """Return (user_message, system_message) from a responses body input list."""
     items = list(body_input)
@@ -1605,6 +1626,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 422,
                 "OpenCode in the task sandbox supports only MCP tool grants; required grants it cannot use: "
                 + ", ".join(sorted(unsupported)),
+            )
+        colliding = _colliding_mcp_grants(
+            [access.name for access in self.effective_tool_accesses(body) if isinstance(access, MCPToolAccess)]
+        )
+        if colliding:
+            raise HTTPException(
+                422,
+                "OpenCode names each MCP tool <grant>_<tool>, writing characters other than letters, digits, '_' and "
+                f"'-' as '_', so the grants {colliding[0]!r} and {colliding[1]!r} can give two tools one name, and the "
+                "later would replace the earlier: rename one of them",
             )
         if not isinstance(self.config.opencode_version, str) or not re.fullmatch(
             r"\d+\.\d+\.\d+", self.config.opencode_version

@@ -256,7 +256,7 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
         The checkpointer stops what it still tracks, which does nothing to a sandbox that already stopped.
         """
         key = self._sandbox_key(session_id)
-        if self._sandbox_checkpointer is not None and key in self._sandbox_checkpointer:
+        if self._sandbox_checkpointer is not None and key in self._sandbox_checkpointer.keys:
             await self._sandbox_checkpointer.stop(key)
 
     # -- partial-rollout checkpoint hooks ----------------------------------------------------------------------
@@ -282,7 +282,10 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             for session_id in locks.keys() - set(exported):
                 await locks[session_id].aclose()
             for session_id in exported:
-                if session_id in self._session_id_to_sandbox and self._sandbox_key(session_id) not in checkpointer:
+                if (
+                    session_id in self._session_id_to_sandbox
+                    and self._sandbox_key(session_id) not in checkpointer.keys
+                ):
                     raise RuntimeError(
                         f"{type(self).__name__} started the task sandbox of session {session_id!r} without "
                         "new_task_sandbox, so a checkpoint cannot snapshot it"

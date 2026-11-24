@@ -29,6 +29,7 @@ from nemo_gym.sandbox.providers import (
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
@@ -47,6 +48,7 @@ from nemo_gym.sandbox.providers import (
     SnapshotContent,
     SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
+    SupportsSandboxExecArgv,
     SupportsSandboxExecScopedProcesses,
     SupportsSandboxNetwork,
     SupportsSandboxNetworkRules,
@@ -80,6 +82,7 @@ __all__ = [
     "SandboxCreateError",
     "SandboxCreateVerificationError",
     "SandboxEndpoint",
+    "SandboxExecArgvUnsupportedError",
     "SandboxExecResult",
     "SandboxHandle",
     "SandboxProvider",
@@ -101,6 +104,7 @@ __all__ = [
     "SandboxStatus",
     "SupportsSandboxCheckpointPolling",
     "SupportsSandboxEndpoint",
+    "SupportsSandboxExecArgv",
     "SupportsSandboxExecScopedProcesses",
     "SupportsSandboxNetwork",
     "SupportsSandboxParkedPolling",
@@ -145,6 +149,7 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
     from nemo_gym.sandbox.config import NetworkRuleOptions, SandboxConfig
     from nemo_gym.sandbox.failures import sandbox_failure
+    from nemo_gym.sandbox.harness_config import HarnessSandboxConfig
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
@@ -193,6 +198,7 @@ _PUBLIC_API = {
     "OpenSandboxProvider": "providers.opensandbox.provider",
     "NetworkRuleOptions": "config",
     "SandboxAccess": "access",
+    "HarnessSandboxConfig": "harness_config",
     "SandboxConfig": "config",
     "SandboxProbeError": "transfer",
     "SandboxTransferError": "transfer",
