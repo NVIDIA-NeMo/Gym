@@ -2468,6 +2468,8 @@ class TestRolloutCollection:
         assert result["ng_trajectory"]["gaps"] == [
             {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
         ]
+        _attach_captured_calls(result, observability_enabled=True)
+        assert NG_CAPTURED_CALLS_KEY not in result, "a trajectory that failed to project counted no call"
 
     def test_rollout_for_export_keeps_canonical_facts_without_trajectory_or_capture_payloads(self) -> None:
         result = {

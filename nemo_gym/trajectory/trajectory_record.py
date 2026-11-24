@@ -601,7 +601,7 @@ class CapturedCallSummary(TypedDict):
     ``unattributed``: captured under the rollout but referenced by neither. ``attributed_call_coverage`` is the
     share of calls with a role other than ``unattributed``, or ``None`` when there are no calls.
     ``capture_complete`` is false when capture writes were still pending or incomplete, so the counts are a lower
-    bound. A rollout whose capture holds no call, or could not be read, has no summary at all.
+    bound. A rollout whose trajectory holds no captured call has no summary at all.
     """
 
     calls: int

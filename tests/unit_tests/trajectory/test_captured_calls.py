@@ -74,10 +74,13 @@ def test_captured_calls_count_shared_references_once_and_keep_missing_usage_out_
     assert captured["by_role"]["unattributed"] == {"calls": 1, "calls_without_usage": 1}
 
 
-@pytest.mark.parametrize("gap", ["model_call_capture_no_records", "model_calls_unavailable"])
-def test_a_rollout_without_captured_calls_has_no_summary_rather_than_zero_calls(gap: str) -> None:
+@pytest.mark.parametrize(
+    "gaps",
+    [[], [{"code": "model_call_capture_no_records"}], [{"code": "trajectory_projection_failed"}]],
+)
+def test_a_rollout_without_captured_calls_has_no_summary_rather_than_zero_calls(gaps: list) -> None:
     assert build_captured_calls({}) is None
-    empty = {NG_TRAJECTORY_KEY: {"task_id": "t", "rollout_id": "t-0", "gaps": [{"code": gap}]}}
+    empty = {NG_TRAJECTORY_KEY: {"task_id": "t", "rollout_id": "t-0", "gaps": gaps}}
     assert build_captured_calls(empty) is None
 
 
@@ -99,9 +102,13 @@ def test_corrupt_capture_records_make_the_summary_incomplete_or_absent() -> None
     "gap",
     [
         "model_call_capture_pending",
+        # Calls found by another producer while the rollout's own capture is empty or unreadable.
+        "model_call_capture_no_records",
+        "model_call_capture_unreadable",
         "judge_capture_unavailable",
         "judge_capture_incomplete",
         "judge_capture_records_unreadable",
+        "judge_receipt_calls_missing",
     ],
 )
 def test_a_pending_capture_or_a_partly_read_judge_capture_is_summarized_as_incomplete(gap: str) -> None:

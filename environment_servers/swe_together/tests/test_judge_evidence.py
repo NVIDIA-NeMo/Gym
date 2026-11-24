@@ -212,6 +212,26 @@ async def test_a_missing_judge_capture_leaves_the_captured_call_counts_incomplet
 
 
 @pytest.mark.parametrize(
+    "candidate_fields,judged_response,expected_calls",
+    [
+        pytest.param({"gaps": [{"code": "model_call_capture_no_records"}]}, "response", 1, id="candidate capture empty"),
+        pytest.param({"model_calls": [{"model_call_id": "candidate-call"}]}, "absent", 2, id="judge call missing"),
+    ],
+)
+async def test_either_capture_missing_calls_leaves_the_captured_call_counts_incomplete(
+    tmp_path, candidate_fields, judged_response, expected_calls
+):
+    candidate = TrajectoryRecord.model_validate(parent().model_dump(mode="json") | candidate_fields)
+    (tmp_path / "child.capture.jsonl").write_text(json.dumps(exchange()))
+    verification = {"judge_capture_episode": "child", "judge_close": receipt(judged_response).model_dump(mode="json")}
+    result = await collect_judge_evidence(
+        candidate, verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+    captured = build_captured_calls({NG_TRAJECTORY_KEY: result.model_dump(mode="json")})
+    assert (captured["calls"], captured["capture_complete"]) == (expected_calls, False)
+
+
+@pytest.mark.parametrize(
     "reference,identities,owned,gap",
     [
         (
