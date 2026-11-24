@@ -380,6 +380,34 @@ _USAGE_SHAPES = {
         120,
         None,
     ),
+    "litellm chat completions cache write": (
+        {"prompt_tokens": 100, "prompt_tokens_details": {"cache_creation_tokens": 7}, "completion_tokens": 20},
+        100,
+        120,
+        7,
+    ),
+    "litellm zero cache write": (
+        {"prompt_tokens": 100, "prompt_tokens_details": {"cache_creation_tokens": 0}, "completion_tokens": 20},
+        100,
+        120,
+        0,
+    ),
+    "openai detail wins over the litellm detail": (
+        {
+            "prompt_tokens": 100,
+            "prompt_tokens_details": {"cache_write_tokens": 60, "cache_creation_tokens": 7},
+            "completion_tokens": 20,
+        },
+        100,
+        120,
+        60,
+    ),
+    "litellm malformed cache write": (
+        {"prompt_tokens": 100, "prompt_tokens_details": {"cache_creation_tokens": "7"}, "completion_tokens": 20},
+        100,
+        120,
+        None,
+    ),
     "chat completions": ({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}, 100, 120, None),
     "chat completions cached subset": (
         {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 80}, "completion_tokens": 20},
