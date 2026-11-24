@@ -281,7 +281,8 @@ class ImageWorkspace:
         elif isinstance(args, RotateArgs):
             angle = math.radians(args.angle)
             width, height = image.size
-            if args.expand:
+            # Pillow turns right angles by transpose, which keeps the pixel count; bound only other angles.
+            if args.expand and args.angle % 90:
                 # Conservative bound before Pillow allocates the expanded canvas.
                 width = math.ceil(abs(image.width * math.cos(angle)) + abs(image.height * math.sin(angle))) + 2
                 height = math.ceil(abs(image.width * math.sin(angle)) + abs(image.height * math.cos(angle))) + 2

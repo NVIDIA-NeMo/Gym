@@ -268,3 +268,11 @@ def test_model_image_uses_the_smaller_encoding(image, mime) -> None:
     assert url.startswith(f"data:image/{mime};base64,")
     assert decode(url).size == image.size
     assert model_image_url(image) == url  # deterministic: resending the same image keeps the prefix
+
+
+def test_right_angle_rotation_of_an_image_at_the_limit() -> None:
+    # A downscaled input sits just under max_pixels; right-angle turns keep its pixel count and must not be refused.
+    workspace = ImageWorkspace(max_pixels=154 * 103)
+    workspace.add(Image.new("RGB", (154, 103)))
+    assert workspace.apply("rotate", {"image_index": 0, "angle": 90})["size"] == [103, 154]
+    assert workspace.apply("rotate", {"image_index": 0, "angle": -180})["size"] == [154, 103]
