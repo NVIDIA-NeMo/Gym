@@ -45,6 +45,19 @@ class _StrictModel(BaseModel):
 
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# The node_exporter metrics the collector's local `metrics.jsonl` keeps by default: CPU time, load, memory, pressure
+# stall and network/InfiniBand byte totals, plus `up` to tell a filtered exporter from an unreachable one. The rest of
+# node_exporter's output (per-port InfiniBand error counters, systemd unit states, NFS mount statistics, hardware
+# sensors and the like) is node health rather than benchmark performance, and was about 90% of the file's bytes.
+LOCAL_NODE_METRICS = (
+    "up",
+    "node_cpu_seconds_total",
+    "node_load(1|5|15)",
+    "node_memory_(MemTotal|MemAvailable|MemFree|Cached|Buffers|Shmem|SwapTotal|SwapFree)_bytes",
+    "node_pressure_.*",
+    "node_network_(receive|transmit)_bytes_total",
+    "node_infiniband_port_data_(received|transmitted)_bytes_total",
+)
 # Canonical marker left on a resolved `env` value for `runtime:VAR` entries. Executors
 # (e.g. slurm_script.py) detect this prefix and emit an unquoted shell reference instead
 # of a literal, so the value is picked up from the job's actual environment at run time.
@@ -676,8 +689,23 @@ class OtelConfig(_StrictModel):
     # node_exporter gives CPU/memory/network/disk. A closed port only logs scrape errors.
     gpu_metrics_port: int | None = 9400
     node_metrics_port: int | None = 9100
+    # node_exporter metrics kept in the local `metrics.jsonl`, as regular expressions matched against the whole
+    # metric name; the remote export keeps all of them. null keeps every node_exporter metric locally too.
+    local_node_metrics: list[str] | None = Field(default_factory=lambda: list(LOCAL_NODE_METRICS))
+    # More patterns kept on top of `local_node_metrics`, so a run can add a family without restating the list.
+    local_node_metrics_extra: list[str] = Field(default_factory=list)
     scrape_interval_seconds: int = 15
     health_check_timeout_seconds: int = 300
+
+    @field_validator("local_node_metrics", "local_node_metrics_extra")
+    @classmethod
+    def _validate_metric_patterns(cls, v: list[str] | None) -> list[str] | None:
+        for pattern in v or ():
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"{pattern!r} is not a valid regular expression: {e}") from e
+        return v
 
     @field_validator("token_env")
     @classmethod

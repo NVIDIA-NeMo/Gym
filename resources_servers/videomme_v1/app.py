@@ -5,7 +5,7 @@
 
 from typing import ClassVar
 
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.video_mcqa.app import VideoMCQAResourcesServer
 from resources_servers.video_mcqa.dataset import Benchmark
 

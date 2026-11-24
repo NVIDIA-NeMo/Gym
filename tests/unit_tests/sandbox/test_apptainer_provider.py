@@ -26,6 +26,7 @@ import pytest
 
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.base import (
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -249,7 +250,7 @@ def test_serialize_env_file_rejects_invalid_input(env: dict[Any, Any], error: ty
 
 
 def test_private_env_file_is_mode_0600_and_always_removed(tmp_path: Path) -> None:
-    content = b"TOKEN='not-a-real-secret'\n"
+    content = b"TOKEN='not-a-real-secret'\n"  # pragma: allowlist secret
 
     with apptainer_provider._private_env_file(tmp_path, content) as path:
         assert path is not None
@@ -460,13 +461,18 @@ async def test_create_start_failure_cleans_up(
         nonlocal env_file
         env_file = _env_file_path(argv)
         assert env_file.exists()
-        assert "not-a-real-secret" not in argv
+        assert "not-a-real-secret" not in argv  # pragma: allowlist secret
         return (1, "", "boom")
 
     provider, _rec = _make_provider(monkeypatch, responder)
 
     with pytest.raises(apptainer_provider.ApptainerCreateError, match="failed"):
-        await provider.create(SandboxSpec(image="docker://img", env={"TOKEN": "not-a-real-secret"}))
+        await provider.create(
+            SandboxSpec(
+                image="docker://img",
+                env={"TOKEN": "not-a-real-secret"},  # pragma: allowlist secret
+            )
+        )
     assert env_file is not None and not env_file.exists()
     assert not staging.exists()
 
@@ -487,8 +493,13 @@ async def test_create_start_timeout_cleans_up(
 
     provider, _rec = _make_provider(monkeypatch, responder)
     with pytest.raises(apptainer_provider.ApptainerCreateError, match="timed out") as exc_info:
-        await provider.create(SandboxSpec(image="docker://img", env={"TOKEN": "not-a-real-secret"}))
-    assert "not-a-real-secret" not in str(exc_info.value)
+        await provider.create(
+            SandboxSpec(
+                image="docker://img",
+                env={"TOKEN": "not-a-real-secret"},  # pragma: allowlist secret
+            )
+        )
+    assert "not-a-real-secret" not in str(exc_info.value)  # pragma: allowlist secret
     assert env_file is not None and not env_file.exists()
     assert not staging.exists()
 
@@ -616,6 +627,88 @@ async def test_exec_user_mapping(
         assert argv[-1] == "whoami"
 
 
+@pytest.mark.parametrize("user, expect_fakeroot", [(None, False), ("root", True), (0, True)])
+async def test_exec_hands_an_argument_list_to_apptainer_without_sh(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, user: Any, expect_fakeroot: bool
+) -> None:
+    """The list is the tail of the ``apptainer exec`` command line: the program's argv, with no ``sh -c``."""
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+    assert provider.exec_takes_argv()
+
+    await provider.exec(_make_handle(tmp_path), ["printf", "%s", "a;b $HOME"], cwd="/work", user=user)
+
+    sent = rec.calls[0]["argv"]
+    assert sent[:4] == [fake_binary, "exec", "--pwd", "/work"]
+    assert ("--fakeroot" in sent) is expect_fakeroot
+    assert sent[-4:] == ["instance://nemo-gym-x", "printf", "%s", "a;b $HOME"]
+
+
+# What Apptainer 1.5.5 prints, with exit code 255, for ``apptainer exec instance://<name> <program>``.
+_APPTAINER_UNSTARTABLE_PROGRAM = [
+    ('FATAL:   "nosuch": executable file not found in $PATH\n', 127),
+    ("FATAL:   stat /nosuch/dir/program: no such file or directory\n", 127),
+    ("FATAL:   stat /etc/passwd/x: not a directory\n", 127),
+    ("FATAL:   permission denied\n", 126),
+    ("FATAL:   is a directory\n", 126),
+    ("FATAL:   exec /opt/script failed: a shared library is likely missing in the image\n", 126),
+    # --fakeroot (user root) adds a line before it.
+    (
+        'INFO:    --fakeroot ignored when joining instance\nFATAL:   "nosuch": executable file not found in $PATH\n',
+        127,
+    ),
+]
+
+
+@pytest.mark.parametrize("stderr, return_code", _APPTAINER_UNSTARTABLE_PROGRAM)
+async def test_an_argument_list_whose_program_cannot_start_is_a_command_failure(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stderr: str, return_code: int
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (255, "", stderr))
+
+    result = await provider.exec(_make_handle(tmp_path), ["nosuch", "argument"])
+
+    assert (result.return_code, result.error_type, result.stderr) == (return_code, None, stderr)
+
+
+@pytest.mark.parametrize(
+    "command, exit_code, stderr",
+    [
+        # Shell text runs under sh: an image without one is broken, not a failed command.
+        ("nosuch argument", 255, 'FATAL:   "sh": executable file not found in $PATH\n'),
+        # Apptainer failed before it got to the program.
+        (["true"], 255, "FATAL:   While setting image/instance: no instance found with name nemo-gym-x\n"),
+        (["true"], 255, "FATAL:   failed to set working directory: chdir /nosuch: no such file or directory\n"),
+        # Only apptainer exits with 255 for its own FATAL line.
+        (["true"], 1, "FATAL:   permission denied\n"),
+    ],
+)
+async def test_other_apptainer_failures_stay_sandbox_failures(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command: str | list[str],
+    exit_code: int,
+    stderr: str,
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (exit_code, "", stderr))
+
+    result = await provider.exec(_make_handle(tmp_path), command)
+
+    assert (result.return_code, result.error_type) == (apptainer_provider.SANDBOX_RUNTIME_RETURN_CODE, "sandbox")
+
+
+@pytest.mark.parametrize("user", ["alice", 1000])
+async def test_exec_refuses_an_argument_list_for_a_user_it_switches_to_through_su(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, user: Any
+) -> None:
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    with pytest.raises(SandboxExecArgvUnsupportedError, match="only through su"):
+        await provider.exec(_make_handle(tmp_path), ["whoami"], user=user)
+
+    assert rec.calls == []
+
+
 async def test_exec_passes_stdin(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     provider, rec = _make_provider(monkeypatch, lambda argv: (0, "ok", ""))
     await provider.exec(_make_handle(tmp_path), "cat", stdin=b"prompt-bytes")
@@ -633,7 +726,10 @@ async def test_exec_timeout(fake_binary: str, monkeypatch: pytest.MonkeyPatch, t
 
     provider, _rec = _make_provider(monkeypatch, responder)
     result = await provider.exec(
-        _make_handle(tmp_path, env={"TOKEN": "not-a-real-secret"}),
+        _make_handle(
+            tmp_path,
+            env={"TOKEN": "not-a-real-secret"},  # pragma: allowlist secret
+        ),
         "sleep 99",
         timeout_s=1,
     )
@@ -641,7 +737,7 @@ async def test_exec_timeout(fake_binary: str, monkeypatch: pytest.MonkeyPatch, t
     assert result.return_code == apptainer_provider.SANDBOX_RUNTIME_RETURN_CODE
     assert result.error_type == "timeout"
     assert result.stdout is None
-    assert "not-a-real-secret" not in (result.stderr or "")
+    assert "not-a-real-secret" not in (result.stderr or "")  # pragma: allowlist secret
     assert env_file is not None and not env_file.exists()
 
 
@@ -842,6 +938,23 @@ async def test_close_success(fake_binary: str, monkeypatch: pytest.MonkeyPatch, 
     assert _contains_seq(rec.calls[0]["argv"], [FAKE_BINARY, "instance", "stop", "nemo-gym-x"])
 
 
+async def test_close_removes_read_only_sandbox_tree(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    locked = staging / "runtime"
+    locked.mkdir(parents=True)
+    artifact = locked / "python"
+    artifact.write_text("runtime")
+    artifact.chmod(0o444)
+    locked.chmod(0o555)
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    await provider.close(_make_handle(staging))
+
+    assert not staging.exists()
+
+
 async def test_close_missing_instance_is_success(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -897,7 +1010,7 @@ async def test_close_staging_removal_failure_is_logged(
     def boom(path: Any, ignore_errors: bool = False) -> None:
         raise OSError("locked")
 
-    monkeypatch.setattr(apptainer_provider.shutil, "rmtree", boom)
+    monkeypatch.setattr(apptainer_provider, "_remove_writable_tree", boom)
     with caplog.at_level("WARNING"):
         await provider.close(_make_handle(staging))  # does not raise
     assert "failed to remove staging dir" in caplog.text
