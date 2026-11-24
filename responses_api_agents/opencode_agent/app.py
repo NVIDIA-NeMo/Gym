@@ -117,6 +117,7 @@ from responses_api_agents.opencode_agent.artifacts import (
     _assistant_part_items,
     _empty_answer_part,
     _parse_opencode_session,
+    last_assistant_message,
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.continuation import (
@@ -206,6 +207,32 @@ def _is_model_endpoint_failure(error: object) -> bool:
     ):
         return True
     return bool(_CONNECTION_ERROR.search(str(data.get("message") or "")))
+
+
+def _provider_error_message(error: Mapping[str, Any]) -> str:
+    """The response error for a provider failure OpenCode reported: its message and the upstream HTTP status."""
+    data = error.get("data") or {}
+    message = data.get("message")
+    if not isinstance(message, str) or not message:
+        message = "OpenCode provider request failed"
+    status = data.get("statusCode")
+    if type(status) is int and 400 <= status <= 599:
+        message = f"HTTP {status}: {message}"
+    return format_error_message(message)
+
+
+@dataclass(frozen=True)
+class _LocalRunFailure:
+    """How a local OpenCode run that ended on its own did not complete.
+
+    ``native_result`` is the last assistant message the outcome is classified from; it is empty when OpenCode
+    reported no provider failure.
+    """
+
+    status: Literal["failed", "incomplete"]
+    error_type: str
+    message: Optional[str]
+    native_result: Mapping[str, Any]
 
 
 def _request_digest(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
@@ -1089,8 +1116,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
         timeout: float | None = None,
-    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
-        """Run one headless OpenCode session and read its persisted artifact."""
+    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle, Optional[_LocalRunFailure]]:
+        """Run one headless OpenCode session and read its persisted artifact.
+
+        The last element says how a run that ended on its own did not complete, and is None for a completed run
+        or one that reached ``timeout``.
+        """
         try:
             self.config._validate_prompt_agent()
         except ValueError as error:
@@ -1160,6 +1191,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 labels = message_labels(label_file.read_text()) if label_file.is_file() else {}
                 untranslated = await asyncio.to_thread(translate_store, db_path, translated, labels=labels)
                 db_path = translated
+            failure = None if timed_out else self._local_run_failure(db_path, proc.returncode, stderr)
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
                 ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None})
@@ -1193,12 +1225,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             ObservationGap(code="model_call_ownership_unavailable"),
                         ],
                     )
-            run_status = "incomplete" if timed_out else "completed" if proc.returncode == 0 else "failed"
+            run_status = "incomplete" if timed_out else "completed" if failure is None else failure.status
             for invocation in observations.records:
                 if not isinstance(invocation, AgentInvocation):
                     continue
                 if invocation.parent_invocation_id is None:
                     invocation.status = run_status
+                    if failure is not None:
+                        invocation.error_type = failure.error_type
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
             if untranslated:
@@ -1206,9 +1240,34 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 observations.gaps.append(
                     ObservationGap(code="harness_records_untranslated", detail="; ".join(untranslated)[:2500])
                 )
-            return output_items, usage, self.config.model, observations
+            return output_items, usage, self.config.model, observations, failure
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _local_run_failure(
+        self, db_path: Path, return_code: Optional[int], stderr: bytes
+    ) -> Optional[_LocalRunFailure]:
+        """Classify a local run that ended on its own the way a sandbox session classifies its run.
+
+        A provider failure OpenCode reported after its own retries (an endpoint outage, a rejected request) fails
+        the run with that failure's status. Any other nonzero exit fails it without a known cause. A context
+        overflow leaves the response incomplete and gradable. Each failed response then carries its cause, so the
+        caller's outcome policy decides whether it is graded.
+        """
+        native_result = last_assistant_message(db_path)
+        cleanup = {"return_code": return_code, "timed_out": False, "error": None}
+        if self._reported_model_error(native_result, cleanup):
+            if native_result["error"]["name"] == _CONTEXT_OVERFLOW_ERROR:
+                return _LocalRunFailure("incomplete", "context_limit", None, native_result)
+            return _LocalRunFailure(
+                "failed", "provider_error", _provider_error_message(native_result["error"]), native_result
+            )
+        if return_code in (0, None):
+            return None
+        message = format_error_message(
+            f"OpenCode exited with code {return_code}", stderr=stderr.decode(errors="replace")
+        )
+        return _LocalRunFailure("failed", "server_error", message, {})
 
     async def _create_episode(
         self,
@@ -1238,7 +1297,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
-        output_items, usage, model_name, observations = await self._run_opencode(
+        output_items, usage, model_name, observations, failure = await self._run_opencode(
             user_message,
             system_prompt,
             rollout_id=rollout_id,
@@ -1287,6 +1346,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
+        run_outcome: dict[str, Any] = {}
+        if failure is not None:
+            run_outcome["status"] = failure.status
+            if failure.message is not None:
+                run_outcome["error"] = {"code": "server_error", "message": failure.message}
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1306,7 +1370,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
             metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
+            **run_outcome,
         )
+        if failure is not None and failure.status == "failed":
+            fields = verification_failure_fields()
+            if fields["failure_report"] is not None:
+                response = response.model_copy(update=fields)
+            response = self.report_outcome(response, failure.native_result)
         if trajectory is not None:
             response = response.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
         return AgentEpisode(response=response, observations=observations)
@@ -3138,14 +3208,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(502, format_error_message(error, stderr=state.stderr))
         reported_message = None
         if reported_error and not context_limit:
-            error_data = native_result["error"].get("data") or {}
-            reported_message = error_data.get("message")
-            if not isinstance(reported_message, str) or not reported_message:
-                reported_message = "OpenCode provider request failed"
-            upstream_status = error_data.get("statusCode")
-            if type(upstream_status) is int and 400 <= upstream_status <= 599:
-                reported_message = f"HTTP {upstream_status}: {reported_message}"
-            reported_message = format_error_message(reported_message)
+            reported_message = _provider_error_message(native_result["error"])
         response = self._make_session_response(
             state,
             body,

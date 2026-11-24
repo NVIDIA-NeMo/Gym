@@ -20,7 +20,8 @@ the host's PATH when there is one and fails unless it reports the configured ver
 default, and its configs (`configs/opencode_sandboxed_agent.yaml` and the presets built on it) pin 1.17.11.
 
 What 1.19.6 does differently from 1.17.11, and a recipe may notice: it retries a failed model call at most 5 times
-(about a minute without `Retry-After`) where 1.17.11 retried until the activation timeout; it no longer sends its own
+(about a minute without `Retry-After`) where 1.17.11 retried until the activation timeout, so a longer endpoint outage
+fails the run (see [Deprecated local episodes](#deprecated-local-episodes) for local runs); it no longer sends its own
 temperature and `top_p` for Qwen model IDs; compaction keeps up to 15k recent tokens, and its summary has other
 sections (`vllm_model`'s `compaction_summary_sections` lists 1.17.11's); it replaces the oldest images once a request
 carries more than 25 MiB of them (see [EnvironmentServer sessions](#environmentserver-sessions)); and a provider call that sends no headers
@@ -71,6 +72,12 @@ This entry point preserves local seed → responses → verify orchestration,
 including cookies, rollout identity, observations and trajectory metadata.
 It requires `resources_server` and refuses sandbox-session `/run` calls.
 New configurations should use the default `app.py` and agent sessions below.
+
+A local run that OpenCode ends with a nonzero exit is reported as a sandbox session reports it. The response is
+`failed`, with the endpoint's HTTP status when OpenCode recorded one; a context overflow leaves it `incomplete`.
+This entry point verifies only the responses the agent outcome policy grades: an endpoint outage or an unexplained
+exit fails the rollout with HTTP 502 and no reward instead of scoring 0, while a rejected request (400, 413, 422)
+and a context overflow are graded.
 The SWE `*_legacy_agent` recipes use the separate `opencode_sandboxed_agent`
 package and do not need this local compatibility entry point.
 

@@ -422,7 +422,7 @@ async def test_a_local_call_runs_opencode_2_standalone_and_reads_its_store(openc
     agent.config.command = str(binary)
     agent.config.workspace_root = str(tmp_path / "workspaces")
     with patch("responses_api_agents.opencode_agent.app.ensure_opencode2") as install:
-        output, usage, _, _ = await agent._run_opencode("task", None)
+        output, usage, _, _, _ = await agent._run_opencode("task", None)
     install.assert_not_called()
     call = json.loads(log.read_text())
     # A fixed title: OpenCode 2 would otherwise ask a model for one outside the rollout.
