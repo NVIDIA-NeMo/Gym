@@ -774,7 +774,9 @@ class TestProviderHistoryMatchesStrictIngress:
         serialized = to_provider_openai_messages(self._history())
 
         assistant, tool, final = serialized[2], serialized[3], serialized[4]
-        assert set(assistant) == {"role", "content", "tool_calls"}
+        assert set(assistant) == {"role", "content", "tool_calls", "reasoning_content", "thinking_blocks"}
+        assert assistant["reasoning_content"] == "I think..."
+        assert assistant["thinking_blocks"] == [{"type": "thinking", "signature": "sig-1", "thinking": "I think..."}]
         assert set(assistant["tool_calls"][0]) == {"id", "type", "function"}
         assert assistant["tool_calls"][0] == {
             "id": "call_1",
@@ -816,7 +818,8 @@ class TestProviderHistoryMatchesStrictIngress:
 
     def test_fixture_actually_leaks_the_fields_the_schema_rejects(self) -> None:
         """Guard the fixture against going stale: the raw serializer must still
-        emit every field the canonicalization exists to remove."""
+        emit the reasoning fields we preserve and every field canonicalization
+        exists to remove."""
         import responses_api_agents.stirrup_agent.stirrup_utils as stirrup_utils
 
         raw = stirrup_utils.to_openai_messages(stirrup_utils.restore_tool_messages_for_model(self._history()))
@@ -827,9 +830,7 @@ class TestProviderHistoryMatchesStrictIngress:
         assert "name" in raw[3]
 
     def test_allowlists_stay_within_the_strict_schema(self) -> None:
-        """Subset pin: if the ingress schema ever widens (e.g. to replay
-        reasoning_content), this still passes, but the allowlist must then be
-        revisited deliberately; if the schema narrows below the allowlist,
+        """Subset pin: if the ingress schema ever narrows below the allowlist,
         canonical output would 422 and this fails first."""
         from typing import get_type_hints
 
@@ -869,3 +870,31 @@ class TestProviderHistoryMatchesStrictIngress:
         assert assistant.reasoning is not None and assistant.reasoning.signature == "sig-1"
         assert assistant.metadata == {"k": "v"}
         assert assistant.tool_calls[0].signature == "tsig"
+
+    @pytest.mark.asyncio
+    async def test_second_turn_request_replays_first_turn_reasoning(self) -> None:
+        """A reasoning field returned on turn 1 must be replayed on turn 2."""
+        turn1_response = _make_response(content="")
+        turn1_response.choices[0].message.reasoning_content = "check the failing test first"
+        tool_call = MagicMock()
+        tool_call.id = "call_1"
+        tool_call.function.name = "code_exec"
+        tool_call.function.arguments = '{"cmd":"pytest"}'
+        turn1_response.choices[0].message.tool_calls = [tool_call]
+
+        client, fake_create = _client_with_fake_create(max_tokens=100_000)
+        fake_create.side_effect = [turn1_response, _make_response(content="done")]
+
+        history: list = [UserMessage(content="fix it")]
+        first = await client.generate(history, tools={})
+        history.extend(
+            [
+                first,
+                NeMoUserMessage(content="1 passed", name="code_exec", success=True, tool_call_id="call_1"),
+            ]
+        )
+        await client.generate(history, tools={})
+
+        second_sent = fake_create.await_args_list[1].kwargs["messages"]
+        assert second_sent[1]["role"] == "assistant"
+        assert second_sent[1]["reasoning_content"] == "check the failing test first"

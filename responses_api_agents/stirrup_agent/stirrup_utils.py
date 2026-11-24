@@ -108,14 +108,16 @@ def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMes
     return restored
 
 
-# Stirrup's ``to_openai_messages`` leaks its internal models onto the wire:
+# Stirrup's ``to_openai_messages`` leaks internal fields onto the wire:
 # ``ToolCall.model_dump()`` (``tool_call_id``/``name``/``arguments``/``signature``)
 # beside the canonical ``{id, type, function}`` envelope, ``name`` on tool-role
-# messages, and ``reasoning_content``/``thinking_blocks``/``metadata`` on the
-# assistant message. Gym's chat request schema is ``extra="forbid"``, so a
-# replayed history carrying those fields is rejected with 422. Emit only the
-# canonical keys below; earlier-turn reasoning is therefore not replayed.
-_PROVIDER_ASSISTANT_KEYS = frozenset({"role", "content", "tool_calls"})
+# messages, and ``metadata`` on the assistant message. Gym's chat request schema
+# is ``extra="forbid"``, so a replayed history carrying those fields is rejected
+# with 422. Keep only the schema-accepted keys below (including reasoning fields
+# so earlier-turn thinking is replayed through ``openai_model``).
+_PROVIDER_ASSISTANT_KEYS = frozenset(
+    {"role", "content", "tool_calls", "reasoning_content", "reasoning", "thinking_blocks"}
+)
 _PROVIDER_TOOL_CALL_KEYS = frozenset({"id", "type", "function"})
 _PROVIDER_TOOL_MESSAGE_KEYS = frozenset({"role", "content", "tool_call_id"})
 
