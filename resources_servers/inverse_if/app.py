@@ -253,13 +253,15 @@ def _extract_verdict(judge_text: str) -> tuple[str | None, str]:
         except (json.JSONDecodeError, AttributeError):
             pass
 
-    # Strategy 3: Keyword fallback: the whole word PASS or FAIL on one of the last few lines, latest line first. A word
-    # that only contains one ("passenger", "passport", "passing", "passed") is not a verdict. A line that names both
-    # words ("FAIL, but it would PASS with a date") is ambiguous: neither word wins, so the reply has no verdict and
-    # the caller masks the row, as it does for any reply without a verdict.
+    # Strategy 3: Keyword fallback: the whole word PASS or FAIL, in capitals, on one of the last few lines, latest line
+    # first. A word that only contains one ("passenger", "passport", "passing", "passed") is not a verdict. Matching is
+    # case-sensitive: a lowercase "pass" or "fail" is prose ("5 of 6 criteria pass") and can describe other criteria
+    # than the one asked, so "Result: Pass" in mixed case also gives no verdict. A line that names both words ("FAIL,
+    # but it would PASS with a date") is ambiguous: neither word wins, so the reply has no verdict and the caller
+    # masks the row, as it does for any reply without a verdict.
     lines = judge_text.strip().split("\n")
     for line in reversed(lines[-5:]):
-        words = set(_FALLBACK_VERDICT_WORD.findall(line.upper()))
+        words = set(_FALLBACK_VERDICT_WORD.findall(line))
         if len(words) == 1:
             return words.pop(), ""
         if words:

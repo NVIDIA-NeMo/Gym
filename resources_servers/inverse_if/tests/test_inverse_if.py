@@ -84,11 +84,24 @@ class TestExtractVerdict:
             "Passing this criterion needs a date.",
             "0 out of 3 passed",
             "FAIL, but it would PASS with a date.",
+            "C6 fails because no date is given.\nSince 5 of 6 criteria pass, the response is mostly fine.",
+            "The response does not follow the rule, so it would fail.",
+            "Result: Pass",
         ],
-        ids=["passenger", "passport", "passing", "passed", "both-words"],
+        ids=[
+            "passenger",
+            "passport",
+            "passing",
+            "passed",
+            "both-words",
+            "lowercase-pass",
+            "lowercase-fail",
+            "mixed-case",
+        ],
     )
     def test_keyword_fallback_reads_only_a_whole_verdict_word(self, text):
-        """A word that only contains PASS or FAIL is no verdict, and neither is a line that names both."""
+        """A word that only contains PASS or FAIL is no verdict, and neither is a line that names both. Matching is
+        case-sensitive, so a lowercase or mixed-case word is no verdict either."""
         verdict, _ = _extract_verdict(text)
         assert verdict is None
 
@@ -97,6 +110,7 @@ class TestExtractVerdict:
         [
             ("The response gives the date in the required format.\nPASS", "PASS"),
             ("The passenger count is missing.\nVerdict: FAIL", "FAIL"),
+            ("The criteria pass and fail in turn.\nFinal: PASS", "PASS"),
         ],
     )
     def test_keyword_fallback_reads_a_whole_verdict_word(self, text, expected):
