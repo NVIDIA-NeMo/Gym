@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import contextlib
 import hashlib
 import json
 import os
@@ -84,6 +85,10 @@ class MiniSWEAgentConfig(BaseResponsesAPIAgentConfig):
     step_limit: int = 250
     tool_choice: Optional[str | dict[str, Any]] = None
     sandbox_resource_profiles: Optional[list[dict[str, str]]] = None
+    # Each /run writes its resolved mini-swe config to a unique file under
+    # results/<subset>/<model>/_configs/ and deletes it when the rollout ends.
+    # Set to keep those files for debugging.
+    keep_run_configs: bool = False
 
 
 class MiniSWEAgentRunRequest(BaseRunRequest):
@@ -830,8 +835,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 config.setdefault("model", {}).setdefault("model_kwargs", {}).update(model_kwargs)
 
             output_file_dir = f"{Path.cwd()}/results/{subset}/{policy_model_name}"
-            config_path = mini_swe_config_path
-            should_write_config = bool(model_kwargs)
             if self.config.sandbox_provider is None:
                 raise ValueError("mini_swe_agent_2 requires sandbox_provider")
             resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -847,17 +850,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 # Provider defaults first; the agent's own spec metadata wins on conflict.
                 instance_spec["metadata"] = {**provider_default_metadata, **(instance_spec.get("metadata") or {})}
             config["environment"]["spec"] = instance_spec
-            should_write_config = True
-
-            if should_write_config:
-                config_output_dir = Path(output_file_dir) / "_configs"
-                config_output_dir.mkdir(parents=True, exist_ok=True)
-                config_path = config_output_dir / f"{instance_id}.sandbox.yaml"
-                # Repeats of one instance share this path and rewrite it per
-                # rollout; replace atomically so a reader never sees it empty.
-                tmp_path = config_path.with_name(f"{config_path.name}.{uuid4().hex}.tmp")
-                tmp_path.write_text(yaml.safe_dump(config, sort_keys=False))
-                os.replace(tmp_path, config_path)
 
             if self.config.skip_if_exists:
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
@@ -865,6 +857,14 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                         print(f"Skipping {instance_id} because it already exists")
                         verify_response = MiniSWEAgentVerifyResponse.model_validate_json(f.read())
                     return verify_response
+
+            # The path must be unique per /run, not per instance: concurrent rollouts of
+            # one instance (num_repeats, or several collectors sharing this server) carry
+            # different model_kwargs, and the worker reads the file after dispatch. Nothing
+            # else writes this path, so the worker never sees a partial file.
+            config_path = Path(output_file_dir) / "_configs" / f"{instance_id}.{uuid4().hex}.sandbox.yaml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
             #### RUN MINI-SWE-AGENT #####
             try:
@@ -912,6 +912,10 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 response_output = []
                 responses = []
                 reward = 0.0
+            finally:
+                if not self.config.keep_run_configs:
+                    with contextlib.suppress(OSError):
+                        config_path.unlink(missing_ok=True)
 
             body.responses_create_params.input = input_messages
             response = _default_response_object()

@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -834,6 +835,8 @@ class TestApp:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         config = create_test_config()
+        # These assertions read the worker config after run() returns.
+        config.keep_run_configs = True
         config.tool_choice = "bash"
         config.sandbox_provider = {
             "opensandbox": {
@@ -885,6 +888,93 @@ class TestApp:
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
     @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
+    async def test_concurrent_runs_of_same_instance_keep_their_own_config(
+        self,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """Two in-flight rollouts of one instance with different extra_body must not share a config file.
+
+        The worker reads the config only after both runs have been dispatched, which is the ordering that let one
+        collector's rollouts run with another collector's sampling settings when the path was per-instance.
+        """
+        monkeypatch.chdir(tmp_path)
+        config = create_test_config()
+        config.concurrency = 2
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=config, server_client=mock_server_client)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
+        setup_config_path_mock(mock_get_config_path)
+
+        both_dispatched = asyncio.Event()
+        dispatched: list[dict[str, Any]] = []
+        requested_vs_seen: list[tuple[Any, Any]] = []
+
+        def fake_remote(_runner: Any, params: dict[str, Any]) -> Any:
+            dispatched.append(params)
+            if len(dispatched) == 2:
+                both_dispatched.set()
+
+            async def worker() -> dict[str, Any]:
+                await both_dispatched.wait()
+                worker_config = yaml.safe_load(Path(params["config"]).read_text())
+                requested = json.loads(json.loads(params["responses_create_params"])["metadata"]["extra_body"])
+                requested_vs_seen.append((requested, worker_config["model"]["model_kwargs"]["extra_body"]))
+                return DEFAULT_RUN_MINI_SWE_RESULT
+
+            return worker()
+
+        mock_runner_ray_remote.remote.side_effect = fake_remote
+        mock_runner_ray_remote.options.return_value.remote.side_effect = fake_remote
+
+        await asyncio.wait_for(
+            asyncio.gather(
+                server.run(create_run_request(metadata={"extra_body": '{"top_k":20}'})),
+                server.run(create_run_request(metadata={"extra_body": '{"top_k":40}'})),
+            ),
+            timeout=10,
+        )
+
+        assert len(requested_vs_seen) == 2
+        for requested, seen in requested_vs_seen:
+            assert seen == requested
+        assert dispatched[0]["config"] != dispatched[1]["config"]
+        # Per-run configs are removed once the rollout finishes.
+        assert not any(Path(params["config"]).exists() for params in dispatched)
+
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
+    async def test_keep_run_configs_leaves_config_on_disk(
+        self,
+        mock_runner_ray_remote,
+        mock_get_config_path,
+        mock_get_first_server_config_dict,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = create_test_config()
+        config.keep_run_configs = True
+        mock_server_client = MagicMock(spec=ServerClient)
+        server = MiniSWEAgent(config=config, server_client=mock_server_client)
+        setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict)
+        setup_config_path_mock(mock_get_config_path)
+        setup_run_mini_swe_mock(mock_runner_ray_remote)
+
+        await server.run(create_run_request())
+
+        config_path = Path(mock_runner_ray_remote.remote.call_args.args[1]["config"])
+        assert config_path.exists()
+        assert config_path.parent == tmp_path / "results" / "gym" / "test_model" / "_configs"
+        assert config_path.name.startswith("test_instance_123.")
+
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
+    @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
+    @patch("responses_api_agents.mini_swe_agent_2.app.runner_ray_remote")
     async def test_run_keeps_e2b_api_key_out_of_worker_config(
         self,
         mock_runner_ray_remote,
@@ -895,6 +985,8 @@ class TestApp:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         config = create_test_config()
+        # These assertions read the worker config after run() returns.
+        config.keep_run_configs = True
         config.sandbox_provider = {
             "e2b": {
                 "connection": {
@@ -933,6 +1025,8 @@ class TestApp:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         config = create_test_config()
+        # These assertions read the worker config after run() returns.
+        config.keep_run_configs = True
         config.sandbox_provider = "sandbox"
         mock_server_client = MagicMock(spec=ServerClient)
         server = MiniSWEAgent(config=config, server_client=mock_server_client)
