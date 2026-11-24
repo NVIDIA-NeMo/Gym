@@ -1025,9 +1025,11 @@ async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(state_
 
 
 async def test_a_fork_of_a_cancelled_restore_whose_stop_fails_stays_tracked_until_settle_stops_it(
-    state_dir: Path,
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The cancel path must record the forks before it stops them: a stop that fails would otherwise lose one."""
+    # The cancelled restore lets the hanging fork run for the stop limit before it cuts it short.
+    monkeypatch.setattr(checkpoint_sandbox, "STOP_TIMEOUT_S", 0.2)
     provider = FakeSnapshotProvider()
     states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
     # The forks are sb-5, then sb-6: the restore is cancelled while sb-6 is created, and sb-5's first stop fails.
