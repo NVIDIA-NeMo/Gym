@@ -55,8 +55,8 @@ datasets are excluded from Git.
 For an English comparison, explicitly provide the original, checksum-matching
 files with `--source-dir` and `--languages en`. English is scored separately.
 The former Hugging Face download and `--revision` option have been replaced by the
-pinned registry version. Dataset licensing remains unspecified; registry access
-does not establish redistribution permission.
+pinned registry version. Dataset licensing: NVIDIA internal, derived from
+arena-proxy-v3.
 
 ## Generation and judging
 

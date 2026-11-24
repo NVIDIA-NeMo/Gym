@@ -21,7 +21,7 @@ indic_arena_proxy_v3_agent:
           prepare_script: benchmarks/indic/arena_proxy_v3/prepare.py
           # No prompt_config: the prepared input already contains the full conversation.
           num_repeats: 1
-          license: unknown
+          license: NVIDIA internal, derived from arena-proxy-v3
 
 indic_arena_proxy_v3_environment_server:
   environment_servers:

@@ -8,7 +8,7 @@ integration_profile: custom-gym-verifier
 domain: other
 description: Twelve Indic chat-400 conversation sets from the dataset registry judged against frozen GPT-5.4-mini answers.
 modality: text
-licensing: unknown
+licensing: NVIDIA internal, derived from arena-proxy-v3
 authors: [NVIDIA NeMo Gym contributors]
 reward:
   range: [0, 1]

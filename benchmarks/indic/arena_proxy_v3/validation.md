@@ -90,5 +90,5 @@ failures and no official Indic headline.
 No new GPU rollout was needed for this data-access migration: the prepared input
 bytes and generation/judging code are unchanged for the selected population.
 A full model run compared with separately generated reference judgments is still
-pending. Licensing metadata remains `unknown`; this change does not assert a
-license clearance or measured end-to-end score equivalence.
+pending. Dataset licensing metadata is `NVIDIA internal, derived from
+arena-proxy-v3`. Measured end-to-end score equivalence remains unverified.
