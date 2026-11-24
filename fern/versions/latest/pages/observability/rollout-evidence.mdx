@@ -377,10 +377,17 @@ The record includes configured model and served-model names, known checkpoint id
 dataset identifiers, a SHA-256 of the exact materialized-input bytes, prompt/template hashes,
 explicit sampling settings and seeds (an explicit `null`, such as `max_tokens: null` for no cap,
 is kept, so it reads differently from a setting left out), rollout and server concurrency limits
-(`num_samples_in_parallel`, `max_concurrent_requests`, `max_concurrent_episodes`,
-`library_verifier_max_concurrency`), configured judge models and judge-prompt versions, and
-the running Gym version and commit. Unknown values are null or absent from the corresponding
-settings map. Prompt text and request metadata from the input rows are fingerprinted, not copied.
+by config path, configured judge models and judge-prompt versions, and the running Gym version and
+commit. Unknown values are null or absent from the corresponding settings map. Prompt text and
+request metadata from the input rows are fingerprinted, not copied.
+
+`concurrency_limits` holds integer or `null` values of `num_samples_in_parallel`,
+`max_resident_rollout_tasks`, `num_workers`, `max_concurrent_requests`, `max_concurrent_episodes`,
+`max_concurrency` and `concurrency` (such as a sandbox's `exec.concurrency`), and of any key named
+`max_concurrent_*`, `*_max_concurrency` or `*_max_concurrent`, such as `judge_endpoint_max_concurrency`.
+Server limits such as `max_concurrent_requests` and `max_concurrent_episodes` apply per worker
+process, so the server's effective limit is that value times its `num_workers` (`null` runs one
+worker).
 
 `resolved_config` holds the whole resolved Gym configuration, so two results can be compared
 setting by setting. Secret-shaped keys (tokens, keys, headers, passwords, cookies) are masked as

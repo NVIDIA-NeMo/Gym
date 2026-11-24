@@ -196,6 +196,43 @@ def test_concurrency_limits_are_recorded_by_path() -> None:
     }
 
 
+def test_concurrency_limits_include_worker_counts_and_server_specific_limit_names() -> None:
+    record = provenance.build_provenance(
+        {
+            "num_samples_in_parallel": 64,
+            "max_resident_rollout_tasks": 256,
+            "policy_model": {
+                "responses_api_models": {
+                    "openai_model": {"num_workers": 4, "max_concurrent_requests": 32, "tensor_parallel_size": 8}
+                }
+            },
+            "stem_judge": {"resources_servers": {"stem_judge": {"judge_endpoint_max_concurrency": 64}}},
+            "frontiermath": {"resources_servers": {"frontiermath": {"verifier_max_concurrency": 16}}},
+            "gdpval": {"resources_servers": {"gdpval": {"num_workers": None, "preconvert_max_concurrent": 4}}},
+            "bird_sql": {"resources_servers": {"bird_sql": {"max_concurrency": 32}}},
+            "rna_design": {
+                "responses_api_agents": {
+                    "rna_design_agent": {"max_concurrent_rollouts": 8, "parallel_tool_calls": True}
+                }
+            },
+            "goose": {"responses_api_agents": {"goose_agent": {"concurrency": 32, "max_concurrent_flag": True}}},
+            "sandbox": {"docker": {"exec": {"default_timeout_s": 180, "concurrency": 32}}},
+            "judge": {"resources_servers": {"sciknoweval": {"env": {"judge_max_concurrency": 3}}}},
+        }
+    )
+    assert record.concurrency_limits == {
+        provenance.TOP_LEVEL_PATH: {"num_samples_in_parallel": 64, "max_resident_rollout_tasks": 256},
+        "policy_model.responses_api_models.openai_model": {"num_workers": 4, "max_concurrent_requests": 32},
+        "stem_judge.resources_servers.stem_judge": {"judge_endpoint_max_concurrency": 64},
+        "frontiermath.resources_servers.frontiermath": {"verifier_max_concurrency": 16},
+        "gdpval.resources_servers.gdpval": {"num_workers": None, "preconvert_max_concurrent": 4},
+        "bird_sql.resources_servers.bird_sql": {"max_concurrency": 32},
+        "rna_design.responses_api_agents.rna_design_agent": {"max_concurrent_rollouts": 8},
+        "goose.responses_api_agents.goose_agent": {"concurrency": 32},
+        "sandbox.docker.exec": {"concurrency": 32},
+    }
+
+
 def test_review_provenance_excludes_boolean_sampling_values() -> None:
     record = provenance.build_provenance({"seed": True, "temperature": False, "top_p": 0.9})
     assert record.sampling_parameters == {provenance.TOP_LEVEL_PATH: {"top_p": 0.9}}

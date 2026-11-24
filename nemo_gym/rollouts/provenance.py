@@ -46,14 +46,21 @@ _SAMPLING_KEYS = frozenset(
     }
 )
 # Rollout and server concurrency: often the only setting that differs between two otherwise identical runs.
+# `num_workers` is kept beside them: server limits such as `max_concurrent_requests` apply per worker.
 _CONCURRENCY_KEYS = frozenset(
     {
         "num_samples_in_parallel",
+        "max_resident_rollout_tasks",
+        "num_workers",
         "max_concurrent_requests",
         "max_concurrent_episodes",
-        "library_verifier_max_concurrency",
+        "max_concurrency",
+        "concurrency",
     }
 )
+# Server-specific limits, such as `judge_endpoint_max_concurrency` or `max_concurrent_rollouts`.
+_CONCURRENCY_KEY_SUFFIXES = ("_max_concurrency", "_max_concurrent")
+_CONCURRENCY_KEY_PREFIX = "max_concurrent_"
 _MODEL_KEYS = frozenset(
     {
         "model",
@@ -131,11 +138,19 @@ def _sampling(config: Mapping) -> dict[str, JsonValue]:
     }
 
 
+def _is_concurrency_key(key: object) -> bool:
+    return isinstance(key, str) and (
+        key in _CONCURRENCY_KEYS
+        or key.endswith(_CONCURRENCY_KEY_SUFFIXES)
+        or key.startswith(_CONCURRENCY_KEY_PREFIX)
+    )
+
+
 def _concurrency(config: Mapping) -> dict[str, int | None]:
     return {
         key: value
         for key, value in config.items()
-        if key in _CONCURRENCY_KEYS and (value is None or (isinstance(value, int) and not isinstance(value, bool)))
+        if _is_concurrency_key(key) and (value is None or (isinstance(value, int) and not isinstance(value, bool)))
     }
 
 
