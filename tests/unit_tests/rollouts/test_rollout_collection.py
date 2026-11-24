@@ -1880,14 +1880,19 @@ class TestRolloutCollection:
         # The re-judge pass grades the saved answer correct, then the run-wide metrics are recomputed: alpha is 2/2,
         # beta is unchanged, and gamma has no entry. The first entry carries the run-level health summary.
         _settle(output, judge_failure, 0.5)
-        recomputed = [entry("alpha", 0.75) | {"_ng_run_health_metrics": {"metrics": {}}}, entry("beta", 1.0)]
+        # The recomputed entry also names alpha's agent type, which its completion file was written without.
+        alpha_ref = {"name": "alpha", "implementation": "opencode_agent"}
+        alpha_entry = entry("alpha", 0.75) | {AGENT_REF_KEY_NAME: alpha_ref}
+        recomputed = [alpha_entry | {"_ng_run_health_metrics": {"metrics": {}}}, entry("beta", 1.0)]
         (tmp_path / "rollouts_aggregate_metrics.json").write_bytes(orjson.dumps(recomputed))
 
         refresh_agent_complete_files(output, OmegaConf.create({}))
 
         alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
         assert (alpha["expected_rollouts"], alpha["completed_rollouts"], alpha["failed_rollouts"]) == (2, 2, 0)
-        assert alpha["aggregate"] == entry("alpha", 0.75)
+        assert alpha["aggregate"] == alpha_entry
+        # Both copies of the agent reference come from the recomputed entry.
+        assert alpha[AGENT_REF_KEY_NAME] == alpha_ref
         assert alpha["aggregation_status"] == "complete"
         assert alpha["completed_at"] != "2026-01-01T00:00:00+00:00"
         assert (complete_dir / "beta.json").read_bytes() == beta_before
@@ -7441,6 +7446,8 @@ class TestRolloutCollection:
         for expected in expected_results:
             expected["_ng_run_id"] = manifest["run_id"]
             expected[ATTEMPT_INDEX_KEY_NAME] = 0
+            # The collector's own config is empty here; the agent type comes from the running servers' config.
+            expected["ng_agent_implementation"] = "impl"
         assert expected_results == actual_returned_results
 
         expected_materialized_inputs_len = 6
@@ -7713,6 +7720,7 @@ class TestRolloutCollection:
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 ATTEMPT_INDEX_KEY_NAME: 0,
                 AGENT_REF_KEY_NAME: {"name": "agent"},
+                "ng_agent_implementation": "impl",
             }
         ]
         assert failures_fpath.read_bytes() == b""
@@ -8570,6 +8578,8 @@ class TestRolloutCollection:
         for expected in expected_results:
             expected["_ng_run_id"] = manifest["run_id"]
             expected[ATTEMPT_INDEX_KEY_NAME] = 0
+            # The collector's own config is empty here; the agent type comes from the running servers' config.
+            expected["ng_agent_implementation"] = "impl"
         assert expected_results == actual_returned_results
 
     async def test_run_from_config_routes_only_explicit_failures_out_of_scored_rows(
@@ -14242,6 +14252,55 @@ class TestEnvironmentServerRouting:
             "implementation": "hermes_agent",
         }
 
+    _OPENCODE_RUN = {"_ng_run_id": "run", "ng_agent_implementation": "opencode_agent"}
+
+    @pytest.mark.parametrize(
+        ("results", "expected"),
+        [
+            # Saved rollouts aggregated under a config that now declares another agent type for the instance.
+            ([_OPENCODE_RUN, _OPENCODE_RUN], {"name": "hermes", "implementation": "opencode_agent"}),
+            # A run has one config, so its stamped rollout speaks for a row the run added without dispatching.
+            ([_OPENCODE_RUN, {"_ng_run_id": "run"}], {"name": "hermes", "implementation": "opencode_agent"}),
+            # A zero counted for a rollout that left no record names no run and has no say.
+            ([_OPENCODE_RUN, {}], {"name": "hermes", "implementation": "opencode_agent"}),
+            # No stamp at all: the running config is all there is.
+            ([{"_ng_run_id": "run"}, {"_ng_run_id": "run"}], {"name": "hermes", "implementation": "hermes_agent"}),
+            # Two agent types scored together have no single one to name.
+            (
+                [_OPENCODE_RUN, {"_ng_run_id": "other", "ng_agent_implementation": "mini_swe_agent"}],
+                {"name": "hermes"},
+            ),
+            # A run that recorded no agent type may have run on another one than the stamped run.
+            ([_OPENCODE_RUN, {"_ng_run_id": "earlier"}], {"name": "hermes"}),
+        ],
+        ids=["stamped", "same-run-unstamped-row", "counted-zero", "unstamped", "two-types", "unstamped-run"],
+    )
+    async def test_call_aggregate_metrics_names_the_agent_type_its_rollouts_recorded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        results: list[dict[str, str]],
+        expected: dict[str, str],
+    ) -> None:
+        agg = AggregateMetrics(agent_metrics={"mean/reward": 1.0}, key_metrics={"mean/reward": 1.0})
+        client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, agg.model_dump())))
+        client.global_config_dict = _environment_server_config()
+        rows = [
+            {TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"}
+            for index in range(len(results))
+        ]
+        results = [row | result | {"reward": 1.0} for row, result in zip(rows, results)]
+
+        with caplog.at_level("WARNING", logger="nemo_gym.rollouts.rollout_collection"):
+            metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
+                results, rows, tmp_path / "output.jsonl"
+            )
+
+        [entry] = json.loads(metrics_fpath.read_text())
+        assert entry[AGENT_REF_KEY_NAME] == expected
+        assert ("do not establish one agent type" in caplog.text) == ("implementation" not in expected)
+
     async def test_call_aggregate_metrics_names_a_stamped_server_missing_from_the_config(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -15097,6 +15156,14 @@ class TestRecordAgentImplementation:
             _record_agent_implementation(result, config, "terminal_bench_agent")
             assert result["ng_agent_implementation"] == "opencode_agent"
 
+    @pytest.mark.parametrize(("agent", "expected"), [("terminal_bench_agent", "opencode_agent"), ("unknown", None)])
+    def test_a_value_a_server_reply_supplied_is_not_kept(self, agent: str, expected: str | None) -> None:
+        from nemo_gym.rollouts.rollout_collection import _record_agent_implementation
+
+        result = {"reward": 1.0, "ng_agent_implementation": "not_a_configured_agent"}
+        _record_agent_implementation(result, self.SWAPPED, agent)
+        assert result.get("ng_agent_implementation") == expected
+
     @pytest.mark.parametrize(
         ("config", "agent"),
         [
@@ -15173,7 +15240,8 @@ async def test_collection_persists_policy_alias_for_offline_failed_rollout_timin
         )
     failures = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
     assert [r.get("ng_policy_model_server") for r in failures] == ["policy"]
-    assert [r.get("ng_agent_implementation") for r in failures] == ["pinchbench_agent"]
+    # The collector's own config can differ from the running servers' config (--no-serve); the servers' wins.
+    assert [r.get("ng_agent_implementation") for r in failures] == ["impl"]
     assert "ng_model_call_capture" not in failures[0]
     assert failures[0]["_ng_elapsed_s"] == 100.0
 

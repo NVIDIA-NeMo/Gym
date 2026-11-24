@@ -115,6 +115,7 @@ from nemo_gym.rollouts.rollout_collection import (
     _RUN_FAILURE_ERRORS,
     _environment_server_for_agent,
     _environment_servers_by_agent,
+    _record_agent_implementation,
     _record_rollout_outcome,
 )
 from nemo_gym.rollouts.rollout_records import prepare_append
@@ -2831,6 +2832,10 @@ async def run_e2e_multistage(
         result[NG_RESULT_TYPE_KEY] = next(
             iter(server_client.global_config_dict[environment_server]["environment_servers"])
         )
+        # Reused rows had their agent resolved in place before judging, as dispatched rows do.
+        _record_agent_implementation(
+            result, server_client.global_config_dict, (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+        )
         attach_rollout_evidence(row, result, (time.time() - started_at) * 1000)
         on_result(row, result)
         return row, result
@@ -2859,6 +2864,11 @@ async def run_e2e_multistage(
                 completed.result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
             if completed.environment_server_type is not None:
                 completed.result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
+            # Dispatch resolved the row's agent in place, and this run's config, which started the servers,
+            # declares it.
+            _record_agent_implementation(
+                completed.result, global_config_dict, (completed.row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            )
             attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
             on_result(completed.row, completed.result)
             results.append((completed.row, completed.result))

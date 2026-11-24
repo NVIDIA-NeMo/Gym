@@ -842,6 +842,15 @@ class TestBuildVerifyPayload:
         assert (result["_ng_environment_server"], result["_ng_result_type"]) == ("env_a", "legacy_agent")
         assert NG_FAILURE_CLASS_KEY not in result
 
+    def test_keeps_the_agent_type_the_rollout_recorded(self) -> None:
+        """The agent type is a fact of the collected attempt: a new judgment does not change which harness ran."""
+        pair = InputRolloutPair(
+            input={"task": "q1", AGENT_REF_KEY_NAME: {"name": "agent_a"}},
+            rollout={"response": {"output": "x"}, "ng_agent_implementation": "opencode_agent"},
+        )
+
+        assert _build_verify_payload(pair)["ng_agent_implementation"] == "opencode_agent"
+
     def test_merges_input_row_with_response(self) -> None:
         pair = InputRolloutPair(
             input={"task": "q1", "verifier_metadata": {"answer": 42}},
@@ -1601,6 +1610,7 @@ class TestRunVerificationPayloads:
             "_ng_result_type": "legacy_agent",
             "_ng_run_id": "source-run",
             "_ng_attempt_index": 2,
+            "ng_agent_implementation": "opencode_agent",
         }
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
@@ -1612,7 +1622,9 @@ class TestRunVerificationPayloads:
         sent = mock_client.post.await_args.kwargs["json"]
         assert "_ng_environment_server" not in sent and "_ng_result_type" not in sent
         assert "_ng_run_id" not in sent and "_ng_attempt_index" not in sent
+        assert "ng_agent_implementation" not in sent
         assert returned["_ng_environment_server"] == "env_a"
+        assert returned["ng_agent_implementation"] == "opencode_agent"
         assert (returned["_ng_run_id"], returned["_ng_attempt_index"]) == ("source-run", 2)
 
     @pytest.mark.parametrize("context_location", ["top_level", "task_data", "both"])
@@ -2185,6 +2197,30 @@ class TestCallAggregateMetrics:
         # rs_b gets the one agent_b result
         assert len(by_server["rs_b"]) == 1
         assert by_server["rs_b"][0][TASK_INDEX_KEY_NAME] == 2
+
+    @pytest.mark.parametrize(
+        ("stamp", "expected"),
+        [
+            # The rollout's own record wins over the config the re-verification runs with.
+            ("opencode_agent", {"name": "agent_a", "implementation": "opencode_agent"}),
+            # A rollout saved before the stamp existed falls back to that config.
+            (None, {"name": "agent_a", "implementation": "mini_swe_agent"}),
+        ],
+    )
+    async def test_the_entry_names_the_agent_type_the_rollouts_recorded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stamp: str | None, expected: dict[str, str]
+    ) -> None:
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{"reward": 1.0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        if stamp is not None:
+            results[0]["ng_agent_implementation"] = stamp
+        mock_client = self._patch(monkeypatch, {"agent_a": "rs_a"})
+        mock_client.global_config_dict = {"agent_a": {"responses_api_agents": {"mini_swe_agent": {}}}}
+
+        metrics_fpath = await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
+
+        [entry] = json.loads(metrics_fpath.read_text())
+        assert entry[AGENT_REF_KEY_NAME] == expected
 
     async def test_rows_drives_routing_results_drives_payload_and_output_fpath_drives_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3378,6 +3414,28 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
             resume_from_cache=resume,
             **overrides,
         )
+
+    @pytest.mark.parametrize("recorded", ["opencode_agent", None])
+    async def test_the_agent_type_comes_from_the_collected_rollout_not_the_verify_reply(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, recorded: str | None
+    ) -> None:
+        stamp = self._STAMP | ({"ng_agent_implementation": recorded} if recorded is not None else {})
+        self._fixture(tmp_path, source_stamp=stamp, cached_tasks=[])
+        self._patch(monkeypatch, [], [])
+
+        def reply_naming_an_agent_type(payloads, semaphore=None):
+            async def fut(p: dict) -> tuple[dict, dict]:
+                return p, {"reward": 0.5, "ng_agent_implementation": "named_by_the_verifier"}
+
+            return [fut(p) for p in payloads]
+
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification._run_verification_payloads", reply_naming_an_agent_type
+        )
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=False))
+
+        assert [r.get("ng_agent_implementation") for r in returned] == [recorded] * 4
 
     async def test_cached_rows_take_their_source_stamps_and_group_with_the_new_rows(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

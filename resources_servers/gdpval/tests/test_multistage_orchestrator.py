@@ -4320,6 +4320,8 @@ class TestCachedDeliverableReuse:
             check_completion=lambda **kwargs: None,
         )
         global_config = {
+            # The run's config declares the servers it started, the agent among them.
+            **_ROUTING_CONFIG,
             "multistage": {"enabled": True, "stages": list(stages), "seed": 0, "retry_inprocess": retry_inprocess},
             "gdpval_resources_server": {
                 "resources_servers": {
@@ -4352,6 +4354,8 @@ class TestCachedDeliverableReuse:
         assert {
             (row[NG_ENVIRONMENT_SERVER_KEY], row[NG_RESULT_TYPE_KEY], row[TASK_SOURCE_KEY_NAME]) for row in persisted
         } == {("gdpval_environment_server", "single_agent_turn_legacy", "gdpval_stirrup_agent")}
+        # Both also name the agent type that ran, which the instance name does not say.
+        assert [row.get("ng_agent_implementation") for row in persisted] == ["stirrup_agent", "stirrup_agent"]
         inputs = [
             json.loads(line) for line in (tmp_path / "rollouts_materialized_inputs.jsonl").read_text().splitlines()
         ]

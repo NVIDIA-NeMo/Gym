@@ -64,7 +64,9 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollouts.rollout_collection import (
+    NG_AGENT_IMPLEMENTATION_KEY,
     NG_RESULT_TYPE_KEY,
+    _aggregated_agent_implementation,
     _coverage_report,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
@@ -735,7 +737,13 @@ def check_saved_patch_replay(
 
 
 # Collection identity is retained for grouping and cache resume, never sent to /verify.
-_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY, RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME)
+_IDENTITY_KEYS = (
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
+    NG_RESULT_TYPE_KEY,
+    RUN_ID_KEY,
+    ATTEMPT_INDEX_KEY_NAME,
+    NG_AGENT_IMPLEMENTATION_KEY,
+)
 
 
 def _build_verify_payload(pair: InputRolloutPair, *, forward_agent_evidence: bool = False) -> Dict:
@@ -1166,8 +1174,14 @@ async def _call_aggregate_metrics(
         await raise_for_status(agg_response)
         agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
 
+        agent_ref = {"name": agent_name}
+        implementation = _aggregated_agent_implementation(
+            agent_result_list, server_client.global_config_dict, agent_name
+        )
+        if implementation is not None:
+            agent_ref["implementation"] = implementation
         agent_entry = {
-            AGENT_REF_KEY_NAME: {"name": agent_name},
+            AGENT_REF_KEY_NAME: agent_ref,
             "agent_metrics": agg_result.agent_metrics,
             "key_metrics": agg_result.key_metrics,
             "group_level_metrics": agg_result.group_level_metrics,
@@ -2014,6 +2028,8 @@ class RolloutReverificationHelper(BaseModel):
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+                # Only the collected attempt knows which agent type ran it; a verifier's reply does not.
+                result.pop(NG_AGENT_IMPLEMENTATION_KEY, None)
                 for key in (AGENT_REF_KEY_NAME, *_IDENTITY_KEYS):
                     if key in row:
                         result[key] = row[key]

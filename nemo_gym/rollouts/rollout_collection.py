@@ -1005,11 +1005,47 @@ def _agent_implementation(global_config: Any, agent_name: str | None) -> str | N
 def _record_agent_implementation(result: dict[str, Any], global_config: Any, agent_name: str | None) -> None:
     """Write the agent type that ran the rollout onto its record, as ``ng_agent_implementation``.
 
-    Called for successful and failed rollouts. Does nothing when the config does not declare the agent.
+    Called for successful and failed rollouts. The collector owns this key: a value a server reply supplied is
+    dropped, and the key stays absent when the config does not declare the agent.
     """
+    result.pop(NG_AGENT_IMPLEMENTATION_KEY, None)
     implementation = _agent_implementation(global_config, agent_name)
     if implementation is not None:
         result[NG_AGENT_IMPLEMENTATION_KEY] = implementation
+
+
+def _aggregated_agent_implementation(
+    results: Iterable[Mapping[str, Any]], global_config: Any, agent_name: str | None
+) -> str | None:
+    """The agent type an aggregate entry names for the rollouts it scores.
+
+    The type stamped on the rollouts wins: saved rollouts can be aggregated under a config that declares another
+    agent type for the same instance name. When no rollout is stamped, the running config is all there is.
+
+    A run has one config, so one stamped rollout speaks for every row of its run, including the rows a run adds
+    without dispatching. The entry names no agent type when its rollouts do not establish a single one: they are
+    stamped with different types, or a stamped run is scored together with a run that recorded none. A row with
+    no run id, such as a zero counted for a rollout that left no record, has no say.
+    """
+    stamps_by_run: dict[Any, set[str]] = {}
+    for result in results:
+        stamps = stamps_by_run.setdefault(result.get(RUN_ID_KEY), set())
+        implementation = result.get(NG_AGENT_IMPLEMENTATION_KEY)
+        if isinstance(implementation, str) and implementation:
+            stamps.add(implementation)
+    recorded = set().union(*stamps_by_run.values())
+    if not recorded:
+        return _agent_implementation(global_config, agent_name)
+    unstamped_run = any(run_id is not None and not stamps for run_id, stamps in stamps_by_run.items())
+    if len(recorded) > 1 or unstamped_run:
+        logger.warning(
+            "Rollouts aggregated for '%s' do not establish one agent type (recorded: %s%s); the entry names none.",
+            agent_name,
+            ", ".join(sorted(recorded)),
+            ", and a run that recorded none" if unstamped_run else "",
+        )
+        return None
+    return next(iter(recorded))
 
 
 get_max_rollout_attempts = _get_max_rollout_attempts  # Public compatibility alias
@@ -3434,6 +3470,8 @@ def refresh_agent_complete_files(output_fpath: Path, global_config_dict: DictCon
             continue
         completed, failed = counts[entry[NG_ENVIRONMENT_SERVER_KEY]]
         refreshed = current | {
+            # The same recomputed entry as ``aggregate``, so the two copies of the agent reference agree.
+            AGENT_REF_KEY_NAME: entry[AGENT_REF_KEY_NAME],
             "completed_rollouts": completed,
             "failed_rollouts": failed,
             "aggregation_status": "error" if AGGREGATION_ERROR_KEY in entry else "complete",
@@ -5001,7 +5039,8 @@ executions → not run again (left to recovery)
 
                 attributed_agent = self._agent_name_for_row(row, global_config)
                 _record_policy_model_server(result, global_config, attributed_agent)
-                _record_agent_implementation(result, global_config, attributed_agent)
+                # The running servers' config: the collector's own can hold collection options only (--no-serve).
+                _record_agent_implementation(result, identity_client.global_config_dict, attributed_agent)
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off), project ng_trajectory and assemble ng_perf. Never alters the
@@ -5530,9 +5569,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             nonlocal first_error
             # The label does not say which agent harness ran (see ``_agent_implementation``), so the entry names
-            # the implementation of the agent it is labelled by as well.
+            # the agent type as well.
             agent_ref = {"name": agent_name}
-            implementation = _agent_implementation(global_config_dict, server_agents[server_name])
+            implementation = _aggregated_agent_implementation(
+                agent_result_list, global_config_dict, server_agents[server_name]
+            )
             if implementation is not None:
                 agent_ref["implementation"] = implementation
             # Strip generated content, but keep provider metrics for request-level
