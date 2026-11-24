@@ -153,6 +153,8 @@ def _normalize_to_response(data: Dict[str, Any]) -> Dict[str, Any]:
         "cached_input_tokens",
         "cache_read_input_tokens",
     )
+    if cached_tokens is None:
+        cached_tokens = _usage_detail(usage, "input_tokens_details", "cached_tokens")
     reasoning_tokens = _usage_detail(
         usage,
         "completion_tokens_details",
