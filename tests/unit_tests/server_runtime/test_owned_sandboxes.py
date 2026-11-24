@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import MagicMock
 
 import anyio
@@ -26,8 +26,8 @@ from tests.unit_tests.server_runtime.test_checkpoint_sandbox import FakeSnapshot
 
 
 class _Config(BaseRunServerInstanceConfig):
-    sandbox_provider: Optional[str] = None
-    gpu_sandbox_provider: Optional[str] = None
+    sandbox_provider: str | None = None
+    gpu_sandbox_provider: str | None = None
 
 
 class _Server(SimpleServer):
@@ -143,30 +143,54 @@ def test_a_server_without_a_sandbox_provider_is_refused(providers) -> None:
         server.sandboxes
 
 
-async def test_a_non_exporting_owner_needs_no_checkpoint_state_dir(providers, monkeypatch) -> None:
-    def no_state_dir(global_config: Any) -> None:
-        raise ValueError("checkpoint.state_dir is required to checkpoint sandboxes")
+def test_a_refused_config_builds_no_provider(providers, monkeypatch) -> None:
+    # A relative checkpoint.state_dir is refused; a provider built first would never be closed, and a later
+    # self.sandboxes would build another.
+    def relative_state_dir(global_config: Any) -> None:
+        raise ValueError("checkpoint.state_dir must be an absolute path")
 
-    monkeypatch.setattr(owned_sandboxes_module, "checkpoint_state_dir", no_state_dir)
-    owned = _server(sandbox_provider="opensandbox").sandboxes
-    await owned.create("session", _spec())
-    assert owned.indexed_snapshots == {}
-    with pytest.raises(ValueError, match="checkpoint.state_dir is required"):
-        await owned.export(["session"], checkpoint_id="checkpoint")
-    assert providers["opensandbox"].snapshots == {}
-    await owned.aclose()
-    assert providers["opensandbox"].client_closed
+    monkeypatch.setattr(owned_sandboxes_module, "_configured_state_dir", relative_state_dir)
+    server = _server(sandbox_provider="opensandbox")
 
+    for _ in range(2):
+        with pytest.raises(ValueError, match="checkpoint.state_dir must be an absolute path"):
+            server.sandboxes
 
-@pytest.mark.parametrize("resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency"])
-def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch, resolver: str) -> None:
-    def refuse(*args: Any) -> None:
-        raise ValueError("unknown provider block")
-
-    monkeypatch.setattr(owned_sandboxes_module, resolver, refuse)
-    with pytest.raises(ValueError, match="unknown provider block"):
-        _server(sandbox_provider="missing").sandboxes
     assert providers == {}
+
+
+def test_a_state_dir_that_cannot_be_written_builds_no_provider(providers, tmp_path: Path) -> None:
+    not_a_directory = tmp_path / "state"
+    not_a_directory.write_text("")
+    server = _server(sandbox_provider="opensandbox")
+    server.server_client.global_config_dict = {
+        **SERVER_GLOBAL_CONFIG,
+        "checkpoint": {"enabled": True, "control_auth_token": "token", "state_dir": str(not_a_directory)},
+    }
+
+    for _ in range(2):
+        with pytest.raises(OSError):
+            server.sandboxes
+
+    assert providers == {}
+
+
+async def test_a_server_that_never_exports_needs_no_state_dir(providers, monkeypatch) -> None:
+    # Checkpointing is on, but this server (an agent, say) only starts and stops sandboxes: it gets no snapshot
+    # index, and only an export says that checkpoint.state_dir is missing.
+    monkeypatch.setattr(
+        owned_sandboxes_module, "checkpoint_settings", lambda config: MagicMock(state_dir=None, name="settings")
+    )
+    server = _server(sandbox_provider="opensandbox")
+    owned = server.sandboxes
+    await owned.create("k", _spec())
+
+    with pytest.raises(owned_sandboxes_module.SandboxCheckpointError, match="set checkpoint.state_dir"):
+        await owned.export(["k"], checkpoint_id="c1")
+
+    await owned.stop("k")
+    assert owned.keys == []
+    assert owned.indexed_snapshots == {}
 
 
 def test_an_instance_no_server_holds_has_no_other_providers() -> None:
@@ -234,20 +258,121 @@ async def test_a_provider_stays_open_while_a_sandbox_is_left_to_stop(providers) 
     assert provider.client_closed
 
 
-async def test_each_provider_field_has_its_own_snapshot_index(providers, monkeypatch, tmp_path: Path) -> None:
+def test_each_provider_field_has_its_own_snapshot_index(providers, monkeypatch, tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
-    monkeypatch.setattr(owned_sandboxes_module, "checkpoint_state_dir", lambda config: state_dir)
+    monkeypatch.setattr(owned_sandboxes_module, "_configured_state_dir", lambda config: state_dir)
     server = _server(sandbox_provider="opensandbox", gpu_sandbox_provider="gpu")
 
     main, gpu = server.sandboxes, server.sandboxes.on("gpu_sandbox_provider")
 
-    assert not state_dir.exists()
-    await main.export([], checkpoint_id="checkpoint")
-    await gpu.delete_snapshots(frozenset())
-
     assert (state_dir / "my_server" / "snapshots").is_dir()
-    assert (state_dir / "my_server.gpu_sandbox_provider" / "snapshots").is_dir()
+    assert (state_dir / "my_server" / "providers" / "gpu_sandbox_provider" / "snapshots").is_dir()
     assert main.snapshot_name_prefix != gpu.snapshot_name_prefix
+
+
+async def test_a_second_provider_field_never_shares_an_index_with_another_server(tmp_path: Path) -> None:
+    # Server "server" on its gpu_sandbox_provider, and a server named "server.gpu_sandbox_provider" on its own
+    # sandbox_provider, each on a provider whose snapshot ids overlap the other's.
+    state_dir = tmp_path / "state"
+    gpu, other = FakeSnapshotProvider(), FakeSnapshotProvider()
+    gpu.add_snapshot("unrelated")  # shifts gpu's ids by one: its c1 snapshot gets the id of other's c2 snapshot
+    owners = [
+        OwnedSandboxes(
+            gpu,
+            state_dir=state_dir,
+            server_name="server",
+            provider_field="gpu_sandbox_provider",
+            snapshot_retry_delay_s=0,
+        ),
+        OwnedSandboxes(
+            other, state_dir=state_dir, server_name="server.gpu_sandbox_provider", snapshot_retry_delay_s=0
+        ),
+    ]
+    for owner in owners:
+        await owner.create("k", _spec())
+        await owner.export(["k"], checkpoint_id="c1")
+        await owner.export(["k"], checkpoint_id="c2")
+    indexed = [owner.indexed_snapshots for owner in owners]
+    assert indexed[0]["c1"] == indexed[1]["c2"], "the two providers' snapshot ids overlap"
+    assert owners[0].snapshot_name_prefix != owners[1].snapshot_name_prefix
+
+    for owner in reversed(owners):
+        await owner.delete_snapshots(frozenset({"c2"}))
+
+    for provider, ids in zip((gpu, other), indexed):
+        assert set(ids["c2"]) <= set(provider.snapshots), "the snapshot of the kept checkpoint survives"
+        assert not set(ids["c1"]) & set(provider.snapshots)
+    for owner in owners:
+        await owner.aclose()
+
+
+async def _until(condition: Any) -> None:
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0.001)
+
+
+class _CloseCounting(FakeSnapshotProvider):
+    """Counts client closes; can fail the next few, or hold them until its gate opens."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+        self.failing_closes = 0
+        self.close_gate = asyncio.Event()
+        self.close_gate.set()
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        await self.close_gate.wait()
+        if self.failing_closes:
+            self.failing_closes -= 1
+            raise RuntimeError("client close failed")
+
+
+class TestTheOwnedProviderIsClosedOnce:
+    def _owned(self, provider: _CloseCounting) -> OwnedSandboxes:
+        return OwnedSandboxes(provider, state_dir=None, server_name="server", owns_provider=True)
+
+    async def test_a_failed_close_is_tried_again_and_a_successful_one_is_not_repeated(self) -> None:
+        provider = _CloseCounting()
+        provider.failing_closes = 1
+        owned = self._owned(provider)
+
+        with pytest.raises(RuntimeError, match="client close failed"):
+            await owned.aclose()
+        await owned.aclose()
+        await owned.aclose()
+
+        assert provider.close_calls == 2
+
+    async def test_a_cancelled_close_is_tried_again(self) -> None:
+        provider = _CloseCounting()
+        provider.close_gate.clear()
+        owned = self._owned(provider)
+        closing = asyncio.create_task(owned.aclose())
+        await _until(lambda: provider.close_calls == 1)
+
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        provider.close_gate.set()
+        await owned.aclose()
+
+        assert provider.close_calls == 2
+
+    async def test_concurrent_closes_close_the_provider_once(self) -> None:
+        provider = _CloseCounting()
+        provider.close_gate.clear()
+        owned = self._owned(provider)
+        closes = [asyncio.create_task(owned.aclose()) for _ in range(2)]
+        await _until(lambda: provider.close_calls == 1)
+        await asyncio.sleep(0.01)
+
+        provider.close_gate.set()
+        await asyncio.gather(*closes)
+
+        assert provider.close_calls == 1
 
 
 def test_a_field_that_is_not_a_provider_field_is_refused(providers) -> None:
@@ -390,19 +515,13 @@ class _GatedProvider(FakeSnapshotProvider):
         await super().close(handle)
 
 
-def _owned(provider: FakeSnapshotProvider, state_dir: Optional[Path] = None, **kwargs: Any) -> OwnedSandboxes:
+def _owned(provider: FakeSnapshotProvider, state_dir: Path | None = None, **kwargs: Any) -> OwnedSandboxes:
     kwargs.setdefault("snapshot_retry_delay_s", 0.0)
     return OwnedSandboxes(provider, state_dir=state_dir, server_name="server", **kwargs)
 
 
 def _states(provider: FakeSnapshotProvider) -> list[str]:
     return [box["state"] for box in provider.boxes.values()]
-
-
-async def _until(condition: Any) -> None:
-    async with asyncio.timeout(5):
-        while not condition():
-            await asyncio.sleep(0.001)
 
 
 class TestStop:
@@ -477,22 +596,6 @@ class TestStartsAndStopsHaveTheirOwnLimits:
 
 
 class TestTrackedBeforeStart:
-    async def test_a_start_that_fails_is_stopped_and_forgotten(self) -> None:
-        provider = FakeSnapshotProvider()
-        owned = _owned(provider)
-        spec = SandboxSpec(image="image", ttl_s=60, files={"/task": "x"})
-
-        async def failing_upload(*args: Any, **kwargs: Any) -> None:
-            raise RuntimeError("upload refused")
-
-        provider.upload_file = failing_upload  # type: ignore[method-assign]
-        with pytest.raises(RuntimeError, match="upload refused"):
-            await owned.create("session", spec)
-
-        assert _states(provider) == ["stopped"]
-        assert owned.keys == []
-        await owned.create("session", _spec())
-
     async def test_a_start_is_not_exposed_while_its_files_are_uploading(self) -> None:
         provider = FakeSnapshotProvider()
         owned = _owned(provider, provider_config_ref="sandbox")
@@ -525,6 +628,22 @@ class TestTrackedBeforeStart:
             release.set()
             await creating
             await owned.aclose()
+
+    async def test_a_start_that_fails_is_stopped_and_forgotten(self) -> None:
+        provider = FakeSnapshotProvider()
+        owned = _owned(provider)
+        spec = SandboxSpec(image="image", ttl_s=60, files={"/task": "x"})
+
+        async def failing_upload(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("upload refused")
+
+        provider.upload_file = failing_upload  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="upload refused"):
+            await owned.create("session", spec)
+
+        assert _states(provider) == ["stopped"]
+        assert owned.keys == []
+        await owned.create("session", _spec())
 
     async def test_a_start_cancelled_by_its_request_is_stopped(self) -> None:
         provider = FakeSnapshotProvider()
@@ -649,8 +768,6 @@ class TestTrackedBeforeStart:
 
         assert str(raised.value.__context__) == "provider unreachable", "the failed stop rides along as context"
         assert owned.keys == ["session"], "the sandbox whose stop failed stays owned"
-        assert owned.get("session") is None
-        assert "session" not in owned
         assert _states(provider) == ["running"]
         unreachable = False
         await owned.stop("session")
@@ -878,11 +995,31 @@ class TestTheOwnersOwnChecks:
 
         with pytest.raises(KeyError, match="has no running sandbox"):
             await owned.access("session", workdir="/work")
+        assert "session" not in owned and owned.get("session") is None
+        assert owned.keys == ["session"], "the key is taken while it starts"
 
         provider.create_gate.set()
-        await creating
+        sandbox = await creating
+        assert "session" in owned and owned.get("session") is sandbox
         assert (await owned.access("session", workdir="/work")).workdir == "/work"
         await owned.aclose()
+
+    async def test_a_discard_waits_for_the_keys_create_and_stops_what_it_started(self) -> None:
+        provider = _GatedProvider()
+        owned = _owned(provider)
+        provider.create_gate.clear()
+        creating = asyncio.create_task(owned.create("session", _spec()))
+        await _until(lambda: provider.in_flight == 1)
+
+        discarding = asyncio.create_task(owned.discard(["session"]))
+        await asyncio.sleep(0.01)
+        assert not discarding.done(), "the discard waits for the start"
+        provider.create_gate.set()
+        await creating
+        await discarding
+
+        assert owned.keys == []
+        assert _states(provider) == ["stopped"], "nothing is left running untracked"
 
     async def test_an_instance_from_a_checkpoint_config_bounds_starts_and_stops_by_its_parallelism(self) -> None:
         provider = _GatedProvider()
@@ -927,6 +1064,30 @@ class TestAFailedStartWhoseStopFails:
         provider.close = real_close  # type: ignore[method-assign]
         await owned.stop("session")
         assert owned.keys == []
+
+    async def test_it_is_neither_returned_nor_lent(self) -> None:
+        provider = FakeSnapshotProvider()
+        owned = _owned(provider, provider_config_ref="sandbox")
+        real_close = provider.close
+
+        async def unreachable(handle: Any) -> None:
+            raise RuntimeError("provider unreachable")
+
+        async def failing_upload(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("upload refused")
+
+        provider.close = unreachable  # type: ignore[method-assign]
+        provider.upload_file = failing_upload  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="upload refused"):
+            await owned.create("session", SandboxSpec(image="image", ttl_s=60, files={"/task": "x"}))
+
+        assert "session" not in owned and owned.get("session") is None
+        with pytest.raises(KeyError, match="has no running sandbox"):
+            await owned.access("session", workdir="/work")
+        assert owned.keys == ["session"], "kept, so a stop or aclose stops it again"
+        provider.close = real_close  # type: ignore[method-assign]
+        await owned.aclose()
+        assert owned.keys == [] and _states(provider) == ["stopped"]
 
 
 class TestStopDuringRestore:
@@ -1026,7 +1187,7 @@ async def test_a_keys_lock_is_never_held_twice_when_a_third_caller_arrives() -> 
     peak = 0
     a_in, a_go, b_in = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    async def hold(entered: asyncio.Event, release: Optional[asyncio.Event]) -> None:
+    async def hold(entered: asyncio.Event, release: asyncio.Event | None) -> None:
         nonlocal held, peak
         async with locks.locked("key"):
             held += 1
@@ -1083,33 +1244,12 @@ async def test_a_superseded_stop_waiting_for_a_slot_is_bounded(monkeypatch, capl
     owned._stop_limit.release()
 
 
-def test_the_old_checkpointer_name_resolves_with_a_deprecation_warning() -> None:
-    import importlib
+@pytest.mark.parametrize("resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency"])
+def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch, resolver: str) -> None:
+    def refuse(*args: Any) -> None:
+        raise ValueError("unknown provider block")
 
-    with pytest.warns(DeprecationWarning, match="OwnedSandboxes"):
-        old = getattr(importlib.import_module("nemo_gym.server_runtime"), "SandboxSessionCheckpointer")
-    assert old is OwnedSandboxes
-    with pytest.warns(DeprecationWarning):
-        module = importlib.import_module("nemo_gym.server_runtime._checkpoint.sandbox")
-        old = getattr(module, "SandboxSessionCheckpointer")
-    assert old is OwnedSandboxes
-
-
-async def test_discard_waits_for_a_pending_start_and_stops_the_sandbox() -> None:
-    provider = _GatedProvider()
-    owned = _owned(provider)
-    provider.create_gate.clear()
-    creating = asyncio.create_task(owned.create("session", _spec()))
-    await _until(lambda: provider.in_flight == 1)
-    assert owned.get("session") is None
-    assert "session" not in owned
-    assert owned.keys == ["session"]
-    discarding = asyncio.create_task(owned.discard(["session"]))
-    await asyncio.sleep(0)
-    assert not discarding.done()
-    provider.create_gate.set()
-    sandbox = await creating
-    await discarding
-    assert not sandbox.started
-    assert _states(provider) == ["stopped"]
-    assert owned.keys == []
+    monkeypatch.setattr(owned_sandboxes_module, resolver, refuse)
+    with pytest.raises(ValueError, match="unknown provider block"):
+        _server(sandbox_provider="missing").sandboxes
+    assert providers == {}
