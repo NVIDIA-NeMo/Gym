@@ -16775,6 +16775,35 @@ class TestRunRecordWriter:
         assert record["ng_agent_observations"]["source"] == "agent"
         assert record["_ng_failure_record"]["failure"]["failure_reason"] == "tool crashed"
 
+    async def test_a_recorded_omission_keeps_the_transport_resends_of_its_dispatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.core.failure_transport import observe_transport_resend
+        from nemo_gym.rollouts.rollout_collection import NG_TRANSPORT_RESENDS_KEY
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+
+        async def post(*args, **kwargs):
+            for _ in range(2):
+                observe_transport_resend()
+            return FakeResponse(200, {NG_NO_PERSIST_KEY: True, "error": "nothing to score"})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        run_dir = tmp_path / "run"
+        received: list[tuple[str, dict]] = []
+        for completion in RolloutCollectionHelper().run_examples(
+            [failing_row()],
+            record_output_dir=run_dir,
+            record_shard="s",
+            record_omitted_rollouts=True,
+            record_sink=lambda kind, record: received.append((kind, record)),
+        ):
+            await completion
+
+        [(kind, record)] = received
+        assert kind == "omitted" and record[NG_TRANSPORT_RESENDS_KEY] == 2
+        metrics = RolloutStore.read(run_dir / "rollouts-s.jsonl").failure_export_metrics()
+        assert (metrics["transport/resends"], metrics["transport/attempts_counted"]) == (2, 1)
+
     def test_a_sink_without_a_shard_is_refused(self) -> None:
         with pytest.raises(ValueError, match="record_sink .* needs record_output_dir"):
             RolloutCollectionHelper().run_examples([failing_row()], record_sink=lambda kind, record: None)

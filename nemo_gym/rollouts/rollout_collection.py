@@ -1266,6 +1266,8 @@ def _shard_record(
         for key in _SHARD_IDENTITY_KEYS:
             if key in row:
                 record.setdefault(key, row[key])
+        if completed.transport_resends is not None:
+            record[NG_TRANSPORT_RESENDS_KEY] = completed.transport_resends
         record[RUN_ID_KEY] = run_id
         return record
     if _materialized_taskset(row) is not None and _is_episode_response(result):
