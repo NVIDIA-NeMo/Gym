@@ -736,7 +736,7 @@ def candidates(root, shards, out):
     from verified shards that MANIFEST.json serves, at their recorded sizes; a
     deletion must still re-check each file against these values right before
     removing it. Returns (count, shards skipped)."""
-    n, unverified = 0, []
+    n, skipped = 0, []
     live = (_load_json(os.path.join(pack_root_of(root), MANIFEST)) or {}).get("shards") or {}
     for kind, ab in shards:
         m = load_shard_manifest(root, kind, ab)
@@ -748,14 +748,14 @@ def candidates(root, shards, out):
             and live.get(shard_key(kind, ab), {}).get("build_id") == m["build_id"]
             and tuple(_size(p) for p in shard_paths(pack_root_of(root), kind, ab)) == (m["idx_bytes"], m["dat_bytes"])
         ):
-            unverified.append(shard_key(kind, ab))
+            skipped.append(shard_key(kind, ab))
             continue
         excluded = set(v["flat_changed"]) | set(v["flat_missing"]) | set(v["flat_unreadable"])
         for rel, size, mtime_ns, sha in m["entries"]:
             if rel not in excluded:
                 out.write(f"{rel}\t{size}\t{mtime_ns}\t{sha}\n")
                 n += 1
-    return n, unverified
+    return n, skipped
 
 
 def unpack_shard(root, kind, ab, dry_run=False):
@@ -871,12 +871,13 @@ def _cmd_unpack(args):
 def _cmd_candidates(args):
     out = open(args.out, "w", encoding="utf-8") if args.out else sys.stdout
     try:
-        n, unverified = candidates(args.cache_root, _selected(args), out)
+        n, skipped = candidates(args.cache_root, _selected(args), out)
     finally:
         if args.out:
             out.close()
-    print(f"candidates: {n} flat file(s); unverified shards skipped: {unverified}", file=sys.stderr)
-    return 1 if unverified else 0
+    # A shard is skipped when it is unverified, not served by MANIFEST.json yet, or not at its recorded sizes.
+    print(f"candidates: {n} flat file(s); shards skipped: {skipped}", file=sys.stderr)
+    return 1 if skipped else 0
 
 
 def main(argv=None):
