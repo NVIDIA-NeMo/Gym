@@ -256,6 +256,7 @@ def test_mcp_grants_are_direct_servers_that_the_plugin_checks(opencode2):
         ({"interleaved_reasoning_field": "reasoning"}, "interleaved_reasoning_field apply only to OpenCode 1"),
         ({"output_token_policy": "remaining_context"}, "output_token_policy apply only to OpenCode 1"),
         ({"declare_model_limits": False}, "declare_model_limits apply only to OpenCode 1"),
+        ({"opencode_model_call_timeout": 1800000}, "opencode_model_call_timeout apply only to OpenCode 1"),
         (
             {"argv_prompt_quoting": True, "reasoning_effort": "max"},
             "reasoning_effort, argv_prompt_quoting apply only to OpenCode 1",
@@ -652,3 +653,18 @@ def test_the_plugin_registers_its_hooks_and_acts_on_them(tmp_path):
         "optional": {"status": "connected"},
     }
     assert result["ready"] == "ready\n"
+
+
+async def test_a_musl_pin_follows_the_release_digests(opencode2):
+    agent, sandbox = opencode2
+    agent.config.sandbox_executable_path = "/opt/opencode"
+    agent.config.sandbox_executable_sha256 = "b" * 64
+    agent.config.sandbox_musl_executable_path = "/opt/opencode-musl"
+    agent.config.sandbox_musl_executable_sha256 = "c" * 64
+    events = record(sandbox)
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    install = shlex.split(events[index(events, "install_opencode_runtime.sh")])
+    digests = OPENCODE_RELEASE_SHA256[agent.config.opencode_version]
+    assert install[7] == " ".join(f"{arch}={digest}" for arch, digest in digests.items())
+    assert install[8:] == ["--musl-executable", "/opt/opencode-musl", "c" * 64]

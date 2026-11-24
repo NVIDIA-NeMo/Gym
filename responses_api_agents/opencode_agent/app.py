@@ -737,7 +737,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
-    # Milliseconds, matching the OpenCode provider's per-request timeout.
+    # Sandbox sessions only, OpenCode 1 only. Milliseconds, OpenCode's per-request provider timeout, as on
+    # opencode_sandboxed_agent. Unset, only the run's timeout bounds a model call.
     opencode_model_call_timeout: int | None = Field(default=None, gt=0)
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
@@ -747,7 +748,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # On musl task images an optional second verified pin replaces the primary executable.
     sandbox_musl_executable_path: str | None = None
     sandbox_musl_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
-    # Existing benchmark images mount this installer and its libc-specific binaries.
+    # Sandbox sessions only. opencode_sandboxed_agent's mounted installer: the script receives the binary paths and
+    # leaves OpenCode at $HOME/.opencode/bin/opencode. Its result is checked by version only, not by digest.
     remote_opencode_install_script_path: str | None = None
     remote_opencode_binary_path: str | None = None
     remote_opencode_musl_binary_path: str | None = None
@@ -1679,14 +1681,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, f"OpenCode sandbox config: compaction.{key} must be below context_window")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
-        cached_installer = self.config.remote_opencode_install_script_path
-        cached_binary = self.config.remote_opencode_binary_path
-        if bool(cached_installer) != bool(cached_binary) or (
-            self.config.remote_opencode_musl_binary_path and not cached_installer
+        mounted_installer = self.config.remote_opencode_install_script_path
+        mounted_binary = self.config.remote_opencode_binary_path
+        mounted_musl_binary = self.config.remote_opencode_musl_binary_path
+        if bool(mounted_installer) != bool(mounted_binary) or (mounted_musl_binary and not mounted_installer):
+            raise AgentSeedRejectedError("A mounted OpenCode installer requires its script and binary paths together")
+        if not all(
+            _is_sandbox_path(path) for path in (mounted_installer, mounted_binary, mounted_musl_binary) if path
         ):
-            raise HTTPException(422, "A cached OpenCode installer requires its script and binary paths together")
-        if cached_installer and self.config.sandbox_executable_path:
-            raise HTTPException(422, "Choose a cached OpenCode installer or a verified executable, not both")
+            raise AgentSeedRejectedError("Mounted OpenCode installer paths must be absolute, normalized sandbox paths")
+        if mounted_installer and self.config.sandbox_executable_path:
+            raise AgentSeedRejectedError("Choose a mounted OpenCode installer or a verified executable, not both")
         musl_executable = self._pinned_file("musl_executable")
         if musl_executable and not self._pinned_file("executable"):
             raise AgentSeedRejectedError("A musl OpenCode pin requires a verified primary sandbox_executable_path")
@@ -2015,10 +2020,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> None:
         """Install the OpenCode runtime if the sandbox lacks it, and upload the session's helper files.
 
-        ``ripgrep`` and ``plugin_dependencies`` are the pinned files a seed resolved, staged under ``directory``, the
-        session's persistent directory. Everything goes through ``sandbox``: a restored session that is being
-        re-bound has no ``state.session`` yet. A checkpointed session also gets the script that reprompts its saved
-        conversation.
+        ``musl_executable`` is the seed's musl OpenCode pin, which the installer uses in place of the primary pin on
+        a musl image. ``ripgrep`` and ``plugin_dependencies`` are the pinned files a seed resolved, staged under
+        ``directory``, the session's persistent directory. Everything goes through ``sandbox``: a restored session
+        that is being re-bound has no ``state.session`` yet. A checkpointed session also gets the script that
+        reprompts its saved conversation.
         """
         if self.config.plugins:
             # Owner-staged plugins are checked before installation. OpenCode 2 loads a plugin from a directory.
@@ -2045,7 +2051,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             runtime,
             self.config.opencode_version,
             self.config.sandbox_executable_path or "",
-            self.config.sandbox_executable_sha256 or "",
+            # The installer compares against sha256sum's lowercase output.
+            (self.config.sandbox_executable_sha256 or "").lower(),
             ":".join(self.config.sandbox_path_prefix),
         ]
         if self._opencode2 or self.config.remote_opencode_install_script_path or musl_executable:
@@ -2063,7 +2070,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         elif musl_executable:
             install_args.extend(["--musl-executable", musl_executable.sandbox_path, musl_executable.digest])
         command += "bash " + shlex.join(install_args)
-        # The installer serializes concurrent runs and skips a runtime already in place, so running it again is safe.
+        # The installer serializes concurrent runs, checks a pinned binary or reruns the mounted installer, publishes
+        # the result as a new file, and skips the download when a runtime is already in place, so running it again is
+        # safe.
         result = await exec_idempotent(
             sandbox,
             command,

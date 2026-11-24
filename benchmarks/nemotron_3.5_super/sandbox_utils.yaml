@@ -22,7 +22,8 @@ deepswe_opencode_agent:
       sandbox_executable_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
       sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret (public runtime digest)
 
-# Mounts used by the native SWE-bench Pro session recipe (OpenCode 1.17.11, Linux x64).
+# Verified OpenCode 1.17.11 binaries (Linux x64) that benchmarks/swebench/pro/opencode.yaml selects by task-image
+# libc. A top-level block, not a swebench_pro_opencode_agent block, so configs without that recipe stay unchanged.
 swebench_pro_opencode_runtime:
   glibc_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
   glibc_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret

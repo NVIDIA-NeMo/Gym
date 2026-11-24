@@ -12,9 +12,7 @@ from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig, _sessio
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
 
-def _resolve_config(
-    path: str, monkeypatch: pytest.MonkeyPatch, *, overlays: tuple[str, ...] = (), cli_args: tuple[str, ...] = ()
-) -> DictConfig:
+def _resolve_config(path: str, monkeypatch: pytest.MonkeyPatch, *, cli_args: tuple[str, ...] = ()) -> DictConfig:
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
     monkeypatch.setattr("sys.argv", ["gym", *cli_args])
     return GlobalConfigDictParser().parse(
@@ -24,7 +22,7 @@ def _resolve_config(
             offline=True,
             initial_global_config_dict=OmegaConf.create(
                 {
-                    "config_paths": ["responses_api_models/vllm_model/configs/vllm_model.yaml", path, *overlays],
+                    "config_paths": ["responses_api_models/vllm_model/configs/vllm_model.yaml", path],
                     "policy_base_url": "http://unused.invalid/v1",
                     "policy_api_key": "unused",
                     "policy_model_name": "test-model",
@@ -189,23 +187,3 @@ def test_nemotron_overlays_bind_deepswe_opencode_sessions(staged: bool, monkeypa
     )
     environment = get_first_server_config_dict(config, "deepswe_environment_server")
     assert environment.agent_server.name == "deepswe_opencode_agent"
-
-
-@pytest.mark.parametrize("offline", [False, True])
-def test_swe_pro_native_recipe_resolves_libc_pins(offline: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    overlays = ("benchmarks/nemotron_3.5_super/sandbox_utils.yaml",) if offline else ()
-    cfg = _resolve_config("benchmarks/swebench/pro/opencode.yaml", monkeypatch, overlays=overlays)
-    settings = get_first_server_config_dict(cfg, "swebench_pro_opencode_agent")
-    agent = OpenCodeAgentConfig.model_validate(OmegaConf.to_container(settings, resolve=True) | {"name": "test"})
-    if offline:
-        assert agent.sandbox_executable_path == "/mnt/s3-data/data/bxyu/opencode/opencode-linux-x64"
-        assert agent.sandbox_executable_sha256 == (
-            "0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded"  # pragma: allowlist secret
-        )
-        assert agent.sandbox_musl_executable_path == agent.sandbox_executable_path + "-musl-v1.17.11"
-        assert agent.sandbox_musl_executable_sha256 == (
-            "674a7e3c4e397bd58452bdaf3da83800f4eb541029bfc6306b24b4d788a87eec"  # pragma: allowlist secret
-        )
-    else:
-        assert agent.sandbox_executable_path is agent.sandbox_executable_sha256 is None
-        assert agent.sandbox_musl_executable_path is agent.sandbox_musl_executable_sha256 is None

@@ -90,19 +90,19 @@ if [ "${7:-}" = --musl-executable ]; then
     source_sha256=${9:?missing musl executable digest}
   fi
 elif [ -n "${7:-}" ]; then
-  cached_install_script=$7
-  cached_binary=$8
-  cached_musl_binary=${9:-}
-  if [ -n "$cached_musl_binary" ]; then
-    bash "$cached_install_script" --glibc-binary "$cached_binary" --musl-binary "$cached_musl_binary"
+  mounted_install_script=$7
+  mounted_binary=$8
+  mounted_musl_binary=${9:-}
+  if [ -n "$mounted_musl_binary" ]; then
+    bash "$mounted_install_script" --glibc-binary "$mounted_binary" --musl-binary "$mounted_musl_binary"
   else
-    bash "$cached_install_script" --binary "$cached_binary"
+    bash "$mounted_install_script" --binary "$mounted_binary"
   fi
   staged=$(mktemp "$runtime/.opencode-XXXXXX")
   cp "$HOME/.opencode/bin/opencode" "$staged"
   chmod 755 "$staged"
   if ! actual=$("$staged" --version) || ! is_requested_version "$actual"; then
-    echo 'Cached OpenCode installer produced an invalid version' >&2
+    echo 'Mounted OpenCode installer produced an invalid version' >&2
     exit 1
   fi
   mv -f "$staged" "$runtime/opencode"

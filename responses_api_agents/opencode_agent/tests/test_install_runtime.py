@@ -191,14 +191,14 @@ def test_verified_binary_uses_the_task_libc_and_checks_its_digest(sandbox, libc,
     ("requested", "reported", "valid"),
     [("1.17.11", "1.17.11", True), ("2.2.7", "opencode v2.2.7", True), ("1.17.11", "1.17.10", False)],
 )
-def test_mounted_cached_installer_keeps_its_binary_contract(sandbox, musl, requested, reported, valid):
+def test_mounted_installer_keeps_its_binary_contract(sandbox, musl, requested, reported, valid):
     root, env = sandbox
-    binary = root / "cached opencode"
+    binary = root / "mounted opencode"
     binary.write_text(f"#!/bin/bash\necho {reported}\n")
     binary.chmod(0o755)
-    installer = root / "cached installer.sh"
+    installer = root / "mounted installer.sh"
     installer.write_text(
-        '#!/bin/bash\nset -eu\nprintf "%s\\n" "$@" > "$TEST_ROOT/cached-arguments"\n'
+        '#!/bin/bash\nset -eu\nprintf "%s\\n" "$@" > "$TEST_ROOT/installer-arguments"\n'
         'mkdir -p "$HOME/.opencode/bin"\ncp "$2" "$HOME/.opencode/bin/opencode"\n'
     )
     command = [
@@ -215,7 +215,7 @@ def test_mounted_cached_installer_keeps_its_binary_contract(sandbox, musl, reque
         str(root / "musl binary") if musl else "",
     ]
     result = subprocess.run(command, env=env, capture_output=True, text=True, errors="replace", timeout=10)
-    assert (root / "cached-arguments").read_text().splitlines() == (
+    assert (root / "installer-arguments").read_text().splitlines() == (
         ["--glibc-binary", str(binary), "--musl-binary", str(root / "musl binary")]
         if musl
         else ["--binary", str(binary)]
