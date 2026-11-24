@@ -50,6 +50,15 @@ def _launch(tmp_path, script, *, logged=False):
     )
 
 
+def _running(pid):
+    """Whether ``pid`` is still a live process. It can exit between any two checks, so a process that is gone by the
+    time it is looked up counts as stopped, the same as a zombie."""
+    try:
+        return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
 def _kill_group(process):
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -151,15 +160,16 @@ subprocess.Popen([sys.executable, '-c', {child!r}], stdin=subprocess.DEVNULL, st
     )
     try:
         process.wait(timeout=5)
+        # The child creates the file before it writes its pid, so wait for the pid itself, not the file.
         deadline = time.monotonic() + 5
-        while not ready.exists():
+        while not (ready.exists() and ready.read_text().strip()):
             assert time.monotonic() < deadline
             time.sleep(0.01)
         child_pid = int(ready.read_text())
         assert os.getpgid(child_pid) == process.pid
         _supervisor({"server": process}).shutdown()
         deadline = time.monotonic() + 2
-        while psutil.pid_exists(child_pid) and psutil.Process(child_pid).status() != psutil.STATUS_ZOMBIE:
+        while _running(child_pid):
             assert time.monotonic() < deadline
             time.sleep(0.01)
     finally:
