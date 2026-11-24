@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -467,6 +468,51 @@ async def test_a_failed_judge_call_is_a_judge_failure_not_a_wrong_answer(tmp_pat
         await _grade(client, tmp_path)
 
     assert is_judge_failure(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_criterion_stops_the_other_criteria_judge_calls(tmp_path: Path) -> None:
+    cancelled = 0
+
+    async def post(**kwargs):
+        nonlocal cancelled
+        if "Criterion 0" in json.dumps(kwargs.get("json")):
+            # Let the other criteria reach their own judge calls first.
+            await asyncio.sleep(0.05)
+            raise ConnectionError("judge unreachable")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled += 1
+            raise
+
+    client = MagicMock()
+    client.post = post
+
+    with pytest.raises(Exception) as raised:
+        await asyncio.wait_for(
+            grade_apex_output(
+                server_client=client,
+                model_server_name="apex_judge_model",
+                task_id="task-1",
+                world_id="world-1",
+                instruction="Do the task",
+                response="Done",
+                rubric=[{"verifier_id": f"v{index}", "criteria": f"Criterion {index}"} for index in range(3)],
+                expected_output=None,
+                artifact_changes=[],
+                final_root=tmp_path,
+                judge_model="judge",
+                judge_create_params_overrides=None,
+                judge_context_window_size=1_000_000,
+            ),
+            10,
+        )
+
+    # The first failure keeps its type, so the verify endpoint's judge failsafe still masks the rollout ...
+    assert is_judge_failure(raised.value)
+    # ... and no judge call outlives the grading that started it.
+    assert cancelled == 2
 
 
 @pytest.mark.asyncio

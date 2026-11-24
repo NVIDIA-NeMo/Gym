@@ -544,7 +544,17 @@ async def grade_apex_output(
             "values": values,
         }
 
-    results = await asyncio.gather(*(grade_one(index, criterion) for index, criterion in enumerate(rubric)))
+    tasks = [asyncio.ensure_future(grade_one(index, criterion)) for index, criterion in enumerate(rubric)]
+    try:
+        results = await asyncio.gather(*tasks)
+    except BaseException:
+        # gather raises the first failure and leaves the other criteria running: stop them before the caller
+        # releases its concurrency slot and deletes the scratch directory they read. The first failure keeps its
+        # type (not a TaskGroup's ExceptionGroup), so a judge outage still reaches the judge failsafe.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
     rubric_scores = dict(results)
     passed_count = sum(score["score"] >= 0.99 for score in rubric_scores.values())
     total_count = len(rubric_scores)

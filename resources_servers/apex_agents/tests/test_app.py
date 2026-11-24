@@ -151,12 +151,48 @@ async def test_verify_returns_saved_snapshots_when_grading_fails(monkeypatch, tm
     result = await _server(artifact_output_dir=str(tmp_path / "saved")).verify(_body())
 
     assert result.reward == 0.0
+    # The verifier failed, not the policy: masked, not a scored 0.
+    assert result.mask_sample is True
+    assert result.model_dump()["failure_kind"] == "verifier_error"
+    assert result.model_dump()["evaluation_completed"] is False
     assert result.invalid_judge_response is True
     assert result.verifier_error == "judge unavailable"
     assert Path(result.initial_snapshot_path).is_file()
     assert Path(result.final_snapshot_path).is_file()
     grading = json.loads((Path(result.artifact_output_dir) / "grading.json").read_text())
     assert grading["error"] == "judge unavailable"
+
+
+def _snapshot_with_files(count: int) -> str:
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        for index in range(count):
+            archive.writestr(f"filesystem/file_{index}.txt", "x")
+    return base64.b64encode(output.getvalue()).decode("ascii")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("over_limit", "masked"), [("final", False), ("initial", True)])
+async def test_a_snapshot_over_its_limit_is_the_policy_s_zero_only_for_the_final_snapshot(
+    monkeypatch, over_limit: str, masked: bool
+) -> None:
+    async def judge(**_kwargs):
+        raise AssertionError("an over-limit snapshot is not graded")
+
+    monkeypatch.setattr("resources_servers.apex_agents.app.grade_apex_output", judge)
+    server = _server()
+    server.config.max_artifact_files = 2
+    body = _body()
+    field = "artifact_snapshot_b64" if over_limit == "final" else "initial_artifact_snapshot_b64"
+    setattr(body, field, _snapshot_with_files(3))
+
+    result = (await server.verify(body)).model_dump()
+
+    # The policy wrote the final snapshot; the world and the task files make the initial one.
+    assert result["reward"] == 0.0
+    assert result["mask_sample"] is masked
+    assert result.get("failure_kind") == ("verifier_error" if masked else None)
+    assert "limit is 2" in result["verifier_error"]
 
 
 @pytest.mark.asyncio

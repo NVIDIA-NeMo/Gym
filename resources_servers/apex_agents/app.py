@@ -23,6 +23,7 @@ from starlette.responses import FileResponse
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config import ModelServerRef
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -35,6 +36,7 @@ from nemo_gym.server_runtime import (
 from nemo_gym.verification import VerifierFixture
 from nemo_gym.verification.judge import is_judge_failure, is_judge_provider_stop
 from resources_servers.apex_agents.artifacts import (
+    SnapshotLimitError,
     safe_extract_snapshot,
     snapshot_changes,
 )
@@ -126,6 +128,10 @@ class ApexVerifyResponse(BaseVerifyResponse):
     final_snapshot_path: Optional[str] = None
     invalid_judge_response: bool = False
     verifier_error: Optional[str] = None
+
+
+class _PolicyOutputRejected(Exception):
+    """The final snapshot, which the policy's work produced, breaks a configured limit: a scored 0."""
 
 
 class ApexResourcesServer(SimpleResourcesServer):
@@ -295,8 +301,18 @@ class ApexResourcesServer(SimpleResourcesServer):
         *,
         artifact_paths: list[str] | None = None,
         persisted_output_dir: Path | None = None,
+        policy_caused: bool = False,
     ) -> ApexVerifyResponse:
+        """An ungraded verify. Masked, because the verifier, the dataset or the transfer failed, not the policy;
+        unless ``policy_caused``: the final snapshot broke a limit, which is the policy's own result and scores 0."""
         payload = body.model_dump(exclude={"initial_artifact_snapshot_b64", "artifact_snapshot_b64"})
+        if not policy_caused:
+            payload |= {
+                "mask_sample": True,
+                "evaluation_completed": False,
+                "failure_kind": VERIFIER_ERROR,
+                "failure_reason": error,
+            }
         return ApexVerifyResponse(
             **payload,
             reward=0.0,
@@ -392,13 +408,17 @@ class ApexResourcesServer(SimpleResourcesServer):
                 self.config.max_snapshot_bytes is not None
                 and len(encoded) > ((self.config.max_snapshot_bytes + 2) // 3) * 4 + 4
             ):
-                return self._failure(body, f"{name} artifact snapshot exceeds configured size limit")
+                return self._failure(
+                    body, f"{name} artifact snapshot exceeds configured size limit", policy_caused=name == "final"
+                )
             try:
                 snapshot = base64.b64decode(encoded, validate=True)
             except (binascii.Error, ValueError) as exc:
                 return self._failure(body, f"invalid {name} artifact snapshot encoding: {exc}")
             if self.config.max_snapshot_bytes is not None and len(snapshot) > self.config.max_snapshot_bytes:
-                return self._failure(body, f"{name} artifact snapshot exceeds configured size limit")
+                return self._failure(
+                    body, f"{name} artifact snapshot exceeds configured size limit", policy_caused=name == "final"
+                )
             snapshots[name] = snapshot
 
         task_prompt = ""
@@ -431,12 +451,15 @@ class ApexResourcesServer(SimpleResourcesServer):
                         max_files=self.config.max_artifact_files,
                         max_uncompressed_bytes=self.config.max_uncompressed_bytes,
                     )
-                    final_files = safe_extract_snapshot(
-                        final_archive_path,
-                        final_root,
-                        max_files=self.config.max_artifact_files,
-                        max_uncompressed_bytes=self.config.max_uncompressed_bytes,
-                    )
+                    try:
+                        final_files = safe_extract_snapshot(
+                            final_archive_path,
+                            final_root,
+                            max_files=self.config.max_artifact_files,
+                            max_uncompressed_bytes=self.config.max_uncompressed_bytes,
+                        )
+                    except SnapshotLimitError as exc:
+                        raise _PolicyOutputRejected(f"final artifact snapshot: {exc}") from exc
                     document_converter_image = self._document_converter_image()
                     changes = snapshot_changes(
                         initial_root,
@@ -488,11 +511,13 @@ class ApexResourcesServer(SimpleResourcesServer):
                     # A judge that could not be reached or gave no usable verdict did not grade the answer: the
                     # verify endpoint's judge failsafe records the rollout as judge_failed, not as a scored zero.
                     raise
+                # Anything else, an initial snapshot over its limits included, is not the policy's doing.
                 return self._failure(
                     body,
                     str(exc),
                     artifact_paths=artifact_paths,
                     persisted_output_dir=persisted_output_dir,
+                    policy_caused=isinstance(exc, _PolicyOutputRejected),
                 )
 
         payload = body.model_dump(exclude={"initial_artifact_snapshot_b64", "artifact_snapshot_b64"})

@@ -52,6 +52,10 @@ class ArtifactChange:
     embedded_images_new: list[dict[str, Any]] | None = None
 
 
+class SnapshotLimitError(ValueError):
+    """A snapshot breaks a content limit: too many files, too many bytes, or a link."""
+
+
 def safe_extract_snapshot(
     archive_path: Path,
     output_dir: Path,
@@ -65,7 +69,7 @@ def safe_extract_snapshot(
     with zipfile.ZipFile(archive_path) as archive:
         members = [member for member in archive.infolist() if not member.is_dir()]
         if len(members) > max_files:
-            raise ValueError(f"snapshot has {len(members)} files; limit is {max_files}")
+            raise SnapshotLimitError(f"snapshot has {len(members)} files; limit is {max_files}")
         for member in members:
             rel = PurePosixPath(member.filename)
             if rel.is_absolute() or ".." in rel.parts:
@@ -79,10 +83,10 @@ def safe_extract_snapshot(
                 continue
             mode = member.external_attr >> 16
             if stat.S_ISLNK(mode):
-                raise ValueError(f"snapshot links are not allowed: {member.filename!r}")
+                raise SnapshotLimitError(f"snapshot links are not allowed: {member.filename!r}")
             total_size += member.file_size
             if total_size > max_uncompressed_bytes:
-                raise ValueError(f"snapshot expands to more than {max_uncompressed_bytes} bytes")
+                raise SnapshotLimitError(f"snapshot expands to more than {max_uncompressed_bytes} bytes")
             target = output_dir.joinpath(*rel.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(member) as source, target.open("wb") as destination:
