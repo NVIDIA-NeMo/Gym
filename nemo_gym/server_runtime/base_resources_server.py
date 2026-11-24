@@ -161,8 +161,8 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     expose_tools_over_mcp: bool = False
     mcp_server_name: Optional[str] = Field(
         default=None,
-        # Harnesses name its tools after it (Pi mcp__<name>__<tool>, OpenCode <name>_<tool>), so it takes the
-        # alphabet of the tools' own names.
+        # Harnesses name its tools after it (Pi and OpenCode <name>_<tool>, mini-SWE mcp__<name>__<tool>), so it
+        # takes the alphabet of the tools' own names.
         pattern=r"^[A-Za-z0-9_-]+$",
         description="The name the MCP endpoint lists itself under in /seed_session's MCP metadata, which clients "
         "name its tools by (default: this server's name): letters, digits, '_' and '-', starting with a letter "
