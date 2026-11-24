@@ -1,0 +1,32 @@
+name: beaver
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Text-to-SQL on BEAVER's enterprise data warehouses (default 300 dw questions, sampling seed 77, schema-only
+  prompt), scored with BEAVER's official execution accuracy on MySQL. Binary reward; accuracy also reported without
+  empty-gold questions.
+modality: text
+licensing: MIT
+authors:
+- abelatnvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: beaver_sql
+agent_server: simple_agent
+datasets:
+- name: beaver
+  type: benchmark
+  jsonl_fpath: benchmarks/beaver/data/beaver_dw_300_seed77.jsonl
+  prepare_script: benchmarks/beaver/prepare.py
+  prompt_config: benchmarks/beaver/prompts/schema_only.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: dw
+standard_prompt_config: benchmarks/beaver/prompts/schema_only.yaml
+lifecycle: active

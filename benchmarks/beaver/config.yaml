@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BEAVER text-to-SQL benchmark: schema-only prompt, scored with BEAVER's official execution accuracy on MySQL.
+# See benchmarks/beaver/README.md for the MySQL server, the gated data and the settings.
+
+config_paths:
+- resources_servers/beaver_sql/configs/beaver_sql.yaml
+
+# Forwarded as kwargs to benchmarks/beaver/prepare.py's prepare(). Override with the Hydra `+` prefix, for example
+# `+prepare_script_args.sample=400`; the prepared file's name then changes (see prepare.output_fpath_for), so point
+# `jsonl_fpath` at it too, or use eval.sh, which does both.
+prepare_script_args:
+  domains: [dw]
+  sample: 300
+  seed: 77
+  include_evidence: true
+
+beaver_agent:
+  _inherit_from: beaver_sql_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        type: resources_servers
+        name: beaver_sql_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: beaver
+        type: benchmark
+        jsonl_fpath: benchmarks/beaver/data/beaver_dw_300_seed77.jsonl
+        prepare_script: benchmarks/beaver/prepare.py
+        prompt_config: benchmarks/beaver/prompts/schema_only.yaml
+        # Never repeat the dataset: take several rollouts per task with `--num-repeats` only.
+        num_repeats: 1
+        license: MIT
+beaver_environment_server:
+  _inherit_from: beaver_sql_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: beaver_agent

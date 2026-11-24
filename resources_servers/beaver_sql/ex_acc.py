@@ -44,10 +44,11 @@ from resources_servers.beaver_sql.setup_beaver_mysql import parse_mysql_dsn
 QUERY_TIMEOUT_S = 10.0
 CONNECTION_TIMEOUT_S = 10
 
-# Errors that mean the grader couldn't reach the data, not that the query is wrong: can't connect (2002, 2003, 2005),
-# connection lost or closed (2006, 2013, 2055), access denied (1044, 1045), unknown database (1049), connection limits
-# (1040, 1203, 1226).
-_UNAVAILABLE_ERRNOS = frozenset({1040, 1044, 1045, 1049, 1203, 1226, 2002, 2003, 2005, 2006, 2013, 2055})
+# Any failure to connect means the grader couldn't reach the data. Once the query runs, only a lost connection (2006,
+# 2013, 2055) does; every other error is the query's, scored as an empty result. That includes access denied (1044,
+# 1142): the grader's user may only read, so a query that writes, creates a temporary table or uses another database
+# fails, as it would for a read-only user anywhere.
+_CONNECTION_LOST_ERRNOS = frozenset({2006, 2013, 2055})
 # The query was stopped: by our KILL QUERY (1317) or by the server's max_execution_time (3024).
 _INTERRUPTED_ERRNOS = frozenset({1317, 3024})
 
@@ -124,11 +125,12 @@ class MySqlRunner:
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self.timeout_s = timeout_s
         self.connection_timeout_s = connection_timeout_s
+        self._clock = time.monotonic
 
     async def run(self, db_id: str, sql: str) -> QueryOutcome:
         async with self._semaphore:
             attempt = _Attempt()
-            start = time.monotonic()
+            start = self._clock()
             thread = threading.Thread(target=self._execute, args=(db_id, sql, attempt), daemon=True)
             thread.start()
             finished = await asyncio.to_thread(attempt.done.wait, self.timeout_s)
@@ -142,13 +144,13 @@ class MySqlRunner:
                     raise MySqlUnavailableError(
                         f"could not connect to MySQL within {self.timeout_s:g} s: {attempt.unavailable or 'no answer'}"
                     )
-                return QueryOutcome(status="timeout", error="timeout", seconds=time.monotonic() - start)
+                return QueryOutcome(status="timeout", error="timeout", seconds=self._clock() - start)
             await asyncio.to_thread(thread.join)
             if attempt.unavailable is not None:
                 raise MySqlUnavailableError(str(attempt.unavailable)) from attempt.unavailable
             outcome = attempt.outcome
             assert outcome is not None
-            outcome.seconds = time.monotonic() - start
+            outcome.seconds = self._clock() - start
             if outcome.status == "ok" and outcome.seconds > self.timeout_s:
                 # Finished, but after the limit: the official evaluator has already given up on it.
                 return QueryOutcome(status="timeout", error="timeout", seconds=outcome.seconds)
@@ -169,12 +171,13 @@ class MySqlRunner:
                 cur = conn.cursor()
                 # A server-side backstop for SELECTs; the client-side limit above is the one that counts.
                 cur.execute(f"SET SESSION max_execution_time = {int(self.timeout_s * 1000) + 1000}")
-                attempt.connection_id = conn.connection_id
             except Exception as e:
                 attempt.unavailable = e
                 return
             if attempt.cancelled.is_set():
+                # Connected only after the limit: the query never starts, and the caller reports the server.
                 return
+            attempt.connection_id = conn.connection_id
             try:
                 cur.execute(sql)
                 if cur.description is None:
@@ -186,7 +189,7 @@ class MySqlRunner:
             except mysql.connector.Error as e:
                 if e.errno in _INTERRUPTED_ERRNOS:
                     attempt.outcome = QueryOutcome(status="timeout", error="timeout")
-                elif e.errno in _UNAVAILABLE_ERRNOS:
+                elif e.errno in _CONNECTION_LOST_ERRNOS:
                     attempt.unavailable = e
                 else:
                     attempt.outcome = QueryOutcome(status="error", error=f"mysql {e.errno}")

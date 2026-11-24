@@ -55,6 +55,20 @@ DUMPS: Dict[str, BeaverDump] = {
 
 META_DB = "_beaver_meta"
 
+CASE_INSENSITIVE_NAMES_HELP = (
+    "BEAVER needs MySQL with case-insensitive table names: start it with --lower-case-table-names=1 (it can only be "
+    "set when the data directory is created). The dumps were made on macOS, where MySQL compares table names "
+    "case-insensitively, and many gold queries spell table names or aliases in another case: with case-sensitive "
+    "names (Linux's default), 950 of neutron's 1,017 and 15 of dw_real's 121 gold queries fail."
+)
+
+
+def require_case_insensitive_names(cur) -> None:
+    """Raise unless the server compares table names case-insensitively, as the macOS MySQL the dumps came from."""
+    cur.execute("SELECT @@lower_case_table_names")
+    if int(cur.fetchone()[0]) == 0:
+        raise RuntimeError(CASE_INSENSITIVE_NAMES_HELP)
+
 
 def parse_mysql_dsn(dsn: str) -> Dict[str, object]:
     """``mysql://user:password@host:port[/database]`` as ``mysql.connector.connect`` keyword arguments.
@@ -89,6 +103,8 @@ def ensure_beaver_dumps(cache_dir: Path, db_ids: List[str]) -> Dict[str, Path]:
 
     Every extracted dump is checked against ``DUMPS``; a mismatch (a partial extract, another revision) is an error.
     """
+    for db_id in db_ids:
+        _dump(db_id)
     cache_dir = Path(cache_dir)
     dumps_dir = cache_dir / "dumps"
     out: Dict[str, Path] = {}
@@ -228,10 +244,11 @@ def _ensure_reader(cur, admin_user: str, reader_dsn: str, db_ids: List[str]) -> 
     if not user or user == admin_user:
         logger.warning("BEAVER MySQL: grader DSN uses the loader's user %r; no read-only user is enforced", user)
         return
-    cur.execute("CREATE USER IF NOT EXISTS %s@'%%' IDENTIFIED BY %s", (user, password))
-    cur.execute("ALTER USER %s@'%%' IDENTIFIED BY %s", (user, password))
+    # The host is a parameter too: the driver's C extension leaves a literal '%%' as two characters.
+    cur.execute("CREATE USER IF NOT EXISTS %s@%s IDENTIFIED BY %s", (user, "%", password))
+    cur.execute("ALTER USER %s@%s IDENTIFIED BY %s", (user, "%", password))
     for db in (META_DB, *db_ids):
-        cur.execute(f"GRANT SELECT ON `{db}`.* TO %s@'%%'", (user,))
+        cur.execute(f"GRANT SELECT ON `{db}`.* TO %s@%s", (user, "%"))
 
 
 def ensure_beaver_mysql(cache_dir: Path, db_ids: List[str], admin_dsn: str, reader_dsn: str) -> None:
@@ -243,6 +260,7 @@ def ensure_beaver_mysql(cache_dir: Path, db_ids: List[str], admin_dsn: str, read
     conn = _connect(admin_dsn, autocommit=False)
     try:
         cur = conn.cursor()
+        require_case_insensitive_names(cur)
         _ensure_meta(cur)
         conn.commit()
         recorded = _recorded(cur)
@@ -277,6 +295,7 @@ def check_beaver_mysql(reader_dsn: str, db_ids: List[str], connection_timeout: O
     conn = _connect(reader_dsn, connection_timeout=connection_timeout)
     try:
         cur = conn.cursor()
+        require_case_insensitive_names(cur)
         try:
             cur.execute(f"SELECT db_id, dump_sha256, tables FROM `{META_DB}`.loaded")
         except Exception as e:
