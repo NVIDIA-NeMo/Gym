@@ -320,8 +320,8 @@ class DockerProvider:
         if rule != "no_network":
             raise ValueError(f"the Docker provider cannot restrict egress to a list of hosts ({rule!r})")
         run_args = _coerce_str_list(provider_options.get("run_args"), "run_args")
-        if any(arg in ("--network", "--net") or arg.startswith(("--network=", "--net=")) for arg in run_args):
-            raise ValueError("the sandbox's run_args pick a network themselves; set only network: no_network")
+        if any(arg in ("--network", "--net") or arg.startswith(("--network=", "--net=")) for arg in [*run_args, *self._create_config.extra_run_args]):
+            raise ValueError("the sandbox's run_args or provider extra_run_args pick a network themselves; set only network_access: no_network")
         if self._create_config.network == "none":
             return dict(provider_options)
         if self._create_config.network is not None:

@@ -419,7 +419,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             return None
         named = get_global_config_dict() if isinstance(cfg.sandbox_provider, str) else None
         spec = cfg.sandbox_spec
-        if spec.network not in (None, "inherit"):
+        if spec.network_access not in (None, "inherit"):
             # Its egress comes from provider_options; a typed rule dropped here would leave the provider's default.
             raise ValueError("critpt's agentic execution sandbox does not apply a typed network rule")
         # Only the fields a SandboxSpec has: SandboxConfig also carries the typed network rule's fields.

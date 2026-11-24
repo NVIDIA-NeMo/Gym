@@ -20,33 +20,33 @@ class TestSandboxConfigNetwork:
         "block",
         [
             {},
-            {"network": "inherit"},
-            {"network": "no_network"},
-            {"network": "model_only", "model_server": "policy_model"},
-            {"network": "model_and_tools", "model_server": "policy_model", "tool_servers": ["search"]},
-            {"network": "hosts_only", "allowed_hosts": ["proxy.internal"]},
-            {"network": "model_only", "model_server": "policy_model", "allowed_hosts": ["proxy.internal"]},
+            {"network_access": "inherit"},
+            {"network_access": "no_network"},
+            {"network_access": "model_only", "model_server": "policy_model"},
+            {"network_access": "model_and_tools", "model_server": "policy_model", "tool_servers": ["search"]},
+            {"network_access": "hosts_only", "allowed_hosts": ["proxy.internal"]},
+            {"network_access": "model_only", "model_server": "policy_model", "allowed_hosts": ["proxy.internal"]},
             # Without a typed rule, a provider's own network option keeps working for the deprecation release.
             {"provider_options": {"network_policy": {"defaultAction": "deny"}}},
         ],
     )
     def test_a_consistent_block_loads(self, block: dict) -> None:
-        assert SandboxConfig.model_validate(block).network == block.get("network")
+        assert SandboxConfig.model_validate(block).network_access == block.get("network_access")
 
     @pytest.mark.parametrize(
         ("block", "message"),
         [
-            ({"network": "model_only"}, "model_server"),
-            ({"network": "no_network", "model_server": "policy_model"}, "model_server"),
-            ({"network": "model_only", "model_server": "m", "tool_servers": ["t"]}, "tool_servers"),
-            ({"network": "model_and_tools", "model_server": "m"}, "tool_servers"),
-            ({"network": "hosts_only"}, "allowed_hosts"),
-            ({"network": "inherit", "allowed_hosts": ["h"]}, "allowed_hosts"),
-            ({"network": "no_network", "allowed_hosts": ["h"]}, "hosts_only"),
+            ({"network_access": "model_only"}, "model_server"),
+            ({"network_access": "no_network", "model_server": "policy_model"}, "model_server"),
+            ({"network_access": "model_only", "model_server": "m", "tool_servers": ["t"]}, "tool_servers"),
+            ({"network_access": "model_and_tools", "model_server": "m"}, "tool_servers"),
+            ({"network_access": "hosts_only"}, "allowed_hosts"),
+            ({"network_access": "inherit", "allowed_hosts": ["h"]}, "allowed_hosts"),
+            ({"network_access": "no_network", "allowed_hosts": ["h"]}, "hosts_only"),
             ({"allowed_hosts": ["h"]}, "allowed_hosts"),
-            ({"network": "no_network", "provider_options": {"network_policy": {}}}, "set only network"),
-            ({"network": "inherit", "provider_options": {"network": "none"}}, "set only network"),
-            ({"network": "open"}, "network"),
+            ({"network_access": "no_network", "provider_options": {"network_policy": {}}}, "set only network"),
+            ({"network_access": "inherit", "provider_options": {"network_access": "none"}}, "set only network"),
+            ({"network_access": "open"}, "network"),
         ],
     )
     def test_an_inconsistent_block_is_refused(self, block: dict, message: str) -> None:
@@ -111,12 +111,12 @@ class TestDockerNetworkOptions:
 
 
 class TestARuleNeverReachesASpecWithoutItsPolicy:
-    @pytest.mark.parametrize("block", [{"network": "no_network"}, {"network": "hosts_only", "allowed_hosts": ["h"]}])
+    @pytest.mark.parametrize("block", [{"network_access": "no_network"}, {"network_access": "hosts_only", "allowed_hosts": ["h"]}])
     def test_spec_alone_refuses_a_restricted_rule(self, block: dict) -> None:
         with pytest.raises(ValueError, match="OwnedSandboxes.spec"):
             SandboxConfig.model_validate(block).spec({"docker": {}}, image="image", workdir=None)
 
-    @pytest.mark.parametrize("block", [{}, {"network": "inherit"}])
+    @pytest.mark.parametrize("block", [{}, {"network_access": "inherit"}])
     def test_spec_alone_builds_an_open_or_unset_rule(self, block: dict) -> None:
         spec = SandboxConfig.model_validate({**block, "provider_options": {"volumes": ["v"]}}).spec(
             {"docker": {}}, image="image", workdir=None
@@ -125,11 +125,11 @@ class TestARuleNeverReachesASpecWithoutItsPolicy:
         assert spec.provider_options == {"volumes": ["v"]}
 
     def test_the_owners_options_replace_the_provider_options(self) -> None:
-        spec = SandboxConfig(network="no_network", provider_options={"volumes": ["v"]}).spec(
+        spec = SandboxConfig(network_access="no_network", provider_options={"volumes": ["v"]}).spec(
             {"docker": {}},
             image="image",
             workdir=None,
-            network_options={"run_args": ["--network", "none"]},
+            _network_options={"run_args": ["--network", "none"]},
         )
 
         assert spec.provider_options == {"run_args": ["--network", "none"]}
@@ -140,14 +140,17 @@ class _OwnNetwork(SandboxConfig):
 
 
 def test_a_subclass_with_its_own_network_setting_keeps_its_own_checks() -> None:
-    # The typed rule's checks would refuse allowed_hosts without a restricted rule; this subclass owns its network.
-    assert _OwnNetwork(allowed_hosts=["pypi.org"]).allowed_hosts == ["pypi.org"]
+    assert _OwnNetwork().network == "package_index"
+    with pytest.raises(ValidationError, match="allowed_hosts"):
+        _OwnNetwork(allowed_hosts=["pypi.org"])
+    with pytest.raises(ValidationError, match="cannot both be set"):
+        _OwnNetwork(network_access="no_network")
 
 
 TABLE = [
     ("opensandbox", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
     ("docker", {"inherit", "no_network"}, "same_host"),
-    ("e2b", {"inherit"}, "always"),
+    ("e2b", {"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}, "always"),
     ("openshell", {"inherit"}, "always"),
     ("daytona", {"inherit"}, "never"),
     ("apptainer", {"inherit"}, "same_host"),
@@ -204,3 +207,36 @@ class TestDockerAppliesNoNetworkOnce:
     def test_run_args_that_pick_a_network_are_refused(self, run_args) -> None:
         with pytest.raises(ValueError, match="pick a network themselves"):
             self._provider().network_options("no_network", [], {"run_args": run_args})
+
+
+@pytest.mark.parametrize("host", ["https://pypi.org/simple", "host:443", "*", "host/path", "", "bad host"])
+def test_allowed_hosts_refuses_targets_that_cannot_match(host: str) -> None:
+    with pytest.raises(ValidationError, match="bare host"):
+        SandboxConfig(network_access="hosts_only", allowed_hosts=[host])
+
+
+@pytest.mark.parametrize("host", ["pypi.org", "*.example.org", "192.0.2.1", "192.0.2.0/24", "2001:db8::/32"])
+def test_allowed_hosts_accepts_hosts_wildcards_and_ip_networks(host: str) -> None:
+    assert SandboxConfig(network_access="hosts_only", allowed_hosts=[host]).allowed_hosts == [host]
+
+
+def test_e2b_applies_restricted_rules_through_its_existing_adapter() -> None:
+    from nemo_gym.sandbox.providers.e2b.provider import E2BProvider, _network_options
+
+    provider = object.__new__(E2BProvider)
+    options = provider.network_options("hosts_only", ["pypi.org"], {"template": "harness"})
+    assert options["template"] == "harness"
+    assert _network_options(options["network_policy"]) == {"deny_out": ["0.0.0.0/0"], "allow_out": ["pypi.org"]}
+
+
+def test_docker_refuses_a_network_hidden_in_provider_run_args() -> None:
+    provider = object.__new__(DockerProvider)
+    provider._create_config = DockerCreateConfig(extra_run_args=["--network=host"])
+    with pytest.raises(ValueError, match="extra_run_args pick a network"):
+        provider.network_options("no_network", [], {})
+
+
+def test_public_spec_cannot_bypass_a_restricted_rule_with_empty_options() -> None:
+    config = SandboxConfig(network_access="hosts_only", allowed_hosts=["pypi.org"])
+    with pytest.raises(TypeError, match="network_options"):
+        config.spec({"opensandbox": {}}, image=None, workdir=None, network_options={})

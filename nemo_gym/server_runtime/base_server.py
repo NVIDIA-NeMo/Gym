@@ -317,6 +317,9 @@ class SimpleServer(BaseServer):
     routes_sessions_to_owner: ClassVar[bool] = False
     # Whether this server lends sandboxes it owns to agents, so startup refuses a provider that never reconnects.
     lends_sandboxes: ClassVar[bool] = False
+    # Config field -> provider field for blocks this server builds through OwnedSandboxes.spec().
+    # This explicit adoption declaration also makes startup validation independent of provider-field names.
+    sandbox_config_providers: ClassVar[dict[str, str]] = {}
     # The sandboxes this server owns, one OwnedSandboxes per provider field, created on first use.
     _owned_sandboxes: dict[str, "OwnedSandboxes"] = PrivateAttr(default_factory=dict)
     # Set when the shutdown sweep begins: no instance is built after it, so none is left that nothing closes.
@@ -381,44 +384,45 @@ class SimpleServer(BaseServer):
         app.router.lifespan_context = lifespan
 
     def check_sandbox_provider(self) -> None:
-        """Refuse at startup what the server's ``sandbox_provider`` cannot do for the sandboxes its config declares.
+        """Validate declared owner blocks and refuse restricted rules on servers that have not adopted them.
 
-        A server that sets ``lends_sandboxes`` is checked for lending. When ``sandbox_provider`` is the server's only
-        provider field, each typed ``SandboxConfig`` field of the config is checked for its network rule, and the
-        model and tool servers the rule allows are resolved to hosts a sandbox reaches. With several provider fields a
-        block's provider shows only where the server uses it, so its instance's first ``spec()`` checks it instead.
-        The provider's class is checked, so no provider is created here.
-
-        Raises:
-            ValueError: Naming the first need the provider cannot meet, or a server the rule cannot reach.
+        ``sandbox_config_providers`` maps each config block built through ``OwnedSandboxes.spec`` to its provider
+        field. Provider classes are checked without creating clients. Restricted blocks absent from the mapping
+        fail here, including during dry runs, instead of at a seed request.
         """
-        reference = getattr(self.config, "sandbox_provider", None)
-        if reference is None:
-            return
         from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
-        from nemo_gym.sandbox.providers.base import NETWORK_RULES
         from nemo_gym.sandbox.providers.registry import get_provider_class
         from nemo_gym.server_runtime.owned_sandboxes import check_provider, rule_hosts
 
-        provider_fields = [
-            name
+        blocks = {
+            name: value
             for name in type(self.config).model_fields
-            if name.endswith("sandbox_provider") and getattr(self.config, name) is not None
-        ]
-        blocks = []
-        if provider_fields == ["sandbox_provider"]:
-            blocks = [
-                value
-                for name in type(self.config).model_fields
-                if isinstance(value := getattr(self.config, name), SandboxConfig) and value.network in NETWORK_RULES
-            ]
-        # Nothing to check, so a server whose blocks set no typed rule does not even load its provider's module.
-        if not blocks and not self.lends_sandboxes:
+            if isinstance(value := getattr(self.config, name), SandboxConfig)
+        }
+        for name, block in blocks.items():
+            if block.network_access not in (None, "inherit") and name not in self.sandbox_config_providers:
+                raise ValueError(
+                    f"{self.config.name}.{name} sets restricted network_access but this server has not declared "
+                    "that it builds the block through OwnedSandboxes.spec() in sandbox_config_providers"
+                )
+        if not self.sandbox_config_providers and not self.lends_sandboxes:
             return
-        (provider_name,) = resolve_provider_config(reference, self._global_config())
-        check_provider(get_provider_class(provider_name), configs=blocks, lends=self.lends_sandboxes)
-        for block in blocks:
-            rule_hosts(block, self._global_config())
+        global_config = self._global_config()
+        for name, provider_field in self.sandbox_config_providers.items():
+            if name not in blocks:
+                raise ValueError(f"sandbox_config_providers names unknown SandboxConfig field {name!r}")
+            reference = getattr(self.config, provider_field, None)
+            if reference is None:
+                raise ValueError(f"sandbox_config_providers needs provider field {provider_field!r}")
+            (provider_name,) = resolve_provider_config(reference, global_config)
+            check_provider(get_provider_class(provider_name), configs=[blocks[name]])
+            rule_hosts(blocks[name], global_config)
+        if self.lends_sandboxes:
+            reference = getattr(self.config, "sandbox_provider", None)
+            if reference is None:
+                raise ValueError("lends_sandboxes needs sandbox_provider")
+            (provider_name,) = resolve_provider_config(reference, global_config)
+            check_provider(get_provider_class(provider_name), lends=True)
 
     async def aclose_sandboxes(self) -> None:
         """Stop every sandbox of every ``OwnedSandboxes`` this server created; see ``OwnedSandboxes.aclose``.

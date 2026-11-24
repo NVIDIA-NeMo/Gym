@@ -472,8 +472,8 @@ def check_provider(provider: object, *, configs: Iterable[SandboxConfig] = (), l
     that a server checks its provider without creating it."""
     for config in configs:
         # A subclass's own network setting is not a typed rule (see SandboxConfig): its server checks it.
-        if config.network in NETWORK_RULES:
-            check_network_rule(provider, config.network)
+        if config.network_access in NETWORK_RULES:
+            check_network_rule(provider, config.network_access)
     if lends:
         check_lending(provider)
 
@@ -503,12 +503,12 @@ def _suggested_rule(config: SandboxConfig) -> str:
     """The typed rule that keeps what a block without one does today, for the deprecation warning."""
     policy = config.provider_options.get("network_policy")
     if not isinstance(policy, Mapping):
-        return "network: inherit"
+        return "network_access: inherit"
     targets = [rule.get("target") for rule in policy.get("egress") or [] if isinstance(rule, Mapping)]
     if policy.get("defaultAction") == "deny" and not targets:
-        return "network: no_network"
+        return "network_access: no_network"
     if policy.get("defaultAction") == "deny":
-        return f"network: hosts_only with allowed_hosts {targets}, or model_only for a model server"
+        return f"network_access: hosts_only with allowed_hosts {targets}, or model_only for a model server"
     return "the rule closest to its network_policy (no typed rule allows by default and denies some hosts)"
 
 
@@ -754,7 +754,7 @@ class OwnedSandboxes:
         Raises:
             ValueError: If the provider cannot apply the rule, or a server's URL is one a sandbox cannot reach.
         """
-        rule = config.network
+        rule = config.network_access
         # An inline provider block with the default metadata beside the provider, all SandboxConfig.spec reads of it.
         provider_block = {self._provider_name(): {}, "default_metadata": self._default_metadata}
         if rule is None:
@@ -774,7 +774,7 @@ class OwnedSandboxes:
             workdir=workdir,
             metadata=metadata,
             files=files,
-            network_options=options,
+            _network_options=options,
         )
 
     def check_provider(self, *, configs: Iterable[SandboxConfig] = (), lends: bool = False) -> None:
