@@ -355,7 +355,8 @@ def test_startup_refuses_a_rule_that_blocks_the_tools_an_episode_grants(
 ) -> None:
     sandbox_config = _attempt_sandbox_config(network=network, tool_servers=tool_servers)
     server, client = _lending_server(_Provider(), sandbox_config=sandbox_config, **grants)
-    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": {"opensandbox": {}}})
+    provider = {"opensandbox": {"networking": {"enforces_network_policy": True}}}
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": provider})
 
     if refused:
         with pytest.raises(ValueError, match=r"does not allow \['resources'\]"):

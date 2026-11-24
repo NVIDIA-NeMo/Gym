@@ -71,6 +71,9 @@ environment_servers:
       model_server: policy_model  # the agent's model server
 ```
 
+For OpenSandbox, the example requires packet-level egress enforcement on the deployment.
+Set `networking.enforces_network_policy: true` in the OpenSandbox provider block once it enforces that policy.
+
 Each attempt then runs in one sandbox:
 
 | Step | What happens |
