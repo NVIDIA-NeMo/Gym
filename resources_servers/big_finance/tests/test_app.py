@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import hashlib
+import inspect
 import json
 import os
 import tomllib
@@ -547,6 +550,32 @@ async def test_python_exec_keeps_the_upstream_result_errors_and_timeout(
         await ScratchDirPythonExecTool(timeout_s=30).run({"code": "  "})
     with pytest.raises(ToolError, match="timed out after 1s"):
         await ScratchDirPythonExecTool(timeout_s=1).run({"code": "import time; time.sleep(30)"})
+
+
+@pytest.mark.asyncio
+async def test_python_exec_kills_the_child_when_the_call_is_cancelled(tmp_path: Path) -> None:
+    pid_file = tmp_path / "pid"
+    code = f"import os, pathlib, time; pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    call = asyncio.create_task(ScratchDirPythonExecTool(timeout_s=30).run({"code": code}))
+    for _ in range(200):
+        if pid_file.exists() and pid_file.read_text():
+            break
+        await asyncio.sleep(0.05)
+
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+
+
+def test_python_exec_copy_matches_the_pinned_upstream_run() -> None:
+    upstream = hashlib.sha256(inspect.getsource(PythonExecTool.run).encode()).hexdigest()
+    assert upstream == "2efa1fc991f8f58e913777f9ae8dbdabdf059d9553eae5a7058989b2f9aeed85", (
+        "big-finance-harness changed PythonExecTool.run. Copy the change into ScratchDirPythonExecTool.run, "
+        "then record the new hash here."
+    )
 
 
 @pytest.mark.asyncio

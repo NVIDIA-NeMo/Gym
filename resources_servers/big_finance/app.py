@@ -12,6 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# ScratchDirPythonExecTool.run is adapted from PythonExecTool.run in big_finance_harness/tools/python_exec.py of
+# https://github.com/wowowoxuan1994/big-finance-benchmark at commit dffb39459dbfc96a7b38d179fec420900d616a69
+# (Apache-2.0).
 """BigFinanceBench tools and verifier for NeMo Gym.
 
 The five tools come from a commit-pinned, tools-only BigFinanceBench package.
@@ -81,7 +85,7 @@ class ScratchDirPythonExecTool(PythonExecTool):
         if not code.strip():
             raise ToolError("code is required and must be non-empty")
 
-        with tempfile.TemporaryDirectory(prefix="big_finance_python_exec_") as workdir:
+        with tempfile.TemporaryDirectory(prefix="big_finance_python_exec_", ignore_cleanup_errors=True) as workdir:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-I",
@@ -94,9 +98,11 @@ class ScratchDirPythonExecTool(PythonExecTool):
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=self.timeout_s)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
                 raise ToolError(f"python_exec timed out after {self.timeout_s}s") from None
+            finally:
+                if proc.returncode is None:
+                    proc.kill()
+                    await proc.wait()
 
         stdout = stdout_b.decode("utf-8", errors="replace")[:PYTHON_EXEC_MAX_OUTPUT_CHARS]
         stderr = stderr_b.decode("utf-8", errors="replace")[:PYTHON_EXEC_MAX_OUTPUT_CHARS]
