@@ -21,7 +21,14 @@ SUPERVISOR = str(SUPERVISOR_SCRIPT)
 linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is required")
 
 
-def _supervise(tmp_path: Path, *command: str, timeout: str = "10", **kwargs) -> subprocess.CompletedProcess[str]:
+def _supervise(
+    tmp_path: Path,
+    *command: str,
+    timeout: str = "10",
+    cleanup_timeout: str = "0.5",
+    run_timeout: float = 20,
+    **kwargs,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             "bash",
@@ -29,7 +36,7 @@ def _supervise(tmp_path: Path, *command: str, timeout: str = "10", **kwargs) -> 
             "--timeout",
             timeout,
             "--cleanup-timeout",
-            "0.5",
+            cleanup_timeout,
             "--receipt",
             str(tmp_path / "cleanup.json"),
         ]
@@ -37,7 +44,7 @@ def _supervise(tmp_path: Path, *command: str, timeout: str = "10", **kwargs) -> 
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=20,
+        timeout=run_timeout,
         **kwargs,
     )
 
@@ -129,6 +136,7 @@ def test_natural_exit_reports_the_harness_status(tmp_path: Path, command: str, r
         "return_code": return_code,
         "error": None,
         "timed_out": False,
+        "stopped": False,
     }
 
 
@@ -174,10 +182,12 @@ def test_forced_stop_reaches_processes_that_leave_the_harness_during_the_stop(tm
     }[escape]
     (tmp_path / "worker.sh").write_text(worker)
     try:
-        # The worker touches `ready` once its trap is set. A stop that comes earlier (a slow, loaded host) kills
-        # the shell before it can spawn anything, which tests nothing, so the run is repeated with more time.
+        # The worker must install its trap before the stop, then get time to record its spawned child.
+        # The cleanup scans every process on the machine; on a busy one a few seconds can be less than one scan.
         for timeout in ("1", "4", "10"):
-            result = _supervise(tmp_path, "bash", "worker.sh", timeout=timeout, cwd=tmp_path)
+            result = _supervise(
+                tmp_path, "bash", "worker.sh", timeout=timeout, cleanup_timeout="15", run_timeout=60, cwd=tmp_path
+            )
             if (tmp_path / "ready").exists():
                 break
         assert (tmp_path / "ready").exists(), "the worker never set its trap before the stop"
@@ -254,7 +264,13 @@ def test_provider_group_kill_leaves_supervisor_alive_to_stop_the_harness(tmp_pat
         while not (tmp_path / "cleanup.json").exists():
             assert time.monotonic() < deadline, (tmp_path / "output.log").read_text()
             time.sleep(0.01)
-        assert _receipt(tmp_path) == {"cleanup_confirmed": True, "return_code": 143, "error": None, "timed_out": False}
+        assert _receipt(tmp_path) == {
+            "cleanup_confirmed": True,
+            "return_code": 143,
+            "error": None,
+            "timed_out": False,
+            "stopped": True,
+        }
         assert not _running(worker_pid)
     finally:
         if process.poll() is None:
@@ -279,7 +295,13 @@ def test_existing_stop_file_fences_the_launch(tmp_path: Path) -> None:
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert _receipt(tmp_path) == {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False}
+    assert _receipt(tmp_path) == {
+        "cleanup_confirmed": True,
+        "return_code": None,
+        "error": None,
+        "timed_out": False,
+        "stopped": True,
+    }
     assert not (tmp_path / "started").exists()
 
 
@@ -320,7 +342,13 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
         _, stderr = process.communicate(timeout=20)
         assert process.returncode == 0, stderr
         receipt = _receipt(tmp_path)
-        assert receipt == {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False}
+        assert receipt == {
+            "cleanup_confirmed": True,
+            "return_code": 0,
+            "error": None,
+            "timed_out": False,
+            "stopped": True,
+        }
         assert (tmp_path / "checkpoint").read_text() == "saved\n"
     finally:
         if process.poll() is None:
@@ -389,11 +417,23 @@ def test_expire_file_ends_the_harness_as_a_timeout(tmp_path: Path, requested: st
         assert process.returncode == 0, stderr
         receipt = _receipt(tmp_path)
         if requested == "before_launch":
-            assert receipt == {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": True}
+            assert receipt == {
+                "cleanup_confirmed": True,
+                "return_code": None,
+                "error": None,
+                "timed_out": True,
+                "stopped": False,
+            }
             assert not (tmp_path / "ready").exists()
         else:
             # Ended through the timeout path: TERM first, so the harness could save its work.
-            assert receipt == {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": True}
+            assert receipt == {
+                "cleanup_confirmed": True,
+                "return_code": 0,
+                "error": None,
+                "timed_out": True,
+                "stopped": False,
+            }
             assert (tmp_path / "checkpoint").read_text() == "saved\n"
         assert expire.exists(), "the supervisor never deletes the expire file"
     finally:
@@ -415,7 +455,13 @@ def test_stop_file_wins_over_an_expire_file_before_launch(tmp_path: Path) -> Non
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert _receipt(tmp_path) == {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False}
+    assert _receipt(tmp_path) == {
+        "cleanup_confirmed": True,
+        "return_code": None,
+        "error": None,
+        "timed_out": False,
+        "stopped": True,
+    }
     assert not (tmp_path / "started").exists()
 
 

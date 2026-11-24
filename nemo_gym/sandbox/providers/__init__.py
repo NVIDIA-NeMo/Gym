@@ -17,6 +17,7 @@
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
     ExecResult,
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
@@ -35,6 +36,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
+    SnapshotContent,
     SupportsSandboxBackgroundServices,
     SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
@@ -53,6 +55,7 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxSidecars,
     SupportsSandboxSnapshot,
     clamp_resource_requests,
+    provider_capabilities,
 )
 from nemo_gym.sandbox.providers.registry import (
     create_provider,
@@ -79,7 +82,10 @@ __all__ = [
     "SandboxSidecarSpec",
     "SandboxSnapshotError",
     "SandboxSnapshotFailedError",
+    "SandboxCapabilities",
     "SandboxSnapshotInfo",
+    "SnapshotContent",
+    "provider_capabilities",
     "SandboxSnapshotInUseError",
     "SandboxSnapshotNotFoundError",
     "SandboxSpec",
