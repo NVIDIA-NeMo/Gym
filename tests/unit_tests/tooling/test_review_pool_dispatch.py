@@ -4,6 +4,7 @@
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,11 +40,21 @@ def event(iid: object = 1355) -> dict:
 class ReviewPoolDispatchTests(unittest.TestCase):
     """Exercise the boundary between untrusted webhooks and child CI config."""
 
-    def test_invalid_payload_cannot_create_child_and_failure_blocks(self) -> None:
+    def test_review_pool_jobs_block_on_failure_and_require_code_owners(self) -> None:
+        """Every review-pool job blocks, and the child runs the pinned adapter in enforcing mode."""
+        parent = yaml.safe_load((ROOT / ".gitlab/ci/review-pools.yml").read_text())
+        child = yaml.safe_load((ROOT / ".gitlab/ci/review-pools-run.yml").read_text())
+        self.assertFalse(parent["gym-review-pools-prepare"]["allow_failure"])
+        self.assertFalse(parent["gym-review-pools"]["allow_failure"])
+        self.assertFalse(child[".gym-review-pools"]["allow_failure"])
+        script = "\n".join(child[".gym-review-pools"]["script"])
+        self.assertIn("--require-codeowners", script)
+        self.assertIn("--codeowners-fallback @nvidia-nemo/gym_maintainers", script)
+        pin = re.search(r"fetch --depth=1 origin ([0-9a-f]{40})", script).group(1)
+        self.assertIn(f"`{pin}`", (ROOT / ".gitlab/ci/README.md").read_text(), "README pin differs from the job pin")
+
+    def test_invalid_payload_cannot_create_child(self) -> None:
         """Reject malformed payloads without producing runnable child configuration."""
-        config = yaml.safe_load((ROOT / ".gitlab/ci/review-pools.yml").read_text())
-        self.assertFalse(config["gym-review-pools-prepare"]["allow_failure"])
-        self.assertFalse(config["gym-review-pools"]["allow_failure"])
         with tempfile.TemporaryDirectory() as directory:
             payload = Path(directory) / "event.json"
             output = Path(directory) / "child.json"

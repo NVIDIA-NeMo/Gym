@@ -32,11 +32,11 @@ Focused validation runs with:
 uv run pytest tests/unit_tests/tooling/test_collect_downstream_junit.py
 ```
 
-## Advisory review pools
+## Review pools
 
-Today MR webhooks run the shared adapter on protected `nv-internal-main` and
-create optional approval rules with zero required approvals. These rules expose
-eligible approvers; they do not assign the MR's Reviewers field.
+MR webhooks run the shared adapter on protected `nv-internal-main`. It creates
+optional approval rules with zero required approvals for `# suggest:` lines and
+required approval rules for enforced `.github/CODEOWNERS` lines (see below).
 
 From deployment of this configuration, a lightweight preparation job will validate
 `TRIGGER_PAYLOAD` and generate a child pipeline. Each child will lock only
@@ -52,12 +52,13 @@ flowchart LR
   Lock --> Adapter[Pinned shared adapter]
   Rules[GitHub suggestion rules and team membership] --> Adapter
   Adapter --> Pools[Optional GitLab approval pools]
+  Adapter --> Required[Required code-owner pools]
 ```
 
-The GitLab adapter pin will move to
-`8e6261cee4bb152e86ea3a5640dda99ae29b046a`
-([FW-CI-templates PR 631](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/631)).
-The adapter will skip mapped users without active Developer-or-higher project
+The GitLab adapter is pinned to
+`828755659a6f9be14bc691c1394a33b38c9f92f8`
+([FW-CI-templates PR 632](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/632),
+which adds `--require-codeowners`). The adapter skips mapped users without active Developer-or-higher project
 membership and report them in `warnings`. Missing identity mappings, empty pools,
 and attempts to replace required approval rules will still block writes. The MR
 author is excluded. The adapter will always reconcile the optional approval pools.
@@ -80,13 +81,18 @@ Both credentials are protected, masked, hidden, raw CI variables scoped to the
 | Variable | Purpose |
 | --- | --- |
 | `GH_SSO_MANAGMENT_PAT` | Read audited SSO identities, GitHub rules, and team membership. |
-| `GITLAB_REVIEW_POOLS_TOKEN` | Read project members and manage optional MR approval rules. |
+| `GITLAB_REVIEW_POOLS_TOKEN` | Read project members and manage the adapter's optional and required MR approval rules. |
 
 The protected environment permits dedicated project bot `160783`, which owns
 trigger `3236`. Webhook `283184` sends merge request events to that trigger on
 protected `nv-internal-main`. The child inherits the triggering identity and reads
 the project variables in its own `review-pools` environment; the bridge forwards
 neither pipeline nor YAML variables. CPU CI continues to select MR pipelines only.
+
+GitLab switches to MR-local approval rules when the first optional pool is
+created. Future project-level regular or any-approver rules will not automatically
+apply to those MRs. Before introducing or changing project approval requirements,
+maintainers must migrate rules on existing MRs as part of that policy change.
 
 ## Required code-owner pools
 
@@ -98,14 +104,12 @@ members of those GitHub teams. `--codeowners-fallback @nvidia-nemo/gym_maintaine
 keeps the MR gated by the maintainers when an identity or eligibility problem
 prevents resolving the exact pools; the job then fails with the problems listed and
 converges on a later run. All three review-pool jobs use `allow_failure: false`
-so a failed reconciliation is visible in the trigger pipeline. Enable "Prevent
-editing approval rules in merge requests" on the project so authors cannot remove
-the required rules.
+so a failed reconciliation is visible in the trigger pipeline.
 
-GitLab switches to MR-local approval rules when the first optional pool is
-created. Future project-level regular or any-approver rules will not automatically
-apply to those MRs. Before introducing or changing project approval requirements,
-maintainers must migrate rules on existing MRs as part of that policy change.
+Limitation: the rules are MR-local, so the MR author and Maintainers can edit them
+and no webhook reports that edit; the adapter restores them on the next MR update.
+Keep "Prevent editing approval rules in merge requests" disabled on the project:
+that setting also removes the adapter's permission to manage MR approval rules.
 
 Validate the dispatcher tests, shared adapter tests, pre-commit hooks, and expanded
 parent/child configurations with GitLab CI lint. After deployment, trigger two
