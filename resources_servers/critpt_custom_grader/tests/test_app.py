@@ -419,7 +419,7 @@ def test_the_execution_sandbox_spec_takes_only_the_fields_a_sandbox_spec_has(mak
     )
     execution = {
         "sandbox_provider": {"docker": {"create": {"network": "none"}}},
-        "sandbox_spec": {"image": "example/execution:test", "network_access": "inherit"},
+        "sandbox_spec": {"image": "example/execution:test", "network": "inherit"},
     }
     server, _, _ = make_server(answer_source="finish_tool", agentic_execution=execution)
 
@@ -429,7 +429,7 @@ def test_the_execution_sandbox_spec_takes_only_the_fields_a_sandbox_spec_has(mak
         answer_source="finish_tool",
         agentic_execution={
             **execution,
-            "sandbox_spec": {"image": "example/execution:test", "network_access": "no_network"},
+            "sandbox_spec": {"image": "example/execution:test", "network": "no_network"},
         },
     )
     with pytest.raises(ValueError, match="does not apply a typed network rule"):
