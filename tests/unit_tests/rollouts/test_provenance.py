@@ -420,6 +420,22 @@ def test_the_judge_sampling_seed_is_recorded_as_its_resources_server_reads_it(
     assert record["sampling_parameters"] == {path: {"judge_sampling_seed": seed}}
 
 
+@pytest.mark.parametrize(("configured", "limit"), [(" 16 ", 16), (None, 32)])
+def test_an_env_backed_sandbox_exec_concurrency_is_recorded(configured, limit, monkeypatch) -> None:
+    if configured is None:
+        monkeypatch.delenv("SANDBOX_EXEC_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("SANDBOX_EXEC_CONCURRENCY", configured)
+    config = OmegaConf.create(
+        {
+            "sandbox": {
+                "docker": {"exec": {"default_timeout_s": 180, "concurrency": "${oc.env:SANDBOX_EXEC_CONCURRENCY,32}"}}
+            }
+        }
+    )
+    assert provenance.build_provenance(config).concurrency_limits == {"sandbox.docker.exec": {"concurrency": limit}}
+
+
 def test_a_setting_that_cannot_be_resolved_is_left_out_without_losing_the_record(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("PROVENANCE_UNSET_LIMIT", raising=False)
     config = OmegaConf.create(
