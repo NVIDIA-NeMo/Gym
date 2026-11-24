@@ -206,7 +206,7 @@ def test_source_bundle_roundtrip_preserves_bytes_ids_and_strict_schema(source_re
     assert [json.loads(line) for line in prepared.read_text().splitlines()] == original
     params = dict(
         benchmark=PlanBenchmark(name="agentx", config_paths=[]),
-        taskset="visual_tasks",
+        taskset="opencode_multimodal_benchmarks/agentx",
         gym=PlanGym(version="test", commit=None),
     )
     assert build_eval_plan(original, **params) == build_eval_plan(original[::-1], **params)

@@ -13,7 +13,7 @@ config_paths:
 
 environment_routing_mode: taskset
 environment_server_routes:
-  "swebench:pro": swebench_pro_opencode_single_agent_turn
+  "swebench/pro": swebench_pro_opencode_single_agent_turn
 
 swebench_pro_opencode_agent_resources_server:
   _inherit_from: swebench_pro_resources_server
@@ -26,7 +26,7 @@ swebench_pro_opencode_agent_resources_server:
       datasets:
         - name: swebench_pro
           type: benchmark
-          taskset: "swebench:pro"
+          taskset: "swebench/pro"
           jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
           prepare_script: benchmarks/swebench/pro/prepare.py
           num_repeats: 3

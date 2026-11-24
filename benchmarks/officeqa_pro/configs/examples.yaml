@@ -18,7 +18,7 @@ officeqa_pro_resources_server:
         jsonl_fpath: benchmarks/officeqa_pro/data/example.jsonl
         prepare_script: benchmarks/officeqa_pro/prepare.py
         num_repeats: 1
-        taskset: officeqa_pro_examples
+        taskset: "officeqa_pro:examples"
         license: Apache 2.0
 environment_server_routes:
-  officeqa_pro_examples: officeqa_pro_environment_server
+  "officeqa_pro:examples": officeqa_pro_environment_server

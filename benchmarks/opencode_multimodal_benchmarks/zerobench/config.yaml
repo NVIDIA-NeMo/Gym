@@ -19,7 +19,7 @@ opencode_multimodal_benchmarks:
         - Pillow
         - pyarrow
         num_repeats: 5
-        taskset: visual_tasks
+        taskset: opencode_multimodal_benchmarks/zerobench
 visual_environment:
   environment_servers:
     single_agent_turn:
@@ -35,4 +35,4 @@ visual_environment:
 
 environment_routing_mode: taskset
 environment_server_routes:
-  visual_tasks: visual_environment
+  opencode_multimodal_benchmarks/zerobench: visual_environment

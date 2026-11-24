@@ -99,7 +99,7 @@ def test_pairing_manifest_and_task_data_are_consumable(monkeypatch, harness):
             task = TaskData(task=row["task"])
             params = row["responses_create_params"]
         else:
-            assert row["task_id"]["taskset"] == f"mm-coding:{harness}"
+            assert row["task_id"]["taskset"] == f"mm_coding_{harness}"
             parsed = SingleAgentTurnTaskInput.model_validate(row["task_input"])
             task = TaskData.model_validate(parsed.task_data)
             params = parsed.responses_create_params.model_dump()
