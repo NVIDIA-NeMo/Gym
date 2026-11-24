@@ -172,7 +172,7 @@ async def test_an_attempt_borrows_one_model_only_sandbox_for_its_turn_and_its_ve
     assert server.sandboxes.keys == []
 
 
-async def test_a_sandbox_the_resources_seed_lends_is_lent_on_and_none_is_started() -> None:
+async def test_a_resources_server_that_lends_a_sandbox_of_its_own_fails_the_attempt_and_none_is_started() -> None:
     server, client = _lending_server(None)
     resources_access = {
         "connection": {"kind": "direct", "provider_config_ref": "task_sandboxes", "descriptor": {"id": "task"}},
@@ -182,14 +182,16 @@ async def test_a_sandbox_the_resources_seed_lends_is_lent_on_and_none_is_started
 
     result = await server.run_request(_request())
 
-    assert result.failure is None, result.failure
+    # Two owners of one attempt's sandbox is a configuration error, so retrying the attempt would not help.
+    assert result.result is None
+    assert result.failure.stage == "seed"
+    assert result.failure.terminal is True
+    assert "only borrows" in result.failure.failure_reason
+    # No agent ran, and the Resources session, which stops its own sandbox, is still closed.
+    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
     # No provider was built, not even by the cleanup that stops an attempt sandbox, and no cleanup failed.
     assert server._owned_sandboxes == {}
     assert result.failure_report is None
-    seed = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
-    assert seed.sandbox_access.connection.provider_config_ref == "task_sandboxes"
-    verify_body = next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
-    assert NG_SANDBOX_ACCESS_KEY not in verify_body
 
 
 async def test_a_sandbox_that_cannot_start_fails_the_attempt_for_a_retry_before_the_agent_runs() -> None:

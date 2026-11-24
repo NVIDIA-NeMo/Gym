@@ -538,8 +538,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     ) -> CleanupHandle | None:
         """Seed the episode's resources and tool server sessions, then its agent session with what they lent.
 
-        When the resources seed lends no sandbox and ``sandbox_provider`` is set, this server starts the attempt's
-        sandbox and lends it to the agent instead.
+        With ``sandbox_provider`` set, this server owns the attempt's sandbox: it starts it and lends it to the agent,
+        and a resources seed that lends a sandbox of its own fails the attempt, since a Resources Server only borrows.
+        Without it, a sandbox the resources seed lends is lent on to the agent.
         ``register_agent_cleanup`` runs before the agent seed, so a lost agent seed reply is still closed;
         its result is returned.
         An episode whose agent holds resources MCP grants restarts after a crash
@@ -547,9 +548,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         one that grants a tool server's MCP tools, or borrows a sandbox this server started, always does.
         """
         seed = await self._seed_resources(request, handles)
+        if seed.sandbox_access is not None and self.config.sandbox_provider is not None:
+            raise self._failure(
+                stage="seed",
+                failure_reason=(
+                    f"Resources Server {self.config.resources_server.name!r} lent a sandbox, but Environment Server "
+                    f"{self.config.name!r} starts the attempt's sandbox itself (sandbox_provider is set); a "
+                    "Resources Server only borrows the sandbox the Environment Server lends"
+                ),
+                terminal=True,
+            )
         tool_accesses = await self._seed_tool_servers(request, handles)
         sandbox_access = None
-        if seed.sandbox_access is None and self.config.sandbox_provider is not None:
+        if self.config.sandbox_provider is not None:
             sandbox_access = await self._start_attempt_sandbox(request, handles)
         registered = register_agent_cleanup() if register_agent_cleanup is not None else None
         await self._seed_agent(request, handles, seed, tool_accesses, sandbox_access=sandbox_access)
