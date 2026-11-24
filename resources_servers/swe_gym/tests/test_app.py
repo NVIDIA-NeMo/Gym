@@ -18,6 +18,8 @@ These cover the parts that decide whether a task counts as resolved and what rea
 sandbox lifecycle itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -250,6 +252,31 @@ class TestBuildEvalScript:
     def test_propagates_the_test_exit_code(self) -> None:
         script = build_eval_script(_inputs())
         assert script.rstrip().endswith("exit $__test_exit")
+
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+    @pytest.mark.parametrize(("ending", "exit_code"), [("false", 1), ("exit 3", 3)])
+    def test_a_runner_s_stderr_and_own_exit_stay_inside_the_markers(self, tmp_path, ending, exit_code) -> None:
+        """A runner that reports on stderr is graded, and a runner's own `exit` still closes the markers."""
+        inputs = _inputs()
+        runner = f"echo 'PASSED tests/a.py::test_out'; echo 'PASSED tests/a.py::test_err' >&2; {ending}"
+        script = build_eval_script(inputs).replace("/tmp/", f"{tmp_path}/")
+        script = script.replace(pytest_command(inputs.repo, inputs.version, inputs.test_patch), runner)
+        start = script.index(f'echo "{TEST_OUTPUT_BEGIN}"')
+        end = script.index(f'echo "{TEST_OUTPUT_END}"') + len(f'echo "{TEST_OUTPUT_END}"')
+        result = subprocess.run(
+            ["bash", "-c", script[start:end] + "\nexit $__test_exit"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            timeout=30,
+        )
+        output = result.stdout + ("\n" + result.stderr if result.stderr else "")
+        assert TEST_OUTPUT_END in result.stdout
+        assert parse_log_pytest(slice_test_output(output)) == {
+            "tests/a.py::test_out": "PASSED",
+            "tests/a.py::test_err": "PASSED",
+        }
+        assert result.returncode == exit_code
 
 
 class TestVerificationFiles:

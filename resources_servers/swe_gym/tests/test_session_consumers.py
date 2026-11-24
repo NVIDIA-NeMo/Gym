@@ -410,7 +410,7 @@ async def test_an_interrupted_grading_after_a_failed_extraction_grades_the_same_
     body = verify_type.model_validate(fixtures._VERIFY)
 
     interrupted = asyncio.create_task(server.verify(request, body))
-    await grading_started.wait()
+    await asyncio.wait_for(grading_started.wait(), timeout=5)
     interrupted.cancel()
     with pytest.raises(asyncio.CancelledError):
         await interrupted
@@ -513,7 +513,9 @@ def test_a_row_without_its_grading_spec_is_masked_without_grading(consumer, epis
     module.run_verification.assert_not_awaited()
 
 
-@pytest.mark.parametrize("outcome", ["tests_failed", "patch_does_not_apply", "git_failed_on_the_agent_repo"])
+@pytest.mark.parametrize(
+    "outcome", ["tests_failed", "patch_does_not_apply", "empty_patch", "git_failed_on_the_agent_repo"]
+)
 def test_the_patch_s_own_failures_stay_a_trained_zero(consumer, outcome):
     module, fixtures, server, sandboxes, _ = consumer
     verification_result = type(module.run_verification.return_value)
@@ -523,6 +525,10 @@ def test_the_patch_s_own_failures_stay_a_trained_zero(consumer, outcome):
         module.run_verification.return_value = verification_result(
             True, False, False, None, "", "patch does not apply"
         )
+    elif outcome == "empty_patch":
+        capture = type(module.capture_model_patch.return_value)
+        module.capture_model_patch.return_value = capture.static("", "worktree", "worktree")
+        module.run_verification.return_value = verification_result(True, False, True, {"resolved": False}, "FAILED")
     else:
         # A repository the agent damaged: git itself exits non-zero, so the empty patch is graded.
         module.capture_model_patch.side_effect = CaptureCommandError(
@@ -537,6 +543,8 @@ def test_the_patch_s_own_failures_stay_a_trained_zero(consumer, outcome):
     assert not result["mask_sample"] and result["failure_kind"] is None
     assert result["evaluation_completed"] and result["reward"] == 0
     module.run_verification.assert_awaited_once()
+    if outcome == "empty_patch":
+        assert module.run_verification.await_args.kwargs["inputs"].patch == ""
 
 
 @pytest.mark.parametrize("episode", [True, False], ids=["episode", "agent_run"])
