@@ -1156,6 +1156,13 @@ def test_provider_configuration_resolves_defaults_and_metadata(tmp_path, named: 
     server = MCPAtlasResourcesServer(config=config, server_client=client)
     assert server._backend.pool.sandbox_provider == provider
     assert server._backend.pool.sandbox_metadata == {"team": "atlas"}
+    # The record names the local image without its host path.
+    assert server._backend.provenance(None) == {
+        "backend": "scale_live",
+        "sandbox_image": "atlas.sif",
+        "sandbox_provider": "apptainer",
+        "development_mode": True,
+    }
 
 
 @pytest.mark.parametrize("service_failure", [False, True])

@@ -281,9 +281,13 @@ class ScaleLiveBackend(MCPAtlasBackend):
         return ToolOutcome.MODEL_RESULT
 
     def provenance(self, handle: AtlasSandbox | None) -> dict[str, Any]:
+        image = self.config.sandbox_image or None
+        if image is not None and os.path.isabs(image):
+            # A local development image: its name identifies it; its host path is not part of the record.
+            image = os.path.basename(image)
         record: dict[str, Any] = {
             "backend": self.name,
-            "sandbox_image": self.config.sandbox_image or None,
+            "sandbox_image": image,
             "sandbox_provider": self.provider_name,
             "development_mode": self.config.sandbox_development_mode,
         }
