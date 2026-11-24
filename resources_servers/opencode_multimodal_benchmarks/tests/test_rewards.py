@@ -305,6 +305,40 @@ def test_unfinished_tool_without_a_rollout_timeout_stays_unusable(status, root):
     assert not isinstance(raised.value, RolloutTimeoutToolEvidence)
 
 
+def test_unusable_tool_evidence_wins_over_a_tool_cut_by_the_rollout_timeout():
+    from nemo_gym.trajectory import TrajectoryRecord
+    from resources_servers.opencode_multimodal_benchmarks.rewards import (
+        RolloutTimeoutToolEvidence,
+        ToolEvidenceError,
+        trajectory_tool_reward,
+    )
+
+    response = tool_response()
+    output = response.model_dump()["output"]
+    response = type(response).model_validate(
+        response.model_dump()
+        | {"output": [call("bash-0"), {"type": "function_call_output", "call_id": "bash-0", "output": "cut"}, *output]}
+    )
+    tool_calls = [
+        {
+            "invocation_id": "root",
+            "tool_call_id": call_id,
+            "native_tool_call_id": call_id,
+            "span_id": f"span-{call_id}",
+            "tool_name": "bash",
+            "status": status,
+        }
+        for call_id, status in (("bash-0", "incomplete"), ("bash-1", "unknown"))
+    ]
+    record = TrajectoryRecord.model_validate(
+        trajectory(root=_ROLLOUT_TIMEOUT).model_dump(mode="json") | {"tool_calls": tool_calls}
+    )
+
+    with pytest.raises(ToolEvidenceError, match="Unfinished") as raised:
+        trajectory_tool_reward(response, record, 0, bonus_config())
+    assert not isinstance(raised.value, RolloutTimeoutToolEvidence)
+
+
 def test_child_tool_cannot_supply_missing_parent_evidence():
     from resources_servers.opencode_multimodal_benchmarks.rewards import trajectory_tool_reward
 
