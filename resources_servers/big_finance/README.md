@@ -18,8 +18,11 @@ upstream harness's model-provider dependency conflicts.
 
 Routes are `/web_search`, `/edgar_search`, `/fetch_url`, `/python_exec`, and
 `/final_answer`; each accepts the upstream JSON arguments and returns the
-upstream tool string verbatim. `/seed_session`, `/verify`,
-`/aggregate_metrics`, and `/reverify_mode` follow the standard Gym protocol.
+upstream tool string verbatim. Each `python_exec` call runs in a fresh temporary
+folder, so files do not carry over to the next call. This matches the tool
+description, which says there is no persistent state between calls.
+`/seed_session`, `/verify`, `/aggregate_metrics`, and `/reverify_mode` follow
+the standard Gym protocol.
 Tool replies carry `x-nemo-gym-tool-error: false` for a successful return and
 `true` for an exception or an unconfigured tool. Failure bodies contain the error
 message. The shared agent uses this status and preserves it in rollout metadata
