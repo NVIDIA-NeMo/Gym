@@ -417,10 +417,12 @@ class RequesterTest(unittest.TestCase):
         self.assertTrue(asyncio.run(vf_env.no_tools_called(state)))
         self.assertEqual(state["requester_failed"], 1)
 
-    def test_a_broken_dated_event_ends_the_rollout_masked(self):
-        # The simulator rejects this record only when the event fires (an email must be a string).
+    def test_a_dated_event_that_fails_when_it_fires_ends_the_rollout_masked(self):
+        # Load refuses a row whose events cannot apply to its seed. An event that still fails when it fires (here put
+        # in place after setup: an email must be a string) ends the rollout masked.
+        vf_env, state = load(INFO)
         add = {"app": "hubspot", "collection": "contacts", "add": {"id": "303", "email": 5}}
-        vf_env, state = load({**INFO, "events": [{"at": "2026-03-03T08:00:00", "patch": add}]})
+        state["clock"].events.insert(0, {"at": "2026-03-03T08:00:00", "patch": add})
         call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "2026-03-04T09:00:00"}))
 
         with self.assertRaises(vf.ToolCallError):

@@ -335,24 +335,21 @@ def resolve_records(info: dict) -> list[str]:
 
     A record string names the record with that key or alias (or the sheet row with that row_id), in the seed or added
     by an event. Only a string no record answers to is read as an A1 reference to sheet rows of one tab. Returns one
-    problem per record that names nothing or more than one record (two collections, or rows of two tabs)."""
+    problem per record that names nothing or more than one record (two collections, or rows of two tabs), and one for the
+    first dated event that cannot apply."""
     seed = WorldState(**strip_none_values(info["initial_state"]))
     world, sheets = seed.model_dump(mode="json"), seed.google_sheets
     names, problems = _names(world, info.get("events") or [], sheets), []
-    # A dated event edits a record of the seed or one an earlier event added; any other target would mask only the rollouts
-    # that wait past it.
-    known = _known(_records(world, sheets))
+    # Run the dated events in time order on a copy of the seed, as a rollout that waits to the end would: an event that
+    # cannot apply (no such record, a field or an added record the schema rejects) would mask only the rollouts that
+    # wait past it.
+    scratch = copy.deepcopy(seed)
     for e in sorted(info.get("events") or [], key=lambda e: _time(e["at"])):
-        patch = e["patch"]
-        if "add" in patch:
-            known |= {
-                (patch["app"], patch["collection"], n)
-                for n in (_key(patch["app"], patch["collection"], patch["add"], sheets), str(patch["add"].get("id")))
-            }
-        elif (patch["app"], patch["collection"], str(patch["id"])) not in known:
-            problems.append(
-                f"unresolvable: event at {e['at']} targets no record {patch['id']!r} in {patch['app']}.{patch['collection']}"
-            )
+        try:
+            apply_patch(scratch, e["patch"])
+        except Exception as err:  # noqa: BLE001  any failure refuses the row, with the error
+            problems.append(f"unresolvable: event at {e['at']} does not apply: {type(err).__name__}: {err}"[:300])
+            break
     for a in info.get("assertions", []):
         if a.get("type") not in DAY_ASSERTIONS:
             continue
@@ -740,7 +737,7 @@ def load_environment(
 
         def _setup(self, state, info):
             end = info.get("period_end") or state["world"].meta.current_time.isoformat()
-            state["clock"] = Clock(state["world"], copy.deepcopy(info.get("events", [])), end)
+            state["clock"] = Clock(state["world"], copy.deepcopy(info.get("events") or []), end)
             if info.get("period_end"):
                 until = {"type": "string", "description": info["wait_until_description"]}
                 wait_tool = vf.Tool(

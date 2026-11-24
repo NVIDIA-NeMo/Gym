@@ -186,7 +186,7 @@ class ForeignKeyFirstFieldTest(unittest.TestCase):
                     "patch": {
                         "app": "slack",
                         "collection": "messages",
-                        "add": {"channel_id": "C1", "text": "Approved", "ts": "1772528400.000100"},
+                        "add": {"channel_id": "C1", "user_id": "U1", "text": "Approved", "ts": "1772528400.000100"},
                     },
                 }
             ],
@@ -713,17 +713,15 @@ def test_one_bad_row_is_refused_and_the_good_row_still_loads(name):
     assert len(vf_env.dataset) == 1
 
 
-def test_a_row_with_null_events_loads_like_a_row_without_events():
-    # Upstream strips null values from a row before a rollout, so `events: null` runs as a row with no events.
-    rows = [{"responses_create_params": {"input": PROMPT}, "info": {**copy.deepcopy(SINGLE_DAY), "events": None}}]
-    with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:
-        f.write("".join(json.dumps(r) + "\n" for r in rows))
-        f.flush()
-        vf_env = env.load_environment(
-            tasks_path=f.name, requester_base_url="http://127.0.0.1:9/v1", requester_model="m"
-        )
+def test_a_row_with_null_events_is_set_up_and_scored_like_a_row_without_events():
+    # A generator writing a uniform schema keeps the key with a null value: the row loads, and its rollouts run as a
+    # row without events (setup_state, not only the load).
+    vf_env, state = load({**copy.deepcopy(SINGLE_DAY), "events": None})
 
     assert len(vf_env.dataset) == 1
+    assert not state.get("env_row_invalid")
+    state["clock"].fetch(**PROMOTE)
+    assert env.reward(state) == 1.0
 
 
 # F2: a sheet column named "Timestamp" is a cell the agent writes, not a field the simulator stamps.
@@ -798,6 +796,29 @@ def test_an_event_on_a_record_the_seed_never_had_is_refused_or_masked_before_the
     # Neither: a rollout that never waits past the event is scored as if the row were sound.
     state["clock"].fetch(**PROMOTE)
     assert state.get("env_row_invalid") == 1, f"row loaded and scored without waiting: reward {env.reward(state)}"
+
+
+# A dated event that cannot apply (fields outside `set`, an added record the schema rejects) is known before any
+# rollout: refused at load, not left for only the rollouts that wait past it.
+BROKEN_EVENTS = {
+    "id patch with fields at top level, no set": {
+        "at": "2026-03-04T08:00:00",
+        "patch": {"app": "hubspot", "collection": "contacts", "id": "1010", "lifecyclestage": "opportunity"},
+    },
+    "added hubspot deal without its required dealstage": {
+        "at": "2026-03-04T08:00:00",
+        "patch": {"app": "hubspot", "collection": "deals", "add": {"id": "d1", "dealname": "Renewal"}},
+    },
+}
+
+
+@pytest.mark.parametrize("name", list(BROKEN_EVENTS))
+def test_an_event_that_cannot_apply_is_refused_at_load(name):
+    info = {**copy.deepcopy(INFO), "events": [BROKEN_EVENTS[name]]}
+
+    assert any("does not apply" in p for p in env.resolve_records(copy.deepcopy(info)))
+    with pytest.raises(ValueError):
+        load(info)
 
 
 if __name__ == "__main__":

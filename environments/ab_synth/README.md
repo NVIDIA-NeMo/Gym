@@ -69,8 +69,9 @@ there wins. An endpoint that needs a key gets it as a Bearer token, read from th
 conversation, never reasoning or tool traffic. The environment refuses to load multi-turn rows when
 `requester_base_url` or `requester_model` is unset. Each try ends after `requester_timeout_s` (default 300). A requester that still fails after
 `requester_max_tries`, or keeps calling tools after its tool budget, ends the episode and sets the `requester_failed`
-metric. A dated event that cannot be applied (a missing record, an invalid field) does the same, since it is a dataset
-failure and not the agent's. An event on a record that existed and is gone (the agent, or the requester it asked,
+metric. Load runs each row's dated events in time order on a copy of its seed and refuses the row when one cannot
+apply (a missing record, a field or an added record the schema rejects). An event that still fails when it fires ends
+the episode the same way, since it is a dataset failure and not the agent's. An event on a record that existed and is gone (the agent, or the requester it asked,
 deleted it) is skipped instead, and the rollout is scored. The agent config in `config.yaml` lists
 it in `mask_sample_metrics`, so `verifiers_agent` returns that rollout with `mask_sample: true`
 (`failure_kind: verifiers_agent:requester_failed`) and the reward is not counted as a measurement.
