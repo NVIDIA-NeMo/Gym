@@ -157,6 +157,7 @@ class TestJudgeFailsafe:
             True,
         )
         assert data["_ng_failure_judge_error"] == "no verdict in 3 attempts"
+        assert data["_ng_failure_events"][data["_ng_failure_id"]]["failure_kind"] == "judge_unparseable"
 
     def test_judge_error_refuses_a_kind_no_parser_owns(self) -> None:
         with pytest.raises(ValueError, match="not a parser judge failure kind"):
