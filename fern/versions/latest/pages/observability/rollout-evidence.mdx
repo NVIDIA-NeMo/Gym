@@ -396,8 +396,10 @@ A concurrency limit, or a sampling setting among a server's own config fields, g
 as `${oc.env:MAX_REQUESTS,2}`, is recorded as the server's config reads it: Pydantic's integer or
 float coercion, so `" 6 "` and `"6.0"` record `6`, but never a boolean or a non-finite number. A
 sampling value in `extra_body`, `request_overrides` or an input row is forwarded as given, so it is
-recorded only when it already is a number or `null`; text there is left out. An input row whose
-settings cannot be written is counted in `input_sampling_rows_skipped` instead.
+recorded only when it already is a number or `null`; text there is left out. A setting that cannot
+be resolved, such as an `${oc.env:...}` reference to an unset variable without a default or a
+`???` value, is left out on its own, as is a literal `${...}` string in a submitted config. An input
+row whose settings cannot be written is counted in `input_sampling_rows_skipped` instead.
 
 `resolved_config` holds the whole resolved Gym configuration, so two results can be compared
 setting by setting. Secret-shaped keys (tokens, keys, headers, passwords, cookies) are masked as

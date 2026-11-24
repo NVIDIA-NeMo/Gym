@@ -16,6 +16,7 @@ from typing import Literal
 
 import orjson
 from omegaconf import DictConfig, ListConfig, OmegaConf
+from omegaconf.errors import InterpolationResolutionError, MissingMandatoryValue
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.config.secret_utils import is_credential_name, looks_like_secret_key, url_without_credentials
@@ -156,11 +157,24 @@ def _private(key: object) -> bool:
     return looks_like_secret_key(key) or is_credential_name(key) or name == "env" or name.endswith("env_vars")
 
 
+def _entries(config: Mapping) -> list[tuple[object, object]]:
+    """A mapping's entries, without a value OmegaConf cannot resolve, such as an unset `${oc.env:...}` or `???`."""
+    if not isinstance(config, DictConfig):
+        return list(config.items())
+    entries = []
+    for key in config.keys():
+        try:
+            entries.append((key, config[key]))
+        except (InterpolationResolutionError, MissingMandatoryValue):
+            continue
+    return entries
+
+
 def _sampling(config: Mapping, *, typed: bool = False) -> dict[str, JsonValue]:
     """Explicit nulls and numbers. With ``typed`` (a server's own config fields), a string is read as the server
     reads it; elsewhere, as in a request payload Gym forwards as given, a string is left out."""
     selected: dict[str, JsonValue] = {}
-    for key, value in config.items():
+    for key, value in _entries(config):
         if key not in _SAMPLING_KEYS:
             continue
         if typed and isinstance(value, str):
@@ -184,7 +198,7 @@ def _is_concurrency_key(key: object) -> bool:
 def _concurrency(config: Mapping) -> dict[str, int | None]:
     """Explicit nulls and integers, read as the servers' integer fields read them, but never from a boolean."""
     selected: dict[str, int | None] = {}
-    for key, value in config.items():
+    for key, value in _entries(config):
         if not _is_concurrency_key(key) or isinstance(value, bool):
             continue
         try:
@@ -199,17 +213,19 @@ def build_provenance(
 ) -> RunProvenance:
     """Snapshot model, judge, template and sampling settings. The masked config itself is saved separately."""
     record = RunProvenance(gym_commit=installed_gym_commit())
-    efb_config_ref = config.get("efb_config_ref")
+    top_level = dict(_entries(config))
+    efb_config_ref = top_level.get("efb_config_ref")
     if isinstance(efb_config_ref, str):
         record.efb_config_ref = url_without_credentials(efb_config_ref)
-    seed = config.get("seed")
+    seed = top_level.get("seed")
     if isinstance(seed, int) and not isinstance(seed, bool):
         record.seed = seed
 
     def visit(node: Mapping, path: str, keys: tuple[str, ...] = ()) -> None:
+        entries = _entries(node)
         model = {
             key: url_without_credentials(value)
-            for key, value in node.items()
+            for key, value in entries
             if key in _MODEL_KEYS and isinstance(value, str)
         }
         if model:
@@ -221,7 +237,7 @@ def build_provenance(
         concurrency = _concurrency(node)
         if concurrency:
             record.concurrency_limits[path or TOP_LEVEL_PATH] = concurrency
-        for key, value in node.items():
+        for key, value in entries:
             location = f"{path}.{key}" if path else str(key)
             if key in {"input_jsonl_fpath", "dataset_name", "dataset_id"} and isinstance(value, str):
                 record.datasets.append(url_without_credentials(value))

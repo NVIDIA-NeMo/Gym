@@ -419,6 +419,38 @@ def test_the_judge_sampling_seed_is_recorded_as_its_resources_server_reads_it(
     assert record["sampling_parameters"] == {path: {"judge_sampling_seed": seed}}
 
 
+def test_a_setting_that_cannot_be_resolved_is_left_out_without_losing_the_record(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("PROVENANCE_UNSET_LIMIT", raising=False)
+    config = OmegaConf.create(
+        {
+            "seed": "${oc.env:PROVENANCE_UNSET_LIMIT}",
+            "num_samples_in_parallel": 16,
+            "judge": {
+                "responses_api_models": {
+                    "openai_model": {
+                        "openai_model": "judge",
+                        "max_concurrent_requests": "${oc.env:PROVENANCE_UNSET_LIMIT}",
+                        "num_workers": 2,
+                        "persist_dir": "???",
+                        "extra_body": {"temperature": "${missing.temperature}", "top_p": 0.9},
+                    }
+                }
+            },
+        }
+    )
+
+    record = _write_without_probing(tmp_path / "rollouts.jsonl", config, monkeypatch)
+
+    assert record["status"] == "available"
+    assert record["seed"] is None
+    assert record["models"] == {"judge.responses_api_models.openai_model": {"openai_model": "judge"}}
+    assert record["concurrency_limits"] == {
+        provenance.TOP_LEVEL_PATH: {"num_samples_in_parallel": 16},
+        "judge.responses_api_models.openai_model": {"num_workers": 2},
+    }
+    assert record["sampling_parameters"] == {"judge.responses_api_models.openai_model.extra_body": {"top_p": 0.9}}
+
+
 def test_a_sampling_value_gym_forwards_as_given_is_recorded_only_when_it_is_a_number(
     tmp_path: Path, monkeypatch
 ) -> None:
