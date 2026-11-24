@@ -9017,6 +9017,67 @@ class TestRolloutCollection:
         written = json.loads(metrics_fpath.read_text())
         assert "perf_summary" not in written[0]
 
+    async def test_run_from_config_writes_captured_call_totals_and_incomplete_rollouts_to_the_aggregate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.models.model_call_capture import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        )
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            assert url_path == "/aggregate_metrics"
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("agent",))
+        input_fpath, output_fpath = tmp_path / "input.jsonl", tmp_path / "rollouts.jsonl"
+        input_fpath.write_bytes(
+            b"".join(
+                orjson.dumps({"responses_create_params": {"input": [], "task": task}, AGENT_REF_KEY_NAME: {"name": "agent"}})
+                + b"\n"
+                for task in ("complete", "incomplete")
+            )
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    rollout_id = f"{example[TASK_INDEX_KEY_NAME]}-0"
+                    calls = 2 if example[TASK_INDEX_KEY_NAME] == 0 else 1
+                    for index in range(calls):
+                        store.record(
+                            rollout_id,
+                            {
+                                "model_call_id": f"{rollout_id}-{index}",
+                                "dialect": "responses",
+                                "request": {},
+                                "response": {"usage": {"input_tokens": 5}},
+                            },
+                        )
+                    if example[TASK_INDEX_KEY_NAME] == 1:
+                        store.mark_incomplete(rollout_id)
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(row=example, result={"response": {}, "reward": 1.0}, rollout_latency_ms=1.0)
+                    )
+                    futures.append(future)
+                return futures
+
+        await Helper().run_from_config(
+            RolloutCollectionConfig(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath))
+        )
+
+        [entry] = orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        captured = entry["perf_summary"]["captured_calls"]
+        assert (captured["calls"], captured["rollouts_with_capture"], captured["total_rollouts"]) == (3, 2, 2)
+        assert (captured["rollouts_with_incomplete_capture"], captured["capture_complete"]) == (1, False)
+
     async def test_call_aggregate_metrics_multiple_agents(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

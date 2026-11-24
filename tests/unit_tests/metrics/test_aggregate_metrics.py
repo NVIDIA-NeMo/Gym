@@ -1549,13 +1549,13 @@ class TestCapturedCallSummary:
     """NVIDIA-NeMo/Gym#4723: run totals of captured calls, from the per-rollout ng_captured_calls summary."""
 
     @staticmethod
-    def _rollout(task: int, by_role: dict) -> dict:
+    def _rollout(task: int, by_role: dict, capture_complete: bool = True) -> dict:
         return {
             TASK_INDEX_KEY_NAME: task,
             ROLLOUT_INDEX_KEY_NAME: 0,
             "reward": 1.0,
             "response": {},
-            "ng_captured_calls": {"by_role": by_role},
+            "ng_captured_calls": {"capture_complete": capture_complete, "by_role": by_role},
         }
 
     def test_two_rollouts_with_two_and_three_calls_report_five(self) -> None:
@@ -1593,6 +1593,20 @@ class TestCapturedCallSummary:
                 "verifier": {"calls": 1, "calls_without_usage": 0, "prompt_tokens": 50},
             },
         }
+
+    def test_one_incomplete_rollout_makes_the_run_totals_a_lower_bound(self) -> None:
+        responses = [
+            self._rollout(0, {"agent": {"calls": 2, "calls_without_usage": 0}}),
+            self._rollout(1, {"agent": {"calls": 1, "calls_without_usage": 0}}, capture_complete=False),
+        ]
+
+        captured = compute_aggregate_metrics(responses).perf_summary["captured_calls"]
+
+        assert (captured["calls"], captured["rollouts_with_incomplete_capture"], captured["capture_complete"]) == (
+            3,
+            1,
+            False,
+        )
 
     def test_capture_off_reports_no_totals_rather_than_zero(self) -> None:
         responses = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}}]
