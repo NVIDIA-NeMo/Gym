@@ -9,7 +9,7 @@ verifiers use harbor-rewardkit criteria, which changes the meaning of test count
 
 ## Profiles
 
-- `terminal_bench_4/miniswe`: mini-SWE **2.4.6** `DefaultAgent`, with upstream
+- `terminal_bench_4` (`miniswe.yaml`): mini-SWE **2.4.6** `DefaultAgent`, with upstream
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
   adapter, and task-local MCP CLI, in
   [`mini_swe_agent`](../../responses_api_agents/mini_swe_agent/README.md#agent-sessions)
@@ -52,7 +52,7 @@ benchmark supplies 30 seconds. Task-specific overall deadlines remain separate.
 
 ```sh
 gym dataset pull terminal_bench_4
-gym eval run --benchmark terminal_bench_4/miniswe --sandbox opensandbox \
+gym eval run --benchmark terminal_bench_4 --sandbox opensandbox \
   --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml \
   --config DEPLOYMENT_OVERLAY.yaml \
   --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
@@ -104,7 +104,7 @@ sandbox, and an episode that runs past its bound (`harbor:task_deadline`).
 
 ### From the `/run` commands
 
-`terminal_bench_4/miniswe` keeps its name but no longer reads the `/run`
+`terminal_bench_4` no longer reads the `/run`
 profile's keys, and `++` keys merge without an error, so map them:
 
 - `++tb4_split_sandbox_endpoints=true`: a `sandbox_gpu` provider block named by

@@ -14,6 +14,7 @@
 # limitations under the License.
 """Read-only catalog for manifest-backed and legacy environments and benchmarks."""
 
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,7 @@ from omegaconf import DictConfig, ListConfig, OmegaConf
 from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.benchmarks import MANIFEST_FILENAME, _benchmark_config_name, _benchmark_config_paths
+from nemo_gym.environment.catalog_renames import RENAMED_CATALOG_NAMES, renamed_catalog_name_warning
 from nemo_gym.environment.discovery import iter_server_configs, read_config_metadata
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
@@ -33,6 +35,8 @@ from nemo_gym.environment.manifest import (
     resolve_manifest_config_path,
 )
 
+
+logger = logging.getLogger(__name__)
 
 ENVIRONMENTS_SUBDIR = "environments"
 # Written at the root of every pulled Harbor dataset (nemo_gym/data/tasks/harbor/manifest.py); discovery stops there.
@@ -377,16 +381,22 @@ def resolve_catalog_entry(
     *,
     entries: Iterable[EnvironmentCatalogEntry] | None = None,
 ) -> EnvironmentCatalogEntry:
-    """Resolve a catalog name, requiring its kind only for a cross-kind collision."""
+    """Resolve a catalog name, requiring its kind only for a cross-kind collision.
+
+    A renamed catalog name (:data:`~nemo_gym.environment.catalog_renames.RENAMED_CATALOG_NAMES`) that the catalog no
+    longer lists resolves to the name that replaced it, with a deprecation warning.
+    """
     selected_kind = _enum_value(kind)
     if selected_kind not in (None, "environment", "benchmark"):
         raise RegistryError(f"Unknown catalog kind '{selected_kind}'.")
 
+    entries = tuple(discover_environment_catalog() if entries is None else entries)
     matches = [
-        entry
-        for entry in (discover_environment_catalog() if entries is None else entries)
-        if entry.name == name and (selected_kind is None or entry.kind == selected_kind)
+        entry for entry in entries if entry.name == name and (selected_kind is None or entry.kind == selected_kind)
     ]
+    if not matches and (renamed := RENAMED_CATALOG_NAMES.get(name)) is not None:
+        logger.warning(renamed_catalog_name_warning(name, renamed))
+        return resolve_catalog_entry(renamed, selected_kind, entries=entries)
     if not matches:
         suffix = f" with kind '{selected_kind}'" if selected_kind else ""
         raise RegistryError(f"Unknown catalog entry '{name}'{suffix}.")

@@ -408,7 +408,7 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         if self._agent_ripgrep is not None and not self._agent_ripgrep.is_file():
             raise ValueError(
                 f"agent_ripgrep_path is missing: {self._agent_ripgrep}; for the benchmark, run "
-                "`gym eval prepare --benchmark deepswe/opencode`"
+                "`gym eval prepare --benchmark deepswe`"
             )
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:

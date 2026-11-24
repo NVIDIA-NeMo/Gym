@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from nemo_gym import component_search_roots
+from nemo_gym.environment.catalog_renames import RENAMED_CATALOG_NAMES, renamed_catalog_name_warning
 from nemo_gym.utils.text import did_you_mean
 
 
@@ -72,6 +73,27 @@ def _config_in_root(root: Path, flag: str, value: str, path: str, *, shadowed: b
 
 
 def asset_config_path(flag: str, value: str) -> str:
+    """Map a named asset (`name` or `name/flavor`) to its config path, following renamed catalog names.
+
+    A renamed benchmark or environment catalog name
+    (:data:`~nemo_gym.environment.catalog_renames.RENAMED_CATALOG_NAMES`) selects the config of the name that replaced
+    it, with a deprecation warning, unless it still selects a config of its own: a run preset, which it keeps
+    selecting without a warning.
+    """
+    renamed = RENAMED_CATALOG_NAMES.get(value) if flag in _CATALOG_FLAGS else None
+    if renamed is None:
+        return _config_path_by_name(flag, value)
+    replacement = asset_config_path(flag, renamed)
+    try:
+        selected = _config_path_by_name(flag, value)
+    except ValueError:
+        selected = replacement
+    if selected == replacement:
+        logger.warning(renamed_catalog_name_warning(value, renamed))
+    return selected
+
+
+def _config_path_by_name(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
     Searches the roots from :func:`~nemo_gym.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +

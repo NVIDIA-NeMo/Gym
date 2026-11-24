@@ -1,0 +1,52 @@
+name: terminal_bench_science
+version: 0.2.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: The pinned 70-task Terminal-Bench-Science v0.1 dataset in its Harbor task folders,
+  run through the Harbor environment server with separate no-network official verification.
+  Three Compose tasks are unsupported on this route and must be excluded (--exclude-tasks),
+  and two tasks whose working directory is / are refused at seed. The terminal_bench_science/miniswe_legacy_agent
+  run preset covers every task.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- gwarmstrong
+capabilities:
+- coding
+- coding/scientific_coding
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/env_feedback_interpretation
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+- knowledge
+- knowledge/expert_knowledge
+domains:
+- computer_science
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: miniswe.yaml
+harbor_target: terminal_bench_science
+resources_server: null
+agent_server: mini_swe_agent
+datasets: []
+model_server: policy_model
+canonical_split: full
+prompt_source: agent
+adopted_from:
+  source: https://github.com/harbor-framework/terminal-bench-science
+  ref: f81afac4f11048e77a15dfc8fb1dbfb897fea0ce  # pragma: allowlist secret
+  reconciled: '2026-10-23'
+lifecycle: active

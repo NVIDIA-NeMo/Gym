@@ -570,3 +570,38 @@ def test_manifest_workloads_default_to_the_discovered_catalog(tmp_path: Path, mo
     monkeypatch.setattr(registry_module, "discover_environment_catalog", lambda: (_workload("bench", "rubric"),))
 
     assert [entry.name for entry in registry_module.manifest_workloads_for_server("rubric", tmp_path)] == ["bench"]
+
+
+class TestRenamedCatalogNames:
+    def test_a_renamed_name_resolves_to_its_replacement_with_a_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from nemo_gym.environment.catalog_renames import RENAMED_CATALOG_NAMES
+
+        _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark"))
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+        monkeypatch.setitem(RENAMED_CATALOG_NAMES, "suite/opencode", "suite")
+
+        with caplog.at_level("WARNING"):
+            entry = resolve_catalog_entry("suite/opencode", "benchmark")
+
+        assert entry.name == "suite"
+        assert "Catalog name `suite/opencode` is deprecated" in caplog.text
+
+    def test_a_renamed_name_the_catalog_still_lists_is_not_followed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # A run preset keeps its path name in the catalog, as an entry without a manifest.
+        from nemo_gym.environment.catalog_renames import RENAMED_CATALOG_NAMES
+
+        _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark"))
+        preset = tmp_path / "benchmarks" / "suite" / "hermes.yaml"
+        preset.write_text("agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n")
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+        monkeypatch.setitem(RENAMED_CATALOG_NAMES, "suite/hermes", "suite")
+
+        with caplog.at_level("WARNING"):
+            entry = resolve_catalog_entry("suite/hermes", "benchmark")
+
+        assert (entry.name, entry.status, entry.config_path) == ("suite/hermes", "no-manifest", preset)
+        assert "deprecated" not in caplog.text

@@ -1,8 +1,8 @@
 # SWE-bench Pro v2
 
-The `swebench/pro_v2/opencode` benchmark runs the 642 tasks from
+The `swebench/pro_v2` benchmark runs the 642 tasks from
 [SWE-bench Pro v2.0.0](https://github.com/scaleapi/SWE-bench_Pro-os/tree/66f92766bba642462d4bbe5479e83f91f9211862/v2).
-`swebench/pro_v2_hard/opencode` runs its exact HARD-51 subset. V1 remains separately available.
+`swebench/pro_v2_hard` runs its exact HARD-51 subset. V1 remains separately available.
 
 Preparation checks upstream `SHA256SUMS`, the task image identity, the network-lock declaration,
 642/51 unique task IDs and HARD-51 membership. It preserves `instruction.md`, verifier files and

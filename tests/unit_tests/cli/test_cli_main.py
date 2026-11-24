@@ -1828,18 +1828,18 @@ class TestAgentSelector:
         [
             # The taskset routes to a single_agent_turn Environment Server that binds OpenCode.
             (
-                ["eval", "run", "--benchmark", "swebench/pro/opencode"],
+                ["eval", "run", "--benchmark", "swebench/pro"],
                 "codex_agent",
                 "swebench_pro_opencode_agent (opencode_agent)",
             ),
             (
-                ["eval", "run", "--benchmark", "swebench/pro/opencode"],
+                ["eval", "run", "--benchmark", "swebench/pro"],
                 "claude_code_agent",
                 "swebench_pro_opencode_agent (opencode_agent)",
             ),
             # `gym env start` serves the two-step flow, so it refuses the selection before starting servers too.
             (
-                ["env", "start", "--benchmark", "swebench/pro/opencode"],
+                ["env", "start", "--benchmark", "swebench/pro"],
                 "hermes_agent",
                 "swebench_pro_opencode_agent (opencode_agent)",
             ),
@@ -1852,7 +1852,7 @@ class TestAgentSelector:
             (["eval", "run", "--benchmark", "gpqa"], "hermes_agent", "gpqa_mcqa_simple_agent (simple_agent)"),
             # Selecting one benchmark's harness does not run it on the other.
             (
-                ["eval", "run", "--benchmark", "gpqa", "--benchmark", "swebench/pro/opencode"],
+                ["eval", "run", "--benchmark", "gpqa", "--benchmark", "swebench/pro"],
                 "opencode_agent",
                 "gpqa_mcqa_simple_agent (simple_agent)",
             ),
@@ -1874,7 +1874,7 @@ class TestAgentSelector:
         [
             # The taskset route already binds the selected type.
             (
-                ["eval", "run", "--benchmark", "swebench/pro/opencode"],
+                ["eval", "run", "--benchmark", "swebench/pro"],
                 "opencode_agent",
                 [],
                 ("swebench_pro_opencode_agent", "opencode_agent"),
@@ -1898,7 +1898,7 @@ class TestAgentSelector:
             ),
             # A Harbor-backed benchmark declares no datasets until `gym eval run` prepares its target.
             (
-                ["env", "start", "--benchmark", "terminal_bench_4/miniswe"],
+                ["env", "start", "--benchmark", "terminal_bench_4"],
                 "mini_swe_agent/mini_swe_agent_sandboxed",
                 [],
                 ("mini_swe_agent", "mini_swe_agent"),
@@ -1923,7 +1923,7 @@ class TestAgentSelector:
         assert "_selected_agent_config" not in resolved
 
     def test_printed_rebinding_runs_the_selected_agent(self, monkeypatch: MonkeyPatch) -> None:
-        argv = ["eval", "run", "--benchmark", "swebench/pro/opencode", "--agent-type", "codex_agent"]
+        argv = ["eval", "run", "--benchmark", "swebench/pro", "--agent-type", "codex_agent"]
         argv += ["--model-type", "vllm_model", "--allow-unsupported-pairing"]
         with pytest.raises(AgentCompositionError) as error:
             self._resolve(monkeypatch, *argv)
