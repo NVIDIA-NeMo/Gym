@@ -1,10 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 import math
+import os
+import shutil
+import stat
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -74,8 +80,10 @@ class FakeSandbox:
             for path in (module.SOLVE_LOG, module.EXIT_CODE_LOG):
                 self.files.pop(path, None)
             return SandboxExecResult(stdout="", stderr="", return_code=0)
-        if command.startswith("printf %s ") and command.endswith(f" > {module.EXIT_CODE_LOG}"):
-            self.files[module.EXIT_CODE_LOG] = command.split()[2]
+        if command.startswith("printf %s "):
+            code = command.split()[2]
+            assert command == module.exit_code_write_command(int(code)), command
+            self.files[module.EXIT_CODE_LOG] = code
             return SandboxExecResult(stdout="", stderr="", return_code=0)
         if command == "test -f /solution/solve.sh":
             return SandboxExecResult(stdout="", stderr="", return_code=0 if self.solution else 1)
@@ -180,6 +188,8 @@ RESPONSES_BODY = {"input": [{"role": "user", "content": "Create hello.txt"}]}
 
 # What every turn runs first, as root: an earlier turn's oracle.txt and exit-code.txt go.
 CLEAR_LOGS = "rm -f -- /logs/agent/oracle.txt /logs/agent/exit-code.txt"
+# What a turn whose solve.sh exited 2 runs as root afterwards: the bare code, then the file opened to every reader.
+WRITE_EXIT_CODE_2 = "printf %s 2 > /logs/agent/exit-code.txt && chmod a+r /logs/agent/exit-code.txt"
 
 
 def solve_run(sandbox: FakeSandbox) -> dict:
@@ -542,7 +552,7 @@ def test_a_failed_solution_leaves_its_exit_code_beside_oracle_txt_as_harbors_ora
     # The bare number, no newline, as root once solve.sh has returned.
     assert sandbox.files == {module.SOLVE_LOG: "half done\nboom", module.EXIT_CODE_LOG: "2"}
     commands = [call["command"] for call in sandbox.execs]
-    write = commands.index("printf %s 2 > /logs/agent/exit-code.txt")
+    write = commands.index(WRITE_EXIT_CODE_2)
     assert commands.index(solve_run(sandbox)["command"]) < write
     assert sandbox.execs[write]["user"] == TRANSFER_USER
 
@@ -604,7 +614,7 @@ def test_each_turn_on_a_sandbox_shows_only_its_own_oracle_txt_and_exit_code(monk
     assert [call["command"] for call in sandbox.execs].count(CLEAR_LOGS) == 4
 
 
-@pytest.mark.parametrize("refused", [CLEAR_LOGS, "printf %s 2 > /logs/agent/exit-code.txt"], ids=["clear", "write"])
+@pytest.mark.parametrize("refused", [CLEAR_LOGS, WRITE_EXIT_CODE_2], ids=["clear", "write"])
 def test_a_log_file_the_sandbox_refuses_is_warned_about_and_the_turn_still_reported(monkeypatch, caplog, refused):
     class Refusing(FakeSandbox):
         async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
@@ -624,6 +634,124 @@ def test_a_log_file_the_sandbox_refuses_is_warned_about_and_the_turn_still_repor
     assert payload["metadata"] == {"oracle": "failed", "oracle_return_code": "2"}
     (warning,) = [record.getMessage() for record in caplog.records if record.name == module.__name__]
     assert warning.startswith("hello: episode r1: could not") and "Read-only file system" in warning
+
+
+def test_a_lost_sandbox_on_the_exit_code_write_is_not_scored(monkeypatch):
+    """A refused write is warned about (above); a provider failure on it propagates, as on every root exec."""
+
+    class LostOnWrite(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
+            result = await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
+            if command == WRITE_EXIT_CODE_2:
+                return SandboxExecResult(stdout="", stderr="container gone", return_code=125, error_type="sandbox")
+            return result
+
+    sandbox = LostOnWrite(result=SandboxExecResult(stdout="", stderr="boom", return_code=2))
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    response = client.post("/v1/responses", json=RESPONSES_BODY)
+
+    assert response.status_code == 500, response.text
+    assert sandbox.execs[-1]["command"] == WRITE_EXIT_CODE_2
+
+
+class ShellSandbox:
+    """Run the oracle's real commands in bash under the restrictive umask a sandbox shell may have.
+
+    A command for root (``TRANSFER_USER``) or the default user runs as this process; one for a numeric ``user`` runs
+    as that uid through ``setpriv``, which needs this process to be root.
+    """
+
+    umask = 0o077
+
+    async def exec(
+        self, command, *, cwd=None, env=None, timeout_s=None, user=None, preserve_background_services=False
+    ):
+        argv = ["bash", "-c", f"umask {self.umask:03o}; {command}"]
+        if user not in (None, TRANSFER_USER):
+            argv = ["setpriv", f"--reuid={user}", f"--regid={user}", "--clear-groups", *argv]
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            env={**os.environ, **(env or {})},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
+        return SandboxExecResult(
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
+            return_code=process.returncode,
+        )
+
+    async def disconnect(self):
+        pass
+
+
+@pytest.fixture
+def shell_task(monkeypatch):
+    """A sandbox tree every user can traverse, as an image's /solution, /logs and working directory are, with a
+    solve.sh that exits 3. The oracle's paths point into it."""
+    root = Path(tempfile.mkdtemp(prefix="oracle-shell-"))
+    root.chmod(0o755)
+    for name in ("solution", "logs", "app"):
+        (root / name).mkdir(mode=0o755)
+        (root / name).chmod(0o755)
+    solve = root / "solution" / "solve.sh"
+    solve.write_text("echo half done\nexit 3\n")
+    solve.chmod(0o644)
+    monkeypatch.setattr(module, "SOLVE_SCRIPT", str(solve))
+    monkeypatch.setattr(module, "SOLVE_LOG_DIR", str(root / "logs" / "agent"))
+    monkeypatch.setattr(module, "SOLVE_LOG", str(root / "logs" / "agent" / "oracle.txt"))
+    monkeypatch.setattr(module, "EXIT_CODE_LOG", str(root / "logs" / "agent" / "exit-code.txt"))
+    yield root
+    shutil.rmtree(root)
+
+
+def run_failing_turn_in_a_shell(monkeypatch, root: Path, *, task_user: int | None) -> dict:
+    sandbox = ShellSandbox()
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    body = seed_body(user=task_user)
+    body["sandbox_access"]["workdir"] = str(root / "app")
+    assert client.post("/v1/agent_sessions", json=body).status_code == 200
+    return client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="coreutils timeout is required")
+def test_exit_code_txt_written_under_umask_077_is_readable_by_every_user(monkeypatch, shell_task):
+    """The sandbox shell's umask 077 creates exit-code.txt 0600, which a [verifier].user other than its owner cannot
+    read (the folder's chmod 777 does not change a file's mode). The real write path opens the file to every reader
+    and keeps its contents the bare number."""
+    payload = run_failing_turn_in_a_shell(monkeypatch, shell_task, task_user=None)
+
+    assert payload["metadata"] == {"oracle": "failed", "oracle_return_code": "3"}
+    exit_code = shell_task / "logs" / "agent" / "exit-code.txt"
+    assert exit_code.read_text() == "3"
+    assert stat.S_IMODE(exit_code.stat().st_mode) == 0o644
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() != 0 or shutil.which("setpriv") is None or not shutil.which("timeout"),
+    reason="switching to other users needs root and setpriv",
+)
+def test_a_non_root_verifier_user_reads_the_exact_exit_code_under_umask_077(monkeypatch, shell_task):
+    """The reviewer's case, with real users: solve.sh runs as a non-root task user and exits 3, root records the
+    code under umask 077, and a third, non-root verifier user reads exactly ``3``."""
+    task_user, verifier_user = 65534, 65533
+
+    payload = run_failing_turn_in_a_shell(monkeypatch, shell_task, task_user=task_user)
+
+    assert payload["metadata"] == {"oracle": "failed", "oracle_return_code": "3"}
+    agent_logs = shell_task / "logs" / "agent"
+    assert (agent_logs / "oracle.txt").stat().st_uid == task_user
+    assert (agent_logs / "exit-code.txt").stat().st_uid == 0
+    read = asyncio.run(
+        ShellSandbox().exec(f"cat {agent_logs / 'exit-code.txt'}", cwd="/", timeout_s=60, user=verifier_user)
+    )
+    assert (read.return_code, read.stdout, read.stderr) == (0, "3", "")
 
 
 def test_seed_requires_sandbox_access(monkeypatch):
