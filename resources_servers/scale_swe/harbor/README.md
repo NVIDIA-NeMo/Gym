@@ -57,7 +57,8 @@ missing id, a negative `--limit`, a missing folder for `--native-rows-out` or `-
 JSON, an `instance_id` that is not a folder name or starts with a dot, an empty or missing `workdir` or `image_url`, an
 `image_url` with whitespace or a control character, a `workdir` that is not an absolute path of letters, digits and
 `._@+-/`, text that is not valid UTF-8, a prompt that is not one user message, a prompt whose first line Gym would drop
-as a canary marker), and every native setting the task folders cannot reproduce: `is_verifying_golden_patch: true`,
+as a canary marker, a `responses_create_params` key other than `input` set to any value but null (an empty `tools`
+list aside), such as `temperature: 0` or `top_p: 0.4`: the agent's run configuration sets the request), and every native setting the task folders cannot reproduce: `is_verifying_golden_patch: true`,
 `enforce_agent_no_network: true`, `sandbox_config.provider_options.network_policy`,
 `sandbox_config.derive_cpu_env: false`, `evaluation_timeout: null`, a resource other than `cpu`, `memory_mib` and
 `disk_gib`, a `cpu` that is not a whole number, and an unknown `patch_capture_mode`.

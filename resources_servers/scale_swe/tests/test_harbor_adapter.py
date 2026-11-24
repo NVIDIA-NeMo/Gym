@@ -22,8 +22,10 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -229,6 +231,40 @@ def test_malformed_row_is_refused_before_writing(
     assert _convert(rows, tmp_path / "ds") == 2
     assert message in capsys.readouterr().err
     assert not (tmp_path / "ds").exists()
+
+
+@pytest.mark.parametrize(
+    "control", [{"temperature": 0}, {"top_p": 0.4}, {"parallel_tool_calls": False}, {"max_output_tokens": 64}]
+)
+def test_request_control_is_refused_before_writing(
+    tmp_path: Path, rows: Path, capsys: pytest.CaptureFixture, control: dict
+) -> None:
+    # The task cannot carry a sampling or request control (the agent's run configuration sets the request), so a
+    # row that sets one, even to a zero or false value, is refused instead of silently dropped.
+    row = _row("repo_d_pr4")
+    row["responses_create_params"].update(control)
+    with rows.open("a") as handle:
+        handle.write(json.dumps(row) + "\n")
+    assert _convert(rows, tmp_path / "ds") == 2
+    assert (
+        f"repo_d_pr4: responses_create_params.{next(iter(control))} has no task-folder form" in capsys.readouterr().err
+    )
+    assert not (tmp_path / "ds").exists()
+
+
+def test_null_request_controls_convert_unchanged(tmp_path: Path, rows: Path) -> None:
+    assert _convert(rows, tmp_path / "plain") == 0
+    changed = []
+    for line in rows.read_text().splitlines():
+        row = json.loads(line)
+        row["responses_create_params"].update(temperature=None, top_p=None, tools=[])
+        changed.append(json.dumps(row) + "\n")
+    rows.write_text("".join(changed))
+    assert _convert(rows, tmp_path / "nulls") == 0
+    # Every task file is the same; only the dataset README differs, since it records the rows file's digest.
+    nulls, plain = _tree(tmp_path / "nulls"), _tree(tmp_path / "plain")
+    assert nulls.pop("README.md") != plain.pop("README.md")
+    assert nulls == plain
 
 
 @pytest.mark.parametrize("name", [".", "..", ".hidden"])
@@ -1004,14 +1040,39 @@ def test_root_ownership_walk_handles_a_deep_tree_on_every_python(tmp_path: Path,
     assert outcome["chowned"] == _expected_chowned(entries)
 
 
+@pytest.fixture
+def scratch(tmp_path: Path) -> Iterator[Path]:
+    """The folder ``_drive`` gives the grader as its verifier, artifacts, workdir and library tree.
+
+    As root the grader really drops to the reward uid, which must traverse every ancestor of these folders, and
+    pytest's own temporary folders are private to root. A root run therefore uses a folder of its own directly under
+    the system temporary folder, open for traversal only, and removes it afterwards; other runs use ``tmp_path``.
+    """
+    if os.geteuid() != 0:
+        yield tmp_path / "scratch"
+        return
+    root = Path(tempfile.mkdtemp(prefix="ng-grade-"))
+    try:
+        root.chmod(0o755)
+        yield root / "scratch"
+    finally:
+        shutil.rmtree(root)
+
+
 def _drive(
-    tmp_path: Path, rows: Path, eval_script: str, scenario: str = "plain", *, python: str = sys.executable, **env
+    tmp_path: Path,
+    scratch: Path,
+    rows: Path,
+    eval_script: str,
+    scenario: str = "plain",
+    *,
+    python: str = sys.executable,
+    **env,
 ) -> tuple[dict, subprocess.CompletedProcess]:
     """Run grade.py's main() of a converted task in a subprocess (see ``DRIVER``) and return its outcome."""
     if not (tmp_path / "ds").exists():
         assert _convert(rows, tmp_path / "ds") == 0
     here = tmp_path / "ds" / "repo_a_pr1" / "tests" / "nemo_gym"
-    scratch = tmp_path / "scratch"
     for folder in ("artifacts", "verifier", "repo", "lib"):
         (scratch / folder).mkdir(parents=True, exist_ok=True)
     task = json.loads((here / "task.json").read_text())
@@ -1038,10 +1099,12 @@ def _drive(
 
 @pytest.mark.parametrize("python", _interpreter_params())
 @pytest.mark.parametrize("resolved", [True, False])
-def test_armed_grader_scores_a_real_run(tmp_path: Path, rows: Path, python: str, resolved: bool) -> None:
+def test_armed_grader_scores_a_real_run(
+    tmp_path: Path, scratch: Path, rows: Path, python: str, resolved: bool
+) -> None:
     # The whole path after the tests (the vendored run_verification and parser, the inline to_thread, the outputs)
     # runs under the audit hook with one real subprocess, and needs no import, no new mapping and no refused open.
-    outcome, process = _drive(tmp_path, rows, PASSING if resolved else FAILING, python=python)
+    outcome, process = _drive(tmp_path, scratch, rows, PASSING if resolved else FAILING, python=python)
     assert outcome["code"] == 0, process.stderr
     assert outcome["refused"] is None and "failing closed" not in process.stderr
     assert json.loads(outcome["reward"])["reward"] == float(resolved)
@@ -1051,28 +1114,28 @@ def test_armed_grader_scores_a_real_run(tmp_path: Path, rows: Path, python: str,
 
 
 @pytest.mark.parametrize("python", _interpreter_params())
-def test_in_place_write_to_a_mapped_file_is_refused(tmp_path: Path, rows: Path, python: str) -> None:
+def test_in_place_write_to_a_mapped_file_is_refused(tmp_path: Path, scratch: Path, rows: Path, python: str) -> None:
     # The mutation control: the tests (the eval script, same uid) try to rewrite a file the grader has mapped. The
     # protection takes its write bits and its owner, so the write fails, the mapped bytes stay, the check passes and
     # the failing run still scores 0.
-    (tmp_path / "scratch" / "lib").mkdir(parents=True)
-    target = tmp_path / "scratch" / "lib" / "mapped.bin"
+    (scratch / "lib").mkdir(parents=True)
+    target = scratch / "lib" / "mapped.bin"
     target.write_bytes(b"A" * 4096)
     attack = f"printf 'XXXXXXXX' 1<> {shlex.quote(str(target))} && echo WRITE_LANDED || echo WRITE_REFUSED\n"
-    outcome, process = _drive(tmp_path, rows, attack + FAILING, python=python, NG_TARGET="mapped.bin")
+    outcome, process = _drive(tmp_path, scratch, rows, attack + FAILING, python=python, NG_TARGET="mapped.bin")
     assert "WRITE_REFUSED" in outcome["test_output"] and "WRITE_LANDED" not in outcome["test_output"]
     assert target.read_bytes() == b"A" * 4096 and outcome["mapped_prefix"] == b"A" * 8
     assert outcome["code"] == 0 and outcome["refused"] is None, process.stderr
     assert json.loads(outcome["reward"])["reward"] == 0.0
 
 
-def test_changed_mapped_file_fails_closed(tmp_path: Path, rows: Path) -> None:
+def test_changed_mapped_file_fails_closed(tmp_path: Path, scratch: Path, rows: Path) -> None:
     # The check after the tests: a mapped file whose mode (or owner, size, mtime) changed while the tests ran means
     # the protection did not hold, so the grader exits 1 without a reward, even for a passing run. The change is made
     # in the grader process just after the tests, since the tests themselves cannot make it (the test above).
-    (tmp_path / "scratch" / "lib").mkdir(parents=True)
-    (tmp_path / "scratch" / "lib" / "mapped.bin").write_bytes(b"A" * 4096)
-    outcome, process = _drive(tmp_path, rows, PASSING, "mapped_file_changed", NG_TARGET="mapped.bin")
+    (scratch / "lib").mkdir(parents=True)
+    (scratch / "lib" / "mapped.bin").write_bytes(b"A" * 4096)
+    outcome, process = _drive(tmp_path, scratch, rows, PASSING, "mapped_file_changed", NG_TARGET="mapped.bin")
     assert outcome["code"] == 1 and outcome["reward"] is None
     assert "a file the grader has mapped changed during the tests" in process.stderr
 
@@ -1085,21 +1148,23 @@ def _file_backed_json() -> tuple[str, Path] | None:
     return None
 
 
-def test_in_place_write_to_the_mapped_json_extension_is_refused(tmp_path: Path, rows: Path) -> None:
+def test_in_place_write_to_the_mapped_json_extension_is_refused(tmp_path: Path, scratch: Path, rows: Path) -> None:
     # The review's forgery rewrote the loaded _json extension in place. Here the grader's json uses a scratch copy
     # of it, and the tests' in-place write to that copy is refused before any byte changes.
     found = _file_backed_json()
     if found is None:
         pytest.skip("no Python here has a file-backed _json extension")
     python, json_lib = found
-    lib = tmp_path / "scratch" / "lib"
+    lib = scratch / "lib"
     lib.mkdir(parents=True)
     shutil.copyfile(json_lib, lib / json_lib.name)
     original = (lib / json_lib.name).read_bytes()
     attack = (
         f"printf 'XXXXXXXX' 1<> {shlex.quote(str(lib / json_lib.name))} && echo WRITE_LANDED || echo WRITE_REFUSED\n"
     )
-    outcome, process = _drive(tmp_path, rows, attack + FAILING, "json_copy", python=python, NG_TARGET=json_lib.name)
+    outcome, process = _drive(
+        tmp_path, scratch, rows, attack + FAILING, "json_copy", python=python, NG_TARGET=json_lib.name
+    )
     assert outcome["json_file"] == str(lib / json_lib.name)
     assert "WRITE_REFUSED" in outcome["test_output"]
     assert (lib / json_lib.name).read_bytes() == original
@@ -1107,15 +1172,15 @@ def test_in_place_write_to_the_mapped_json_extension_is_refused(tmp_path: Path, 
     assert json.loads(outcome["reward"])["reward"] == 0.0
 
 
-def test_import_after_the_tests_fails_closed(tmp_path: Path, rows: Path) -> None:
+def test_import_after_the_tests_fails_closed(tmp_path: Path, scratch: Path, rows: Path) -> None:
     # A module the grader would import after the tests is one the tests could have rewritten: here they make it
     # forge json.dumps. The import is refused, so the grader exits 1 without a reward instead of writing a 1.
-    lib = tmp_path / "scratch" / "lib"
+    lib = scratch / "lib"
     lib.mkdir(parents=True)
     (lib / "standin.py").write_text("")
     forged = "import json\njson.dumps = lambda *args, **kwargs: '{\"reward\": 1.0}'\n"
     attack = f"printf '%s' {shlex.quote(forged)} > {shlex.quote(str(lib / 'standin.py'))}\n"
-    outcome, process = _drive(tmp_path, rows, attack + FAILING, "lazy_import")
+    outcome, process = _drive(tmp_path, scratch, rows, attack + FAILING, "lazy_import")
     assert "json.dumps" in (lib / "standin.py").read_text()
     assert outcome["code"] == 1 and outcome["reward"] is None
     # Refused at its first file access: the open of standin's bytecode or source (an extension module would be
@@ -1124,8 +1189,8 @@ def test_import_after_the_tests_fails_closed(tmp_path: Path, rows: Path) -> None
     assert "failing closed after the tests started" in process.stderr
 
 
-def test_exception_after_the_tests_fails_closed_never_masks(tmp_path: Path, rows: Path) -> None:
-    outcome, process = _drive(tmp_path, rows, PASSING, "raise_after_tests")
+def test_exception_after_the_tests_fails_closed_never_masks(tmp_path: Path, scratch: Path, rows: Path) -> None:
+    outcome, process = _drive(tmp_path, scratch, rows, PASSING, "raise_after_tests")
     assert outcome["code"] == 1 and outcome["code"] != 75 and outcome["reward"] is None
     assert "RuntimeError: simulated failure after the tests" in process.stderr
     # The pre-created exit record stays at 1 (the wrapper writes the real code after test.sh).
