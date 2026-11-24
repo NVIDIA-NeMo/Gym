@@ -75,8 +75,9 @@ Exit codes: 0 done; 2 a native setting or input the dataset cannot reproduce. Ex
 - a malformed row: an `instance_id` that is not a folder name (letters, digits and `._-`, not starting with `.`), an
   `image_name` that is empty or holds whitespace or a control character, an `image_name` missing from
   `--image-digests` or whose digest there is not `sha256:<64 hex>`, text that is not valid UTF-8,
-  `responses_create_params` that is not an object, `tools`, `parallel_tool_calls`, `temperature`, `top_p` or
-  `instructions` set, an input that is not exactly one user message with string content, a prompt whose first line
+  `responses_create_params` that is not an object, a `responses_create_params` key other than `input` set to any
+  value but null (an empty `tools` list aside), such as `temperature: 0`, `top_p: 0.4` or `parallel_tool_calls:
+  false` (the agent's run configuration sets the request), an input that is not exactly one user message with string content, a prompt whose first line
   Gym would drop as a canary marker;
 - every native setting the task folders cannot reproduce: golden-patch mode (`is_verifying_golden_patch: true`), the
   agent egress block (`enforce_agent_no_network: true`), `sandbox_config.provider_options.network_policy`,

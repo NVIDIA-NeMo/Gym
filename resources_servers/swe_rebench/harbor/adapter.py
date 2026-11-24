@@ -455,8 +455,11 @@ def _prompt(row: dict[str, Any]) -> str:
     params = row.get("responses_create_params") or {}
     if not isinstance(params, dict):
         raise AdapterError(f"{row.get('instance_id')}: expected responses_create_params.input to hold one message")
-    for key in ("tools", "parallel_tool_calls", "temperature", "top_p", "instructions"):
-        if params.get(key) not in (None, [], False):
+    # A request control the row sets (a sampling value such as temperature 0 or top_p 0.4, tools, instructions, a
+    # token limit) has no task-folder form: the agent's run configuration sets the request. Checked by presence, not
+    # truthiness, so a zero or false value is refused too; null, absent and an empty tool list convert.
+    for key, value in sorted(params.items()):
+        if key != "input" and value is not None and not (key == "tools" and value == []):
             raise AdapterError(f"{row.get('instance_id')}: responses_create_params.{key} has no task-folder form")
     messages = params.get("input")
     if not isinstance(messages, list) or len(messages) != 1:
