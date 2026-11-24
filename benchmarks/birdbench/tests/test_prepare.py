@@ -344,7 +344,8 @@ class TestVersions:
             ({"version": "dev_2000"}, "Unsupported version"),
             ({"version": "dev_20251106", "split": "train"}, "can't be used with split"),
             ({"prompt_format": "fancy"}, "Unsupported prompt_format"),
-            ({"prompt_format": "schema_only", "dialect": "spark"}, "SQLite only"),
+            ({"prompt_format": "schema_only", "dialect": "spark"}, "dev on SQLite only"),
+            ({"prompt_format": "schema_only", "split": "train"}, "dev on SQLite only"),
         ],
     )
     def test_bad_arguments(self, prepared, kwargs, message):

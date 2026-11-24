@@ -345,8 +345,8 @@ def prepare(
         raise ValueError(f"version selects a release of BIRD dev; it can't be used with split={split!r}")
     if prompt_format not in PROMPT_FORMATS:
         raise ValueError(f"Unsupported prompt_format {prompt_format!r}; expected one of {PROMPT_FORMATS}")
-    if prompt_format == "schema_only" and dialect != "sqlite":
-        raise ValueError("prompt_format='schema_only' is SQLite only")
+    if prompt_format == "schema_only" and (dialect != "sqlite" or split != "dev"):
+        raise ValueError("prompt_format='schema_only' is for BIRD dev on SQLite only")
     output_fpath = output_fpath_for(dialect, split, version, prompt_format)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 

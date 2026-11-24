@@ -44,7 +44,7 @@
 #   --version NAME                         Default: dev_20240627. Which release of BIRD dev's questions (dev split only):
 #                                            dev_20240627, dev_20251106, minidev_20250704 or minidev_20261028 (see
 #                                            README.md, "Versions"). All run on the same databases.
-#   --prompt-format default|schema_only    Default: default. `schema_only` (SQLite only) uses
+#   --prompt-format default|schema_only    Default: default. `schema_only` (dev, SQLite only) uses
 #                                            prompts/schema_only_sqlite.yaml, auto-ontology-eval's schema-only prompt
 #                                            (CREATE TABLE statements and column descriptions; see README.md).
 #   --concurrency N                        Default: 8. Caps concurrent in-flight requests
@@ -155,8 +155,8 @@ case "${PROMPT_FORMAT}" in
     default) FORMAT_SUFFIX="" ;;
     schema_only)
         FORMAT_SUFFIX="_schema_only"
-        if [[ "${DIALECT}" != "sqlite" ]]; then
-            echo "--prompt-format schema_only is SQLite only." >&2
+        if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
+            echo "--prompt-format schema_only is for BIRD dev on SQLite only." >&2
             exit 1
         fi
         ;;
