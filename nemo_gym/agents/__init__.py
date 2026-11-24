@@ -65,7 +65,6 @@ if TYPE_CHECKING:
     from nemo_gym.agents.testing.checkpoint_conformance import HarnessFixture, check_harness_checkpointing
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
     from nemo_gym.agents.utils.agent_context import resolve_agent_context_artifact
-    from nemo_gym.agents.utils.harness_sandbox_config import HarnessSandboxConfig
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.run_with_checkpoint_pauses import (
         LaunchFinished,
@@ -139,7 +138,6 @@ _PUBLIC_API = {
     "HARNESS_STEP_LIMIT_METADATA_KEY": "agent_outcome",
     "HarnessFixture": "testing.checkpoint_conformance",
     "HarnessPauseResult": "utils.sandbox_session",
-    "HarnessSandboxConfig": "utils.harness_sandbox_config",
     "LaunchFinished": "utils.run_with_checkpoint_pauses",
     "LaunchStopped": "utils.run_with_checkpoint_pauses",
     "NothingCapturedError": "utils.sandbox_session",

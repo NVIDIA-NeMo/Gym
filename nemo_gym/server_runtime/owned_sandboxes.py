@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """The sandboxes a server owns: their start, lending, stop and partial-rollout checkpoints.
 
-Every sandbox has one owner, the server that starts it. Each resources, environment and agent server holds an
-:class:`OwnedSandboxes` as ``SimpleServer.sandboxes`` to start, lend and stop the sandboxes it owns; servers move onto
-it one family at a time. It knows sandboxes by an opaque key, the owner's session ID or a name within it such as ``session/grader``, and nothing
-about the owner's protocol. Anyone else only borrows a sandbox, through the operate-scope access ``access`` gives.
+Every sandbox has one owner, the server that starts it. The sandbox an attempt runs in belongs to its Environment
+Server, which lends it to the agent and to the Resources Server: they only borrow it, through the operate-scope access
+``access`` gives, and never start, lend or stop it. A Resources Server owns a sandbox of its own only for a grader that
+runs code in an attempt that runs without one. Every server holds an :class:`OwnedSandboxes` as
+``SimpleServer.sandboxes`` to start, lend and stop the sandboxes it owns. Servers move onto it one family at a time,
+and onto borrowing the Environment Server's sandbox: until then, a Resources Server that lends a sandbox from its seed,
+or an agent that starts its own because nothing was lent, owns that sandbox. It knows sandboxes by an opaque key, the
+owner's session ID or a name within it such as ``session/grader``, and nothing about the owner's protocol.
 
 A sandbox is also session state outside Gym's process. An owner that checkpoints implements its participant's
 checkpoint hooks (``export_session_states`` and friends from ``nemo_gym.server_runtime._checkpoint``) by delegating
@@ -34,10 +38,10 @@ controller's release decides, through :meth:`~OwnedSandboxes.delete_snapshots`:
   service returns a snapshot's id, its file is written, before the snapshot is awaited; then the export waits until
   each snapshot is ready. A snapshot that fails or does not become ready in time is taken again, up to
   ``snapshot_attempts`` times, and every attempt is indexed. The sandbox keeps running; the episode continues in it
-  after the resume. The owner calls ``export`` only while no command uses the sandbox. A participant's prepare
-  guarantees that for a resources server whose ``checkpoint_verify`` is ``"wait"``, the default. With ``"replay"``
-  its ``/verify`` is admitted while a checkpoint is open, so an owner whose ``/verify`` runs commands in the
-  sandbox, or stops it, must keep ``checkpoint_verify`` at ``"wait"``.
+  after the resume. The owner calls ``export`` only while no command uses the sandbox, a borrower's included. A
+  participant's prepare guarantees that for a resources server whose ``checkpoint_verify`` is ``"wait"``, the
+  default. With ``"replay"`` its ``/verify`` is admitted while a checkpoint is open, so an owner whose ``/verify``
+  runs commands in the sandbox, or stops it, must keep ``checkpoint_verify`` at ``"wait"``.
 - :meth:`~OwnedSandboxes.delete_snapshots` receives every checkpoint the controller may still restore
   and deletes the snapshots indexed under any other checkpoint, removing each file once the service confirms the
   snapshot is gone. It returns only once it has tried every delete, so the participant that awaits it admits no
@@ -94,6 +98,7 @@ from typing import Any, Callable, Literal
 import anyio
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.config.global_config import SERVER_TYPE_KEYS, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
@@ -124,6 +129,7 @@ from nemo_gym.utils.network_policy import reachable_host
 
 
 LOGGER = logging.getLogger(__name__)
+__getattr__ = moved_names_getattr(__name__)
 
 # A fork that the backend answers with "snapshot not found" is retried this many times, this far apart: a snapshot
 # store that is not fully shared across the service's replicas can answer from one that has not seen it yet.
@@ -423,14 +429,14 @@ def _settle_s(spec: SandboxSpec) -> float:
 
 
 async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, **start_kwargs: Any) -> None:
-    """Start ``sandbox``; if the caller is cancelled meanwhile, let the start end and stop what it started.
+    """Let a cancelled start settle so its owner can roll back the handle under its stop limit.
 
     A provider create cut short can leave a sandbox with no handle to stop, and not every provider applies ``ttl_s``
     (Enroot does not). So a cancelled caller waits for the start, shielded through any further cancellation and
-    bounded by ``settle_s``, stops the sandbox it started, and only then lets the cancellation go on. A start still
-    running after ``settle_s`` is cancelled, and its ``ttl_s`` is all that reclaims what it made.
+    bounded by ``settle_s``, before handing cleanup back to the owner. A start still running after ``settle_s`` is
+    cancelled. If the provider never returned a handle, only its ``ttl_s`` can reclaim what it made.
     """
-    start = asyncio.ensure_future(sandbox.start(**start_kwargs))
+    start = asyncio.ensure_future(sandbox.start(_owner_rolls_back=True, **start_kwargs))
     try:
         await asyncio.shield(start)
     except asyncio.CancelledError:
@@ -443,25 +449,21 @@ async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, **start_k
                 start.cancel()
                 with anyio.move_on_after(STOP_TIMEOUT_S):
                     await asyncio.wait({start})
-            elif not start.cancelled() and start.exception() is None:
-                try:
-                    await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
-                except Exception as error:
-                    # The caller's own rollback stops it again where it still tracks the sandbox.
-                    LOGGER.warning("a sandbox started for a cancelled caller was not stopped: %r", error)
         if start.done() and not start.cancelled() and start.exception() is not None:
             # Retrieved so it is not reported as never retrieved; the caller's cancellation is what goes on.
             LOGGER.info("a cancelled caller's start failed: %r", start.exception())
         raise
 
 
-def check_network_rule(provider: object, rule: NetworkRule) -> None:
+def check_network_rule(
+    provider: object, rule: NetworkRule, *, provider_config: Mapping[str, Any] | None = None
+) -> None:
     """Refuse ``rule`` unless ``provider``, a provider or its class, can apply it when it creates a sandbox.
 
     Raises:
         ValueError: If it cannot, so no sandbox starts with open egress in place of the rule.
     """
-    capabilities = provider_capabilities(provider)
+    capabilities = provider_capabilities(provider, config=provider_config)
     expressible = rule in capabilities.network_rules and (rule == "inherit" or hasattr(provider, "network_options"))
     if not expressible:
         raise ValueError(
@@ -486,13 +488,19 @@ def check_lending(provider: object) -> None:
         )
 
 
-def check_provider(provider: object, *, configs: Iterable[SandboxConfig] = (), lends: bool = False) -> None:
+def check_provider(
+    provider: object,
+    *,
+    configs: Iterable[SandboxConfig] = (),
+    lends: bool = False,
+    provider_config: Mapping[str, Any] | None = None,
+) -> None:
     """The checks of :meth:`OwnedSandboxes.check_provider`, against a provider or its class, which startup uses so
     that a server checks its provider without creating it."""
     for config in configs:
         # A subclass's own network setting is not a typed rule (see SandboxConfig): its server checks it.
         if config.network in NETWORK_RULES:
-            check_network_rule(provider, config.network)
+            check_network_rule(provider, config.network, provider_config=provider_config)
     if lends:
         check_lending(provider)
 
@@ -568,12 +576,13 @@ def _suggested_rule(config: SandboxConfig) -> str:
     policy = config.provider_options.get("network_policy")
     if not isinstance(policy, Mapping):
         return "network: inherit"
-    targets = [rule.get("target") for rule in policy.get("egress") or [] if isinstance(rule, Mapping)]
-    if policy.get("defaultAction") == "deny" and not targets:
-        return "network: no_network"
-    if policy.get("defaultAction") == "deny":
-        return f"network: hosts_only with allowed_hosts {targets}, or model_only for a model server"
-    return "the rule closest to its network_policy (no typed rule allows by default and denies some hosts)"
+    egress = policy.get("egress", [])
+    if policy.get("defaultAction") == "deny" and isinstance(egress, (list, tuple)):
+        if not egress:
+            return "network: no_network"
+        if all(isinstance(rule, Mapping) and rule.get("action") == "allow" and rule.get("target") for rule in egress):
+            return f"network: hosts_only with allowed_hosts {[rule['target'] for rule in egress]}"
+    return "review the ordered network_policy manually before choosing a typed rule"
 
 
 def _name_of(provider: object) -> str:
@@ -762,6 +771,7 @@ class OwnedSandboxes:
         # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
         provider_config = resolve_provider_config(reference, global_config)
         concurrency = resolve_provider_owner_concurrency(reference, global_config)
+        default_metadata = resolve_provider_metadata(reference, global_config)
         state_dir = _configured_state_dir(global_config)
         server_name = _path_component(config.name, "server name")
         other_field = None if provider_field == "sandbox_provider" else _path_component(provider_field, "field")
@@ -782,7 +792,7 @@ class OwnedSandboxes:
             owns_provider=True,
             max_concurrent_starts=concurrency.starts,
             max_concurrent_stops=concurrency.stops,
-            default_metadata=resolve_provider_metadata(reference, global_config),
+            default_metadata=default_metadata,
             global_config=global_config,
             provider_field=other_field,
         )
@@ -864,7 +874,8 @@ class OwnedSandboxes:
         self._warned_untyped_network.add(warned)
         LOGGER.warning(
             "a %s of server %s sets no network rule, so its sandboxes keep the provider's default egress or the "
-            "network_policy of its provider_options. That is deprecated and a later release requires the rule: set "
+            "network_policy of its provider_options. This is deprecated. A later release requires a typed rule. "
+            "Migration guidance: "
             "%s",
             type(config).__name__,
             self._server_name,
@@ -904,7 +915,7 @@ class OwnedSandboxes:
     def __contains__(self, key: object) -> bool:
         """Whether ``key`` has a sandbox ready to use: not one still starting, nor one whose start failed."""
         entry = self._entries.get(key)  # type: ignore[call-overload]
-        return entry is not None and entry.ready
+        return entry is not None and entry.ready and entry.sandbox.started
 
     def get(self, key: str) -> AsyncSandbox | None:
         """``key``'s sandbox if it is ready to use, else ``None``; after a restore it is the fork, under a new id.
@@ -913,7 +924,7 @@ class OwnedSandboxes:
         still lists its key.
         """
         entry = self._entries.get(key)
-        return entry.sandbox if entry is not None and entry.ready else None
+        return entry.sandbox if entry is not None and entry.ready and entry.sandbox.started else None
 
     def add(self, key: str, sandbox: AsyncSandbox, spec: SandboxSpec) -> None:
         """Track a sandbox the owner started itself; ``spec`` is what a restore re-creates its fork from.
@@ -1337,7 +1348,10 @@ class OwnedSandboxes:
                 raise SandboxCheckpointError(
                     key, f"could not be re-created from snapshot {state.snapshot_id!r}: {error}"
                 ) from error
-        created[key] = sandbox
+            finally:
+                # A caller can be cancelled as the provider returns its handle. Rollback must own that fork too.
+                if sandbox.started:
+                    created[key] = sandbox
 
     def _track_unstopped(self, created: Mapping[str, AsyncSandbox]) -> None:
         """Record the forks of a restore that will not install them, before anything stops them."""
