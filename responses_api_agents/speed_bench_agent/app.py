@@ -91,9 +91,6 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
-# Bound on stopping a session's replay that is still running when the session closes.
-_SESSION_CLOSE_TIMEOUT_SECS = 30.0
-
 
 class SpeedBenchAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
@@ -115,6 +112,8 @@ class SpeedBenchAgentVerifyResponse(BaseVerifyResponse):
 @dataclass
 class _SpeedBenchSession(AgentSessionState):
     operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
+    # The route of the first activation; a retry on another route is refused rather than joined.
+    activation_path: str | None = None
     # The replay's evidence, returned at close. Both stay None while model-call capture is off;
     # a failed replay keeps its observations and has no trajectory, as on /run.
     observations: AgentObservationBundle | None = None
@@ -156,10 +155,18 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, _SpeedBenchSession):
             raise TypeError("Expected SPEED-Bench session state")
-        await state.operations.close(timeout=_SESSION_CLOSE_TIMEOUT_SECS)
+        await state.operations.close(timeout=self.config.session_close_timeout_seconds)
+        observations = state.observations
+        if observations is None and self._model_call_capture_enabled():
+            # Capture is on but no activation started, so close says why it returns no replay.
+            # With capture off there is nothing to report, as on /run.
+            observations = AgentObservationBundle(
+                source="speed_bench_agent",
+                gaps=[ObservationGap(code="observation_capture_failed", detail="No activation started a replay.")],
+            )
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
-            agent_observations=state.observations,
+            agent_observations=observations,
             trajectory=state.trajectory,
         )
 
@@ -189,6 +196,10 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             raise TypeError("Expected SPEED-Bench session state")
         if rollout_id != state.request.episode_id.capture_key:
             raise AgentSessionConflictError("Activation requires the seeded session's rollout path")
+        if state.activation_path is None:
+            state.activation_path = request.url.path
+        elif state.activation_path != request.url.path:
+            raise AgentSessionConflictError("Activation path does not match the session's first activation")
 
         async def activation() -> NeMoGymResponse:
             state.observations = self._start_observations(request, rollout_id, in_session=True)

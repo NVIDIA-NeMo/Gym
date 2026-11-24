@@ -67,5 +67,7 @@ speed_bench_simple_agent:
 The agent also serves the agent sessions API, and the shipped configs run it through a `single_agent_turn_legacy`
 Environment Server. The Environment Server seeds and verifies; the agent session's one activation runs the same replay.
 A session takes no tools and no sandbox: a seed that grants a sandbox or requires a tool is refused. A retried
-activation returns the replay it already ran instead of making new model calls. The timing fields cover only the
-replay, so the session's seed and close round trips stay outside each task's generation window.
+activation returns the replay it already ran instead of making new model calls, and an activation on another rollout
+route than the seed's is refused. The timing fields cover only the replay, so the session's seed and close round trips
+stay outside each task's generation window. With model-call capture on, the replay's invocation and turns are
+returned when the session closes, bound to the seeded task and the episode's capture key, instead of in the reply.
