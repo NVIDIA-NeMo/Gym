@@ -17,11 +17,11 @@ changes) is applied when the clock passes its time, so the agent has to wait for
 and act then. `events` is `[{"at": iso time, "patch": {...}}]`: a patch sets fields on a record (`app`, `collection`,
 `id`, `set`) or adds one (`app`, `collection`, `add`).
 
-Every successful state-changing `api_fetch` call is logged with the simulated time, and two more assertion types grade
-when the agent acted:
+Every `api_fetch` write that changes the world is logged with the simulated time (a failed write or a read-only
+POST such as a search is not an act), and two more assertion types grade when the agent acted:
 
 - `acted_on_day` (`record`, `day`, optional `body_contains`): the first write whose URL names `record` happened on
-  `day` (YYYY-MM-DD). Acting early fails it.
+  `day` (YYYY-MM-DD, in the time zone of the seed's `meta.current_time`, UTC for a naive one). Acting early fails it.
 - `not_acted` (`record`): no write named `record`. It is a guardrail.
 
 ## Multi-turn
@@ -42,7 +42,8 @@ conversation, never reasoning or tool traffic. The environment refuses to load m
 `requester_base_url` or `requester_model` is unset. Each try ends after `requester_timeout_s` (default 300). A requester that still fails after
 `requester_max_tries`, or keeps calling tools after its tool budget, ends the episode and sets the `requester_failed`
 metric. A dated event that cannot be applied (a missing record, an invalid field) does the same, since it is a dataset
-failure and not the agent's. The agent config in `config.yaml` lists
+failure and not the agent's. An event on a record the agent deleted itself is skipped instead, and the rollout is
+scored. The agent config in `config.yaml` lists
 it in `mask_sample_metrics`, so `verifiers_agent` returns that rollout with `mask_sample: true`
 (`failure_kind: verifiers_agent:requester_failed`) and the reward is not counted as a measurement.
 

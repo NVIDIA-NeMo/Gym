@@ -100,8 +100,9 @@ def _time(value) -> datetime:
 
 
 def _as_json_text(value) -> str:
-    # The api_fetch schema declares params and body as JSON objects, upstream's fetch takes JSON strings.
-    return value if isinstance(value, str) else json.dumps(value or {})
+    # The api_fetch schema declares params and body as JSON objects, upstream's fetch takes JSON strings. Non-ASCII
+    # text stays as is, so a body_contains such as "Müller" matches an object body.
+    return value if isinstance(value, str) else json.dumps(value or {}, ensure_ascii=False)
 
 
 def _text(content) -> str:
@@ -116,21 +117,31 @@ def _get(msg, key):
     return msg.get(key) if isinstance(msg, dict) else getattr(msg, key, None)
 
 
+class MissingRecord(ValueError):
+    """A dated event names a record the world does not hold."""
+
+
 def apply_patch(world: WorldState, patch: dict) -> None:
-    """Apply one dated event: set fields on a record (`app`, `collection`, `id`, `set`) or add one (`add`)."""
+    """Apply one dated event: set fields on a record (`app`, `collection`, `id`, `set`) or add one (`add`).
+
+    Some collections hold plain dicts (jira.issues, google_drive.files, ...), the others typed records."""
     app = getattr(world, patch["app"])
     collection = getattr(app, patch["collection"])
     if "add" in patch:
         # The record type comes from the collection's declared schema (list[Contact] -> Contact), so a record added
         # to an empty collection is the same typed object as one loaded with the world.
         (model,) = typing.get_args(type(app).model_fields[patch["collection"]].annotation)
-        collection.append(model.model_validate(patch["add"]))
+        add = copy.deepcopy(patch["add"])
+        collection.append(model.model_validate(add) if hasattr(model, "model_validate") else add)
         return
-    record = next((r for r in collection if str(r.id) == str(patch["id"])), None)
+    record = next((r for r in collection if str(_get(r, "id")) == str(patch["id"])), None)
     if record is None:
-        raise ValueError(f"event patch targets no record {patch['id']!r} in {patch['app']}.{patch['collection']}")
+        raise MissingRecord(f"event patch targets no record {patch['id']!r} in {patch['app']}.{patch['collection']}")
     for key, value in patch["set"].items():
-        setattr(record, key, value)
+        if isinstance(record, dict):
+            record[key] = value
+        else:
+            setattr(record, key, value)
 
 
 class Clock:
@@ -141,6 +152,8 @@ class Clock:
         self.end = _time(end)
         self.events = sorted(events, key=lambda e: _time(e["at"]))
         self.log: list[dict] = []
+        # acted_on_day reads the day in the seed's own time zone (UTC for a naive seed); the clock itself runs in UTC.
+        self.zone = world.meta.current_time.tzinfo or timezone.utc
 
     def now(self) -> datetime:
         return _time(self.world.meta.current_time.isoformat())
@@ -151,17 +164,32 @@ class Clock:
         if target <= self.now():
             return json.dumps({"now": self.now().isoformat(), "advanced": False})
         while self.events and _time(self.events[0]["at"]) <= target:
-            apply_patch(self.world, self.events.pop(0)["patch"])
+            patch = self.events.pop(0)["patch"]
+            try:
+                apply_patch(self.world, patch)
+            except MissingRecord:
+                # The agent deleted the record itself: the event has nothing left to change, and the rollout is
+                # scored (a not_acted guardrail on that record catches the deletion). Any other missing target is a
+                # dataset fault and still ends the rollout unscored.
+                if not any(e["method"] == "DELETE" and names(str(patch.get("id")), e["url"]) for e in self.log):
+                    raise
+                logger.info("ab_synth: event skipped, the agent deleted %s", patch.get("id"))
         # Keep the seed's awareness: upstream date queries read a naive time as host-local time.
         aware = self.world.meta.current_time.tzinfo is not None
         self.world.meta.current_time = target.replace(tzinfo=timezone.utc) if aware else target
         return json.dumps({"now": target.isoformat(), "advanced": True})
 
     def fetch(self, method: str, url: str, params=None, body=None) -> str:
+        """Run one API call. A write is logged when it changes the world: failed writes (whatever shape their error
+        reply has) and read-only POSTs such as searches are not acts."""
         params, body = _as_json_text(params), _as_json_text(body)
+        write = method.upper() in WRITE_METHODS
+        before = self.world.model_dump_json() if write else None
         out = upstream_api_fetch(self.world, method, url, params, body)
-        if method.upper() in WRITE_METHODS and not out.lstrip().startswith('{"error"'):
-            self.log.append({"at": self.now().isoformat(), "method": method.upper(), "url": url, "body": body})
+        if write and self.world.model_dump_json() != before:
+            now = self.now()
+            day = now.replace(tzinfo=timezone.utc).astimezone(self.zone).date().isoformat()
+            self.log.append({"at": now.isoformat(), "day": day, "method": method.upper(), "url": url, "body": body})
         return out
 
 
@@ -169,11 +197,14 @@ def names(record: str, url: str) -> bool:
     """Whether `record` appears in the decoded URL as a whole identifier.
 
     Row "6" matches "Sheet!I6:J6" but not "I16" or "I60", and "FD-101" does not match "FD-1010": an edge digit may not
-    touch another digit, an edge letter may not touch a letter or digit.
+    touch another digit, an edge letter may not touch a letter or digit. A leading digit after letters matches only in
+    an A1 cell reference ("!I6", ":J6"), not inside "/v4/" or "Sheet1".
     """
     url = unquote(url)
     for match in re.finditer(re.escape(record), url):
         before, after = url[match.start() - 1 : match.start()], url[match.end() : match.end() + 1]
+        if record[0].isdigit() and before.isalpha() and not re.search(r"[!:][A-Z]{1,3}$", url[: match.start()]):
+            continue
         if not (_joins(record[0], before) or _joins(record[-1], after)):
             return True
     return False
@@ -192,8 +223,8 @@ def day_check(log: list[dict], assertion: dict) -> bool:
     ]
     if assertion["type"] == "not_acted":
         return not hits
-    days = sorted(e["at"][:10] for e in hits)
-    return bool(days) and days[0] == assertion["day"]
+    first = min(hits, key=lambda e: e["at"], default=None)
+    return first is not None and first.get("day", first["at"][:10]) == assertion["day"]
 
 
 def headline(initial_state: dict, world: WorldState, log: list[dict], assertions: list[dict]) -> float:
@@ -303,8 +334,11 @@ def own_records(world: WorldState, services: list[str], budget: int = 4000) -> s
     return text if len(text) <= budget else text[:budget] + " ..."
 
 
-async def reward(state, **kwargs) -> float:
-    """The headline over world and day assertions, 0 after a broken unavailable-call guardrail."""
+def reward(state, **kwargs) -> float:
+    """The headline over world and day assertions, 0 after a broken unavailable-call guardrail.
+
+    Synchronous, so verifiers_agent watches it: a row whose assertions make it raise is masked as a verifier error,
+    not scored 0."""
     if state.get("violation"):
         return 0.0
     return headline(state["initial_state"], state["world"], state["clock"].log, state["info"]["assertions"])
@@ -441,6 +475,10 @@ def load_environment(
             info = state["info"]
             if not (info.get("user_card") or info.get("requester_services")):
                 return True
+            if state.get("requester_step") == len(state["trajectory"]):
+                # No policy step since the requester's last reply (the next prompt ran past the context, so the loop
+                # added none): the requester already answered this turn, and an acting one would repeat its writes.
+                return True
             if not _text(_get(state["trajectory"][-1]["completion"][-1], "content")):
                 # A turn with neither text nor tool call ends the episode: a reply to it would make the next model
                 # request invalid (an assistant message with no content and no tool calls).
@@ -448,6 +486,7 @@ def load_environment(
                 return True
             if state.get("user_turns", 0) >= max_user_turns:
                 return True
+            state["requester_step"] = len(state["trajectory"])
             try:
                 reply = await (self._acting_reply(state) if info.get("requester_services") else self._reply(state))
             except RequesterUnavailable as e:

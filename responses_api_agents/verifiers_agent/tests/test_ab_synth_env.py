@@ -232,7 +232,7 @@ class LoadEnvironmentTest(unittest.TestCase):
             state["clock"].fetch(**PROMOTE)
 
             self.assertEqual(state["unknown_tool_calls"], 1)
-            self.assertEqual(asyncio.run(env.reward(state)), reward)
+            self.assertEqual(env.reward(state), reward)
 
 
 class RequesterTest(unittest.TestCase):
@@ -290,7 +290,7 @@ class RequesterTest(unittest.TestCase):
         self.assertFalse(asyncio.run(vf_env.no_tools_called(state)))
         self.assertEqual(state["requester_tool_calls"], 1)
         self.assertEqual(state["world"].hubspot.contacts[0].lifecyclestage, "customer")
-        self.assertEqual(asyncio.run(env.reward(state)), 1.0)
+        self.assertEqual(env.reward(state), 1.0)
 
     def test_requester_tool_budget_counts_calls_not_responses(self):
         vf_env, state = load({**SINGLE_DAY, "requester_services": ["hubspot"]}, max_requester_tool_calls=1)
@@ -429,6 +429,228 @@ class RequesterTest(unittest.TestCase):
         out = asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
         self.assertIn("invalid until", str(out))
         self.assertNotIn("requester_failed", state)
+
+
+SF = "https://example.my.salesforce.com/services/data/v61.0/sobjects/"
+ROW_7 = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc/values/Sheet1!A7:B7"
+JIRA_SEED = {
+    "meta": {"current_time": "2026-03-02T09:00:00"},
+    "jira": {"issues": [{"id": "10001", "key": "OPS-1", "fields": {"status": {"name": "Done"}}}]},
+}
+
+
+class WriteLogTest(unittest.TestCase):
+    def test_failed_writes_of_any_reply_shape_and_read_only_posts_are_not_acts(self):
+        info = {
+            "initial_state": copy.deepcopy(INITIAL_STATE),
+            "assertions": [
+                PROMOTED,
+                {"type": "not_acted", "record": "500A"},
+                {"type": "not_acted", "record": "C_NOPE"},
+            ],
+        }
+        # Salesforce replies {"success": false, ...} for a missing case, Slack {"ok": false, ...} for a missing channel.
+        failed_sf = {"method": "PATCH", "url": SF + "Case/500A", "body": {"Status": "Closed"}}
+        failed_slack = {
+            "method": "POST",
+            "url": "https://slack.com/api/chat.postMessage",
+            "body": {"channel": "C_NOPE", "text": "hi"},
+        }
+        search = {"method": "POST", "url": CONTACTS + "search", "body": {"filterGroups": []}}
+        clock = env.Clock(WorldState(**copy.deepcopy(INITIAL_STATE)), [], "2026-03-06T18:00:00")
+        for call in (failed_sf, failed_slack, search):
+            clock.fetch(call["method"], call["url"], body=call["body"])
+
+        self.assertEqual(clock.log, [])
+        self.assertEqual(env.replay(info, [PROMOTE, failed_sf, failed_slack]), 1.0)
+
+    def test_non_ascii_body_contains_matches_an_object_body(self):
+        info = {
+            **INFO,
+            "assertions": [{"type": "acted_on_day", "record": "101", "day": "2026-03-04", "body_contains": "Müller"}],
+        }
+        # The api_fetch schema declares body as a JSON object, so a schema-following agent sends a dict.
+        write = {"method": "PATCH", "url": CONTACTS + "101", "body": {"properties": {"lastname": "Müller"}}}
+
+        self.assertEqual(env.replay(info, [{"wait": "2026-03-04T09:00:00"}, write]), 1.0)
+
+    def test_acted_on_day_reads_the_day_in_the_seed_time_zone(self):
+        info = {
+            **INFO,
+            "initial_state": {**INITIAL_STATE, "meta": {"current_time": "2026-03-02T09:00:00-08:00"}},
+            "period_end": "2026-03-06T18:00:00-08:00",
+            "events": [],
+            "assertions": [PROMOTED, {"type": "acted_on_day", "record": "101", "day": "2026-03-04"}],
+        }
+
+        # 17:30 Pacific on 2026-03-04 is 01:30 UTC on 2026-03-05: the due day is the row's own day.
+        self.assertEqual(env.replay(info, [{"wait": "2026-03-04T17:30:00-08:00"}, PROMOTE]), 1.0)
+
+
+class RowNumberTest(unittest.TestCase):
+    def test_a_row_number_does_not_match_the_api_version_or_the_tab_name(self):
+        self.assertFalse(env.names("4", ROW_7))  # inside /v4/
+        self.assertFalse(env.names("1", ROW_7))  # inside Sheet1
+        self.assertFalse(env.names("3", CONTACTS + "101"))  # inside crm/v3
+        self.assertTrue(env.names("7", ROW_7))  # the A1 cell reference
+
+    def test_a_write_to_row_7_does_not_break_not_acted_on_row_4(self):
+        log = [{"at": "2026-03-04T09:00:00", "method": "PUT", "url": ROW_7, "body": "{}"}]
+
+        self.assertTrue(env.day_check(log, {"type": "not_acted", "record": "4"}))
+
+
+class DictCollectionEventTest(unittest.TestCase):
+    def test_an_event_can_reopen_a_jira_issue(self):
+        patch = {
+            "app": "jira",
+            "collection": "issues",
+            "id": "10001",
+            "set": {"fields": {"status": {"name": "Reopened"}}},
+        }
+        clock = env.Clock(
+            WorldState(**JIRA_SEED), [{"at": "2026-03-03T08:00:00", "patch": patch}], "2026-03-06T18:00:00"
+        )
+
+        clock.wait("2026-03-04T09:00:00")
+        self.assertEqual(clock.world.jira.issues[0]["fields"]["status"]["name"], "Reopened")
+
+    def test_an_event_can_add_a_jira_issue(self):
+        patch = {"app": "jira", "collection": "issues", "add": {"id": "10002", "key": "OPS-2"}}
+        clock = env.Clock(
+            WorldState(**JIRA_SEED), [{"at": "2026-03-03T08:00:00", "patch": patch}], "2026-03-06T18:00:00"
+        )
+
+        clock.wait("2026-03-04T09:00:00")
+        self.assertEqual([i["id"] for i in clock.world.jira.issues], ["10001", "10002"])
+
+
+class EventAfterPolicyDeleteTest(unittest.TestCase):
+    def test_a_policy_delete_of_an_event_target_is_scored_not_masked(self):
+        initial = {
+            "meta": {"current_time": "2026-03-02T09:00:00"},
+            "salesforce": {
+                "contacts": [{"id": "003A", "first_name": "Ann", "last_name": "Lee", "email": "a@example.com"}]
+            },
+        }
+        events = [
+            {
+                "at": "2026-03-04T08:00:00",
+                "patch": {"app": "salesforce", "collection": "contacts", "id": "003A", "set": {"title": "VP"}},
+            }
+        ]
+        info = {
+            **INFO,
+            "initial_state": initial,
+            "events": events,
+            "assertions": [{"type": "not_acted", "record": "003A"}],
+        }
+        vf_env, state = load(info)
+        # The policy deletes the contact on day one, a mistake the not_acted guardrail exists to catch.
+        state["clock"].fetch("DELETE", SF + "Contact/003A")
+        self.assertEqual(state["world"].salesforce.contacts, [])
+
+        call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "2026-03-05T09:00:00"}))
+        asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
+
+        self.assertNotIn("requester_failed", state)
+        self.assertEqual(state["clock"].now(), datetime(2026, 3, 5, 9))
+        self.assertEqual(env.reward(state), 0.0)
+
+    def test_an_event_on_a_record_that_never_existed_still_ends_the_rollout_unscored(self):
+        events = [
+            {
+                "at": "2026-03-04T08:00:00",
+                "patch": {"app": "hubspot", "collection": "contacts", "id": "999", "set": {}},
+            }
+        ]
+        vf_env, state = load({**INFO, "events": events})
+
+        call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "2026-03-05T09:00:00"}))
+        with self.assertRaises(vf.ToolCallError):
+            asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
+        self.assertEqual(state["requester_failed"], 1)
+
+
+class OverlongPromptTest(unittest.TestCase):
+    def test_an_overlong_prompt_after_a_requester_reply_does_not_rerun_the_requester(self):
+        vf_env, state = load({**SINGLE_DAY, "requester_services": ["hubspot"]})
+        create = json.dumps(
+            {"method": "POST", "url": CONTACTS.rstrip("/"), "body": {"properties": {"email": "n@example.com"}}}
+        )
+        calls = []
+
+        async def chat(messages, **body):
+            calls.append(messages)
+            # Each requester reply: one tool call that creates the contact, then a text report.
+            if len(calls) % 2:
+                return {
+                    "content": "",
+                    "tool_calls": [{"id": f"c{len(calls)}", "function": {"name": "api_fetch", "arguments": create}}],
+                }
+            return {"content": "I created the contact."}
+
+        vf_env._chat = chat
+        end_turn(state, "Please create contact n@example.com in your HubSpot.")
+
+        # verifiers' rollout loop, step by step (MultiTurnEnv.rollout):
+        self.assertFalse(asyncio.run(vf_env.is_completed(state)))  # the requester answers and acts once
+        asyncio.run(vf_env.get_prompt_messages(state))  # env_response hands the reply to the policy
+        # The next policy call raises vf.OverlongPromptError: no trajectory step is added and the loop sets these.
+        state["prompt_too_long"] = True
+        state["is_truncated"] = True
+        self.assertTrue(asyncio.run(vf_env.is_completed(state)))
+
+        created = [c.id for c in state["world"].hubspot.contacts if c.email == "n@example.com"]
+        self.assertEqual((len(created), state["user_turns"], len(calls)), (1, 1, 2))
+
+
+class RewardMaskingTest(unittest.TestCase):
+    def test_a_row_whose_reward_raises_is_masked_as_a_verifier_error(self):
+        from fastapi.testclient import TestClient
+
+        from nemo_gym.client import ServerClient
+        from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef
+        from responses_api_agents.verifiers_agent.app import VerifiersAgent, VerifiersAgentConfig
+
+        # A dataset fault: an assertion type the registry does not know makes headline raise ValueError.
+        vf_env, state = load({**SINGLE_DAY, "assertions": [{"type": "no_such_assertion"}]})
+        state["completion"] = []
+        [reward_rubric] = [r for r in vf_env.rubric.rubrics if type(r).__name__ == "Rubric"]
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            # Score as verifiers does: each reward function through the rubric, an error scored 0.0.
+            rewards = [await reward_rubric._call_individual_reward_func(f, state) for f in reward_rubric.funcs[:1]]
+            return [{"reward": sum(rewards), "metrics": {}, "completion": [], "trajectory": []}]
+
+        vf_env.run_group = fake_run_group
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ab_synth",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="ab_synth",
+        )
+        server_client = unittest.mock.MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: False}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+        with (
+            unittest.mock.patch.object(VerifiersAgent, "resolve_model_base_url", return_value="http://policy.test/v1"),
+            unittest.mock.patch("responses_api_agents.verifiers_agent.app.vf.load_environment", return_value=vf_env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/run",
+                json={
+                    "task_idx": 0,
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 0,
+                    "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual((body["mask_sample"], body.get("failure_kind")), (True, "verifier_error"))
 
 
 if __name__ == "__main__":
