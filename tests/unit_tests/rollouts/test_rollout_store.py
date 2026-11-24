@@ -37,6 +37,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     manifest_path_for,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.trajectory.captured_calls import build_captured_calls
 from nemo_gym.utils.path_utils import failures_path_for, rerun_masked_journal_path_for
 
 
@@ -1595,11 +1596,18 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
     old = {
         "task_id": "t",
         "rollout_id": "r",
+        "invocations": [{"invocation_id": "policy", "model_calls": [{"model_call_id": "policy-call"}]}],
         "verifier_invocations": [
-            {"invocation_id": "old-verifier", "status": "failed", "failure_kind": "judge_failure"}
+            {
+                "invocation_id": "old-verifier",
+                "status": "failed",
+                "failure_kind": "judge_failure",
+                "model_calls": [{"model_call_id": "judge-call"}],
+            }
         ],
+        "model_calls": [{"model_call_id": "policy-call"}, {"model_call_id": "judge-call"}],
     }
-    captured = {"calls": 1, "capture_complete": True, "by_role": {"verifier": {"calls": 1, "calls_without_usage": 0}}}
+    captured = build_captured_calls({"ng_trajectory": old})
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         row = store.pending(3)[0]
         store.record_dispatch(row)
@@ -1639,7 +1647,9 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
     assert selected["_ng_rejudged_failure_observations"]["ng_trajectory"] == old
     assert selected["_ng_rejudge_verifier_invocation_ids"] == ["new-verifier"]
     assert [v["invocation_id"] for v in selected["ng_trajectory"]["verifier_invocations"]] == ["new-verifier"]
+    assert [call["model_call_id"] for call in selected["ng_trajectory"]["model_calls"]] == ["policy-call"]
     assert "ng_captured_calls" not in selected, "the replaced judge's calls are not the selected row's"
+    assert {role: totals["calls"] for role, totals in captured["by_role"].items()} == {"agent": 1, "verifier": 1}
     assert selected["_ng_rejudged_failure_observations"]["ng_captured_calls"] == captured
     assert selected["response"] == failure["response"] and selected["reward"] == 0.0
 

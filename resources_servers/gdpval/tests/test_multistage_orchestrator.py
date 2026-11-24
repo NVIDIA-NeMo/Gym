@@ -39,6 +39,7 @@ from nemo_gym.config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core import AGENT_TIMEOUT, maybe_rollout_id_from_run_body
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
@@ -4301,6 +4302,7 @@ class TestCachedDeliverableReuse:
                 return SimpleNamespace(post=post, global_config_dict=OmegaConf.create(_ROUTING_CONFIG))
 
             async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                test.aggregated_results = results
                 return tmp_path / "aggregate.json"
 
         monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
@@ -4431,9 +4433,11 @@ class TestCachedDeliverableReuse:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         capture_dir = tmp_path / "capture"
-        # An earlier session wrote the calls of the reused stage-1 row, whose task index is offset by the stride.
+        # An earlier session wrote the judge call of the reused stage-1 row, whose task index is offset by the stride.
         reused_key = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0}
-        CaptureStore(capture_dir).record(maybe_rollout_id_from_run_body(reused_key), _capture_exchange("seeded"))
+        CaptureStore(capture_dir).record(
+            maybe_rollout_id_from_run_body(reused_key), _capture_exchange("seeded") | {"verifier_invocation_id": "judge"}
+        )
 
         _, _, persisted = await self._run_two_stages(tmp_path, monkeypatch, cached=True, capture_dir=capture_dir)
 
@@ -4443,7 +4447,16 @@ class TestCachedDeliverableReuse:
         }
         assert calls_by_stage == {0: ["dispatched"], 1: ["seeded"]}
         # Dispatched and cached-deliverable rows alike carry the per-rollout count the run summary adds up.
-        assert {row["stage_index"]: row["ng_captured_calls"]["calls"] for row in persisted} == {0: 1, 1: 1}
+        roles_by_stage = {
+            row["stage_index"]: {role: totals["calls"] for role, totals in row["ng_captured_calls"]["by_role"].items()}
+            for row in persisted
+        }
+        assert roles_by_stage == {0: {"unattributed": 1}, 1: {"verifier": 1}}
+        run_totals = compute_aggregate_metrics(self.aggregated_results).perf_summary["captured_calls"]
+        assert {role: totals["calls"] for role, totals in run_totals["by_role"].items()} == {
+            "unattributed": 1,
+            "verifier": 1,
+        }
 
     async def test_a_reused_row_without_a_capture_has_no_calls(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
