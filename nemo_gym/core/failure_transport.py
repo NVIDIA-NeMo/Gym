@@ -99,8 +99,10 @@ UNREGISTERED_KIND_PREFIX = "unregistered:"
 class TransportResendHeader:
     """Carry the transport resends made while a request was served in a reply header of their own.
 
-    A transport resend is another attempt of the same HTTP request after a connection failure, counted where it starts
-    (``observe_transport_resend``), so a failure that exhausts the retry budget adds nothing. It excludes a model
+    A transport resend is another attempt of the same HTTP request that a retry loop starts after the attempt before
+    it raised (a connection error, a timeout, or another error the loop retries), counted where it starts
+    (``observe_transport_resend``), so a failure that exhausts the retry budget adds nothing. A reconnect aiohttp
+    makes inside one ``request()`` call is not seen. It excludes a model
     client's retries of 429 and 5xx replies (``ModelOperationObservation.http_attempts``) and rollout retries (the run
     summary's ``retries/*``). The count stays out of ``FailureReport``, whose ``extra="forbid"`` would make a peer on an
     older version drop the whole report. A reply with no resends carries no header, and so does a Gym server older than
