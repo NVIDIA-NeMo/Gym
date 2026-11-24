@@ -20,10 +20,8 @@ from environment_servers.harbor.entrypoint import (
     ENTRYPOINT_FAILED_KIND,
     entrypoint_to_run,
     image_healthcheck_settings,
-    image_start_bound_s,
     is_keepalive_entrypoint,
 )
-from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S, HarborSeedTimeoutError
 from environment_servers.harbor.tests.conftest import (
     HEALTHCHECK_TOML,
     IMAGE_PATH,
@@ -675,49 +673,6 @@ class TestEntrypoint:
         assert agent.launch_cancelled_before_stop is True and agent.stopped
         assert verifier.launch_cancelled_before_stop is True and verifier.stopped
         assert not server._sandboxes and not server._sessions
-
-    async def test_separate_verifier_retry_reserves_its_entrypoint_start(self, tmp_path, monkeypatch):
-        """A verifier create retried after a ready timeout needs room for its image's entrypoint as well as test.sh:
-        with too little the row stays masked after one create; with enough it starts before test.sh and is scored."""
-        verifier_record = {"Entrypoint": ["/verify.sh"], "User": "grader", "WorkingDir": "/tests"}
-        for spare, scored in ((-30.0, False), (30.0, True)):
-            server, task, agent, verifier = self.separate_server(
-                tmp_path / str(scored), monkeypatch, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier_record=verifier_record
-            )
-            creates = []
-
-            async def create_verifier(task, *, episode_key=None, server=server, verifier=verifier, creates=creates):
-                creates.append(episode_key)
-                if len(creates) == 1:
-                    raise HarborSeedTimeoutError("the sandbox was not ready within 0.05s")
-                server._sandboxes[f"{episode_key}/verifier"] = verifier
-                return verifier
-
-            monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
-            start = _verifier_start(task, True)
-            assert entrypoint_to_run(start) == ["/verify.sh"] and start.image_healthcheck is None
-            # Room for the create and test.sh either way: only the entrypoint's reservation tells them apart.
-            budget = (
-                server.config.sandbox_ready_timeout_s
-                + SEED_CREATE_GRACE_S
-                + task.config.verifier.timeout_sec
-                + server.config.verifier_grace_s
-                + image_start_bound_s(start)
-                + spare
-            )
-            monkeypatch.setattr(server, "_post_seed_budget_s", lambda task, budget=budget: budget)
-
-            response = await run_episode(server, task)
-
-            assert response.failure is None, response.failure
-            result = response.result
-            if scored:
-                assert len(creates) == 2 and result.reward == 1.0 and result.mask_sample is not True
-                assert verifier.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < verifier.index_of("bash /tests/test.sh")
-            else:
-                assert len(creates) == 1 and result.mask_sample is True
-                assert result.failure_kind == "provider_unavailable" and verifier.launch() is None
-            assert not server._sandboxes
 
     async def test_built_verifier_image_starts_with_its_own_record_not_the_task_images(self, tmp_path, monkeypatch):
         # Harbor `up --wait`s the image built from tests/Dockerfile: its entrypoint, as its user in its WorkingDir,

@@ -4575,46 +4575,36 @@ class TestSeedGuards:
         assert response.result.mask_sample is True and response.result.failure_kind == "provider_unavailable"
         assert stopped == ["hanging"] and not server._sandboxes
 
-    async def test_verifier_retry_reserves_the_verifier_image_start(self, tmp_path, monkeypatch):
-        """The verifier image's ENTRYPOINT and HEALTHCHECK start between the create and test.sh, so their worst case
-        is reserved, with the entrypoint probed before every healthcheck attempt."""
-        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch)
+    async def test_retried_verifier_start_is_capped_in_time_for_test_sh(self, tmp_path, monkeypatch):
+        """Everything a retried verifier does before test.sh ends in time for test.sh and its grace, whatever its
+        image starts: a setup step that hangs masks the row instead of running into the task deadline."""
+
+        @dataclass
+        class HangingSetup(VerifierSandbox):
+            async def start(self, spec):
+                pass
+
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "mkdir -p /tests " in command:
+                    await asyncio.get_running_loop().create_future()
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        verifier = HangingSetup()
+        server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch, None, verifier)
         settings = task.config.verifier
-        # 30 s interval and timeout, 3 retries: 35 + 5 + 3 * 35 + 2 * 30 = 205 s at worst.
-        record = {"Test": ["CMD", "true"], "Interval": 30_000_000_000, "Timeout": 30_000_000_000, "Retries": 3}
-        start = SimpleNamespace(entrypoint=None, entrypoint_user=None, image_healthcheck=record, image_shell=None)
-        monkeypatch.setattr("environment_servers.harbor.sandboxes._verifier_start", lambda task, separate: start)
-        # Without a start: the 0.05 s create plus test.sh and its grace.
+        # Room for the retry's create and test.sh, and about a second more: the cap ends there.
         need = 0.05 + settings.timeout_sec + server.config.verifier_grace_s
-        now = asyncio.get_running_loop().time()
-
-        def reserved(bound):
-            """Whether the retry check reserves exactly ``bound`` seconds for the image's start."""
-            fits = [
-                server._verifier_retry_fits(
-                    SimpleNamespace(deadline=now + need + bound + spare), task, settings, overlaid=False
-                )
-                for spare in (-0.5, 0.5)
-            ]
-            return fits == [False, True]
-
-        assert reserved(205)
-        # A keepalive entrypoint starts nothing.
-        start.entrypoint = ("sleep", "infinity")
-        assert reserved(205)
-        # A running entrypoint: 5 execs of 60 s and the 60.5 s marker wait, plus a 60 s probe before each of the
-        # healthcheck's 4 attempts at worst.
-        start.entrypoint = ("/opt/nvidia/nvidia_entrypoint.sh",)
-        assert reserved(360.5 + 205 + 4 * 60)
-        # A numeric USER is looked up by name first.
-        start.entrypoint_user = "1000"
-        assert reserved(60 + 360.5 + 205 + 4 * 60)
-        start.entrypoint_user = None
-        start.image_healthcheck = None
-        assert reserved(360.5)
-        start.entrypoint = None
-        assert reserved(0)
-        assert server._verifier_retry_fits(SimpleNamespace(deadline=None), task, settings, overlaid=False)
+        monkeypatch.setattr(server, "_post_seed_budget_s", lambda task: need + 1.5)
+        started = asyncio.get_running_loop().time()
+        response = await run_episode(server, task)
+        assert asyncio.get_running_loop().time() - started < 10
+        assert response.failure is None, response.failure
+        result = response.result
+        assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+        assert "in the time left for test.sh" in result.failure_reason
+        assert not any("bash /tests/test.sh" in call["command"] for call in verifier.execs)
+        assert stopped == ["hanging"] and verifier.stopped and not server._sandboxes
+        assert server._verifier_retry_fits(SimpleNamespace(deadline=None), settings)
 
     async def test_separate_verifier_create_failure_other_than_the_ready_timeout_is_not_retried(
         self, tmp_path, monkeypatch

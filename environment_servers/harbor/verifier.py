@@ -724,84 +724,92 @@ class HarborVerificationMixin:
                     failure_kinds.PROVIDER_UNAVAILABLE,
                     f"the previous turn's verifier sandbox could not be stopped: {type(exc).__name__}: {exc}",
                 )
+        start_deadline = asyncio.timeout(None)
         try:
-            overlaid = _verifier_gets_overlay(task, True)
-            verifier = await self._start_separate_verifier(session, task, settings, overlaid=overlaid)
-            names: dict[str, str] = {}
-            if overlaid:
-                # A shared-mode task verified separately runs in the task's own image, so it needs the same overlay
-                # as the agent did (a declared separate verifier in the task image is a prebuilt image: no overlay).
-                names = await self._apply_overlay(verifier, task)
-            if _verifier_runs_task_image(task):
-                # Its default is that image's own USER, never [agent].user, resolved by name once it exists.
-                await self._set_default_user(verifier, task, names, role="verifier")
-            if overlaid and task.workdir is not None:
-                # The overlay made the Dockerfile's WORKDIR directories only. The task workdir ([environment].workdir
-                # when task.toml sets one, else the Dockerfile's final WORKDIR) is where test.sh is sent below, so it
-                # is made and handed to the task's user here as the seed's `_prepare_workdir` leaves it in the agent's
-                # sandbox, which is how the shared verifier finds it; a Docker exec into a missing directory fails
-                # before test.sh starts.
-                await self._own_workdir(verifier, task.workdir, task.user, create=True)
-            # The verifier's /logs folders exist before its entrypoint starts, as in the seed and as Harbor's
-            # /logs/verifier bind mount does; /tests and the artifacts follow, as Harbor uploads them after start.
-            prepare = await exec_as_root(
-                verifier,
-                f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR} {ARTIFACTS_DIR} "
-                f"&& chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
-                timeout_s=60,
-            )
-            if prepare.return_code != 0:
-                raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            start = _verifier_start(task, True)
-            if start is not None:
-                # Harbor only `up --wait`s the verifier's image (built from tests/Dockerfile, declared by
-                # [verifier.environment] and recorded as a Dockerfile's base, or the task's own when its effective
-                # verifier environment is a copy of [environment] with a docker_image): that image's
-                # entrypoint and HEALTHCHECK run here as its user; the task's [environment.healthcheck] is not run,
-                # as Harbor does not run it in the verifier. The verifier sandbox is a plain one whatever the agent's
-                # environment was (a Compose group included), so nothing is left to an adapter here.
-                image_user = await self._image_user_name(verifier, start, names)
-                verifier_entrypoint = await self._start_entrypoint(verifier, start, image_user)
-                await self._wait_healthy(verifier, start, verifier_entrypoint, user=image_user, task_check=False)
-            # A prebuilt verifier image usually ships /tests already, with the modes its tests expect, and one
-            # built from tests/Dockerfile owns /tests the way its file copied it (Harbor uploads nothing into it,
-            # `skip_tests_upload`). Only upload the package's tests when the image has none, as the old server did.
-            # A task graded by a Python verifier has no test.sh of its own: a test.sh the image ships is not its
-            # grader, so its tests/ (the module and its helpers) is uploaded regardless and the shim's test.sh,
-            # uploaded last, is the one that runs.
-            image_has_tests = await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is not None
-            if not image_has_tests or task.python_verifier is not None:
-                unseen = task.verifier_image and task.verifier_image not in self._verifier_images_without_tests
-                if not image_has_tests and unseen:
-                    self._verifier_images_without_tests.add(task.verifier_image)
-                    LOGGER.warning(
-                        "%s: verifier image %s has no %s/test.sh; uploading the task's tests/ into it (Harbor uploads "
-                        "nothing into a separate verifier's image, so its tests/Dockerfile usually copies the folder)",
-                        task.task_id,
-                        task.verifier_image,
-                        TESTS_DIR,
-                    )
-                if test_dirs is not None:
-                    # A turn's layers: the task's tests/ then the step's, each over the last, absent ones skipped.
-                    for tests in test_dirs:
-                        if tests.is_dir():
-                            await upload_dir(verifier, tests, TESTS_DIR, ignore=is_ignored)
-                elif _uploads_task_tests(task):
-                    await upload_dir(verifier, task.path / "tests", TESTS_DIR, ignore=is_ignored)
-            await self._upload_verifier_shim(verifier, session, response)
-            for archive, kind, source in restored:
-                await self._restore_artifact(verifier, task, archive, kind, source)
-                # The staged tree stays as the diagnostic; the archive served its purpose.
-                archive.unlink(missing_ok=True)
-            # An artifact that covers /logs/agent brought the agent's tree, planted entries included, into
-            # this fresh sandbox: the transcript's destination is cleared again before it is written.
-            await self._upload_trajectory(verifier, trajectory, logs_dir, restored=[source for *_, source in restored])
-            if verifier_entrypoint is not None:
-                # The last look before test.sh, in a fresh sandbox the agent never had: its exit status is trusted.
-                await self._check_entrypoint(verifier, start, verifier_entrypoint)
-            # A sub-second task budget still gets one whole second: `timeout 0` would mean no limit.
-            budget = max(1, math.ceil(settings.timeout_sec))
-            await _make_test_script_executable(verifier)
+            async with start_deadline:
+                overlaid = _verifier_gets_overlay(task, True)
+                verifier, retried = await self._start_separate_verifier(session, task, settings)
+                if retried and session.deadline is not None:
+                    # A retry must not turn a masked row into a task-deadline failure: the retried verifier is
+                    # started, set up and fed in time for test.sh, or the row is masked as before.
+                    start_deadline.reschedule(session.deadline - settings.timeout_sec - self.config.verifier_grace_s)
+                names: dict[str, str] = {}
+                if overlaid:
+                    # A shared-mode task verified separately runs in the task's own image, so it needs the same overlay
+                    # as the agent did (a declared separate verifier in the task image is a prebuilt image: no overlay).
+                    names = await self._apply_overlay(verifier, task)
+                if _verifier_runs_task_image(task):
+                    # Its default is that image's own USER, never [agent].user, resolved by name once it exists.
+                    await self._set_default_user(verifier, task, names, role="verifier")
+                if overlaid and task.workdir is not None:
+                    # The overlay made the Dockerfile's WORKDIR directories only. The task workdir ([environment].workdir
+                    # when task.toml sets one, else the Dockerfile's final WORKDIR) is where test.sh is sent below, so it
+                    # is made and handed to the task's user here as the seed's `_prepare_workdir` leaves it in the agent's
+                    # sandbox, which is how the shared verifier finds it; a Docker exec into a missing directory fails
+                    # before test.sh starts.
+                    await self._own_workdir(verifier, task.workdir, task.user, create=True)
+                # The verifier's /logs folders exist before its entrypoint starts, as in the seed and as Harbor's
+                # /logs/verifier bind mount does; /tests and the artifacts follow, as Harbor uploads them after start.
+                prepare = await exec_as_root(
+                    verifier,
+                    f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR} {ARTIFACTS_DIR} "
+                    f"&& chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
+                    timeout_s=60,
+                )
+                if prepare.return_code != 0:
+                    raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
+                start = _verifier_start(task, True)
+                if start is not None:
+                    # Harbor only `up --wait`s the verifier's image (built from tests/Dockerfile, declared by
+                    # [verifier.environment] and recorded as a Dockerfile's base, or the task's own when its effective
+                    # verifier environment is a copy of [environment] with a docker_image): that image's
+                    # entrypoint and HEALTHCHECK run here as its user; the task's [environment.healthcheck] is not run,
+                    # as Harbor does not run it in the verifier. The verifier sandbox is a plain one whatever the agent's
+                    # environment was (a Compose group included), so nothing is left to an adapter here.
+                    image_user = await self._image_user_name(verifier, start, names)
+                    verifier_entrypoint = await self._start_entrypoint(verifier, start, image_user)
+                    await self._wait_healthy(verifier, start, verifier_entrypoint, user=image_user, task_check=False)
+                # A prebuilt verifier image usually ships /tests already, with the modes its tests expect, and one
+                # built from tests/Dockerfile owns /tests the way its file copied it (Harbor uploads nothing into it,
+                # `skip_tests_upload`). Only upload the package's tests when the image has none, as the old server did.
+                # A task graded by a Python verifier has no test.sh of its own: a test.sh the image ships is not its
+                # grader, so its tests/ (the module and its helpers) is uploaded regardless and the shim's test.sh,
+                # uploaded last, is the one that runs.
+                image_has_tests = await remote_kind(verifier, f"{TESTS_DIR}/test.sh") is not None
+                if not image_has_tests or task.python_verifier is not None:
+                    unseen = task.verifier_image and task.verifier_image not in self._verifier_images_without_tests
+                    if not image_has_tests and unseen:
+                        self._verifier_images_without_tests.add(task.verifier_image)
+                        LOGGER.warning(
+                            "%s: verifier image %s has no %s/test.sh; uploading the task's tests/ into it (Harbor uploads "
+                            "nothing into a separate verifier's image, so its tests/Dockerfile usually copies the folder)",
+                            task.task_id,
+                            task.verifier_image,
+                            TESTS_DIR,
+                        )
+                    if test_dirs is not None:
+                        # A turn's layers: the task's tests/ then the step's, each over the last, absent ones skipped.
+                        for tests in test_dirs:
+                            if tests.is_dir():
+                                await upload_dir(verifier, tests, TESTS_DIR, ignore=is_ignored)
+                    elif _uploads_task_tests(task):
+                        await upload_dir(verifier, task.path / "tests", TESTS_DIR, ignore=is_ignored)
+                await self._upload_verifier_shim(verifier, session, response)
+                for archive, kind, source in restored:
+                    await self._restore_artifact(verifier, task, archive, kind, source)
+                    # The staged tree stays as the diagnostic; the archive served its purpose.
+                    archive.unlink(missing_ok=True)
+                # An artifact that covers /logs/agent brought the agent's tree, planted entries included, into
+                # this fresh sandbox: the transcript's destination is cleared again before it is written.
+                await self._upload_trajectory(
+                    verifier, trajectory, logs_dir, restored=[source for *_, source in restored]
+                )
+                if verifier_entrypoint is not None:
+                    # The last look before test.sh, in a fresh sandbox the agent never had: its exit status is trusted.
+                    await self._check_entrypoint(verifier, start, verifier_entrypoint)
+                # A sub-second task budget still gets one whole second: `timeout 0` would mean no limit.
+                budget = max(1, math.ceil(settings.timeout_sec))
+                await _make_test_script_executable(verifier)
             # An overlaid verifier sandbox was created without the task workdir, as the agent's is (see
             # `_create_verifier_sandbox`), so its default directory is the base image's own: test.sh is sent to the
             # task workdir made above, as the shared verifier's exec is sent to the session's. Harbor's exec passes
@@ -842,6 +850,12 @@ class HarborVerificationMixin:
             LOGGER.error(f"Image ENTRYPOINT failed in the verifier sandbox for {task.task_id}: {exc}")
             return self._masked(ENTRYPOINT_FAILED_KIND, f"Image ENTRYPOINT failed in the verifier sandbox: {exc}")
         except Exception as exc:
+            if start_deadline.expired():
+                LOGGER.error(f"The retried verifier sandbox for {task.task_id} was not ready in time for test.sh")
+                return self._masked(
+                    failure_kinds.PROVIDER_UNAVAILABLE,
+                    "the retried verifier sandbox could not be started in the time left for test.sh",
+                )
             LOGGER.exception(f"Separate verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
         finally:
