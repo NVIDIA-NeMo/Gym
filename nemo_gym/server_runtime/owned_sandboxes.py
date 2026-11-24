@@ -384,6 +384,28 @@ def _optional_semaphore(limit: Optional[int]) -> Optional[asyncio.Semaphore]:
     return asyncio.Semaphore(limit) if limit is not None else None
 
 
+async def _start_to_the_end(sandbox: AsyncSandbox) -> None:
+    """Start ``sandbox``; if the caller is cancelled meanwhile, let the start finish before the cancellation goes on.
+
+    The wait is shielded and bounded by ``STOP_TIMEOUT_S``, so the caller's rollback has a handle to stop instead of
+    a provider create cut short in the middle. A start still running after that is cancelled.
+    """
+    start = asyncio.ensure_future(sandbox.start())
+    try:
+        await asyncio.shield(start)
+    except asyncio.CancelledError:
+        with anyio.CancelScope(shield=True):
+            with anyio.move_on_after(STOP_TIMEOUT_S):
+                await asyncio.wait({start})
+            if not start.done():
+                start.cancel()
+                await asyncio.wait({start})
+        if not start.cancelled() and start.exception() is not None:
+            # Retrieved so it is not reported as never retrieved; the caller's cancellation is what goes on.
+            LOGGER.info("a cancelled create's start failed: %r", start.exception())
+        raise
+
+
 @dataclass
 class _Entry:
     sandbox: AsyncSandbox
@@ -624,11 +646,13 @@ class OwnedSandboxes:
         The key is taken from the first moment, so a second create for it is refused while the first is starting. A
         create of a key that an export is snapshotting waits for that export; creates of other keys do not.
 
-        The sandbox is tracked before it starts. A start that fails or is cancelled after the provider returned the
-        sandbox is stopped here, shielded from the cancellation. If that stop fails too, the key stays tracked, so the
+        The sandbox is tracked before it starts. A start that fails or is cancelled is stopped here, shielded from the
+        cancellation. A start cancelled before the provider returned the sandbox is first let finish, shielded and
+        bounded by ``STOP_TIMEOUT_S``: a provider create cut short can leave a sandbox with no handle to stop, and not
+        every provider applies ``ttl_s`` (Enroot does not). Only a start still running after that is cut short, and
+        the spec's ``ttl_s`` is all that reclaims what it made. If the stop fails too, the key stays tracked, so the
         next :meth:`stop` of the key or :meth:`aclose` stops it again, an export leaves it out, and the start's error
-        is raised with the stop's as its context. The start itself is not shielded: one cancelled before the provider
-        returned the sandbox leaves nothing here to stop, and the spec's ``ttl_s`` reclaims what the provider made.
+        is raised with the stop's as its context.
 
         Raises:
             ValueError: If ``key`` already has a sandbox, or one is starting.
@@ -644,7 +668,7 @@ class OwnedSandboxes:
                 self._entries[key] = entry
                 try:
                     async with self._start_slot():
-                        await sandbox.start()
+                        await _start_to_the_end(sandbox)
                 except BaseException as error:
                     entry.exportable = False
                     try:

@@ -488,6 +488,53 @@ class TestTrackedBeforeStart:
         assert _states(provider) == ["stopped"]
         assert owned.keys == []
 
+    async def test_a_start_cancelled_inside_the_providers_create_is_let_finish_and_stopped(self) -> None:
+        # The provider has made the sandbox before its create returns (Enroot's rootfs, a container still starting).
+        # Cut short there, the create would leave a sandbox with no handle, which a provider without ttl_s never ends.
+        provider = FakeSnapshotProvider()
+        owned = _owned(provider)
+        made = asyncio.Event()
+        ready = asyncio.Event()
+        real_create = provider.create
+
+        async def create(spec: SandboxSpec) -> Any:
+            handle = await real_create(spec)
+            made.set()
+            await ready.wait()
+            return handle
+
+        provider.create = create  # type: ignore[method-assign]
+        async with anyio.create_task_group() as request:
+            request.start_soon(owned.create, "session", _spec())
+            await asyncio.wait_for(made.wait(), timeout=5)
+            request.cancel_scope.cancel()
+            ready.set()
+
+        assert _states(provider) == ["stopped"]
+        assert owned.keys == []
+
+    async def test_a_cancelled_start_that_never_returns_is_cut_short_after_the_stop_limit(self, monkeypatch) -> None:
+        monkeypatch.setattr(owned_sandboxes_module, "STOP_TIMEOUT_S", 0.05)
+        provider = FakeSnapshotProvider()
+        owned = _owned(provider)
+        made = asyncio.Event()
+        real_create = provider.create
+
+        async def create(spec: SandboxSpec) -> Any:
+            handle = await real_create(spec)
+            made.set()
+            await asyncio.Event().wait()
+            return handle
+
+        provider.create = create  # type: ignore[method-assign]
+        async with asyncio.timeout(5):
+            async with anyio.create_task_group() as request:
+                request.start_soon(owned.create, "session", _spec())
+                await asyncio.wait_for(made.wait(), timeout=5)
+                request.cancel_scope.cancel()
+
+        assert owned.keys == []
+
     async def test_a_failed_start_whose_stop_fails_stays_owned_until_a_stop_succeeds(self) -> None:
         provider = FakeSnapshotProvider()
         owned = _owned(provider)
