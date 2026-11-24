@@ -41,6 +41,12 @@
 #                                            ReViSQL-verified "uberset" of BIRD train (~9 GB download on first use; see
 #                                            README.md, "Dialects and splits") and is meant for generating training
 #                                            data. Not gym's own `--split` (that one is fixed to `benchmark`).
+#   --version NAME                         Default: dev_20240627. Which release of BIRD dev's questions (dev split only):
+#                                            dev_20240627, dev_20251106, minidev_20250704 or minidev_20261028 (see
+#                                            README.md, "Versions"). All run on the same databases.
+#   --prompt-format default|schema_only    Default: default. `schema_only` (SQLite only) uses
+#                                            prompts/schema_only_sqlite.yaml, auto-ontology-eval's schema-only prompt
+#                                            (CREATE TABLE statements and column descriptions; see README.md).
 #   --concurrency N                        Default: 8. Caps concurrent in-flight requests
 #                                            (nemo_gym's own retry on 429/502/503/504/520 has no
 #                                            upper bound and no backoff growth -- see
@@ -99,6 +105,8 @@ MODEL_TYPE="vllm_model"
 CONCURRENCY="8"
 DIALECT="sqlite"
 SPLIT="dev"
+VERSION="dev_20240627"
+PROMPT_FORMAT="default"
 # (Empty arrays are expanded as ${ARR[@]+"${ARR[@]}"} below: plain "${ARR[@]}" errors under `set -u` on bash < 4.4,
 # e.g. macOS's stock bash 3.2, when the array is empty.)
 EXTRA_ARGS=()
@@ -116,6 +124,8 @@ while [[ $# -gt 0 ]]; do
         --concurrency) CONCURRENCY="$2"; shift 2 ;;
         --dialect) DIALECT="$2"; shift 2 ;;
         --split) SPLIT="$2"; shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --prompt-format) PROMPT_FORMAT="$2"; shift 2 ;;
         *) EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -128,14 +138,39 @@ fi
 if [[ -z "${OUTPUT_DIR}" ]]; then
     SAFE_MODEL_NAME="$(echo "${MODEL}" | tr '/: ' '___')"
     OUTPUT_DIR="benchmarks/birdbench/results/${SPLIT}_${DIALECT}/${SAFE_MODEL_NAME}"
+    if [[ "${VERSION}" != "dev_20240627" || "${PROMPT_FORMAT}" != "default" ]]; then
+        OUTPUT_DIR="benchmarks/birdbench/results/${VERSION}_${DIALECT}_${PROMPT_FORMAT}/${SAFE_MODEL_NAME}"
+    fi
 fi
 # dev + sqlite is config.yaml's own default, so it needs no overrides. Any other dialect or split overrides, for both
 # `gym eval prepare` and `gym eval run`: what `prepare` renders, the engine the server runs, and the dataset
 # (Hydra cannot override one list item, so the whole `datasets` list is replaced; `gym eval prepare` also requires
 # prepare()'s output path to equal the dataset's jsonl_fpath). num_repeats is 1: the dataset is never repeated.
 # (File naming mirrors prepare.output_fpath_for and prepare.prompt_config_fpath_for.)
-PREPARED_JSONL="benchmarks/birdbench/data/birdbench_${DIALECT}_${SPLIT}.jsonl"
-PROMPT_CONFIG="benchmarks/birdbench/prompts/default_${DIALECT}.yaml"
+if [[ "${SPLIT}" != "dev" && "${VERSION}" != "dev_20240627" ]]; then
+    echo "--version picks a release of BIRD dev; it can't be used with --split ${SPLIT}." >&2
+    exit 1
+fi
+case "${PROMPT_FORMAT}" in
+    default) FORMAT_SUFFIX="" ;;
+    schema_only)
+        FORMAT_SUFFIX="_schema_only"
+        if [[ "${DIALECT}" != "sqlite" ]]; then
+            echo "--prompt-format schema_only is SQLite only." >&2
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Unsupported --prompt-format '${PROMPT_FORMAT}'; expected default or schema_only." >&2
+        exit 1
+        ;;
+esac
+FILE_TAG="${SPLIT}"
+if [[ "${VERSION}" != "dev_20240627" ]]; then
+    FILE_TAG="${VERSION}"
+fi
+PREPARED_JSONL="benchmarks/birdbench/data/birdbench_${DIALECT}_${FILE_TAG}${FORMAT_SUFFIX}.jsonl"
+PROMPT_CONFIG="benchmarks/birdbench/prompts/${PROMPT_FORMAT}_${DIALECT}.yaml"
 case "${SPLIT}" in
     dev) DATASET_NAME="birdbench" ;;
     train) DATASET_NAME="birdbench_train" ;;
@@ -164,10 +199,12 @@ case "${DIALECT}" in
         exit 1
         ;;
 esac
-if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
+if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" || "${VERSION}" != "dev_20240627" || "${PROMPT_FORMAT}" != "default" ]]; then
     DIALECT_ARGS=(
         "+prepare_script_args.dialect=${DIALECT}"
         "+prepare_script_args.split=${SPLIT}"
+        "+prepare_script_args.version=${VERSION}"
+        "+prepare_script_args.prompt_format=${PROMPT_FORMAT}"
         "+birdbench_bird_sql_resources_server.resources_servers.bird_sql.dialect=${DIALECT}"
         "+birdbench_bird_sql_resources_server.resources_servers.bird_sql.split=${SPLIT}"
         "++birdbench_bird_sql_simple_agent.responses_api_agents.simple_agent.datasets=[{name:${DATASET_NAME},type:benchmark,jsonl_fpath:${PREPARED_JSONL},prompt_config:${PROMPT_CONFIG},prepare_script:benchmarks/birdbench/prepare.py,prepare_project:benchmarks/birdbench,num_repeats:1}]"
