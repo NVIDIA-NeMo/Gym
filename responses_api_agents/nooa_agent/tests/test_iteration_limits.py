@@ -4,8 +4,10 @@
 """Exercise agent sessions with the pinned CodeAct runtime and scripted model replies."""
 
 import asyncio
+import inspect
 from json import dumps as json_dumps
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -146,8 +148,8 @@ def iteration_agent(*, scenario: str = "iterations", sentinel: Path | None = Non
                 NeMoGymResponseFunctionToolCall(
                     id="function-1",
                     call_id="call-1",
-                    name="execute_python",
-                    arguments=arguments,
+                    name="return_result" if scenario == "result_validation" else "execute_python",
+                    arguments='{"result": {"wrong": "type"}}' if scenario == "result_validation" else arguments,
                 )
             )
         response = model_response(*output, response_id=f"resp-{len(model_calls)}")
@@ -284,7 +286,7 @@ async def test_real_codeact_environment_verifies_partial_response_once(
     assert _paths(client)[-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
 
 
-@pytest.mark.parametrize("scenario", ["retries", "model_outage"])
+@pytest.mark.parametrize("scenario", ["model_outage"])
 async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation(scenario: str) -> None:
     instance, model_calls = iteration_agent(scenario=scenario)
     req = await open_session(instance)
@@ -428,3 +430,49 @@ async def test_codeact_cleanup_failure_after_policy_stop_skips_verification(
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in gaps
     assert reason not in gaps
     assert saved_reply.agent_observations.records
+
+
+@pytest.mark.parametrize(
+    "scenario,reason",
+    [
+        ("retries", NOOATerminationReason.CODE_RETRIES_EXHAUSTED),
+        ("result_validation", NOOATerminationReason.RESULT_VALIDATION_EXHAUSTED),
+    ],
+)
+async def test_pinned_model_retry_exhaustion_preserves_calls_and_reaches_verifier(scenario, reason):
+    instance, calls = iteration_agent(scenario=scenario)
+    environment, client = _environment(instance)
+    result = await environment.run_request(_request())
+    assert result.failure is None
+    assert result.result.response.status == "incomplete"
+    assert result.result.response.error is None
+    assert len(calls) == 1
+    assert result.result.response.output
+    assert _paths(client).count("/verify") == 1
+    record = _episode_record(result.model_dump(mode="json"))
+    assert reason.value in {gap["code"] for gap in record["ng_agent_observations"]["gaps"]}
+    assert record["ng_agent_observations"]["records"][0]["model_calls"]
+
+
+@pytest.mark.parametrize(
+    "message,from_atom,gradable",
+    [
+        ("Atom ended without a TaskResult: Done carrying dict", True, True),
+        ("an AtomHarness runs one episode; construct another", True, False),
+        ("Atom ended without a TaskResult: Done carrying dict", False, False),
+    ],
+)
+def test_atom_done_without_task_result_is_invalid_policy_output(
+    message: str, from_atom: bool, gradable: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the pinned Atom harness's own check, raised from AtomHarness.solve, is a model-caused ending.
+    from nooa_atom.gym import AtomHarness
+
+    from responses_api_agents.nooa_agent import termination
+
+    code = inspect.unwrap(AtomHarness.solve).__code__ if from_atom else invoke_text.__code__
+    monkeypatch.setattr(termination, "_raising_frame", lambda error: SimpleNamespace(f_code=code))
+
+    reason, _ = termination.policy_termination(RuntimeError(message))
+
+    assert reason == (NOOATerminationReason.INVALID_POLICY_OUTPUT if gradable else None)

@@ -22,6 +22,8 @@ def set_response_lifecycle(
     if reason in {
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.INVALID_POLICY_OUTPUT,
+        NOOATerminationReason.CODE_RETRIES_EXHAUSTED,
+        NOOATerminationReason.RESULT_VALIDATION_EXHAUSTED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
         NOOATerminationReason.LOOP_DETECTED,
@@ -60,6 +62,16 @@ def finalize_run_result(run_result: NOOARunResult) -> tuple[NeMoGymResponse, Age
     ), observations
 
 
+# litellm is not a Gym dependency, so recognize its transient model errors by class, not by import.
+_LITELLM_TRANSIENT = {"Timeout", "ServiceUnavailableError"}
+
+
+def _is_litellm_transient(error: BaseException) -> bool:
+    return any(
+        cls.__module__.split(".")[0] == "litellm" and cls.__name__ in _LITELLM_TRANSIENT for cls in type(error).__mro__
+    )
+
+
 def is_transient_infrastructure_error(error: BaseException) -> bool:
     """Recognize retryable transport failures in task and retained cleanup errors."""
     seen: set[int] = set()
@@ -73,6 +85,8 @@ def is_transient_infrastructure_error(error: BaseException) -> bool:
         if isinstance(
             error, (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, TimeoutError, ConnectionError)
         ):
+            return True
+        if _is_litellm_transient(error):
             return True
         if isinstance(error, aiohttp.ClientResponseError):
             if error.status in {408, 425, 429} or error.status >= 500:

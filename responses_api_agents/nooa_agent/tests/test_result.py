@@ -184,3 +184,21 @@ def test_retry_classification_checks_all_cleanup_errors_with_cycles(
     wrapper = RuntimeError("wrapper")
     wrapper.__cause__ = primary
     assert is_transient_infrastructure_error(wrapper) is (first_transient or second_transient)
+
+
+@pytest.mark.parametrize(
+    ("name", "module", "transient"),
+    [
+        ("Timeout", "litellm.exceptions", True),
+        ("ServiceUnavailableError", "litellm.exceptions", True),
+        ("AuthenticationError", "litellm.exceptions", False),
+        ("Timeout", "other.lib", False),
+    ],
+)
+def test_litellm_timeout_and_unavailable_are_transient(name: str, module: str, transient: bool) -> None:
+    from responses_api_agents.nooa_agent.result import is_transient_infrastructure_error
+
+    error = type(name, (Exception,), {"__module__": module})("model call failed")
+    wrapper = RuntimeError("wrapper")
+    wrapper.__cause__ = error
+    assert is_transient_infrastructure_error(wrapper) is transient
