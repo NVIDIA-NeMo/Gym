@@ -42,9 +42,11 @@ a query also matched a question whose gold result is empty.
 - **Provider.** `sandbox_provider: sandbox` names a top-level block from a provider config, for example
   `nemo_gym/sandbox/providers/docker/configs/docker.yaml`; pass it with `--config`. The server refuses to start
   without it.
-- **Image and database.** `sandbox_config.image` (default `python:3.13.14-alpine3.24`: CPython 3.13.14, SQLite
-  3.53.2) needs Python 3.11+ with `sqlite3`. Its SQLite version decides which SQL functions a query can call, so keep
-  it pinned; Debian `-slim` images ship SQLite 3.46, which lacks `IF()`. The row's database
+- **Image and database.** `sandbox_config.image` (default `python:3.13.14-slim-trixie`) needs Python 3.11+ with
+  `sqlite3`, and the shell its provider runs commands with (bash for Enroot, E2B and OpenSandbox, so not Alpine).
+  Its SQLite version decides which SQL functions a query can call, so keep it pinned. The default image has SQLite
+  3.46.1, which lacks `IF()` (added in 3.48), while a server's own uv-managed Python may have a newer SQLite. A model
+  answer using `IF()` now fails as the model's error; `IIF()` and `CASE` work. The row's database
   is uploaded into each sandbox (dev's largest is about 600 MB). To skip the upload, set
   `sandbox_config.databases_dir` to a directory of an image, or of a read-only provider mount, that holds
   `<db_id>/<db_id>.sqlite`.
@@ -56,9 +58,8 @@ a query also matched a question whose gold result is empty.
   the runner's address space, so a query that needs more memory fails as the model's error instead of killing the
   sandbox. `max_concurrency` bounds the sandboxes running at once.
 - **Startup.** The server grades one known answer (`SELECT sqlite_version()`) on its smallest database in a sandbox
-  before it serves, exactly as it grades a row. A provider or image that cannot grade, or an image whose SQLite is
-  older than `sandbox_config.min_sqlite_version` (3.48, which added `IF()`), stops startup instead of masking or
-  shifting every row; the log names the SQLite version that grades.
+  before it serves, exactly as it grades a row. A provider or image that cannot grade stops startup instead of
+  masking every row, and the log names the SQLite version that grades.
 - **Failures.** A sandbox that cannot start, run the runner or report a result is retried on a fresh sandbox
   `inconclusive_verification_retries` times (default 2). If every attempt fails, the row is masked with
   `failure_reason: sandbox_error`, `evaluation_completed: false` and `failure_kind` `provider_unavailable` or

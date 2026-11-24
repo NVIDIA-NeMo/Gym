@@ -247,7 +247,7 @@ class TestFreshSandbox:
             "database_bytes": database.stat().st_size,
         }
         assert database_uploads(provider) == [(database, f"{work_dir}/TestDB.sqlite")]
-        assert spec.image == "python:3.13.14-alpine3.24"
+        assert spec.image == "python:3.13.14-slim-trixie"
         assert spec.metadata == {"sandbox-api": "scripted", "db_id": "TestDB"}
         assert spec.ttl_s == 600 + runner_timeout_s(30.0) + 300
         [(command, kwargs)] = provider.commands
@@ -360,11 +360,6 @@ class TestProbe:
     async def test_returns_the_sqlite_version_the_image_grades_with(self, tmp_path, database):
         assert await self.probe(tmp_path, database) == sqlite3.sqlite_version
         assert database.exists(), "only the uploaded copy is deleted"
-
-    @pytest.mark.asyncio
-    async def test_an_image_below_the_minimum_sqlite_fails(self, tmp_path, database):
-        with pytest.raises(RuntimeError, match="below sandbox_config.min_sqlite_version 99.0"):
-            await self.probe(tmp_path, database, min_sqlite_version="99.0")
 
     @pytest.mark.asyncio
     async def test_a_databases_dir_without_the_database_fails(self, tmp_path, database):
