@@ -19,8 +19,9 @@
 #   --output_dir DIR         Default: benchmarks/birdbench/results/<split>_<dialect>/<sanitized model name>
 #                              (benchmarks/birdbench/data/ is reserved for input/prepared data)
 #   --max-output-tokens N     Default: 16000
-#   --temperature T            Default: 1.0. Both are pinned on the policy Model Server (its sampling_overrides), so
-#                                --model-type must be vllm_model or switchyard_model.
+#   --temperature T            Default: 1.0
+#   --top-p P                  Default: none (the endpoint's own). These three are pinned on the policy Model Server (its
+#                                sampling_overrides), so --model-type must be vllm_model or switchyard_model.
 #   --num-repeats N              Default: 1 = exactly one rollout per task (1534 rollouts). The dataset itself is
 #                                  never repeated (config.yaml's num_repeats is 1); this flag is the only repeat
 #                                  control, so N > 1 gives 1534 x N rollouts.
@@ -58,7 +59,7 @@
 # benchmark` declaration for birdbench (nemo_gym/rollout_collection.py's `split` field only
 # accepts "train"/"validation"/"benchmark" -- birdbench's own dataset is always "benchmark").
 #
-# Any other flag (e.g. --limit, --top-p) is passed straight through to `gym eval run`.
+# Any other flag (e.g. --limit) is passed straight through to `gym eval run`.
 #
 # Example:
 #   ./benchmarks/birdbench/eval.sh --model nvidia/zai-org/glm-5.2 \
@@ -95,6 +96,7 @@ MODEL=""
 OUTPUT_DIR=""
 MAX_OUTPUT_TOKENS="16000"
 TEMPERATURE="1.0"
+TOP_P=""
 NUM_REPEATS="1"
 MODEL_URL=""
 MODEL_API_KEY=""
@@ -112,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         --output_dir|--output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --max-output-tokens) MAX_OUTPUT_TOKENS="$2"; shift 2 ;;
         --temperature) TEMPERATURE="$2"; shift 2 ;;
+        --top-p) TOP_P="$2"; shift 2 ;;
         --num-repeats) NUM_REPEATS="$2"; shift 2 ;;
         --model-url) MODEL_URL="$2"; shift 2 ;;
         --model-api-key) MODEL_API_KEY="$2"; shift 2 ;;
@@ -124,7 +127,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${MODEL}" ]]; then
-    echo "Usage: $0 --model <policy_model_name> [--output_dir DIR] [--max-output-tokens N] [--temperature T] [--num-repeats K] [--model-url URL] [--model-api-key KEY]" >&2
+    echo "Usage: $0 --model <policy_model_name> [--output_dir DIR] [--max-output-tokens N] [--temperature T] [--top-p P] [--num-repeats K] [--model-url URL] [--model-api-key KEY]" >&2
     exit 1
 fi
 
@@ -171,7 +174,7 @@ case "${DIALECT}" in
         exit 1
         ;;
 esac
-# BIRD dev's rows are typed tasks, which refuse run-level sampling (gym eval run's --temperature and
+# BIRD dev's rows are typed tasks, which refuse run-level sampling (gym eval run's --temperature, --top-p and
 # --max-output-tokens), so the policy Model Server pins it on every call it serves. Only these Model Servers have
 # sampling_overrides; another would ignore it and sample with the endpoint's defaults.
 case "${MODEL_TYPE}" in
@@ -186,6 +189,9 @@ SAMPLING_ARGS=(
     "++policy_model.responses_api_models.${MODEL_TYPE}.sampling_overrides.temperature=${TEMPERATURE}"
     "++policy_model.responses_api_models.${MODEL_TYPE}.sampling_overrides.max_output_tokens=${MAX_OUTPUT_TOKENS}"
 )
+if [[ -n "${TOP_P}" ]]; then
+    SAMPLING_ARGS+=("++policy_model.responses_api_models.${MODEL_TYPE}.sampling_overrides.top_p=${TOP_P}")
+fi
 OVERRIDES=()
 if [[ "${SPLIT}" == "train" ]]; then
     OVERRIDES=(

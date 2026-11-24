@@ -117,7 +117,17 @@ def test_eval_sh_pins_sampling_on_the_policy_model_server(model_type, tmp_path):
     assert process.returncode == 0, process.stderr
     pinned = f"++policy_model.responses_api_models.{model_type}.sampling_overrides"
     assert {f"{pinned}.temperature=0.6", f"{pinned}.max_output_tokens=4096"} <= set(run)
-    assert not {"--temperature", "--max-output-tokens"} & set(run)
+    assert not {"--temperature", "--max-output-tokens", "--top-p"} & set(run)
+    # With no --top-p, the endpoint keeps its own.
+    assert not [arg for arg in run if ".sampling_overrides.top_p=" in arg]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="eval.sh is a bash script")
+def test_eval_sh_pins_top_p_on_the_policy_model_server(tmp_path):
+    process, (_, run) = _run_eval_sh(tmp_path, "--top-p", "0.9")
+    assert process.returncode == 0, process.stderr
+    assert "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.9" in run
+    assert "--top-p" not in run
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="eval.sh is a bash script")
