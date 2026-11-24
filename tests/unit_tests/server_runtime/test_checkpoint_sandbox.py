@@ -529,7 +529,8 @@ async def test_export_maps_a_tracked_sandbox_that_was_never_started_to_none(stat
     states = await checkpointer.export(["s1", "s2"], checkpoint_id="c1")
     assert states["s2"] is None and states["s1"] is not None
     assert ops(provider, "snapshot") == ["sb-1"]
-    assert "s2" in checkpointer and checkpointer.get("s2") is unstarted
+    assert "s2" in checkpointer.keys, "unstarted entries remain tracked for cleanup"
+    assert "s2" not in checkpointer and checkpointer.get("s2") is None
 
 
 def test_add_rejects_a_duplicate_or_a_sandbox_that_is_not_on_the_shared_provider(state_dir: Path) -> None:

@@ -78,6 +78,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.e2b._sdk import E2B_SDK_CONSTRAINT, require_e2b_sdk
+from nemo_gym.sandbox.providers.utils import require_shell_text
 from nemo_gym.utils.network_policy import allowlist_policy
 
 
@@ -569,8 +570,7 @@ class E2BProvider:
     """Provider backed by the E2B Python SDK."""
 
     name = "e2b"
-    # A snapshot saves memory and processes, and a sandbox created from it continues them. Every network rule is
-    # applied as a deny-by-default network_policy, which create maps onto E2B's own network option.
+    # A snapshot saves memory and processes, and a sandbox created from it continues them.
     capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(
         snapshot_keeps=frozenset({"files", "processes"}), network_rules=NETWORK_RULES
     )
@@ -578,11 +578,7 @@ class E2BProvider:
     def network_options(
         self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
     ) -> dict[str, Any]:
-        """``provider_options`` with a ``network_policy`` for ``rule``: deny all egress but ``hosts``.
-
-        ``inherit`` leaves them as they are, so ``create.network`` applies. Every other rule replaces
-        ``create.network`` for the sandbox; ``no_network``, given no hosts, denies all egress.
-        """
+        """Apply a portable egress rule through E2B's existing network_policy adapter."""
         if rule == "inherit":
             return dict(provider_options)
         return {**provider_options, "network_policy": allowlist_policy(hosts)}
@@ -1576,13 +1572,14 @@ class E2BProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
+        command = require_shell_text(command, provider=self.name)
         e2b = _require_e2b_sdk()
         sandbox = self._sandbox(handle)
 
