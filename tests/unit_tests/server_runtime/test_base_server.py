@@ -442,7 +442,7 @@ class TestServerUtils:
         class TestSimpleServer(SimpleServer):
             def __init__(self, *args, **kwargs):
                 # Only the config: the startup checks before the dry-run return read it.
-                object.__setattr__(self, "config", MagicMock(num_workers=None))
+                object.__setattr__(self, "config", MagicMock(num_workers=None, sandbox_provider=None))
 
             def setup_webserver(self):
                 assert False
