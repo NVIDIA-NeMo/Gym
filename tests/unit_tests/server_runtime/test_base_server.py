@@ -1438,6 +1438,7 @@ class TestRunWebserverProxyKwargs:
 
         def run(**kwargs) -> None:
             captured.update(kwargs)
+            self.session_secret_at_run = os.environ.get(_run_secret_variable("my_server"))
             self.blocked_signals_at_run = signal.pthread_sigmask(signal.SIG_BLOCK, ())  # reads the mask, adds nothing
 
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.uvicorn, "run", run)
@@ -1480,6 +1481,25 @@ class TestRunWebserverProxyKwargs:
 
         TestSimpleServer.run_webserver()
         return captured
+
+    @mark.parametrize("bearer", [False, True])
+    def test_multi_worker_main_initializes_the_secret_before_uvicorn_starts(
+        self, monkeypatch: MonkeyPatch, bearer: bool
+    ) -> None:
+        variable = _run_secret_variable("my_server")
+        monkeypatch.delenv(variable, raising=False)
+
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch, {}, num_workers=4, is_worker=False, mcp={"mcp_bearer_token": bearer}
+        )
+
+        assert kwargs["workers"] == 4
+        if bearer:
+            assert self.session_secret_at_run
+            assert self.session_secret_at_run == os.environ[variable]
+            assert self.session_secret_at_run != "TestSimpleServer___my_server"
+        else:
+            assert self.session_secret_at_run is None
 
     @mark.parametrize(
         ("config_dict", "num_workers", "uses_reuse_port"),
