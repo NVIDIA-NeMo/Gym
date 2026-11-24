@@ -366,10 +366,9 @@ itself: a required grant that it does not list as `connected`, or a run without 
 activation with HTTP 502 and an `agent_startup_failed` gap that names the servers and their status, so the turn is
 never graded. This holds when the run then timed out, too: only a run that timed out before the `init` event, or
 that failed for another reason, keeps that cause. An optional grant that did not connect is left out of the tools
-and recorded as an `mcp_server_skipped` gap. The `harbor` Environment Server refuses a task with
-`task_mcp_grants: optional` for a harness that does not declare `supports_task_tool_context`, as this one does
-not, so run Harbor tasks with `task_mcp_grants: required`. A server lost later in the run shows up as failed tool
-calls. The connection check needs no tool in the image besides `bash` and `sleep`.
+and recorded as an `mcp_server_skipped` gap. The `harbor` Environment Server grants a task's MCP servers as
+required, so a Harbor task's server that does not connect fails the turn. A server lost later in the run shows up as
+failed tool calls. The connection check needs no tool in the image besides `bash` and `sleep`.
 
 Sandbox requests accept one user text prompt (a string or a single user message),
 optionally preceded by one system message. Assistant/developer messages, multiple
