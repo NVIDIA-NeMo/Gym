@@ -17,6 +17,11 @@ from pydantic import BaseModel, ConfigDict, Field
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one (BIRD: the source `question_id`).",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     question: str = Field(
         description=(
             "Natural-language question the SQL must answer; wire-required but not read for grading — "
