@@ -44,6 +44,7 @@ from nemo_gym.metrics import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.sandbox import resolve_provider_config
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -52,7 +53,6 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_programmatic_grading,
 )
-from nemo_gym.sandbox import resolve_provider_config
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.bird_sql.eval_utils import (
     PostgresPool,

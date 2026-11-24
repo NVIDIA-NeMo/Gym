@@ -100,8 +100,7 @@ async def grade_in_sandbox(sandbox: AsyncSandbox, *, work_dir: str, python: str,
             timeout), exits nonzero or leaves no valid result.
     """
     command = (
-        f"cd {shlex.quote(work_dir)} && "
-        f"{shlex.quote(python)} {RUNNER_FILE} request.json result.json > runner.log 2>&1"
+        f"cd {shlex.quote(work_dir)} && {shlex.quote(python)} {RUNNER_FILE} request.json result.json > runner.log 2>&1"
     )
     execution = await sandbox.exec(command, timeout_s=timeout_s)
     if execution.error_type is not None or execution.return_code != 0:

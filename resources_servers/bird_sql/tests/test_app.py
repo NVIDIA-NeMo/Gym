@@ -711,7 +711,9 @@ def _refuse_host_execution(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_sandbox_that_never_grades_is_retried_then_masked_as_incomplete(server_with_mocked_dbs, monkeypatch):
+async def test_verify_sandbox_that_never_grades_is_retried_then_masked_as_incomplete(
+    server_with_mocked_dbs, monkeypatch
+):
     """No host fallback: every attempt gets a fresh sandbox, and when none grades the row is masked, not scored 0."""
     attempts = []
 
