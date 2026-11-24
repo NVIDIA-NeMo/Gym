@@ -20,7 +20,6 @@ from typing import Any, NamedTuple, Optional
 from uuid import uuid4
 
 from nemo_gym.core import (
-    NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
@@ -123,15 +122,27 @@ def transcript_calls(records: Iterable[Any]) -> dict[str, TranscriptCall]:
     return calls
 
 
-def tool_call_messages(records: Iterable[Any]) -> dict[str, list[NeMoGymEasyInputMessage]]:
-    """The user messages Claude Code adds to a tool call's result, by the call's id, in transcript order.
+class ToolResultAdditions(NamedTuple):
+    """The text Claude Code adds to one tool call's result, in transcript order."""
+
+    # Lines Claude Code appends to the tool result itself (``appendToToolResult``).
+    result_lines: list[str]
+    # The text of each message Claude Code sends right after the result.
+    messages: list[str]
+
+
+def tool_result_additions(records: Iterable[Any]) -> dict[str, ToolResultAdditions]:
+    """The text Claude Code adds to each tool call's result, by the call's id, read from its session transcript.
 
     The Skill tool answers its call with ``Launching skill: <name>`` and then sends the skill's text ("Base
-    directory for this skill: ..." and its SKILL.md) as a user message of its own, which the model reads right
-    after the call's result. The stream carries that message without naming its call; the transcript entry names
-    it in ``sourceToolUseID``.
+    directory for this skill: ..." and its SKILL.md) as a message of its own, which the model reads right after
+    the call's result. The stream carries that message without naming its call; the transcript entry names it in
+    ``sourceToolUseID``. For a skill whose frontmatter has a ``compatibility`` line, Claude Code 2.1.330 can send
+    one more such message: its ``appendToToolResult`` line (``compatibility: ...``) goes into the tool result
+    itself, and its text, an instruction about that line, follows the skill's text. Claude Code does this only in
+    some session modes, not by default for ``claude -p``; the parser handles it if it appears.
     """
-    messages: dict[str, list[NeMoGymEasyInputMessage]] = {}
+    additions: dict[str, ToolResultAdditions] = {}
     for record in records:
         if not isinstance(record, Mapping) or record.get("type") != "user":
             continue
@@ -150,16 +161,23 @@ def tool_call_messages(records: Iterable[Any]) -> dict[str, list[NeMoGymEasyInpu
             ]
         else:
             texts = []
-        texts = [text for text in texts if text]
-        if not texts:
+        texts = [text for text in texts if text.strip()]
+        line = record.get("appendToToolResult")
+        lines = [line] if isinstance(line, str) and line.strip() else []
+        if not texts and not lines:
             continue
-        messages.setdefault(call_id, []).append(
-            NeMoGymEasyInputMessage(
-                role="user",
-                content=texts[0] if len(texts) == 1 else [{"type": "input_text", "text": text} for text in texts],
-            )
-        )
-    return messages
+        added = additions.setdefault(call_id, ToolResultAdditions([], []))
+        added.result_lines.extend(lines)
+        if texts:
+            added.messages.append("\n\n".join(texts))
+    return additions
+
+
+def _with_additions(result_text: str, added: Optional[ToolResultAdditions]) -> str:
+    """The tool's result followed by the lines and the messages Claude Code added to it, a blank line apart."""
+    if added is None:
+        return result_text
+    return "\n\n".join(part for part in (result_text, *added.result_lines, *added.messages) if part)
 
 
 def _extract_thinking(content: list[Any]) -> str:
@@ -189,10 +207,12 @@ def parse_stream_json(
     transcripts, the stream's per-message usage is all there is, which on servers that send output only at the end
     of a message (vLLM) holds input alone. ``cached_tokens`` is None when no cache count was reported.
 
-    A user message Claude Code adds to a tool call's result, such as the text of a skill the Skill tool loads,
-    follows that call's ``function_call_output`` as a ``user`` input message (:func:`tool_call_messages`). It is
-    input the model read, not model output. The transcript records link it to its call, so without them it is
-    left out.
+    Text Claude Code adds to a tool call's result, such as the text of a skill the Skill tool loads, is appended
+    to that call's ``function_call_output`` after the tool's own result, a blank line apart
+    (:func:`tool_result_additions`). Claude Code sends the skill's text as a message after the result; keeping it in
+    the result adds no item to the output, so readers of the model's answer and of tool results stay as they were.
+    The transcript records link the text to its call, so without them it is left out. A call whose result never
+    arrived has no ``function_call_output``, so its text is left out too.
 
     ``fold_thinking=True`` (eval default) prefixes each assistant message with the model's thinking as
     ``<think>...</think>`` text. Under training-token capture that must be off: Gym attributes the finished
@@ -215,7 +235,7 @@ def parse_stream_json(
 
     if transcript_records is not None:
         transcript_records = list(transcript_records)
-    result_messages = tool_call_messages(transcript_records or ())
+    additions = tool_result_additions(transcript_records or ())
     output_items: list[Any] = []
     pending_calls: dict[str, NeMoGymResponseFunctionToolCall] = {}
     buffered_think: str | None = None
@@ -348,12 +368,11 @@ def parse_stream_json(
                     NeMoGymFunctionCallOutput(
                         type="function_call_output",
                         call_id=tool_id,
-                        output=result_text,
+                        # The model read the added text once, so a repeated result does not repeat it.
+                        output=_with_additions(result_text, additions.pop(tool_id, None)),
                         status="completed",
                     )
                 )
-                # Right after the result, where Claude Code records it.
-                output_items.extend(result_messages.pop(tool_id, ()))
 
         elif etype == "system" and event.get("subtype") == "status":
             session_id = event.get("session_id")

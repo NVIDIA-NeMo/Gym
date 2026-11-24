@@ -32,6 +32,7 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.server_runtime.base_resources_server import ReverifyMode
+from nemo_gym.trajectory.atif_export import transcript_to_atif
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,
     AtifReverifyManifestEntry,
@@ -45,6 +46,7 @@ from nemo_gym.trajectory.atif_reverification import (
 )
 from nemo_gym.trajectory.atif_v1_7 import AtifTrajectoryV1_7
 from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
+from responses_api_agents.claude_code_agent.parsing import parse_stream_json
 
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
@@ -712,6 +714,84 @@ def test_observation_results_are_paired_by_source_call_id() -> None:
         "function_call_output",
         "message",
     ]
+
+
+@pytest.mark.parametrize("fold_thinking", [True, False], ids=["evaluation", "capture"])
+def test_a_claude_code_skill_call_round_trips_with_the_skill_text_in_its_result(fold_thinking: bool) -> None:
+    # Claude Code sends the text a Skill call loads as a message after the call's result, and only its session
+    # transcript names the call. Its parser appends the text to the call's function_call_output, so trajectory.json
+    # keeps it as that call's observation result and reverification projects the same response back.
+    skill_text = "Base directory for this skill: /workspace/.claude/skills/calculator\n\n# Calculator"
+    events = [
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "content": [
+                    {"type": "tool_use", "id": "call-skill", "name": "Skill", "input": {"skill": "calculator"}}
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call-skill", "content": "Launching skill: calculator"}
+                ]
+            },
+        },
+        {"type": "user", "isSynthetic": True, "message": {"content": [{"type": "text", "text": skill_text}]}},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m2",
+                "content": [
+                    {"type": "tool_use", "id": "call-bash", "name": "Bash", "input": {"command": "calc 2 + 3 * 4"}}
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "tool_use_id": "call-bash", "content": "Result: 14"}]},
+        },
+        {"type": "assistant", "message": {"id": "m3", "content": [{"type": "text", "text": "14"}]}},
+        {"type": "result", "subtype": "success", "is_error": False, "usage": {"input_tokens": 3, "output_tokens": 3}},
+    ]
+    transcript = [
+        {
+            "type": "user",
+            "isMeta": True,
+            "sourceToolUseID": "call-skill",
+            "message": {"role": "user", "content": [{"type": "text", "text": skill_text}]},
+        }
+    ]
+    items, _ = parse_stream_json(
+        "\n".join(json.dumps(event) for event in events), fold_thinking=fold_thinking, transcript_records=transcript
+    )
+    trajectory = transcript_to_atif(
+        "What is 2 + 3 * 4?",
+        [item.model_dump(mode="json") for item in items],
+        session_id="rollout",
+        agent_name="claude_code_agent",
+        agent_version="test",
+    )
+    response = atif_trajectory_to_response(AtifTrajectoryV1_7.model_validate_json(trajectory.model_dump_json()))
+
+    assert [(result.source_call_id, result.content) for result in trajectory.steps[1].observation.results] == [
+        ("call-skill", "Launching skill: calculator\n\n" + skill_text)
+    ]
+    assert [(item.type, getattr(item, "call_id", None)) for item in response.output] == [
+        ("function_call", "call-skill"),
+        ("function_call_output", "call-skill"),
+        ("function_call", "call-bash"),
+        ("function_call_output", "call-bash"),
+        ("message", None),
+    ]
+    assert [(item.call_id, item.output) for item in response.output if item.type == "function_call_output"] == [
+        (item.call_id, item.output) for item in items if item.type == "function_call_output"
+    ]
+    assert response.output[1].output == "Launching skill: calculator\n\n" + skill_text
+    assert response.output_text == "14"
 
 
 def test_text_only_multipart_messages_and_tool_results_preserve_part_order() -> None:
