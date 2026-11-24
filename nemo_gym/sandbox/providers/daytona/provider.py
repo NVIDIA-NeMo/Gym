@@ -155,6 +155,14 @@ def _exception_status_code(exception: BaseException) -> int | None:
     return int(match.group(1))
 
 
+def _is_missing_file_error(exception: BaseException) -> bool:
+    """Whether a file operation failed because the path is absent: the SDK's not-found error, or a 404, that does
+    not name the sandbox itself (a sandbox that is gone is an outage, not a missing file)."""
+    not_found = _daytona_error_types().get("not_found")
+    missing = (not_found is not None and isinstance(exception, not_found)) or _exception_status_code(exception) == 404
+    return missing and "sandbox" not in str(exception).lower()
+
+
 def _has_retryable_error_marker(exception: BaseException) -> bool:
     message = str(exception).lower()
     return any(marker in message for marker in RETRYABLE_ERROR_MARKERS)
@@ -1084,16 +1092,22 @@ class DaytonaProvider:
         )
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+        """Download one sandbox file; ``FileNotFoundError`` when the toolbox reports it absent."""
         target_path.parent.mkdir(parents=True, exist_ok=True)
         timeout_s = self._operations.file_timeout_s
-        await self._await_operation(
-            lambda: handle.raw.fs.download_file(source_path, str(target_path))
-            if timeout_s is None
-            else handle.raw.fs.download_file(source_path, str(target_path), timeout_s),
-            operation=f"download_file({source_path})",
-            sandbox_id=handle.sandbox_id,
-            timeout_s=float(timeout_s) if timeout_s is not None else None,
-        )
+        try:
+            await self._await_operation(
+                lambda: handle.raw.fs.download_file(source_path, str(target_path))
+                if timeout_s is None
+                else handle.raw.fs.download_file(source_path, str(target_path), timeout_s),
+                operation=f"download_file({source_path})",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=float(timeout_s) if timeout_s is not None else None,
+            )
+        except Exception as error:
+            if _is_missing_file_error(error):
+                raise FileNotFoundError(f"{source_path!r} does not exist in the sandbox: {error}") from error
+            raise
 
     async def close(self, handle: SandboxHandle, *, delete: bool = True) -> None:
         if not delete:

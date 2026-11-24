@@ -18,6 +18,7 @@ bwrap flags and runs the command on the host, so argv, env, process tracking and
 transfer are exercised without namespaces. ``test_bwrap_integration`` runs the real binary."""
 
 import asyncio
+import errno
 import json
 import os
 import socket
@@ -665,6 +666,24 @@ async def test_transfer_containment(system, tmp_path) -> None:
     assert not await provider.exists(sandbox._handle, "/workspace/escape/secret")
     assert (outside / "secret").read_text() == "secret"
     assert not (outside / "new").exists()
+    await sandbox.stop()
+
+
+async def test_a_download_through_a_symlink_is_refused_with_eloop(system, tmp_path) -> None:
+    """The errno is what lets a caller (``read_file_bytes``) tell a planted link from an outage."""
+    provider = make_provider(system)
+    sandbox = await start(provider, workdir="/workspace")
+    inst = sandbox._handle.raw
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "reward.txt").write_text("1")
+    (inst.workspace / "linked").symlink_to(outside)
+    (inst.workspace / "reward.txt").symlink_to(outside / "reward.txt")
+    for path in ("/workspace/reward.txt", "/workspace/linked/reward.txt"):
+        with pytest.raises(BwrapPathError) as refused:
+            await sandbox.download(path, tmp_path / "got")
+        assert refused.value.errno == errno.ELOOP, path
+    assert not (tmp_path / "got").exists()
     await sandbox.stop()
 
 

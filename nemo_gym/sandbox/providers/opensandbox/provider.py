@@ -25,6 +25,7 @@ import shlex
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -138,6 +139,31 @@ class _MissingSandboxTerminateFilter(logging.Filter):
 
 
 logging.getLogger("opensandbox.adapters.sandboxes_adapter").addFilter(_MissingSandboxTerminateFilter())
+
+# The sandbox path ``download_file`` is reading in the current task, while it reads it.
+_DOWNLOADING: ContextVar[str | None] = ContextVar("ng_opensandbox_downloading", default=None)
+
+
+class _DownloadNotFoundFilter(logging.Filter):
+    """Hide the SDK's error traceback for a 404 on the file ``download_file`` is reading in this task.
+
+    The SDK logs every failed stream at error level before raising. Whether a 404 means an absent file (an answer)
+    or a sandbox that is gone (a failure) is decided after the SDK has logged, and ``download_file`` logs the failure
+    itself in the second case.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        path = _DOWNLOADING.get()
+        error = record.exc_info[1] if record.exc_info else None
+        return not (
+            path is not None
+            and error is not None
+            and record.getMessage() == f"Failed to stream file {path}"
+            and _is_missing_file(error)
+        )
+
+
+logging.getLogger("opensandbox.adapters.filesystem_adapter").addFilter(_DownloadNotFoundFilter())
 
 
 @dataclass(frozen=True)
@@ -545,6 +571,19 @@ def _is_http_not_found(error: BaseException) -> bool:
                 return True
         pending.extend(link for link in (current.__cause__, current.__context__) if link is not None)
     return False
+
+
+def _is_missing_file(error: BaseException) -> bool:
+    """Whether a file read failed with an SDK 404 for the path itself: a 404 whose code names the sandbox (the
+    sandbox is gone) is not a missing file and stays a failure."""
+    if getattr(error, "status_code", None) != 404:
+        return False
+    code = getattr(getattr(error, "error", None), "code", None)
+    return code is None or "SANDBOX" not in str(code).upper()
+
+
+class _AbsentSandboxFile(FileNotFoundError):
+    """The sandbox answered that the path it was asked to read does not exist: an answer, not a provider failure."""
 
 
 def _http_failure(status: int, body: str) -> str:
@@ -2165,6 +2204,8 @@ class OpenSandboxProvider:
         # callers pass their own predicate.
         is_retryable: Callable[[BaseException], bool] | None = None,
         replay_safe: bool = False,
+        # Errors that are the operation's answer, not a failure: raised as they are, never recorded or retried.
+        answers: tuple[type[Exception], ...] = (),
     ) -> Any:
         renewal = self._renewals.get(sandbox_id) if sandbox_id is not None else None
         if renewal is not None and renewal.done() and not renewal.cancelled():
@@ -2218,6 +2259,8 @@ class OpenSandboxProvider:
                         sandbox_id=sandbox_id,
                         timeout_s=timeout_s,
                     )
+                except answers:
+                    raise
                 except Exception as error:
                     if isinstance(error, NgFailureEvent):
                         failure = error
@@ -3943,9 +3986,20 @@ class OpenSandboxProvider:
             # A retry starts the file again, so every attempt truncates it. The writes run in a thread so a
             # large file does not block the event loop.
             with target_path.open("wb") as out:
-                async for chunk in await handle.raw.files.read_bytes_stream(source_path):
-                    await asyncio.to_thread(out.write, chunk)
+                try:
+                    async for chunk in await handle.raw.files.read_bytes_stream(source_path):
+                        await asyncio.to_thread(out.write, chunk)
+                except Exception as error:
+                    if not _is_missing_file(error):
+                        raise
+                    # The SDK gives the same bare 404 for an absent path and, through a proxy, for a sandbox that is
+                    # gone: the path is absent only while the sandbox still runs.
+                    if await self._is_running(handle):
+                        raise _AbsentSandboxFile(f"{source_path!r} does not exist in the sandbox") from error
+                    LOGGER.error("Failed to stream file %s", source_path, exc_info=error)
+                    raise
 
+        token = _DOWNLOADING.set(source_path)
         try:
             await self._await_sdk_operation(
                 stream,
@@ -3955,9 +4009,33 @@ class OpenSandboxProvider:
                 # No overall deadline: the transfer time grows with the file, and the SDK client's request timeout
                 # still applies to every read, so a stalled stream fails.
                 timeout_s=None,
+                # An absent file is an answer, not a failure: asking again cannot change it.
+                answers=(_AbsentSandboxFile,),
             )
         except TimeoutError as error:
             raise opensandbox_failure(operation="provider I/O", sandbox_id=handle.sandbox_id, cause=error) from error
+        finally:
+            _DOWNLOADING.reset(token)
+
+    async def _is_running(self, handle: SandboxHandle) -> bool:
+        """Whether the sandbox reports running, asked once: any error, or no answer, is ``False``."""
+        get_info = getattr(handle.raw, "get_info", None)
+        if get_info is None:
+            return False
+        try:
+            info = await self._await_sdk_call(
+                get_info(),
+                operation="get_info",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=float(self._connection.request_timeout_s)
+                if self._connection.request_timeout_s is not None
+                else None,
+            )
+        except Exception:  # noqa: BLE001 - the caller reports the read that led here as the failure
+            return False
+        raw_status = getattr(info, "status", None)
+        state = getattr(raw_status, "state", None) if raw_status is not None else None
+        return _to_sandbox_status(state) == SandboxStatus.RUNNING
 
     async def _kill_with_retry(self, kill: Callable[[], Awaitable[None]], *, sandbox_id: str) -> None:
         """Apply the same idempotent deletion and permission guards to handles and orphan cleanup."""

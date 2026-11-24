@@ -115,8 +115,9 @@ _NETWORK_API_KEYS = {"allow_out": "allowOut", "deny_out": "denyOut"}
 _PROVIDER_OPTION_KEYS = frozenset({"template", "resource_requests", "network_policy"})
 _NETWORK_POLICY_KEYS = frozenset({"defaultAction", "egress"})
 
-# Every command carries this marker in its environment, so the processes a timed-out command left behind can be
-# found and killed. Never by process group: envd runs commands in its own group, and killing it ends the sandbox.
+# Every command carries this marker in its environment, so a timed-out command started without a pid in hand (the
+# foreground mode) can be found in envd's process list and ended, and the processes it left behind can be found and
+# killed. Never by process group: envd runs commands in its own group, and killing it ends the sandbox.
 _EXEC_MARKER_ENV = "NEMO_GYM_E2B_EXEC"
 _KILL_MARKED_SCRIPT = (
     'm={marker}; for d in /proc/[0-9]*; do p=${{d#/proc/}}; [ "$p" = "$$" ] && continue; '
@@ -596,6 +597,10 @@ class E2BProvider:
         self._warned_network_replaced = False
         # Monotonic end of each new sandbox's grace period (``operations.new_sandbox_grace_s``), by sandbox id.
         self._new_until: dict[str, float] = {}
+        # Markers of timed-out commands whose leftover processes are still to be killed, by sandbox id. The sweep runs
+        # a shell from the sandbox's disk, so it waits for the next exec rather than running at the deadline, before
+        # the caller has read what the command wrote (see ``_end_timed_out``).
+        self._pending_sweeps: dict[str, list[str]] = {}
 
     # ---------------------------------------------------------------- helpers
 
@@ -1232,6 +1237,7 @@ class E2BProvider:
         if sandbox is None:
             return
         self._leases.pop(handle.sandbox_id, None)
+        self._pending_sweeps.pop(handle.sandbox_id, None)
         await self._stop(sandbox, handle.sandbox_id)
         handle.raw = None
 
@@ -1461,7 +1467,7 @@ class E2BProvider:
 
     # -------------------------------------------------------------- commands
 
-    async def _run_background(self, sandbox: Any, kwargs: dict[str, Any]) -> Any:
+    async def _run_background(self, sandbox: Any, kwargs: dict[str, Any], pids: list[int] | None = None) -> Any:
         """Run a command detached, reattaching by pid if the stream drops.
 
         ``commands.run(background=True)`` returns as soon as the process has
@@ -1488,6 +1494,9 @@ class E2BProvider:
         )
         handle = await sandbox.commands.run(**kwargs, background=True)
         pid = getattr(handle, "pid", None)
+        if pids is not None and pid is not None:
+            # The caller ends the command by this pid if it reaches its deadline.
+            pids.append(pid)
         stdout = ""
         stderr = ""
 
@@ -1567,6 +1576,8 @@ class E2BProvider:
     ) -> SandboxExecResult:
         e2b = _require_e2b_sdk()
         sandbox = self._sandbox(handle)
+        for marker in self._pending_sweeps.pop(handle.sandbox_id, []):
+            await self._kill_marked(sandbox, marker)
 
         effective_timeout = timeout_s if timeout_s is not None else self._exec.default_timeout_s
         if effective_timeout is not None and (not _is_finite_number(effective_timeout) or effective_timeout < 0):
@@ -1588,9 +1599,10 @@ class E2BProvider:
         not_running_exc = getattr(e2b, "SandboxNotRunningException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
         started = monotonic()
+        pids: list[int] = []
         try:
             if self._exec.background:
-                result = await self._run_background(sandbox, kwargs)
+                result = await self._run_background(sandbox, kwargs, pids)
             else:
                 result = await sandbox.commands.run(**kwargs)
         except Exception as exc:
@@ -1623,7 +1635,8 @@ class E2BProvider:
                 isinstance(timeout_exc, type) and isinstance(exc, timeout_exc)
             )
             if timed_out and effective_timeout and monotonic() - started >= _DEADLINE_FRACTION * effective_timeout:
-                await self._kill_marked(sandbox, f"{_EXEC_MARKER_ENV}={exec_id}")
+                await self._end_timed_out(sandbox, pid=pids[0] if pids else None, exec_id=exec_id)
+                self._pending_sweeps.setdefault(handle.sandbox_id, []).append(f"{_EXEC_MARKER_ENV}={exec_id}")
                 return SandboxExecResult(
                     stdout=None,
                     stderr=f"Command timed out after {effective_timeout:g}s",
@@ -1641,6 +1654,28 @@ class E2BProvider:
             stderr=getattr(result, "stderr", None),
             return_code=int(getattr(result, "exit_code", 0) or 0),
         )
+
+    async def _end_timed_out(self, sandbox: Any, *, pid: int | None, exec_id: str) -> None:
+        """End a timed-out command through envd's process API, which signals a pid and runs nothing in the sandbox;
+        best effort.
+
+        No program from the sandbox's disk may run here: the command may have been a verifier's tests, which can
+        replace any of them, and this runs before the caller reads what the tests wrote. Without a pid (the
+        foreground mode) the command is found by its marker in envd's process list. Processes it started are killed by
+        marker at the start of the next exec on this sandbox.
+        """
+        request_timeout = self._exec_request_timeout()
+        try:
+            if pid is None:
+                marker = {_EXEC_MARKER_ENV: exec_id}.items()
+                for process in await sandbox.commands.list(request_timeout=request_timeout):
+                    if marker <= (getattr(process, "envs", None) or {}).items():
+                        pid = process.pid
+                        break
+            if pid is not None:
+                await sandbox.commands.kill(pid, request_timeout=request_timeout)
+        except Exception as error:  # noqa: BLE001 - the timeout is reported either way
+            LOGGER.warning("could not end a timed-out e2b command: %r", error)
 
     async def _kill_marked(self, sandbox: Any, marker: str) -> None:
         """Kill what a timed-out command left running, found by its environment marker; best effort."""
@@ -1665,9 +1700,11 @@ class E2BProvider:
         )
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
+        """Read one sandbox file as root, as the other providers' downloads do (a file only root may read is a file
+        Gym's own transfers could read before)."""
         sandbox = self._sandbox(handle)
         data = await self._with_retries(
-            lambda: sandbox.files.read(source_path, format="bytes", **self._request_params()),
+            lambda: sandbox.files.read(source_path, format="bytes", user="root", **self._request_params()),
             operation="read_file",
         )
         return data if isinstance(data, bytes) else bytes(data)
@@ -1679,6 +1716,24 @@ class E2BProvider:
         await self.write_file(handle, target_path, source.read_bytes())
 
     async def download_file(self, handle: SandboxHandle, source_path: str, target_path: Path) -> None:
+        """Download one sandbox file as root, streamed to disk in chunks; ``FileNotFoundError`` when it is absent."""
+        e2b = _require_e2b_sdk()
+        sandbox = self._sandbox(handle)
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(await self.read_file(handle, source_path))
+
+        async def stream() -> None:
+            # A retry starts the file again; the writes run in a thread so a large file does not block the loop.
+            reader = await sandbox.files.read(source_path, format="stream", user="root", **self._request_params())
+            async with reader:
+                with target.open("wb") as out:
+                    async for chunk in reader:
+                        await asyncio.to_thread(out.write, chunk)
+
+        missing = getattr(e2b, "FileNotFoundException", None)
+        try:
+            await self._with_retries(stream, operation="download_file")
+        except Exception as error:
+            if isinstance(missing, type) and isinstance(error, missing):
+                raise FileNotFoundError(f"{source_path!r} does not exist in the sandbox") from error
+            raise

@@ -935,6 +935,8 @@ class OpenShellProvider:
         """
         result = await self.exec(handle, f"base64 {shlex.quote(source_path)}")
         if result.return_code != 0:
+            if "no such file" in (result.stderr or "").lower():
+                raise FileNotFoundError(f"{source_path!r} does not exist in the sandbox: {result.stderr.strip()}")
             raise RuntimeError(
                 f"openshell download from {source_path!r} failed (code={result.return_code}): "
                 f"{(result.stderr or '').strip()}"

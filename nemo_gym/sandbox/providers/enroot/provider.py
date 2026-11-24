@@ -50,7 +50,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
-from nemo_gym.sandbox.providers.utils import kill_cancelled_command
+from nemo_gym.sandbox.providers.utils import kill_cancelled_command, missing_source_error, read_regular_host_file
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
 from nemo_gym.sandbox.providers.utils import remove_writable_tree as _remove_writable_tree
 
@@ -915,19 +915,17 @@ class EnrootProvider:
 
         Fast path (source under the bind mount): read directly from the host side
         of the shared folder. Fallback (arbitrary path): cp inside the container
-        into the shared folder, then read the host side.
+        into the shared folder, then read the host side. Both host reads take a
+        regular file only, opened without following a link
+        (:func:`read_regular_host_file`), so a link the sandbox's code left there,
+        or swapped in after a check, is refused with ``OSError`` (``ELOOP``).
         """
         instance = handle.raw
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
         rel = _path_under_mount(instance.mount_point, source_path)
         if rel is not None:
-            host_file = instance.staging_dir / rel
-            if host_file.is_symlink():
-                raise RuntimeError(
-                    f"download_file: refusing to read {source_path!r} — source is a symlink inside the sandbox mount"
-                )
-            target_path.write_bytes(host_file.read_bytes())
+            target_path.write_bytes(read_regular_host_file(instance.staging_dir / rel))
             return
 
         tmp_name = uuid.uuid4().hex
@@ -937,8 +935,10 @@ class EnrootProvider:
             script = f"cp {shlex.quote(source_path)} {shlex.quote(container_tmp)}"
             result = await self.exec(handle, script)
             if result.return_code != 0:
-                raise RuntimeError(f"enroot download from {source_path!r} failed: {result.stderr}")
-            target_path.write_bytes(host_tmp.read_bytes())
+                raise missing_source_error(source_path, result.stderr) or RuntimeError(
+                    f"enroot download from {source_path!r} failed: {result.stderr}"
+                )
+            target_path.write_bytes(read_regular_host_file(host_tmp))
         finally:
             host_tmp.unlink(missing_ok=True)
 

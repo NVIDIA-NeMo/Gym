@@ -980,3 +980,20 @@ async def _return_value(value: Any) -> Any:
 
 async def _raise(error: BaseException) -> None:
     raise error
+
+
+@pytest.mark.parametrize(
+    ("message", "absent"), [("File not found: /logs/verifier/reward.json", True), ("Sandbox sbx-1 not found", False)]
+)
+async def test_download_of_a_missing_file_raises_file_not_found(tmp_path: Path, message: str, absent: bool) -> None:
+    """The toolbox's not-found for the path is an absent file; one that names the sandbox stays an outage."""
+    from daytona import DaytonaNotFoundError
+
+    class MissingFs:
+        async def download_file(self, *args: Any, **kwargs: Any) -> None:
+            raise DaytonaNotFoundError(message)
+
+    provider = daytona_provider.DaytonaProvider(operations={"retries": 0, "file_timeout_s": 5})
+    handle = SandboxHandle(sandbox_id="sbx-1", provider_name="daytona", raw=SimpleNamespace(fs=MissingFs()))
+    with pytest.raises(FileNotFoundError if absent else DaytonaNotFoundError):
+        await provider.download_file(handle, "/logs/verifier/reward.json", tmp_path / "reward.json")

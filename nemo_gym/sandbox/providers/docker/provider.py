@@ -291,6 +291,11 @@ def _user_flag(user: str | int) -> str:
     return "0" if user == "root" or user == 0 else str(user)
 
 
+# What `docker cp` prints, across CLI and daemon versions, when the source path does not exist in the container (the
+# container itself is there: a missing container says `No such container: <name>`, without `:path`).
+_DOCKER_CP_MISSING_SOURCE = ("could not find the file", "no such container:path")
+
+
 class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
@@ -888,6 +893,8 @@ class DockerProvider:
             timeout_s=self._exec_config.default_timeout_s,
         )
         if code != 0:
+            if any(marker in err.lower() for marker in _DOCKER_CP_MISSING_SOURCE):
+                raise FileNotFoundError(f"{source_path!r} does not exist in the container: {err.strip()}")
             raise RuntimeError(f"docker cp download from {source_path!r} failed: {err.strip()}")
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:

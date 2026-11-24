@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import errno
 import io
 import os
 import shutil
@@ -12,7 +13,9 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.providers.bwrap.provider import BwrapPathError
 from nemo_gym.sandbox.transfer import (
+    SandboxFileRefused,
     SandboxProbeError,
     SandboxTransferError,
     SandboxUnavailableError,
@@ -22,6 +25,7 @@ from nemo_gym.sandbox.transfer import (
     download_dir,
     download_path,
     exec_as_root,
+    read_file_bytes,
     remote_kind,
     remote_size_bytes,
     tar_extract_command,
@@ -1221,3 +1225,190 @@ async def test_failed_part_cleanup_warns_without_replacing_the_original_failure(
         "timeout": "cleanup timed out",
     }[cleanup_failure]
     assert diagnostic in caplog.text
+
+
+class HostFileSandbox:
+    """A provider download served from outside the sandbox (as ``docker cp`` is): a link travels as a link, a
+    directory as a directory, and an absent path raises ``FileNotFoundError``; nothing runs in the sandbox."""
+
+    def __init__(self):
+        self.execs: list[str] = []
+
+    async def exec(self, command, **kwargs):
+        self.execs.append(command)
+        raise AssertionError("read_file_bytes must not run anything in the sandbox")
+
+    async def download(self, remote, local):
+        source = Path(remote)
+        if source.is_dir() and not source.is_symlink():
+            Path(local).mkdir()
+        else:
+            shutil.copyfile(source, local, follow_symlinks=False)
+
+
+async def test_read_file_bytes_reads_a_regular_file_and_reports_an_absent_one(tmp_path):
+    (tmp_path / "reward.txt").write_bytes(b"0.5\n")
+    sandbox = HostFileSandbox()
+    assert await read_file_bytes(sandbox, str(tmp_path / "reward.txt"), max_bytes=16, timeout_s=10) == b"0.5\n"
+    assert await read_file_bytes(sandbox, str(tmp_path / "missing"), max_bytes=16, timeout_s=10) is None
+    assert sandbox.execs == []
+
+
+@pytest.mark.parametrize("shape", ["symlink", "directory", "oversize"])
+async def test_read_file_bytes_refuses_what_is_not_a_small_regular_file(tmp_path, shape):
+    secret = tmp_path / "host-secret"
+    secret.write_text("1")
+    path = tmp_path / "reward.txt"
+    if shape == "symlink":
+        path.symlink_to(secret)
+    elif shape == "directory":
+        path.mkdir()
+    else:
+        path.write_bytes(b"1" * 17)
+    with pytest.raises(SandboxFileRefused) as refused:
+        await read_file_bytes(HostFileSandbox(), str(path), max_bytes=16, timeout_s=10)
+    assert refused.value.path == str(path)
+    assert ("exceeds 16 bytes" if shape == "oversize" else "is not a regular file") in refused.value.reason
+
+
+async def test_read_file_bytes_refuses_a_fifo_without_blocking(tmp_path):
+    # This models a provider that copies the entry itself and refuses what is not a regular file (docker cp, bwrap,
+    # apptainer, enroot). A provider whose in-sandbox service opens the path and streams it may instead block on a
+    # FIFO until the read's time limit, which masks the sample rather than measuring it.
+    class Fifo(HostFileSandbox):
+        async def download(self, remote, local):
+            os.mkfifo(local)
+
+    with pytest.raises(SandboxFileRefused, match="is not a regular file"):
+        await asyncio.wait_for(read_file_bytes(Fifo(), "/logs/verifier/reward.txt", max_bytes=16, timeout_s=10), 5)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        IsADirectoryError(21, "Is a directory"),
+        OSError(40, "Too many levels"),
+        BwrapPathError(errno.ELOOP, "refusing to read through symlink '/logs/verifier/reward.txt'"),
+    ],
+    ids=["directory", "link", "bwrap-link"],
+)
+async def test_read_file_bytes_maps_a_provider_type_refusal(error):
+    """bwrap, apptainer and enroot see the entry's type themselves and refuse a directory or a link as an OSError."""
+
+    class Refusing(HostFileSandbox):
+        async def download(self, remote, local):
+            raise error
+
+    with pytest.raises(SandboxFileRefused, match="is not a regular file"):
+        await read_file_bytes(Refusing(), "/logs/verifier/reward.txt", max_bytes=16, timeout_s=10)
+
+
+async def test_read_file_bytes_lets_a_provider_error_propagate():
+    class Outage(HostFileSandbox):
+        async def download(self, remote, local):
+            raise RuntimeError("connection reset")
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await read_file_bytes(Outage(), "/logs/verifier/reward.txt", max_bytes=16, timeout_s=10)
+
+
+async def test_read_file_bytes_cancels_a_download_once_it_passes_max_bytes():
+    """A huge or sparse file is refused while it streams in: the provider's task is cancelled past the limit."""
+    cancelled = asyncio.Event()
+
+    class Endless(HostFileSandbox):
+        async def download(self, remote, local):
+            try:
+                with open(local, "wb") as handle:
+                    while True:
+                        handle.write(b"x" * 64)
+                        handle.flush()
+                        await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    with pytest.raises(SandboxFileRefused, match="exceeds 1024 bytes"):
+        await asyncio.wait_for(read_file_bytes(Endless(), "/r", max_bytes=1024, timeout_s=30), 10)
+    assert cancelled.is_set()
+
+
+async def test_read_file_bytes_cancels_a_download_past_its_time_limit():
+    cancelled = asyncio.Event()
+
+    class Stuck(HostFileSandbox):
+        async def download(self, remote, local):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(read_file_bytes(Stuck(), "/r", max_bytes=1024, timeout_s=0.3), 10)
+    assert cancelled.is_set()
+
+
+async def test_read_file_bytes_cancels_the_download_when_its_caller_is_cancelled():
+    """An episode deadline that cancels the read must not leave the download running into a removed folder."""
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    class Slow(HostFileSandbox):
+        async def download(self, remote, local):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    reading = asyncio.ensure_future(read_file_bytes(Slow(), "/r", max_bytes=1024, timeout_s=60))
+    await asyncio.wait_for(started.wait(), 5)
+    reading.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+    assert cancelled.is_set()
+
+
+async def test_read_file_bytes_refuses_a_directory_while_it_is_still_being_copied():
+    """A directory's own size says nothing of the tree copied under it: it is refused at the first poll."""
+    cancelled = asyncio.Event()
+    written = []
+
+    class TreeCopy(HostFileSandbox):
+        async def download(self, remote, local):
+            Path(local).mkdir()
+            try:
+                for index in range(10_000):
+                    (Path(local) / f"part-{index}").write_bytes(b"x" * 4096)
+                    written.append(index)
+                    await asyncio.sleep(0.01)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    with pytest.raises(SandboxFileRefused, match="is not a regular file"):
+        await asyncio.wait_for(read_file_bytes(TreeCopy(), "/r", max_bytes=1 << 20, timeout_s=60), 10)
+    assert cancelled.is_set()
+    # Refused within a few polls, long before the tree passed max_bytes (256 parts of 4 KiB).
+    assert len(written) < 100
+
+
+@pytest.mark.parametrize(
+    "name", ["reward.json", "./reward.json", ".//reward.json", "x/../reward.json", "./x/../reward.json"]
+)
+def test_a_protected_name_is_kept_however_the_member_spells_it(tmp_path, name):
+    archive = tmp_path / "logs.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        if name.startswith(("x/", "./x/")):
+            folder = tarfile.TarInfo(name.split("/..", 1)[0])
+            folder.type = tarfile.DIRTYPE
+            tar.addfile(folder)
+        forged = tarfile.TarInfo(name)
+        forged.size = len(b'{"reward": 1.0}')
+        tar.addfile(forged, io.BytesIO(b'{"reward": 1.0}'))
+    target = tmp_path / "logs"
+    target.mkdir()
+    (target / "reward.json").write_bytes(b'{"reward": 0.0}')
+    _unpack(archive, target, protect=("reward.json",))
+    assert (target / "reward.json").read_bytes() == b'{"reward": 0.0}'

@@ -1860,9 +1860,139 @@ def _download_provider(monkeypatch: pytest.MonkeyPatch, attempts: list[list[Any]
     monkeypatch.setattr(asyncio, "sleep", _no_sleep)
     provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
     handle = opensandbox_provider.SandboxHandle(
-        sandbox_id="sandbox-1", provider_name="opensandbox", raw=SimpleNamespace(files=FakeFiles())
+        sandbox_id="sandbox-1",
+        provider_name="opensandbox",
+        raw=SimpleNamespace(files=FakeFiles(), get_info=AsyncMock(return_value=_sandbox_info("Running"))),
     )
     return provider, handle
+
+
+def _sandbox_info(state: str) -> Any:
+    return SimpleNamespace(status=SimpleNamespace(state=state))
+
+
+@pytest.mark.parametrize(
+    ("code", "absent"),
+    [(None, True), ("UNEXPECTED_RESPONSE", True), ("FILE_NOT_FOUND", True), ("KUBERNETES::SANDBOX_NOT_FOUND", False)],
+)
+async def test_a_missing_file_downloads_as_file_not_found_without_a_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, code: str | None, absent: bool
+) -> None:
+    """execd's 404 for the path is an answer (absent), read once and recorded nowhere; a 404 that names the sandbox
+    is an outage, recorded as a failure event."""
+    from opensandbox.exceptions import SandboxApiException
+
+    error = SandboxApiException("file not found", status_code=404)
+    error.error = SimpleNamespace(code=code) if code is not None else None
+    provider, handle = _download_provider(monkeypatch, [[error]] * 3)
+    reads = []
+    stream = handle.raw.files.read_bytes_stream
+
+    async def counted(source_path: str) -> Any:
+        reads.append(source_path)
+        return await stream(source_path)
+
+    handle.raw.files.read_bytes_stream = counted
+    with RequestFailureLog.capture() as log:
+        if absent:
+            with pytest.raises(FileNotFoundError):
+                await provider.download_file(handle, "/logs/verifier/reward.json", tmp_path / "reward.json")
+            assert reads == ["/logs/verifier/reward.json"]
+            assert not log.reply_report(None).events
+        else:
+            with pytest.raises(Exception) as caught:
+                await provider.download_file(handle, "/logs/verifier/reward.json", tmp_path / "reward.json")
+            assert not isinstance(caught.value, FileNotFoundError)
+            assert log.reply_report(None).events
+
+
+def _sdk_download_handle(respond: Any, get_info: AsyncMock) -> Any:
+    """A handle whose file reads go through the SDK's own filesystem adapter, answered by ``respond``."""
+    from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
+    from opensandbox.config import ConnectionConfig
+    from opensandbox.models.sandboxes import SandboxEndpoint
+
+    files = FilesystemAdapter(
+        ConnectionConfig(transport=httpx.MockTransport(respond)), SandboxEndpoint(endpoint="execd.invalid")
+    )
+    return opensandbox_provider.SandboxHandle(
+        sandbox_id="sandbox-1", provider_name="opensandbox", raw=SimpleNamespace(files=files, get_info=get_info)
+    )
+
+
+async def test_an_absent_file_through_the_sdk_records_no_failure_and_logs_no_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The SDK logs a traceback at error level for every failed stream; for an absent file that is an answer, so
+    the read raises ``FileNotFoundError`` after one request, with no failure event and nothing at error level."""
+    from opensandbox.exceptions import SandboxApiException
+
+    requests = []
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(404, json={"code": "FILE_NOT_FOUND", "message": "no such file"})
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    get_info = AsyncMock(return_value=_sandbox_info("Running"))
+    handle = _sdk_download_handle(respond, get_info)
+
+    caplog.set_level(logging.DEBUG)
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(FileNotFoundError) as caught:
+            await provider.download_file(handle, "/logs/verifier/reward.json", tmp_path / "reward.json")
+        assert not log.reply_report(None).events
+
+    assert isinstance(caught.value.__cause__, SandboxApiException)
+    assert caught.value.__cause__.status_code == 404
+    assert [request.url.params["path"] for request in requests] == ["/logs/verifier/reward.json"]
+    get_info.assert_awaited_once()
+    assert [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR] == []
+    # The read leaves nothing behind that could hide a later SDK error in this task.
+    assert opensandbox_provider._DOWNLOADING.get() is None
+
+
+@pytest.mark.parametrize("outage", ["sandbox_gone", "sandbox_stopped", "read_timeout", "connection_lost"])
+async def test_a_provider_failure_through_the_sdk_is_still_recorded_and_logged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, outage: str
+) -> None:
+    """A bare 404 from a sandbox that no longer runs, a timeout and a lost connection stay provider failures: a
+    failure event per attempt and an error-level log, never ``FileNotFoundError``."""
+    from opensandbox.exceptions import SandboxApiException
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        if outage == "read_timeout":
+            raise httpx.ReadTimeout("injected", request=request)
+        if outage == "connection_lost":
+            raise httpx.RemoteProtocolError("injected", request=request)
+        return httpx.Response(404, text="not found")
+
+    gone = SandboxApiException("sandbox not found", status_code=404)
+    gone.error = SimpleNamespace(code="KUBERNETES::SANDBOX_NOT_FOUND")
+    get_info = (
+        AsyncMock(side_effect=gone)
+        if outage == "sandbox_gone"
+        else AsyncMock(return_value=_sandbox_info("Terminated" if outage == "sandbox_stopped" else "Running"))
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"request_timeout_s": 5}, probe={"command": None})
+    handle = _sdk_download_handle(respond, get_info)
+
+    caplog.set_level(logging.DEBUG)
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await provider.download_file(handle, "/logs/verifier/reward.json", tmp_path / "reward.json")
+        events = list(log.reply_report(None).events.values())
+
+    assert not isinstance(caught.value, FileNotFoundError)
+    assert events and all(event.operation == "download_file" for event in events)
+    expected = {"read_timeout": PROVIDER_IO_TIMEOUT, "connection_lost": PROVIDER_UNAVAILABLE}.get(
+        outage, PROVIDER_REQUEST_FAILED
+    )
+    assert caught.value.failure_kind == events[-1].failure_kind == expected
+    errors = [record.getMessage() for record in caplog.records if record.levelno >= logging.ERROR]
+    assert any(message.startswith("Failed to stream file /logs/verifier/reward.json") for message in errors)
 
 
 async def test_download_streams_a_large_file_to_disk_in_chunks(
