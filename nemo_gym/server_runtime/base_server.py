@@ -68,6 +68,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.correlation import CorrelationPathError, parse_path
 from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.core.run_session_secrets import RUN_SESSION_SECRET_ENV_PREFIX
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.ray_support import (
     _connect_server_to_ray,
@@ -271,10 +272,6 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
-# The variables that carry each server's run secret (run_session_secret) to its workers, by a hash of its name.
-RUN_SESSION_SECRET_ENV_PREFIX = "NEMO_GYM_RUN_SESSION_SECRET_"
-
-
 def run_session_secret(server_name: str) -> str:
     """The random secret that signs one server's sessions for this run.
 
@@ -282,13 +279,25 @@ def run_session_secret(server_name: str) -> str:
     server, so servers that share a process keep one secret each. A multi-worker server reads it in its main process
     (``setup_webserver``) before uvicorn starts the workers, so every worker inherits it and reads the cookies and
     tokens another worker signed, as Environment Servers do with ``episode_token_secret``. A server that starts
-    again makes a new one, which ends the sessions signed with the old.
+    again makes a new one, which ends the sessions signed with the old. Every other process the server starts
+    inherits the variable too; the Apptainer and local sandbox providers leave it out of the environment they pass
+    to the code they run (``nemo_gym.core.run_session_secrets``).
     """
     variable = RUN_SESSION_SECRET_ENV_PREFIX + hashlib.sha256(server_name.encode()).hexdigest()[:16].upper()
     secret = environ.get(variable)
     if not secret:
         secret = environ[variable] = secrets.token_urlsafe(32)
     return secret
+
+
+def uses_run_session_secret(server: "SimpleServer") -> bool:
+    """Whether ``server`` asks for the run's secret (``signs_sessions_with_run_secret``, or ``mcp_bearer_token`` in its
+    config), which ``SimpleServer.get_session_secret`` then signs its sessions with. A restart replaces that secret,
+    so checkpoint setup reads this too: such a server takes part in checkpoints as ``restart_only``."""
+    return (
+        getattr(type(server), "signs_sessions_with_run_secret", False) is True
+        or getattr(server.config, "mcp_bearer_token", False) is True
+    )
 
 
 def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
@@ -406,15 +415,19 @@ class SimpleServer(BaseServer):
         ``get_session_middleware_key()``, which anyone who knows the server's class and name can compute.
         Only the signing changes: the cookie keeps its name (``get_session_cookie_name()``).
 
+        The run's secret keeps a sandbox from forging only where code in it cannot read the server's environment.
+        Docker, OpenSandbox, OpenShell, bwrap and Enroot sandboxes cannot, and the Apptainer and local providers
+        leave the secret out of the environment they pass. But code those two run has the server's user and, unless
+        Apptainer contains it (``--containall``), the host's process table, so they do not isolate the secret from
+        it: it can, for example, read a multi-worker server's secret from its workers' environment.
+
         An override must return the same secret in every worker of the server, because a cookie or token signed by
         one worker is read by another (session routing reads it to find the session's worker). And every cookie and
         token signed with a secret is invalid once the secret changes: a secret made when the process starts ends
-        every open session at a restart, so it suits a server whose sessions cannot outlive its process anyway.
+        every open session at a restart, so it suits a server whose sessions cannot outlive its process anyway. A
+        server that signs with the run's secret takes part in partial-rollout checkpoints as ``restart_only``.
         """
-        if (
-            getattr(type(self), "signs_sessions_with_run_secret", False) is True
-            or getattr(self.config, "mcp_bearer_token", False) is True
-        ):
+        if uses_run_session_secret(self):
             return run_session_secret(self.config.name)
         return self.get_session_middleware_key()
 

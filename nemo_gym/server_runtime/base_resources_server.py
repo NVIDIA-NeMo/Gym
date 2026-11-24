@@ -77,7 +77,12 @@ from nemo_gym.server_runtime._checkpoint.resources import (
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
-from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.base_server import (
+    BaseRunServerInstanceConfig,
+    BaseServer,
+    SimpleServer,
+    uses_run_session_secret,
+)
 from nemo_gym.server_runtime.request_handling.model_sampling import CallerSamplingMiddleware
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, mcp_session_token
@@ -171,7 +176,8 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
         "session's tools; a tool outside the session's grant is answered as an unknown tool, and errors name no "
         "framework. For clients that pass the seed's MCP headers as given, as the environment server's MCP grants "
         "do. Needs expose_tools_over_mcp. The server then signs its sessions with a secret made for the run, which "
-        "every worker shares (SimpleServer.get_session_secret)",
+        "every worker shares and a restart replaces (SimpleServer.get_session_secret), so with partial-rollout "
+        "checkpointing it takes part as restart_only",
     )
     session_close_retry_window_seconds: float = Field(
         default=300,
@@ -985,7 +991,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         Status, discovery and seed replies report it.
         A server whose capture depends on its configuration, such as on a sandbox provider that can snapshot,
-        overrides it.
+        overrides it. A server that signs its sessions with the run's secret takes part as ``restart_only`` whatever
+        this returns (``setup_resources_checkpoint``).
         """
         return self.checkpoint_mode
 
@@ -1007,6 +1014,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         mode = self.checkpoint_mode_in_effect()
         if mode not in get_args(CheckpointMode):
             raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        if mode != "restart_only" and uses_run_session_secret(self):
+            # A restart replaces the run's secret, so the cookies and MCP tokens a restored session arrives with would
+            # not decode, and the session could not be reached. Its episodes start over after a crash instead.
+            logger.warning(
+                "%s signs its sessions with the run's secret, which a restart replaces, so it takes part in "
+                "checkpoints as restart_only, not %s",
+                self.config.name,
+                mode,
+            )
+            mode = "restart_only"
         if mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [

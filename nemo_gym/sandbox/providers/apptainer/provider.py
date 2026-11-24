@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.core.run_session_secrets import without_run_session_secrets
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -106,7 +107,9 @@ def _require_apptainer(bin_path: str | None = None) -> str:
 
 
 def _apptainer_subprocess_env(bin_path: str | None) -> dict[str, str]:
-    env = os.environ.copy()
+    # Apptainer passes this environment into the container, where code a model wrote runs, so the secrets a server
+    # signs its sessions with stay out of it.
+    env = without_run_session_secrets(os.environ)
     if bin_path:
         env["PATH"] = f"{bin_path}:{env.get('PATH', '')}"
     return env

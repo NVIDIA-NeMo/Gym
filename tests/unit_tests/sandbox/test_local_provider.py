@@ -205,6 +205,21 @@ async def test_public_sandbox_api_runs_an_argument_list_literally_and_shell_text
     assert (text.return_code, text.stdout) == (0, "a;b /home/agent")
 
 
+async def test_exec_leaves_run_session_secrets_out_of_the_command_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_RUN_SESSION_SECRET_0123456789ABCDEF", "secret")
+    monkeypatch.setenv("KEPT", "kept")
+    provider = LocalProvider(workspace_root=str(tmp_path))
+    handle = await provider.create(SandboxSpec())
+
+    result = await provider.exec(handle, "echo ${NEMO_GYM_RUN_SESSION_SECRET_0123456789ABCDEF:-unset} $KEPT")
+
+    assert result.return_code == 0 and result.error_type is None
+    assert result.stdout.split() == ["unset", "kept"]
+    await provider.close(handle)
+
+
 async def test_command_failure_is_reported_not_raised(tmp_path: Path) -> None:
     provider = LocalProvider(workspace_root=str(tmp_path))
     handle = await provider.create(SandboxSpec())

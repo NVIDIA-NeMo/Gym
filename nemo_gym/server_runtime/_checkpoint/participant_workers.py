@@ -19,6 +19,8 @@ coordinator is the server's participant:
     and every other worker drops any ownership it held of the session.
     Cookies and MCP tokens name only the session ID, so one from before the crash,
     or from a single-process server, reaches the worker that holds the session now.
+    That needs the key that signed it to outlive the crash: a server that signs with the run's secret
+    (``run_session_secret``) takes part as ``restart_only`` instead.
   - State that lives inside one request (environment episodes, an agent's own ``/run`` episodes) stays with
     the coordinator. The worker that receives the replacement attempt's ``/run`` claims it; exactly one
     claim succeeds. The claim leases the record to that worker, which settles it once it has installed the
