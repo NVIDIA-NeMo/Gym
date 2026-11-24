@@ -430,7 +430,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             **({"system_prompt": system_prompt} if system_prompt else {}),
         )
         observer.watch_compaction(agent)
-        replies = _Replies.watch(client, agent)
+        turn = _RunningTurn.watch(agent)
         started = time.time()
         stop_reason = None
         model_error = None
@@ -440,13 +440,13 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             try:
                 finish_params, history, _ = await session.run(messages)
             except asyncio.CancelledError:
-                # SIGTERM from the supervisor, at the deadline, on a rollout stop or on a close: report the turns
-                # completed so far and the reply of the turn that was running, whose tool calls had not answered. A
-                # stop once the task has ended lands so: the call that ended the task waits for its answer until the
-                # run is over, and that call is the run's last.
+                # SIGTERM from the supervisor, at the deadline, on a rollout stop or on a close: report the live
+                # conversation, which holds the turns that answered and, while a turn's tool calls run, that turn's
+                # reply, whose calls have no answers. A stop once the task has ended lands so: the call that ended the
+                # task waits for its answer until the run is over, and that call is the run's last.
                 asyncio.current_task().uncancel()
                 finish_params = None
-                history = _with_reply_in_flight(_completed_turns(session, messages), replies.last)
+                history = turn.history(_completed_turns(session, messages))
                 stop_reason = _stop_reason(payload)
             except APIStatusError as error:
                 if not _rejected_by_model(error):
@@ -496,52 +496,45 @@ def _completed_turns(session: Any, messages: list[Any]) -> list[list[Any]]:
     return [list(messages)] if state is None else [*state.full_msg_history, state.msgs]
 
 
-class _Replies:
-    """The reply of the policy turn that is running, as Stirrup's client returned it (``generate``).
+class _RunningTurn:
+    """Stirrup's live conversation (``step``): the messages its last policy call was sent, which Stirrup extends with
+    the turn once its tool calls have answered, and the turn's reply while those calls run.
 
-    Each model call clears it first, so a call that the end of the run cuts off leaves none. A compaction summary is
-    not a policy turn: its reply is never kept, although it can call tools, since its first attempts offer them.
+    A compaction summary is not a turn: its request is a new message list, so its reply is never kept, although it can
+    call tools, since its first attempts offer them.
     """
 
     def __init__(self) -> None:
-        self.last: Any = None
-        self._compacting = False
+        self.messages: list[Any] | None = None
+        self.reply: Any = None
 
     @classmethod
-    def watch(cls, client: Any, agent: Any) -> _Replies:
-        replies = cls()
-        generate = client.generate
-        summarize = agent.summarize_messages
+    def watch(cls, agent: Any) -> _RunningTurn:
+        turn = cls()
+        step, generate = agent.step, agent._client.generate
 
-        async def recorded_generate(*args: Any, **kwargs: Any) -> Any:
-            replies.last = None
-            reply = await generate(*args, **kwargs)
-            if not replies._compacting:
-                replies.last = reply
+        async def recorded_step(messages: list[Any], *args: Any, **kwargs: Any) -> Any:
+            turn.messages, turn.reply = messages, None
+            result = await step(messages, *args, **kwargs)
+            turn.reply = None
+            return result
+
+        async def recorded_generate(messages: list[Any], *args: Any, **kwargs: Any) -> Any:
+            reply = await generate(messages, *args, **kwargs)
+            if messages is turn.messages:
+                turn.reply = reply
             return reply
 
-        async def unrecorded_summarize(*args: Any, **kwargs: Any) -> Any:
-            replies._compacting = True
-            try:
-                return await summarize(*args, **kwargs)
-            finally:
-                replies._compacting = False
+        # On the instance, which Stirrup's session agent shares (SessionAgent.from_agent), as watch_compaction does.
+        agent.step = recorded_step
+        agent._client.generate = recorded_generate
+        return turn
 
-        client.generate = recorded_generate
-        agent.summarize_messages = unrecorded_summarize
-        return replies
-
-
-def _with_reply_in_flight(history: list[list[Any]], reply: Any) -> list[list[Any]]:
-    """``history`` ending with the turn that was running: its reply, whose tool calls had not answered yet.
-
-    Only a policy reply that calls tools and is not in the history yet is the running turn's.
-    """
-    if reply is None or not getattr(reply, "tool_calls", None):
-        return history
-    if any(message is reply for turn in history for message in turn):
-        return history
-    return [*history[:-1], [*history[-1], reply]] if history else [[reply]]
+    def history(self, completed: list[list[Any]]) -> list[list[Any]]:
+        """``completed`` ending with the live conversation and, while its tool calls run, the running turn's reply."""
+        if self.messages is None:
+            return completed
+        return [*completed[:-1], [*self.messages, *([self.reply] if self.reply is not None else [])]]
 
 
 def _rejected_by_model(error: APIStatusError) -> bool:

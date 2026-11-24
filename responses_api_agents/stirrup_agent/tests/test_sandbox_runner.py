@@ -231,41 +231,27 @@ def test_a_stopped_run_ends_with_the_turn_whose_tool_call_was_running(tmp_path, 
     assert [t["tool_name"] for t in output["observations"]["tool_calls"]] == ["code_exec"]
 
 
-def test_a_compaction_summary_never_enters_the_output_of_a_run_stopped_after_it(tmp_path, resources):
-    """A compaction summary can carry text and tool calls, since its first attempts offer the tools. The run ends while
-    the next policy call waits for the model: the summary is not a policy turn, so neither its reply nor its calls
-    enter the output, and its calls never run."""
+@pytest.mark.parametrize(
+    "after_turn",
+    [
+        [{**_call("code_exec", json.dumps({"cmd": "echo from-the-summary"})), "content": "Wrote report.txt."}, None],
+        [_call("code_exec", json.dumps({"cmd": "echo from-the-summary"})), None],
+        [None],
+    ],
+    ids=["after-the-summary", "second-summary-attempt", "first-summary-attempt"],
+)
+def test_a_run_stopped_around_a_compaction_ends_with_its_completed_turn(tmp_path, resources, after_turn):
+    """A summary is not a turn: a run stopped during or after a compaction ends with the turn that ran, answered."""
     workdir = tmp_path / "root"
     workdir.mkdir()
-    summary = {
-        "role": "assistant",
-        "content": "SUMMARY_TEXT: the first command ran.",
-        "tool_calls": [
-            {
-                "id": "call-summary",
-                "type": "function",
-                "function": {"name": "code_exec", "arguments": json.dumps({"cmd": "touch SUMMARY_ONLY"})},
-            }
-        ],
-    }
-    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo first"})), summary, None])
-    payload = _payload(model.base_url, resources.base_url, workdir)
-    # Every turn passes the summarization cutoff, so the first turn is followed by a compaction.
-    payload["client"]["max_tokens"] = 10
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), *after_turn])
+    payload = {**_payload(model.base_url, resources.base_url, workdir), "context_summarization_cutoff": 1e-6}
     try:
         output = asyncio.run(_cancelled_after_the_model_hangs(payload, tmp_path, model))
     finally:
         model.close()
 
-    # The policy turn, the summary, and the policy call that the stop cut off
-    assert len(model.requests) == 3
-    assert output["observations"]["status"] == "incomplete"
-    calls = [item for item in output["output_items"] if item["type"] == "function_call"]
-    assert len(calls) == 1 and "echo first" in calls[0]["arguments"]
-    assert "SUMMARY_ONLY" not in json.dumps(output["output_items"])
-    replies = [item for item in output["output_items"] if item.get("role") == "assistant"]
-    assert "SUMMARY_TEXT" not in json.dumps(replies)
-    assert not (workdir / "SUMMARY_ONLY").exists()
+    assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
 
 
 def test_the_report_of_a_run_stopped_before_launch_has_the_runners_shape(tmp_path, resources):
@@ -758,34 +744,3 @@ async def test_compaction_observer_retains_all_summary_attempts_without_policy_c
     assert event["summary"] == (None if failed else "Retain the changes.")
     assert event["trigger"] == "automatic"
 
-
-async def test_only_the_reply_of_the_running_policy_turn_is_kept():
-    """A compaction summary is never kept, and a model call in flight clears the reply of the turn before it."""
-    from types import SimpleNamespace
-
-    answers = iter(["policy", "summary", "second policy", "cut off"])
-    called, release = asyncio.Event(), asyncio.Event()
-
-    async def generate(*_args):
-        answer = next(answers)
-        if answer == "cut off":
-            called.set()
-            await release.wait()
-        return answer
-
-    client = SimpleNamespace(generate=generate)
-
-    async def summarize(*_args):
-        return await client.generate()
-
-    agent = SimpleNamespace(summarize_messages=summarize)
-    replies = sandbox_runner._Replies.watch(client, agent)
-
-    assert await client.generate() == "policy" and replies.last == "policy"
-    assert await agent.summarize_messages() == "summary" and replies.last is None
-    assert await client.generate() == "second policy" and replies.last == "second policy"
-    pending = asyncio.ensure_future(client.generate())
-    await called.wait()
-    assert replies.last is None
-    release.set()
-    assert await pending == "cut off" and replies.last == "cut off"
