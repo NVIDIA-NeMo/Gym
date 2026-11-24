@@ -112,7 +112,6 @@ These are constructor arguments of `DynamicMaxTokensChatCompletionsClient`
 | `context_overflow_recovery` (client) | `False` | When `True`, a request the model server rejects with HTTP 400 or 413 and the error code `context_length_exceeded` does not end the episode while a completed turn can still be dropped: Stirrup drops the latest one and sends the request again. See [Context overflow recovery](#context-overflow-recovery) for the model server settings it needs and what bounds repeated recovery. |
 | `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and never replaces the history with an unusable summary: when every attempt is unusable, the episode ends as a failed response on the turns so far, classified `agent_invalid_output`, so it is graded as the model's result and not retried. |
 | `context_summarization_cutoff` (agent) | `0.7` | Fraction of the context window at which Stirrup replaces the history with a summary. `None` never summarizes, so an episode that reaches the context limit ends there. See [Keeping the recorded history](#keeping-the-recorded-history). |
-| `recover_from_context_overflow` (agent) | `True` | When `True`, Stirrup drops the latest completed turn when the client reports a context overflow. The client reports one only with `context_overflow_recovery` on. When `False`, the episode ends at the first overflow. |
 
 Thinking control (`enable_thinking`, and the thinking-off turn of
 `truncation_recovery`) is sent as `extra_body.chat_template_kwargs`. It only
@@ -155,10 +154,6 @@ Training on recorded tokens (token capture) needs each model call of an episode 
 model wrote it. A context summary and a dropped turn both change that history, so the next call matches no recorded
 call. To keep the history, a training config sets `context_summarization_cutoff: null` and keeps
 `context_overflow_recovery` off, its default. Long episodes then end at the context limit.
-
-With `context_overflow_recovery` off, the client never reports an overflow to Stirrup, so Stirrup drops no turn,
-whatever `recover_from_context_overflow` says. `recover_from_context_overflow: false` changes a run only when a config
-also turns `context_overflow_recovery` on: the episode then ends at the first overflow.
 
 ## Licensing
 

@@ -416,15 +416,10 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             tool_response_as_user=True,
             skip_input_file_listing=True,
             min_compaction_summary_words=payload["min_compaction_summary_words"],
-            # None never summarizes (JSON carries no infinity); a payload without the keys keeps Stirrup's defaults.
+            # None never summarizes (JSON carries no infinity); a payload without the key keeps Stirrup's default.
             **(
                 {"context_summarization_cutoff": payload["context_summarization_cutoff"] or math.inf}
                 if "context_summarization_cutoff" in payload
-                else {}
-            ),
-            **(
-                {"recover_from_context_overflow": payload["recover_from_context_overflow"]}
-                if "recover_from_context_overflow" in payload
                 else {}
             ),
             **({"system_prompt": system_prompt} if system_prompt else {}),

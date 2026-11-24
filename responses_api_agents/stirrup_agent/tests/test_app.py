@@ -207,15 +207,14 @@ class TestApp:
 
     @pytest.mark.parametrize("training", [False, True])
     @pytest.mark.asyncio
-    async def test_the_history_options_are_forwarded_to_the_rollout(self, training) -> None:
-        # Stirrup's defaults summarize at 0.7 of the window and unwind turns on overflow; training keeps the history.
+    async def test_the_summarization_cutoff_is_forwarded_to_the_rollout(self, training) -> None:
+        # Stirrup's default summarizes at 0.7 of the window; training keeps the history and never summarizes.
         body = NeMoGymResponseCreateParamsNonStreaming(input="ignored", model="policy")
-        fields = {"context_summarization_cutoff": None, "recover_from_context_overflow": False} if training else {}
+        fields = {"context_summarization_cutoff": None} if training else {}
 
         payload = await _runner_payload(_make_config(**fields), body)
 
         assert payload["context_summarization_cutoff"] == (None if training else 0.7)
-        assert payload["recover_from_context_overflow"] is not training
 
     @pytest.mark.asyncio
     async def test_runtime_knobs_shape_the_model_requests_the_runner_makes(self) -> None:
