@@ -1003,8 +1003,10 @@ def _agent_implementation(global_config: Any, agent_name: str | None) -> str | N
 
 
 def _record_agent_implementation(result: dict[str, Any], global_config: Any, agent_name: str | None) -> None:
-    """Name the implementation of the agent that ran the rollout on the record (landed or failed), so a reader can
-    group rollouts by agent harness without the run's config."""
+    """Write the agent type that ran the rollout onto its record, as ``ng_agent_implementation``.
+
+    Called for successful and failed rollouts. Does nothing when the config does not declare the agent.
+    """
     implementation = _agent_implementation(global_config, agent_name)
     if implementation is not None:
         result[NG_AGENT_IMPLEMENTATION_KEY] = implementation
