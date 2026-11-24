@@ -19,6 +19,7 @@ from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.typed_exceptions import failure_report_for
+from nemo_gym.eval.recovery.trials import _row_recovered_attempts
 
 
 @pytest.mark.parametrize("error_type", [aiohttp.ServerDisconnectedError, aiohttp.ClientOSError])
@@ -254,6 +255,47 @@ async def test_a_successful_call_records_nothing(monkeypatch):
         await model._request(method="POST", url="http://model.test/responses")
 
     assert not log.report.events
+
+
+@pytest.mark.parametrize("max_num_tries", [None, 1])
+async def test_a_call_answered_after_key_failover_reports_every_send_and_joins_its_recovery(
+    monkeypatch, max_num_tries
+):
+    replies = [
+        _reply(429, body=b'{"error": {"code": "budget_exceeded"}}'),
+        _reply(403, body=b'{"error": {"code": "invalid_api_key"}}'),
+        _reply(200),
+    ]
+    wire = SimpleNamespace(request=AsyncMock(side_effect=replies))
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key=["k0", "k1", "k2"], base_url="http://model.test", max_num_tries=max_num_tries)
+
+    with RequestFailureLog.capture() as log:
+        assert await model._request(method="POST", url="http://model.test/responses") is replies[2]
+
+    assert wire.request.await_count == 3
+    [operation] = log.model_operations.values()
+    failures = sorted(log.report.events.values(), key=lambda event: event.attempt_id)
+    op = operation.operation_id
+    assert (operation.outcome, operation.http_attempts, operation.final_attempt_id) == ("completed", 3, f"{op}-3")
+    assert [(event.attempt_id, event.http_status) for event in failures] == [(f"{op}-1", 429), (f"{op}-2", 403)]
+    row = {
+        "ng_trial_observations": {
+            "model_calls": [
+                {
+                    "response_metadata": {
+                        "status_code": 200,
+                        "failure_report": {
+                            "events": {key: event.model_dump(mode="json") for key, event in log.report.events.items()}
+                        },
+                        "model_operations": [operation.model_dump(mode="json")],
+                    }
+                }
+            ]
+        }
+    }
+    assert [(op_id, len(owned)) for op_id, owned in _row_recovered_attempts(row)] == [(op, 2)]
 
 
 async def _scripted_model(monkeypatch, replies: list[tuple[int, bytes, dict]]):

@@ -671,6 +671,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         # One logical model call; each HTTP attempt of it is observed under its own attempt id.
         operation_id = uuid.uuid4().hex
         transport_failures = 0
+        # Sends resent at once with the next key: each still counts as an HTTP attempt, but not against the retry
+        # allowance or the backoff.
+        key_switches = 0
         last_transport_failure: tuple[Exception, NgFailureEvent] | None = None
         # Response timeouts whose server queue is being read; each is recorded once its read returns.
         queue_reads: list[tuple[Exception, str, asyncio.Task]] = []
@@ -806,7 +809,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 del body
                 if permanent_auth and self._switch_to_next_api_key(sent_authorization):
                     # The provider never ran the request, so it is resent with the next key at once.
-                    tries -= 1
+                    key_switches += 1
+                    max_num_tries += 1
                     continue
                 if permanent_auth:
                     observe_terminal(
@@ -847,7 +851,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             content = _bounded_error_body(body)
             del body
             if permanent_quota and self._switch_to_next_api_key(sent_authorization):
-                tries -= 1
+                key_switches += 1
+                max_num_tries += 1
                 continue
             if permanent_quota:
                 observe_terminal(
@@ -868,7 +873,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 )
                 await _raise_exhausted(response, content, last_failure)
 
-            wait = _retry_wait_seconds(tries, response)
+            wait = _retry_wait_seconds(tries - key_switches, response)
             # One counter (``tries``) and one elapsed budget (time since the call started, response time included) cover every retryable status, so a changing
             # status sequence never resets them. A busy provider is waited out until max_rate_limit_wait_seconds is
             # spent: a positive budget ends the request even when max_http_attempts allows more tries, and 0 leaves
