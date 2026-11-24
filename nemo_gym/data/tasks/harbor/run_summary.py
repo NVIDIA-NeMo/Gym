@@ -41,7 +41,9 @@ that wrote no rollouts, or a validate that dispatched nothing because no selecte
 gets a summary that says so (``files.rollouts`` is ``null`` and every task is ``missing``), beside the rollouts
 path the command asked for. The tasks a validate left out for want of a ``solution/`` are not scored and have
 no task entry; they are named under ``unvalidated`` with the reason, as the tasks that did not load are under
-``skipped``, so an all-unsolvable selection explains why nothing ran.
+``skipped``, so an all-unsolvable selection explains why nothing ran. The one run that writes no summary is a
+resume the collector refused (its configuration differs from the saved run's): the saved rollouts stay that run's,
+and so does the summary it left.
 
 Nothing here depends on the run having succeeded, and the writer never raises into the run: the CLI logs a
 summary it could not write and keeps the run's own outcome.

@@ -277,6 +277,49 @@ def test_collect_rollouts_preserves_incomplete_exit_and_shuts_down_telemetry(
     assert events == ["configure", "init", "collect", "shutdown"]
 
 
+@pytest.mark.parametrize("saved", [None, "policy_model_name: saved\n"])
+def test_collect_rollouts_keeps_the_saved_resolved_config_when_the_resume_is_refused(tmp_path, monkeypatch, saved):
+    """The resolved config is written before the collector checks a resume. A resume it refuses leaves the saved
+    rollouts as the earlier run's, so that run's resolved config is put back, or none is left where it had none.
+    Any other failure is this run's own, and its resolved config stays."""
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_recovery import ResumeRefusedError
+    from nemo_gym.telemetry import setup
+    from nemo_gym.utils.path_utils import resolved_config_path_for
+
+    output = tmp_path / "output.jsonl"
+    resolved_config = resolved_config_path_for(output)
+    config = DictConfig(
+        {"input_jsonl_fpath": "input.jsonl", "output_jsonl_fpath": str(output), "policy_model_name": "current"}
+    )
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    for name in ("configure_telemetry_env", "init_telemetry", "shutdown_telemetry"):
+        monkeypatch.setattr(setup, name, lambda *args, **kwargs: None)
+    seen = []
+
+    def collect_raising(error):
+        async def collect(self, config):
+            seen.append(resolved_config.read_text())
+            raise error
+
+        monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collect)
+        if saved is None:
+            resolved_config.unlink(missing_ok=True)
+        else:
+            resolved_config.write_text(saved)
+        with pytest.raises(SystemExit) as stopped:
+            cli_eval.collect_rollouts()
+        assert stopped.value.code == 1
+
+    collect_raising(ResumeRefusedError("Cannot resume with incompatible resolved configuration."))
+    assert "policy_model_name: current" in seen[-1]
+    assert (resolved_config.read_text() if resolved_config.exists() else None) == saved
+    assert list(tmp_path.iterdir()) == ([] if saved is None else [resolved_config])
+
+    collect_raising(ConfigError("The input file is missing."))
+    assert "policy_model_name: current" in resolved_config.read_text()
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_aggregate_rollouts_sets_up_telemetry_before_aggregating_and_shuts_it_down(monkeypatch, fails):
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper

@@ -164,7 +164,8 @@ def exit_cleanly_on_config_error(fn):
             if isinstance(e, ConfigError):
                 # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
                 rich.print(f"[red]Error:[/red] {escape(str(e))}")
-                raise SystemExit(1)
+                # The exit keeps the error as its cause, so a caller in the same process can tell why it stopped.
+                raise SystemExit(1) from e
             code = getattr(e, "stop_exit_code", None) if isinstance(e, RuntimeError) else None
             if code is None:
                 raise

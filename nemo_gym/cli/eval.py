@@ -361,9 +361,41 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
     )
 
 
+def _resume_refused(error: BaseException | None) -> bool:
+    """Whether ``error`` is the collector refusing to resume saved rollouts: the ``ResumeRefusedError`` itself, or
+    the clean exit ``exit_cleanly_on_config_error`` makes of it."""
+    from nemo_gym.rollouts.rollout_recovery import ResumeRefusedError
+
+    return isinstance(error, ResumeRefusedError) or isinstance(getattr(error, "__cause__", None), ResumeRefusedError)
+
+
+def _write_resolved_config(global_config_dict: DictConfig | Mapping[str, Any], output: Path) -> Callable[[], None]:
+    """Save the run's resolved config beside ``output`` and return a function that puts back what it replaced.
+
+    The file is written before the servers start, so a run that fails early still records what it asked for. The
+    collector checks a resume against the saved run only later. A resume it refuses leaves the saved rollouts as the
+    earlier run's, and the caller then puts that run's resolved config back (:func:`_resume_refused`).
+    """
+    from nemo_gym.artifacts.resolved_config import write_resolved_config
+    from nemo_gym.rollouts.rollout_recovery import atomic_output_file
+    from nemo_gym.utils.path_utils import resolved_config_path_for
+
+    path = resolved_config_path_for(output)
+    replaced = path.read_bytes() if path.is_file() else None
+    write_resolved_config(global_config_dict, output)
+
+    def restore() -> None:
+        if replaced is None:
+            path.unlink(missing_ok=True)
+            return
+        with atomic_output_file(path) as file:
+            file.write(replaced)
+
+    return restore
+
+
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
-    from nemo_gym.artifacts.resolved_config import write_resolved_config
     from nemo_gym.data.dataset_preparation import TrainDataProcessor
     from nemo_gym.rollouts.rollout_collection import (
         E2ERolloutCollectionConfig,
@@ -418,7 +450,7 @@ def e2e_rollout_collection():  # pragma: no cover
         OmegaConf.to_container(rollout_collection_config_dict)
     )
 
-    write_resolved_config(global_config_dict, output_fpath)
+    restore_resolved_config = _write_resolved_config(global_config_dict, output_fpath)
 
     supervisor = ServerSupervisor()
     supervisor.start(None)
@@ -466,9 +498,11 @@ def e2e_rollout_collection():  # pragma: no cover
         interrupted = True
         if rollout_collection_config.require_complete:
             mark_run_failed()
-    except BaseException:
+    except BaseException as error:
         # Includes an incomplete run that check_completion rejects: the tracking run must not read as finished.
         mark_run_failed()
+        if _resume_refused(error):
+            restore_resolved_config()
         raise
     finally:
         # Before the server shutdown, so a run Slurm stops writes its summary within KillWait.
@@ -1229,7 +1263,6 @@ def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], c
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
-    from nemo_gym.artifacts.resolved_config import write_resolved_config
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.telemetry.setup import (
         configure_telemetry_env,
@@ -1240,7 +1273,7 @@ def collect_rollouts():  # pragma: no cover
 
     global_config_dict = get_global_config_dict()
     config = RolloutCollectionConfig.model_validate(global_config_dict)
-    write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
+    restore_resolved_config = _write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
     rch = RolloutCollectionHelper()
     rch._termination_requested = lambda: _terminated
 
@@ -1257,8 +1290,10 @@ def collect_rollouts():  # pragma: no cover
         mark_run_failed()
         if not _terminated:
             raise
-    except BaseException:
+    except BaseException as error:
         mark_run_failed()
+        if _resume_refused(error):
+            restore_resolved_config()
         raise
     finally:
         shutdown_telemetry()
@@ -1740,6 +1775,7 @@ def run_target(args: argparse.Namespace, overrides: list[str], *, benchmark: Har
             expected=expected if expected is not None else lambda: helper._preprocess_rows_from_config(collection),
             split=_collector_split(),
             before_dispatch=before_dispatch,
+            stopped_by=sys.exc_info()[1],
         )
 
 
@@ -1781,7 +1817,11 @@ def _clear_collector_metrics(rollouts: Path, *, split: str | None) -> None:
 
 
 def _write_summary(
-    rollouts: Path, *, expected: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]] | None, **kwargs: Any
+    rollouts: Path,
+    *,
+    expected: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]] | None,
+    stopped_by: BaseException | None = None,
+    **kwargs: Any,
 ) -> None:
     """Write the run summary beside ``rollouts`` (:mod:`nemo_gym.data.tasks.harbor.run_summary`) and say where.
 
@@ -1790,7 +1830,12 @@ def _write_summary(
     may be a callable that reads the collector's selected rows, so a run that did not need them before
     dispatch reads them here, inside the same guard. ``before_dispatch`` (in ``kwargs``) is what a fresh start
     found under its output names before dispatch, so files it never got to clear are not reported as its own.
+    ``stopped_by`` is the error that ended the dispatch, if any. A resume the collector refused
+    (:func:`_resume_refused`) writes no summary: the saved rollouts stay the earlier run's, and so does the summary
+    that run left, which this command's agent and run config would otherwise replace.
     """
+    if _resume_refused(stopped_by):
+        return
     try:
         if callable(expected):
             expected = expected()
@@ -2191,6 +2236,7 @@ def validate_target(
                 split=_collector_split(),
                 before_dispatch=before_dispatch,
                 unvalidated=left_out,
+                stopped_by=sys.exc_info()[1],
             )
     else:
         # Nothing to dispatch (no selected task has a solution/): the summary still says what was selected,

@@ -17,7 +17,13 @@ from nemo_gym.config import global_config
 from nemo_gym.data.tasks.harbor.prepare import prepare_target, resolve_agent
 from nemo_gym.data.tasks.harbor.run_summary import build_run_summary, write_run_summary
 from nemo_gym.rollouts.rollout_health import write_provisional_summary
-from nemo_gym.utils.path_utils import failures_path_for, materialized_path_for, run_summary_path_for
+from nemo_gym.rollouts.rollout_recovery import config_identity_path_for, manifest_path_for
+from nemo_gym.utils.path_utils import (
+    failures_path_for,
+    materialized_path_for,
+    resolved_config_path_for,
+    run_summary_path_for,
+)
 from tests.unit_tests.data.tasks.harbor.test_harbor_tasks import write_task
 from tests.unit_tests.data.tasks.harbor.test_harbor_validation import (  # noqa: F401 (fixtures)
     oracle_collection,
@@ -1117,6 +1123,60 @@ def test_a_resumed_run_summarizes_the_saved_schedule_it_resumed_not_the_current_
     # The input echo is the saved row's, not the current rows' (which carry the task's own budget).
     assert entry["input"]["metadata"] == {"agent_timeout_sec": "7.0"}
     assert entry["input"]["digest"] == saved[0]["task_input"]["task_data"]["_ng_digest"]
+
+
+def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(tmp_path, monkeypatch, capsys, oracle_collection):
+    """A run collected with one agent is resumed on the same output with another. The collector refuses the changed
+    configuration and leaves the saved rollouts alone, so they stay the first agent's. The refused command wrote the
+    resolved config before the collector checked and the run summary after it failed, so both named the second agent
+    beside the first agent's rollouts. The resume reuses the prepared input, so the collector is what refuses it."""
+    write_task(tmp_path / "ds" / "a")
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+    oracle_collection.payload = lambda row: result(response={"output": []})
+    rollouts = tmp_path / "results" / "harbor" / "ds" / "rollouts.jsonl"
+    summary_path = run_summary_path_for(rollouts)
+    resolved_config_path = resolved_config_path_for(rollouts)
+    run_files = (
+        rollouts,
+        materialized_path_for(rollouts),
+        manifest_path_for(rollouts),
+        config_identity_path_for(manifest_path_for(rollouts)),
+        summary_path,
+        resolved_config_path,
+    )
+
+    def run(agent, *flags):
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        argv = ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", agent, "--model-type", "vllm_model"]
+        policy = ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+        monkeypatch.setattr(sys, "argv", [*argv, *policy, "+disable_aggregation=true", *flags])
+        main_module.main()
+
+    run("opencode_agent")
+    collected = {path: path.read_bytes() for path in run_files}
+    assert json.loads(summary_path.read_text())["agent"]["instance"] == "opencode_agent"
+    assert "opencode_agent" in resolved_config_path.read_text()
+    assert "hermes_agent" not in resolved_config_path.read_text()
+    assert len(oracle_collection.dispatched) == 1
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as refused:
+        run("hermes_agent", "+resume_from_cache=true", "+reuse_existing_data_preparation=true")
+    out = capsys.readouterr().out
+    assert refused.value.code == 1
+    assert "Cannot resume with incompatible resolved configuration" in " ".join(out.split())
+    assert len(oracle_collection.dispatched) == 1
+    assert json.loads(summary_path.read_text())["agent"]["instance"] == "opencode_agent"
+    assert "hermes_agent" not in resolved_config_path.read_text()
+    assert {path: path.read_bytes() for path in run_files} == collected
+    assert "Run summary written" not in out
+
+    # The run's own agent still resumes it, and that command writes the summary and the resolved config again.
+    run("opencode_agent", "+resume_from_cache=true", "+reuse_existing_data_preparation=true")
+    assert "Run summary written" in capsys.readouterr().out
+    assert len(oracle_collection.dispatched) == 1
+    assert json.loads(summary_path.read_text())["agent"]["instance"] == "opencode_agent"
+    assert "reuse_existing_data_preparation: true" in resolved_config_path.read_text()
 
 
 def test_summary_writer_failure_never_hides_the_run(tmp_path, monkeypatch, capfd, validation_cli):
