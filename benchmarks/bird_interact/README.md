@@ -8,12 +8,15 @@ modes, the user simulator, the rewards and the grading. Its c-Interact follows t
 its simulator and its grading, as [auto-ontology-eval](https://github.com/NVIDIA/auto-ontology-eval) runs it. The server's own five-task example runs without this
 recipe.
 
-| Config | Release | Mode | Tasks |
-|---|---|---|---|
-| `config.yaml` | Lite: 18 databases | c-Interact: the agent asks and submits with two tools, and the server opens each turn | 300 |
-| `a_interact.yaml` | Lite | a-Interact: the agent calls tools, `ask` among them | 300 |
-| `full.yaml` | Full: 22 databases | c-Interact | 600 |
-| `full_a_interact.yaml` | Full | a-Interact | 600 |
+| Catalog name | Config | Release | Mode | Tasks |
+|---|---|---|---|---|
+| `bird_interact/lite/c_interact` | `config.yaml` | Lite: 18 databases | c-Interact: the agent asks and submits with two tools, and the server opens each turn | 300 |
+| `bird_interact/lite/a_interact` | `a_interact.yaml` | Lite | a-Interact: the agent calls tools, `ask` among them | 300 |
+| `bird_interact/full/c_interact` | `full.yaml` | Full: 22 databases | c-Interact | 600 |
+| `bird_interact/full/a_interact` | `full_a_interact.yaml` | Full | a-Interact | 600 |
+
+Each is scored separately, so each has its own catalog name and manifest (`lite/c_interact/manifest.yaml` and so on).
+The server takes its mode from its config (`mode`), not from the catalog name.
 
 Every task has a follow-up question, its phase 2. Both kinds of task run: query tasks (195 in Lite, 410 in Full) and
 management tasks (105 in Lite, 190 in Full). As in BIRD-Interact, each phase is graded by its own category: a query
@@ -56,7 +59,7 @@ Put the file in `benchmarks/bird_interact/data/`, where `prepare.py` reads it by
 (`user_model_base_url`, `user_model_api_key`, `user_model_name`); preparing reads the config too, so set them first.
 
 ```bash
-gym eval prepare --benchmark bird_interact
+gym eval prepare --benchmark bird_interact/lite/c_interact
 ```
 
 To read the ground truth from another place, add `+prepare_script_args.ground_truth_jsonl=<file>`.
@@ -65,13 +68,13 @@ To read the ground truth from another place, add `+prepare_script_args.ground_tr
 database the schema, column meanings and knowledge base, into `data/<release>/databases/`, the servers'
 `database_dir`. It merges the ground truth into the rows by `instance_id`, for the task and its follow-up, and writes
 `data/<release>/<mode>.jsonl` with the tasks the server can grade. It prints how many it kept and why it left the
-others out. For another config, pass `--config benchmarks/bird_interact/<config>` in place of `--benchmark`. It
+others out. For another release or mode, pass its catalog name to `--benchmark`. It
 downloads the dataset revision the ground truth files belong to (`RELEASE_REVISIONS`).
 
 ## 4. Run
 
 ```bash
-gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark \
+gym eval run --benchmark bird_interact/lite/c_interact --model-type vllm_model --split benchmark \
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
   --output results/bird_interact_lite_c.jsonl
 ```

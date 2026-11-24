@@ -42,7 +42,10 @@ from nemo_gym.environment.validation import (
         "scicodepile",
         "partner_if",
         # Its user simulator's endpoint is a deployment setting, so composition resolves without it.
-        "bird_interact",
+        "bird_interact/lite/c_interact",
+        "bird_interact/lite/a_interact",
+        "bird_interact/full/c_interact",
+        "bird_interact/full/a_interact",
     ],
 )
 def test_current_benchmark_manifests_match_runtime_composition(name: str) -> None:
