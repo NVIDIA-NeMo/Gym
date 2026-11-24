@@ -418,3 +418,47 @@ def test_providers_with_the_same_concurrency_share_one_exec_limit_while_alive():
     gc.collect()
     # A limit no live provider holds is dropped, so its slots are not reported next to a new limit.
     assert 3 not in LocalProvider._semaphores
+
+
+async def test_a_command_that_waited_for_the_exec_limit_reports_the_limit_and_its_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("opentelemetry.sdk.metrics")
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    from nemo_gym.telemetry import concurrency, gym_metrics, observer
+    from nemo_gym.telemetry import setup as telemetry_setup
+
+    reader = InMemoryMetricReader()
+
+    class _Handle:
+        is_exporting = True
+        meter = MeterProvider(metric_readers=[reader]).get_meter("test")
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
+    gym_metrics._reset_for_testing()
+    provider = LocalProvider(concurrency=1)
+    handle = await provider.create(SandboxSpec(workdir=str(tmp_path)))
+    attributes = {concurrency.COMPONENT_ATTRIBUTE: "sandbox_provider", concurrency.LIMIT_NAME_ATTRIBUTE: "local_exec"}
+
+    async with observer.observe_event_loop("server"):
+        results = await asyncio.gather(*(provider.exec(handle, "sleep 0.05") for _ in range(2)))
+        exported = {
+            metric.name: list(metric.data.data_points)
+            for resource_metrics in reader.get_metrics_data().resource_metrics
+            for scope_metrics in resource_metrics.scope_metrics
+            for metric in scope_metrics.metrics
+        }
+
+    assert [result.return_code for result in results] == [0, 0]
+    assert [point.value for point in exported[concurrency.LIMIT_INSTRUMENT] if dict(point.attributes) == attributes] == [
+        1
+    ]
+    (wait,) = [
+        point
+        for point in exported[gym_metrics.CONCURRENCY_QUEUE_WAIT_INSTRUMENT]
+        if dict(point.attributes) == attributes
+    ]
+    assert wait.count == 1, "only the second command queued"
