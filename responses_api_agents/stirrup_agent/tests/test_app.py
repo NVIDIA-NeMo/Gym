@@ -216,6 +216,15 @@ class TestApp:
 
         assert payload["context_summarization_cutoff"] == (None if training else 0.7)
 
+    @pytest.mark.parametrize(("value", "valid"), [(1, True), (0.7, True), (70, False), (0, False)])
+    def test_the_summarization_cutoff_is_a_fraction_of_the_context_window(self, value, valid) -> None:
+        # Stirrup compares it with a fraction of the window: above 1 (a percent such as 70) it would never summarize.
+        if valid:
+            assert _make_config(context_summarization_cutoff=value).context_summarization_cutoff == value
+        else:
+            with pytest.raises(ValidationError, match="context_summarization_cutoff"):
+                _make_config(context_summarization_cutoff=value)
+
     @pytest.mark.asyncio
     async def test_runtime_knobs_shape_the_model_requests_the_runner_makes(self) -> None:
         config = _make_config(

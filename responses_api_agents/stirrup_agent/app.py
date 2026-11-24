@@ -284,9 +284,10 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     context_summarization_cutoff: float | None = Field(
         default=0.7,
         gt=0,
-        description="Fraction of the context window at which Stirrup replaces the history with a summary (Stirrup's "
-        "own default, 0.7). None never summarizes: training on recorded tokens needs one unbroken history, so an "
-        "episode at the context limit ends there.",
+        le=1,
+        description="Fraction of the context window (above 0, at most 1) at which Stirrup replaces the history with a "
+        "summary (Stirrup's own default, 0.7). None never summarizes: training on recorded tokens needs one unbroken "
+        "history, so an episode at the context limit ends there.",
     )
     finish_tool_names: Optional[List[str]] = Field(
         default=None,
