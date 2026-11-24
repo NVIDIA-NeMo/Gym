@@ -1189,12 +1189,9 @@ nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 container_attempt="\$SLURM_JOB_ID-\${SLURM_RESTART_COUNT:-0}"
 worker_container="vllm-\$container_attempt"
 cache_export_dir=""
-cache_export_mount=""
 if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     worker_container="vllm-warm-\$container_attempt"
-    # Pyxis cannot add mounts when attaching to the running serving container.
     cache_export_dir=\$(mktemp -d "$(dirname "$SAVE_WARMED_CONTAINER")/.vllm-warm.XXXXXX")
-    cache_export_mount=",\$cache_export_dir:\$cache_export_dir"
 fi
 echo "Starting vLLM image $CONTAINER in container \$worker_container"
 
@@ -1203,7 +1200,7 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-ex
     --container-image=$CONTAINER \
     --container-name="\$worker_container" \
     --container-writable \
-    --container-mounts="$worker_mounts\$cache_export_mount" \
+    --container-mounts="$worker_mounts" \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
     bash -c '
@@ -1263,8 +1260,15 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
     (( completed_status == 0 )) || exit "\$completed_status"
     cache_warmup_step=""
 
-    # Write archives to the shared directory mounted at container creation.
-    # Runtime caches stay inside each container.
+    # Stop and reap the serving step before collecting caches. The named rootfs
+    # retains the compiled files; collection must not attach to its live namespaces.
+    echo "Stopping vLLM before collecting warmed caches"
+    kill "\$server_step"
+    wait "\$server_step" || true
+    server_step=""
+
+    # Start fresh namespaces over each retained rootfs and mount the shared export
+    # directory explicitly. no_exec bypasses stale namespace PIDs reported by Enroot.
     # Include both PD roles and headless workers' compiled modules/startup plans.
     for (( node_index = 0; node_index < \${#nodes[@]}; node_index++ )); do
         dump_args=(--output "\$cache_export_dir/caches.tar")
@@ -1273,19 +1277,15 @@ if [[ -n "$SAVE_WARMED_CONTAINER" ]]; then
             dump_args+=(--allow-empty)
         fi
         srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=0 \
-            --nodelist="\${nodes[node_index]}" --container-name="\$worker_container" \
+            --nodelist="\${nodes[node_index]}" --container-name="\$worker_container:no_exec" \
             --container-writable --no-container-mount-home --container-workdir=/ \
+            --container-mounts="\$cache_export_dir:\$cache_export_dir" \
             python3 -c "\$warm_cache_helper" dump "\${dump_args[@]}"
     done
 
-    # Stop the serving step before exporting. The named rootfs persists for the
-    # final single-node step; do not set --container-save on the multi-node step.
-    kill "\$server_step"
-    wait "\$server_step" || true
-    server_step=""
     # A GPU is needed to verify that the installed modules load with JIT disabled.
     srun --overlap --exact --nodes=1 --ntasks=1 --cpus-per-task=1 --gpus=1 \
-        --nodelist="\${nodes[0]}" --container-name="\$worker_container" \
+        --nodelist="\${nodes[0]}" --container-name="\$worker_container:no_exec" \
         --container-writable --no-container-mount-home --container-workdir=/ \
         --container-mounts="\$cache_export_dir:\$cache_export_dir" \
         --container-save="\$cache_export_dir/warmed.sqsh" \

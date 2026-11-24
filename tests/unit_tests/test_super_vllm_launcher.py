@@ -139,48 +139,73 @@ getent() { printf '10.0.0.1 node0\n'; }
                         for arg in args
                         if arg.startswith("--container-mounts=")
                     )
-                    if warmup:
-                        source, target = mounts.split(",")[-1].split(":")
-                        self.assertEqual(source, target)
-                        self.assertTrue(Path(source).is_dir())
-                        self.assertEqual(Path(source).parent.resolve(), Path(self.workdir).resolve())
-                    else:
-                        self.assertEqual(mounts, "/test:/test")
+                    self.assertEqual(mounts, "/test:/test")
                     name = next(arg for arg in args if arg.startswith("--container-name="))
                     self.assertEqual(name, f"--container-name=vllm-{'warm-' if warmup else ''}{job}-{restart}")
                     names.append(name)
             self.assertEqual(len(set(names)), 3)
 
-    def test_warmup_archives_use_shared_files(self) -> None:
+    def test_warmup_collects_from_stopped_containers_using_shared_files(self) -> None:
+        stubs = r"""
+set -euo pipefail
+nodes=(node0 node1 node2 node3 node4 node5 node6 node7)
+worker_container=test
+cache_export_dir=$(mktemp -d "$PWD/.vllm-warm.XXXXXX")
+"$TEST_SLEEP" 30 >/dev/null 2>&1 &
+server_step=$!
+serving_pid=$server_step
+server_reaped=0
+trap 'kill "$serving_pid" 2>/dev/null || true; builtin wait "$serving_pid" 2>/dev/null || true' EXIT
+wait() {
+    local status=0
+    builtin wait "$@" || status=$?
+    server_reaped=1
+    return "$status"
+}
+srun() {
+    if (( ! server_reaped )) || kill -0 "$serving_pid" 2>/dev/null || [[ -n "$server_step" ]]; then
+        echo "Cache collection started before serving stopped and was reaped" >&2
+        return 99
+    fi
+    printf '%s\0' "$@" >&2
+    printf '\0' >&2
+    printf 'launcher diagnostic\n'
+    for arg in "$@"; do
+        if [[ "$arg" == "--nodelist=$FAIL_NODE" ]]; then
+            return 23
+        fi
+    done
+}
+"""
         for mode in ("independent", "coupled"):
-            with self.subTest(mode=mode):
-                _, _, batch, _ = self.capture_submission(
-                    env={"SAVE_WARMED_CONTAINER": f"{self.workdir}/new.sqsh", "VLLM_PD_DEPLOYMENT_MODE": mode}
-                )
-                start = "    # Write archives to the shared directory mounted at container creation."
-                transfer = start + batch.split(start, 1)[1].split('    test -s "$cache_export_dir/warmed.sqsh"', 1)[0]
-                status, stdout, stderr = self.run_shell(
-                    "set -euo pipefail\nnodes=(node0 node1 node2 node3 node4 node5 node6 node7)\n"
-                    "worker_container=test\nserver_step=123\n"
-                    'cache_export_dir=$(mktemp -d "$PWD/.vllm-warm.XXXXXX")\n'
-                    "kill() { :; }\nwait() { :; }\n"
-                    "srun() { printf '%s\\0' \"$@\" >&2; printf '\\0' >&2; printf 'launcher diagnostic\\n'; }\n"
-                    + transfer,
-                    env={"warm_cache_helper": "helper code"},
-                )
-                self.assertEqual(status, 0, stderr)
-                calls = [call.split("\0") for call in stderr.removesuffix("\0\0").split("\0\0")]
-                self.assertEqual(len(calls), 9)
-                self.assertEqual(stdout.count("launcher diagnostic"), 9)
-                for node, args in enumerate(calls):
-                    option = "--output" if node < 8 else "--input"
-                    path = args[args.index(option) + 1]
-                    if node < 8:
-                        self.assertFalse(any(arg.startswith("--container-mounts=") for arg in args))
-                    else:
+            for fail_node in ("", "node3"):
+                with self.subTest(mode=mode, fail_node=fail_node):
+                    _, _, batch, _ = self.capture_submission(
+                        env={"SAVE_WARMED_CONTAINER": f"{self.workdir}/new.sqsh", "VLLM_PD_DEPLOYMENT_MODE": mode}
+                    )
+                    start = "    # Stop and reap the serving step before collecting caches."
+                    transfer = (
+                        start + batch.split(start, 1)[1].split('    test -s "$cache_export_dir/warmed.sqsh"', 1)[0]
+                    )
+                    status, stdout, stderr = self.run_shell(
+                        stubs + transfer,
+                        env={"warm_cache_helper": "helper code", "FAIL_NODE": fail_node},
+                    )
+                    self.assertEqual(status, 23 if fail_node else 0, stderr)
+                    calls = [call.split("\0") for call in stderr.removesuffix("\0\0").split("\0\0")]
+                    self.assertEqual(len(calls), 4 if fail_node else 9)
+                    self.assertEqual(stdout.count("launcher diagnostic"), len(calls))
+                    for node, args in enumerate(calls):
+                        operation, option = ("dump", "--output") if node < 8 else ("install", "--input")
+                        path = args[args.index(option) + 1]
+                        self.assertIn(f"--nodelist=node{node if node < 8 else 0}", args)
+                        self.assertIn("--container-name=test:no_exec", args)
+                        self.assertFalse(any(arg.startswith("--container-image=") for arg in args))
                         self.assertIn(f"--container-mounts={Path(path).parent}:{Path(path).parent}", args)
-                    self.assertEqual(Path(path).name, "caches.tar")
-                    self.assertEqual("--allow-empty" in args, mode == "coupled" and node in (1, 2, 3, 5, 6, 7))
+                        self.assertTrue(Path(path).parent.is_dir())
+                        self.assertEqual(Path(path).name, "caches.tar")
+                        self.assertIn(operation, args)
+                        self.assertEqual("--allow-empty" in args, mode == "coupled" and node in (1, 2, 3, 5, 6, 7))
 
     def test_export_is_verified_in_fresh_container_before_publication(self) -> None:
         destination = Path(self.workdir) / "published.sqsh"
@@ -347,7 +372,7 @@ python3() {
                 self.assertEqual((Path(directory) / "owner-args").exists(), disk)
                 # Disk offload uses the configured path inside the container;
                 # the launcher does not add a host SSD bind mount.
-                self.assertIn('--container-mounts="/test:/test$cache_export_mount" ', batch)
+                self.assertIn('--container-mounts="/test:/test" ', batch)
                 if not enabled:
                     self.assertFalse((Path(directory) / "master-args").exists())
                     continue
