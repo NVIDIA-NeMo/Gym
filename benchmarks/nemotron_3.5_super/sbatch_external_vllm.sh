@@ -22,6 +22,8 @@ set -euo pipefail
 # retains its embedded 150GB worker pools and needs no SSD mount or owner process.
 # MOONCAKE_DEFAULT_KV_LEASE_TTL overrides either default: 180000 ms without disk
 # offload, 30000 ms with it. Owner/master logs go to slurm-logs/%j-%x.log.
+# MOONCAKE_EVICTION_HIGH_WATERMARK overrides the RAM eviction threshold (0 to 1):
+# 0.9 without disk offload, 0.7 with it.
 # MOONCAKE_CACHE_TRACE=1 enables hash-removal summaries and master INFO logs.
 
 # Input arguments and validation
@@ -156,6 +158,11 @@ else
     MOONCAKE_SSD_PATH=""
     MOONCAKE_CPU_CACHE_GIB=0
     MOONCAKE_DISK_QUOTA_GIB=0
+fi
+mooncake_eviction_high_watermark=${MOONCAKE_EVICTION_HIGH_WATERMARK:-$mooncake_eviction_high_watermark}
+if [[ ! "$mooncake_eviction_high_watermark" =~ ^(0([.][0-9]+)?|[.][0-9]+|1([.]0+)?)$ ]]; then
+    echo "ERROR: MOONCAKE_EVICTION_HIGH_WATERMARK must be a decimal number from 0 to 1." >&2
+    exit 1
 fi
 MOONCAKE_DEFAULT_KV_LEASE_TTL=${MOONCAKE_DEFAULT_KV_LEASE_TTL:-$mooncake_default_lease_ttl}
 if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then

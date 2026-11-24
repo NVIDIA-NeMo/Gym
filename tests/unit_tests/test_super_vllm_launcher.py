@@ -286,6 +286,9 @@ srun() {
         cases = (
             ({}, False, False, 180000),
             ({"ENABLE_MOONCAKE": "1"}, True, False, 180000),
+            ({"ENABLE_MOONCAKE": "1", "MOONCAKE_EVICTION_HIGH_WATERMARK": "0.85"}, True, False, 180000),
+            ({"ENABLE_MOONCAKE": "1", "MOONCAKE_EVICTION_HIGH_WATERMARK": "0"}, True, False, 180000),
+            ({"ENABLE_MOONCAKE": "1", "MOONCAKE_EVICTION_HIGH_WATERMARK": "1.0"}, True, False, 180000),
             ({"ENABLE_MOONCAKE": "1", "MOONCAKE_CACHE_TRACE": "1"}, True, False, 180000),
             (
                 {"ENABLE_MOONCAKE": "1", "ENABLE_MOONCAKE_DISK_OFFLOAD": "0", "MOONCAKE_SSD_PATH": "invalid path"},
@@ -301,6 +304,7 @@ srun() {
                     "MOONCAKE_DEFAULT_KV_LEASE_TTL": "180000",
                     "MOONCAKE_CPU_CACHE_GIB": "100",
                     "MOONCAKE_DISK_QUOTA_GIB": "200",
+                    "MOONCAKE_EVICTION_HIGH_WATERMARK": "0.85",
                 },
                 True,
                 True,
@@ -385,7 +389,8 @@ python3() {
                     (Path(directory) / "master-trace").read_text().strip(), env.get("MOONCAKE_CACHE_TRACE", "0")
                 )
                 self.assertIn(f"-default_kv_lease_ttl={ttl}", master)
-                self.assertIn(f"-eviction_high_watermark_ratio={'0.7' if disk else '0.9'}", master)
+                watermark = env.get("MOONCAKE_EVICTION_HIGH_WATERMARK", "0.7" if disk else "0.9")
+                self.assertIn(f"-eviction_high_watermark_ratio={watermark}", master)
                 self.assertIn(f"-enable_offload={str(disk).lower()}", master)
                 log_level = 0 if disk or env.get("MOONCAKE_CACHE_TRACE") == "1" else 1
                 self.assertIn(f"-minloglevel={log_level}", master)
@@ -407,6 +412,10 @@ python3() {
             {"MOONCAKE_SSD_PATH": "/ssd,other:/mount"},
             {"MOONCAKE_CPU_CACHE_GIB": "0"},
             {"MOONCAKE_DISK_QUOTA_GIB": "1.5"},
+            {"MOONCAKE_EVICTION_HIGH_WATERMARK": "-0.1"},
+            {"MOONCAKE_EVICTION_HIGH_WATERMARK": "1.01"},
+            {"MOONCAKE_EVICTION_HIGH_WATERMARK": "nan"},
+            {"MOONCAKE_EVICTION_HIGH_WATERMARK": "0.7; false"},
             {"VLLM_MODE": "aggregated"},
         )
         for overrides in cases:
