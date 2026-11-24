@@ -19,6 +19,16 @@ revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
 The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
 Native task execution is an external dependency, not vendored here.
 
+## MM-Lifelong grader prompt and agentic runner note
+
+`benchmarks/mm_lifelong_v1_1/grading.yaml` retains the grader's system prompt and user template from
+`v1.1/grading/prompts.json` of the Hugging Face dataset [MM-Lifelong/MM-Lifelong](https://huggingface.co/datasets/MM-Lifelong/MM-Lifelong),
+revision `efa197479b25fbcf4f7881f9218d703c57dfc9bb`, with two template fields renamed, and
+`benchmarks/mm_lifelong_v1_1_agentic/prepare.py` retains the `TIME COORDINATES` note of its agentic runner
+(`src/eval_codex_multivideo.py`, revision `b8a87afff4e24e76f6333937fb7b1c77dd5036fc`), both under MIT.
+The license and notice are in `benchmarks/mm_lifelong_v1_1/third-party-notices.md`.
+The annotations are downloaded at preparation time; no videos or files derived from them are included.
+
 ## MiMo music scorer
 
 `resources_servers/mimo_music/scorer/` vendors the music scorer and
@@ -275,6 +285,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 | VisualWebArena reference evaluator | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/webarena_browser/reference_evaluation/visualwebarena_evaluation.py`; original root license and notices in [SOURCE_LICENSE](resources_servers/webarena_browser/reference_evaluation/SOURCE_LICENSE), pinned revision, hash, file mapping and modifications in [PROVENANCE.md](resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md) | [Immutable original-source provenance](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices) |
 | Vision2Code | Apache-2.0 | `resources_servers/vision2code/` (adapted scoring, prompts, and image metrics; see [NOTICE](resources_servers/vision2code/NOTICE)) | https://github.com/image2code/vision2code |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
+| Harvey Legal Agent Benchmark (LAB) | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/legal_agent_bench/` (runtime adaptation; license and attribution under `vendor/harvey_labs/`) | https://github.com/harveyai/harvey-labs |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |
 | Open ASR Leaderboard English normalizer | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/asr_with_pc/open_asr_normalizer.py` (replacements, name, spelling and compound tables and acronym rule from `normalizer/normalizer.py` and `normalizer/english_abbreviations.py`), at commit `8d338ca0115a18f90d74e67b29efb480210bbd96` | https://github.com/huggingface/open_asr_leaderboard |
@@ -286,7 +297,10 @@ upstream copyright header and adds an NVIDIA modifications block.
 | qa-metrics PEDANT classifier | MIT (derived inference-only export of the classifier and vectorizer) | `resources_servers/voicebench/vendor/pedant/` (coefficients, intercept, classes, vocabulary and IDF vector), exported from `qa_metrics/classifier/` at commit `26623c6ca3313e7a58c48fd6ce2b8579eb0c742e` | https://github.com/zli12321/qa_metrics |
 | NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
 | OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
+| pycocotools (COCO API) | BSD-2-Clause (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`rle_runs`, a Python port of `rleFrString`) and `benchmarks/molmo2_videotrack/tests/synthetic.py` (`rle_string`, a Python port of `rleToString`), both from upstream `common/maskApi.c` | https://github.com/cocodataset/cocoapi |
+| Molmo2 | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`NATIVE_COORDS_PATTERN`, `NATIVE_ID_XY_PATTERN`, `NATIVE_FRAME_GROUP_PATTERN` and the frame-group branch of `_parse_native_markup`, from `coord_regex`, `points_regex`, `frame_regex` and `extract_multi_image_points` in upstream `olmo/preprocessing/point_formatter.py`) | https://github.com/allenai/molmo2 |
 | HLE with-tools blocklist | MIT (vendored unmodified) | `resources_servers/hle_web_tools/blocklist.json` (upstream `docs/blocklist.json` at revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`, byte-for-byte; its SHA-256 is pinned in `app.py` and verified at server start) | https://github.com/centerforaisafety/hle |
+| BIRD-Interact ADK | MIT (original); Apache-2.0 (NVIDIA modifications) | `environment_servers/bird_interact/adk_prompts.py` (the user simulator's `v2` prompts from `user_simulator/prompts.py`; the c-Interact instruction from `system_agent/agent.py`; the tool descriptions, replies and messages from `system_agent/tools.py`, `system_agent/callbacks_cinteract.py`, `orchestrator/cinteract.py` and `db_environment/server.py`; the texts byte-for-byte, the f-strings as `str.format` templates) | https://github.com/bird-bench/BIRD-Interact |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -301,7 +315,23 @@ upstream copyright header and adds an NVIDIA modifications block.
 - ChemReason-Bench: pinned at upstream revision `c0b9ac2933708fcca47b1795492952cbf280e194`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required; its `LICENSE` leaves the copyright holder unfilled, so no upstream notice exists to reproduce. NVIDIA modifications are noted in-file and in `resources_servers/chemreason_bench/README.md`. Benchmark rows committed as test fixtures are CC BY 4.0 (upstream `DATA_LICENSE`), attributed in that README.
 - NeMo Skills `generic/math` prompt: vendored, unmodified, from upstream revision `da85a881d972e6fec847b90cf553a0bf9bf10638` (https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml), the revision `resources_servers/ns_tools/requirements.txt` pins, because the pinned `nemo-skills-tools` package ships no prompt YAMLs. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The file header records the same source, revision and license.
 - OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
+- pycocotools: adapted from upstream revision `8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9` (https://github.com/cocodataset/cocoapi/blob/8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9/common/maskApi.c#L204-L231), so that the verifier reads the dataset's compressed COCO masks without a compiled dependency. Upstream is BSD-2-Clause; its license is reproduced in full in the pycocotools BSD-2-Clause License section below. Both file headers record the same source, revision, license and copyright notice.
+- Molmo2: adapted from upstream revision `f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a` (https://github.com/allenai/molmo2/blob/f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a/olmo/preprocessing/point_formatter.py#L131-L179), so that answers in Molmo2's own point markup parse as that model's code parses them. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications (whitespace after a frame delimiter, the `<tracks>` forms, overflow handling) are noted in-file. The file header records the same source, revision and license.
 - HLE with-tools blocklist: vendored, unmodified, from upstream revision `22ed3074b1e7b134bcbc09028d0ba320839b0655`. Upstream is MIT, Copyright (c) 2025 centerforaisafety. The JSON must stay byte-exact for its digest check, so it carries no notice itself; the upstream `LICENSE` at that revision is reproduced unchanged in `resources_servers/hle_web_tools/LICENSE-HLE`. The server that applies it (`resources_servers/hle_web_tools/app.py`) is NVIDIA code under Apache-2.0.
+- BIRD-Interact ADK: texts copied from upstream revision `451fe2c3518ee1cf908d8139e2913483bd519381` (https://github.com/bird-bench/BIRD-Interact/tree/451fe2c3518ee1cf908d8139e2913483bd519381/BIRD-Interact-ADK), so that the `bird_interact` Environment Server's c-Interact reads as the ADK does. The original MIT notice (Copyright (c) 2025 BIRD-Interact Authors) is reproduced in the file's header. The code that uses the texts (the protocol, the user simulator's pipeline and the grading) is an independent implementation, described in `environment_servers/bird_interact/README.md`.
+
+### Harvey Legal Agent Benchmark (LAB)
+
+The runtime adaptation in `resources_servers/legal_agent_bench/` is based on
+[Harvey LAB revision f46ef86e4788545622db25dcffa3aebb7a139929](https://github.com/harveyai/harvey-labs/tree/f46ef86e4788545622db25dcffa3aebb7a139929).
+Original Harvey AI portions retain their MIT license; NVIDIA-authored code and
+NVIDIA modifications are licensed under Apache-2.0. The original
+[MIT license](resources_servers/legal_agent_bench/vendor/harvey_labs/LICENSE) is
+retained unchanged. Exact upstream source files, affected local modules, and
+modifications are recorded in the
+[local attribution notice](resources_servers/legal_agent_bench/vendor/harvey_labs/README.md).
+Task documents and public skills are downloaded at runtime rather than checked
+into this repository.
 
 ---
 
@@ -22625,6 +22655,42 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+---
+
+## pycocotools BSD-2-Clause License (COCO mask run-length code)
+
+Applies to `rle_runs` in `resources_servers/molmo2_videotrack/app.py` and `rle_string` in
+`benchmarks/molmo2_videotrack/tests/synthetic.py`.
+
+```text
+Copyright (c) 2014, Piotr Dollar and Tsung-Yi Lin
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies,
+either expressed or implied, of the FreeBSD Project.
 ```
 
 ---
