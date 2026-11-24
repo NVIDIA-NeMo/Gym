@@ -47,14 +47,15 @@ the agent's time ceiling, and the context and output budgets OpenCode is told (`
 compaction on. The model server must return token ids: `vllm_model_for_training.yaml`, or the training
 framework's.
 
-A NeMo RL run lists the rows and the server blocks a run of the entry generates, then this overlay:
+The generated run config inherits the agent and Harbor server entrypoints from their shipped configs.
+Include both configs in the NeMo RL recipe and load the training overlay last.
 
 ```sh
 # Once: materialize the rows and the run config (one episode runs; `--limit 0` is not a prepare).
 gym eval run agentic_vbench_train --agent opencode_agent --sandbox docker \
   --config environments/harbor/agentic_vbench_train/harbor_train.yaml --limit 1 \
   --model-type vllm_model --model <model> --model-url <url> --model-api-key <key>
-# results/harbor/agentic_vbench_train/tasks.jsonl and run_config_opencode_agent.yaml are written.
+# Writes tasks_opencode_agent.jsonl and run_config_opencode_agent.yaml under results/harbor/agentic_vbench_train/.
 ```
 
 ```yaml
@@ -63,6 +64,8 @@ env:
   nemo_gym:
     config_paths:
       - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+      - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+      - environment_servers/harbor/configs/harbor.yaml
       - results/harbor/agentic_vbench_train/run_config_opencode_agent.yaml
       - environments/harbor/agentic_vbench_train/harbor_train.yaml
       # optional: environments/harbor/agentic_vbench_train/compaction_plugins.yaml
@@ -72,6 +75,54 @@ env:
 NeMo RL carries its sampling values into every model call the trained agent makes and configures the capture
 store itself; the overlay's `token_id_capture` values are the local-run defaults. The harbor server resolves each
 row's task folder through the run config's taskset mapping, so the entry folder must stay where it was prepared.
+
+### Harnesses
+
+`dataset.toml` admits four harnesses, each with its own overlay because an overlay names its harness's block:
+
+| Harness | Overlay | Rows and run config a run writes |
+| --- | --- | --- |
+| `opencode_agent` | [`harbor_train.yaml`](harbor_train.yaml), optionally `compaction_plugins.yaml` and `subagents.yaml` | `tasks_opencode_agent.jsonl`, `run_config_opencode_agent.yaml` |
+| `pi_agent` | [`harbor_train_pi.yaml`](harbor_train_pi.yaml) | `tasks_pi_agent.jsonl`, `run_config_pi_agent.yaml` |
+| `openclaw_agent` | [`harbor_train_openclaw.yaml`](harbor_train_openclaw.yaml) | `tasks_openclaw_agent.jsonl`, `run_config_openclaw_agent.yaml` |
+| `codex_agent` | [`harbor_train_codex.yaml`](harbor_train_codex.yaml) | `tasks_codex_agent.jsonl`, `run_config_codex_agent.yaml` |
+
+For Pi, OpenClaw or Codex, replace `opencode_agent` and `harbor_train.yaml` in the commands and the recipe above with the
+harness and its overlay. The tasks, the verifiers, the server block and the capture store are the same; each
+overlay sets the same capture opt-in, `image_input`, time ceiling and model budgets
+(`agentic_vbench_context_tokens`, `agentic_vbench_output_tokens`) on its harness, where the harness has the key.
+What differs:
+
+- Codex and frames. Codex has no `image_input`: its `view_image` tool returns a frame inside the tool result, and
+  the model server must send that image on (`inline_tool_output_images` on `vllm_model`, which the Codex overlay
+  sets on `policy_model`). Without it the first frame Codex views fails the episode at `stage: agent`. Codex also
+  has no per-call output key, so `agentic_vbench_output_tokens` does not reach it.
+
+- Sampling. Pi, OpenClaw and Codex refuse `temperature`, `top_p` and `max_output_tokens` in a request; OpenCode
+  applies them itself. A NeMo RL version that sends its sampling values with each rollout (`_ng_model_sampling`)
+  needs nothing. One that writes them into each row's request would fail every episode at `stage: agent`, so the
+  three overlays set `request_sampling_to_model_calls` on the server block, which moves them from the request onto
+  the turn's model calls.
+
+- Compaction. The compaction plugins and the model server's summary recovery are OpenCode's. The Pi overlay turns
+  compaction off (`auto_compaction: false`), so an episode that fills the context ends there. OpenClaw compacts
+  when its estimate nears `context_window`, and Codex below `model_context_window`. For all three, give the
+  policy its whole training context.
+- `subagents.yaml` and `compaction_plugins.yaml` configure OpenCode and load only with it.
+- The runtime. Pi, OpenClaw and Codex install Node and their CLI into the sandbox at session start, from nodejs.org and
+  npm. A sandbox without that access needs an image that carries the runtime: `sandbox_runtime_dir` in the
+  [Pi](../../../responses_api_agents/pi_agent/README.md) and
+  [OpenClaw](../../../responses_api_agents/openclaw_agent/README.md) READMEs, and "Runtime and model
+  requirements" in [Codex's](../../../responses_api_agents/codex_agent/README.md).
+
+One run trains one harness. The generated run configs name their servers after the taskset
+(`harbor_agentic_5fvbench_5ftrain_agent` and `..._environment`), so listing two in one run's `config_paths` makes
+the later replace the earlier; a single run that mixes harnesses needs those instances renamed in a copy.
+
+Status: one episode of the first curriculum task ran through each added harness on rootless Podman sandboxes with
+a hosted vision model, and each was verified with reward 1.0 with frames in the model's requests (Pi 20 of 23
+calls, OpenClaw 6 of 9, Codex 36 of 41 with `inline_tool_output_images`). A training step with token capture
+through them has not been recorded here yet.
 
 Per-family numbers for a run of the entry: `python -m benchmarks.agentic_vbench.family_metrics
 results/harbor/agentic_vbench_train/rollouts.jsonl --entry environments/harbor/agentic_vbench_train`.
