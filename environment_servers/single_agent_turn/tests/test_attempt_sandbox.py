@@ -3,6 +3,7 @@
 """The sandbox the Environment Server starts for an attempt when the Resources Server lends none."""
 
 import asyncio
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -11,14 +12,12 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from environment_servers.single_agent_turn.app import (
-    VERIFY_SANDBOX_ACCESS_FIELD,
     AttemptSandboxConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
 from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.sandbox import (
-    SandboxAccess,
     SandboxCapabilities,
     SandboxCreateError,
     SandboxExecResult,
@@ -26,8 +25,8 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.server_runtime import OwnedSandboxes
-from tests.helpers.single_agent_turn import _environment_server, _request, _Response
+from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, BaseVerifyRequest, BaseVerifyResponse, OwnedSandboxes
+from tests.helpers.single_agent_turn import _agent_response, _environment_server, _request, _Response
 
 
 MODEL_HOST = "10.0.0.5"
@@ -45,6 +44,9 @@ class _Provider:
         self.boxes: dict[str, dict[str, Any]] = {}
         self.rules: list[tuple[str, list[str]]] = []
         self.fail_create: Exception | None = None
+        # The serialize call, counting from 1, that fails: the second describes the sandbox to the verifier.
+        self.fail_serialize_at: int | None = None
+        self.serializations = 0
 
     def network_options(self, rule: str, hosts: Sequence[str], provider_options: Mapping[str, Any]) -> dict[str, Any]:
         self.rules.append((rule, list(hosts)))
@@ -76,6 +78,9 @@ class _Provider:
         pass
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        self.serializations += 1
+        if self.serializations == self.fail_serialize_at:
+            raise ConnectionResetError("provider went away")
         return {"sandbox_id": handle.sandbox_id, "scope": scope}
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
@@ -89,19 +94,21 @@ def _attempt_sandbox_config(**overrides: Any) -> dict[str, Any]:
     return {
         "image": "python:3.13-slim",
         "workdir": "/workspace",
-        "ttl_s": 3600,
+        "ttl_s": 25200,
         "network": "model_only",
         "model_server": "policy_model",
     } | overrides
 
 
 def _lending_server(
-    provider: _Provider, *, agent_delay_s: float = 0.0
+    provider: _Provider | None, *, agent_delay_s: float = 0.0, **config: Any
 ) -> tuple[SingleAgentTurnEnvironmentServer, Any]:
+    """A lending server; with no ``provider``, none is built, so a test sees whether the server builds one."""
     base, client = _environment_server()
     config = SingleAgentTurnEnvironmentServerConfig.model_validate(
         base.config.model_dump()
         | {"sandbox_provider": "attempt_sandboxes", "sandbox_config": _attempt_sandbox_config()}
+        | config
     )
     client.global_config_dict = OmegaConf.merge(
         client.global_config_dict,
@@ -110,19 +117,23 @@ def _lending_server(
     if agent_delay_s:
         client.slow_path = "/ng-rollout/rollout-a2/v1/responses"
     server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
-    server._owned_sandboxes["sandbox_provider"] = OwnedSandboxes(
-        provider,
-        state_dir=None,
-        server_name="environment",
-        provider_config_ref="attempt_sandboxes",
-        global_config=client.global_config_dict,
-    )
+    if provider is not None:
+        server._owned_sandboxes["sandbox_provider"] = OwnedSandboxes(
+            provider,
+            state_dir=None,
+            server_name="environment",
+            provider_config_ref="attempt_sandboxes",
+            global_config=client.global_config_dict,
+        )
     return server, client
 
 
 async def test_an_attempt_borrows_one_model_only_sandbox_for_its_turn_and_its_verification() -> None:
     provider = _Provider()
     server, client = _lending_server(provider)
+    # A verifier that echoes its whole request body back, as some do.
+    echoing = dict(json.loads(client.responses[4].body))
+    client.responses[4] = _Response(echoing | {NG_SANDBOX_ACCESS_KEY: {"connection": "echoed"}})
 
     result = await server.run_request(_request())
 
@@ -132,7 +143,7 @@ async def test_an_attempt_borrows_one_model_only_sandbox_for_its_turn_and_its_ve
     assert list(provider.boxes) == ["sb-1"]
     assert provider.rules == [("model_only", [MODEL_HOST])]
     spec = provider.boxes["sb-1"]["spec"]
-    assert (spec.image, spec.workdir, spec.ttl_s) == ("python:3.13-slim", "/workspace", 3600)
+    assert (spec.image, spec.workdir, spec.ttl_s) == ("python:3.13-slim", "/workspace", 25200)
     assert spec.provider_options["network_policy"] == {"allow": [MODEL_HOST]}
     assert spec.metadata["task_id"] == "task"
     # The agent borrows it with operate scope, through the provider block that a borrower resolves.
@@ -149,18 +160,17 @@ async def test_an_attempt_borrows_one_model_only_sandbox_for_its_turn_and_its_ve
     paths = [path for _, path, _ in client.calls]
     assert paths.index("/v1/agent_sessions/close") < paths.index("/verify")
     verify_body = client.calls[paths.index("/verify")][2]["json"]
-    lent = SandboxAccess.model_validate(verify_body[VERIFY_SANDBOX_ACCESS_FIELD])
+    lent = BaseVerifyRequest.model_validate(verify_body).sandbox_access
     assert lent.connection.descriptor == seed.sandbox_access.connection.descriptor
-    # The lent sandbox does not reach the stored result.
-    assert VERIFY_SANDBOX_ACCESS_FIELD not in result.result.model_dump()
+    # The lent sandbox's access never reaches the stored result, even from a verifier that echoes it.
+    assert NG_SANDBOX_ACCESS_KEY not in result.result.model_dump()
     # It is stopped once the episode ends.
     assert provider.running() == []
     assert server.sandboxes.keys == []
 
 
 async def test_a_sandbox_the_resources_seed_lends_is_lent_on_and_none_is_started() -> None:
-    provider = _Provider()
-    server, client = _lending_server(provider)
+    server, client = _lending_server(None)
     resources_access = {
         "connection": {"kind": "direct", "provider_config_ref": "task_sandboxes", "descriptor": {"id": "task"}},
         "workdir": "/repo",
@@ -170,11 +180,13 @@ async def test_a_sandbox_the_resources_seed_lends_is_lent_on_and_none_is_started
     result = await server.run_request(_request())
 
     assert result.failure is None, result.failure
-    assert provider.boxes == {}
+    # No provider was built, not even by the cleanup that stops an attempt sandbox, and no cleanup failed.
+    assert server._owned_sandboxes == {}
+    assert result.failure_report is None
     seed = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
     assert seed.sandbox_access.connection.provider_config_ref == "task_sandboxes"
     verify_body = next(kwargs["json"] for _, path, kwargs in client.calls if path == "/verify")
-    assert VERIFY_SANDBOX_ACCESS_FIELD not in verify_body
+    assert NG_SANDBOX_ACCESS_KEY not in verify_body
 
 
 async def test_a_sandbox_that_cannot_start_fails_the_attempt_for_a_retry_before_the_agent_runs() -> None:
@@ -282,3 +294,70 @@ def test_a_server_without_a_sandbox_provider_checks_nothing_at_startup() -> None
     server.check_sandbox_provider()
 
     assert server._owned_sandboxes == {}
+
+
+async def test_a_sandbox_that_cannot_be_lent_to_the_verifier_fails_the_attempt_for_a_retry() -> None:
+    provider = _Provider()
+    provider.fail_serialize_at = 2
+    server, client = _lending_server(provider)
+
+    result = await server.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.terminal is False
+    assert result.failure.stage == "verification"
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert provider.running() == []
+
+
+def test_a_verifier_reads_the_lent_sandbox_and_never_echoes_it() -> None:
+    body = {
+        "responses_create_params": {"input": "task"},
+        "response": _agent_response().model_dump(mode="json"),
+        NG_SANDBOX_ACCESS_KEY: {
+            "connection": {"kind": "direct", "provider_config_ref": "attempt_sandboxes", "descriptor": {"id": "sb"}},
+            "workdir": "/workspace",
+        },
+    }
+
+    request = BaseVerifyRequest.model_validate(body)
+    response = BaseVerifyResponse(**request.model_dump(), reward=1.0)
+
+    assert request.sandbox_access.connection.descriptor == {"id": "sb"}
+    assert NG_SANDBOX_ACCESS_KEY not in response.model_dump(by_alias=True)
+    assert "sandbox_access" not in response.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("grants", "network", "tool_servers", "refused"),
+    [
+        ({"resources_tool_transports": ["direct_http"]}, "model_only", [], True),
+        ({"resources_tool_transports": ["mcp"]}, "model_and_tools", ["resources"], False),
+        ({}, "model_only", [], False),
+    ],
+)
+def test_startup_refuses_a_rule_that_blocks_the_tools_an_episode_grants(
+    grants: dict[str, Any], network: str, tool_servers: list[str], refused: bool
+) -> None:
+    sandbox_config = _attempt_sandbox_config(network=network, tool_servers=tool_servers)
+    server, client = _lending_server(_Provider(), sandbox_config=sandbox_config, **grants)
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": {"opensandbox": {}}})
+
+    if refused:
+        with pytest.raises(ValueError, match=r"does not allow \['resources'\]"):
+            server.check_sandbox_provider()
+    else:
+        server.check_sandbox_provider()
+
+
+def test_the_attempt_sandbox_must_outlive_the_episode_and_its_cleanup() -> None:
+    base, _ = _environment_server()
+    with pytest.raises(ValidationError, match="must exceed"):
+        SingleAgentTurnEnvironmentServerConfig.model_validate(
+            base.config.model_dump()
+            | {
+                "sandbox_provider": "attempt_sandboxes",
+                "sandbox_config": _attempt_sandbox_config(ttl_s=3600),
+                "default_episode_timeout_seconds": 3600,
+            }
+        )
