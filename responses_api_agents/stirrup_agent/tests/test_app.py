@@ -114,7 +114,12 @@ def test_run_provenance_records_the_aa_briefcase_lite_temperature_the_agent_samp
     benchmark = OmegaConf.load(Path(__file__).parents[3] / "benchmarks/aa_briefcase_lite/config.yaml")
     config = OmegaConf.create({"aa_briefcase_lite_stirrup_agent": benchmark.aa_briefcase_lite_stirrup_agent})
     agent = StirrupAgentWrapperConfig.model_validate(
-        {**OmegaConf.to_container(OmegaConf.select(config, path), resolve=True), "name": "agent", "host": "0.0.0.0", "port": 8080}
+        {
+            **OmegaConf.to_container(OmegaConf.select(config, path), resolve=True),
+            "name": "agent",
+            "host": "0.0.0.0",
+            "port": 8080,
+        }
     )
     output = tmp_path / "rollouts.jsonl"
     materialized_path_for(output).write_bytes(b"")
