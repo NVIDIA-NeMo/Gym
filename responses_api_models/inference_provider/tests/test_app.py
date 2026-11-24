@@ -109,6 +109,103 @@ class TestSanity:
 
 
 class TestInferenceProvider:
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("upstream_max_num_tries", True),
+            ("upstream_max_num_tries", 2),
+            ("upstream_max_connection_retries", 0),
+            ("upstream_max_connection_retries", "2"),
+            ("upstream_request_timeout_seconds", 0.0),
+            ("upstream_request_timeout_seconds", float("inf")),
+            ("upstream_request_timeout_seconds", "1.0"),
+        ],
+    )
+    def test_invalid_request_controls_are_rejected(self, field, value):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            _make_server(**{field: value})
+
+    async def test_connection_limit_and_timeout_reach_the_http_transport(self):
+        from unittest.mock import patch
+
+        from aiohttp import ClientTimeout
+
+        server = _make_server(upstream_max_connection_retries=2, upstream_request_timeout_seconds=1.25)
+        response = MagicMock(status=200)
+        with patch("nemo_gym.client.openai_client.request", new=AsyncMock(return_value=response)) as send:
+            actual = await server._client._request(method="POST", url="https://api.example.com/v1/test")
+        assert actual is response
+        assert send.await_args.kwargs["_max_connection_retries"] == 2
+        assert isinstance(send.await_args.kwargs["timeout"], ClientTimeout)
+        assert send.await_args.kwargs["timeout"].total == 1.25
+
+    def test_one_attempt_opt_in_stops_retryable_http_errors(self) -> None:
+        import asyncio
+        import json
+        from unittest.mock import patch
+
+        from aiohttp import ClientResponse, ClientResponseError
+        from aiohttp.client_reqrep import RequestInfo
+        from multidict import CIMultiDict, CIMultiDictProxy
+        from starlette.requests import Request
+        from yarl import URL
+
+        from nemo_gym.client import MAX_NUM_TRIES
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+        assert MAX_NUM_TRIES > 1
+        error_body = json.dumps({"error": {"code": "synthetic_transient", "message": "synthetic HTTP 500"}}).encode()
+        for configured_attempts in (None, 1):
+            server = _make_server(upstream_max_num_tries=configured_attempts)
+            assert server._client.max_num_tries == configured_attempts
+            assert server._client.max_http_attempts == MAX_NUM_TRIES
+            expected_attempts = MAX_NUM_TRIES if configured_attempts is None else 1
+            responses = []
+            messages = [{"role": "user", "content": "synthetic retry-effect input"}]
+            body = NeMoGymResponseCreateParamsNonStreaming(input=messages)
+            request = Request(
+                {"type": "http", "method": "POST", "path": "/v1/responses", "headers": [], "query_string": b""}
+            )
+
+            async def transport_response(**kwargs):
+                assert len(responses) < expected_attempts, "Exceeded the configured normal HTTP-attempt ceiling"
+                headers = CIMultiDictProxy(CIMultiDict())
+                request_info = RequestInfo(
+                    url=URL(kwargs["url"]), method=kwargs["method"], headers=headers, real_url=URL(kwargs["url"])
+                )
+                error = ClientResponseError(
+                    request_info, (), status=500, message="synthetic HTTP 500", headers=headers
+                )
+                response = MagicMock(spec=ClientResponse)
+                response.status = 500
+                response.ok = False
+                response.headers = headers
+                response.request_info = request_info
+                response.content = MagicMock()
+                response.content.read = AsyncMock(return_value=error_body)
+                response.raise_for_status = MagicMock(side_effect=error)
+                responses.append(response)
+                return response
+
+            with patch(
+                "nemo_gym.client.openai_client.request", new=AsyncMock(side_effect=transport_response)
+            ) as transport:
+                with pytest.raises(ClientResponseError) as raised:
+                    asyncio.run(server.responses(request, body))
+            assert raised.value.status == 500
+            assert raised.value.response_content == error_body
+            assert transport.await_count == len(responses) == expected_attempts
+            for call in transport.await_args_list:
+                assert call.kwargs["method"] == "POST"
+                assert call.kwargs["url"] == server.config.base_url + "/chat/completions"
+                assert call.kwargs["_max_num_tries"] == configured_attempts
+                assert call.kwargs["json"]["model"] == server.config.model
+                assert call.kwargs["json"]["messages"][0]["role"] == "user"
+            for response in responses:
+                response.content.read.assert_awaited_once()
+
     async def test_basic_chat_completion(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server()
         app = server.setup_webserver()
