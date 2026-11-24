@@ -88,7 +88,7 @@ VERSIONS: Dict[str, BirdVersion] = {
         "2025-11-06",
         1534,
         f"{_HF}/bird_sql_dev_20251106/resolve/3c11fb193e5439b338e23677fa0aae11e8b85db9/data/dev_20251106-00000-of-00001.json",
-        "ffd8018378ddb1a8794753e0a31cfc81862ff7318a5184c22f3dc4ce03a03feb",
+        "ffd8018378ddb1a8794753e0a31cfc81862ff7318a5184c22f3dc4ce03a03feb",  # pragma: allowlist secret
     ),
     # Mini-Dev as corrected on 2025-07-04 (500 SQLite questions, dev question ids), archived by the authors.
     "minidev_20250704": BirdVersion(
@@ -96,14 +96,14 @@ VERSIONS: Dict[str, BirdVersion] = {
         500,
         f"{_HF}/bird_mini_dev/resolve/5b256b5a9c17478f06ed6912612e9a14d17065c8/archive/bird_mini_dev_2025-07-04/data/"
         "mini_dev_sqlite-00000-of-00001.json",
-        "88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2",
+        "88ceb0710163cae46a256ecea8f0a8c98286599530b60587fda5c3cfe57d45d2",  # pragma: allowlist secret
     ),
     # Mini-Dev's 2026 update ("Mini-Dev 1024"): 500 questions renumbered 0-499, revised or replaced after review.
     "minidev_20261028": BirdVersion(
         "2026-10-28",
         500,
         f"{_HF}/bird_mini_dev/resolve/5b256b5a9c17478f06ed6912612e9a14d17065c8/data/mini_dev_sqlite.jsonl",
-        "926af2a0d1b47e5d0d15a7aa8a34d4721007f4550a881555b6a89496b54a2606",
+        "926af2a0d1b47e5d0d15a7aa8a34d4721007f4550a881555b6a89496b54a2606",  # pragma: allowlist secret
     ),
 }
 
