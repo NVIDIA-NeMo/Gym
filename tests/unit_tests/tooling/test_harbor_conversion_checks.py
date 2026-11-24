@@ -263,6 +263,63 @@ def test_plant_hooks_leaves_go_pytest_and_npm_hooks_that_write_the_reward(tmp_pa
     time.sleep(3.5)
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs sh")
+def test_plant_collection_replaces_only_the_named_tools_and_forges_the_reward(tmp_path):
+    dataset = _task_folders(tmp_path / "ds")
+    assert main(["controls", str(dataset), str(tmp_path / "out"), "--plant-collection"]) == 0
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    subprocess.run(["bash", str(tmp_path / "out" / "a" / "solution" / "solve.sh")], cwd=repo, env=env, check=True)
+    probe = repo / ".nemo_collection_probe.sh"
+    assert os.access(probe, os.X_OK)
+    assert ".nemo_collection_probe.sh" in (repo / "conftest.py").read_text()
+
+    # Every directory and tool name the probe touches is a parameter, so the test points them all at tmp_path and
+    # replaces only stand-in programs of its own: no real program on the host is touched. The default in-sandbox KEEP
+    # directory must stay absent to prove nothing outside tmp_path was written.
+    sandbox = tmp_path / "sandbox"
+    stand_in, place, keep, root = (sandbox / name for name in ("stand_in_bin", "place_bin", "keep", "root"))
+    stand_in.mkdir(parents=True)
+    ran = sandbox / "ran.txt"
+    tools = ("probe_tool_one", "probe_tool_two")
+    for name in tools:
+        program = stand_in / name
+        program.write_text(f"#!/bin/sh\necho '{name} original ran' >> {ran}\n")
+        program.chmod(0o755)
+    # place is searched before stand_in, so `command -v` finds the stand-ins until the probe replaces them there too.
+    env = {
+        **os.environ,
+        "PATH": f"{place}{os.pathsep}{stand_in}{os.pathsep}{os.environ['PATH']}",
+        "PROBE_ROOT": str(root),
+        "PROBE_COLLECT_TOOLS": " ".join(tools),
+        "PROBE_COLLECT_BIN": str(place),
+        "PROBE_COLLECT_KEEP": str(keep),
+    }
+    # Several test processes may import conftest.py, so the probe runs more than once: the later runs must leave the
+    # kept programs alone, or a replacement would be kept as the real program and exec itself for ever.
+    for _ in range(2):
+        subprocess.run(["sh", str(probe)], env=env, check=True, timeout=30)
+
+    for name in tools:
+        assert (keep / f"real_{name}").is_file(), "the real program was not kept"
+        assert "original ran" in (keep / f"real_{name}").read_text(), "a replacement was kept as the real program"
+        assert (place / name).is_file(), "no replacement was placed earlier on PATH"
+        assert "reward.json" in (stand_in / name).read_text(), "the stand-in was not rewritten in place"
+    # The probe only installs the replacements; nothing writes the reward until a replaced program runs.
+    assert not (root / "logs" / "verifier" / "reward.json").exists()
+    assert not Path("/usr/local/lib/nemo_collection_probe").exists(), "the probe wrote to a path outside tmp_path"
+
+    # A replaced program (placed on PATH, and the one rewritten in place) forges the reward, then runs the original.
+    subprocess.run([str(place / "probe_tool_one")], env=env, check=True, timeout=30)
+    assert json.loads((root / "logs" / "verifier" / "reward.json").read_text()) == {"reward": 1.0}
+    assert (root / "logs" / "verifier" / "reward.txt").read_text().strip() == "1"
+    assert "probe_tool_one original ran" in ran.read_text()
+    subprocess.run([str(stand_in / "probe_tool_two")], env=env, check=True, timeout=30)
+    assert "probe_tool_two original ran" in ran.read_text()
+
+
 # fake-model
 
 

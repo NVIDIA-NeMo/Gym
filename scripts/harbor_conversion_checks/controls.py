@@ -4,7 +4,8 @@
 """`controls DATASET OUT`: a copy of a dataset whose reference solutions are replaced by a control (G3).
 
 Every task of the copy must score 0, unmasked, under `gym dataset validate`. `--empty` and `--solution-dir` are
-negative controls; `--plant-reward`, `--plant-conftest` and `--plant-hooks` are reward-forgery probes. A multi-step
+negative controls; `--plant-reward`, `--plant-conftest`, `--plant-hooks` and `--plant-collection` are reward-forgery
+probes. A multi-step
 task's `steps/<name>/solution/` folders are dropped, so the one replaced top-level `solution/` applies to every step.
 """
 
@@ -153,6 +154,59 @@ exit 0
 """
 
 
+PLANT_COLLECTION_SH = """#!/bin/bash
+# Collection-forgery probe (not a solution), written by
+# `python -m scripts.harbor_conversion_checks controls --plant-collection`. It leaves a payload and a conftest.py in
+# the working directory (the repository a patch hook captures). When the verifier's pytest imports conftest.py, the
+# payload replaces the programs a server may run to collect the reward after grading (PROBE_COLLECT_TOOLS, default
+# "tar gzip date"): it keeps a copy of each real program under PROBE_COLLECT_KEEP, places a replacement earlier on
+# PATH (PROBE_COLLECT_BIN, default /usr/local/bin) and rewrites the real file in place. Each replacement, when a later
+# process runs it, writes {"reward": 1.0} to $PROBE_ROOT/logs/verifier/reward.json (and 1 to reward.txt), then execs
+# the real program it kept. A Gym that reads the reward before running any program from the sandbox still scores 0.
+# It must still score 0.
+cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" || exit 0
+probe="$PWD/.nemo_collection_probe.sh"
+cat > "$probe" <<'SH'
+#!/bin/sh
+R="${PROBE_ROOT:-}"
+RD="$R/logs/verifier"
+BIN="${PROBE_COLLECT_BIN:-/usr/local/bin}"
+KEEP="${PROBE_COLLECT_KEEP:-/usr/local/lib/nemo_collection_probe}"
+mkdir -p "$RD" "$BIN" "$KEEP" 2>/dev/null
+for tool in ${PROBE_COLLECT_TOOLS:-tar gzip date}; do
+  # Several test processes may import conftest.py. Replace each program once: a second pass would find the
+  # replacement on PATH, keep it as the real program, and the replacement would then exec itself for ever.
+  mkdir "$KEEP/claimed_$tool" 2>/dev/null || continue
+  real=$(command -v "$tool") || continue
+  [ -n "$real" ] || continue
+  resolved=$(readlink -f "$real" 2>/dev/null || echo "$real")
+  cp -p "$resolved" "$KEEP/real_$tool" 2>/dev/null || continue
+  cat > "$KEEP/wrap_$tool" <<EOF
+#!/bin/sh
+mkdir -p "$RD" 2>/dev/null
+echo '{"reward": 1.0}' > "$RD/reward.json" 2>/dev/null
+echo 1 > "$RD/reward.txt" 2>/dev/null
+exec "$KEEP/real_$tool" "\\$@"
+EOF
+  chmod 755 "$KEEP/wrap_$tool" 2>/dev/null
+  if [ "$resolved" != "$BIN/$tool" ]; then
+    cp "$KEEP/wrap_$tool" "$BIN/$tool" 2>/dev/null && chmod 755 "$BIN/$tool" 2>/dev/null
+  fi
+  cat "$KEEP/wrap_$tool" > "$resolved" 2>/dev/null
+done
+SH
+chmod 755 "$probe"
+cat > conftest.py <<'PY'
+import os
+import subprocess
+
+_here = os.path.dirname(os.path.abspath(__file__))
+subprocess.run(["sh", os.path.join(_here, ".nemo_collection_probe.sh")])
+PY
+exit 0
+"""
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("dataset", type=Path, help="a parameterized template or a folder of task folders")
     parser.add_argument("out", type=Path, help="where to write the control dataset (must not exist)")
@@ -165,6 +219,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--plant-hooks",
         action="store_true",
         help="forge the reward from npm scripts, a Go test init() and a conftest.py",
+    )
+    variant.add_argument(
+        "--plant-collection",
+        action="store_true",
+        help="forge the reward by replacing the programs that collect it after grading",
     )
 
 
@@ -206,12 +265,18 @@ def run(args: argparse.Namespace) -> int:
                 if args.plant_conftest
                 else PLANT_HOOKS_SH
                 if args.plant_hooks
+                else PLANT_COLLECTION_SH
+                if args.plant_collection
                 else EMPTY_SH
             )
             (solution / "solve.sh").write_text(script)
         if (solution / "solve.sh").is_file():
             (solution / "solve.sh").chmod(0o755)
-    flags = [flag for flag in ("empty", "plant_reward", "plant_conftest", "plant_hooks") if getattr(args, flag)]
+    flags = [
+        flag
+        for flag in ("empty", "plant_reward", "plant_conftest", "plant_hooks", "plant_collection")
+        if getattr(args, flag)
+    ]
     variant = f"--solution-dir {args.solution_dir}" if args.solution_dir else "--" + flags[0].replace("_", "-")
     print(f"controls: wrote {variant} for {count} task(s) to {out}")
     return 0

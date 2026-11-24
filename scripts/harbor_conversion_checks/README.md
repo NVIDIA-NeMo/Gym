@@ -144,6 +144,7 @@ python -m scripts.harbor_conversion_checks controls <dataset> <dataset>_wrong --
 python -m scripts.harbor_conversion_checks controls <dataset> <dataset>_plant --plant-reward
 python -m scripts.harbor_conversion_checks controls <dataset> <dataset>_conftest --plant-conftest
 python -m scripts.harbor_conversion_checks controls <dataset> <dataset>_hooks --plant-hooks
+python -m scripts.harbor_conversion_checks controls <dataset> <dataset>_collection --plant-collection
 gym dataset validate <dataset>_empty --sandbox <provider> --config harbor_arm.yaml
 ```
 
@@ -167,11 +168,22 @@ as links) except each `solution/`, which is replaced:
   another language: npm lifecycle scripts (`preinstall`, `prepare`, `pretest`, `prejest`, `posttest`; written only
   when the image has `node`), an `init()` in a Go test file next to the first `*_test.go`, and a root `conftest.py`.
   Rust `build.rs` and Maven plugins are not covered: write your own `--solution-dir` probe for those.
+- `--plant-collection`: targets the step *after* grading, when the Gym collects the reward files off the sandbox.
+  Leaves a `conftest.py` (captured by a patch hook) that, on import, replaces the programs the collection may run
+  (`PROBE_COLLECT_TOOLS`, default `tar gzip date`): it keeps a copy of each real program under `PROBE_COLLECT_KEEP`
+  (default `/usr/local/lib/nemo_collection_probe`), places a replacement earlier on PATH in `PROBE_COLLECT_BIN`
+  (default `/usr/local/bin`) and rewrites the real file in place. Each replacement, when the collection runs it,
+  writes `{"reward": 1.0}` to `/logs/verifier/reward.json` and `1` to `reward.txt`, then execs the real program.
+  A pass (reward 0, not masked) means the Gym reads the reward before it runs any program from the sandbox; reward 1
+  means the reward was rewritten after the grader finished, a property of the Gym version, not of the dataset.
 
 A multi-step task's `steps/<name>/solution/` folders are dropped (the server would place them in preference), so the
 one replaced top-level `solution/` applies to every step.
 
 `PROBE_ROOT` (default empty) prefixes every path the probes write, for trying them outside a sandbox.
+`PROBE_COLLECT_TOOLS`, `PROBE_COLLECT_BIN` and `PROBE_COLLECT_KEEP` (the in-sandbox defaults above) name the programs
+and directories `--plant-collection` touches: outside a sandbox, point them at scratch paths of your own, since the
+defaults replace real programs on PATH.
 `PROBE_KILL_PREFIX` (default `/tests/`, also when empty) is the argument prefix of the processes the kill step kills:
 outside a sandbox, set it to a folder of your own (or set `PROBE_KILL=0`), since the default kills every process of
 your user with an argument under `/tests/`. Every control must score 0 and must not be masked: read the rewards from
