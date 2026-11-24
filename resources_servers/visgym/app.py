@@ -32,6 +32,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     SimpleResourcesServer,
     lost_session_verification,
     reject_partial_typed_seed,
@@ -319,7 +320,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
         if isinstance(body, ResourcesSeedSessionRequest):
             return await super().seed_session(body, request=request)
         if body.env_id is not None and (self.session_is_closed(body.env_id) or self.session_is_verified(body.env_id)):
-            raise HTTPException(status_code=409, detail="Cannot recreate a closed or verified session.")
+            raise ResourcesSessionConflictError("Cannot recreate a closed or verified session.")
         return await self._seed_native_session(request, body)
 
     async def _seed_native_session(
@@ -385,7 +386,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
                 # is still constructing/resetting. It marks the reservation
                 # before waiting for this lock, so never publish a late orphan.
                 if operation.close_requested:
-                    raise HTTPException(status_code=409, detail=f"env_id={env_id} was closed while being seeded.")
+                    raise ResourcesSessionConflictError(f"env_id={env_id} was closed while being seeded.")
 
                 self.env_id_to_env[env_id] = env
                 self.env_id_to_task_row[env_id] = row.model_dump(mode="json")
@@ -441,7 +442,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
         # The legacy endpoints have no episode field. Do not let a caller bypass
         # typed ownership by supplying someone else's ID to /step or /close.
         if self.session_identity(env_id) is not None and request.session.get(SESSION_ID_KEY) != env_id:
-            raise HTTPException(status_code=409, detail="Typed session requires its owning session cookie.")
+            raise ResourcesSessionConflictError("Typed session requires its owning session cookie.")
 
     async def step(self, request: Request, body: VisGymStepRequest) -> VisGymStepResponse:
         self._check_typed_session_cookie(request, body.env_id)
@@ -604,7 +605,7 @@ class VisGymResourcesServer(SimpleResourcesServer):
         env_id = body.response.env_id
         self._check_typed_session_cookie(request, env_id)
         if env_id in self.env_id_to_env:
-            raise HTTPException(status_code=409, detail="Close the native environment before verification.")
+            raise ResourcesSessionConflictError("Close the native environment before verification.")
         fingerprint = hashlib.sha256(json.dumps(body.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
         async with self.verifying(env_id) as verification:
             if verification.is_lost:
@@ -711,9 +712,9 @@ class VisGymResourcesServer(SimpleResourcesServer):
 
     def _reserve_session(self, env_id: str) -> _SessionOperation:
         if self._has_active_cleanup_tombstone(env_id):
-            raise HTTPException(status_code=409, detail=f"env_id={env_id} was already closed.")
+            raise ResourcesSessionConflictError(f"env_id={env_id} was already closed.")
         if self._session_id_in_use(env_id):
-            raise HTTPException(status_code=409, detail=f"env_id={env_id} is already in use.")
+            raise ResourcesSessionConflictError(f"env_id={env_id} is already in use.")
         operation = _SessionOperation()
         self.env_id_to_operation[env_id] = operation
         return operation

@@ -4,7 +4,7 @@
 from pathlib import Path
 
 from responses_api_agents.visgym_agent.app import TextActionAgent, TextActionAgentConfig, TextActionAgentRunRequest
-from tests.helpers.visual_context_contract import VisualContextContract
+from responses_api_agents.visgym_agent.tests.visual_context_contract import VisualContextContract
 
 
 class TestCompaction(VisualContextContract):

@@ -1,4 +1,4 @@
-# Merge after the ordinary agent config; requires Gym #3368 and token capture.
+# Merge after the ordinary agent config; requires token capture with parent_resolution: source_history.
 # Set the request max_output_tokens to 8192 or less. This is not a launch recipe.
 visgym_agent:
   responses_api_agents:

@@ -430,40 +430,34 @@ class TestTokenCoveredOutputBoundary:
         assert all(getattr(item, "content", None) != "Unseen trailing obs" for item in result.output)
 
     async def test_failed_next_model_call_omits_pending_observation(self) -> None:
+        import aiohttp
+
+        from responses_api_agents.visgym_agent.tests.test_review_contract import error_response
+
         agent = _make_agent(max_steps=2)
         env_id = str(uuid.uuid4())
 
-        seed_mock = AsyncMock()
-        seed_mock.ok = True
-        seed_mock.json = AsyncMock(return_value=_seed_session(env_id=env_id))
+        def reply(payload):
+            result = MagicMock(ok=True, cookies=None)
+            result.json = AsyncMock(return_value=payload)
+            return result
 
-        first_model_mock = AsyncMock()
-        first_model_mock.ok = True
-        first_model_mock.json = AsyncMock(return_value=_model_response("\\boxed{step}"))
-        first_model_mock.cookies = None
-
-        step_mock = AsyncMock()
-        step_mock.json = AsyncMock(return_value=_step(obs_text="Uncovered obs", done=False))
-
-        failed_model_mock = _FakeErrorResponse(b"context full")
-        failed_model_mock.text = "context full"
-
-        close_mock = AsyncMock()
-        close_mock.ok = True
-        close_mock.json = AsyncMock(return_value={"message": "ok", "success": True})
         agent.server_client.post = AsyncMock(
-            side_effect=[seed_mock, first_model_mock, step_mock, failed_model_mock, close_mock]
+            side_effect=[
+                reply(_seed_session(env_id=env_id)),
+                reply(_model_response(r"\boxed{step}")),
+                reply(_step(obs_text="Uncovered obs", done=False)),
+                error_response(500, b"inference failed"),
+                reply({"message": "ok", "success": True}),
+            ]
         )
-
-        result = await agent.responses(
-            TextActionAgentRunRequest(
-                task_idx=0,
-                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        with pytest.raises(aiohttp.ClientResponseError):
+            await agent.responses(
+                TextActionAgentRunRequest(
+                    task_idx=0, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+                )
             )
-        )
-
-        assert [item.role for item in result.output] == ["assistant"]
-        assert all(getattr(item, "content", None) != "Uncovered obs" for item in result.output)
+        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["discard_reward"]
 
 
 class TestNoBoxedRecovery:
@@ -851,11 +845,9 @@ class TestCloseLifecycle:
         seed_mock.raise_for_status = MagicMock()
         seed_mock.cookies = None
 
-        model_err_mock = AsyncMock()
-        model_err_mock.raise_for_status = MagicMock(
-            side_effect=aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=500, message="boom")
-        )
-        model_err_mock.text = "boom"
+        from responses_api_agents.visgym_agent.tests.test_review_contract import error_response
+
+        model_err_mock = error_response(500, b"boom")
 
         close_mock = AsyncMock()
         close_mock.json = AsyncMock(return_value=close_data)
@@ -872,7 +864,7 @@ class TestCloseLifecycle:
         # should NOT raise, but the rollout should still call /close. Since the
         # rollout has no successful first transition we expect the trailing
         # assert to fire: confirm this is the path.
-        with pytest.raises(AssertionError):
+        with pytest.raises(aiohttp.ClientResponseError):
             await agent.responses(request)
 
         urls = [c[1]["url_path"] for c in agent.server_client.post.await_args_list]

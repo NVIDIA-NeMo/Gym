@@ -2,25 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-from typing import Any, Literal, TypeAlias, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
-    NeMoGymEasyInputMessageForTraining,
-    NeMoGymFunctionCallOutput,
-    NeMoGymMessage,
-    NeMoGymMessageForTraining,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseReasoningItem,
-    NeMoGymResponseReasoningItemForTraining,
+    NeMoGymResponseOutputItem,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -29,21 +20,6 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-
-
-VisGymNeMoGymResponseOutputItem: TypeAlias = Union[
-    NeMoGymEasyInputMessageForTraining,
-    NeMoGymMessageForTraining,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseReasoningItemForTraining,
-    NeMoGymEasyInputMessage,
-    NeMoGymMessage,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymFunctionCallOutput,
-    NeMoGymResponseReasoningItem,
-]
 
 
 class VisGymTaskRow(BaseModel):
@@ -221,7 +197,7 @@ class VisGymNeMoGymResponse(NeMoGymResponse):
     group_id: str | None = None
     contains_transitions: bool = False
     seed_obs: list[VisGymEnvStateEasyInputMessage] | None = Field(default=None)
-    output: list[VisGymNeMoGymResponseOutputItem] | list[list[VisGymNeMoGymResponseOutputItem]]
+    output: list[NeMoGymResponseOutputItem] | list[list[NeMoGymResponseOutputItem]]
 
 
 class VisGymAgentVerifyRequest(BaseVerifyRequest):

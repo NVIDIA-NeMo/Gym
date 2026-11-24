@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared admission checks for the visual agents' capture-backed history client."""
+"""Admission checks for the visual agent' capture-backed history client."""
 
 from collections.abc import Mapping
 
 from nemo_gym.agents import SimpleResponsesAPIAgent
 from nemo_gym.agents.context_management import ContextHistoryConfig, ContextManagedResponsesClient
+from nemo_gym.config import TOKEN_CAPTURE_BLOCK
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
@@ -48,6 +49,9 @@ def visual_context_client(
     image_limit = getattr(agent.config, "max_images", None)
     if image_limit is not None and image_limit != config.guards.max_active_images:
         raise ValueError("Agent max_images and context max_active_images must agree")
+    capture = agent.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
+    if capture.get("parent_resolution") != "source_history":
+        raise ValueError("Visual context management requires token_id_capture.parent_resolution=source_history")
     return ContextManagedResponsesClient(
         server_client=agent.server_client,
         model_server=agent.config.model_server,
