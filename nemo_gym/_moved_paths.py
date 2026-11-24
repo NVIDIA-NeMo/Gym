@@ -205,11 +205,6 @@ def _names(new: str, since: str, names: str) -> dict[str, MovedPath]:
 
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
 MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
-    "nemo_gym.server_runtime": {
-        "SandboxSessionCheckpointer": MovedPath(
-            new="nemo_gym.server_runtime.owned_sandboxes:OwnedSandboxes", since="0.8.0"
-        ),
-    },
     "nemo_gym.server_runtime.owned_sandboxes": {
         "SandboxSessionCheckpointer": MovedPath(
             new="nemo_gym.server_runtime.owned_sandboxes:OwnedSandboxes", since="0.8.0"
