@@ -44,9 +44,11 @@ _SAMPLING_KEYS = frozenset(
         "repetition_penalty",
         "seed",
         "n",
+        # Seeds the draw of judges in GDPval and AA Briefcase Lite.
+        "judge_sampling_seed",
     }
 )
-_INTEGER_SAMPLING_KEYS = frozenset({"top_k", "max_tokens", "max_output_tokens", "seed", "n"})
+_INTEGER_SAMPLING_KEYS = frozenset({"top_k", "max_tokens", "max_output_tokens", "seed", "n", "judge_sampling_seed"})
 _SERVER_TYPES = frozenset({"responses_api_models", "responses_api_agents", "resources_servers", "environment_servers"})
 # Request fields forwarded as given, so a value in them is recorded only when it already is a number.
 _PAYLOAD_KEYS = frozenset({"extra_body", "request_overrides"})

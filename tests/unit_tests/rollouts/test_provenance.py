@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import time
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -10,6 +11,7 @@ from threading import Thread
 import orjson
 import pytest
 from omegaconf import OmegaConf
+from pydantic import TypeAdapter
 
 from nemo_gym.config.config_types import HeadServerUnreachableError
 from nemo_gym.rollouts import provenance
@@ -377,6 +379,44 @@ def test_gdpval_judge_request_limit_is_recorded_as_its_model_server_reads_it(
             "max_concurrent_requests": server.max_concurrent_requests
         }
     }
+
+
+@pytest.mark.parametrize("configured", ["7", " 8 ", None])
+@pytest.mark.parametrize(
+    ("config_fpath", "path", "config_model"),
+    [
+        (
+            "benchmarks/gdpval/config.yaml",
+            "gdpval_resources_server.resources_servers.gdpval",
+            "resources_servers.gdpval.app:GDPValResourcesServerConfig",
+        ),
+        (
+            "benchmarks/aa_briefcase_lite/config.yaml",
+            "aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite",
+            "resources_servers.aa_briefcase_lite.app:AABriefcaseLiteResourcesServerConfig",
+        ),
+    ],
+)
+def test_the_judge_sampling_seed_is_recorded_as_its_resources_server_reads_it(
+    config_fpath, path, config_model, configured, tmp_path: Path, monkeypatch
+) -> None:
+    module, name = config_model.split(":")
+    field = getattr(importlib.import_module(module), name).model_fields["judge_sampling_seed"]
+    if configured is None:
+        monkeypatch.delenv("JUDGE_SAMPLING_SEED", raising=False)
+    else:
+        monkeypatch.setenv("JUDGE_SAMPLING_SEED", configured)
+    shipped = OmegaConf.to_container(OmegaConf.select(OmegaConf.load(REPO_ROOT / config_fpath), path), resolve=False)
+    config: dict = {"judge_sampling_seed": shipped["judge_sampling_seed"]}
+    for part in reversed(path.split(".")):
+        config = {part: config}
+    config = OmegaConf.create(config)
+
+    record = _write_without_probing(tmp_path / "rollouts.jsonl", config, monkeypatch)
+
+    seed = TypeAdapter(field.annotation).validate_python(OmegaConf.select(config, f"{path}.judge_sampling_seed"))
+    assert seed == (None if configured is None else int(configured))
+    assert record["sampling_parameters"] == {path: {"judge_sampling_seed": seed}}
 
 
 def test_a_sampling_value_gym_forwards_as_given_is_recorded_only_when_it_is_a_number(

@@ -376,9 +376,9 @@ cat results/my-run/rollouts_provenance.json
 The record includes configured model and served-model names, known checkpoint identifiers,
 dataset identifiers, a SHA-256 of the exact materialized-input bytes, prompt/template hashes,
 explicit sampling settings and seeds (an explicit `null`, such as `max_tokens: null` for no cap,
-is kept, so it reads differently from a setting left out), rollout and server concurrency limits
-by config path, configured judge models and judge-prompt versions, and the running Gym version and
-commit. Unknown values are null or absent from the corresponding settings map. Prompt text and
+is kept, so it reads differently from a setting left out), the `judge_sampling_seed` that seeds the
+judge draw in GDPval and AA Briefcase Lite, rollout and server concurrency limits by config path,
+configured judge models and judge-prompt versions, and the running Gym version and commit. Unknown values are null or absent from the corresponding settings map. Prompt text and
 request metadata from the input rows are fingerprinted, not copied.
 
 `concurrency_limits` holds integer or `null` values of the rollout limits (`num_samples_in_parallel`,
