@@ -15,7 +15,9 @@ tasks are shipped or used. One environment serves three kinds of rows, chosen by
 The `wait` tool moves the clock forward. Each dated event (an approval arrives, a ticket is reopened, a record
 changes) is applied when the clock passes its time, so the agent has to wait for the right day, read the world again
 and act then. `events` is `[{"at": iso time, "patch": {...}}]`: a patch sets fields on a record (`app`, `collection`,
-`id`, `set`) or adds one (`app`, `collection`, `add`).
+`id`, `set`) or adds one (`app`, `collection`, `add`). The `wait` reply gives the new time in the seed's zone (naive
+UTC for a naive seed). The environment refuses to load a multi-day row without the two wait texts or with a time
+that is not ISO 8601.
 
 Every `api_fetch` write that changes the world is logged with the simulated time (a failed write or a read-only
 POST such as a search is not an act), and two more assertion types grade when the agent acted:

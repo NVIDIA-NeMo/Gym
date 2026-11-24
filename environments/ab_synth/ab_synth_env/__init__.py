@@ -173,7 +173,7 @@ class Clock:
         """Move to `until` (capped at the end of the task's period), applying every event due by then."""
         target = min(_time(until), self.end)
         if target <= self.now():
-            return json.dumps({"now": self.now().isoformat(), "advanced": False})
+            return json.dumps({"now": self._local(self.now()), "advanced": False})
         while self.events and _time(self.events[0]["at"]) <= target:
             patch = self.events.pop(0)["patch"]
             key = (patch["app"], patch["collection"], str(patch["id"] if "id" in patch else _get(patch["add"], "id")))
@@ -190,7 +190,15 @@ class Clock:
         # Keep the seed's awareness: upstream date queries read a naive time as host-local time.
         aware = self.world.meta.current_time.tzinfo is not None
         self.world.meta.current_time = target.replace(tzinfo=timezone.utc) if aware else target
-        return json.dumps({"now": target.isoformat(), "advanced": True})
+        return json.dumps({"now": self._local(target), "advanced": True})
+
+    def _local(self, t: datetime) -> str:
+        """A clock time as the agent is told it: in the seed's zone with its offset, or naive UTC for a naive seed."""
+        return (
+            t.isoformat()
+            if self.zone is timezone.utc
+            else t.replace(tzinfo=timezone.utc).astimezone(self.zone).isoformat()
+        )
 
     def fetch(self, method: str, url: str, params=None, body=None) -> str:
         """Run one API call. A write is logged when it changes the world: failed writes (whatever shape their error
@@ -211,11 +219,12 @@ def names(record: str, url: str) -> bool:
 
     Row "6" matches "Sheet!I6:J6" but not "I16" or "I60", and "FD-101" does not match "FD-1010": an edge digit may not
     touch another digit, an edge letter may not touch a letter or digit. A leading digit after letters matches only
-    after an A1 column ("B7", "a7:b7", "Sheet1!I6"), not inside "Sheet1". The host and API version segments ("/v4/",
-    "/2/" first, "/1.0/") never match.
+    after the column of an A1 range in a Sheets values path ("values/B7", "a7:b7", "Sheet1!I6"), never inside a tab
+    title ("Q4 2025!B7") or an id ("deal_ye5l8juv"). The host and API version segments ("/v4/", "/2/" first, "/1.0/")
+    never match.
     """
-    parts = urlsplit(unquote(url))
-    path = parts.path.split("/")
+    parts = urlsplit(url)
+    path = unquote(parts.path).split("/")
     segments = [
         ""
         if re.fullmatch(r"v\d+(\.\d+)*|\d+\.\d+(\.\d+)*", s)
@@ -223,10 +232,20 @@ def names(record: str, url: str) -> bool:
         else s
         for i, s in enumerate(path)
     ]
-    text = "/".join(segments) + ("?" + parts.query if parts.query else "")
+    text = "/".join(segments) + ("?" + unquote(parts.query) if parts.query else "")
+    # The A1 part of a Sheets range: the segment after the last "/values/" (or a bare range with no "/"), after its "!"
+    # when it names a tab.
+    v = a1_start = a1_end = -1
+    if (v := text.rfind("/values/")) >= 0 or "/" not in text:
+        v = v + 8 if v >= 0 else 0
+        a1_end = len(text) if (e := re.search(r"[/?]", text[v:])) is None else v + e.start()
+        a1_start = max(v, text.rfind("!", v, a1_end) + 1)
     for match in re.finditer(re.escape(record), text):
         before, after = text[match.start() - 1 : match.start()], text[match.end() : match.end() + 1]
-        a1_column = re.search(r"(^|[^A-Za-z0-9])[A-Za-z]{1,3}$", text[: match.start()])
+        if record.isdigit() and 0 <= v <= match.start() < a1_start:
+            continue  # a number in the tab title ("PO #12!A7") is not a row
+        in_a1 = a1_start <= match.start() <= a1_end
+        a1_column = in_a1 and re.search(r"(^|:)[A-Za-z]{1,3}$", text[a1_start : match.start()])
         if record[0].isdigit() and before.isalpha() and not a1_column:
             continue
         if not (_joins(record[0], before) or _joins(record[-1], after)):
@@ -652,12 +671,21 @@ def load_environment(
             "multi-turn rows (user_card or requester_services) need requester_base_url and requester_model"
         )
     for i, r in enumerate(rows):
-        for a in r["info"].get("assertions", []):
+        info = r["info"]
+        for a in info.get("assertions", []):
             if fields := time_fields(a):
                 raise ValueError(
                     f"row {i}: assertion {a.get('type')!r} reads date or time fields {fields}. Records the agent creates "
                     "carry the wall-clock time, not simulated time, so grade timing with acted_on_day or not_acted"
                 )
+        if info.get("period_end"):
+            if missing := [k for k in ("wait_tool_description", "wait_until_description") if not info.get(k)]:
+                raise ValueError(f"row {i}: a multi-day row needs {missing}")
+            for t in [info["period_end"], *(e["at"] for e in info.get("events", []))]:
+                try:
+                    _time(t)
+                except (TypeError, ValueError):
+                    raise ValueError(f"row {i}: {t!r} is not an ISO 8601 time") from None
     dataset = Dataset.from_list(
         [
             {

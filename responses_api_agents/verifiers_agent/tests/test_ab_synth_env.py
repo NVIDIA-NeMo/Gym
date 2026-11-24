@@ -556,6 +556,26 @@ class RowNumberTest(unittest.TestCase):
 
         self.assertEqual(env.replay(info, [write]), 1.0)
 
+        # A tab title with letters before a digit is not a column: "Q4 2025" does not name row 4.
+        seed["google_sheets"]["worksheets"][0]["title"] = "Q4 2025"
+        info["assertions"].append({"type": "not_acted", "record": "4"})
+        q4 = dict(write, url=self.SHEET + "Q4%202025!B7")
+        self.assertEqual(env.replay(info, [q4]), 1.0)
+
+    def test_digits_inside_tab_titles_and_ids_do_not_name_a_row(self):
+        self.assertFalse(env.names("4", self.SHEET + "Q4%202025!B7"))
+        self.assertTrue(env.names("7", self.SHEET + "Q4%202025!B7"))
+        self.assertFalse(env.names("5", "https://api.hubapi.com/crm/v3/objects/deals/deal_ye5l8juv"))
+        self.assertFalse(env.names("2", "https://slack.com/api/messages/msg_v2"))
+        self.assertFalse(
+            env.names("8", "https://sheets.googleapis.com/v4/spreadsheets/sheet_i8gkxai1a0/values/Sheet1!A2")
+        )
+        self.assertFalse(env.names("7", "https://example.com/items/c7"))
+
+    def test_an_encoded_hash_in_a_tab_title_keeps_the_range(self):
+        self.assertTrue(env.names("7", self.SHEET + "PO%20%2312!A7:B7"))
+        self.assertFalse(env.names("12", self.SHEET + "PO%20%2312!A7:B7"))
+
 
 class DictCollectionEventTest(unittest.TestCase):
     def test_an_event_can_reopen_a_jira_issue(self):
@@ -770,6 +790,27 @@ class RewardMaskingTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
         self.assertEqual((body["mask_sample"], body.get("failure_kind")), (True, "verifier_error"))
+
+
+class SeedZoneTest(unittest.TestCase):
+    def test_wait_reports_the_time_in_the_seed_zone_the_day_is_graded_in(self):
+        seed = {**copy.deepcopy(INITIAL_STATE), "meta": {"current_time": "2026-03-02T09:00:00-08:00"}}
+        clock = env.Clock(WorldState(**seed), [], "2026-03-06T18:00:00-08:00")
+
+        now = json.loads(clock.wait("2026-03-04T20:00:00-08:00"))["now"]
+        clock.fetch("PATCH", CONTACTS + "101", body={"properties": {"lifecyclestage": "customer"}})
+
+        self.assertEqual(now, "2026-03-04T20:00:00-08:00")
+        self.assertEqual(clock.log[0]["day"], "2026-03-04")
+
+
+class MalformedMultiDayRowTest(unittest.TestCase):
+    def test_a_multi_day_row_without_wait_text_or_with_a_bad_event_time_is_refused_at_load(self):
+        no_wait_text = {k: v for k, v in INFO.items() if k not in ("wait_tool_description", "wait_until_description")}
+        bad_event_time = {**INFO, "events": [{**INFO["events"][0], "at": "next Tuesday"}]}
+        for info in (no_wait_text, bad_event_time):
+            with self.assertRaises(ValueError):
+                load(info)
 
 
 if __name__ == "__main__":
