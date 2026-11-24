@@ -264,12 +264,18 @@ report reasoning-token usage, so `tokens_reasoning` is `null` for that dialect.
 
 Each call's `tokens_in` is the whole prompt size. When the provider reports prompt caching, the call
 also carries `cached_tokens` (tokens read from the cache) and `cache_creation_tokens` (tokens written
-to the cache); both are part of `tokens_in`. Gym reads cache writes, first match wins, from
-Anthropic's top-level `cache_creation_input_tokens`, then OpenAI's
-`input_tokens_details.cache_write_tokens` (Responses) or `prompt_tokens_details.cache_write_tokens`
-(Chat Completions), then LiteLLM's `prompt_tokens_details.cache_creation_tokens`. The Chat
-Completions converter and the LiteLLM model server read cache writes the same way, so a call's
-captured count and its converted Responses usage agree.
+to the cache); both are part of `tokens_in`. Gym reads cache writes from Anthropic's top-level
+`cache_creation_input_tokens`, then OpenAI's `input_tokens_details.cache_write_tokens` (Responses)
+or `prompt_tokens_details.cache_write_tokens` (Chat Completions), then LiteLLM's
+`prompt_tokens_details.cache_creation_tokens`. The first valid count wins: a nonnegative integer,
+an explicit `0` included. A negative number or a value that is not an integer (a boolean, a string
+or a float) counts as unreported, so the next spelling is read; when no spelling has a valid count,
+`cache_creation_tokens` is `null`.
+
+The Chat Completions converter and the LiteLLM model server read cache writes the same way, so a
+call's captured count and the cache-write count of its Responses usage agree. Chat Completions
+responses a model server validates keep a malformed `cache_write_tokens` unreported rather than
+coercing `true` to 1 or `"60"` to 60.
 
 After successful [`ng_trajectory`](/main/observability/rollout-evidence#which-artifact-to-read) projection, attached calls
 omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads

@@ -2575,6 +2575,30 @@ def test_cache_write_usage_omission_is_unknown() -> None:
     assert "cache_write_tokens" not in details.model_dump(exclude_unset=True)
 
 
+@pytest.mark.parametrize(("reported", "expected"), [(True, None), ("60", None), (60.0, None), (0, 0), (60, 60)])
+def test_chat_completion_keeps_a_malformed_cache_write_count_unknown(reported: object, expected: int | None) -> None:
+    payload = {
+        "id": "c1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12,
+            "prompt_tokens_details": {"cache_write_tokens": reported, "cache_creation_tokens": 7},
+        },
+    }
+    before = deepcopy(payload)
+
+    details = NeMoGymChatCompletion.model_validate(payload).usage.prompt_tokens_details
+
+    assert details.cache_write_tokens == expected
+    assert details.model_extra == {"cache_creation_tokens": 7}
+    assert payload == before
+
+
 class TestUntypedInputItems:
     """A replayed input item without a type is classified by its fields; one that fits no item is rejected."""
 
