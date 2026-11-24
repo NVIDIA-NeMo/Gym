@@ -97,11 +97,12 @@ def test_retained_generation_is_structural_not_placeholder_presence(slot):
         assert not has_saved_generation({slot: placeholder})
 
 
+@pytest.mark.parametrize("kind", ["judge_failed", "judge_unparseable", "provider_credentials_rejected"])
 @pytest.mark.parametrize("saved,expected", [(True, "reverify"), (False, "stop")])
-async def test_judge_saved_generation_is_not_regenerated(tmp_path, monkeypatch, saved, expected):
+async def test_judge_saved_generation_is_not_regenerated(tmp_path, monkeypatch, saved, expected, kind):
     result = {
         "_ng_failure_class": "judge_failed",
-        "failure_kind": "judge_failed",
+        "failure_kind": kind,
         "response": response() if saved else {},
     }
     decision, store, projected = await persist_producer_result(tmp_path, monkeypatch, result)
@@ -277,9 +278,14 @@ async def test_reverification_requires_the_original_verifier_input_slot(tmp_path
         assert _rollout_response(failure) == response()
 
 
+@pytest.mark.parametrize(
+    "failure_kind,as_event",
+    [("judge_failed", False), ("judge_unparseable", False), ("judge_unparseable", True)],
+    ids=["judge_failed", "judge_unparseable", "judge_unparseable_event"],
+)
 @pytest.mark.parametrize("empty_output", [False, True])
 async def test_actual_judge_route_saved_input_survives_collection_and_reverification(
-    tmp_path, monkeypatch, empty_output
+    tmp_path, monkeypatch, empty_output, failure_kind, as_event
 ):
     from unittest.mock import MagicMock
 
@@ -288,6 +294,8 @@ async def test_actual_judge_route_saved_input_survives_collection_and_reverifica
 
     import nemo_gym.eval.rollout_reverification as reverify
     from nemo_gym.client.server_client import ServerClient
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
     from nemo_gym.server_runtime.base_resources_server import (
         BaseResourcesServerConfig,
         BaseVerifyRequest,
@@ -301,8 +309,14 @@ async def test_actual_judge_route_saved_input_survives_collection_and_reverifica
     class Resources(SimpleResourcesServer):
         async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
             state["inputs"].append(body.response.model_dump(mode="json"))
+            if state["fail"] and as_event:
+                raise NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=failure_kind,
+                    failure_reason="synthetic judge unavailable",
+                )
             if state["fail"]:
-                raise JudgeError("synthetic judge unavailable")
+                raise JudgeError("synthetic judge unavailable", failure_kind=failure_kind)
             return BaseVerifyResponse(**body.model_dump(), reward=0.0 if empty_output else 1.0)
 
     original = response(
