@@ -30,6 +30,7 @@ the official evaluator runs on (its setup is Python 3.10, and pandas 3 needs 3.1
 """
 
 import asyncio
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -39,6 +40,8 @@ import pandas as pd
 
 from resources_servers.beaver_sql.setup_beaver_mysql import parse_mysql_dsn
 
+
+logger = logging.getLogger(__name__)
 
 # The official evaluator's limits, in seconds.
 QUERY_TIMEOUT_S = 10.0
@@ -108,8 +111,9 @@ class _Attempt:
 class MySqlRunner:
     """Runs queries on the BEAVER MySQL server, at most ``max_concurrency`` at a time.
 
-    A query holds its slot until its thread has finished, including after a timeout, so a stopped query can't pile up
-    on the server behind new ones.
+    A timed-out query keeps its slot while ``KILL QUERY`` is repeated, until its thread ends or ``stop_grace_s`` passes,
+    so stopped queries don't pile up on the server behind new ones, and one the server can't stop doesn't hold the slot
+    forever.
     """
 
     def __init__(
@@ -125,6 +129,8 @@ class MySqlRunner:
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self.timeout_s = timeout_s
         self.connection_timeout_s = connection_timeout_s
+        # How long a timed-out query may take to stop before its slot is released anyway.
+        self.stop_grace_s = 10.0
         self._clock = time.monotonic
 
     async def run(self, db_id: str, sql: str) -> QueryOutcome:
@@ -136,16 +142,21 @@ class MySqlRunner:
             finished = await asyncio.to_thread(attempt.done.wait, self.timeout_s)
             if not finished:
                 attempt.cancelled.set()
-                await asyncio.to_thread(self._stop, attempt)
-                await asyncio.to_thread(thread.join)
+                stopped = await asyncio.to_thread(self._stop, attempt, self.stop_grace_s)
                 if attempt.connection_id is None:
                     # Still connecting after the whole limit: the server is unreachable or overloaded, which says
                     # nothing about the query. (The official evaluator would score this as an empty result.)
                     raise MySqlUnavailableError(
                         f"could not connect to MySQL within {self.timeout_s:g} s: {attempt.unavailable or 'no answer'}"
                     )
+                if not stopped:
+                    # The server didn't stop it: give up on the thread rather than hold the slot. The server-side
+                    # max_execution_time still ends a SELECT; anything else runs on as a read-only statement.
+                    logger.warning(
+                        "BEAVER query on %s still running %g s after KILL QUERY; abandoned", db_id, self.stop_grace_s
+                    )
                 return QueryOutcome(status="timeout", error="timeout", seconds=self._clock() - start)
-            await asyncio.to_thread(thread.join)
+            await asyncio.to_thread(thread.join, self.stop_grace_s)
             if attempt.unavailable is not None:
                 raise MySqlUnavailableError(str(attempt.unavailable)) from attempt.unavailable
             outcome = attempt.outcome
@@ -203,16 +214,18 @@ class MySqlRunner:
                 except Exception:
                     pass
 
-    def _stop(self, attempt: _Attempt) -> None:
-        """Stop a timed-out query on the server, and keep at it until its thread ends.
+    def _stop(self, attempt: _Attempt, grace_s: float) -> bool:
+        """Stop a timed-out query on the server; return whether its thread ended within ``grace_s``.
 
         ``KILL QUERY`` sent between a connection's ``SET`` and its query would stop nothing, so it is repeated every
         second. The grader's user may kill its own connections' queries without extra privileges.
         """
-        while not attempt.done.is_set():
+        deadline = time.monotonic() + grace_s
+        while not attempt.done.is_set() and time.monotonic() < deadline:
             if attempt.connection_id is not None:
                 self._kill_query(attempt.connection_id)
-            attempt.done.wait(1.0)
+            attempt.done.wait(min(1.0, max(0.0, deadline - time.monotonic())))
+        return attempt.done.is_set()
 
     def _kill_query(self, connection_id: int) -> None:
         try:

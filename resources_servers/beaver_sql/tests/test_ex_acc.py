@@ -156,6 +156,9 @@ class _FakeCursor:
             server.interrupt.set()
             return
         answer = server.script[sql]
+        if isinstance(answer, tuple) and answer[0] == "ignores kill":
+            time.sleep(answer[1])
+            answer = (["x"], [(1,)])
         if isinstance(answer, float):
             if server.interrupt.wait(answer):
                 raise mysql.connector.errors.DatabaseError("Query execution was interrupted", errno=1317)
@@ -239,6 +242,15 @@ def test_runner_timeout_kills_the_query(fake) -> None:
     assert outcome.status == "timeout" and outcome.empty
     assert server.killed and server.killed[0] >= 101
     assert time.monotonic() - start < 3
+
+
+def test_runner_releases_a_query_the_server_will_not_stop(fake) -> None:
+    server = fake({"STUCK": ("ignores kill", 3.0)})
+    runner = MySqlRunner("mysql://r:p@h", timeout_s=0.2)
+    runner.stop_grace_s = 0.5
+    start = time.monotonic()
+    assert _run(runner, "STUCK").status == "timeout"
+    assert time.monotonic() - start < 2.0 and server.killed
 
 
 def test_runner_slow_connect_is_unavailable(fake) -> None:
