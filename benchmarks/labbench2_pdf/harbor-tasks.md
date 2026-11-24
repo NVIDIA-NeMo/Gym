@@ -193,6 +193,50 @@ The generated files include:
 The manifests and coverage audit remain outside every task container. Gold
 answers exist only inside each task's hidden verifier and Oracle files.
 
+## Move generated tasks
+
+Each Docker task's `docker-compose.yaml` binds its benchmark's corpus view,
+`_corpus_views/<benchmark>/papers`, at `/papers` by the view's absolute host
+path. A moved or copied `tasks_docker` tree therefore still binds the folder it
+was generated in, and its tasks lose `/papers` once that folder is gone. Do not
+move a Docker task tree; generate it again in its new place from the same
+question and PDF caches.
+
+This step is required before using `harbor_docker.yaml` with tasks prepared
+under `environments/labbench2_pdf/data/`, where this benchmark's Harbor tasks
+were generated before they moved here:
+
+1. Move the question and PDF caches from `environments/labbench2_pdf/data/source`
+   to `benchmarks/labbench2_pdf/data/source`.
+2. Generate the tasks again from those caches, with the selection flags of the
+   first run (`--benchmarks`, `--limit-per-benchmark`, `--source-policy`,
+   `--missing-paper`, `--image`). That run's `materialization_manifest.json`
+   records its benchmarks, image, policies and task list.
+
+   ```bash
+   python benchmarks/labbench2_pdf/prepare_data.py \
+     --questions-dir benchmarks/labbench2_pdf/data/source/questions \
+     --papers-dir benchmarks/labbench2_pdf/data/source/papers \
+     --environment-type docker \
+     --overwrite
+   ```
+
+   With both directories supplied, preparation uses them in place and downloads
+   nothing. Task names come from each question's position in its snapshot, so
+   the same caches give the same task names. For the cataloged workflow, run
+   `gym eval prepare --benchmark labbench2_pdf` with
+   `+prepare_script_args.questions_dir` and `+prepare_script_args.papers_dir`
+   set to the absolute paths of the same folders, and
+   `+prepare_script_args.build_image=false` to keep the existing image. It
+   generates the tasks the same way and also rewrites the benchmark index.
+3. Delete `environments/labbench2_pdf/`.
+
+Singularity tasks are not affected. Each task folder holds hard links to its
+papers under `environment/files/papers`, and `setup.sh` links `/papers` to them
+through `${HARBOR_STAGING}`, so a moved `tasks_singularity` tree keeps working.
+To regenerate it instead, run the same command with
+`--environment-type singularity` and the `--image` it was built with.
+
 ## Configure policy and judge endpoints
 
 Configure the OpenAI-compatible policy endpoint and judge in the root,

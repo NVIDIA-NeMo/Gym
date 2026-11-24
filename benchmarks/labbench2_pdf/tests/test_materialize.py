@@ -4,12 +4,21 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
-from benchmarks.labbench2_pdf.materialize import MaterializationOptions, build_parser, materialize
+from benchmarks.labbench2_pdf import materialize as materialize_module
+from benchmarks.labbench2_pdf.materialize import (
+    MaterializationOptions,
+    build_parser,
+    materialize,
+    options_from_args,
+)
 
 
 def _write_questions(path: Path, benchmark: str, rows: list[dict]) -> None:
@@ -296,6 +305,74 @@ def test_hardlink_mode_is_an_explicit_zero_copy_option(tmp_path: Path) -> None:
     view_pdf = Path(manifest["corpus_views"]["litqa3"]["path"]) / source_pdf.name
     assert view_pdf.read_bytes() == source_pdf.read_bytes()
     assert view_pdf.stat().st_ino == source_pdf.stat().st_ino
+
+
+def _papers_bind_sources(output_dir: Path) -> list[Path]:
+    sources = []
+    for compose_path in sorted(output_dir.glob("*/environment/docker-compose.yaml")):
+        compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+        for volume in compose["services"]["main"]["volumes"]:
+            if isinstance(volume, dict) and volume["target"] == "/papers":
+                sources.append(Path(volume["source"]))
+    return sources
+
+
+def test_regenerating_moved_docker_tasks_binds_papers_under_the_new_folder(tmp_path: Path) -> None:
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    _write_questions(
+        tmp_path / "questions",
+        "litqa3",
+        [_row("11111111-first", "10.1000/first"), _row("22222222-second", "10.1000/second")],
+    )
+    for name in ("10.1000_first.pdf", "10.1000_second.pdf"):
+        (papers / name).write_bytes(b"%PDF-1.4")
+    first_options = replace(_options(tmp_path), output_dir=tmp_path / "first" / "tasks_docker")
+    first = materialize(first_options)
+    new_dir = tmp_path / "second" / "tasks_docker"
+    new_dir.parent.mkdir()
+    shutil.move(first_options.output_dir, new_dir)
+
+    # A Docker task binds its corpus view by absolute path, so a moved tree still binds the folder it was built in.
+    stale_sources = _papers_bind_sources(new_dir)
+    assert len(stale_sources) == 2
+    assert not any(source.exists() for source in stale_sources)
+
+    second = materialize(replace(first_options, output_dir=new_dir, overwrite=True))
+
+    assert [task["name"] for task in second["tasks"]] == [task["name"] for task in first["tasks"]]
+    sources = _papers_bind_sources(new_dir)
+    assert len(sources) == 2
+    for source in sources:
+        assert source.is_relative_to(new_dir.resolve())
+        assert sorted(path.name for path in source.glob("*.pdf")) == ["10.1000_first.pdf", "10.1000_second.pdf"]
+
+
+def test_moved_singularity_tasks_name_no_host_path(tmp_path: Path) -> None:
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    _write_questions(tmp_path / "questions", "litqa3", [_row("11111111-first", "10.1000/first")])
+    (papers / "10.1000_first.pdf").write_bytes(b"%PDF-1.4")
+    manifest = materialize(_options(tmp_path, environment_type="singularity"))
+    moved = tmp_path / "moved"
+    shutil.move(manifest["output_dir"], moved)
+
+    task = moved / "litqa3-0001-11111111"
+    task_files = [path for path in task.rglob("*") if path.is_file()]
+    assert task_files
+    for path in task_files:
+        assert str(tmp_path.resolve()) not in path.read_text(encoding="utf-8", errors="replace")
+    assert (task / "environment" / "files" / "papers" / "10.1000_first.pdf").read_bytes() == b"%PDF-1.4"
+
+
+@pytest.mark.parametrize("environment_type", ["docker", "singularity"])
+def test_default_output_is_in_the_folder_that_holds_the_materializer(environment_type: str) -> None:
+    args = build_parser().parse_args(
+        ["--questions-dir", "questions", "--papers-dir", "papers", "--environment-type", environment_type]
+    )
+
+    benchmark_dir = Path(materialize_module.__file__).resolve().parent
+    assert options_from_args(args).output_dir == benchmark_dir / "data" / f"tasks_{environment_type}"
 
 
 def test_cli_modes_are_explicit() -> None:
