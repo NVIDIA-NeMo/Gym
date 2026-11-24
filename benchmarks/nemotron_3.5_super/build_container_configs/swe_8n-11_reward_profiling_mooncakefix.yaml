@@ -6,3 +6,6 @@ mooncake:
     branch: bxyu/v0.3.13.post1-rl
     cpus_per_task: 96
     build_parallel_level: 96
+
+shared_run_warmup_env_vars:
+  MOONCAKE_DEFAULT_KV_LEASE_TTL: 5000  # milliseconds
