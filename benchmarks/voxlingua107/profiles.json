@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "voxlingua107": {
+      "prompt_override": {
+        "system_prompt": ""
+      },
+      "request": "greedy",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=language_id ++eval_config.cleanup_generation_loops=true",
+        "METRICS_TYPE": "language_id"
+      }
+    }
+  }
+}

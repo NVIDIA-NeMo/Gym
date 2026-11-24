@@ -1,0 +1,33 @@
+config_paths:
+- resources_servers/audio_eval/configs/audio_eval.yaml
+
+voxlingua107_resources_server:
+  _inherit_from: audio_eval
+  resources_servers:
+    audio_eval:
+      profile_contracts: benchmarks/voxlingua107/profiles.json
+
+voxlingua107_simple_agent:
+  _inherit_from: audio_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: voxlingua107_resources_server
+      datasets:
+      - name: voxlingua107
+        type: benchmark
+        jsonl_fpath: benchmarks/voxlingua107/data/voxlingua107_benchmark.jsonl
+        prepare_script: benchmarks/voxlingua107/prepare.py
+        prepare_dependencies:
+        - soundfile
+        license: Creative Commons Attribution 4.0 International
+
+voxlingua107_environment_server:
+  _inherit_from: audio_eval_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: voxlingua107_simple_agent
+      resources_server:
+        type: resources_servers
+        name: voxlingua107_resources_server
