@@ -240,34 +240,6 @@ def test_a_pass_that_returns_zero_but_saved_evidence_refreshes_the_quality_summa
     assert all(call["metrics"] is False for call in calls)
 
 
-@pytest.mark.parametrize("complete_only", [False, True])
-@pytest.mark.parametrize("appended", [True, False], ids=["pass-saved-rows", "pass-saved-nothing"])
-def test_a_pass_that_saved_rows_recounts_the_run_status(
-    tmp_path, monkeypatch, pass_settles_one_row, appended, complete_only
-) -> None:
-    """Collection last wrote the run status before the pass, so rows the pass saved must be counted again."""
-    output = tmp_path / "rollouts.jsonl"
-    output.write_text('{"_ng_task_index": 0}\n')
-
-    async def rejudge(run_config, output_fpath):
-        if appended:
-            with output.open("a") as handle:
-                handle.write('{"_ng_task_index": 1}\n')
-        return 0
-
-    recounted = []
-    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.rejudge_saved_judge_failures", rejudge)
-    monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.refresh_run_status", recounted.append)
-    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda path: False)
-    monkeypatch.setattr(eval_cli, "_refresh_settled_source", lambda *args, **kwargs: {})
-
-    eval_cli._rejudge_saved_judge_failures(
-        {}, output, SimpleNamespace(disable_aggregation=False), complete_only=complete_only
-    )
-
-    assert recounted == ([output] if appended else [])
-
-
 @pytest.mark.parametrize("form", ["model_call_failed", ["model_call_failed"], "model_call_failed,model_call_failed"])
 def test_the_settled_health_settings_accept_every_form_of_the_ignored_checks(form) -> None:
     from nemo_gym.rollouts.rollout_health import normalize_ignored_checks

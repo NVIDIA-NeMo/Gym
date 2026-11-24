@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.cli import eval as eval_cli
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.eval.rollout_reverification import (
     RolloutReverificationConfig,
     RolloutReverificationHelper,
@@ -18,6 +19,7 @@ from nemo_gym.eval.rollout_reverification import (
 )
 from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper, refresh_run_status
 from nemo_gym.rollouts.rollout_records import materialized_path_for
+from nemo_gym.rollouts.rollout_recovery import run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from nemo_gym.utils.path_utils import batch_status_path_for
 from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _run as _run_with_judge_failures
@@ -191,6 +193,42 @@ def test_the_settled_run_recounts_its_run_status(tmp_path, verifier, aggregation
     after = json.loads(status.read_text())["members"]["agent"]
     assert (before["completed_rollout_count"], before["failures_by_class"]) == (2, {"judge_failed": 1})
     assert (after["completed_rollout_count"], after["failures_by_class"]) == (3, {})
+
+
+def test_a_job_refused_the_run_never_writes_its_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
+    """Another writer owns the run, so a refused job must not replace that writer's status with its own snapshot."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=1)
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    refresh_run_status(output)
+    owned = status.read_bytes()
+
+    with run_lock(output), pytest.raises(ConfigError, match="Another collector owns this run"):
+        eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"]}, _job_config(output))
+
+    assert status.read_bytes() == owned
+
+
+def test_a_job_through_a_rollout_alias_recounts_the_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
+    """The status sits beside the resolved run, which settlement writes, not beside the alias the job was given."""
+    run = tmp_path / "real"
+    run.mkdir()
+    output, _ = _run_with_judge_failures(run, judge_failures=1)
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    alias = tmp_path / "alias.jsonl"
+    alias.symlink_to(output)
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    refresh_run_status(output)
+    config = _job_config(alias, settle_source_snapshot_json=_snapshot(output)).model_copy(
+        update={"materialized_inputs_jsonl_fpath": str(materialized_path_for(output))}
+    )
+
+    eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"], "health_check_workers": 1}, config)
+
+    after = json.loads(status.read_text())["members"]["agent"]
+    assert (after["completed_rollout_count"], after["failures_by_class"]) == (3, {})
+    assert not batch_status_path_for(alias).exists()
 
 
 def test_a_job_that_cannot_judge_leaves_a_failed_receipt_and_the_run_as_it_was(

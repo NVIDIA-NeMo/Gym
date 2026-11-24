@@ -962,15 +962,11 @@ def _rejudge_saved_judge_failures(
     ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
     incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
     (always False without ``complete_only``). Recomputed metrics also refresh the per-agent completion files written
-    during collection; when they cannot be refreshed, the files are removed rather than left with the old scores. A
-    pass that saved rows also recounts the run status collection wrote before it.
+    during collection; when they cannot be refreshed, the files are removed rather than left with the old scores. The
+    pass recounts the run status collection wrote before it, while it still owns the run.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
-    from nemo_gym.rollouts.rollout_collection import (
-        RolloutAggregationConfig,
-        RolloutAggregationHelper,
-        refresh_run_status,
-    )
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 
     # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
     if isinstance(global_config_dict, DictConfig):
@@ -995,9 +991,6 @@ def _rejudge_saved_judge_failures(
         return complete
     if scored:
         print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
-    if scored or changed:
-        # Collection wrote the run status before the pass, so the rows the pass saved are counted again.
-        refresh_run_status(output)
     if collection_config.disable_aggregation or not aggregate:
         return complete
     if complete_only and not complete:
@@ -1194,10 +1187,9 @@ def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], c
     happened. A pass that fails (the source changed while the job was queued, a verifier that cannot be reached)
     leaves a failed receipt naming the error and counting what it settled and withdrew before it failed: a grade it
     settled stays and counts as progress, the other saved answers stay as they were, and the error is raised as before.
-    Either way, a job that settles into the run recounts the run status collection wrote before it.
+    Either way, a job that owned the run recounts the run status collection wrote before it; a refused job does not.
     """
     from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper, write_settle_receipt
-    from nemo_gym.rollouts.rollout_collection import refresh_run_status
 
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     helper = RolloutReverificationHelper()
@@ -1218,10 +1210,6 @@ def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], c
                 error=f"{type(error).__name__}: {error}",
             )
         raise
-    finally:
-        if config.settle_into_source:
-            # Grades settled into the run, even by a job that then failed, are newer than its run status.
-            refresh_run_status(Path(config.rollouts_jsonl_fpath))
     if receipt is None:
         return
     output = Path(config.rollouts_jsonl_fpath)

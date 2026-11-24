@@ -71,6 +71,7 @@ from nemo_gym.rollouts.rollout_collection import (
     is_omitted_rollout_row,
     is_terminal_failure,
     matches_failure_class,
+    refresh_run_status,
 )
 from nemo_gym.rollouts.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
@@ -1901,6 +1902,8 @@ class RolloutReverificationHelper(BaseModel):
                 print(_RECOVERY_TWO_SOURCES_WARNING)
                 if config.settle_into_source:
                     settle_lock.enter_context(run_lock(rollouts_jsonl_fpath))
+                    # Runs last before the lock is released, after a failed pass settled what it judged.
+                    settle_lock.callback(refresh_run_status, rollouts_jsonl_fpath)
                     if config.settle_source_snapshot_json is not None:
                         validate_settle_source_snapshot(rollouts_jsonl_fpath, config.settle_source_snapshot_json)
                     settle_binding = bind_judge_failures(
