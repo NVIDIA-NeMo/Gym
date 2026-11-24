@@ -13,9 +13,14 @@ from pytest import MonkeyPatch
 
 import resources_servers.nl2repobench.app as app_module
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, NgFailureEvent
+from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, NgFailureEvent, TaskId
 from nemo_gym.sandbox.providers.base import SandboxHandle
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
+)
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.nl2repobench.app import (
     NL2RepoBenchResourcesServer,
@@ -45,7 +50,23 @@ def _config(tasks_dir: Path) -> NL2RepoBenchResourcesServerConfig:
         expected_task_count=1,
         sandbox_provider="test",
         sandbox_config={},
+        # The shipped preset's open-egress official mode; the network tests below set their own mode.
+        enforce_agent_no_network=False,
+        sandbox_model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
     )
+
+
+def _restricted_config(tasks_dir: Path) -> NL2RepoBenchResourcesServerConfig:
+    config = _config(tasks_dir)
+    config.enforce_agent_no_network = True
+    return config
+
+
+def _global_config(model_host: str = "model.internal", provider: str = "opensandbox") -> dict:
+    return {
+        "test": {provider: {}},
+        "policy_model": {"responses_api_agents": {"model": {"host": model_host, "port": 8000}}},
+    }
 
 
 def _request() -> dict:
@@ -140,12 +161,9 @@ def test_request_image_must_match_pinned_task_image(task_assets: Path) -> None:
 
 
 def test_model_endpoint_is_the_only_added_egress_target(monkeypatch: MonkeyPatch, task_assets: Path) -> None:
-    config = _config(task_assets)
+    config = _restricted_config(task_assets)
     config.sandbox_model_server = ModelServerRef(type="responses_api_models", name="policy_model")
-    monkeypatch.setattr(
-        "resources_servers.nl2repobench.app.get_global_config_dict",
-        lambda: {"policy_model": {"responses_api_agents": {"model": {"host": "model.internal", "port": 8000}}}},
-    )
+    monkeypatch.setattr("resources_servers.nl2repobench.app.get_global_config_dict", _global_config)
     config.sandbox_config = {
         "provider_options": {
             "network_policy": {"defaultAction": "deny", "egress": [{"action": "deny", "target": "example.com"}]}
@@ -163,33 +181,52 @@ def test_model_endpoint_is_the_only_added_egress_target(monkeypatch: MonkeyPatch
 
 
 def test_loopback_model_endpoint_is_rejected(monkeypatch: MonkeyPatch, task_assets: Path) -> None:
-    config = _config(task_assets)
+    config = _restricted_config(task_assets)
     config.sandbox_model_server = ModelServerRef(type="responses_api_models", name="policy_model")
     monkeypatch.setattr(
-        "resources_servers.nl2repobench.app.get_global_config_dict",
-        lambda: {"policy_model": {"responses_api_agents": {"model": {"host": "127.0.0.1", "port": 8000}}}},
+        "resources_servers.nl2repobench.app.get_global_config_dict", lambda: _global_config("127.0.0.1")
     )
     server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-    with pytest.raises(ValueError, match="loopback model host"):
+    # A configuration error no retry fixes: a 422 seed refusal, not a 500 that re-dispatches the episode.
+    with pytest.raises(ResourcesSeedRejectedError, match="loopback model host"):
         server._provider_options(phase="agent")
 
 
-def test_network_policy_is_scoped_to_agent_sandbox(task_assets: Path) -> None:
+@pytest.mark.parametrize(("mode", "enforce"), [("no_internet_preinstalled", False), ("official", True)])
+def test_restricted_modes_refuse_a_provider_without_network_policies(
+    monkeypatch: MonkeyPatch, task_assets: Path, mode: str, enforce: bool
+) -> None:
     config = _config(task_assets)
+    config.agent_network_mode = mode
+    config.enforce_agent_no_network = enforce
+    config.sandbox_model_server = ModelServerRef(type="responses_api_models", name="policy_model")
+    monkeypatch.setattr(
+        "resources_servers.nl2repobench.app.get_global_config_dict", lambda: _global_config(provider="docker")
+    )
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    # Docker ignores network_policy, so the agent would get open egress: the seed is refused instead.
+    with pytest.raises(ResourcesSeedRejectedError, match="'docker' cannot apply"):
+        server._provider_options(phase="agent")
+    assert server._provider_options(phase="verifier") == {}
+
+
+def test_network_policy_is_scoped_to_agent_sandbox(monkeypatch: MonkeyPatch, task_assets: Path) -> None:
+    config = _restricted_config(task_assets)
+    config.sandbox_model_server = None
     config.sandbox_config = {"provider_options": {"network_policy": {"defaultAction": "allow", "egress": []}}}
+    monkeypatch.setattr("resources_servers.nl2repobench.app.get_global_config_dict", _global_config)
     server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     assert server._provider_options(phase="verifier") == {}
-    # config here has enforce_agent_no_network=True: an inherited allow-all is replaced by deny-all (no model host here)
-    assert server._provider_options(phase="agent")["network_policy"] == {"defaultAction": "deny", "egress": []}
+    # Deny-all with no model host would fail every model call of the run: refused at seed instead.
+    with pytest.raises(ResourcesSeedRejectedError, match="needs sandbox_model_server"):
+        server._provider_options(phase="agent")
 
 
 def test_offline_modes_replace_an_inherited_allow_policy(monkeypatch: MonkeyPatch, task_assets: Path) -> None:
-    monkeypatch.setattr(
-        "resources_servers.nl2repobench.app.get_global_config_dict",
-        lambda: {"policy_model": {"responses_api_agents": {"model": {"host": "model.internal", "port": 8000}}}},
-    )
+    monkeypatch.setattr("resources_servers.nl2repobench.app.get_global_config_dict", _global_config)
     inherited = {
         "defaultAction": "allow",
         "egress": [
@@ -215,12 +252,6 @@ def test_offline_modes_replace_an_inherited_allow_policy(monkeypatch: MonkeyPatc
         }
         assert server._provider_options(phase="verifier") == {}
 
-    # no inherited policy and no model host: deny-all alone
-    config = _config(task_assets)
-    config.agent_network_mode = "no_internet_preinstalled"
-    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
-    assert server._provider_options(phase="agent")["network_policy"] == {"defaultAction": "deny", "egress": []}
-
 
 def test_official_mode_without_enforcement_keeps_the_inherited_policy_absent(task_assets: Path) -> None:
     config = _config(task_assets)
@@ -240,8 +271,8 @@ async def test_seed_session_creates_agent_sandbox(task_assets: Path, monkeypatch
     sandbox = AsyncMock()
     sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/workspace"}
     sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
-    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
     request = MagicMock()
@@ -258,6 +289,47 @@ async def test_seed_session_creates_agent_sandbox(task_assets: Path, monkeypatch
     # _AGENT_SANDBOX_IMAGE in app.py.
     assert spec.image == app_module._AGENT_SANDBOX_IMAGE
     assert spec.workdir == "/workspace"
+
+
+async def test_a_typed_seed_lends_the_agent_sandbox_to_the_session_harness(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """An Environment Server episode gets the agent sandbox as sandbox_access, with a descriptor that cannot stop it;
+    verify collects and stops it, and a seed retried after that is refused."""
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.serialize.side_effect = lambda scope=None: {"sandbox_id": "agent-sandbox", "scope": scope or "full"}
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    monkeypatch.setattr(server, "_collect_workspace", AsyncMock(return_value=(None, "nothing to collect")))
+    request = MagicMock()
+    request.session = {}
+    task_data = {key: value for key, value in _request().items() if key != "response"}
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="episode-session",
+        episode_id=EpisodeId(rollout_id="0-0"),
+        task_id=TaskId(taskset="nl2repobench:benchmark", task_id="example-task"),
+        task_data=task_data,
+    )
+
+    response = await server.seed_session(request, seed)
+
+    access = response.sandbox_access
+    assert access is not None and access.workdir == "/workspace"
+    assert access.connection.provider_config_ref == "test"
+    assert access.connection.descriptor == {"sandbox_id": "agent-sandbox", "scope": "operate"}
+    assert request.session[SESSION_ID_KEY] == "episode-session"
+    # A retried seed of the same episode lends the same live sandbox again.
+    assert (await server.seed_session(request, seed)).sandbox_access == access
+    sandbox.start.assert_awaited_once()
+
+    await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+    sandbox.stop.assert_awaited_once()
+    with pytest.raises(ResourcesSessionConflictError):
+        await server.seed_session(request, seed)
 
 
 async def test_verify_without_seed_returns_incomplete_result(task_assets: Path) -> None:
@@ -535,8 +607,8 @@ async def test_task_workdir_is_where_the_agent_works(task_assets: Path, monkeypa
     sandbox = AsyncMock()
     sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
     sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
-    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
     request = MagicMock()
@@ -550,7 +622,8 @@ async def test_task_workdir_is_where_the_agent_works(task_assets: Path, monkeypa
     assert sandbox.upload.await_args.args[1] == "/workspace/example/start.md"
     assert server._agent_sessions["s1"].workdir == "/workspace/example"
     assert "-C /workspace/example ." in app_module._collect_command("/workspace/example")
-    assert app_module._collect_command("/workspace") == app_module._COLLECT_COMMAND
+    # The tar itself is unchanged for /workspace; the command wraps it with the archive checks and its size.
+    assert app_module._COLLECT_COMMAND in app_module._collect_command("/workspace")
 
 
 async def test_sandbox_metadata_from_config_reaches_the_spec(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
@@ -562,8 +635,8 @@ async def test_sandbox_metadata_from_config_reaches_the_spec(task_assets: Path, 
     sandbox = AsyncMock()
     sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
     sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
-    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
     request = MagicMock()
@@ -588,8 +661,8 @@ async def test_verify_image_registry_template_picks_the_grading_image(
     sandbox = AsyncMock()
     sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
     created = MagicMock(return_value=sandbox)
-    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr(app_module, "AsyncSandbox", created)
     task = _resolve_task(NL2RepoBenchVerifyRequest.model_validate(_request()), server._task_store)
@@ -756,8 +829,8 @@ async def test_failed_agent_init_stops_the_sandbox(task_assets: Path, monkeypatc
     server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
     sandbox = AsyncMock()
     sandbox.exec.return_value = _exec_result(1)  # mkdir -p /workspace fails after the sandbox started
-    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
     request = MagicMock()
@@ -844,8 +917,8 @@ async def test_agent_init_failure_or_cancellation_stops_the_sandbox(
             sandbox.exec.side_effect = error
         else:
             sandbox.upload.side_effect = error
-        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
         monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
         monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
         request = MagicMock()
@@ -959,6 +1032,11 @@ async def test_a_test_command_timeout_is_scored_not_masked(task_assets: Path, mo
     assert create_sandbox.await_count == 2  # no retry
 
 
+def _collected(size: int) -> MagicMock:
+    """The collect command's result when the archive in the sandbox has `size` bytes."""
+    return MagicMock(return_code=0, stdout=f"{app_module._COLLECT_SIZE_MARKER}{size}\n", stderr="", error_type=None)
+
+
 def _use_real_collection(server: NL2RepoBenchResourcesServer, monkeypatch: MonkeyPatch) -> None:
     async def collect(sandbox: Any, workdir: str = "/workspace") -> tuple:
         return await NL2RepoBenchResourcesServer._collect_workspace(server, sandbox, workdir)
@@ -1012,21 +1090,77 @@ async def test_an_ordinary_tar_failure_during_collection_is_still_scored(
     assert create_sandbox.await_count == 1
 
 
-async def test_an_over_limit_archive_is_still_scored(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+async def test_an_over_limit_archive_is_scored_and_never_downloaded(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
     server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch, workspace_tar_max_bytes=3)
     agent_sandbox = server._agent_sessions["test-session"].sandbox
-    agent_sandbox.exec.return_value = _exec_result(0)
-
-    async def download(remote: str, local: Path) -> None:
-        Path(local).write_bytes(b"x" * 10)
-
-    agent_sandbox.download.side_effect = download
+    agent_sandbox.exec.return_value = _collected(10)
     _use_real_collection(server, monkeypatch)
 
     response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
 
     assert response.reward == 0.0 and not getattr(response, "mask_sample", False)
     assert "exceeds workspace_tar_max_bytes" in response.verifier_error
+    # The size is read in the sandbox, so an oversized archive never reaches this server's disk or memory.
+    agent_sandbox.download.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        (MagicMock(return_code=124, stdout="", stderr="", error_type="timeout"), "reported 'timeout'"),
+        (MagicMock(return_code=0, stdout="", stderr="", error_type=None), "did not report the archive size"),
+    ],
+)
+async def test_a_collection_that_times_out_or_reports_no_size_is_masked(
+    task_assets: Path, monkeypatch: MonkeyPatch, result: MagicMock, reason: str
+) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    agent_sandbox.exec.return_value = result
+    _use_real_collection(server, monkeypatch)
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    # This server's own tar step failed, not the agent's work: masked, and no verifier runs.
+    assert response.mask_sample is True and response.failure_kind == "verifier_error"
+    assert reason in response.failure_reason
+    assert create_sandbox.await_count == 1
+
+
+async def test_a_download_shorter_than_the_archive_is_masked(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
+    agent_sandbox = server._agent_sessions["test-session"].sandbox
+    agent_sandbox.exec.return_value = _collected(10)
+
+    async def download(remote: str, local: Path) -> None:
+        Path(local).write_bytes(b"x" * 4)
+
+    agent_sandbox.download.side_effect = download
+    _use_real_collection(server, monkeypatch)
+
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.mask_sample is True and "returned 4 bytes" in response.failure_reason
+    assert create_sandbox.await_count == 1
+
+
+def test_the_collect_command_refuses_a_planted_archive_and_reports_the_size(tmp_path: Path) -> None:
+    """The real command under bash: the archive is rebuilt, a symlink in its place is removed first, and the last line
+    carries the size the server reads."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "pkg.py").write_text("x = 1\n")
+    archive = tmp_path / "workspace.tar.gz"
+    archive.symlink_to("/dev/zero")
+    command = app_module._collect_command(str(workspace)).replace("/tmp/workspace.tar.gz", str(archive))
+
+    result = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert not archive.is_symlink()
+    assert app_module._collected_size(result.stdout) == archive.stat().st_size > 0
 
 
 # --- trace-only rows are masked ------------------------------------------------------------------
@@ -1169,8 +1303,8 @@ async def _seed_and_capture_uploads(task_assets: Path, monkeypatch: MonkeyPatch,
     sandbox.exec.return_value = _exec_result(0)
     sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
     sandbox.upload.side_effect = upload
-    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
     request = MagicMock()
@@ -1265,7 +1399,7 @@ def _docker_download_sandbox(monkeypatch: MonkeyPatch, tmp_path: Path, stderr: s
     )
     sandbox = AsyncMock()
     sandbox.serialize.return_value = {"sandbox_id": "nemo-gym-x"}
-    sandbox.exec.return_value = _exec_result(0)  # the tar command succeeded
+    sandbox.exec.return_value = _collected(10)  # the tar command succeeded and the archive is in the sandbox
 
     async def download(remote: str, local: Path) -> None:
         await provider.download_file(handle, remote, Path(local))
@@ -1293,7 +1427,7 @@ async def test_a_docker_daemon_outage_during_the_download_masks_the_row_and_allo
     assert create_sandbox.await_count == verify_task_requests  # no verifier sandbox allocated
 
 
-async def test_a_missing_archive_after_a_successful_tar_is_still_scored(
+async def test_a_download_that_fails_after_the_archive_was_confirmed_is_masked(
     task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch)
@@ -1308,8 +1442,10 @@ async def test_a_missing_archive_after_a_successful_tar_is_still_scored(
 
     response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
 
-    assert not getattr(response, "mask_sample", False)  # agent-caused: the row keeps its scored zero
-    assert response.reward == 0.0 and "docker cp download" in (response.verifier_error or "")
+    # The collect command already confirmed a regular archive in the sandbox (a missing one fails there and is scored),
+    # so a transfer that then fails is this server's: masked, never a scored 0.
+    assert response.mask_sample is True and response.failure_kind == "verifier_error"
+    assert "docker cp download" in (response.verifier_error or "")
     assert create_sandbox.await_count == 1
 
 
@@ -1322,8 +1458,8 @@ async def test_a_setup_failure_whose_stop_also_fails_is_stopped_at_shutdown(
     sandbox.exec.return_value = _exec_result(0)
     setattr(getattr(sandbox, failing), "side_effect", RuntimeError(f"{failing} failed"))
     sandbox.stop.side_effect = [RuntimeError("provider down"), None]  # the first stop fails
-    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
-    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "get_global_config_dict", _global_config)
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: {"opensandbox": {}})
     monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
     monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
     request = MagicMock()

@@ -6,7 +6,7 @@ integration_profile: custom-gym-agent-loop
 domain: coding
 description: NL2RepoBench greenfield "0-to-1" repository-generation tasks (natural-language
   spec to a complete, installable Python package, no base repository or reference solution)
-  with an OpenCode sandboxed agent and execution-based pytest verification against each
+  with OpenCode running in the task sandbox and execution-based pytest verification against each
   task's hidden test suite.
 modality: text
 licensing: unknown
@@ -20,7 +20,7 @@ reward:
 determinism: unknown
 config_path: ../opencode.yaml
 resources_server: nl2repobench
-agent_server: opencode_sandboxed_agent
+agent_server: opencode_agent
 datasets:
 - name: nl2repobench_v1
   type: benchmark
