@@ -201,6 +201,139 @@
       "files": [
         "files/gym-eval-013-negative-harness"
       ]
+    },
+    {
+      "id": "gym-eval-014-chat-endpoint",
+      "prompt": "Prepare my first local IFEval smoke starting from pip, without a manual checkout. Connect to my existing endpoint and retain the benchmark defaults outside the explicitly requested smoke selection. Read the supplied evidence at /workspace/input/gym-eval-014-chat-endpoint/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, dispatch jobs, or start a sandbox. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "expected_output": "An exact-commit Git-pip preview installation and a bounded direct IFEval smoke using inference_provider. Resolve the installed Gym asset root from nemo_gym.PARENT_DIR and prepare the benchmark there while preserving or restoring the caller's directory, then collect from that original directory. Preserve the benchmark dataset configuration, require complete selected results and retain model-call evidence. No clone, Slurm job or new inference service is needed.",
+      "assertions": [
+        "Installs nemo-gym from the supplied full Git commit using pip and identifies it as a preview rather than inventing a PyPI release.",
+        "Chooses --model-type inference_provider for the Chat Completions-only endpoint, retaining the supplied model and base URL; passes the literal ${oc.env:POLICY_API_KEY} interpolation to Gym instead of shell-expanding the secret into the process arguments.",
+        "Derives the installed asset root from nemo_gym.PARENT_DIR and runs gym eval prepare --benchmark ifeval there in a subshell or otherwise restores the caller's directory before collection, without a manual checkout or replacing the dataset list.",
+        "Uses gym eval run --benchmark ifeval --split benchmark with a five-task, one-repeat smoke and the requested separate output, without changing sampling, output limits or the benchmark verifier.",
+        "Enables require_complete and observability with an absolute model-call capture directory; describes a smoke without claiming it ran or starting another model service."
+      ],
+      "expected_skill": "nemo-gym-run-and-babysit-eval",
+      "expected_script": null,
+      "files": [
+        "files/gym-eval-014-chat-endpoint"
+      ]
+    },
+    {
+      "id": "gym-eval-015-responses-endpoint",
+      "prompt": "Prepare the full local IFBench evaluation against this existing Responses endpoint. Preserve the bound agent and canonical repeat protocol; preparation is already complete. Do not start another inference service. Read the supplied evidence at /workspace/input/gym-eval-015-responses-endpoint/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, dispatch jobs, or start a sandbox. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "expected_output": "A complete direct benchmark run using openai_model and the supplied Responses endpoint, preserving the configured agent and five repeats. Save outputs and evidence in the supplied full-run directory and check them before reporting a result.",
+      "assertions": [
+        "Selects --model-type openai_model for the Responses-only endpoint and preserves the supplied URL, model and API-key environment variable.",
+        "Uses gym eval run --benchmark ifbench --split benchmark with the requested output, without adding a task limit or reducing the configured five repeats.",
+        "Preserves the bound simple_agent, prompts, verifier and model sampling/output budgets instead of replacing the agent or protocol.",
+        "Requires completion and retained evidence, then names coverage, health/quality and the matching saved aggregate metric as checks before reporting a score.",
+        "Does not start vLLM, submit a Slurm job, or claim that preparation or successful command construction proves evaluation success."
+      ],
+      "expected_skill": "nemo-gym-run-and-babysit-eval",
+      "expected_script": null,
+      "files": [
+        "files/gym-eval-015-responses-endpoint"
+      ]
+    },
+    {
+      "id": "gym-eval-016-local-health",
+      "prompt": "Report the measured local result and whether it is formally verified. The process exit was zero; interpret the saved evidence before recommending any recovery. Read the supplied evidence at /workspace/input/gym-eval-016-local-health/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, dispatch jobs, or start a sandbox. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "expected_output": "The observed reward mean is 0.8, independently eight successes over ten selected rollouts. Selected coverage is complete, but ten quality verdicts and grading traceability are unobserved, so formal verification is unsupported. There is no submitted-run ID or Slurm gate.",
+      "assertions": [
+        "Reports 0.8 or 80% from the matching harbor_my-taskset_agent aggregate entry and reconciles it as eight successes out of ten selected rollouts.",
+        "Distinguishes complete 10/10 inventory from ten unobserved quality verdicts and missing grading traceability.",
+        "Does not infer a submitted-run SUCCESS gate or evaluation-health PASS from process exit zero or run.artifacts.healthy.",
+        "Does not use eval resubmit without a submission ID or claim that repeated collection repairs absent grading evidence."
+      ],
+      "expected_skill": "nemo-gym-run-and-babysit-eval",
+      "expected_script": null,
+      "files": [
+        "files/gym-eval-016-local-health"
+      ]
+    },
+    {
+      "id": "gym-eval-017-task-selection",
+      "prompt": "Prepare a local smoke for exactly hello-a and hello-c in my existing task folders using the supplied supported agent. Keep generated files and verifier artifacts together and explain the scope of the result. Read the supplied evidence at /workspace/input/gym-eval-017-task-selection/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, dispatch jobs, or start a sandbox. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "expected_output": "A positional task-target run with hermes_agent, the Docker sandbox, inference_provider and --only-tasks hello-a,hello-c, one repeat, and harbor_output_root in the selected-smoke directory. Optional oracle validation is separate reference-solution evidence. The eventual model score covers only the two selected tasks.",
+      "assertions": [
+        "Uses gym eval run ./my-tasks --agent hermes_agent --sandbox docker instead of implementing a harness or converting the supported task folders into a new benchmark.",
+        "Selects exactly hello-a and hello-c with --only-tasks, one repeat and inference_provider for the supplied Chat Completions endpoint.",
+        "Sets harbor_output_root to retain generated task configuration, prepared rows and verifier artifacts together with the selected smoke output.",
+        "Treats any gym dataset validate oracle run as reference-solution evidence, distinct from the model evaluation, and labels the model result a two-task subset rather than the six-task dataset score.",
+        "Preserves selected task definitions and admission settings without adding a flag that silently omits unloadable tasks."
+      ],
+      "expected_skill": "nemo-gym-run-and-babysit-eval",
+      "expected_script": null,
+      "files": [
+        "files/gym-eval-017-task-selection"
+      ]
+    },
+    {
+      "id": "gym-eval-018-local-resume",
+      "prompt": "Finish the same interrupted direct evaluation while preserving completed answers. Give the safe continuation command and say whether the partial number can be reported as final. Read the supplied evidence at /workspace/input/gym-eval-018-local-resume/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, dispatch jobs, or start a sandbox. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "expected_output": "Continue the original direct run with --resume only after restoring /workspace/gym-evaluation as the working directory or using the exact saved absolute output and capture paths. Check that the saved rollouts and materialized inputs exist first; stop if they are missing because --resume can otherwise start a fresh evaluation. Preserve completed answers, the endpoint/model, literal credential interpolation and unchanged protocol. The 0.75 metric covers 900/1500 rollouts with 600 missing, so it is not the final full-benchmark score.",
+      "assertions": [
+        "Uses gym eval run --resume from the original /workspace/gym-evaluation directory or with the exact saved absolute output and capture paths, retaining endpoint/model, split, complete-result requirement and literal ${oc.env:POLICY_API_KEY} credential interpolation.",
+        "Requires the saved rollouts and materialized inputs at their original absolute paths before dispatch; stops if they are missing instead of allowing --resume to silently start fresh from /workspace/review.",
+        "Keeps the saved materialized selection and completed answers rather than deleting artifacts, starting a fresh Slurm submission or using eval resubmit.",
+        "Reports 900/1500 coverage with 600 remaining and does not call partial 0.75 the final IFBench score.",
+        "Separates direct-run continuation from submitted-run recovery and requires saved coverage, health and aggregate evidence to be checked after completion."
+      ],
+      "expected_skill": "nemo-gym-run-and-babysit-eval",
+      "expected_script": null,
+      "files": [
+        "files/gym-eval-018-local-resume"
+      ]
+    },
+    {
+      "id": "gym-eval-019-supported-agent",
+      "prompt": "Evaluate this existing task-folder set using Codex, which Gym already supports. Prepare the model-evaluation command and necessary checks; do not implement another adapter or substitute the previous operator agent. Read the supplied evidence at /workspace/input/gym-eval-019-supported-agent/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, dispatch jobs, or start a sandbox. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "expected_output": "A direct task-folder run selecting the existing codex_agent explicitly, with Docker, openai_model for the supplied endpoint, all four tasks and one repeat. Check admission, sandbox reachability and adapter prerequisites; do not invent a new harness, replace it with the previous operator agent, or claim runtime setup already passed.",
+      "assertions": [
+        "Uses gym eval run ./repair-tasks --agent codex_agent --sandbox docker, preserving all four tasks and one repeat.",
+        "Selects openai_model for the supplied Responses endpoint with the existing model and credential environment variable.",
+        "Recognizes codex_agent is available and admitted by the dataset; uses its existing configuration/runtime setup rather than authoring an adapter or silently selecting the previous hermes_agent.",
+        "Keeps outputs under the requested harbor_output_root and requires complete selected coverage plus saved score and quality evidence before calling the evaluation done.",
+        "Names sandbox-to-model reachability and existing adapter/runtime prerequisites as checks without claiming they have executed in this offline preparation."
+      ],
+      "expected_skill": "nemo-gym-run-and-babysit-eval",
+      "expected_script": null,
+      "files": [
+        "files/gym-eval-019-supported-agent"
+      ]
+    },
+    {
+      "id": "gym-eval-020-changed-task-resume",
+      "prompt": "Resume the interrupted local task-folder evaluation, but substitute hello-c for hello-b and use the revised hello-a verifier. I have not authorized discarding or overwriting the original results. Explain the safe choices before giving a continuation command. Read the supplied evidence at /workspace/input/gym-eval-020-changed-task-resume/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, dispatch jobs, or start a sandbox. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "expected_output": "Do not resume changed task identity or grading semantics into the original artifacts. Restore the original selection and task content to continue that saved evaluation, or prepare and run the requested changed evaluation with a fresh harbor_output_root and rollout output. Do not follow the diagnostic's cache-reset suggestion in the saved root, or change only the rollout output while reusing that root: it also holds preparation metadata and verifier artifacts, and preparation can replace metadata before the resume refusal. Retain the original evidence.",
+      "assertions": [
+        "Identifies both changes: replacing a selected task and modifying the already-scored task verifier/digest; these are a different evaluation.",
+        "Does not bypass the mismatch, edit cached identities, delete saved files or follow +resume_from_cache=false in the original output root; retains original result/materialized-input evidence and avoids further overwriting preparation metadata.",
+        "Offers restoration of original selection/content for --resume, or a fresh direct evaluation with a distinct harbor_output_root and rollout output for changed identity; does not treat a new output_jsonl_fpath alone as preserving all original artifacts.",
+        "Does not use Slurm resubmit/recovery commands or claim the original completed answer certifies the modified verifier."
+      ],
+      "expected_skill": "nemo-gym-run-and-babysit-eval",
+      "expected_script": null,
+      "files": [
+        "files/gym-eval-020-changed-task-resume"
+      ]
+    },
+    {
+      "id": "gym-eval-021-benchmark-metric",
+      "prompt": "Report instruction-level strict accuracy for this completed IndicIFEval-Trans subset. The saved chat summary says 99%, and the reward mean is also present; select the requested metric and reconcile its denominator from the retained rows. Read the supplied evidence at /workspace/input/gym-eval-021-benchmark-metric/evidence.yaml. This is an offline review: do not install packages, contact endpoints or schedulers, dispatch jobs, or start a sandbox. Give the concrete requested result, with commands when useful, in at most 700 words.",
+      "expected_output": "The requested subset instruction-level strict accuracy is 0.9 (90%), from 18/20 instruction checks across 10/10 selected prompt rollouts. Prompt-level strict accuracy and mean reward are 0.8 (8/10). Do not substitute 0.99 or label a complete subset as the full benchmark or invent a Slurm acceptance gate.",
+      "assertions": [
+        "Selects agent_metrics.inst_level_strict_acc=0.9 from the matching IndicIFEval agent entry and reconciles it to 18 passed checks out of 20 instruction checks.",
+        "Separately explains mean/reward=0.8 is eight all-instructions-passing prompts out of ten under binary grading, not the requested micro-averaged instruction metric.",
+        "Reports complete 10/10 selected rollout coverage and the named subset scope without promoting it to the full benchmark score.",
+        "Rejects stale chat 0.99, retains the metric scale and denominator, and does not invent a submitted-run gate or certification receipt."
+      ],
+      "expected_skill": "nemo-gym-run-and-babysit-eval",
+      "expected_script": null,
+      "files": [
+        "files/gym-eval-021-benchmark-metric"
+      ]
     }
   ]
 }

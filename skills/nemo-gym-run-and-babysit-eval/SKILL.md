@@ -11,9 +11,26 @@ description: >
   benchmark Z with serving params X", "submit this benchmark", "the job timed out", "the chain
   stopped", "resume the run", "recover the run", "is the run done", "inspect the run", "gate the
   score", "restart the evaluation".
+  Also covers local runs, existing API endpoints, supported agents and Gym task folders.
 ---
 
 # Run a Gym Evaluation to Its Result
+
+## Select an execution path
+
+- For a local run or an existing model endpoint, follow [local and API-endpoint runs](references/local-and-api.md).
+  It covers pip preview installation, built-in benchmarks, and Responses, Chat Completions and vLLM clients.
+- To evaluate an agent Gym already supports, first read [supported agents](references/supported-agents.md)
+  for harness selection and model wiring, then follow the matching local or cluster path.
+- For tasks already in Gym's task-folder format, follow [task folders](references/task-folders.md).
+- For a submitted Slurm run or a self-hosted model on a cluster, follow the existing procedure below,
+  including [model configuration](references/add-model-eval-config.md) when needed.
+
+Finish direct runs with the [saved-result checks](references/local-results.md): require complete coverage,
+read health and grading evidence, and reconcile the reported score with the saved benchmark aggregate.
+Evaluation against Gym servers already started with `gym env start` follows [supported agents](references/supported-agents.md);
+the authoring links below apply when building a benchmark or harness.
+The remaining sections describe submitted Slurm evaluations; direct runs use the references above.
 
 The Gym pages are the reference; when they and this skill disagree, the pages win:
 [Configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/fern/versions/latest/pages/orchestration/configuration.mdx),
