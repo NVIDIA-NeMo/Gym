@@ -520,8 +520,8 @@ def _name_of(provider: object) -> str:
 class _Entry:
     sandbox: AsyncSandbox
     spec: SandboxSpec
-    # False for a sandbox whose start failed and whose stop failed too: it stays tracked until a stop succeeds, but
-    # an export never snapshots it, since its setup never finished.
+    # False until a create finishes, and after a failed start: cleanup still tracks the sandbox, but lookups,
+    # lending and exports must not expose it before its setup succeeds.
     exportable: bool = True
 
 
@@ -895,13 +895,14 @@ class OwnedSandboxes:
         try:
             async with self._key_locks.locked(key):
                 sandbox = AsyncSandbox(self._provider, spec, owns_provider=False)
-                entry = _Entry(sandbox=sandbox, spec=spec)
+                entry = _Entry(sandbox=sandbox, spec=spec, exportable=False)
                 self._entries[key] = entry
                 try:
                     async with self._start_slot():
                         # A create queued for a slot when the shutdown began starts nothing.
                         self._require_open()
                         await _start_to_the_end(sandbox, settle_s=_settle_s(spec))
+                        entry.exportable = True
                 except BaseException as error:
                     entry.exportable = False
                     try:
