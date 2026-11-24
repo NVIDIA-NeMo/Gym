@@ -31,5 +31,6 @@ indic_arena_proxy_v3_resources_server:
       default_category: hard_prompt
       arena_elo_bootstrap_rounds: 100
       arena_elo_bootstrap_seed: 42
+      indic_metrics_input_fpath: ${oc.env:INPUT_JSONL,benchmarks/indic/arena_proxy_v3/data/arena_proxy_v3_benchmark.jsonl}
       sanitize_generations: true
       strip_thinking: true

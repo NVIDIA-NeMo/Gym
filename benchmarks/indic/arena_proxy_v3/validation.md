@@ -48,10 +48,11 @@ top-p/top-k, seed 42, the 120,000-token cap, the measured context budget with a
 positions, strong-verdict weight 3, deterministic bootstrap, complete population
 checks, English separation, and the mean across 12 Indic languages.
 
-The official reference-comparable headline remains the summary's `_avg.all`.
-The shared resources server also emits a pooled `arena_elo/score`; promoting the
-Indic language average into Gym's server metrics remains a separate review item.
-The existing reference-specific model adapter also remains unchanged.
+The official reference-comparable headline is now the server metric
+`arena_elo/indic/score`, also formatted as `_avg.all` by the offline summary.
+Both paths share the same reducer. Indic configuration selects the language mean
+instead of the pooled `arena_elo/score`; other Arena configurations retain their
+existing metrics. The reference-specific model adapter remains unchanged.
 
 ## Automated checks
 
@@ -92,3 +93,52 @@ bytes and generation/judging code are unchanged for the selected population.
 A full model run compared with separately generated reference judgments is still
 pending. Dataset licensing metadata is `NVIDIA internal, derived from
 arena-proxy-v3`. Measured end-to-end score equivalence remains unverified.
+
+## Server metric integration
+
+The Indic configuration opts into `arena_elo/indic/score` as a Gym key metric,
+with per-language slices in agent metrics and a matching single-repeat record for
+comparison suites. Other Arena configurations retain pooled metrics. The same
+server-owned reducer formats saved judgments through `summarize.py`.
+
+The saved November 20 Gemma judgments were replayed through a local HTTP
+`/aggregate_metrics` endpoint. All five tasks returned HTTP 200 aggregation;
+the full offline summary matched the implementation at commit
+`f847cd1579b826262a0833f8f81318ef208b69a8` exactly. Every available language score,
+confidence interval, invalid-verdict count, and sample count matched the server's
+agent and repeat metrics. The tracking exporter preserved those scalar values.
+The five-task subset correctly omitted the official headline in all metric views.
+This replay used saved policy and judge responses; no new model calls were made.
+
+`gym env validate indic/arena_proxy_v3` validates all 4,799 prepared tasks. The
+manifest uses Gym's supported `internal` licensing value; the descriptive dataset
+license remains `NVIDIA internal, derived from arena-proxy-v3` in the config and
+documentation.
+
+The final targeted suite passed **303 tests**:
+
+```bash
+RAY_TMPDIR=/tmp .venv/bin/python -m pytest -o addopts= --no-cov -q \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_metrics.py \
+  resources_servers/arena_judge/tests/test_app.py \
+  tests/unit_tests/metrics/test_aggregate_metrics.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3.py \
+  tests/unit_tests/benchmarks/test_indic_arena_proxy_v3_generation.py \
+  benchmarks/lmarena_v3/tests/test_lmarena_v3_subsets.py
+
+.venv/bin/gym env validate indic/arena_proxy_v3
+.venv/bin/pre-commit run --all-files
+git diff --check
+```
+
+The tests cover the full 12-language mean, English exclusion, scalar tracking
+export, single-repeat reporting, missing and masked tasks, partial preparations,
+duplicate/repeated tasks, and unchanged default Arena aggregation. The complete
+fixture uses 399 eligible Tamil tasks and 400 for every other language, so it
+distinguishes equal language weighting from pooled task weighting. Nine verifier
+and Arena-Elo method ASTs are unchanged from the previous commit.
+
+Pre-commit passed across all files; the private guardword catalog was unavailable,
+so its content scan was skipped. The full core, sandbox, and server suites were
+not run locally; the complete PR requires full CI scope. Existing scikit-learn and
+statistical edge-case warnings remain.

@@ -144,9 +144,24 @@ rounds with seed 42. Each language has overall, single-turn, multi-turn, and sev
 group scores. **The headline is the arithmetic mean of the 12 Indic overall
 scores. English is reported separately.** Mean per-row reward is not the headline.
 
-The official headline is `metrics.json`'s `_avg.all` from the summary command below.
-The shared resources server's `arena_elo/score` is a pooled score across tasks;
-use the language average when comparing with the reference setup.
+The resources server publishes the official headline as **`arena_elo/indic/score`**
+in Gym's agent, key, and repeat metrics, on a 0–100 scale (higher is better).
+Use this metric for comparisons and downstream reports. Language breakdowns use
+`arena_elo/language/<lang>/<slice>/score`, where the slice is `all`, `single_turn`,
+`multi_turn`, or a group name. Each slice also includes `ci_lower`, `ci_upper`,
+`invalid_scores`, and `n`. English uses the `en` language prefix.
+
+`gym eval run` and `gym eval reverify` export these metrics through Gym's normal
+aggregate-metrics and tracking paths. Comparison suites should select
+`arena_elo/indic/score` with bounds 0 and 100. The offline command below uses the
+same server-owned reducer and formats the headline as `metrics.json`'s `_avg.all`.
+
+Coverage is checked against the prepared inputs and their adjacent
+`preparation_report.json`. When using a custom preparation directory, export
+`INPUT_JSONL` pointing to its `arena_proxy_v3_benchmark.jsonl` before running Gym.
+The Slurm scripts set this automatically. Without this override, the judge uses
+the benchmark's default prepared data. This protocol permits one rollout per
+task and one repeat per aggregate; evaluate repeats as separate runs.
 
 Run scoring commands in an environment with the Arena judge dependencies installed:
 
@@ -156,10 +171,14 @@ python -m benchmarks.indic.arena_proxy_v3.summarize "$RUN_DIR/judgments/rollouts
   --output "$RUN_DIR/metrics.json"
 ```
 
-The summary rejects duplicate or mismatched tasks. Missing or failed judgments
-suppress incomplete language scores and the Indic headline. Smoke subsets do not
-produce an official headline. Successfully recovered judgments count when their
-saved-answer identity matches the historical failure.
+Both server metrics and the summary reject duplicate or mismatched tasks.
+Missing, failed, or masked judgments suppress incomplete language scores and the
+Indic headline. Smoke subsets do not produce an official headline. Unavailable
+scores are omitted from Gym metrics and formatted as JSON null in the summary;
+`arena_elo/coverage/headline_available` records availability. Successfully
+recovered judgments count when their saved-answer identity matches the historical
+failure. The headline requires all 4,799 eligible Indic tasks, with 399 Tamil tasks
+and 400 in every other Indic language.
 
 ## Comparing setups
 

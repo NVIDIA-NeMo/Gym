@@ -55,5 +55,5 @@ set_run_paths() {
     JUDGMENTS="$RUN_DIR/judgments/rollouts.jsonl"
     [[ -s "$INPUT_JSONL" ]] || die "Prepared input missing: $INPUT_JSONL. Use slurm/submit.sh first."
     mkdir -p "$RUN_DIR/logs" "$RUN_DIR/generations" "$RUN_DIR/judgments"
-    export RUN_DIR
+    export RUN_DIR INPUT_JSONL
 }

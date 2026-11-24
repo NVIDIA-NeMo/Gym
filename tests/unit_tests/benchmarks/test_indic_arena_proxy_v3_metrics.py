@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.indic.arena_proxy_v3.summarize import GROUPS, INDIC_LANGUAGES, SLICES, summarize
+from benchmarks.indic.arena_proxy_v3.summarize import summarize
+from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.eval.rollout_reverification import (
     OutputPaths,
     _drop_cache_from_payloads,
@@ -18,6 +20,14 @@ from nemo_gym.eval.rollout_reverification import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from resources_servers.arena_judge.app import ArenaJudgeConfig, ArenaJudgeServer
+from resources_servers.arena_judge.indic_metrics import (
+    GROUPS,
+    HEADLINE_METRIC,
+    INDIC_LANGUAGES,
+    SLICES,
+    compute_indic_metrics,
+)
 
 
 def _task(language: str = "hi", index: int = 0) -> dict:
@@ -62,17 +72,34 @@ def _preparation_report(path: Path, rows: list[dict], *, limit: int | None = Non
         "prepared_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "limit_per_language": limit,
         "coverage": {
-            language: {"prepared_rows": count, "source_rows": 400, "eligible_rows": 400, "excluded_untranslated": []}
+            language: {
+                "prepared_rows": count,
+                "source_rows": 400,
+                "eligible_rows": 399 if language == "ta" else 400,
+                "excluded_untranslated": ["399"] if language == "ta" else [],
+            }
             for language, count in Counter(row["language"] for row in rows).items()
         },
     }
     (path.parent / "preparation_report.json").write_text(json.dumps(report))
 
 
-def test_indic_headline_excludes_english_and_preserves_all_breakdowns(tmp_path: Path) -> None:
-    inputs = [_task(language, index) for language in ("en", *INDIC_LANGUAGES) for index in range(400)]
+def _indic_server(inputs: Path) -> ArenaJudgeServer:
+    return ArenaJudgeServer.model_construct(
+        config=ArenaJudgeConfig.model_construct(indic_metrics_input_fpath=str(inputs))
+    )
+
+
+@pytest.mark.asyncio
+async def test_indic_headline_excludes_english_and_preserves_all_breakdowns(tmp_path: Path) -> None:
+    inputs = [
+        _task(language, index)
+        for language in ("en", *INDIC_LANGUAGES)
+        for index in range(399 if language == "ta" else 400)
+    ]
     results = [
-        _judged(task, verdicts=("B>A", "A>B") if task["language"] == "en" else ("A>B", "B>A")) for task in inputs
+        _judged(task, verdicts=("B>A", "A>B") if task["language"] in ("en", "ta") else ("A>B", "B>A"))
+        for task in inputs
     ]
     input_path = _write(tmp_path / "inputs.jsonl", inputs)
     _preparation_report(input_path, inputs)
@@ -84,7 +111,7 @@ def test_indic_headline_excludes_english_and_preserves_all_breakdowns(tmp_path: 
     metrics = summarize(
         _write(tmp_path / "rollouts.jsonl", results), inputs=input_path, reference_verdicts=[reference_path]
     )
-    assert metrics["_avg"]["all"] == 100.0
+    assert metrics["_avg"]["all"] == pytest.approx(1100 / 12)
     assert metrics["en"]["all"]["score"] == 0.0
     assert metrics["_coverage"]["headline_available"] is True
     assert metrics["_avg"]["complete"] is True
@@ -93,10 +120,37 @@ def test_indic_headline_excludes_english_and_preserves_all_breakdowns(tmp_path: 
     assert all(metrics["hi"][name]["n"] in (57, 58) for name in GROUPS.values())
     assert all(name in metrics["hi"] for name in SLICES)
     comparison = metrics["_reference_comparison"]
-    assert comparison["mismatched_verdict_pairs"] == 800
-    assert comparison["indic_average"]["candidate"] == 100.0
+    assert comparison["mismatched_verdict_pairs"] == 1199
+    assert comparison["indic_average"]["candidate"] == pytest.approx(1100 / 12)
     assert comparison["indic_average"]["reference"] == pytest.approx(1100 / 12)
-    assert comparison["indic_average"]["candidate_minus_reference"] == pytest.approx(100 / 12)
+    assert comparison["indic_average"]["candidate_minus_reference"] == 0.0
+
+    # Exercise the real Gym aggregate response and tracking-export path, not only
+    # a direct call to the reducer. Tamil's 399 rows must still have equal weight.
+    server = _indic_server(input_path)
+    response = await server.aggregate_metrics(
+        AggregateMetricsRequest(
+            verify_responses=[row | {"_ng_task_index": index} for index, row in enumerate(reversed(results))]
+        )
+    )
+    assert response.agent_metrics[HEADLINE_METRIC] == metrics["_avg"]["all"]
+    assert response.key_metrics[HEADLINE_METRIC] == metrics["_avg"]["all"]
+    assert len(response.repeat_level_metrics) == 1
+    assert response.repeat_level_metrics[0][HEADLINE_METRIC] == metrics["_avg"]["all"]
+    assert "arena_elo/score" not in response.agent_metrics
+    assert "mean/reward" not in response.key_metrics
+    assert response.agent_metrics["arena_elo/language/ta/all/n"] == 399
+    for language in ("en", *INDIC_LANGUAGES):
+        for name in SLICES:
+            for statistic in ("score", "ci_lower", "ci_upper", "n", "invalid_scores"):
+                assert (
+                    response.agent_metrics[f"arena_elo/language/{language}/{name}/{statistic}"]
+                    == metrics[language][name][statistic]
+                )
+    exported = flatten_aggregate_metrics([{"agent_ref": {"name": "indic"}, **response.model_dump()}])
+    assert exported[f"indic/{HEADLINE_METRIC}"] == pytest.approx(1100 / 12)
+    assert exported[f"key_metrics/indic/{HEADLINE_METRIC}"] == pytest.approx(1100 / 12)
+    json.dumps(response.model_dump(), allow_nan=False)
 
 
 def test_strong_verdicts_weight_three_and_bootstrap_is_reproducible(tmp_path: Path) -> None:
@@ -447,3 +501,144 @@ def test_reference_comparison_rejects_partial_candidate_coverage(tmp_path: Path)
             inputs=_write(tmp_path / "inputs.jsonl", [task]),
             reference_verdicts=[reference],
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "mask_sample", "verification_skipped", "_ng_failure_class"])
+async def test_server_keeps_incomplete_language_out_of_exported_scores(tmp_path: Path, failure: str | None) -> None:
+    tasks = [_task(index=0), _task(index=1), _task("bn")]
+    inputs = _write(tmp_path / "inputs.jsonl", tasks)
+    rows = [_judged(tasks[0]), _judged(tasks[2])]
+    if failure is not None:
+        rows.append(_judged(tasks[1]) | {failure: True})
+    response = await _indic_server(inputs).aggregate_metrics(
+        AggregateMetricsRequest(verify_responses=[r | {"_ng_task_index": i} for i, r in enumerate(rows)])
+    )
+    assert HEADLINE_METRIC not in response.agent_metrics
+    assert HEADLINE_METRIC not in response.key_metrics
+    assert "arena_elo/language/hi/all/score" not in response.agent_metrics
+    assert response.agent_metrics["arena_elo/language/hi/complete"] is False
+    assert response.agent_metrics["arena_elo/language/hi/judged"] == 1
+    assert response.agent_metrics["arena_elo/language/bn/all/score"] == 100
+    assert response.agent_metrics["arena_elo/coverage/headline_available"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("masked_repeat", [False, True])
+async def test_server_rejects_duplicate_tasks_even_when_a_repeat_is_masked(
+    tmp_path: Path, masked_repeat: bool
+) -> None:
+    task = _task()
+    inputs = _write(tmp_path / "inputs.jsonl", [task])
+    rows = [_judged(task), _judged(task) | {"_ng_rollout_index": 1, "mask_sample": masked_repeat}]
+    with pytest.raises(ValueError, match="Duplicate rollout"):
+        await _indic_server(inputs).aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+
+def test_server_rejects_population_assembled_from_different_repeats(tmp_path: Path) -> None:
+    tasks = [_task(index=0), _task(index=1)]
+    inputs = _write(tmp_path / "inputs.jsonl", tasks)
+    with pytest.raises(ValueError, match="do not mix repeat populations"):
+        _indic_server(inputs).compute_metrics(
+            [[_judged(task) | {"_ng_rollout_index": i}] for i, task in enumerate(tasks)]
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", [True, False])
+async def test_server_retains_population_coverage_when_nothing_is_scored(tmp_path: Path, empty: bool) -> None:
+    task = _task()
+    inputs = _write(tmp_path / "inputs.jsonl", [task])
+    rows = [] if empty else [_judged(task) | {"mask_sample": True}]
+    response = await _indic_server(inputs).aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+    assert HEADLINE_METRIC not in response.agent_metrics
+    assert HEADLINE_METRIC not in response.key_metrics
+    assert response.agent_metrics["arena_elo/coverage/expected"] == 1
+    assert response.agent_metrics["arena_elo/language/hi/complete"] is False
+    assert response.key_metrics["arena_elo/coverage/headline_available"] is False
+
+
+def test_server_uses_same_bootstrap_and_prepared_order_as_saved_summary(tmp_path: Path) -> None:
+    tasks = [_task(index=index) for index in range(40)]
+    verdicts = [("A>>B", "B>>A")] * 21 + [("B>A", "A>B")] * 12 + [("A=B", "A=B")] * 7
+    rows = [_judged(task, verdicts=pair) for task, pair in zip(tasks, verdicts, strict=True)]
+    inputs = _write(tmp_path / "inputs.jsonl", tasks)
+    saved = summarize(_write(tmp_path / "rollouts.jsonl", rows), inputs=inputs)
+    server_metrics = _indic_server(inputs).compute_metrics([[row] for row in reversed(rows)])
+    for name in SLICES:
+        for statistic in ("score", "ci_lower", "ci_upper", "n", "invalid_scores"):
+            assert server_metrics[f"arena_elo/language/hi/{name}/{statistic}"] == saved["hi"][name][statistic]
+    assert server_metrics["arena_elo/language/hi/all/score"] == 81.1
+    assert server_metrics["arena_elo/language/hi/all/ci_lower"] == -6.13
+    assert server_metrics["arena_elo/language/hi/all/ci_upper"] == 6.1
+
+
+def test_server_does_not_promote_a_complete_smoke_selection(tmp_path: Path) -> None:
+    tasks = [_task(language) for language in INDIC_LANGUAGES]
+    inputs = _write(tmp_path / "inputs.jsonl", tasks)
+    _preparation_report(inputs, tasks, limit=1)
+    metrics = _indic_server(inputs).compute_metrics([[_judged(task)] for task in tasks])
+    assert metrics["arena_elo/coverage/complete"] is True
+    assert metrics["arena_elo/coverage/population_scope"] == "subset"
+    assert metrics["arena_elo/coverage/indic_complete"] is False
+    assert HEADLINE_METRIC not in metrics
+
+
+def test_server_rejects_changed_population_and_task_metadata(tmp_path: Path) -> None:
+    task = _task()
+    inputs = _write(tmp_path / "inputs.jsonl", [task])
+    server = _indic_server(inputs)
+    with pytest.raises(ValueError, match="language disagrees"):
+        server.compute_metrics([[_judged(task) | {"language": "bn"}]])
+    _preparation_report(inputs, [task], limit=1)
+    _write(inputs, [task, _task(index=1)])
+    with pytest.raises(ValueError, match="do not match preparation_report"):
+        server.compute_metrics([[_judged(task)]])
+
+
+@pytest.mark.parametrize("override", [{"arena_elo_bootstrap_rounds": 10}, {"arena_elo_bootstrap_seed": 1}])
+def test_indic_config_rejects_a_different_scoring_protocol(override: dict) -> None:
+    with pytest.raises(ValueError, match="100 bootstrap rounds, and seed 42"):
+        ArenaJudgeConfig(
+            name="indic",
+            host="127.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            judge_model_server={"type": "responses_api_models", "name": "judge"},
+            judge_chat_completions_create_params={"messages": []},
+            indic_metrics_input_fpath="inputs.jsonl",
+            **override,
+        )
+
+
+@pytest.mark.parametrize("case", ["missing_indic", "masked_indic", "missing_english", "missing_report"])
+def test_full_population_headline_requires_proven_indic_coverage(tmp_path: Path, case: str) -> None:
+    tasks = [
+        _task(language, index)
+        for language in ("en", *INDIC_LANGUAGES)
+        for index in range(399 if language == "ta" else 400)
+    ]
+    inputs = _write(tmp_path / "inputs.jsonl", tasks)
+    if case != "missing_report":
+        _preparation_report(inputs, tasks)
+    rows = [_judged(task) for task in tasks]
+    if case == "missing_indic":
+        rows.pop()
+    elif case == "masked_indic":
+        rows[-1]["mask_sample"] = True
+    elif case == "missing_english":
+        rows.pop(0)
+
+    # Isolate coverage from the scorer: even finite scores for every observed
+    # language must not turn an incomplete/unproven population into a headline.
+    def finite_scores(pairs: list) -> dict:
+        return {"score": 50.0, "ci_lower": 0.0, "ci_upper": 0.0, "invalid_scores": 0, "n": len(pairs)}
+
+    metrics = compute_indic_metrics(rows, inputs=inputs, aggregate_scores=finite_scores)
+    if case == "missing_english":
+        assert metrics["_avg"]["all"] == 50.0
+        assert metrics["en"]["all"]["score"] is None
+        assert metrics["_coverage"]["complete"] is False
+    else:
+        assert metrics["_avg"]["all"] is None
+        assert metrics["_coverage"]["headline_available"] is False

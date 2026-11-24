@@ -77,7 +77,7 @@ text-verdict judge.
 
 ## Metrics
 
-`compute_metrics()` emits:
+With the default configuration, `compute_metrics()` emits:
 
 - **`arena_elo/score`** — headline Arena-Elo win-rate (%) vs baseline,
   computed by MLE logistic regression over the pairwise battles and
@@ -96,3 +96,25 @@ text-verdict judge.
 `get_key_metrics()` surfaces `arena_elo/score` and its CIs as the
 run's headline numbers alongside the highest-k `pass@1[avg-of-k]`
 flavors.
+
+### Indic Arena metrics
+
+Setting `indic_metrics_input_fpath` to an Indic Arena prepared JSONL opts into
+the language aggregation used by `indic/arena_proxy_v3`. The adjacent
+`preparation_report.json` binds coverage to the prepared file. This mode publishes:
+
+- `arena_elo/indic/score`: the arithmetic mean of all 12 Indic language scores,
+  selected by `get_key_metrics()` and included in repeat metrics for suite consumers.
+- `arena_elo/language/<lang>/<slice>/score`, confidence intervals, invalid-verdict
+  counts, and sample counts. Slices include `all`, `single_turn`, `multi_turn`, and
+  the seven chat400 groups. English is reported under `en` and excluded from the mean.
+- `arena_elo/coverage/*`: population scope, expected task count, completeness, and
+  headline availability. Missing or masked tasks, limited populations, and
+  unverifiable preparation suppress the official headline.
+
+The headline uses a 0–100 scale and requires all 4,799 eligible Indic tasks.
+Duplicate tasks and mixed repeats are rejected. Bootstrap settings must remain
+100 rounds and seed 42. The shared `indic_metrics.py` reducer also powers the
+benchmark's saved-rollout formatter, preserving verdict weights, prepared-input
+ordering, rounding, and invalid-verdict handling. Other Arena consumers retain
+the default pooled metrics above.
