@@ -16470,6 +16470,37 @@ class TestEnrichRunResult:
 
         assert CaptureStore(tmp_path).path_for("g1_g0_a0").exists(), "a pending write may still land"
 
+    async def test_a_write_that_lands_during_the_read_leaves_the_counts_incomplete(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        import nemo_gym.rollouts.model_calls as model_calls
+        import nemo_gym.rollouts.rollout_collection as rollout_collection
+        from nemo_gym.models.model_call_capture import CaptureStore
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        CaptureStore(tmp_path).mark_pending("g1_g0_a0", "c2")
+        read = model_calls._read_capture_records
+
+        def read_before_the_late_write(store, rollout_id):
+            records = read(store, rollout_id)
+            self._store_call(tmp_path, rollout_id, "c2", "late")
+            store.clear_pending(rollout_id, "c2")
+            return records
+
+        async def not_quiesced(*args, **kwargs) -> bool:
+            return False
+
+        monkeypatch.setattr(model_calls, "_read_capture_records", read_before_the_late_write)
+        monkeypatch.setattr(rollout_collection, "await_model_call_capture_quiescence", not_quiesced)
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await rollout_collection.enrich_run_result(
+            self._row(), result, capture_dirs=[tmp_path], observability_enabled=True
+        )
+
+        assert {"code": "model_call_capture_pending"} in result["ng_model_call_capture"]["gaps"]
+        assert (result[NG_CAPTURED_CALLS_KEY]["calls"], result[NG_CAPTURED_CALLS_KEY]["capture_complete"]) == (1, False)
+
     async def test_the_capture_is_kept_when_a_record_could_not_be_read(self, tmp_path: Path) -> None:
         from nemo_gym.models.model_call_capture import CaptureStore
         from nemo_gym.rollouts.rollout_collection import enrich_run_result

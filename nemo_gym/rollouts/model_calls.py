@@ -181,6 +181,9 @@ def merge_model_call_capture_into_record(
         gaps.append(ObservationGap(code="model_call_capture_no_records"))
     else:
         try:
+            # Checked before the read as well: a write that appends and clears its claim while the read runs
+            # leaves no claim afterwards, and the snapshot would read as complete without its row.
+            pending = store.has_pending(rollout_id)
             calls, verifier_invocations, invalid_count = _read_capture_records(store, rollout_id)
             if invalid_count:
                 gaps.append(
@@ -189,7 +192,7 @@ def merge_model_call_capture_into_record(
                         detail=f"count={invalid_count}",
                     )
                 )
-            if store.has_pending(rollout_id):
+            if pending or store.has_pending(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_pending"))
             if store.is_incomplete(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_incomplete"))
