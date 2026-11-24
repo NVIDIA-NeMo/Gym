@@ -18444,3 +18444,22 @@ def test_an_episode_request_carries_a_rollout_that_skips_token_capture(
     assert request.skip_token_capture is bool(episode_setting)
     # The model leaves the setting out when it is false, so a request that does not skip is unchanged.
     assert ("skip_token_capture" in request.model_dump()) is bool(episode_setting)
+
+
+def test_a_counted_judge_failure_counts_as_zero_whatever_placeholder_it_carries():
+    import nemo_gym.rollouts.rollout_collection as rollout_collection
+
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "_ng_failure_class": "judge_failed",
+        "failure_kind": "judge_unparseable",
+        "mask_sample": True,
+        "reward": 3.0,
+    }
+    [counted] = rollout_collection._counted_failure_rows([row], ["judge_failed"])
+    assert (counted["reward"], counted["mask_sample"]) == (0.0, False)
+    [kept] = rollout_collection._counted_failure_rows(
+        [row | {"_ng_failure_class": "agent_run_error"}], ["agent_run_error"]
+    )
+    assert kept["reward"] == 3.0

@@ -3174,6 +3174,8 @@ def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
     # This metrics-only copy honors the explicit denominator policy. The original
     # answer, failure diagnostics, and training mask remain untouched in the sidecar.
     scored["mask_sample"] = False
+    if _matches_failure_class(row, {JUDGE_FAILED}):
+        scored["reward"] = 0.0
     scored.setdefault("reward", 0.0)
     return scored
 
