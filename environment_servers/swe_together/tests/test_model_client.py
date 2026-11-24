@@ -10,6 +10,7 @@ from aiohttp import ClientResponseError
 from environment_servers.swe_together import model_client
 from environment_servers.swe_together.model_client import AuxiliaryModel, error_evidence
 from environment_servers.swe_together.simulator import UserAgent
+from nemo_gym.core import current_model_sampling_segment
 
 
 GATEWAY_TIMEOUT = b'{"error":{"message":"litellm.Timeout: Connection timed out. Timeout passed=360.0"}}'
@@ -21,6 +22,28 @@ def http_error(status=408, content=GATEWAY_TIMEOUT):
     error = ClientResponseError(request_info=request_info, history=(), status=status, message="Request Timeout")
     error.response_content = content
     return error
+
+
+@pytest.mark.parametrize("model_sampling", [None, "null"])
+async def test_an_auxiliary_call_carries_its_sampling_segment(monkeypatch, model_sampling):
+    monkeypatch.setattr(model_client, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(
+        model_client,
+        "get_response_json",
+        AsyncMock(return_value={"choices": [{"message": {"content": "ok"}}]}),
+    )
+    segments = []
+
+    async def post(*_args, **_kwargs):
+        # The server client inserts this segment into the call's path.
+        segments.append(current_model_sampling_segment())
+
+    model = AuxiliaryModel(
+        SimpleNamespace(post=post), "sim", cookies={}, temperature=0.5, model_sampling=model_sampling
+    )
+    assert (await model.call("prompt")).content == "ok"
+    assert segments == [model_sampling]
+    assert current_model_sampling_segment() is None
 
 
 async def test_failed_call_keeps_model_server_status_body_and_timing(monkeypatch):
