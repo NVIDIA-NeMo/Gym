@@ -518,6 +518,20 @@ class OpenCodeSandboxSession(AgentSessionState):
             "stderr": f"{directory}/stderr.log",
             "setup": runner_setup(directory, [env[key] for key in _TASK_DIRECTORY_KEYS]),
         }
+        access = self.request.sandbox_access
+        # SandboxAccess.env, except OPENCODE_* and OPENAI_* variables, which could redirect OpenCode's configuration
+        # or model calls, and NEMO_GYM_* variables, which Gym sets for the harness itself.
+        access_env = {
+            key: value
+            for key, value in (access.env if access else {}).items()
+            if not key.startswith(("OPENCODE_", "OPENAI_", "NEMO_GYM_"))
+        }
+        if access_env:
+            # Exported first, over the sandbox's values: the setup then records a HOME or XDG directory among them as
+            # the task's, and the runner applies ``env`` afterwards, so the adapter's own variables keep their values.
+            params["setup"] = (
+                shell_assignments({"access_env": access_env}) + 'export "${access_env[@]}"\n' + params["setup"]
+            )
         if payload.get("path_prefix"):
             # Preinstalled runtime tools come first; the task's own PATH still follows.
             params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"

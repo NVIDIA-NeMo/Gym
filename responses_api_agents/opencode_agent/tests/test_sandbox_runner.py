@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT
+from nemo_gym.sandbox import SandboxAccess
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.snapshot import snapshot
 
@@ -32,10 +33,18 @@ class LocalSandbox:
         shutil.copyfile(source, destination)
 
 
-async def stage(tmp_path: Path, command: list[str], *, env: dict[str, str] | None = None, **options) -> list[str]:
+async def stage(
+    tmp_path: Path,
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    sandbox_access: SandboxAccess | None = None,
+    **options,
+) -> list[str]:
     """Stage an activation with the adapter, then return its argv with the runner it uploaded at seed time."""
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, tmp_path / HARNESS_RUNNER_FILE)
     state = SimpleNamespace(
+        request=SimpleNamespace(sandbox_access=sandbox_access),
         session=SimpleNamespace(sandbox=LocalSandbox(), session_dir=str(tmp_path)),
         persistent_directory=str(tmp_path),
         is_continuation=False,
@@ -128,6 +137,41 @@ async def test_runner_records_task_directories_before_private_overrides(tmp_path
     assert not (tmp_path / "task-environment.ready").exists()
     assert all((private / key).is_dir() for key in PRIVATE_KEYS)
     assert set(json.loads((tmp_path / "runtime.json").read_text())) == {"hostname", "pid"}
+
+
+async def test_sandbox_access_env_reaches_opencode_except_opencode_openai_and_nemo_gym_variables(tmp_path):
+    access = SandboxAccess(
+        connection={"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {}},
+        workdir=str(tmp_path),
+        env={
+            "TASK_API_TOKEN": "task value",
+            "LANG": "C",
+            "HOME": "/task-home",
+            "XDG_CONFIG_HOME": "/task-config",
+            "OPENCODE_CONFIG_DIR": "must-not-apply",
+            "OPENAI_BASE_URL": "http://must-not-apply",
+            "NEMO_GYM_SUPERVISOR": "must-not-apply",
+        },
+    )
+    names = ("HOME", "TASK_API_TOKEN", "LANG", "OPENCODE_CONFIG_DIR", "OPENAI_BASE_URL", "NEMO_GYM_SUPERVISOR")
+    report = "".join(f'printf "%s|" "${{{name}-unset}}"; ' for name in names)
+    argv = await stage(tmp_path, ["bash", "-c", report], sandbox_access=access)
+    # The sandbox's own environment; the process supervisor sets the marker for the harness.
+    env = {key: value for key, value in os.environ.items() if key not in access.env and not key.startswith("XDG_")}
+    env |= {"HOME": "/sandbox-home", "LANG": "C.UTF-8", "NEMO_GYM_SUPERVISOR": "marker"}
+    completed = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    # OpenCode keeps its private HOME; an entry replaces the sandbox's value of the same name.
+    private_home = tmp_path / "private" / "HOME"
+    assert (tmp_path / "stdout.jsonl").read_text() == f"{private_home}|task value|C|unset|unset|marker|"
+    # Tool shells get the task's directories, which the entries name.
+    assert json.loads((tmp_path / "task-env.json").read_text()) == {
+        "HOME": "/task-home",
+        "XDG_DATA_HOME": "/task-home/.local/share",
+        "XDG_CONFIG_HOME": "/task-config",
+        "XDG_CACHE_HOME": "/task-home/.cache",
+        "XDG_STATE_HOME": "/task-home/.local/state",
+    }
 
 
 async def test_unset_home_falls_back_to_the_account_home(tmp_path):
