@@ -8,9 +8,9 @@ the dataset, not from the benchmark. Each row turns features on through keys in 
 - Single-day: `initial_state` and `assertions` only.
 - Multi-day (`period_end`, `events`, `wait_tool_description`, `wait_until_description`): a `wait` tool moves a
   per-rollout clock forward and applies the dated events in time order. Successful writes are logged with the
-  simulated time, so two more assertion types can grade when the agent acted: `acted_on_day` (`record`, `day`,
-  optional `body_contains`: the first write whose URL names `record` happened on `day`) and `not_acted` (`record`: no
-  write named it; a guardrail).
+  simulated time and the records they added, changed or deleted, so two more assertion types can grade when the
+  agent acted: `acted_on_day` (`record`, `day`, optional `body_contains`: the first write that changed `record`
+  happened on `day`) and `not_acted` (`record`: no write changed it, a guardrail).
 - Multi-turn (`user_card`): when the agent ends a turn without tool calls, a simulated requester answers from its
   private notes. The requester is an OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`) that
   sees only the visible conversation. It answers at most `max_user_turns` times and replies DONE when it has nothing
@@ -37,7 +37,6 @@ import re
 import typing
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
 
 from automationbench.rubric.registry import AssertionRegistry
 from automationbench.schema.world import WorldState
@@ -55,6 +54,8 @@ THINK = re.compile(r"<think>.*?(</think>|\Z)", re.S)  # an unclosed block runs t
 TIME_FIELD = re.compile(r"(?:^|_)(?:date|time|datetime|timestamp|ts|at|created|updated|modified)(?:_|$)")
 FIELD_KEYS = {"field", "property", "column"}
 REQUESTER_RESULT_CHARS = 30000  # one requester tool result, cut: a whole sheet runs to 70k+ characters
+# A sheet row named the way a Sheets range names it: "Tab!B7", "'Q4 2025'!A7:C7", "B7", a bare "7", or rows "2:5".
+ROW_REF = re.compile(r"(?:'?(?P<tab>.+?)'?!)?[A-Za-z]{0,3}(?P<first>\d+)(?::[A-Za-z]{0,3}(?P<last>\d+))?")
 
 # Instructions to the requester model only. The policy sees the requester's replies, never this text.
 REQUESTER_SYSTEM = """You play the person who sent a work request to an assistant that operates business apps for you.
@@ -117,6 +118,59 @@ def _get(msg, key):
     return msg.get(key) if isinstance(msg, dict) else getattr(msg, key, None)
 
 
+def _key(record) -> str | None:
+    """The key a record is named by: its `id`, else `sid` (Twilio), else its first `*_id` field that is set (Xero
+    `contact_id`, or the `channel_id` of a Slack message, which has no id of its own)."""
+    fields = list(record) if isinstance(record, dict) else list(getattr(type(record), "model_fields", ()))
+    names = ["id", "sid", *(f for f in fields if f.endswith("_id"))]
+    return next((str(v) for f in names if f in fields and (v := _get(record, f)) is not None), None)
+
+
+def _records(world: dict) -> dict:
+    """Every record of a world dump by (app, collection, key). A list collection holds records, a dict one maps keys
+    to records, and an app's `actions` log maps an action name to the actions taken (a Jira comment is only there)."""
+    found = {}
+    for app, collections in world.items():
+        if not isinstance(collections, dict):
+            continue
+        for name, items in collections.items():
+            if isinstance(items, list):
+                pairs = [(_key(r), r) for r in items if isinstance(r, dict)]
+            elif isinstance(items, dict):
+                pairs = [(k, r) for k, r in items.items() if isinstance(r, dict)]
+                pairs += [
+                    (_key(r), r) for v in items.values() if isinstance(v, list) for r in v if isinstance(r, dict)
+                ]
+            else:
+                continue
+            for key, record in pairs:
+                if key is not None:
+                    found.setdefault((app, name, str(key)), []).append(record)
+    return found
+
+
+def _references(record: dict) -> list:
+    """The values by which a record points to other records of its app: its id fields (an event's `calendarid`, a
+    Slack message's channel, a sheet row's spreadsheet and tab) and an action's params (the issue of a Jira comment)."""
+    params = record.get("params")
+    return [v for f, v in record.items() if f.lower().endswith("id")] + list(
+        params.values() if isinstance(params, dict) else ()
+    )
+
+
+def _sheet_rows(world: dict) -> dict:
+    """Every Google Sheets row of a world dump by (worksheet id, tab title, A1 row number). The number is the row's
+    `row_id`, or for a string id its position in the tab (the first row is 2), the way upstream addresses it."""
+    sheets = world.get("google_sheets") or {}
+    titles = {w["id"]: w["title"] for w in sheets.get("worksheets", [])}
+    found, position = {}, {}
+    for r in sheets.get("rows", []):
+        ws = r["worksheet_id"]
+        position[ws] = position.get(ws, 1) + 1
+        found[(ws, titles.get(ws), r["row_id"] if isinstance(r["row_id"], int) else position[ws])] = r
+    return found
+
+
 class MissingRecord(ValueError):
     """A dated event names a record the world does not hold."""
 
@@ -134,7 +188,7 @@ def apply_patch(world: WorldState, patch: dict) -> None:
         add = copy.deepcopy(patch["add"])
         collection.append(model.model_validate(add) if hasattr(model, "model_validate") else add)
         return
-    record = next((r for r in collection if str(_get(r, "id")) == str(patch["id"])), None)
+    record = next((r for r in collection if _key(r) == str(patch["id"])), None)
     if record is None:
         raise MissingRecord(f"event patch targets no record {patch['id']!r} in {patch['app']}.{patch['collection']}")
     for key, value in patch["set"].items():
@@ -152,19 +206,11 @@ class Clock:
         self.end = _time(end)
         self.events = sorted(events, key=lambda e: _time(e["at"]))
         self.log: list[dict] = []
-        # acted_on_day reads the day in the seed's own time zone (UTC for a naive seed); the clock itself runs in UTC.
+        # acted_on_day reads the day in the seed's own time zone (UTC for a naive seed), while the clock runs in UTC.
         self.zone = world.meta.current_time.tzinfo or timezone.utc
-        # Records that existed at the seed or were added by an event, so an event on one that is gone now can be told
-        # from an event on a record that never existed.
-        self.known = {
-            (app, collection, str(_get(r, "id")))
-            for app, records in world.model_dump(mode="json").items()
-            if isinstance(records, dict)
-            for collection, items in records.items()
-            if isinstance(items, list)
-            for r in items
-            if isinstance(r, dict)
-        }
+        # Records that existed at the seed or after an event, so an event on one that is gone now can be told from an
+        # event on a record that never existed.
+        self.known = set(_records(world.model_dump(mode="json")))
 
     def now(self) -> datetime:
         return _time(self.world.meta.current_time.isoformat())
@@ -176,17 +222,17 @@ class Clock:
             return json.dumps({"now": self._local(self.now()), "advanced": False})
         while self.events and _time(self.events[0]["at"]) <= target:
             patch = self.events.pop(0)["patch"]
-            key = (patch["app"], patch["collection"], str(patch["id"] if "id" in patch else _get(patch["add"], "id")))
             try:
                 apply_patch(self.world, patch)
             except MissingRecord:
                 # The record existed and is gone: the agent, or the requester it asked, deleted it by some route. The
                 # event has nothing left to change and the rollout is scored. An event on a record that never existed
                 # is a dataset fault and still ends the rollout unscored.
+                key = (patch["app"], patch["collection"], str(patch["id"]))
                 if key not in self.known:
                     raise
                 logger.info("ab_synth: event skipped, %s.%s %s was deleted", *key)
-            self.known.add(key)
+            self.known |= set(_records(self.world.model_dump(mode="json")))
         # Keep the seed's awareness: upstream date queries read a naive time as host-local time.
         aware = self.world.meta.current_time.tzinfo is not None
         self.world.meta.current_time = target.replace(tzinfo=timezone.utc) if aware else target
@@ -201,60 +247,53 @@ class Clock:
         )
 
     def fetch(self, method: str, url: str, params=None, body=None) -> str:
-        """Run one API call. A write is logged when it changes the world: failed writes (whatever shape their error
-        reply has) and read-only POSTs such as searches are not acts."""
+        """Run one API call. A write that changes the world is logged with the keys of the records it added, changed
+        or deleted and the sheet rows it touched. Failed writes (whatever shape their error reply has) and read-only
+        POSTs such as searches change nothing and are not acts."""
         params, body = _as_json_text(params), _as_json_text(body)
         write = method.upper() in WRITE_METHODS
-        before = self.world.model_dump_json() if write else None
+        before = self.world.model_dump(mode="json") if write else None
         out = upstream_api_fetch(self.world, method, url, params, body)
-        if write and self.world.model_dump_json() != before:
+        after = self.world.model_dump(mode="json") if write else None
+        if after != before:
             now = self.now()
             day = now.replace(tzinfo=timezone.utc).astimezone(self.zone).date().isoformat()
-            self.log.append({"at": now.isoformat(), "day": day, "method": method.upper(), "url": url, "body": body})
+            old, new = _records(before), _records(after)
+            old_rows, new_rows = _sheet_rows(before), _sheet_rows(after)
+            changed = [k for k in old.keys() | new.keys() if old.get(k) != new.get(k)]
+            keys = {(app, key) for app, _, key in old.keys() | new.keys()}
+            records = {key for _, _, key in changed} | {
+                v
+                for k in changed
+                for r in old.get(k, []) + new.get(k, [])
+                for v in _references(r)
+                if isinstance(v, str) and (k[0], v) in keys
+            }
+            rows = {k[1:] for k in old_rows.keys() | new_rows.keys() if old_rows.get(k) != new_rows.get(k)}
+            self.log.append(
+                {
+                    "at": now.isoformat(),
+                    "day": day,
+                    "method": method.upper(),
+                    "url": url,
+                    "body": body,
+                    "records": sorted(records),
+                    "rows": sorted(rows, key=str),
+                }
+            )
         return out
 
 
-def names(record: str, url: str) -> bool:
-    """Whether `record` appears in the decoded URL's path or query as a whole identifier.
-
-    Row "6" matches "Sheet!I6:J6" but not "I16" or "I60", and "FD-101" does not match "FD-1010": an edge digit may not
-    touch another digit, an edge letter may not touch a letter or digit. A leading digit after letters matches only
-    after the column of an A1 range in a Sheets values path ("values/B7", "a7:b7", "Sheet1!I6"), never inside a tab
-    title ("Q4 2025!B7") or an id ("deal_ye5l8juv"). The host and API version segments ("/v4/", "/2/" first, "/1.0/")
-    never match.
-    """
-    parts = urlsplit(url)
-    path = unquote(parts.path).split("/")
-    segments = [
-        ""
-        if re.fullmatch(r"v\d+(\.\d+)*|\d+\.\d+(\.\d+)*", s)
-        or (re.fullmatch(r"\d{1,2}", s) and (i == 1 or path[i - 1].lower() in ("api", "rest")))
-        else s
-        for i, s in enumerate(path)
-    ]
-    text = "/".join(segments) + ("?" + unquote(parts.query) if parts.query else "")
-    # The A1 part of a Sheets range: the segment after the last "/values/" (or a bare range with no "/"), after its "!"
-    # when it names a tab.
-    v = a1_start = a1_end = -1
-    if (v := text.rfind("/values/")) >= 0 or "/" not in text:
-        v = v + 8 if v >= 0 else 0
-        a1_end = len(text) if (e := re.search(r"[/?]", text[v:])) is None else v + e.start()
-        a1_start = max(v, text.rfind("!", v, a1_end) + 1)
-    for match in re.finditer(re.escape(record), text):
-        before, after = text[match.start() - 1 : match.start()], text[match.end() : match.end() + 1]
-        if record.isdigit() and 0 <= v <= match.start() < a1_start:
-            continue  # a number in the tab title ("PO #12!A7") is not a row
-        in_a1 = a1_start <= match.start() <= a1_end
-        a1_column = in_a1 and re.search(r"(^|:)[A-Za-z]{1,3}$", text[a1_start : match.start()])
-        if record[0].isdigit() and before.isalpha() and not a1_column:
-            continue
-        if not (_joins(record[0], before) or _joins(record[-1], after)):
-            return True
-    return False
-
-
-def _joins(edge: str, neighbor: str) -> bool:
-    return bool(neighbor) and (neighbor.isdigit() if edge.isdigit() else edge.isalpha() and neighbor.isalnum())
+def touches(record: str, write: dict) -> bool:
+    """Whether a logged write added, changed or deleted `record`: a record with that key, or a sheet row it names."""
+    if record in write["records"]:
+        return True
+    ref = ROW_REF.fullmatch(record)
+    if ref is None:
+        return False
+    first = int(ref["first"])
+    last = int(ref["last"] or first)
+    return any(ref["tab"] in (None, tab) and first <= n <= last for tab, n in write["rows"])
 
 
 def _body_strings(body: str) -> list[str]:
@@ -276,12 +315,11 @@ def _body_strings(body: str) -> list[str]:
 
 
 def day_check(log: list[dict], assertion: dict) -> bool:
-    text = assertion.get("body_contains")
+    record, text = str(assertion["record"]), assertion.get("body_contains")
     hits = [
         e
         for e in log
-        if names(assertion["record"], e["url"])
-        and (not text or text in e["body"] or any(text in s for s in _body_strings(e["body"])))
+        if touches(record, e) and (not text or text in e["body"] or any(text in s for s in _body_strings(e["body"])))
     ]
     if assertion["type"] == "not_acted":
         return not hits

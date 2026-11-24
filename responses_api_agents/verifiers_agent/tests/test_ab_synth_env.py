@@ -69,17 +69,6 @@ class VisibleTextTest(unittest.TestCase):
         self.assertEqual(env._text([{"type": "input_text", "text": "Dict parts stay."}]), "Dict parts stay.")
 
 
-class NamesTest(unittest.TestCase):
-    def test_matches_whole_identifiers_only(self):
-        self.assertTrue(env.names("6", "Sheet1!I6:J6"))
-        self.assertFalse(env.names("6", "Sheet1!I16:J16"))
-        self.assertFalse(env.names("6", "Sheet1!I60"))
-        self.assertTrue(env.names("101", CONTACTS + "101"))
-        self.assertFalse(env.names("101", CONTACTS + "1010"))
-        self.assertFalse(env.names("FD-101", "/tickets/FD-1010"))
-        self.assertTrue(env.names("Q1 Plan", "/files/Q1%20Plan"))
-
-
 class ClockTest(unittest.TestCase):
     def test_wait_applies_due_events_and_never_goes_back(self):
         clock = new_clock()
@@ -432,7 +421,7 @@ class RequesterTest(unittest.TestCase):
 
 
 SF = "https://example.my.salesforce.com/services/data/v61.0/sobjects/"
-ROW_7 = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc/values/Sheet1!A7:B7"
+SHEET = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc/values/"
 JIRA_SEED = {
     "meta": {"current_time": "2026-03-02T09:00:00"},
     "jira": {"issues": [{"id": "10001", "key": "OPS-1", "fields": {"status": {"name": "Done"}}}]},
@@ -497,84 +486,185 @@ class WriteLogTest(unittest.TestCase):
             self.assertEqual(env.replay(info, [{"wait": "2026-03-04T09:00:00"}, write]), 1.0, text)
 
 
-class RowNumberTest(unittest.TestCase):
-    SHEET = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc/values/"
+class ChangedRecordTest(unittest.TestCase):
+    """acted_on_day and not_acted grade the records a write added, changed or deleted, whatever its URL says."""
 
-    def test_a_row_number_does_not_match_the_api_version_or_the_tab_name(self):
-        self.assertFalse(env.names("4", ROW_7))  # inside /v4/
-        self.assertFalse(env.names("1", ROW_7))  # inside Sheet1
-        self.assertFalse(env.names("3", CONTACTS + "101"))  # inside crm/v3
-        self.assertTrue(env.names("7", ROW_7))  # the A1 cell reference
-
-    def test_bare_and_lowercase_a1_ranges_name_their_row(self):
-        self.assertTrue(env.names("7", self.SHEET + "B7"))  # first-sheet range, no sheet name
-        self.assertTrue(env.names("7", self.SHEET + "a7:b7"))
-        self.assertTrue(env.names("7", self.SHEET + "Sheet1!a7"))
-        self.assertTrue(env.names("1", self.SHEET + "Sheet1!A1:B1"))
-
-    def test_bare_number_version_segments_and_hosts_do_not_name_a_record(self):
-        self.assertFalse(env.names("2", "https://api.twitter.com/2/tweets"))
-        self.assertFalse(env.names("1", "https://api.trello.com/1/cards"))
-        self.assertFalse(env.names("1", "https://app.asana.com/api/1.0/tasks"))
-        self.assertFalse(env.names("3", "https://3.basecampapi.com/999/buckets/5/todos.json"))
-        self.assertFalse(env.names("3", "https://example.atlassian.net/rest/api/3/issue/10001/comment"))
-        self.assertTrue(env.names("10001", "https://example.atlassian.net/rest/api/3/issue/10001/comment"))
-        self.assertTrue(env.names("5", "https://3.basecampapi.com/999/buckets/5/todos.json"))
-
-    def test_writes_elsewhere_do_not_break_not_acted_on_low_row_numbers(self):
-        info = {**INFO, "events": [], "assertions": [PROMOTED, {"type": "not_acted", "record": "2"}]}
+    def test_a_write_names_only_the_records_it_changed(self):
+        info = {
+            **INFO,
+            "events": [],
+            "assertions": [
+                {"type": "acted_on_day", "record": "101", "day": "2026-03-02"},
+                {"type": "not_acted", "record": "1010"},
+                {"type": "not_acted", "record": 1010},  # an integer record grades like its string
+                {"type": "not_acted", "record": "3"},  # the version in crm/v3
+                {"type": "not_acted", "record": "2"},  # the version in twitter /2/
+            ],
+        }
         tweet = {"method": "POST", "url": "https://api.twitter.com/2/tweets", "body": {"text": "Launch day"}}
-        log = [{"at": "2026-03-04T09:00:00", "method": "PUT", "url": ROW_7, "body": "{}"}]
 
         self.assertEqual(env.replay(info, [PROMOTE, tweet]), 1.0)
-        self.assertTrue(env.day_check(log, {"type": "not_acted", "record": "4"}))
+        self.assertEqual(env.replay(info, [PROMOTE, {**PROMOTE, "url": CONTACTS + "1010"}]), 0.0)
 
-    def test_an_on_time_write_to_a_bare_range_passes_acted_on_day(self):
-        seed = {
+    def test_a_record_named_only_in_the_body_is_graded(self):
+        initial = {
+            "meta": {"current_time": "2026-03-02T09:00:00"},
+            "quickbooks": {"invoices": [{"id": "130", "customer_id": "7", "balance": "100"}]},
+            "slack": {"channels": [{"id": "C123", "name": "ops"}]},
+        }
+        # QuickBooks deletes with the id in the body; a Slack post names its channel only in the body.
+        delete = {
+            "method": "POST",
+            "url": "https://quickbooks.api.intuit.com/v3/company/123/invoice",
+            "params": {"operation": "delete"},
+            "body": {"Id": "130"},
+        }
+        post = {
+            "method": "POST",
+            "url": "https://slack.com/api/chat.postMessage",
+            "body": {"channel": "C123", "text": "hi"},
+        }
+        acted = {
+            "initial_state": initial,
+            "assertions": [{"type": "acted_on_day", "record": r, "day": "2026-03-02"} for r in ("130", "C123")],
+        }
+
+        self.assertEqual(env.replay(acted, [delete, post]), 1.0)
+        self.assertEqual(env.replay({**acted, "assertions": [{"type": "not_acted", "record": "130"}]}, [delete]), 0.0)
+
+    def test_a_new_record_names_the_record_it_belongs_to(self):
+        initial = {
+            "meta": {"current_time": "2026-03-02T09:00:00"},
+            "google_calendar": {
+                "calendars": [{"id": "CAL_1", "summary": "Check-ins"}, {"id": "CAL_2", "summary": "Other"}]
+            },
+        }
+        create = {
+            "method": "POST",
+            "url": "https://www.googleapis.com/calendar/v3/calendars/CAL_1/events",
+            "body": {
+                "summary": "Check-in",
+                "start": {"dateTime": "2026-03-03T10:00:00Z"},
+                "end": {"dateTime": "2026-03-03T10:30:00Z"},
+            },
+        }
+        info = {
+            "initial_state": initial,
+            "assertions": [
+                {"type": "acted_on_day", "record": "CAL_1", "day": "2026-03-02", "body_contains": "Check-in"},
+                {"type": "not_acted", "record": "CAL_2"},
+            ],
+        }
+
+        self.assertEqual(env.replay(info, [create]), 1.0)
+
+    def test_writes_to_untyped_collections_are_logged(self):
+        # jira holds plain-dict issues and an `actions` log of lists by action name.
+        clock = env.Clock(WorldState(**copy.deepcopy(JIRA_SEED)), [], "2026-03-06T18:00:00")
+        jira = "https://example.atlassian.net/rest/api/3/issue"
+        clock.fetch(
+            "POST", jira, body={"fields": {"project": {"key": "OPS"}, "summary": "New", "issuetype": {"name": "Task"}}}
+        )
+        clock.fetch("POST", jira + "/10001/comment", body={"body": "Looked at it"})
+
+        self.assertEqual(len(clock.log), 2)
+        self.assertIn("10001", clock.log[1]["records"])
+
+
+class SheetRowTest(unittest.TestCase):
+    """A sheet row is named the way a Sheets range names it, and graded on the rows the write changed."""
+
+    @staticmethod
+    def seed(title, ws="ws1", row_ids=range(2, 9)):
+        return {
             "meta": {"current_time": "2026-03-02T09:00:00"},
             "google_sheets": {
                 "spreadsheets": [{"id": "ss_abc", "title": "Tracker"}],
-                "worksheets": [{"id": "ws1", "spreadsheet_id": "ss_abc", "title": "Sheet1", "headers": ["A", "B"]}],
+                "worksheets": [{"id": ws, "spreadsheet_id": "ss_abc", "title": title, "headers": ["A", "B"]}],
                 "rows": [
-                    {
-                        "spreadsheet_id": "ss_abc",
-                        "worksheet_id": "ws1",
-                        "row_id": i,
-                        "cells": {"A": f"n{i}", "B": "open"},
-                    }
-                    for i in range(2, 9)
+                    {"spreadsheet_id": "ss_abc", "worksheet_id": ws, "row_id": i, "cells": {"A": f"n{i}", "B": "open"}}
+                    for i in row_ids
                 ],
             },
         }
-        info = {"initial_state": seed, "assertions": [{"type": "acted_on_day", "record": "7", "day": "2026-03-02"}]}
+
+    def test_a_write_names_the_row_it_changed_however_the_range_is_written(self):
+        day = "2026-03-02"
+        for title, rng in [
+            ("Sheet1", "B7"),
+            ("Sheet1", "Sheet1!A7:B7"),
+            ("Q4 2025", "Q4%202025!B7"),
+            ("Q4 2025", "'Q4%202025'!B7"),
+            ("Jan/Feb", "Jan%2FFeb!B7"),
+            ("Done?", "Done%3F!A7"),
+            ("PO #12", "PO%20%2312!A7:B7"),
+        ]:
+            info = {
+                "initial_state": self.seed(title),
+                "assertions": [
+                    {"type": "acted_on_day", "record": "7", "day": day},
+                    {"type": "acted_on_day", "record": f"{title}!H7:I7", "day": day},  # other columns, same row
+                    {"type": "acted_on_day", "record": f"'{title}'!A7", "day": day},
+                    {"type": "acted_on_day", "record": "ss_abc", "day": day},  # the spreadsheet
+                    *({"type": "not_acted", "record": r} for r in ("1", "2", "4", "12", "16", "70", "Other!B7")),
+                ],
+            }
+            write = {
+                "method": "PUT",
+                "url": SHEET + rng,
+                "params": {"valueInputOption": "RAW"},
+                "body": {"values": [["done"]]},
+            }
+
+            self.assertEqual(env.replay(info, [write]), 1.0, rng)
+
+    def test_rows_routes_append_and_multi_row_ranges_name_only_their_rows(self):
+        day = "2026-03-02"
+        rows_route = {"method": "PUT", "url": SHEET + "ws2/rows/5", "body": {"cells": {"B": "done"}}}
+        info = {
+            "initial_state": self.seed("Sheet1", "ws2"),
+            "assertions": [{"type": "acted_on_day", "record": "5", "day": day}, {"type": "not_acted", "record": "2"}],
+        }
+        self.assertEqual(env.replay(info, [rows_route]), 1.0)
+
+        append = {"method": "POST", "url": SHEET + "Q4%202025:append", "body": {"values": [["x", "y"]]}}
+        info = {
+            "initial_state": self.seed("Q4 2025"),
+            "assertions": [
+                {"type": "acted_on_day", "record": "Q4 2025!A9", "day": day},
+                {"type": "not_acted", "record": "4"},
+            ],
+        }
+        self.assertEqual(env.replay(info, [append]), 1.0)
+
+        # One range over rows 2-4 writes row 3, which a not_acted on row 3 has to see.
+        block = {"method": "PUT", "url": SHEET + "Sheet1!B2:B4", "body": {"values": [["a"], ["b"], ["c"]]}}
+        info = {
+            "initial_state": self.seed("Sheet1"),
+            "assertions": [
+                {"type": "acted_on_day", "record": "Sheet1!A2:B8", "day": day},
+                {"type": "not_acted", "record": "3"},
+            ],
+        }
+        self.assertEqual(env.replay(info, [block]), 0.0)
+
+    def test_rows_with_string_ids_are_numbered_by_position(self):
+        # Upstream addresses a tab of string-keyed rows by position: A1 row 2 is its first row.
+        info = {
+            "initial_state": self.seed("Holds", row_ids=["CH-001", "CH-002", "CH-003"]),
+            "assertions": [
+                {"type": "acted_on_day", "record": "Holds!B3", "day": "2026-03-02"},
+                {"type": "not_acted", "record": "Holds!B2"},
+            ],
+        }
         write = {
             "method": "PUT",
-            "url": self.SHEET + "B7",
+            "url": SHEET + "Holds!B3",
             "params": {"valueInputOption": "RAW"},
-            "body": {"values": [["done"]]},
+            "body": {"values": [["x"]]},
         }
 
         self.assertEqual(env.replay(info, [write]), 1.0)
-
-        # A tab title with letters before a digit is not a column: "Q4 2025" does not name row 4.
-        seed["google_sheets"]["worksheets"][0]["title"] = "Q4 2025"
-        info["assertions"].append({"type": "not_acted", "record": "4"})
-        q4 = dict(write, url=self.SHEET + "Q4%202025!B7")
-        self.assertEqual(env.replay(info, [q4]), 1.0)
-
-    def test_digits_inside_tab_titles_and_ids_do_not_name_a_row(self):
-        self.assertFalse(env.names("4", self.SHEET + "Q4%202025!B7"))
-        self.assertTrue(env.names("7", self.SHEET + "Q4%202025!B7"))
-        self.assertFalse(env.names("5", "https://api.hubapi.com/crm/v3/objects/deals/deal_ye5l8juv"))
-        self.assertFalse(env.names("2", "https://slack.com/api/messages/msg_v2"))
-        self.assertFalse(
-            env.names("8", "https://sheets.googleapis.com/v4/spreadsheets/sheet_i8gkxai1a0/values/Sheet1!A2")
-        )
-        self.assertFalse(env.names("7", "https://example.com/items/c7"))
-
-    def test_an_encoded_hash_in_a_tab_title_keeps_the_range(self):
-        self.assertTrue(env.names("7", self.SHEET + "PO%20%2312!A7:B7"))
-        self.assertFalse(env.names("12", self.SHEET + "PO%20%2312!A7:B7"))
 
 
 class DictCollectionEventTest(unittest.TestCase):
@@ -591,6 +681,18 @@ class DictCollectionEventTest(unittest.TestCase):
 
         clock.wait("2026-03-04T09:00:00")
         self.assertEqual(clock.world.jira.issues[0]["fields"]["status"]["name"], "Reopened")
+
+    def test_an_event_can_update_a_record_keyed_by_another_field(self):
+        # Xero contacts are keyed by contact_id, not id.
+        seed = {
+            "meta": {"current_time": "2026-03-02T09:00:00"},
+            "xero": {"contacts": [{"contact_id": "c-1", "name": "Acme"}]},
+        }
+        patch = {"app": "xero", "collection": "contacts", "id": "c-1", "set": {"name": "Acme Ltd"}}
+        clock = env.Clock(WorldState(**seed), [{"at": "2026-03-03T08:00:00", "patch": patch}], "2026-03-06T18:00:00")
+
+        clock.wait("2026-03-04T09:00:00")
+        self.assertEqual(clock.world.xero.contacts[0].name, "Acme Ltd")
 
     def test_an_event_can_add_a_jira_issue(self):
         patch = {"app": "jira", "collection": "issues", "add": {"id": "10002", "key": "OPS-2"}}

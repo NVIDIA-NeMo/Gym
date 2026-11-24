@@ -15,20 +15,25 @@ tasks are shipped or used. One environment serves three kinds of rows, chosen by
 The `wait` tool moves the clock forward. Each dated event (an approval arrives, a ticket is reopened, a record
 changes) is applied when the clock passes its time, so the agent has to wait for the right day, read the world again
 and act then. `events` is `[{"at": iso time, "patch": {...}}]`: a patch sets fields on a record (`app`, `collection`,
-`id`, `set`) or adds one (`app`, `collection`, `add`). The `wait` reply gives the new time in the seed's zone (naive
+`id`, `set`, where `id` is the record's key as below) or adds one (`app`, `collection`, `add`). The `wait` reply gives the new time in the seed's zone (naive
 UTC for a naive seed). The environment refuses to load a multi-day row without the two wait texts or with a time
 that is not ISO 8601.
 
-Every `api_fetch` write that changes the world is logged with the simulated time (a failed write or a read-only
-POST such as a search is not an act), and two more assertion types grade when the agent acted:
+Every `api_fetch` write that changes the world is logged with the simulated time and the records it added, changed
+or deleted (a failed write or a read-only POST such as a search changes nothing and is not an act). Two more
+assertion types grade when the agent acted:
 
-- `acted_on_day` (`record`, `day`, optional `body_contains`): the first write whose URL names `record` happened on
+- `acted_on_day` (`record`, `day`, optional `body_contains`): the first write that changed `record` happened on
   `day` (YYYY-MM-DD, in the time zone of the seed's `meta.current_time`, UTC for a naive one). Acting early fails it.
-- `not_acted` (`record`): no write named `record`. It is a guardrail.
+- `not_acted` (`record`): no write changed `record`. It is a guardrail.
 
-`record` is matched in the request URL's path and query only (the host and API version segments such as `/v3/` are
-skipped; a sheet row number matches its A1 range, `B7` or `Sheet1!A7:B7`). Records that some APIs name only in the
-body, such as a Slack channel in `chat.postMessage` or a GraphQL id, cannot be graded with these two assertions.
+A write is graded on the world, not on its URL, so a record named only in the body (a QuickBooks delete, a Slack
+channel) counts the same as one in the path. `record` is the key of a record: its `id`, else `sid`, else its first
+`*_id` field (Xero `contact_id`). A write also changes the records the changed ones point to by an id field or, for
+an action an app only logs (a Jira comment), by its params: a new calendar event changes its calendar, a Slack post
+its channel, a sheet row its spreadsheet and tab. A sheet row is named the way a Sheets range names it: `7`, `B7`,
+`Sheet1!A7:C7` or `'Q4 2025'!B7` (any columns), or rows `Sheet1!A2:B5`. Its number is its `row_id`, or its position
+in the tab for string row ids (the first row is 2), the way the simulator addresses it.
 
 ## Multi-turn
 
