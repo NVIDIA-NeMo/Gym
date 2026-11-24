@@ -109,8 +109,8 @@ gym eval run --no-serve \
 
 The configs keep the legacy configs' budgets (900 s per task; Hermes 60 turns, Claude Code 30; OpenCode 1.17.11).
 They differ where a lent sandbox needs it: Hermes runs only the `terminal` and `file` toolsets, OpenCode runs with
-`opencode_agent`'s command deny-list and without web, subagent and skill tools, and Claude Code calls the policy model
-server's `/v1/messages` route with a pinned version.
+`opencode_agent`'s command deny-list and without web, subagent and skill tools, and Claude Code runs without
+`WebFetch` and `WebSearch` and calls the policy model server's `/v1/messages` route with a pinned version.
 
 ### Migrating from `cvdp_agent_generic_*`
 

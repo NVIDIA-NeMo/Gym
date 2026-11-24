@@ -18,6 +18,9 @@ cvdp_agentic_claude_code_agent:
       model: ${policy_model_name}
       # Sandbox sessions install this exact version into the lent sandbox.
       claude_code_version: 2.1.285
+      # No web tools, as with Hermes and OpenCode: the tasks need none, and a tool reached over HTTP belongs in a
+      # sidecar, not in the task sandbox.
+      disallowed_tools: WebFetch,WebSearch
       max_turns: 30
       # cvdp_agent's harness timeout.
       timeout: 900
