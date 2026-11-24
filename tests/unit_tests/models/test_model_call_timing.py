@@ -7,6 +7,7 @@ import pytest
 
 from nemo_gym.models import model_call_timing
 from nemo_gym.models.model_call_timing import ModelCallTimingMiddleware
+from nemo_gym.server_runtime.request_handling.disconnect import CLIENT_DISCONNECTED_STATE_KEY
 from nemo_gym.telemetry import gym_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 
@@ -79,7 +80,14 @@ async def _call(app, path: str = "/v1/responses", method: str = "POST", disconne
         pass
 
     await ModelCallTimingMiddleware(app, server_name="policy_model")(
-        {"type": "http", "path": path, "method": method}, receive, send
+        {
+            "type": "http",
+            "path": path,
+            "method": method,
+            "state": {CLIENT_DISCONNECTED_STATE_KEY: asyncio.Event()},
+        },
+        receive,
+        send,
     )
 
 
@@ -151,6 +159,20 @@ async def test_a_call_that_fails_mid_response_is_an_error(collected_metrics, fai
 
     attributes, _ = _only(collected_metrics()[gym_metrics.MODEL_CALL_DURATION_INSTRUMENT])
     assert attributes["nemo.gym.model.call_outcome"] == "error"
+
+
+async def test_a_failure_after_the_client_left_is_a_cancelled_call(collected_metrics) -> None:
+    async def app(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": DELTA, "more_body": True})
+        scope["state"][CLIENT_DISCONNECTED_STATE_KEY].set()
+        raise RuntimeError("cleanup after the cancellation failed")
+
+    with pytest.raises(RuntimeError):
+        await _call(app)
+
+    attributes, _ = _only(collected_metrics()[gym_metrics.MODEL_CALL_DURATION_INSTRUMENT])
+    assert attributes["nemo.gym.model.call_outcome"] == "cancelled"
 
 
 @pytest.mark.parametrize("disconnect", [True, False], ids=["client disconnected", "response abandoned"])

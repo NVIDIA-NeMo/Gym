@@ -121,7 +121,7 @@ class ModelCallTimingMiddleware:
             raise
         except Exception:
             if not finished:
-                _finish("error")
+                _finish("cancelled" if _client_left() else "error")
             raise
         if not finished:
             # The app returned without a final body: the client went away, or the response was abandoned.
