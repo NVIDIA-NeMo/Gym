@@ -1267,8 +1267,7 @@ def build_sbatch_script(
     output_path = f"+output_jsonl_fpath={remote_bench_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    # Where every step of this job logs, so the run can record where its service (vLLM) logs are.
-    driver_env = {SERVICE_LOG_DIR_ENV: str(remote_bench_dir / LOG_DIR), **config.driver.env}
+    driver_env = dict(config.driver.env)
     if instrumented:
         driver_env = {
             **driver_telemetry_env(
@@ -1309,6 +1308,8 @@ def build_sbatch_script(
         driver_env |= _command_env(benchmark, remote_bench_dir)
     # Host PWD can resolve to an alias that is absent from the container bind mounts.
     driver_env["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
+    # Where every step's `srun --output` writes, so the run can record where its service (vLLM) logs are.
+    driver_env[SERVICE_LOG_DIR_ENV] = str(remote_bench_dir / LOG_DIR)
     exports = effective_exports(config, benchmark_name)
     export_tail = (
         render_export_tail(

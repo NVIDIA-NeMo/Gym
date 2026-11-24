@@ -3754,7 +3754,8 @@ def test_a_benchmark_without_a_target_saves_the_config_it_always_did(tmp_path):
     ("declared", "expected"),
     [
         pytest.param(None, "jobs/x/osworld/logs", id="the job's logs folder"),
-        pytest.param("lit:/scratch/logs", "/scratch/logs", id="driver.env wins"),
+        # The step logs stay where `srun --output` writes them, so driver.env cannot move the folder.
+        pytest.param("lit:/scratch/logs", "jobs/x/osworld/logs", id="driver.env cannot move it"),
     ],
 )
 def test_the_driver_is_told_where_the_jobs_step_logs_are(tmp_path, declared, expected):
@@ -3763,3 +3764,4 @@ def test_the_driver_is_told_where_the_jobs_step_logs_are(tmp_path, declared, exp
 
     values = re.findall(r"\bNEMO_GYM_SERVICE_LOG_DIR=(\S*)", script)
     assert values and all(value.endswith(expected) for value in values)
+    assert "--output=logs/driver-$SLURM_JOB_ID.log" in script
