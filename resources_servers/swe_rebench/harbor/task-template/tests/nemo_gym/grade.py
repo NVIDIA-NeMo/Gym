@@ -25,10 +25,11 @@ server's own modules, vendored unchanged beside this file:
    code (its build files, its package hooks) before ``TEST_OUTPUT_BEGIN``, so nothing in that output is trusted.
 
 Reward safety is the Scale-SWE task's: the eval script runs the agent's patched code as uid 0 without the
-capabilities that reach the reward folder, which is handed to ``REWARD_OWNER_UID`` first; the files this process has
-mapped are handed to that uid without write bits; once the eval script starts, an audit hook refuses every import,
-load, spawn and unlisted open; and the outputs are written as that uid. Anything that goes wrong after the tests
-started exits 1 without a reward (a measured 0). See the Scale-SWE grader's docstring for the full argument.
+capabilities that reach the reward folder, which is handed to ``REWARD_OWNER_UID`` first; the files mapped by this
+process and by the processes above it that relay test.sh's exit status are handed to that uid without write bits; once
+the eval script starts, an audit hook refuses every import, load, spawn and unlisted open; and the outputs are written
+as that uid. Anything that goes wrong after the tests started exits 1 without a reward (a measured 0). See the
+Scale-SWE grader's docstring for the full argument.
 
 Standard library only. ``tests/test.sh`` runs it with the image's Python 3.10+ or the pinned standalone Python
 (isolated mode).
@@ -63,8 +64,6 @@ FAILED_CLOSED = 1
 # A uid no process in this sandbox runs as: the owner of every directory on the path to the reward file.
 REWARD_OWNER_UID = 47311
 PROTECTED_DIRS = (Path("/"), Path("/logs"), LOGS)
-# The Harbor wrapper's exit record (environment_servers/harbor/verifier.py, EXIT_RECORD_NAME).
-EXIT_RECORD_NAME = ".ng-exit"
 # Capabilities the eval script keeps (linux/capability.h). None reaches a file or process another uid owns, or the
 # uid itself: CAP_FSETID 4, CAP_KILL 5, CAP_NET_BIND_SERVICE 10, CAP_NET_RAW 13, CAP_AUDIT_WRITE 29.
 KEPT_CAPABILITIES = frozenset({4, 5, 10, 13, 29})
@@ -197,17 +196,17 @@ def _give_root_ownership(top: str = "/") -> int:
 
 
 def _protect_reward_path() -> None:
-    """Hand the reward file's directories to ``REWARD_OWNER_UID``, drop any reward file already there, and leave an
-    exit record saying 1: the wrapper overwrites it with test.sh's real code (as root, keeping its owner), so a test
-    process that kills the wrapper before that write leaves a measured 0 instead of no record. It cannot stop the
-    wrapper's own write from failing after truncating the record (a file size limit a test process set on it): that
-    still masks."""
+    """Hand the reward file's directories to ``REWARD_OWNER_UID`` and drop any reward file already there.
+
+    No exit record is written: the harbor server takes test.sh's exit status from its run exec and reads nothing
+    written in this sandbox after test.sh but the reward. An older harbor server wrapped test.sh in a shell that
+    wrote ``.ng-exit`` after it, and masked a sample whose record was missing or unreadable, so there a test process
+    that kills that shell or spoils its record masks the sample."""
     for name in ("reward.json", "reward.txt"):
         (LOGS / name).unlink(missing_ok=True)
     for directory in PROTECTED_DIRS:
         os.chown(directory, REWARD_OWNER_UID, -1)
         os.chmod(directory, 0o755)
-    _write_output(EXIT_RECORD_NAME, f"{FAILED_CLOSED}\n")
 
 
 def _write_output(name: str, text: str) -> None:
@@ -368,9 +367,9 @@ async def _warm_event_loop() -> None:
     await asyncio.to_thread(int)
 
 
-def _read_mappings() -> set[tuple[str, str, str]]:
-    """``(path, device, inode)`` of every file-backed mapping of this process, from ``/proc/self/maps``."""
-    descriptor = os.open(PROC_MAPS, os.O_RDONLY | os.O_CLOEXEC)
+def _read_mappings(maps: str = PROC_MAPS) -> set[tuple[str, str, str]]:
+    """``(path, device, inode)`` of every file-backed mapping listed in ``maps`` (this process's by default)."""
+    descriptor = os.open(maps, os.O_RDONLY | os.O_CLOEXEC)
     try:
         chunks = []
         while True:
@@ -388,9 +387,36 @@ def _read_mappings() -> set[tuple[str, str, str]]:
     return entries
 
 
-def _mapped_paths() -> list[str]:
-    """The files this process has mapped that still have a path."""
-    return sorted({path for path, _, _ in _read_mappings() if not path.endswith(" (deleted)")})
+def _mapped_paths(maps: str = PROC_MAPS) -> list[str]:
+    """The files a process has mapped that still have a path (``maps`` is this process's by default)."""
+    return sorted({path for path, _, _ in _read_mappings(maps) if not path.endswith(" (deleted)")})
+
+
+def _ancestors() -> list[tuple[int, str | None]]:
+    """``(pid, name)`` of every process above this one, nearest first.
+
+    They all wait for this process and outlive the tests: ``timeout`` and the shell the harbor server runs test.sh in
+    relay its exit status, and whatever started them (``su``, the provider's daemon) relays it further. No shape is
+    assumed (an older harbor server's shell has more to do after test.sh, a provider may add or remove a level): the
+    walk follows the parent links until a parent outside this PID namespace (pid 0), one that is gone, or one whose
+    ``stat`` this process may not read (listed with the name ``None``; its parent is unknown, so the walk ends).
+    """
+    found: list[tuple[int, str | None]] = []
+    pid = os.getppid()
+    while pid > 0 and all(pid != seen for seen, _ in found):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as handle:
+                line = handle.read()
+        except (FileNotFoundError, ProcessLookupError):
+            break
+        except PermissionError:
+            found.append((pid, None))
+            break
+        # The name is in parentheses and may hold any byte: the fields after the last ")" are state, then ppid.
+        head, _, tail = line.rpartition(b")")
+        found.append((pid, head.partition(b"(")[2].decode("utf-8", errors="replace")))
+        pid = int(tail.split()[1])
+    return found
 
 
 def _mapping_ids() -> set[tuple[str, str]]:
@@ -408,13 +434,33 @@ def _file_state(info: os.stat_result) -> tuple[int, int, int, int]:
 
 
 def _protect_mappings() -> dict:
-    """Hand every regular file this process has mapped to ``REWARD_OWNER_UID`` without write bits, keeping an open
-    descriptor and the state of each; a read-only filesystem counts as protected. Any other error raises (before the
-    tests: the caller masks)."""
+    """Hand every regular file mapped by this process or one of its ``_ancestors`` to ``REWARD_OWNER_UID`` without
+    write bits, keeping an open descriptor and the state of each, so the tests cannot rewrite in place the code that
+    computes the reward or relays the exit status. A read-only filesystem counts as protected; an ancestor that is
+    gone, and a mapped path that does not exist in this mount namespace, leave nothing the tests could write. An
+    ancestor whose maps this process may not read is skipped and listed in ``unreadable_ancestors``. Any other error
+    raises (before the tests: the caller masks)."""
     started = time.monotonic()
+    ancestors = _ancestors()
+    paths = set(_mapped_paths())
+    unreadable = []
+    for pid, name in ancestors:
+        try:
+            paths.update(_mapped_paths(f"/proc/{pid}/maps"))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError:
+            # A process this one may not inspect started with more privilege than the exec that runs the grader: in
+            # practice the provider's own service or the sandbox's init. Whether test code can change it is the
+            # provider's boundary, not something the grader can protect. The relays started by that same exec
+            # (timeout, the server's shell, su) stay readable and are protected.
+            unreadable.append({"pid": pid, "name": name})
     kept = {}
-    for path in _mapped_paths():
-        info = os.stat(path)
+    for path in sorted(paths):
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            continue
         if not stat.S_ISREG(info.st_mode):
             continue
         try:
@@ -425,7 +471,13 @@ def _protect_mappings() -> dict:
                 raise
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
         kept[path] = (descriptor, _file_state(os.fstat(descriptor)))
-    return {"mappings": _mapping_ids(), "kept": kept, "seconds": round(time.monotonic() - started, 3)}
+    return {
+        "mappings": _mapping_ids(),
+        "kept": kept,
+        "ancestors": [name for _, name in ancestors],
+        "unreadable_ancestors": unreadable,
+        "seconds": round(time.monotonic() - started, 3),
+    }
 
 
 def _prepare_after_tests() -> dict:
@@ -541,7 +593,12 @@ def grade() -> int:
         record = _prepare_after_tests()
     except OSError as error:
         return _no_verdict(f"could not protect the files the grader has mapped: {error}", details)
-    details["protected_mappings"] = {"files": len(record["kept"]), "seconds": record["seconds"]}
+    details["protected_mappings"] = {
+        "files": len(record["kept"]),
+        "ancestors": record["ancestors"],
+        "unreadable_ancestors": record["unreadable_ancestors"],
+        "seconds": record["seconds"],
+    }
     _arm_after_tests()
     result = asyncio.run(
         v.run_verification(

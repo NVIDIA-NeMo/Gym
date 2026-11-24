@@ -12,6 +12,7 @@ the privilege drop, the uid switch) stubbed out.
 import ast
 import asyncio
 import base64
+import errno
 import gzip
 import importlib.util
 import io
@@ -510,9 +511,10 @@ class _Grader:
         monkeypatch.setattr(self.module, "_give_root_ownership", lambda: self.calls.append("ownership") or 0)
         self.protect_reward_path = self.module._protect_reward_path
         monkeypatch.setattr(self.module, "_protect_reward_path", lambda: self.calls.append("protect"))
-        record = {"mappings": set(), "kept": {}, "seconds": 0.0}
+        record = {"mappings": set(), "kept": {}, "ancestors": [], "unreadable_ancestors": [], "seconds": 0.0}
         monkeypatch.setattr(self.module, "_prepare_after_tests", lambda: self.calls.append("prepare") or record)
         monkeypatch.setattr(self.module, "_arm_after_tests", lambda: self.calls.append("arm"))
+        self.check_mappings = self.module._check_mappings
         monkeypatch.setattr(self.module, "_check_mappings", lambda record: self.calls.append("check"))
 
         def drop() -> None:
@@ -812,32 +814,179 @@ def test_write_output_writes_utf8_bytes_without_a_text_layer(grader: _Grader, mo
     assert (grader.logs / "grading.json").read_bytes() == '{"x": "é中"}'.encode()
 
 
-def test_exit_record_says_1_until_the_wrapper_overwrites_it(grader: _Grader, monkeypatch: pytest.MonkeyPatch) -> None:
-    # A test process that kills the wrapper around test.sh leaves this record: the harbor server reads exit 1 without
-    # a reward, a measured 0, instead of a run with no record.
-    from environment_servers.harbor.verifier import EXIT_RECORD_NAME, parse_exit_record
-
+def test_reward_path_protection_drops_old_rewards_and_writes_no_exit_record(
+    grader: _Grader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The harbor server takes test.sh's exit status from its run exec and never reads an exit record, so the grader
+    # leaves none (a pre-created one was collected as a stale log saying exit 1).
     module = grader.module
     grader.logs.mkdir()
-    (grader.logs / EXIT_RECORD_NAME).write_text("75 0 1\n")
     (grader.logs / "reward.json").write_text('{"reward": 1}')
+    (grader.logs / "reward.txt").write_text("1")
     monkeypatch.setattr(module, "REWARD_OWNER_UID", os.getuid())
     monkeypatch.setattr(module, "PROTECTED_DIRS", (grader.logs,))
     grader.protect_reward_path()
-    assert module.EXIT_RECORD_NAME == EXIT_RECORD_NAME
-    assert (grader.logs / EXIT_RECORD_NAME).read_text() == "1\n"
-    assert parse_exit_record(grader.logs) == (1, None)
-    assert not (grader.logs / "reward.json").exists()
+    assert sorted(path.name for path in grader.logs.iterdir()) == []
+    assert not hasattr(module, "EXIT_RECORD_NAME")
+
+
+def _stub_ancestor_maps(module, monkeypatch: pytest.MonkeyPatch, maps: dict[str, object]) -> None:
+    """Ancestors 101, 102 and 1, nearest first; ``maps`` gives each one's mapped paths or the error reading them."""
+
+    def mapped_paths(path: str = module.PROC_MAPS) -> list[str]:
+        if path == module.PROC_MAPS:
+            return []
+        found = maps[path]
+        if isinstance(found, BaseException):
+            raise found
+        return found
+
+    monkeypatch.setattr(module, "_mapped_paths", mapped_paths)
+    monkeypatch.setattr(module, "_ancestors", lambda: [(101, "gone"), (102, "sh"), (1, "init")])
+    monkeypatch.setattr(module, "REWARD_OWNER_UID", os.getuid())
+
+
+@pytest.mark.parametrize("refusal", [errno.EACCES, errno.EPERM])
+def test_mapping_protection_covers_ancestors_and_skips_one_it_may_not_inspect(
+    grader: _Grader, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, refusal: int
+) -> None:
+    # The files an ancestor has mapped are protected like the grader's own; a gone ancestor is skipped; an ancestor
+    # whose maps the grader may not read (on a real sandbox, pid 1: the provider's service or the sandbox's init) is
+    # skipped and listed, and the readable relay below it is still protected and checked after the tests.
+    module = grader.module
+    mapped = tmp_path / "relay.bin"
+    mapped.write_bytes(b"A" * 64)
+    maps: dict[str, object] = {
+        "/proc/101/maps": FileNotFoundError(),
+        "/proc/102/maps": [str(mapped)],
+        "/proc/1/maps": OSError(refusal, os.strerror(refusal), "/proc/1/maps"),
+    }
+    _stub_ancestor_maps(module, monkeypatch, maps)
+    record = module._protect_mappings()
+    assert list(record["kept"]) == [str(mapped)] and record["ancestors"] == ["gone", "sh", "init"]
+    assert record["unreadable_ancestors"] == [{"pid": 1, "name": "init"}]
+    assert mapped.stat().st_mode & 0o222 == 0
+    grader.check_mappings(record)  # the skipped ancestor recorded nothing, so nothing of it is reported changed
+    os.chmod(mapped, 0o644)
+    with pytest.raises(module._FailClosed, match="relay.bin"):
+        grader.check_mappings(record)
+    # Any other error reading a readable ancestor's maps still raises before the tests, which grade() masks
+    # (test_grader_masks_when_its_mapped_files_cannot_be_protected).
+    maps["/proc/102/maps"] = OSError(errno.EIO, "Input/output error")
+    with pytest.raises(OSError, match="Input/output error"):
+        module._protect_mappings()
+
+
+def test_ancestor_walk_ends_at_a_stat_it_may_not_read(grader: _Grader, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A parent whose /proc/<pid>/stat the grader may not read is listed without a name, and the walk ends there (its
+    # parent is unknown); its maps are tried like any other ancestor's.
+    module = grader.module
+    stats = {"/proc/102/stat": b"102 (s) h) S 1 102 102 0\n", "/proc/1/stat": PermissionError(errno.EACCES, "denied")}
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if str(path) not in stats:
+            return real_open(path, *args, **kwargs)
+        found = stats[str(path)]
+        if isinstance(found, BaseException):
+            raise found
+        return io.BytesIO(found)
+
+    monkeypatch.setattr(module.os, "getppid", lambda: 102)
+    monkeypatch.setattr(module, "open", fake_open, raising=False)
+    assert module._ancestors() == [(102, "s) h"), (1, None)]
+
+    def mapped_paths(path: str = module.PROC_MAPS) -> list[str]:
+        if path == "/proc/1/maps":
+            raise PermissionError(errno.EACCES, "denied", path)
+        return []
+
+    monkeypatch.setattr(module, "_mapped_paths", mapped_paths)
+    record = module._protect_mappings()
+    assert record["ancestors"] == ["s) h", None] and record["unreadable_ancestors"] == [{"pid": 1, "name": None}]
+
+
+def test_grader_does_not_mask_for_an_ancestor_it_may_not_inspect(
+    grader: _Grader, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # On a real sandbox pid 1's maps are refused to the grader: the run is graded, and grading.json lists pid 1.
+    module = grader.module
+    mapped = tmp_path / "relay.bin"
+    mapped.write_bytes(b"A" * 64)
+    maps: dict[str, object] = {
+        "/proc/101/maps": FileNotFoundError(),
+        "/proc/102/maps": [str(mapped)],
+        "/proc/1/maps": PermissionError(errno.EACCES, "Permission denied", "/proc/1/maps"),
+    }
+    _stub_ancestor_maps(module, monkeypatch, maps)
+    monkeypatch.setattr(
+        module, "_prepare_after_tests", lambda: grader.calls.append("prepare") or module._protect_mappings()
+    )
+    grader.capture("ok")
+    grader.result = lambda v: v.VerificationResult(
+        completed=True,
+        resolved=True,
+        patch_applied=True,
+        test_results={"tests_observed": 2},
+        test_output=v.TEST_OUTPUT_BEGIN + "\n",
+    )
+    code, reward, grading = grader.run()
+    assert code == 0 and grading["masked"] is False and reward["reward"] == 1.0
+    protected = grading["protected_mappings"]
+    assert protected["files"] == 1 and protected["ancestors"] == ["gone", "sh", "init"]
+    assert protected["unreadable_ancestors"] == [{"pid": 1, "name": "init"}]
+
+
+# Loads grade.py and runs _protect_mappings over this process's real ancestors, reading each one's real stat and
+# maps, but changes no file (every mapped path is dropped after it is read). Prints what the walk found.
+REAL_WALK = r"""
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.spec_from_file_location("grade_real_walk", sys.argv[1])
+grade = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(grade)
+read_mappings = grade._mapped_paths
+
+
+def mapped_paths(*maps):
+    read_mappings(*maps)
+    return []
+
+
+grade._mapped_paths = mapped_paths
+record = grade._protect_mappings()
+walk = [[pid, name] for pid, name in grade._ancestors()]
+print(json.dumps({"file": grade.__file__, "walk": walk, "unreadable": record["unreadable_ancestors"]}))
+"""
+
+
+def test_mapping_protection_walks_the_real_process_tree() -> None:
+    # No /proc stub: the real ancestors of a child process, up to pid 1, whatever this machine lets it read (pid 1's
+    # maps are refused to a user that does not own it, and to root in a user namespace). The walk must finish and
+    # return a record; an ancestor it may not inspect is listed, not raised.
+    grade_path = TEMPLATE / "tests/nemo_gym/grade.py"
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", REAL_WALK, str(grade_path)], capture_output=True, text=True, timeout=60
+    )
+    assert done.returncode == 0, done.stderr
+    found = json.loads(done.stdout)
+    assert found["file"] == str(grade_path)
+    pids = [pid for pid, _ in found["walk"]]
+    assert pids[0] == os.getpid() and (pids[-1] == 1 or found["walk"][-1][1] is None)
+    assert {entry["pid"] for entry in found["unreadable"]} <= set(pids)
 
 
 # The functions and constants this grade.py copies from Scale-SWE's (only the docstring and grade() differ).
 SHARED_GRADER_NAMES = (
-    "HERE ARTIFACTS LOGS NO_VERDICT FAILED_CLOSED REWARD_OWNER_UID PROTECTED_DIRS EXIT_RECORD_NAME KEPT_CAPABILITIES"
+    "HERE ARTIFACTS LOGS NO_VERDICT FAILED_CLOSED REWARD_OWNER_UID PROTECTED_DIRS KEPT_CAPABILITIES"
     " _PR_CAPBSET_DROP _PR_SET_NO_NEW_PRIVS _PR_CAP_AMBIENT _PR_CAP_AMBIENT_CLEAR_ALL _LINUX_CAPABILITY_VERSION_3"
     " CAPTURE_MAX_BYTES PATCH_MAX_BYTES CAPTURE_TEXT_MAX_CHARS CAPTURE_WARNINGS_MAX PROC_MAPS WARM_IMPORTS"
     " REFUSED_AFTER_TESTS _AFTER_TESTS _FailClosed _Unreadable _CapHeader _CapData _privilege_dropper"
     " _give_root_ownership _protect_reward_path _write_output _load _no_verdict _verdict _capture_failed _fail_closed"
     " _read_agent_file _capture_summary _read_capture _inline_to_thread _warm_event_loop _read_mappings _mapped_paths"
+    " _ancestors"
     " _mapping_ids _protected_mode _file_state _protect_mappings _prepare_after_tests _after_tests_hook"
     " _arm_after_tests _check_mappings main"
 ).split()
@@ -915,7 +1064,18 @@ if os.geteuid() != 0:
     os.seteuid = lambda uid: None
     grade._privilege_dropper = lambda: None
 all_mapped_paths = grade._mapped_paths
-grade._mapped_paths = lambda: [path for path in all_mapped_paths() if path.startswith(scratch + os.sep)]
+grade._mapped_paths = lambda *maps: [path for path in all_mapped_paths(*maps) if path.startswith(scratch + os.sep)]
+# The grader's ancestors here are the ones the test started, below pytest (whose own are not the test's to protect).
+all_ancestors = grade._ancestors
+below = int(os.environ["NG_ANCESTORS_BELOW"])
+
+
+def ancestors():
+    found = all_ancestors()
+    return found[: [pid for pid, _ in found].index(below)]
+
+
+grade._ancestors = ancestors
 real_load = grade._load
 
 
@@ -967,6 +1127,26 @@ outcome = {
 }
 print("OUTCOME", repr(outcome))
 """
+
+
+# A stand-in for the processes above the grader that outlive the tests (the provider's daemon): it maps a file, runs
+# its command (the harbor server's shell, which runs timeout, which runs the grader) and reports the mapped bytes.
+ANCESTOR = r"""
+import mmap
+import subprocess
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    mapping = mmap.mmap(handle.fileno(), 0, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ)
+code = subprocess.run(sys.argv[2:]).returncode
+print("ANCESTOR_PREFIX", repr(bytes(mapping[:8])), flush=True)
+sys.exit(code)
+"""
+# The shell around test.sh: the harbor server's (only exit after timeout) and an older one's (more after it).
+RELAY_SHELLS = {
+    "harbor_server": 'timeout -s KILL 120 "$@"; exit $?',
+    "older_harbor_server": 'start=$(date +%s); timeout -s KILL 120 "$@"; rc=$?; echo "$rc $start" >/dev/null; exit $rc',
+}
 
 BEGIN, END = "___NEMO_GYM_SWE_REBENCH_TEST_BEGIN___", "___NEMO_GYM_SWE_REBENCH_TEST_END___"
 # Stand-ins for two upstream parser kinds: a line-oriented one and one that reads a JUnit XML report (pyexpat).
@@ -1126,9 +1306,15 @@ def _drive(
     *,
     parser: str = "lines",
     python: str = sys.executable,
+    ancestor: Path | None = None,
+    relay_shell: str = RELAY_SHELLS["harbor_server"],
     **env,
 ) -> tuple[dict, subprocess.CompletedProcess]:
-    """Run grade.py's main() of a converted task in a subprocess (see ``DRIVER``) and return its outcome."""
+    """Run grade.py's main() of a converted task in a subprocess (see ``DRIVER``) and return its outcome.
+
+    With ``ancestor``, the grader runs under the stand-in ``ANCESTOR`` mapping that file, then ``relay_shell``, then
+    ``timeout``, as under the harbor server.
+    """
     if not (tmp_path / "ds").exists():
         upstream = parser_repo / "lib/agent/log_parsers.py"
         stand_in = upstream.read_text().replace("def parse_log_stand_in(log):\n    return {}\n", STAND_IN_PARSERS)
@@ -1146,12 +1332,17 @@ def _drive(
     (scratch / "artifacts" / "model_patch.diff").write_text("diff --git a/m.py b/m.py\n")
     (scratch / "eval.sh").write_text(eval_script + f"echo {END}\n")
     (tmp_path / "driver.py").write_text(DRIVER)
+    command = [python, "-I", "-B", str(tmp_path / "driver.py"), str(here), str(scratch), scenario]
+    if ancestor is not None:
+        (tmp_path / "ancestor.py").write_text(ANCESTOR)
+        command = [python, "-I", "-B", str(tmp_path / "ancestor.py"), str(ancestor), "sh", "-c", relay_shell, "sh"]
+        command += [python, "-I", "-B", str(tmp_path / "driver.py"), str(here), str(scratch), scenario]
     process = subprocess.run(
-        [python, "-I", "-B", str(tmp_path / "driver.py"), str(here), str(scratch), scenario],
+        command,
         capture_output=True,
         text=True,
         timeout=120,
-        env={**os.environ, **env},
+        env={**os.environ, "NG_ANCESTORS_BELOW": str(os.getpid()), **env},
     )
     lines = [line for line in process.stdout.splitlines() if line.startswith("OUTCOME ")]
     assert len(lines) == 1, process.stdout + process.stderr
@@ -1176,7 +1367,7 @@ def test_armed_grader_scores_a_real_run(
     assert outcome["refused"] is None and "failing closed" not in process.stderr
     assert json.loads(outcome["reward"])["reward"] == float(resolved)
     assert json.loads(outcome["grading"])["masked"] is False
-    assert outcome["exit_record"] == "1\n"
+    assert outcome["exit_record"] is None
 
 
 @pytest.mark.parametrize("python", _interpreter_params())
@@ -1210,6 +1401,30 @@ def test_changed_mapped_file_fails_closed(tmp_path: Path, scratch: Path, rows: P
     )
     assert outcome["code"] == 1 and outcome["reward"] is None
     assert "a file the grader has mapped changed during the tests" in process.stderr
+
+
+@pytest.mark.skipif(shutil.which("timeout") is None or shutil.which("sh") is None, reason="needs timeout and sh")
+@pytest.mark.parametrize("shell", sorted(RELAY_SHELLS))
+def test_in_place_write_to_a_file_an_ancestor_has_mapped_is_refused(
+    tmp_path: Path, scratch: Path, rows: Path, parser_repo: Path, shell: str
+) -> None:
+    # The processes that relay test.sh's exit status (timeout, the shell, the daemon above them) outlive the tests:
+    # the files they have mapped are protected too, whatever the shape of the tree, so the tests cannot rewrite in
+    # place the code that relays the status.
+    (scratch / "lib").mkdir(parents=True)
+    target = scratch / "lib" / "ancestor.bin"
+    target.write_bytes(b"A" * 4096)
+    attack = f"printf 'XXXXXXXX' 1<> {shlex.quote(str(target))} && echo WRITE_LANDED || echo WRITE_REFUSED\n"
+    outcome, process = _drive(
+        tmp_path, scratch, rows, parser_repo, attack + FAILING, ancestor=target, relay_shell=RELAY_SHELLS[shell]
+    )
+    assert "WRITE_REFUSED" in outcome["test_output"] and "WRITE_LANDED" not in outcome["test_output"]
+    assert target.read_bytes() == b"A" * 4096 and "ANCESTOR_PREFIX b'AAAAAAAA'" in process.stdout
+    assert outcome["code"] == 0 and outcome["refused"] is None, process.stderr
+    assert json.loads(outcome["reward"])["reward"] == 0.0
+    protected = json.loads(outcome["grading"])["protected_mappings"]
+    assert protected["ancestors"][:2] == ["timeout", "sh"] and len(protected["ancestors"]) == 3
+    assert protected["files"] == 1
 
 
 def _file_backed_json() -> tuple[str, Path] | None:
@@ -1267,7 +1482,7 @@ def test_exception_after_the_tests_fails_closed_never_masks(
     outcome, process = _drive(tmp_path, scratch, rows, parser_repo, PASSING, "raise_after_tests")
     assert outcome["code"] == 1 and outcome["reward"] is None
     assert "RuntimeError: simulated failure after the tests" in process.stderr
-    assert outcome["exit_record"] == "1\n"
+    assert outcome["exit_record"] is None
 
 
 @needs_git
