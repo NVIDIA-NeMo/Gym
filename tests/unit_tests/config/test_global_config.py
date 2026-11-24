@@ -66,6 +66,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
+from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
@@ -237,7 +238,14 @@ class TestGlobalConfig:
         ("exported", "configured", "expected_dir", "expected_enabled"),
         [
             ("/run/model-calls", {}, "/run/model-calls", True),  # a submitted command's Gym captures
-            ("/run/model-calls", {"model_call_capture_dir": "/mine"}, "/mine", None),  # the config key wins
+            ("/run/model-calls", {"model_call_capture_dir": "/mine"}, "/mine", True),  # the config key wins
+            # A config that leaves the directory to submit time, as Inkling Small does.
+            (
+                "/run/model-calls",
+                {"observability_enabled": True, "model_call_capture_dir": None},
+                "/run/model-calls",
+                True,
+            ),
             ("/run/model-calls", {"observability_enabled": False}, "/run/model-calls", False),  # an opt-out holds
             ("", {}, None, None),  # an empty export turns nothing on
         ],
@@ -258,6 +266,7 @@ class TestGlobalConfig:
 
         assert config.get("model_call_capture_dir") == expected_dir
         assert config.get("observability_enabled") == expected_enabled
+        ModelCallCaptureConfig.model_validate(dict(config))  # what each model server checks at startup
 
     def test_a_relative_exported_capture_dir_is_refused(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)

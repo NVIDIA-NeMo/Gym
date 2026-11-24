@@ -2072,16 +2072,18 @@ Set the keys individually, in a config or as overrides, e.g.:
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
 
             # A capture directory exported to this process (a `command:` benchmark under `gym eval submit`) turns on
-            # model-call capture there, as submit's override does for `gym eval run`. An explicit key wins, and an
-            # explicit `observability_enabled: false` still turns capture off.
+            # model-call capture there, as submit's override does for `gym eval run`: it fills a missing or null
+            # directory, a configured directory wins, and an explicit `observability_enabled: false` still turns
+            # capture off.
             exported_capture_dir = environ.get(MODEL_CALL_CAPTURE_DIR_ENV, "").strip()
-            if exported_capture_dir and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in global_config_dict:
-                if not Path(exported_capture_dir).is_absolute():
-                    # Processes started from different working directories would each resolve it elsewhere.
-                    raise ConfigError(
-                        f"{MODEL_CALL_CAPTURE_DIR_ENV} must be an absolute path, got {exported_capture_dir!r}."
-                    )
-                global_config_dict[MODEL_CALL_CAPTURE_DIR_KEY_NAME] = exported_capture_dir
+            if exported_capture_dir:
+                if global_config_dict.get(MODEL_CALL_CAPTURE_DIR_KEY_NAME) is None:
+                    if not Path(exported_capture_dir).is_absolute():
+                        # Processes started from different working directories would each resolve it elsewhere.
+                        raise ConfigError(
+                            f"{MODEL_CALL_CAPTURE_DIR_ENV} must be an absolute path, got {exported_capture_dir!r}."
+                        )
+                    global_config_dict[MODEL_CALL_CAPTURE_DIR_KEY_NAME] = exported_capture_dir
                 global_config_dict.setdefault(OBSERVABILITY_ENABLED_KEY_NAME, True)
 
             # Bound server startup independently of model-endpoint readiness. Multi-worker
