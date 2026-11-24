@@ -351,7 +351,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             await provider.aclose()
             raise
         if required:
-            # Harbor's task_mcp_grants: required grants the task's own MCP servers, which task.json also lists.
+            # The harbor environment server grants the task's own MCP servers as required; task.json also lists them.
             try:
                 task_context = await _read_task_context(sandbox)
                 task_servers = {
