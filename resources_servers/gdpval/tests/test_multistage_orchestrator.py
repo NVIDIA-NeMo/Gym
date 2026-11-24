@@ -4442,6 +4442,8 @@ class TestCachedDeliverableReuse:
             for row in persisted
         }
         assert calls_by_stage == {0: ["dispatched"], 1: ["seeded"]}
+        # Dispatched and cached-deliverable rows alike carry the per-rollout count the run summary adds up.
+        assert {row["stage_index"]: row["ng_captured_calls"]["calls"] for row in persisted} == {0: 1, 1: 1}
 
     async def test_a_reused_row_without_a_capture_has_no_calls(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -4452,6 +4454,7 @@ class TestCachedDeliverableReuse:
 
         (reused,) = [row for row in persisted if row["stage_index"] == 1]
         assert reused["ng_model_call_capture"]["calls"] == []
+        assert "ng_captured_calls" not in reused, "no capture is unknown usage, not zero calls"
 
     async def test_rows_across_tasks_repeats_and_stages_never_share_a_rollout_key(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
