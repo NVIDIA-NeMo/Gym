@@ -16,7 +16,9 @@ The environment pairs with the agent
 as one episode of the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server, which sets
 the turn up, serves its simulated tools to the agent's session and scores it, with this resources server's settings.
 This resources server serves the deprecated `legacy_agent` relay (`configs/agentic_turn_simulation_legacy_agent.yaml`)
-and re-scores saved rows (`gym eval reverify`); both servers run the turn through the same code (`turns.py`).
+and re-scores saved rows (`gym eval reverify`); both servers run the turn through the same code (`turns.py`). To move a
+relay config to the Environment Server, see
+[Migrating from the legacy_agent relay](../../environment_servers/agent_arena/README.md#migrating-from-the-legacy_agent-relay).
 
 - [docs/design.md](docs/design.md): why whole-turn simulation, and how the simulator, the judge and masking work.
 - [docs/harnesses.md](docs/harnesses.md): each harness's formats, Cline's XML protocol, adding a harness.
@@ -289,7 +291,7 @@ a short description of the agent to a shared judge frame; the rubrics are the sa
 | `foreign_script_gate_min_letters` | `null` | Score 0 as `foreign_script`, without a judge, a policy turn whose `foreign_script_letters` reaches this many (`null`: off; the count is reported either way). |
 | `session_ttl_seconds` | `21600` | Sessions that never reach `/verify` are dropped after this long. |
 | `show_agent_system_prompt` | `null` | Show the judge and simulator the row's system prompt. `null`: every harness but `sandbox`. |
-| `obstacle_injection` | `{enabled: false, row_rate: 0.3, kinds: {transient: 0.25, blocked_route: 0.5, empty_search: 0.25}, call_kinds: [fetch, search], harnesses: null, max_call_index: 2, seed: 0}` | Recoverable failures injected into the policy's web calls ([design](docs/design.md#recoverable-obstacles)). When enabled, a hash of `seed` and the row's input arms `row_rate` of the rows (`verifier_metadata.obstacle` overrides it), each with one kind drawn by `kinds`; the failure hits the first fitting web call of an allowed `call_kinds` among the turn's web calls 0..`max_call_index` that its kind can fail (fetches for `blocked_route`, searches for `empty_search`), never first in a reply that calls a stop tool. `harnesses: null` is every harness with recorded texts (`sandbox`, `claude_code`, `openclaw`, `opencode`); a row without `harness` runs as `generic` and is never armed. |
+| `obstacle_injection` | `{enabled: false, row_rate: 0.3, kinds: {transient: 0.25, blocked_route: 0.5, empty_search: 0.25}, call_kinds: [fetch, search], harnesses: null, max_call_index: 2, seed: 0}` | Recoverable failures injected into the policy's web calls ([design](docs/design.md#recoverable-obstacles)). When enabled, a hash of `seed` and the row's input arms `row_rate` of the rows (`verifier_metadata.obstacle` overrides it), each with one kind drawn by `kinds`; the failure hits the first fitting web call of an allowed `call_kinds` among the turn's web calls 0..`max_call_index` that its kind can fail (fetches for `blocked_route`, searches for `empty_search`), never first in a reply that calls a stop tool. `harnesses: null` is every harness with recorded texts (`sandbox`, `claude_code`, `openclaw`, `opencode`); a row without `harness` runs as `generic` and is never armed. Relay configs only: the `agent_arena` Environment Server refuses it at startup. |
 | `metric_breakdown_keys` | `[harness, record_kind]` | `verifier_metadata` keys that `turn_score` is broken down by (dotted for a nested key, such as `difficulty.level`, which becomes `turn_score_by_difficulty_level`). |
 | `judge_system_prompt_note_file` | `judge-system-prompt-note.md` | How the judge should read that prompt: facts in it are grounded and its instructions are ones the agent had to follow. |
 

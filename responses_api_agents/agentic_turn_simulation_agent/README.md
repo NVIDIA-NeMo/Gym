@@ -7,8 +7,11 @@ and replaces only the episode loop.
 
 That server is the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server in an agent
 session: it serves the row's tools behind the session's direct HTTP grant, and names the row's harness in the request's
-metadata. A session seeded without such a grant is refused (422). On the deprecated `/run` relay it is the configured
-`resources_server`, with the cookies its `/seed_session` set, through its `/harness` and `/simulate_tool_call`.
+metadata. A session seeded without such a grant, or with `execute_tools: false` (the agent plays the whole turn, so it
+has no unresolved calls to hand back), is refused (422). On the deprecated `/run` relay it is the configured
+`resources_server`, with the cookies its `/seed_session` set, through its `/harness` and `/simulate_tool_call`. A turn
+on the relay logs a deprecation warning once per process; see
+[Migrating from the legacy_agent relay](../../environment_servers/agent_arena/README.md#migrating-from-the-legacy_agent-relay).
 
 ## What the episode does differently
 
@@ -105,7 +108,9 @@ result keeps the `<environment_details>` that close the message. A reply without
 | `cline_max_consecutive_mistakes` | `3` | Cline rows: replies in a row without a tool call before the turn ends. |
 | `simulate_max_attempts` | `3` | Attempts per tool call before its result becomes a simulator failure (masked). |
 
-Inherited: `skip_verification`, `skip_verification_reward`, `token_id_capture` (set `true` for training).
+Inherited: `token_id_capture` (set `true` for training), and `skip_verification` and `skip_verification_reward`. The
+relay's `/run` honors the last two itself; in an agent session the `agent_arena` Environment Server reads them from
+this agent's config (unless it sets its own) and returns the fixed reward without scoring.
 
 Run it through this environment's config (`gym env start --resources-server agentic_turn_simulation`), not alone:
 every episode needs a turn session, which the `agent_arena` Environment Server sets up for each row (or, on the relay,

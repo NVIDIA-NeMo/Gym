@@ -21,6 +21,8 @@ the episode's tools.
 4. **Close** the agent session. A failed agent reply goes through `agent_outcome_policy` (retry, fail or score).
 5. **Score** the turn in process: masking, code gates, judges. The result carries the same fields as the resources
    server's `/verify` response, and `/aggregate_metrics` computes the same metrics (plus Gym's performance metrics).
+   With `skip_verification`, the turn gets `skip_verification_reward` instead, unscored and marked
+   `verification_skipped: true`, and `/aggregate_metrics` reports the performance metrics only.
 6. **Stop** serving the tools in the episode's cleanup.
 
 ### What the simulator sees
@@ -56,6 +58,7 @@ agentic_turn_simulation_environment_server:
 | `agent_outcome_policy` | Gym's default | What a failed agent reply does: retry the episode, fail it, or score the turn. |
 | `default_episode_timeout_seconds` | `21600` | The episode's wall-clock bound. The agent's own `max_time_seconds` usually ends the turn first. |
 | `cleanup_timeout_seconds` | `180` | The bound of each cleanup step (agent close, the end of the tools). |
+| `skip_verification`, `skip_verification_reward` | unset | Return the fixed reward (default `0.0`) without scoring the turn. Unset, each is the bound agent's, which Gym fills from the global `skip_verification` and `skip_verification_reward` flags, so a run moved off the relay keeps skipping as the agent's `/run` did. |
 | `sandbox_provider` | required | `{local: {}}`: no episode starts a sandbox. |
 | `tool_transports`, `tool_call_timeout_seconds` | `[direct_http]`, none | As `BaseEnvironmentServerWithTools` defines them. `agentic_turn_simulation_agent` takes a direct HTTP grant. |
 
@@ -63,9 +66,55 @@ agentic_turn_simulation_environment_server:
 `resources_servers/agentic_turn_simulation/configs/agentic_turn_simulation.yaml` use this server. Their
 `*_legacy_agent.yaml` twins keep the deprecated `legacy_agent` relay.
 
+## Migrating from the legacy_agent relay
+
+The relay configs are deprecated and will be removed after the Environment Server migration. The agent logs a
+deprecation warning at its first turn on the relay. Replace each legacy config with its twin:
+
+| Replace (deprecated relay) | With (this server) |
+| --- | --- |
+| `benchmarks/agent_arena/config_legacy_agent.yaml` | `benchmarks/agent_arena/config.yaml` |
+| `resources_servers/agentic_turn_simulation/configs/agentic_turn_simulation_legacy_agent.yaml` | `resources_servers/agentic_turn_simulation/configs/agentic_turn_simulation.yaml` |
+| `--benchmark agent_arena/config_legacy_agent` | `--benchmark agent_arena` |
+
+For example, replace
+
+```bash
+gym env start \
+  --config benchmarks/agent_arena/config_legacy_agent.yaml \
+  --model-type vllm_model \
+  --model-url http://<policy-host>:8000/v1 --model <policy-model-name> --model-api-key EMPTY \
+  ++judge_base_url=http://<judge-host>:8000/v1 ++judge_api_key=EMPTY ++judge_model_name=<judge-model-name>
+```
+
+with
+
+```bash
+gym env start \
+  --config benchmarks/agent_arena/config.yaml \
+  --model-type vllm_model \
+  --model-url http://<policy-host>:8000/v1 --model <policy-model-name> --model-api-key EMPTY \
+  ++judge_base_url=http://<judge-host>:8000/v1 ++judge_api_key=EMPTY ++judge_model_name=<judge-model-name>
+```
+
+Everything else stays: the rows, the agent instance and its settings (the same
+`++agentic_turn_simulation_agent.responses_api_agents.agentic_turn_simulation_agent.max_time_seconds=1200` override,
+for example), the resources server's settings and their overrides, `skip_verification`, the `gym eval run` command,
+the result fields and metrics, and `gym eval reverify`. What changes:
+
+- The simulator no longer sees what the policy wrote between its tool calls (see "What the simulator sees").
+- `obstacle_injection` is refused at startup; keep the relay config to run obstacle injection.
+- The resources server may run several workers; this server routes each tool call to the worker that runs its episode.
+
+On all 433 AgentArena validation rows, two rollouts each, with one checkpoint as policy, simulator and judge, the mean
+measured reward was 0.952 here and 0.949 on the relay: a paired difference by task of +0.0013 (standard error 0.0109).
+
 ## Limits
 
 - **Restart-only checkpointing.** With rollout checkpointing on, a crash restarts the episode from its input; a
   half-played turn is never continued.
 - **No sandbox.** A call is answered from the model of the agent's files or by a model call, so no episode starts a
   sandbox and `sandbox_provider` is `local`. The server logs the base class's warning about `local` at startup.
+- **No obstacle injection.** An obstacle's decision needs the reply a call belongs to (a stop tool beside it, sibling
+  calls of the same reply), and a call reaches this server alone. The server refuses `obstacle_injection.enabled` at
+  startup; run it on the relay config until the call carries its reply.
