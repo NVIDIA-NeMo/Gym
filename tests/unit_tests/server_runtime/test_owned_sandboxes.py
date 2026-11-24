@@ -158,9 +158,7 @@ async def test_a_non_exporting_owner_needs_no_checkpoint_state_dir(providers, mo
     assert providers["opensandbox"].client_closed
 
 
-@pytest.mark.parametrize(
-    "resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency"]
-)
+@pytest.mark.parametrize("resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency"])
 def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch, resolver: str) -> None:
     def refuse(*args: Any) -> None:
         raise ValueError("unknown provider block")
