@@ -101,8 +101,9 @@ def write_server_log_locations(
 ) -> Path:
     """Save where the run's server logs are beside its rollouts file as `<stem>_server_logs.json`.
 
-    Lets the validation gate and EvalRDL find serving evidence such as vLLM logs. Paths only; no
-    log content is copied. It replaces any earlier attempt's file atomically.
+    Points a reader on the run's own filesystem at serving evidence such as vLLM logs. Absolute paths only, so
+    they do not follow a copy of the job folder; no log content is copied. It replaces any earlier attempt's
+    file atomically, so a resumed Slurm run's file names only the current job.
     """
     path = server_logs_path_for(output_fpath)
     path.parent.mkdir(parents=True, exist_ok=True)
