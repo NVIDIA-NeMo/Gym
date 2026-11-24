@@ -782,18 +782,23 @@ class ApptainerProvider:
         if cwd is not None:
             effective_command = f"cd {shlex.quote(cwd)} && {effective_command}"
 
+        # The command never reads the shell's own stdin, which carries the next framed commands: it gets the staged
+        # input or nothing.
+        container_stdin = "/dev/null"
         stdin_path: Path | None = None
         if stdin is not None:
             stdin_path = inst.staging_dir / f".stdin-{uuid.uuid4().hex}"
             stdin_path.write_bytes(stdin)
             container_stdin = f"{inst.mount_point.rstrip('/')}/{stdin_path.name}"
-            effective_command = f"{effective_command} < {shlex.quote(container_stdin)}"
 
         marker = f"{DIRECT_EXEC_MARKER_PREFIX}{uuid.uuid4().hex}"
         stderr_path = inst.staging_dir / f".stderr-{uuid.uuid4().hex}"
         container_stderr = f"{inst.mount_point.rstrip('/')}/{stderr_path.name}"
+        # The command runs as one quoted `sh -c` argument, so a trailing comment, a heredoc or an unbalanced quote in
+        # it cannot swallow the status line that follows, as instance mode runs it.
         script = (
-            f"( {effective_command} ) 2>{shlex.quote(container_stderr)}; "
+            f"( sh -c {shlex.quote(effective_command)} ) <{shlex.quote(container_stdin)} "
+            f"2>{shlex.quote(container_stderr)}; "
             f"_nemo_gym_rc=$?; printf '\\n{marker}:%s\\n' \"$_nemo_gym_rc\"\n"
         )
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s

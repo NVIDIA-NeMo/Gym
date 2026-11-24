@@ -958,6 +958,18 @@ done
     assert failed.return_code == 7
     assert failed.stderr == "expected-error"
 
+    # A command is one quoted argument: none of these can swallow the status line or read the next command.
+    commented = await provider.exec(handle, "printf hi # trailing comment", timeout_s=5)
+    assert (commented.return_code, commented.stdout) == (0, "hi")
+    heredoc = await provider.exec(handle, "cat <<'EOF'\nhello\nEOF", timeout_s=5)
+    assert (heredoc.return_code, heredoc.stdout) == (0, "hello\n")
+    unbalanced = await provider.exec(handle, 'printf "x', timeout_s=5)
+    assert unbalanced.error_type is None and unbalanced.return_code != 0
+    no_stdin = await provider.exec(handle, "cat", timeout_s=5)
+    assert (no_stdin.return_code, no_stdin.stdout) == (0, "")
+    after = await provider.exec(handle, "printf still-running", timeout_s=5)
+    assert (after.return_code, after.stdout) == (0, "still-running")
+
     await provider.close(handle)
     assert await provider.status(handle) is SandboxStatus.STOPPED
     assert not staging.exists()
