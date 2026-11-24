@@ -518,7 +518,13 @@ calculator_agent:
 The Agent Server's `resources_server.name` must match the top-level Resources Server instance name.
 
 For an Environment Server, add `taskset: <name>` to the dataset
-declaration and map that name in `environment_server_routes`. The normal
+declaration and map that name in `environment_server_routes`. Name the taskset after the
+catalog entry the tasks belong to, `<catalog name>[:<label>]`: the manifest's `name`, such
+as `swebench/pro`, optionally followed by a run-local label such as a split (`:train`) or a
+harness route (`:opencode`) when one run sends the same tasks to two harnesses. Tasks
+scored separately get their own catalog name, not a label. A repository check
+(`tests/unit_tests/test_taskset_names.py`) holds every config a manifest points at, and every
+run preset beside it, to this rule. The normal
 `gym dataset collate` and `gym eval run --benchmark ...` paths then convert prepared
 flat rows to `task_id` and `task_input`; no separate conversion command is needed.
 Collation leaves task-owned fields flat inside `task_input`; each Environment Server
@@ -540,7 +546,7 @@ Server binds the `swebench_pro_hermes_resources_server` instance:
 
 ```yaml
 environment_server_routes:
-  swebench_pro: swebench_pro_hermes
+  swebench/pro: swebench_pro_hermes
 
 swebench_pro_hermes_resources_server:
   resources_servers:
@@ -548,7 +554,7 @@ swebench_pro_hermes_resources_server:
       datasets:
         - name: swebench_pro
           type: benchmark
-          taskset: swebench_pro
+          taskset: swebench/pro
           jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
           prepare_script: benchmarks/swebench/pro/prepare.py
 ```
@@ -558,7 +564,8 @@ taskset in every mode. They reject run-level `+responses_create_params.*`
 overrides, `num_repeats_add_seed`, and run-level `skills`. Set response parameters
 in the source row before collation; benchmark prompt configs still apply to input messages.
 
-The task's qualified ID is `<taskset>/<id>`. The ID is taken from `task_id`,
+The task's qualified ID is `<taskset>/<id>`. A taskset can contain `/` itself, so read
+the taskset from `task_id.taskset` rather than by splitting the qualified ID. The ID is taken from `task_id`,
 `problem_id`, or `instance_id`, in that order. Without an explicit ID, an existing
 `_ng_task_index` takes precedence; otherwise collation uses a zero-based source-row
 index across all datasets of the same type, before repeats. Adding or reordering
