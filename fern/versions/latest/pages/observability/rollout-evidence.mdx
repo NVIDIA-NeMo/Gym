@@ -375,6 +375,10 @@ counts every captured call of the rollout by the role that owns it:
 | `verifier` | Referenced by a verifier invocation. |
 | `unattributed` | Captured under the rollout but referenced by neither. |
 
+Only calls the model server captured under the rollout's identity are counted. A call sent without it, such
+as a GDPVal judge request to the model server's unprefixed `/v1` URL, is not captured for the rollout and is
+not in these counts.
+
 ```json
 "ng_captured_calls": {
   "calls": 3, "calls_without_usage": 0, "attributed_call_coverage": 0.333, "capture_complete": true,
