@@ -6,7 +6,6 @@ resolved config with secrets masked."""
 
 import logging
 import math
-import re
 import urllib.request
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +16,7 @@ from typing import Literal
 
 import orjson
 from omegaconf import DictConfig, ListConfig, OmegaConf
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.config.secret_utils import is_credential_name, looks_like_secret_key, url_without_credentials
 from nemo_gym.data.prompt import load_prompt_config
@@ -47,6 +46,10 @@ _SAMPLING_KEYS = frozenset(
         "n",
     }
 )
+_INTEGER_SAMPLING_KEYS = frozenset({"top_k", "max_tokens", "max_output_tokens", "seed", "n"})
+_SERVER_TYPES = frozenset({"responses_api_models", "responses_api_agents", "resources_servers", "environment_servers"})
+# Request fields forwarded as given, so a value in them is recorded only when it already is a number.
+_PAYLOAD_KEYS = frozenset({"extra_body", "request_overrides"})
 # Rollout and server concurrency: often the only setting that differs between two otherwise identical runs.
 # `num_workers` is kept beside them: server limits such as `max_concurrent_requests` apply per worker.
 _CONCURRENCY_KEYS = frozenset(
@@ -63,11 +66,9 @@ _CONCURRENCY_KEYS = frozenset(
 # Server-specific limits, such as `judge_endpoint_max_concurrency` or `max_concurrent_rollouts`.
 _CONCURRENCY_KEY_SUFFIXES = ("_max_concurrency", "_max_concurrent")
 _CONCURRENCY_KEY_PREFIX = "max_concurrent_"
-# Plain numbers as text: what an `${oc.env:...}` setting resolves to before the server's config reads it.
-_INTEGER_TEXT = re.compile(r"[+-]?[0-9]+")
-_DECIMAL_TEXT = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
-# Marks a value that is neither an explicit null nor a number, so it is left out.
-_NOT_RECORDED = object()
+# How a server's config reads a setting, such as the string an `${oc.env:...}` value resolves to.
+_INTEGER = TypeAdapter(int)
+_FLOAT = TypeAdapter(float)
 _MODEL_KEYS = frozenset(
     {
         "model",
@@ -136,23 +137,23 @@ def _private(key: object) -> bool:
     return looks_like_secret_key(key) or is_credential_name(key) or name == "env" or name.endswith("env_vars")
 
 
-def _setting(value: object, *, decimal: bool) -> object:
-    """An explicit null, an integer, or with ``decimal`` a finite float; a plain numeric string is read as one."""
-    if value is None or (isinstance(value, int) and not isinstance(value, bool)):
-        return value
-    if isinstance(value, str):
-        if _INTEGER_TEXT.fullmatch(value):
-            return int(value)
-        if decimal and _DECIMAL_TEXT.fullmatch(value):
-            value = float(value)
-    if decimal and isinstance(value, float) and math.isfinite(value):
-        return value
-    return _NOT_RECORDED
-
-
-def _sampling(config: Mapping) -> dict[str, JsonValue]:
-    selected = {key: _setting(value, decimal=True) for key, value in config.items() if key in _SAMPLING_KEYS}
-    return {key: value for key, value in selected.items() if value is not _NOT_RECORDED}
+def _sampling(config: Mapping, *, typed: bool = False) -> dict[str, JsonValue]:
+    """Explicit nulls and numbers. With ``typed`` (a server's own config fields), a string is read as the server
+    reads it; elsewhere, as in a request payload Gym forwards as given, a string is left out."""
+    selected: dict[str, JsonValue] = {}
+    for key, value in config.items():
+        if key not in _SAMPLING_KEYS:
+            continue
+        if typed and isinstance(value, str):
+            try:
+                value = (_INTEGER if key in _INTEGER_SAMPLING_KEYS else _FLOAT).validate_python(value)
+            except ValidationError:
+                continue
+        if value is None or (isinstance(value, int) and not isinstance(value, bool)):
+            selected[key] = value
+        elif isinstance(value, float) and math.isfinite(value):
+            selected[key] = value
+    return selected
 
 
 def _is_concurrency_key(key: object) -> bool:
@@ -162,8 +163,16 @@ def _is_concurrency_key(key: object) -> bool:
 
 
 def _concurrency(config: Mapping) -> dict[str, int | None]:
-    selected = {key: _setting(value, decimal=False) for key, value in config.items() if _is_concurrency_key(key)}
-    return {key: value for key, value in selected.items() if value is not _NOT_RECORDED}
+    """Explicit nulls and integers, read as the servers' integer fields read them, but never from a boolean."""
+    selected: dict[str, int | None] = {}
+    for key, value in config.items():
+        if not _is_concurrency_key(key) or isinstance(value, bool):
+            continue
+        try:
+            selected[key] = None if value is None else _INTEGER.validate_python(value)
+        except ValidationError:
+            continue
+    return selected
 
 
 def build_provenance(
@@ -174,11 +183,11 @@ def build_provenance(
     efb_config_ref = config.get("efb_config_ref")
     if isinstance(efb_config_ref, str):
         record.efb_config_ref = url_without_credentials(efb_config_ref)
-    seed = _setting(config.get("seed"), decimal=False)
-    if isinstance(seed, int):
+    seed = config.get("seed")
+    if isinstance(seed, int) and not isinstance(seed, bool):
         record.seed = seed
 
-    def visit(node: Mapping, path: str) -> None:
+    def visit(node: Mapping, path: str, keys: tuple[str, ...] = ()) -> None:
         model = {
             key: url_without_credentials(value)
             for key, value in node.items()
@@ -186,7 +195,8 @@ def build_provenance(
         }
         if model:
             record.models[path or TOP_LEVEL_PATH] = model
-        sampling = _sampling(node)
+        # `<instance>.<server type>.<server>` holds that server's config fields.
+        sampling = _sampling(node, typed=len(keys) == 3 and keys[1] in _SERVER_TYPES)
         if sampling:
             record.sampling_parameters[path or TOP_LEVEL_PATH] = sampling
         concurrency = _concurrency(node)
@@ -212,9 +222,9 @@ def build_provenance(
                 ).hexdigest()
             elif key == "judge_prompt_version" and isinstance(value, (str, int)):
                 record.judge_prompt_versions[location] = str(value)
-            elif isinstance(value, Mapping) and key not in {"metadata", "extra_body"} and not _private(key):
-                visit(value, location)
-            if key == "extra_body" and isinstance(value, Mapping):
+            elif isinstance(value, Mapping) and key not in {"metadata", *_PAYLOAD_KEYS} and not _private(key):
+                visit(value, location, (*keys, str(key)))
+            if key in _PAYLOAD_KEYS and isinstance(value, Mapping):
                 selected = _sampling(value)
                 if selected:
                     record.sampling_parameters[location] = selected
@@ -264,7 +274,12 @@ def build_provenance(
                 if isinstance(extra, Mapping):
                     selected.update(_sampling(extra))
                 if selected:
-                    sampling_profiles[orjson.dumps(selected, option=orjson.OPT_SORT_KEYS)] = selected
+                    try:
+                        profile = orjson.dumps(selected, option=orjson.OPT_SORT_KEYS)
+                    except TypeError:
+                        record.input_sampling_rows_skipped += 1
+                        continue
+                    sampling_profiles[profile] = selected
         record.materialized_inputs_sha256 = digest.hexdigest()
         record.datasets = sorted(datasets)
         record.input_sampling_parameters = [sampling_profiles[key] for key in sorted(sampling_profiles)]

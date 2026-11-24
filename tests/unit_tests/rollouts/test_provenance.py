@@ -233,63 +233,160 @@ def test_concurrency_limits_include_worker_counts_and_server_specific_limit_name
     }
 
 
-def test_env_backed_limits_and_sampling_settings_are_read_as_numbers(monkeypatch) -> None:
-    """`${oc.env:...}` resolves to a string; the servers read it as a number, and so does the record."""
-    monkeypatch.setenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", "6")
-    monkeypatch.setenv("POLICY_TEMPERATURE", "0.6")
-    monkeypatch.setenv("POLICY_SEED", "7")
-    monkeypatch.delenv("SANDBOX_EXEC_CONCURRENCY", raising=False)
-    config = OmegaConf.create(
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _write_without_probing(output: Path, config, monkeypatch) -> dict:
+    monkeypatch.setattr(provenance, "served_models", lambda servers: {})
+    materialized_path_for(output).write_bytes(b"")
+    return orjson.loads(provenance.write_run_provenance(output, config).read_bytes())
+
+
+@pytest.mark.parametrize("configured", ["6", " 6 ", "6.0", None])
+def test_gdpval_judge_request_limit_is_recorded_as_its_model_server_reads_it(
+    configured, tmp_path: Path, monkeypatch
+) -> None:
+    from responses_api_models.openai_model.app import SimpleModelServerConfig
+
+    if configured is None:
+        monkeypatch.delenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", raising=False)
+    else:
+        monkeypatch.setenv("GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS", configured)
+    judge = OmegaConf.load(REPO_ROOT / "benchmarks/gdpval/config.yaml").gdpval_gemini31_judge_model
+    config = OmegaConf.create({"gdpval_gemini31_judge_model": judge})
+    server = SimpleModelServerConfig.model_validate(
         {
-            "seed": "${oc.env:POLICY_SEED}",
-            "gdpval_gemini_judge_model": {
-                "responses_api_models": {
-                    "openai_model": {
-                        "max_concurrent_requests": "${oc.env:GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS,2}",
-                        "temperature": "${oc.env:POLICY_TEMPERATURE}",
+            **OmegaConf.to_container(judge.responses_api_models.openai_model, resolve=True),
+            "name": "gdpval_gemini31_judge_model",
+            "host": "127.0.0.1",
+            "port": 8000,
+        }
+    )
+
+    record = _write_without_probing(tmp_path / "rollouts.jsonl", config, monkeypatch)
+
+    assert server.max_concurrent_requests == (2 if configured is None else 6)
+    assert record["concurrency_limits"] == {
+        "gdpval_gemini31_judge_model.responses_api_models.openai_model": {
+            "max_concurrent_requests": server.max_concurrent_requests
+        }
+    }
+
+
+def test_a_sampling_value_gym_forwards_as_given_is_recorded_only_when_it_is_a_number(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from responses_api_models.openai_model.app import SimpleModelServerConfig
+
+    config = OmegaConf.merge(
+        OmegaConf.load(REPO_ROOT / "benchmarks/legal_agent_bench/model_sampling_openai.yaml"),
+        {
+            "lab": {"policy_temperature": "0.6", "policy_top_p": 0.95},
+            "policy_model": {"responses_api_models": {"openai_model": {"request_overrides": {"seed": "7", "n": 1}}}},
+        },
+    )
+    server = SimpleModelServerConfig.model_validate(
+        {
+            **OmegaConf.to_container(config.policy_model.responses_api_models.openai_model, resolve=True),
+            "name": "policy_model",
+            "host": "127.0.0.1",
+            "port": 8000,
+            "entrypoint": "app.py",
+            "openai_base_url": "http://127.0.0.1:1/v1",
+            "openai_api_key": "dummy",  # pragma: allowlist secret
+            "openai_model": "policy",
+        }
+    )
+
+    record = _write_without_probing(tmp_path / "rollouts.jsonl", config, monkeypatch)
+
+    assert server.extra_body["temperature"] == "0.6"
+    assert server.request_overrides["seed"] == "7"
+    assert record["sampling_parameters"] == {
+        "policy_model.responses_api_models.openai_model.extra_body": {"top_p": 0.95},
+        "policy_model.responses_api_models.openai_model.request_overrides": {"n": 1},
+    }
+
+
+def test_a_quoted_number_in_row_metadata_is_left_out_without_losing_the_record(tmp_path: Path) -> None:
+    output = tmp_path / "rollouts.jsonl"
+    inputs = materialized_path_for(output)
+    extra_body = orjson.dumps({"temperature": "123456789012345678901", "top_p": 0.9}).decode()
+    inputs.write_bytes(
+        orjson.dumps({"responses_create_params": {"temperature": "0.6", "metadata": {"extra_body": extra_body}}})
+        + b"\n"
+    )
+
+    record = orjson.loads(provenance.write_run_provenance(output, {"model": "policy"}).read_bytes())
+
+    assert record["status"] == "available"
+    assert record["materialized_inputs_sha256"] == sha256(inputs.read_bytes()).hexdigest()
+    assert record["input_sampling_parameters"] == [{"top_p": 0.9}]
+
+
+def test_a_row_whose_settings_cannot_be_written_is_skipped_on_its_own(tmp_path: Path, monkeypatch) -> None:
+    output = tmp_path / "rollouts.jsonl"
+    materialized_path_for(output).write_bytes(
+        b'{"responses_create_params":{"seed":1}}\n{"responses_create_params":{"temperature":0.5}}\n'
+    )
+    sampling = provenance._sampling
+    monkeypatch.setattr(
+        provenance,
+        "_sampling",
+        lambda config, **kwargs: {"seed": 2**70} if config.get("seed") == 1 else sampling(config, **kwargs),
+    )
+
+    record = orjson.loads(provenance.write_run_provenance(output, {"model": "policy"}).read_bytes())
+
+    assert record["status"] == "available"
+    assert record["input_sampling_rows_skipped"] == 1
+    assert record["input_sampling_parameters"] == [{"temperature": 0.5}]
+
+
+def test_strings_are_read_as_numbers_only_where_a_server_config_validates_them() -> None:
+    record = provenance.build_provenance(
+        {
+            "seed": "7",
+            "temperature": "0.6",
+            "judge": {
+                "resources_servers": {
+                    "judge": {
+                        "max_concurrent_requests": "${oc.env:UNRESOLVED}",
+                        "max_concurrency": "two",
+                        "concurrency": "1.5",
+                        "num_workers": "1_000",
+                        "judge_max_concurrency": "-1",
+                        "judge_endpoint_max_concurrency": 6.0,
+                        "verifier_max_concurrency": 6.5,
+                        "preconvert_max_concurrent": True,
+                        "max_concurrent_episodes": None,
+                        "max_tokens": "inf",
+                        "temperature": " 0.6 ",
+                        "top_p": "1e999",
+                        "top_k": "40.5",
+                        "min_p": float("inf"),
+                        "presence_penalty": "-0.5",
+                        "repetition_penalty": "true",
+                        "seed": "42",
+                        "judge_responses_create_params": {"temperature": "0.2", "top_p": 0.8},
                     }
                 }
             },
-            "sandbox": {"docker": {"exec": {"concurrency": "${oc.env:SANDBOX_EXEC_CONCURRENCY,32}"}}},
         }
     )
-
-    record = provenance.build_provenance(config)
-
-    assert record.seed == 7
+    assert record.seed is None
     assert record.concurrency_limits == {
-        "gdpval_gemini_judge_model.responses_api_models.openai_model": {"max_concurrent_requests": 6},
-        "sandbox.docker.exec": {"concurrency": 32},
+        "judge.resources_servers.judge": {
+            "num_workers": 1000,
+            "judge_max_concurrency": -1,
+            "judge_endpoint_max_concurrency": 6,
+            "max_concurrent_episodes": None,
+        }
     }
     assert record.sampling_parameters == {
-        provenance.TOP_LEVEL_PATH: {"seed": 7},
-        "gdpval_gemini_judge_model.responses_api_models.openai_model": {"temperature": 0.6},
+        "judge.resources_servers.judge": {"temperature": 0.6, "presence_penalty": -0.5, "seed": 42},
+        "judge.resources_servers.judge.judge_responses_create_params": {"top_p": 0.8},
     }
-
-
-def test_only_plain_numeric_strings_are_read_as_numbers() -> None:
-    record = provenance.build_provenance(
-        {
-            "server": {
-                "max_concurrent_requests": "${oc.env:UNRESOLVED}",
-                "max_concurrency": "two",
-                "concurrency": "1.5",
-                "num_workers": "1_000",
-                "judge_max_concurrency": "-1",
-                "max_concurrent_episodes": None,
-                "max_tokens": "inf",
-                "temperature": "nan",
-                "top_p": "1e999",
-                "top_k": "true",
-                "min_p": float("inf"),
-                "presence_penalty": "-0.5",
-                "frequency_penalty": "1e-3",
-                "seed": "${seed}",
-            }
-        }
-    )
-    assert record.concurrency_limits == {"server": {"judge_max_concurrency": -1, "max_concurrent_episodes": None}}
-    assert record.sampling_parameters == {"server": {"presence_penalty": -0.5, "frequency_penalty": 0.001}}
 
 
 def test_review_provenance_excludes_boolean_sampling_values() -> None:
