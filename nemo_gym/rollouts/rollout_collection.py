@@ -83,6 +83,8 @@ from nemo_gym.config.global_config import (
     ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    GROUP_ID_KEY_NAME,
+    GROUP_SIZE_KEY_NAME,
     MODEL_SAMPLING_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -2910,6 +2912,55 @@ def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailureReco
     )
 
 
+def _cancelled_member_record(
+    row: Dict, *, delivery: Literal["not_sent", "possibly_delivered"]
+) -> RolloutFailureRecord:
+    """The outcome of a group member that ``cancel_groups`` stopped: a terminal failure, never a reward of zero."""
+    return RolloutFailureRecord(
+        episode_id=EpisodeId(rollout_id=logical_rollout_id(row), attempt=row.get(ATTEMPT_INDEX_KEY_NAME, 0)),
+        run_id=row[RUN_ID_KEY],
+        source="collector",
+        delivery=delivery,
+        failure=EpisodeFailure(
+            failure_reason=f"Cancelled with group {row[GROUP_ID_KEY_NAME]!r}"[:2000],
+            terminal=True,
+            failure_kind=CANCELLED,
+        ),
+    )
+
+
+def _check_groups(examples: List[Dict]) -> None:
+    """Refuse group keys that would let ``cancel_groups`` stop rows outside the group the caller means.
+
+    A group's size bounds its distinct rollout IDs, so a group ID reused by another group's rows is caught here.
+    """
+    sizes: Dict[str, Optional[int]] = {}
+    members: Dict[str, Set[str]] = defaultdict(set)
+    for row in examples:
+        group_id = row.get(GROUP_ID_KEY_NAME)
+        size = row.get(GROUP_SIZE_KEY_NAME)
+        if group_id is None:
+            if size is not None:
+                raise ValueError(f"A row with {GROUP_SIZE_KEY_NAME} also needs {GROUP_ID_KEY_NAME}.")
+            continue
+        if not isinstance(group_id, str) or not group_id:
+            raise ValueError(f"{GROUP_ID_KEY_NAME} must be a non-empty string, not {group_id!r}.")
+        if size is not None and (not isinstance(size, int) or isinstance(size, bool) or size < 1):
+            raise ValueError(f"{GROUP_SIZE_KEY_NAME} must be an integer of at least 1, not {size!r}.")
+        if sizes.setdefault(group_id, size) != size:
+            raise ValueError(
+                f"The members of group {group_id!r} disagree on {GROUP_SIZE_KEY_NAME}: "
+                f"{sizes[group_id]!r} and {size!r}."
+            )
+        members[group_id].add(logical_rollout_id(row))
+    for group_id, size in sizes.items():
+        if size is not None and len(members[group_id]) > size:
+            raise ValueError(
+                f"Group {group_id!r} has {len(members[group_id])} distinct rollout IDs but {GROUP_SIZE_KEY_NAME} "
+                f"{size}; give each group its own {GROUP_ID_KEY_NAME}."
+            )
+
+
 def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailureRecord:
     if not isinstance(result, dict):
         raise InvalidRolloutResult("Agent /run must return a JSON object.")
@@ -3609,6 +3660,64 @@ class _EagerCompletionIterator:
         return completed
 
 
+class _GroupCancellation:
+    """Cancel the unfinished members of the groups a ``run_outcomes`` caller names, one record per member.
+
+    A member that has not started is never sent. One in flight is cancelled as ``aclose()`` cancels it: its
+    connection closes and the server cleans up after it. Either way the member resolves to a ``cancelled`` failure
+    record, with delivery ``not_sent`` unless ``mark_sent`` saw it pass the caller's semaphore to ``/run``. A row
+    without a group ID is never cancelled here.
+    """
+
+    def __init__(self) -> None:
+        self.cancelled: Set[str] = set()
+        self._running: Dict[str, Set[asyncio.Task]] = defaultdict(set)
+        self._sent: Set[int] = set()
+
+    def mark_sent(self, row: Dict) -> None:
+        """The ``on_dispatch`` hook: it runs once the caller's semaphore admits the row, just before ``/run``."""
+        if row.get(GROUP_ID_KEY_NAME) is not None:
+            self._sent.add(id(row))
+
+    def cancel(self, group_ids: Iterable[str]) -> None:
+        for group_id in group_ids:
+            # A second task.cancel() on a member still unwinding would turn its record back into a cancellation.
+            if group_id in self.cancelled:
+                continue
+            self.cancelled.add(group_id)
+            for task in self._running.get(group_id, ()):
+                task.cancel()
+
+    async def run(self, row: Dict, dispatch: Callable[[Dict], Awaitable[_CompletedRollout]]) -> _CompletedRollout:
+        group_id = row.get(GROUP_ID_KEY_NAME)
+        if group_id is None:
+            return await dispatch(row)
+        if group_id in self.cancelled:
+            return _CompletedRollout(
+                row=row, result=_cancelled_member_record(row, delivery="not_sent"), rollout_latency_ms=None
+            )
+        task = asyncio.current_task()
+        running = self._running[group_id]
+        running.add(task)
+        try:
+            return await dispatch(row)
+        except asyncio.CancelledError:
+            # Only the group's own cancel becomes a record. A close or an outer cancel of this task leaves a cancel
+            # request after this one is withdrawn, and then the cancellation wins.
+            if group_id not in self.cancelled or task.uncancel() > 0:
+                raise
+            # A member cancelled while it waited for the caller's semaphore never reached /run.
+            delivery = "possibly_delivered" if id(row) in self._sent else "not_sent"
+            return _CompletedRollout(
+                row=row, result=_cancelled_member_record(row, delivery=delivery), rollout_latency_ms=None
+            )
+        finally:
+            self._sent.discard(id(row))
+            running.discard(task)
+            if not running:
+                self._running.pop(group_id, None)
+
+
 class _RowResultIterator:
     """Map completion metadata to ``(row, result)`` for the direct collection APIs.
 
@@ -3622,11 +3731,13 @@ class _RowResultIterator:
         enrich: Optional[Callable[["_CompletedRollout"], Awaitable[Any]]] = None,
         on_close: Optional[Callable[[], None]] = None,
         on_settled: Optional[Callable[[], None]] = None,
+        groups: Optional[_GroupCancellation] = None,
     ):
         self._completions = completions
         self._enrich = enrich
         self._on_close = on_close
         self._on_settled = on_settled
+        self._groups = groups
         self._closed = False
 
     def _finish(self) -> None:
@@ -3656,6 +3767,23 @@ class _RowResultIterator:
             if self._on_settled is not None:
                 self._on_settled()
         return completed.row, completed.result
+
+    def cancel_groups(self, group_ids: Iterable[str]) -> None:
+        """Cancel the unfinished members of these groups, named by the rows' ``_ng_group_id``.
+
+        A member that has not started is never sent. A member in flight is cancelled as ``aclose()`` cancels it, with
+        the same limits: its `/run` connection closes, and server/agent cleanup is neither awaited nor guaranteed. The
+        iterator still yields one outcome per row: each cancelled member yields a terminal ``RolloutFailureRecord``
+        with failure kind ``cancelled``, and a member that had already finished keeps its outcome. Unknown group IDs,
+        and calls after closure, do nothing. Only the iterator ``run_outcomes`` returns supports this.
+        """
+        if self._groups is None:
+            raise ValueError("cancel_groups needs run_outcomes")
+        if isinstance(group_ids, str):
+            raise TypeError(f"cancel_groups takes a collection of group IDs, not the string {group_ids!r}")
+        # A close already cancelled every member; a second cancel would cut short a member's cleanup as it unwinds.
+        if not self._closed:
+            self._groups.cancel(group_ids)
 
     async def aclose(self) -> None:
         """Cancel unfinished rollouts and await the end of their client tasks in this process.
@@ -6092,6 +6220,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         run_timing: Optional[RunTimingReport] = None,
         record_unrouted_failures: bool = False,
         _connect_grace_s: Optional[float] = None,
+        _groups: Optional[_GroupCancellation] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -6369,7 +6498,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             # before admission must not leave an unawaited request coroutine.
             return await count_resident(_post_subroutine(row), observer)
 
-        awaitables = map(observed_post if observer is not None else _post_subroutine, examples)
+        post = observed_post if observer is not None else _post_subroutine
+        if _groups is not None:
+            # Outermost, so a member of a cancelled group returns before its request coroutine is created.
+            post = functools.partial(_groups.run, dispatch=post)
+        awaitables = map(post, examples)
         if max_resident_tasks is not None:
             return _BoundedCompletionIterator(awaitables, max_resident_tasks=max_resident_tasks, total=len(examples))
 
@@ -6403,6 +6536,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         On early stopping, await the iterator's ``aclose()`` to cancel and join unfinished
         client tasks, or ``aclose_and_drain()`` to also retrieve settled, unconsumed outcomes.
         Both have the same server/agent cleanup limitations documented by ``run_examples``.
+
+        To stop one group of rollouts, such as the rollouts of one task that a GRPO trainer compares, stamp the same
+        ``_ng_group_id`` (a non-empty string) on every member, and optionally the group's ``_ng_group_size``, which
+        bounds its distinct rollout IDs. Gym never stamps them, and refuses inconsistent ones before any row is sent.
+        The iterator's ``cancel_groups(group_ids)`` then cancels those groups' unfinished members; each still yields a
+        ``RolloutFailureRecord`` with failure kind ``cancelled``, and the server/agent cleanup limits of ``aclose()``
+        apply. Gym never cancels a group by itself: which groups are unusable is the caller's decision.
         """
         owner = run_id or str(uuid4())
         examples = [dict(row, **{RUN_ID_KEY: run_id or row.get(RUN_ID_KEY) or owner}) for row in examples]
@@ -6410,16 +6550,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             if maybe_rollout_id_from_run_body(row) is None:
                 raise ValueError("run_outcomes requires rollout ids; call preprocess_examples first.")
             logical_rollout_id(row)  # Enforce the shared EpisodeId rules before any HTTP dispatch.
+        _check_groups(examples)
 
+        groups = _GroupCancellation()
         return _RowResultIterator(
             self._run_examples_with_metadata(
                 examples,
                 head_server_config=head_server_config,
                 semaphore=semaphore,
                 typed_outcomes=True,
+                on_dispatch=groups.mark_sent,
                 _max_num_tries=max_num_tries,
                 _connect_grace_s=connect_grace_s,
+                _groups=groups,
             ),
+            groups=groups,
         )
 
     def run_examples(

@@ -9791,6 +9791,93 @@ class TestRunExamplesAclose:
             server.should_exit = True
             await asyncio.wait_for(serve_task, timeout=5)
 
+    async def test_cancel_groups_disconnects_only_that_groups_http_requests(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+
+        started = {"A": asyncio.Event(), "B": asyncio.Event()}
+        cancelled = {"A": asyncio.Event(), "B": asyncio.Event()}
+        release_b = asyncio.Event()
+
+        async def app(scope, receive, send):
+            assert scope["path"] == "/run"
+            body = b""
+            while True:
+                message = await receive()
+                body += message.get("body", b"")
+                if not message.get("more_body", False):
+                    break
+            group_id = json.loads(body)["_ng_group_id"]
+            started[group_id].set()
+            try:
+                await (asyncio.Event() if group_id == "A" else release_b).wait()
+            except asyncio.CancelledError:
+                cancelled[group_id].set()
+                raise
+            await send(
+                {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]}
+            )
+            await send({"type": "http.response.body", "body": json.dumps({"reward": 1.0, "response": {}}).encode()})
+
+        middleware = ClientDisconnectCancellationMiddleware(app)
+        server = uvicorn.Server(
+            uvicorn.Config(middleware, host="127.0.0.1", port=0, lifespan="off", log_level="warning")
+        )
+        serve_task = asyncio.create_task(server.serve())
+        completions = None
+        waiters = []
+        try:
+            async with asyncio.timeout(5):
+                while not server.started:
+                    await asyncio.sleep(0.01)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            server_client = ServerClient(
+                head_server_config=BaseServerConfig(host="127.0.0.1", port=port),
+                global_config_dict=OmegaConf.create(
+                    {
+                        "my_agent": {"responses_api_agents": {"impl": {}}},
+                        "environment": {
+                            "environment_servers": {
+                                "legacy_agent": {
+                                    "agent_server": {"name": "my_agent"},
+                                    "host": "127.0.0.1",
+                                    "port": port,
+                                }
+                            }
+                        },
+                    }
+                ),
+            )
+            monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda *args: server_client)
+            async with ClientSession() as session:
+                monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", session)
+                rows = [self._row(0) | {"_ng_group_id": "A"}, self._row(1) | {"_ng_group_id": "B"}]
+                completions = RolloutCollectionHelper().run_outcomes(rows)
+                waiters = [asyncio.ensure_future(awaitable) for awaitable in completions]
+                await asyncio.wait_for(asyncio.gather(started["A"].wait(), started["B"].wait()), timeout=5)
+                completions.cancel_groups(["A"])
+                await asyncio.wait_for(cancelled["A"].wait(), timeout=5)
+                # Group A's handler was cancelled through its closed connection; group B's is still waiting.
+                assert middleware.num_cancelled == 1 and not cancelled["B"].is_set()
+                release_b.set()
+                results = await asyncio.wait_for(asyncio.gather(*waiters), timeout=5)
+                outcomes = {row["_ng_group_id"]: result for row, result in results}
+                assert outcomes["B"] == {"reward": 1.0, "response": {}}
+                assert isinstance(outcomes["A"], RolloutFailureRecord)
+                assert (outcomes["A"].failure.failure_kind, outcomes["A"].delivery) == (
+                    "cancelled",
+                    "possibly_delivered",
+                )
+                assert middleware.num_cancelled == 1 and not cancelled["B"].is_set()
+        finally:
+            release_b.set()
+            if completions is not None:
+                await asyncio.wait_for(completions.aclose(), timeout=5)
+            await asyncio.wait_for(asyncio.gather(*waiters, return_exceptions=True), timeout=5)
+            server.should_exit = True
+            await asyncio.wait_for(serve_task, timeout=5)
+
 
 class TestDispatchBudget:
     """A task that cannot finish before the deadline must not be started."""

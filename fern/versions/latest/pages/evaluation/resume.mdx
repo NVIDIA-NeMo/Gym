@@ -323,6 +323,42 @@ to also retrieve completed, unconsumed outcomes. These methods wait for local cl
 Expected HTTP, JSON, and completed-result validation errors become failure records; programming errors and cancellation
 still propagate. A malformed completed result must not be interpreted as a reward-zero sample.
 
+To cancel a group of rollouts, such as the rollouts of one task that a GRPO trainer compares, give every member of the
+group the same `_ng_group_id` (a non-empty string) and, optionally, the group's size as `_ng_group_size`
+(`GROUP_ID_KEY_NAME` and `GROUP_SIZE_KEY_NAME` in `nemo_gym.config`). Gym never stamps these keys. Before sending any
+row, `run_outcomes()` refuses a size without a group ID, a size that is not an integer of at least 1, members that
+disagree on the size, and a group with more distinct rollout IDs than its size. A member is identified by its
+rollout ID, so attempts of one rollout are one member. The returned iterator's `cancel_groups(group_ids)` cancels the
+unfinished members of those groups: a member not yet started or still waiting for the `semaphore` is never sent, and
+a member in flight has its `/run` connection closed, as `aclose()` closes it. The iterator still returns one outcome
+per row. A cancelled member's outcome is a terminal `RolloutFailureRecord` with failure kind `cancelled` and delivery
+`not_sent` if it was never sent, or `possibly_delivered` otherwise, and a member that had already finished keeps its
+outcome. Unknown group IDs are ignored, and `run_examples()` does not support `cancel_groups`. Gym never cancels a
+group by itself: the caller decides when a group is unusable, for example after one member's outcome, or when a
+training step has enough groups.
+
+```python
+from nemo_gym.config import GROUP_ID_KEY_NAME
+from nemo_gym.rollouts import RolloutCollectionHelper, RolloutFailureRecord
+
+
+async def collect_groups(rows):
+    outcomes = RolloutCollectionHelper().run_outcomes(rows)
+    results = []
+    for future in outcomes:
+        row, outcome = await future
+        results.append((row, outcome))
+        # This caller cannot train on a group with a failed member, so it stops the rest of that group.
+        if isinstance(outcome, RolloutFailureRecord) and GROUP_ID_KEY_NAME in row:
+            outcomes.cancel_groups([row[GROUP_ID_KEY_NAME]])
+    return results
+```
+
+Like `aclose()`, `cancel_groups()` does not wait for server or sandbox cleanup. When the connection closes, the Harbor
+Environment Server cancels the episode's agent turn, closes its agent session and stops its sandbox. Once that cleanup
+succeeds, the harness makes no further model calls. A cleanup that fails, such as a sandbox stop that gets a provider
+error, is retried when the server shuts down.
+
 `run_examples()` retains its existing dictionary/exception behavior. A legacy agent result tagged with
 `_ng_failure_class` is converted explicitly at the structured API boundary; its old reward/response placeholders are
 not copied into the failure record. Completed masked results remain completed dictionaries.
