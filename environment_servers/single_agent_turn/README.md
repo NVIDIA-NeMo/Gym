@@ -53,4 +53,31 @@ With partial-rollout checkpointing on, the agent of an episode that grants `mcp`
 
 A restore rebuilds a borrowed sandbox under a new ID. When the replacement attempt continues an episode whose agent had not closed yet, it first seeds the Resources and agent sessions again: the Resources Server returns the restored sandbox, and the agent re-binds its restored session to that sandbox and to the replacement attempt's tool grants, such as a new MCP session token. Seeding again is idempotent, so a checkpoint does not wait for it, and a crash during it seeds again after the next restore. An episode without a borrowed sandbox seeds nothing again.
 
+## A sandbox for each attempt
+
+When the Resources Server lends no sandbox, this server can start one for each attempt and lend it to the agent, so a harness that runs its loop in a sandbox, such as a Simple Agent in sandbox mode, never runs on a host. Set `sandbox_provider` to a named sandbox provider block and `sandbox_config` to the sandbox's settings; set both or neither. Unset, this server starts no sandbox, as before.
+
+```yaml
+environment_servers:
+  single_agent_turn:
+    sandbox_provider: attempt_sandboxes  # a top-level sandbox provider block
+    sandbox_config:
+      image: python:3.13-slim
+      workdir: /workspace
+      ttl_s: 25200  # above the episode timeout plus the cleanup timeout
+      network: model_only
+      model_server: policy_model  # the agent's model server
+```
+
+Each attempt then runs in one sandbox:
+
+| Step | What happens |
+|------|--------------|
+| Seed | After the Resources and tool server seeds, the server starts the sandbox through its `OwnedSandboxes` with the typed network rule, then seeds the agent with operate-scope `sandbox_access` to it. A sandbox the Resources seed lends wins: then the server starts none. |
+| Agent turn | The agent borrows the sandbox and runs its turn in it. `model_only` lets the sandbox reach the model server's host and nothing else. |
+| Verify | After the agent closes, `/verify` also receives `ng_sandbox_access`, operate-scope access to the same sandbox. A verifier that grades in it declares the field and borrows it; every other verifier ignores it, and it never reaches the stored result. |
+| Cleanup | The server stops the sandbox on every path, after the agent session closes. `ttl_s` reclaims one it could not stop. |
+
+`sandbox_config` must name a network rule (`network`) and a lifetime (`ttl_s`), so no attempt starts with the provider's default egress or outlives a crashed server. At startup the server refuses a provider that cannot apply the rule, such as Docker for `model_only`, or that no other process can connect to, such as the `local` provider, which runs commands on this host. There is no host fallback: if the sandbox cannot start, the attempt fails as a retryable infrastructure failure before the agent runs, and records no reward. A checkpoint cannot rebuild a sandbox this server started, so with partial-rollout checkpointing on, such an episode starts over from its input after a crash.
+
 The server supports `num_workers > 1`. Episode state and cleanup remain local to the worker handling that request. `max_concurrent_episodes` and queue admission are also enforced independently by each worker, so the deployment-wide concurrency limit is approximately `num_workers * max_concurrent_episodes`.
