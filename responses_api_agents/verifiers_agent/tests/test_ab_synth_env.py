@@ -189,7 +189,8 @@ def load(info, **kwargs):
         f.write(json.dumps(row) + "\n")
         f.flush()
         vf_env = env.load_environment(tasks_path=f.name, **kwargs)
-    state = asyncio.run(vf_env.setup_state({"prompt": PROMPT, "info": copy.deepcopy(info), "example_id": 0}))
+    resolved = json.loads(vf_env.dataset[0]["info"])
+    state = asyncio.run(vf_env.setup_state({"prompt": PROMPT, "info": resolved, "example_id": 0}))
     return vf_env, state
 
 
@@ -451,7 +452,9 @@ class WriteLogTest(unittest.TestCase):
             clock.fetch(call["method"], call["url"], body=call["body"])
 
         self.assertEqual(clock.log, [])
-        self.assertEqual(env.replay(info, [PROMOTE, failed_sf, failed_slack]), 1.0)
+        # A guardrail on a record the seed does not hold names nothing and is refused at load.
+        self.assertEqual(len(env.resolve_records(copy.deepcopy(info))), 2)
+        self.assertEqual(env.replay({**info, "assertions": [PROMOTED]}, [PROMOTE, failed_sf, failed_slack]), 1.0)
 
     def test_non_ascii_body_contains_matches_an_object_body(self):
         info = {
@@ -497,14 +500,55 @@ class ChangedRecordTest(unittest.TestCase):
                 {"type": "acted_on_day", "record": "101", "day": "2026-03-02"},
                 {"type": "not_acted", "record": "1010"},
                 {"type": "not_acted", "record": 1010},  # an integer record grades like its string
-                {"type": "not_acted", "record": "3"},  # the version in crm/v3
-                {"type": "not_acted", "record": "2"},  # the version in twitter /2/
             ],
         }
         tweet = {"method": "POST", "url": "https://api.twitter.com/2/tweets", "body": {"text": "Launch day"}}
 
         self.assertEqual(env.replay(info, [PROMOTE, tweet]), 1.0)
         self.assertEqual(env.replay(info, [PROMOTE, {**PROMOTE, "url": CONTACTS + "1010"}]), 0.0)
+        # API version digits ("3" in crm/v3, "2" in twitter /2/) name no record, so a row naming them is refused.
+        versions = {**info, "assertions": [{"type": "not_acted", "record": r} for r in ("3", "2")]}
+        self.assertEqual(
+            env.resolve_records(versions), ["unresolvable: not_acted record '3'", "unresolvable: not_acted record '2'"]
+        )
+
+    def test_a_write_credits_only_its_own_record_and_mapped_parents(self):
+        # An opportunity points at its account and contact, which it does not act on.
+        initial = {
+            "meta": {"current_time": "2026-03-02T09:00:00"},
+            "salesforce": {
+                "accounts": [{"id": "001A", "account_name": "Acme"}],
+                "contacts": [
+                    {
+                        "id": "003A",
+                        "first_name": "Ann",
+                        "last_name": "Lee",
+                        "email": "a@example.com",
+                        "account_id": "001A",
+                    }
+                ],
+                "opportunities": [
+                    {
+                        "id": "006A",
+                        "name": "Deal",
+                        "stage_name": "Prospecting",
+                        "account_id": "001A",
+                        "contact_id": "003A",
+                    }
+                ],
+            },
+        }
+        info = {
+            "initial_state": initial,
+            "assertions": [
+                {"type": "acted_on_day", "record": "006A", "day": "2026-03-02"},
+                {"type": "not_acted", "record": "001A"},
+                {"type": "not_acted", "record": "003A"},
+            ],
+        }
+        write = {"method": "PATCH", "url": SF + "Opportunity/006A", "body": {"StageName": "Closed Won"}}
+
+        self.assertEqual(env.replay(info, [write]), 1.0)
 
     def test_a_record_named_only_in_the_body_is_graded(self):
         initial = {
@@ -567,8 +611,18 @@ class ChangedRecordTest(unittest.TestCase):
         )
         clock.fetch("POST", jira + "/10001/comment", body={"body": "Looked at it"})
 
-        self.assertEqual(len(clock.log), 2)
-        self.assertIn("10001", clock.log[1]["records"])
+        clock.fetch("POST", jira + "/OPS-1/comment", body={"body": "Again, by key"})
+
+        self.assertEqual(len(clock.log), 3)
+        issue = env._tag("jira", "issues", "10001")
+        self.assertIn(issue, clock.log[1]["targets"])  # a comment by issue id
+        self.assertIn(issue, clock.log[2]["targets"])  # and by issue key
+        self.assertEqual(
+            env.resolve_records(
+                {"initial_state": JIRA_SEED, "assertions": [{"type": "not_acted", "record": "OPS-1"}]}
+            ),
+            [],
+        )
 
 
 class SheetRowTest(unittest.TestCase):
@@ -606,7 +660,11 @@ class SheetRowTest(unittest.TestCase):
                     {"type": "acted_on_day", "record": f"{title}!H7:I7", "day": day},  # other columns, same row
                     {"type": "acted_on_day", "record": f"'{title}'!A7", "day": day},
                     {"type": "acted_on_day", "record": "ss_abc", "day": day},  # the spreadsheet
-                    *({"type": "not_acted", "record": r} for r in ("1", "2", "4", "12", "16", "70", "Other!B7")),
+                    # Other rows of the tab, and rows past its end (an append's), by row_id or A1 reference.
+                    *(
+                        {"type": "not_acted", "record": r}
+                        for r in ("2", "4", f"{title}!A1", f"{title}!A12", f"'{title}'!B70")
+                    ),
                 ],
             }
             write = {
@@ -647,6 +705,53 @@ class SheetRowTest(unittest.TestCase):
             ],
         }
         self.assertEqual(env.replay(info, [block]), 0.0)
+
+    def test_records_that_name_nothing_or_more_than_one_record_are_refused(self):
+        seed = self.seed("Sheet1")
+        seed["google_sheets"]["worksheets"].append({"id": "ws9", "spreadsheet_id": "ss_abc", "title": "Archive"})
+        seed["google_sheets"]["rows"].append(
+            {"spreadsheet_id": "ss_abc", "worksheet_id": "ws9", "row_id": 7, "cells": {}}
+        )
+        seed["hubspot"] = {"contacts": [{"id": "C3"}]}
+        assertions = [{"type": "not_acted", "record": r} for r in ("Other!B7", "B7", "7", "12", "C3", "Archive!B7")]
+
+        problems = env.resolve_records({"initial_state": seed, "assertions": assertions})
+
+        # A missing tab, a tab-less row in two tabs, a row past the end without a tab: refused. "C3" is a contact's
+        # key, so it names the contact and not row 3; a tab-qualified row names that tab's row.
+        self.assertEqual(
+            problems,
+            [
+                "unresolvable: not_acted record 'Other!B7'",
+                "ambiguous: not_acted record 'B7'",
+                "ambiguous: not_acted record '7'",
+                "unresolvable: not_acted record '12'",
+            ],
+        )
+        self.assertEqual(assertions[4]["targets"], [env._tag("hubspot", "contacts", "C3")])
+        self.assertEqual(assertions[5]["targets"], [env._tag("google_sheets", "rows", ["ss_abc", "ws9", 7])])
+
+    def test_string_row_ids_are_named_by_id_and_an_append_does_not_take_their_place(self):
+        info = {
+            "initial_state": self.seed("Invoices", row_ids=["INV-1001", "INV-1002", "INV-1003"]),
+            "assertions": [
+                {"type": "acted_on_day", "record": "INV-1002", "day": "2026-03-02"},
+                {"type": "not_acted", "record": "Invoices!B2"},  # position 2: INV-1001
+            ],
+        }
+        rows_route = {"method": "PUT", "url": SHEET + "ws1/rows/INV-1002", "body": {"cells": {"B": "paid"}}}
+        append = {"method": "POST", "url": SHEET + "Invoices:append", "body": {"values": [["INV-1004", "open"]]}}
+
+        self.assertEqual(env.replay(info, [rows_route, append]), 1.0)
+
+    def test_an_app_that_only_logs_actions_cannot_be_graded_by_day(self):
+        # Trello keeps no cards, only its action log, so a record such as a card id names nothing in the seed.
+        info = {
+            "initial_state": {"meta": {"current_time": "2026-03-02T09:00:00"}},
+            "assertions": [{"type": "acted_on_day", "record": "card_1", "day": "2026-03-02"}],
+        }
+
+        self.assertEqual(env.resolve_records(info), ["unresolvable: acted_on_day record 'card_1'"])
 
     def test_rows_with_string_ids_are_numbered_by_position(self):
         # Upstream addresses a tab of string-keyed rows by position: A1 row 2 is its first row.

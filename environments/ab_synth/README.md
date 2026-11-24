@@ -28,12 +28,19 @@ assertion types grade when the agent acted:
 - `not_acted` (`record`): no write changed `record`. It is a guardrail.
 
 A write is graded on the world, not on its URL, so a record named only in the body (a QuickBooks delete, a Slack
-channel) counts the same as one in the path. `record` is the key of a record: its `id`, else `sid`, else its first
-`*_id` field (Xero `contact_id`). A write also changes the records the changed ones point to by an id field or, for
-an action an app only logs (a Jira comment), by its params: a new calendar event changes its calendar, a Slack post
-its channel, a sheet row its spreadsheet and tab. A sheet row is named the way a Sheets range names it: `7`, `B7`,
-`Sheet1!A7:C7` or `'Q4 2025'!B7` (any columns), or rows `Sheet1!A2:B5`. Its number is its `row_id`, or its position
-in the tab for string row ids (the first row is 2), the way the simulator addresses it.
+channel) counts the same as one in the path. At load, each `record` is resolved against the seed and the records its
+events add, to the record with that key (`id`, else `sid`, else a first field such as Xero's `contact_id`), the Jira
+issue with that key (`OPS-1`), or the sheet row with that `row_id` or row id. Only a string that names no record is
+read as an A1 reference to rows of one tab: `B7`, `Sheet1!A7:C7` or `'Q4 2025'!B7` (any columns), or rows
+`Sheet1!A2:B5`. A row's number is its `row_id`, or its position in a tab of string row ids (the first row is 2), the
+way the simulator addresses it, and a single row past a named tab's end is the row an append adds. A row whose record
+names nothing, or more than one record (two collections, or a row number without a tab in a sheet with several tabs),
+is refused at load and the counts are logged. Apps that keep only an action log (Trello, Notion, Asana, ...) hold no
+records, so their writes cannot be graded with these two assertions.
+
+A write changes the records it adds, edits or deletes, and only these parents: a calendar event's calendar, a Facebook
+post's page, a Slack message's channel, a sheet row's spreadsheet and tab, and the issue of a Jira comment. Records
+that only point at another (an opportunity's account, a ticket's requester) do not act on it.
 
 ## Multi-turn
 
