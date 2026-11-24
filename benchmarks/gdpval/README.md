@@ -873,8 +873,9 @@ Notes:
   [Judge input options](#judge-input-options)). Lower the DPI or these caps if
   you hit `finish_reason: length`.
 - **Idle proxies**: the benchmark's three panel proxies still start (no GPU).
-  Drop them with `~gdpval_gpt55_judge_model ~gdpval_gemini31_judge_model
-  ~gdpval_claude48_judge_model` for a fully clean run.
+  For a fully clean run, set them to null with `++gdpval_gpt55_judge_model=null
+  ++gdpval_gemini31_judge_model=null ++gdpval_claude48_judge_model=null`. A `~name`
+  deletion fails here: command-line overrides apply before the `--config` files load.
 - **Video**: MiniMax-M3 reads video natively, so video deliverables are passed as
   native `video_url` media blocks (not filename stubs) via
   `judge_handles_video: true`.
@@ -916,7 +917,8 @@ loads `--config` files before `--benchmark` files, so with `--benchmark gdpval` 
 starts but is not used. The same holds for the other judge overlays in `resources_servers/gdpval/configs/`.
 
 The same page-cap notes apply as for MiniMax-M3. The benchmark's four OpenAI
-judge proxies start idle; drop them with `~<name>` if you want a clean run.
+judge proxies start idle; for a clean run, set them to null as above, plus
+`++gdpval_judge_model=null`.
 
 ## Aggregate metrics
 

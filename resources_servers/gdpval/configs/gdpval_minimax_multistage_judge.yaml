@@ -116,7 +116,8 @@ gdpval_resources_server:
       #             reference_models:
       #               kimi_k26: {deliverables_dir: /abs/path/to/deliverables_cache}
       #
-      #   - one-off: ++...gdpval.reference_models.<id>.deliverables_dir=/abs/path
+      #   - one-off, e.g. for kimi_k26:
+      #     ++gdpval_resources_server.resources_servers.gdpval.reference_models.kimi_k26.deliverables_dir=/abs/path
       reference_models:
         deepseek_v4_flash_0731:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_flash_0731

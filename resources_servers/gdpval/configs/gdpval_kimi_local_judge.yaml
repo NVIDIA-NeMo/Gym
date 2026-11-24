@@ -32,9 +32,10 @@
 # The benchmark's OpenAI judge proxies (`gdpval_judge_model` and the three
 # per-member `gdpval_gpt55_judge_model`, `gdpval_gemini31_judge_model` and
 # `gdpval_claude48_judge_model`) stay defined but UNUSED. Each boots a cheap
-# idle FastAPI proxy (no GPU); for a fully clean run drop them with
-# `~gdpval_judge_model ~gdpval_gpt55_judge_model ~gdpval_gemini31_judge_model
-# ~gdpval_claude48_judge_model` on the CLI.
+# idle FastAPI proxy (no GPU); for a fully clean run set them to null on the CLI:
+# `++gdpval_judge_model=null ++gdpval_gpt55_judge_model=null
+# ++gdpval_gemini31_judge_model=null ++gdpval_claude48_judge_model=null`
+# (`~name` fails: CLI overrides apply before the --config files load).
 #
 # Serving shape: TP=8 / DP=1. On 4-GPU nodes the TP group spans two nodes, so
 # VLLM_RAY_DP_PACK_STRATEGY is `span` below. See the standalone
