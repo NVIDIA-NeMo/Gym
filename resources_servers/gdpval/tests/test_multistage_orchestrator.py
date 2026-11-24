@@ -4436,7 +4436,8 @@ class TestCachedDeliverableReuse:
         # An earlier session wrote the judge call of the reused stage-1 row, whose task index is offset by the stride.
         reused_key = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0}
         CaptureStore(capture_dir).record(
-            maybe_rollout_id_from_run_body(reused_key), _capture_exchange("seeded") | {"verifier_invocation_id": "judge"}
+            maybe_rollout_id_from_run_body(reused_key),
+            _capture_exchange("seeded") | {"verifier_invocation_id": "judge"},
         )
 
         _, _, persisted = await self._run_two_stages(tmp_path, monkeypatch, cached=True, capture_dir=capture_dir)

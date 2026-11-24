@@ -214,7 +214,9 @@ async def test_a_missing_judge_capture_leaves_the_captured_call_counts_incomplet
 @pytest.mark.parametrize(
     "candidate_fields,judged_response,expected_calls",
     [
-        pytest.param({"gaps": [{"code": "model_call_capture_no_records"}]}, "response", 1, id="candidate capture empty"),
+        pytest.param(
+            {"gaps": [{"code": "model_call_capture_no_records"}]}, "response", 1, id="candidate capture empty"
+        ),
         pytest.param({"model_calls": [{"model_call_id": "candidate-call"}]}, "absent", 2, id="judge call missing"),
     ],
 )
