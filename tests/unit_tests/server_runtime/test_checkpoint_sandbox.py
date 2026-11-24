@@ -347,7 +347,17 @@ def test_spec_round_trips_every_field_a_fork_reads() -> None:
             "snapshot_id": "stale",
         },
         ports=[8080, 9090],
-        sidecars=[SandboxSidecarSpec(name="db", image="postgres:16", env={"POSTGRES_PASSWORD": "x"})],
+        sidecars=[
+            SandboxSidecarSpec(
+                name="db",
+                image="registry.example/postgres:16",
+                env={"POSTGRES_PASSWORD": "x"},
+                provider_options={
+                    "image_auth": {"username": "su", "password": "sp"},
+                    "network_policy": {"egress": [{"action": "allow", "target": "pypi.org"}]},
+                },
+            )
+        ],
     )
     data = spec_to_json(spec)
     # Dropped: the snapshot has the files and replaces the image, so its registry credentials go too.
@@ -355,7 +365,10 @@ def test_spec_round_trips_every_field_a_fork_reads() -> None:
     assert data["provider_options"] == {"network_policy": {"egress": "none"}}
     assert data["ports"] == [8080, 9090]
     assert data["resources"] == {"cpu": 2, "memory_mib": 512, "disk_gib": 10, "gpu": 1, "gpu_type": "H100"}
-    assert [sidecar["name"] for sidecar in data["sidecars"]] == ["db"]
+    # Kept: the snapshot is of the sandbox alone, and the fork pulls the sidecar's image again with its credentials.
+    (sidecar,) = data["sidecars"]
+    assert sidecar["image"] == "registry.example/postgres:16"
+    assert sidecar["provider_options"]["image_auth"] == {"username": "su", "password": "sp"}
     # The rest, the environment included, is exactly what the fork is created with.
     restored = spec_from_json(json.loads(json.dumps(data)))
     assert restored == dataclasses.replace(

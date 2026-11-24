@@ -460,6 +460,8 @@ options, and the default keep-alive entrypoint. Closing the main sandbox deletes
   shell. `on_stdout` receives stdout one line at a time from the streamed request. With
   `operations.background_exec`, it receives what each poll finds new, stdout and stderr together.
 - A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.
+  A checkpoint therefore keeps each sidecar's spec, its `image_auth` included, in plain text in its state; give a
+  sidecar's registry credentials through [`images.auth`](#image-policy-and-setup-commands) to keep them out of it.
 - A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs. A
   sidecar that no longer exists does not fail the connect, so the sandbox can still be stopped; using that sidecar
   raises a provider failure. A sidecar that cannot be reached for another reason fails the connect. Connects to one
