@@ -79,8 +79,8 @@ _CONCURRENCY_KEYS = frozenset(
         "delete_concurrency",
         "build_parallelism",
         "parallelism",
-        "global_aiohttp_intended_concurrency",
-        "global_aiohttp_intended_concurrency_per_host",
+        "global_aiohttp_connector_limit",
+        "global_aiohttp_connector_limit_per_host",
     }
 )
 # Server-specific limits, such as `judge_endpoint_max_concurrency` or `max_concurrent_rollouts`.

@@ -321,8 +321,9 @@ def test_a_shipped_config_limit_under_its_own_name_is_recorded(config_fpath, pat
 def test_limits_named_only_in_their_config_models_are_recorded() -> None:
     record = provenance.build_provenance(
         {
+            "global_aiohttp_connector_limit": 102400,
+            "global_aiohttp_connector_limit_per_host": 16384,
             "global_aiohttp_intended_concurrency": 512,
-            "global_aiohttp_intended_concurrency_per_host": 64,
             "mm_coding": {
                 "resources_servers": {
                     "mm_coding_training": {"verification_concurrency": 8, "checkpoint": {"parallelism": 16}}
@@ -334,8 +335,8 @@ def test_limits_named_only_in_their_config_models_are_recorded() -> None:
     )
     assert record.concurrency_limits == {
         provenance.TOP_LEVEL_PATH: {
-            "global_aiohttp_intended_concurrency": 512,
-            "global_aiohttp_intended_concurrency_per_host": 64,
+            "global_aiohttp_connector_limit": 102400,
+            "global_aiohttp_connector_limit_per_host": 16384,
         },
         "mm_coding.resources_servers.mm_coding_training": {"verification_concurrency": 8},
         "mm_coding.resources_servers.mm_coding_training.checkpoint": {"parallelism": 16},
