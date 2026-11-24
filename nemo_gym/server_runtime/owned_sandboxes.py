@@ -94,7 +94,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, Valid
 
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.api import STOP_TIMEOUT_S, AsyncSandbox
 from nemo_gym.sandbox.config import OwnerConcurrency, resolve_provider_config, resolve_provider_owner_concurrency
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
@@ -103,9 +103,9 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SupportsSandboxSnapshot,
+    provider_capabilities,
 )
 from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.sandbox.utils import STOP_TIMEOUT_S
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 
 
@@ -164,6 +164,10 @@ class SandboxCheckpointState(BaseModel):
 
     ``spec`` is written as the fork needs it, which includes the sandbox environment (``env``) in plain text: a
     checkpoint directory holds whatever the sandboxes were started with.
+
+    ``keeps_processes`` says the provider's snapshot kept the sandbox's running processes as well as its files, so
+    the fork starts with them running (``"processes"`` in the provider's ``capabilities.snapshot_keeps``). States
+    written before the field existed read as files only.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -174,6 +178,7 @@ class SandboxCheckpointState(BaseModel):
     snapshot_id: str
     spec: dict[str, JsonValue]
     snapshot_ready_ts: float
+    keeps_processes: bool = False
 
 
 class SandboxCheckpointError(RuntimeError):
@@ -488,6 +493,8 @@ class OwnedSandboxes:
         self._fork_stops = asyncio.Lock()
         self._background: set[asyncio.Task[Any]] = set()
         self._unreleased_warning_at = _UNRELEASED_CHECKPOINTS_WARNING
+        # The checkpoint whose export last checked the index for checkpoints no release dropped.
+        self._unreleased_checked_for: Optional[str] = None
 
     @classmethod
     def from_config(
@@ -756,21 +763,23 @@ class OwnedSandboxes:
         outcomes = await asyncio.gather(
             *(self._export_locked(key, checkpoint_id) for key in keys), return_exceptions=True
         )
-        await self._warn_of_unreleased_checkpoints()
+        await self._warn_of_unreleased_checkpoints(checkpoint_id)
         failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
         if failures:
             raise failures[0]
         return dict(zip(keys, outcomes))
 
-    async def _warn_of_unreleased_checkpoints(self) -> None:
+    async def _warn_of_unreleased_checkpoints(self, checkpoint_id: str) -> None:
         """Warn when the index keeps growing: nothing but a release deletes a snapshot.
 
         A controller that releases keeps the index at the one or two checkpoints it may restore. One that never
         does leaves the snapshots of every commit on the provider for good, which only shows in the provider's
-        storage unless it is said here.
+        storage unless it is said here. The index is listed once per checkpoint, however many exports the owner
+        makes for it: the index is on a filesystem every node reads.
         """
-        if self._index is None:
+        if self._index is None or checkpoint_id == self._unreleased_checked_for:
             return
+        self._unreleased_checked_for = checkpoint_id
         try:
             count = await asyncio.to_thread(self._index.checkpoint_count)
         except OSError:
@@ -848,6 +857,7 @@ class OwnedSandboxes:
             snapshot_id=snapshot_id,
             spec=spec,
             snapshot_ready_ts=time.time(),
+            keeps_processes="processes" in provider_capabilities(self._provider).snapshot_keeps,
         )
         return state.model_dump(mode="json")
 
@@ -1023,7 +1033,7 @@ class OwnedSandboxes:
             # Bounded as a whole, the wait for a slot included, like every other stop.
             async with asyncio.timeout(STOP_TIMEOUT_S), self._stop_slot():
                 old = await AsyncSandbox.connect(state.descriptor, provider=self._provider, owns_provider=False)
-                await old.stop()
+                await old.stop(timeout_s=STOP_TIMEOUT_S)
         except Exception as error:
             # Already gone (ended by its lifetime), or unreachable: its lifetime ends it.
             LOGGER.info("superseded sandbox %s of %s was not stopped: %r", sandbox_id, key, error)
@@ -1146,15 +1156,30 @@ class OwnedSandboxes:
         entry = self._entries.get(key)
         if entry is None:
             return
-        await self._stop_sandbox(entry.sandbox)
+        if entry.sandbox.started:
+            await self._stop_sandbox(entry.sandbox)
+        # Without a wait for a sandbox its owner already stopped: a caller cancelled there would leave the key
+        # tracked with nothing left to stop.
         self._entries.pop(key, None)
+
+    async def discard(self, keys: Iterable[str]) -> None:
+        """Give up the sandboxes of ``keys`` and stop them; for the forks of a restore its owner could not install.
+
+        Unlike :meth:`stop`, every key can be restored again at once, whether or not the stops succeed. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the
+        forks that :meth:`settle`, the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped.
+        """
+        for key in keys:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self._unstopped_forks.append(entry.sandbox)
+        await self._stop_forks()
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
         # Shielded and bounded as a whole, the wait for a stop slot included: a cancelled request cannot leave the
         # sandbox running, and a stop that cannot get a slot in time fails like a stop that hangs.
         with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
             async with self._stop_slot():
-                await sandbox.stop()
+                await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
 
     def _provider_name(self) -> str:
         return getattr(self._provider, "name", type(self._provider).__name__)

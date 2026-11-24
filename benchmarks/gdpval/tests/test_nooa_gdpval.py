@@ -48,7 +48,7 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
     assert benchmark.agent_name == "gdpval_nooa_agent"
     assert benchmark.dataset.jsonl_fpath == Path("benchmarks/gdpval/data/gdpval_benchmark.jsonl")
     assert benchmark.dataset.prepare_script == Path("benchmarks/gdpval/prepare.py")
-    assert benchmark.dataset.prompt_config == Path("benchmarks/gdpval/prompts/harness-neutral.yaml")
+    assert benchmark.dataset.prompt_config == Path("benchmarks/gdpval/prompts/nooa.yaml")
 
     parser = GlobalConfigDictParser()
     _, configs = parser.load_extra_config_paths([str(recipe)])
@@ -137,13 +137,16 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
     assert row["task_source"] == resources.name
     assert row["agent_ref"]["name"] == agent.name
     assert _environment_server_for_agent(agent.name, _environment_servers_by_agent(config)) == environment.name
-    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment, server_client=MagicMock(spec=ServerClient))
+    adapter = SingleAgentTurnLegacyEnvironmentServer(
+        config=environment, server_client=MagicMock(spec=ServerClient, global_config_dict=config)
+    )
     request = adapter._episode_request_from_row(row)
     task_input = request.task.task_input
     prompt = _latest_user_text(task_input.responses_create_params)
     assert "Sector: Finance\nOccupation: Auditor\n\nAudit {this}." in prompt
     assert "- reference_files/ledger.xlsx" in prompt
     assert "code_exec" not in prompt
+    assert "await self.finish(reason=..., paths=[...])" in prompt
     for key in ("rubric_json", "rubric_pretty", "reference_file_urls"):
         assert task_input.task_data[key] == task[key]
         assert str(task[key]) not in prompt
@@ -156,3 +159,13 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
     finish = next(tool for tool in tools if tool["name"] == "finish")
     assert set(finish["parameters"]["properties"]) == {"reason", "paths"}
     assert source.read_bytes() == original
+
+
+def test_nooa_prompt_adds_only_the_finish_sentence_to_the_harness_neutral_prompt() -> None:
+    prompts = ROOT / "benchmarks/gdpval/prompts"
+    neutral = OmegaConf.load(prompts / "harness-neutral.yaml").user
+    nooa = OmegaConf.load(prompts / "nooa.yaml").user
+    (added,) = [line for line in nooa.splitlines() if line not in neutral.splitlines()]
+    assert "await self.finish(reason=..., paths=[...])" in added
+    assert "`return_result` does not submit any files" in added
+    assert nooa.replace(added + "\n", "", 1) == neutral
