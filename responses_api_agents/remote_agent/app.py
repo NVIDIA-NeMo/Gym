@@ -72,6 +72,7 @@ from nemo_gym.core import (
     accumulate_response_usage,
     observe_failure,
 )
+from nemo_gym.core.failure_transport import observe_transport_resend
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
@@ -324,6 +325,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         response = None
         last_connect_error: Optional[BaseException] = None
         for num_try in range(1, _REMOTE_MAX_TRIES + 1):
+            if num_try > 1:
+                # request() makes one attempt per call, so this loop's resends are counted here.
+                observe_transport_resend()
             try:
                 # Never follow redirects: aiohttp re-issues 301/302/303 as a body-less GET and
                 # re-sends 307/308 to an address the user never configured; fail with the 3xx.
