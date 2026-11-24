@@ -58,14 +58,28 @@ _PIXEL_TERM_RE = re.compile(
     r"(?:the\s+absolute\s+|absolute\s+)?pixel(?:\s+(?:coordinate\s+point|coordinates|coordinate|position|point))?\b",
     re.IGNORECASE,
 )
-_FLOAT_01 = r"(?:0?\.\d+|1\.0+)"
+_COORD_01 = r"(?:0?\.\d+|1\.0+|[01])"
+_COORD_01_FULL_RE = re.compile(rf"^{_COORD_01}$")
 _NORM_01_TUPLE_RE = re.compile(
-    rf"([\[\(])\s*({_FLOAT_01})\s*,\s*({_FLOAT_01})(?:\s*,\s*({_FLOAT_01})\s*,\s*({_FLOAT_01}))?\s*([\]\)])"
+    rf"([\[\(])\s*({_COORD_01})\s*,\s*({_COORD_01})(?:\s*,\s*({_COORD_01})\s*,\s*({_COORD_01}))?\s*([\]\)])"
 )
+_INTERVAL_PREFIX_RE = re.compile(
+    r"(?:"
+    r"\b(?:range|interval|scale)(?:\s+(?:of|over|is|in))?\s*:?"
+    r"|\b(?:in|within|over)(?:\s+the)?"
+    r"|\b(?:normalized|scaled|mapped)\s+to"
+    r")\s*$",
+    re.IGNORECASE,
+)
+_INTERVAL_SUFFIX_RE = re.compile(r"^\s*(?:range|interval|scale|normalized|coordinates?)\b", re.IGNORECASE)
 _NORM_01_RANGE_RE = re.compile(r"(\(\s*0\s*[-–]\s*)1(\s*(?:range)?\s*\))", re.IGNORECASE)
 _NORM_01_RANGE_TEXT_RE = re.compile(r"(\brange\s+0\s*[-–]\s*)1\b", re.IGNORECASE)
-_NORM_01_INTERVAL_RE = re.compile(r"\[\s*0\s*,\s*1\s*\]")
-_NORM_01_SCALAR_OPTION_RE = re.compile(rf"(^|\n)([A-D]\s*[.:]\s*)({_FLOAT_01})\b")
+_NORM_01_INTERVAL_RE = re.compile(r"\[\s*0(?:\.0+)?\s*,\s*1(?:\.0+)?\s*\]")
+_OPTION_LINE_RE = re.compile(r"(?:^|\n)[ \t]*[A-D][ \t]*[.:][ \t]*([^\n]+)")
+_NUMERIC_OPTION_RE = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$")
+_NORM_01_SCALAR_OPTION_RE = re.compile(
+    rf"(^|\n)([ \t]*[A-D][ \t]*[.:][ \t]*)({_COORD_01})(?=[ \t]*\.?[ \t]*(?:\r?\n|$))"
+)
 _ALREADY_1000_RE = re.compile(r"0\s*(?:to|[-–])\s*1000|\[0,\s*1000\]", re.IGNORECASE)
 _MUTUAL_EXCLUSION_MSG = (
     "include_hints and normalize_coords_1000 cannot be used together: "
@@ -190,6 +204,15 @@ def _replace_pixel_term(match: re.Match[str]) -> str:
     return f"{prefix}normalized coordinate{plural}"
 
 
+def _has_out_of_range_numeric_option(text: str) -> bool:
+    for match in _OPTION_LINE_RE.finditer(text):
+        rhs = match.group(1).strip()
+        token = rhs[:-1].rstrip() if rhs.endswith(".") else rhs
+        if _NUMERIC_OPTION_RE.fullmatch(token) and not _COORD_01_FULL_RE.fullmatch(token):
+            return True
+    return False
+
+
 def normalize_prompt_coords_to_1000(problem: str, images: list[str], *, hint: str = "") -> str:
     """Rewrite image pixel and ``[0, 1]`` coordinates in ``problem`` to integer ``[0, 1000]`` ``[x, y]`` format.
 
@@ -240,20 +263,30 @@ def normalize_prompt_coords_to_1000(problem: str, images: list[str], *, hint: st
     if not is_norm_01:
         return problem
 
+    tuple_count = 0
     has_bbox = False
 
     def _scale_tuple(match: re.Match[str]) -> str:
-        nonlocal has_bbox
+        nonlocal tuple_count, has_bbox
+        open_delim, close_delim = match.group(1), match.group(6)
+        if (open_delim, close_delim) not in (("[", "]"), ("(", ")")):
+            return match.group(0)
         vals = [match.group(2), match.group(3)]
         if match.group(4) is not None and match.group(5) is not None:
             vals.extend([match.group(4), match.group(5)])
             has_bbox = True
+        elif open_delim == "[" and float(vals[0]) == 0.0 and float(vals[1]) == 1.0:
+            before = problem[: match.start()]
+            after = problem[match.end() :]
+            if _INTERVAL_PREFIX_RE.search(before) or _INTERVAL_SUFFIX_RE.search(after):
+                return match.group(0)
+        tuple_count += 1
         scaled = ", ".join(str(_scale_1000(float(v))) for v in vals)
         return f"[{scaled}]"
 
-    updated, tuple_count = _NORM_01_TUPLE_RE.subn(_scale_tuple, problem)
+    updated = _NORM_01_TUPLE_RE.sub(_scale_tuple, problem)
     scalar_count = 0
-    if tuple_count == 0 and _NORM_01_RANGE_RE.search(updated):
+    if tuple_count == 0 and _NORM_01_RANGE_RE.search(updated) and not _has_out_of_range_numeric_option(updated):
         updated, scalar_count = _NORM_01_SCALAR_OPTION_RE.subn(
             lambda m: f"{m.group(1)}{m.group(2)}{_scale_1000(float(m.group(3)))}",
             updated,
@@ -261,10 +294,10 @@ def normalize_prompt_coords_to_1000(problem: str, images: list[str], *, hint: st
     if tuple_count == 0 and scalar_count == 0:
         return problem
 
-    updated = _NORM_01_RANGE_RE.sub(r"\g<1>1000\g<2>", updated)
-    updated = _NORM_01_RANGE_TEXT_RE.sub(r"\g<1>1000", updated)
-    updated = _NORM_01_INTERVAL_RE.sub("[0, 1000]", updated)
-    if not _ALREADY_1000_RE.search(updated):
+    updated, range_replacements = _NORM_01_RANGE_RE.subn(r"\g<1>1000\g<2>", updated)
+    updated, range_text_replacements = _NORM_01_RANGE_TEXT_RE.subn(r"\g<1>1000", updated)
+    updated, interval_replacements = _NORM_01_INTERVAL_RE.subn("[0, 1000]", updated)
+    if range_replacements + range_text_replacements + interval_replacements == 0:
         fmt = "[x1, y1, x2, y2]" if (has_bbox or "x1, y1, x2, y2" in hint) else "[x, y]"
         updated = (
             f"{updated}\n\n"

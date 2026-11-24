@@ -417,3 +417,174 @@ class TestNormalizeCoords1000:
             normalize_coords_1000=True,
         )
         assert row_math["verifier_metadata"]["question"] == cartesian
+
+        cartesian_endpoints = (
+            "<|image_1|>Where does the curve cross (0, 1) and (0, 0.5) on the figure's axes?\n"
+            "A. 0\nB. 0.25\nC. 1\nD. 0.5"
+        )
+        row_math_endpoints = pb_prepare.convert_record(
+            {
+                "index": 32,
+                "problem": cartesian_endpoints,
+                "image": [img],
+                "answer": "C",
+                "hint": "",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        assert row_math_endpoints["verifier_metadata"]["question"] == cartesian_endpoints
+
+    def test_converts_integer_endpoint_points_bboxes_and_scalar_options(self) -> None:
+        img = _data_url("image/png", _TINY_PNG)
+        mixed_points = pb_prepare.convert_record(
+            {
+                "index": 40,
+                "problem": (
+                    "<|image_1|>Using normalized coordinates (0-1 range), compare (0, 0.5), [0.25, 0.5], "
+                    "(1, 0), and [0, 1]."
+                ),
+                "image": [img],
+                "answer": "A",
+                "hint": "",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        mpq = mixed_points["verifier_metadata"]["question"]
+        assert "(0-1000 range)" in mpq
+        assert "compare [0, 500], [250, 500], [1000, 0], and [0, 1000]." in mpq
+
+        mixed_bbox = pb_prepare.convert_record(
+            {
+                "index": 41,
+                "problem": "<|image_1|>Compare [0, 0.25, 1, 0.75] with full frame [0, 0, 1, 1].",
+                "image": [img],
+                "answer": "A",
+                "hint": "Coordinates are given in [x1, y1, x2, y2] format.",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        mbq = mixed_bbox["verifier_metadata"]["question"]
+        assert "[0, 250, 1000, 750]" in mbq
+        assert "[0, 0, 1000, 1000]" in mbq
+        assert "Coordinates are normalized to [0, 1000] in [x1, y1, x2, y2] format" in mbq
+
+        corner_point_only = pb_prepare.convert_record(
+            {
+                "index": 42,
+                "problem": "<|image_1|>What is at [0, 1]?",
+                "image": [img],
+                "answer": "floor",
+                "hint": "Coordinates are given in [x, y] format.",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        cpq = corner_point_only["verifier_metadata"]["question"]
+        assert "What is at [0, 1000]?" in cpq
+        assert "Coordinates are normalized to [0, 1000] in [x, y] format" in cpq
+
+        scalar_problem = "<|image_1|>Using normalized coordinates (0-1 range), find x:\nA. 0\nB. 0.25\nC. 1\nD. 0.5"
+        scalar_row = pb_prepare.convert_record(
+            {
+                "index": 43,
+                "problem": scalar_problem,
+                "image": [img],
+                "answer": "C",
+                "hint": "",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        sq = scalar_row["verifier_metadata"]["question"]
+        assert "(0-1000 range)" in sq
+        assert "A. 0\nB. 250\nC. 1000\nD. 500" in sq
+
+        scalar_with_interval = pb_prepare.convert_record(
+            {
+                "index": 44,
+                "problem": (
+                    "<|image_1|>Using normalized coordinates (0-1 range) in [0, 1], find x:\n"
+                    "A. 0\nB. 0.25\nC. 1\nD. 0.5"
+                ),
+                "image": [img],
+                "answer": "C",
+                "hint": "",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        siq = scalar_with_interval["verifier_metadata"]["question"]
+        assert "(0-1000 range) in [0, 1000]" in siq
+        assert "A. 0\nB. 250\nC. 1000\nD. 500" in siq
+
+        default_row = pb_prepare.convert_record(
+            {
+                "index": 45,
+                "problem": scalar_problem,
+                "image": [img],
+                "answer": "C",
+                "hint": "",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=False,
+        )
+        assert default_row["verifier_metadata"]["question"] == scalar_problem
+
+        interval_only = "<|image_1|>Give the normalized coordinates in [0, 1] of the red dot."
+        interval_only_row = pb_prepare.convert_record(
+            {
+                "index": 46,
+                "problem": interval_only,
+                "image": [img],
+                "answer": "[0.25, 0.5]",
+                "hint": "Coordinates are given in [x, y] format.",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        assert interval_only_row["verifier_metadata"]["question"] == interval_only
+
+    def test_does_not_partially_convert_non_endpoint_numeric_tokens(self) -> None:
+        img = _data_url("image/png", _TINY_PNG)
+        bad_tuples = (
+            "<|image_1|>Using normalized coordinates (0-1 range), check (0, 1.5), [0, 10], [01, 0.5], "
+            "[0, 0, 1.05, 1], and [0, 1)."
+        )
+        bad_tuple_row = pb_prepare.convert_record(
+            {
+                "index": 50,
+                "problem": bad_tuples,
+                "image": [img],
+                "answer": "A",
+                "hint": "",
+                "error_category": "visual_localization_error",
+            },
+            normalize_coords_1000=True,
+        )
+        assert bad_tuple_row["verifier_metadata"]["question"] == bad_tuples
+
+        for idx, options in enumerate(
+            [
+                "A. 0\nB. 0.25\nC. 1.5\nD. 0.5",
+                "A. 0\nB. 0.25\nC. 1.05\nD. 0.5",
+                "A. 0\nB. 1\nC. 10\nD. 2",
+                "A. 0\nB. 0.25\nC. 01\nD. 0.5",
+            ],
+            start=51,
+        ):
+            problem = f"<|image_1|>Using normalized coordinates (0-1 range), find x:\n{options}"
+            row = pb_prepare.convert_record(
+                {
+                    "index": idx,
+                    "problem": problem,
+                    "image": [img],
+                    "answer": "A",
+                    "hint": "",
+                    "error_category": "visual_localization_error",
+                },
+                normalize_coords_1000=True,
+            )
+            assert row["verifier_metadata"]["question"] == problem

@@ -14,7 +14,7 @@ import pytest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import MODEL_CONTEXT_LIMIT, NeMoGymResponse
-from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.data import TaskDataValidator, load_task_data_schema
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import exercise_verifier_fixture, judge_failsafe
