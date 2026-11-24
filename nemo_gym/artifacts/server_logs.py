@@ -65,12 +65,19 @@ def server_log_locations(
         configured = {name.replace("/", "_"): str(root / f"{name.replace('/', '_')}.log") for name in names}
         if configured:
             locations["gym_servers"] = dict(sorted(configured.items()))
-        # Other logs already in the folder: a `--no-serve` run's config names no servers, while the `gym env start`
+        # Other logs already in the folder: a `--no-serve` run starts no servers, while the `gym env start`
         # serving it may log there. A shared folder also holds earlier runs' logs, so these are only candidates.
-        if root.is_dir():
-            others = {path.stem: str(path) for path in root.glob("*.log") if path.stem not in configured}
-            if others:
-                locations["unverified_log_dir_files"] = dict(sorted(others.items()))
+        try:
+            others = (
+                {path.stem: str(path) for path in root.glob("*.log") if path.stem not in configured}
+                if root.is_dir()
+                else {}
+            )
+        except OSError as error:
+            others = {}
+            locations["log_dir_error"] = f"{root} cannot be listed: {error.strerror or error}"
+        if others:
+            locations["unverified_log_dir_files"] = dict(sorted(others.items()))
     service_dir = environ.get(SERVICE_LOG_DIR_ENV, "").strip()
     job_id = environ.get("SLURM_JOB_ID", "").strip()
     if service_dir and job_id:

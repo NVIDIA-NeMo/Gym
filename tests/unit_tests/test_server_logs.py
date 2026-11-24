@@ -120,6 +120,19 @@ def test_a_collector_that_starts_no_servers_does_not_claim_its_configs_servers(t
     assert locations["unverified_log_dir_files"] == {"policy_model": str(logs / "policy_model.log")}
 
 
+def test_a_log_folder_that_cannot_be_listed_is_recorded_not_raised(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    (locked / "logs").mkdir(parents=True)
+    locked.chmod(0)
+    try:
+        locations = server_log_locations(OmegaConf.create({"nemo_gym_log_dir": str(locked / "logs")}), environ={})
+    finally:
+        locked.chmod(0o755)
+
+    assert locations["status"] == "unavailable" and "unverified_log_dir_files" not in locations
+    assert locations["log_dir_error"].startswith(f"{locked / 'logs'} cannot be listed: ")
+
+
 def test_no_serve_collection_records_this_attempts_log_locations_before_collecting(
     tmp_path: Path, monkeypatch
 ) -> None:
