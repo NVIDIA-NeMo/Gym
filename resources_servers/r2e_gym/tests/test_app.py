@@ -383,6 +383,15 @@ class TestRunVerification:
         assert result.completed is False and result.test_results is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", [EXIT_NO_REPO, EXIT_NO_TESTS])
+    async def test_a_test_run_that_exits_with_a_reserved_code_is_still_graded(self, code) -> None:
+        """Code from the patch can make the test command exit 97 or 96. After the begin marker, that is not a broken
+        image, so the run is a completed 0."""
+        log = f"{TEST_OUTPUT_BEGIN}\nshort test summary info\nFAILED r2e_tests/test_1.py::TestContextHandler::test_fast_save\n"
+        result = await run_verification(_FakeSandbox(log, return_code=code), _inputs())
+        assert result.completed is True and result.resolved is False and result.test_results is not None
+
+    @pytest.mark.asyncio
     async def test_a_provider_failure_of_the_test_run_is_incomplete_not_a_zero(self) -> None:
         """No exit status from the provider: the partial log cannot grade the run, so it has no verdict."""
         log = f"{TEST_OUTPUT_BEGIN}\nshort test summary info\nPASSED r2e_tests/test_1.py::TestContextHandler::test_fast_save\n"

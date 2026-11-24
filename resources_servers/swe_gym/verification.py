@@ -285,9 +285,11 @@ async def run_verification(
             timed_out=result.error_type == "timeout",
         )
 
-    if result.return_code == EXIT_NO_REPO:
+    # The script exits with these codes only before it prints the begin marker. After it, the exit status is the test
+    # command's own, which code from the patch can choose.
+    if result.return_code == EXIT_NO_REPO and TEST_OUTPUT_BEGIN not in output:
         return VerificationResult(False, False, False, None, output, f"{REPO_DIRECTORY} is not present in the image")
-    if result.return_code == EXIT_NO_CONDA:
+    if result.return_code == EXIT_NO_CONDA and TEST_OUTPUT_BEGIN not in output:
         return VerificationResult(False, False, False, None, output, f"conda env {CONDA_ENV!r} missing in the image")
     if PATCH_FAILED in output:
         # A verdict, not an infrastructure fault: the patch does not apply to base_commit.

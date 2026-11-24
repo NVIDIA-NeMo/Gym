@@ -331,6 +331,15 @@ class TestRunVerification:
         assert result.completed is False and result.test_results is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", [EXIT_NO_REPO, EXIT_NO_CONDA])
+    async def test_a_test_run_that_exits_with_a_reserved_code_is_still_graded(self, code) -> None:
+        """Code from the patch can make the test command exit 97 or 96. After the begin marker, that is not a broken
+        image, so the run is a completed 0."""
+        log = f"{TEST_OUTPUT_BEGIN}\nFAILED tests/test_x.py::test_a\n{TEST_OUTPUT_END}"
+        result = await run_verification(_FakeSandbox(log, return_code=code), _inputs())
+        assert result.completed is True and result.resolved is False and result.test_results is not None
+
+    @pytest.mark.asyncio
     async def test_only_the_marked_region_reaches_the_parser(self) -> None:
         log = (
             "PASSED tests/test_dynamodb/test_update.py::test_update_different_map_elements\n"  # install noise

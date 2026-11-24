@@ -312,9 +312,11 @@ async def run_verification(
             output,
             f"test run did not finish ({error_type}): {(result.stderr or '')[-500:]}",
         )
-    if result.return_code == EXIT_NO_REPO:
+    # The script exits with these codes only before it prints the begin marker. After it, the exit status is the test
+    # command's own, which code from the patch can choose.
+    if result.return_code == EXIT_NO_REPO and TEST_OUTPUT_BEGIN not in output:
         return VerificationResult(False, False, False, None, output, f"{REPO_DIRECTORY} is not present in the image")
-    if result.return_code == EXIT_NO_TESTS:
+    if result.return_code == EXIT_NO_TESTS and TEST_OUTPUT_BEGIN not in output:
         return VerificationResult(
             False, False, False, None, output, f"{HIDDEN_TESTS_DIR} or {RUNNER_PATH} missing in the image"
         )

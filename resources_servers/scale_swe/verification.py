@@ -312,7 +312,9 @@ async def run_verification(
 
         await asyncio.to_thread(_persist)
 
-    if result.return_code == 97:
+    # The script exits 97 only before it prints the begin marker. After it, the exit status is pytest's own, which code
+    # from the patch can choose.
+    if result.return_code == 97 and TEST_OUTPUT_BEGIN not in output:
         return VerificationResult(
             completed=False,
             resolved=False,
