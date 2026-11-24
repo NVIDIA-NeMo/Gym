@@ -4575,25 +4575,45 @@ class TestSeedGuards:
         assert response.result.mask_sample is True and response.result.failure_kind == "provider_unavailable"
         assert stopped == ["hanging"] and not server._sandboxes
 
-    async def test_verifier_retry_reserves_the_verifier_image_healthcheck(self, tmp_path, monkeypatch):
-        """The verifier image's HEALTHCHECK runs between the create and test.sh, so its worst case is reserved."""
+    async def test_verifier_retry_reserves_the_verifier_image_start(self, tmp_path, monkeypatch):
+        """The verifier image's ENTRYPOINT and HEALTHCHECK start between the create and test.sh, so their worst case
+        is reserved, with the entrypoint probed before every healthcheck attempt."""
         server, task, agent, stopped = self.separate_with_verifier_starts(tmp_path, monkeypatch)
         settings = task.config.verifier
         # 30 s interval and timeout, 3 retries: 35 + 5 + 3 * 35 + 2 * 30 = 205 s at worst.
         record = {"Test": ["CMD", "true"], "Interval": 30_000_000_000, "Timeout": 30_000_000_000, "Retries": 3}
-        start = SimpleNamespace(image_healthcheck=record, image_shell=None)
+        start = SimpleNamespace(entrypoint=None, entrypoint_user=None, image_healthcheck=record, image_shell=None)
         monkeypatch.setattr("environment_servers.harbor.sandboxes._verifier_start", lambda task, separate: start)
-        # Without the check: the 0.05 s create plus test.sh and its grace.
+        # Without a start: the 0.05 s create plus test.sh and its grace.
         need = 0.05 + settings.timeout_sec + server.config.verifier_grace_s
         now = asyncio.get_running_loop().time()
 
-        def fits(remaining):
-            session = SimpleNamespace(deadline=now + remaining)
-            return server._verifier_retry_fits(session, task, settings, overlaid=False)
+        def reserved(bound):
+            """Whether the retry check reserves exactly ``bound`` seconds for the image's start."""
+            fits = [
+                server._verifier_retry_fits(
+                    SimpleNamespace(deadline=now + need + bound + spare), task, settings, overlaid=False
+                )
+                for spare in (-0.5, 0.5)
+            ]
+            return fits == [False, True]
 
-        assert not fits(need + 100) and fits(need + 300)
+        assert reserved(205)
+        # A keepalive entrypoint starts nothing.
+        start.entrypoint = ("sleep", "infinity")
+        assert reserved(205)
+        # A running entrypoint: 5 execs of 60 s and the 60.5 s marker wait, plus a 60 s probe before each of the
+        # healthcheck's 4 attempts at worst.
+        start.entrypoint = ("/opt/nvidia/nvidia_entrypoint.sh",)
+        assert reserved(360.5 + 205 + 4 * 60)
+        # A numeric USER is looked up by name first.
+        start.entrypoint_user = "1000"
+        assert reserved(60 + 360.5 + 205 + 4 * 60)
+        start.entrypoint_user = None
         start.image_healthcheck = None
-        assert fits(need + 100)
+        assert reserved(360.5)
+        start.entrypoint = None
+        assert reserved(0)
         assert server._verifier_retry_fits(SimpleNamespace(deadline=None), task, settings, overlaid=False)
 
     async def test_separate_verifier_create_failure_other_than_the_ready_timeout_is_not_retried(

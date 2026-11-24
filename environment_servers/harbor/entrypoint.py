@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from environment_servers.harbor.overlay import OVERLAY_OUTPUT_TAIL, _output_tail, overlay_workdir_command
-from environment_servers.harbor.users import _exec_as_root_user, _is_root
+from environment_servers.harbor.users import _exec_as_root_user, _is_numeric_user, _is_root
 from nemo_gym.data.tasks.harbor import DEFAULT_SHELL, HarborHealthcheck, HarborTask
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, download_path, exec_as_root
 
@@ -41,6 +41,8 @@ ENTRYPOINT_ARGS = ("sh", "-c", "sleep infinity")
 # How long the launcher waits for its started marker before the provider is judged unable to run it.
 ENTRYPOINT_START_TIMEOUT_S = 60.0
 ENTRYPOINT_POLL_INTERVAL_S = 0.5
+# The timeout of each exec that starts or probes the entrypoint.
+ENTRYPOINT_EXEC_TIMEOUT_S = 60
 # The entrypoint's output, collected best effort into the verification's logs folder, and the exit status
 # it had recorded by the time the agent's sandbox was verified.
 ENTRYPOINT_LOG_NAME = "entrypoint-stdout.txt"
@@ -75,14 +77,15 @@ class EntrypointLaunch:
 HEALTHCHECK_EXEC_GRACE_S = 5
 
 
-def healthcheck_bound_s(check: HarborHealthcheck) -> float:
+def healthcheck_bound_s(check: HarborHealthcheck, probe_s: float = 0.0) -> float:
     """The most one healthcheck may take before it passes or fails, as :meth:`HarborEntrypointMixin._poll_healthcheck`
     runs it: the start period, the one attempt that may start just inside it and run past its end, the
     ``start_interval_sec`` sleep that follows such an attempt (the loop sleeps by when the attempt began), then the
     counted attempts (``retries`` of them, or the one that fails a check with ``retries = 0``) with an
     ``interval_sec`` sleep between them and none after the last, each attempt the command's ``timeout_sec`` plus
-    the exec grace. A poll that fails ends at most that long after it began, whatever its alignment."""
-    attempt = check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S
+    the exec grace, plus ``probe_s`` for what runs before each attempt (the exit probe of a running entrypoint).
+    A poll that fails ends at most that long after it began, whatever its alignment."""
+    attempt = check.timeout_sec + HEALTHCHECK_EXEC_GRACE_S + probe_s
     counted = max(check.retries, 1)
     return (
         check.start_period_sec
@@ -174,6 +177,23 @@ def image_healthcheck_settings(
     )
 
 
+def image_start_bound_s(task: HarborTask) -> float:
+    """The most the image's start may take once its sandbox exists, as a separate verifier runs it: the lookup of a
+    numeric ``User``, the ``ENTRYPOINT`` launch (:meth:`HarborEntrypointMixin._start_entrypoint`) and the
+    ``HEALTHCHECK`` (:func:`healthcheck_bound_s`), the entrypoint probed before each attempt. Each step is an exec
+    within :data:`ENTRYPOINT_EXEC_TIMEOUT_S`; only the upload of the small ``run.sh`` has no bound of its own."""
+    bound = ENTRYPOINT_EXEC_TIMEOUT_S if _is_numeric_user(task.entrypoint_user) else 0.0
+    running = entrypoint_to_run(task) is not None
+    if running:
+        # Its folder and WORKDIR, the started marker polled to its deadline with one probe in flight, then the first
+        # exit check: the status and, once per launch, the output tail.
+        bound += 5 * ENTRYPOINT_EXEC_TIMEOUT_S + ENTRYPOINT_START_TIMEOUT_S + ENTRYPOINT_POLL_INTERVAL_S
+    check = image_healthcheck_settings(task.image_healthcheck, task.image_shell)
+    if check is not None:
+        bound += healthcheck_bound_s(check, probe_s=ENTRYPOINT_EXEC_TIMEOUT_S if running else 0.0)
+    return bound
+
+
 async def _cancel_entrypoint(launch: EntrypointLaunch | None) -> None:
     """End the exec that holds the entrypoint open; the sandbox is stopped right after."""
     if launch is None:
@@ -257,7 +277,9 @@ class HarborEntrypointMixin:
         argv = entrypoint_to_run(task, compose_managed=compose_managed)
         if argv is None:
             return None
-        made = await exec_as_root(sandbox, f"mkdir -p {ENTRYPOINT_DIR} && chmod 777 {ENTRYPOINT_DIR}", timeout_s=60)
+        made = await exec_as_root(
+            sandbox, f"mkdir -p {ENTRYPOINT_DIR} && chmod 777 {ENTRYPOINT_DIR}", timeout_s=ENTRYPOINT_EXEC_TIMEOUT_S
+        )
         if made.return_code:
             raise HarborEntrypointUnavailable(f"could not create {ENTRYPOINT_DIR}: {made.stderr or made.stdout}")
         # The recorded User and WorkingDir, named explicitly: `[agent].user` and `[environment].workdir` shape
@@ -267,7 +289,11 @@ class HarborEntrypointMixin:
             # The Dockerfile's final WORKDIR, which `docker build` creates in the image; only a RUN line after it
             # made the overlay create it, and the seed makes the task's workdir, which may be another.
             workdir = await _exec_as_root_user(
-                sandbox, overlay_workdir_command(cwd, user), configured_user=task.sandbox_user, spec_user=task.user
+                sandbox,
+                overlay_workdir_command(cwd, user),
+                configured_user=task.sandbox_user,
+                spec_user=task.user,
+                timeout_s=ENTRYPOINT_EXEC_TIMEOUT_S,
             )
             if workdir.error_type is not None:
                 raise HarborEntrypointUnavailable(f"WORKDIR {cwd} could not be created: {workdir.error_type}")
@@ -297,7 +323,7 @@ class HarborEntrypointMixin:
             deadline = loop.time() + ENTRYPOINT_START_TIMEOUT_S
             while True:
                 finished = launch.process.done()
-                started = await sandbox.exec(f"test -f {ENTRYPOINT_DIR}/started", timeout_s=60)
+                started = await sandbox.exec(f"test -f {ENTRYPOINT_DIR}/started", timeout_s=ENTRYPOINT_EXEC_TIMEOUT_S)
                 if started.return_code == 0:
                     break
                 if finished:
@@ -331,7 +357,8 @@ class HarborEntrypointMixin:
     async def _entrypoint_exit_status(self, sandbox: AsyncSandbox) -> str | None:
         """What ``run.sh`` recorded as the entrypoint's exit status, or ``None`` while it has not exited."""
         probe = await sandbox.exec(
-            f"if test -f {ENTRYPOINT_DIR}/exit; then cat {ENTRYPOINT_DIR}/exit; fi", timeout_s=60
+            f"if test -f {ENTRYPOINT_DIR}/exit; then cat {ENTRYPOINT_DIR}/exit; fi",
+            timeout_s=ENTRYPOINT_EXEC_TIMEOUT_S,
         )
         if probe.return_code:
             raise HarborEntrypointUnavailable(
@@ -340,7 +367,9 @@ class HarborEntrypointMixin:
         return (probe.stdout or "").strip() or None
 
     async def _entrypoint_output_tail(self, sandbox: AsyncSandbox) -> str:
-        tail = await sandbox.exec(f"tail -c {OVERLAY_OUTPUT_TAIL} {ENTRYPOINT_LOG}", timeout_s=60)
+        tail = await sandbox.exec(
+            f"tail -c {OVERLAY_OUTPUT_TAIL} {ENTRYPOINT_LOG}", timeout_s=ENTRYPOINT_EXEC_TIMEOUT_S
+        )
         return (tail.stdout or "").strip() or "(no output)"
 
     @staticmethod

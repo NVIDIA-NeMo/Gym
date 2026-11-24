@@ -29,11 +29,7 @@ from typing import Any
 import yaml
 from fastapi import HTTPException
 
-from environment_servers.harbor.entrypoint import (
-    healthcheck_bound_s,
-    image_healthcheck_settings,
-    is_keepalive_entrypoint,
-)
+from environment_servers.harbor.entrypoint import image_start_bound_s, is_keepalive_entrypoint
 from environment_servers.harbor.network_policy import phase_network_policy
 from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import HarborSession, _task_sandbox_env, resolve_env_templates
@@ -901,8 +897,8 @@ class HarborSandboxMixin:
 
     def _verifier_retry_fits(self, session: HarborSession, task: HarborTask, settings: Any, *, overlaid: bool) -> bool:
         """Whether the task deadline still holds a whole verifier create, the overlay when there is one, the verifier
-        image's ``HEALTHCHECK`` at its worst (:func:`healthcheck_bound_s`; the task's own check is not run there) and
-        ``test.sh`` with its grace. Always true when the deadline is not enforced."""
+        image's start at its worst (:func:`image_start_bound_s`: its ``ENTRYPOINT`` and ``HEALTHCHECK``; the task's
+        own check is not run there) and ``test.sh`` with its grace. Always true when the deadline is not enforced."""
         if session.deadline is None:
             return True
         need = self.config.sandbox_ready_timeout_s + SEED_CREATE_GRACE_S
@@ -910,9 +906,8 @@ class HarborSandboxMixin:
         if overlaid:
             need += task.config.environment.build_timeout_sec
         start = _verifier_start(task, True)
-        check = image_healthcheck_settings(start.image_healthcheck, start.image_shell) if start is not None else None
-        if check is not None:
-            need += healthcheck_bound_s(check)
+        if start is not None:
+            need += image_start_bound_s(start)
         return session.deadline - asyncio.get_running_loop().time() >= need
 
     async def _start_with_pull_retries(
