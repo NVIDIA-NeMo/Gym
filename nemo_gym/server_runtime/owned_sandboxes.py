@@ -527,8 +527,19 @@ class OwnedSandboxes:
         state_dir: str | os.PathLike[str] | None,
         server_name: str,
     ) -> "OwnedSandboxes":
-        """Build an instance from a server's ``SandboxCheckpointConfig``; the rest as in the constructor."""
-        return cls(provider, state_dir=state_dir, server_name=server_name, **config.model_dump())
+        """Build an instance from a server's ``SandboxCheckpointConfig``; the rest as in the constructor.
+
+        ``parallelism`` also bounds its starts, forks and stops, as it did before they had limits of their own, since
+        such a server has no ``owner_concurrency`` to set them.
+        """
+        return cls(
+            provider,
+            state_dir=state_dir,
+            server_name=server_name,
+            max_concurrent_starts=config.parallelism,
+            max_concurrent_stops=config.parallelism,
+            **config.model_dump(),
+        )
 
     @classmethod
     def for_server(
@@ -664,9 +675,12 @@ class OwnedSandboxes:
         is raised with the stop's as its context.
 
         Raises:
-            ValueError: If ``key`` already has a sandbox, or one is starting.
+            ValueError: If ``key`` already has a sandbox, or one is starting, or ``spec`` sets no ``ttl_s``.
         """
         self._require_open()
+        if spec.ttl_s is None:
+            # The shutdown sweep is bounded and a crash runs none: ttl_s is what ends a sandbox its owner never stops.
+            raise ValueError(f"the sandbox of {key!r} needs a ttl_s, so the provider ends it if its owner never does")
         if key in self._entries or key in self._pending:
             raise ValueError(f"{key!r} already has a sandbox")
         self._take_keys([key])
@@ -725,13 +739,15 @@ class OwnedSandboxes:
         ``provider_config_ref`` defaults to the one this instance was built with.
 
         Raises:
-            KeyError: If ``key`` has no sandbox.
+            KeyError: If ``key`` has no running sandbox: none, one still starting, or one whose start failed and whose
+                stop failed too.
             ValueError: If neither this call nor the instance names the provider's config block, as for a server
                 whose ``sandbox_provider`` is an inline block rather than a named one.
         """
         entry = self._entries.get(key)
-        if entry is None:
-            raise KeyError(f"{key!r} has no sandbox")
+        # A key is tracked from before its start, so being tracked does not mean there is a sandbox to lend.
+        if entry is None or not entry.sandbox.started or not entry.exportable:
+            raise KeyError(f"{key!r} has no running sandbox")
         provider_config_ref = provider_config_ref or self._provider_config_ref
         if provider_config_ref is None:
             raise ValueError("lending needs provider_config_ref: the borrower resolves the provider by that name")
@@ -1181,16 +1197,17 @@ class OwnedSandboxes:
         retried retire stops it again. The sandbox's snapshots stay: a checkpoint the controller may still restore
         can name them, and only a release knows which.
         """
+        deadline = anyio.current_time() + STOP_TIMEOUT_S
         with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
             async with self._key_locks.locked(key):
-                await self._stop_key(key)
+                await self._stop_key(key, deadline=deadline)
 
-    async def _stop_key(self, key: str) -> None:
+    async def _stop_key(self, key: str, *, deadline: float | None = None) -> None:
         entry = self._entries.get(key)
         if entry is None:
             return
         if entry.sandbox.started:
-            await self._stop_sandbox(entry.sandbox)
+            await self._stop_sandbox(entry.sandbox, deadline=deadline)
         # Without a wait for a sandbox its owner already stopped: a caller cancelled there would leave the key
         # tracked with nothing left to stop.
         self._entries.pop(key, None)
@@ -1207,12 +1224,15 @@ class OwnedSandboxes:
                 self._unstopped_forks.append(entry.sandbox)
         await self._stop_forks()
 
-    async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
-        # Shielded and bounded as a whole, the wait for a stop slot included: a cancelled request cannot leave the
-        # sandbox running, and a stop that cannot get a slot in time fails like a stop that hangs.
-        with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
+    async def _stop_sandbox(self, sandbox: AsyncSandbox, *, deadline: float | None = None) -> None:
+        # Shielded and bounded as a whole by one deadline, the wait for a stop slot included: a cancelled request
+        # cannot leave the sandbox running, and a stop that cannot get a slot in time fails like a stop that hangs.
+        # AsyncSandbox.stop shields itself from enclosing deadlines too, so it is given only the time that is left.
+        if deadline is None:
+            deadline = anyio.current_time() + STOP_TIMEOUT_S
+        with anyio.CancelScope(shield=True), anyio.fail_after(max(0.0, deadline - anyio.current_time())):
             async with self._stop_slot():
-                await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
+                await sandbox.stop(timeout_s=max(0.0, deadline - anyio.current_time()))
 
     def _provider_name(self) -> str:
         return getattr(self._provider, "name", type(self._provider).__name__)

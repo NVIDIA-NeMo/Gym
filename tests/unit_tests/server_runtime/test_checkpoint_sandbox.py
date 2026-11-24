@@ -196,7 +196,7 @@ class NoSnapshotProvider(FakeSnapshotProvider):
     list_snapshots = None  # type: ignore[assignment]
 
 
-SPEC = SandboxSpec(image="img:1", workdir="/work", env={"A": "1"}, resources={"cpu": 2}, ports=[8080])
+SPEC = SandboxSpec(image="img:1", ttl_s=3600, workdir="/work", env={"A": "1"}, resources={"cpu": 2}, ports=[8080])
 # What a checkpoint record keeps of SPEC: the snapshot stands in for the image.
 RESTORED_SPEC = dataclasses.replace(SPEC, image=None)
 

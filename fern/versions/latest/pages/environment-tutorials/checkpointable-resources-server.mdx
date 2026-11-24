@@ -86,7 +86,7 @@ callback captures the patch inside `capture_task_sandbox_patch(session_id, captu
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `parallelism` | `16` | Concurrent snapshot submits, creates, stops and deletes against the sandbox backend. Readiness waits are not counted. |
+| `parallelism` | `16` | Concurrent snapshot submits and deletes against the sandbox backend. An instance built from these settings with `OwnedSandboxes.from_config` also bounds its creates, forks and stops by it, each kind on its own. Readiness waits are not counted. |
 | `snapshot_attempts` | `3` | Snapshots of one sandbox per commit before its export fails. The commit deadline must cover this many times the provider's snapshot timeout. |
 | `snapshot_retry_delay_s` | `5.0` | Pause between those attempts. |
 

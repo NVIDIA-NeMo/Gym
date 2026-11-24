@@ -21,7 +21,7 @@ from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.server_runtime import owned_sandboxes as owned_sandboxes_module
 from nemo_gym.server_runtime.base_server import SimpleServer
-from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
+from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes, SandboxCheckpointConfig
 from tests.unit_tests.server_runtime.test_checkpoint_sandbox import FakeSnapshotProvider
 
 
@@ -707,6 +707,76 @@ class TestEveryStopIsShieldedAndBoundedFromItsCall:
         await asyncio.gather(*stops)
 
         assert provider.max_in_flight == 1
+
+    async def test_the_slot_wait_and_the_providers_stop_share_one_limit(self, monkeypatch) -> None:
+        # AsyncSandbox.stop shields itself from an enclosing deadline, so each wait taking its own full limit would
+        # add up: here 0.8 s for a slot, then another full limit for a close that hangs.
+        monkeypatch.setattr(owned_sandboxes_module, "STOP_TIMEOUT_S", 1.0)
+        provider = _GatedProvider()
+        owned = _owned(provider, max_concurrent_stops=1)
+        await owned.create("session", _spec())
+        provider.close_gate.clear()
+        assert owned._stop_limit is not None
+        await owned._stop_limit.acquire()
+        asyncio.get_running_loop().call_later(0.8, owned._stop_limit.release)
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(owned.stop("session"), timeout=10)
+
+        assert time.monotonic() - started < 1.5, "the whole stop ends at its one limit"
+        assert owned.keys == ["session"], "a stop that timed out keeps its key"
+        provider.close_gate.set()
+        await owned.stop("session")
+        assert owned.keys == []
+
+
+class TestTheOwnersOwnChecks:
+    async def test_a_sandbox_without_ttl_s_is_refused_before_it_starts(self) -> None:
+        provider = FakeSnapshotProvider()
+        owned = _owned(provider)
+
+        with pytest.raises(ValueError, match="needs a ttl_s"):
+            await owned.create("session", SandboxSpec(image="image"))
+
+        assert provider.boxes == {}
+        assert owned.keys == []
+
+    async def test_a_sandbox_still_starting_is_not_lent(self) -> None:
+        provider = _GatedProvider()
+        owned = _owned(provider, provider_config_ref="sandbox")
+        provider.create_gate.clear()
+        creating = asyncio.create_task(owned.create("session", _spec()))
+        await _until(lambda: provider.in_flight == 1)
+
+        with pytest.raises(KeyError, match="has no running sandbox"):
+            await owned.access("session", workdir="/work")
+
+        provider.create_gate.set()
+        await creating
+        assert (await owned.access("session", workdir="/work")).workdir == "/work"
+        await owned.aclose()
+
+    async def test_an_instance_from_a_checkpoint_config_bounds_starts_and_stops_by_its_parallelism(self) -> None:
+        provider = _GatedProvider()
+        owned = OwnedSandboxes.from_config(
+            provider, SandboxCheckpointConfig(parallelism=1), state_dir=None, server_name="server"
+        )
+        provider.create_gate.clear()
+        creates = [asyncio.create_task(owned.create(f"session-{index}", _spec())) for index in range(3)]
+        await _until(lambda: provider.in_flight == 1)
+        await asyncio.sleep(0.01)
+        provider.create_gate.set()
+        await asyncio.gather(*creates)
+        provider.close_gate.clear()
+        stops = [asyncio.create_task(owned.stop(f"session-{index}")) for index in range(3)]
+        await _until(lambda: provider.in_flight == 1)
+        await asyncio.sleep(0.01)
+        provider.close_gate.set()
+        await asyncio.gather(*stops)
+
+        assert provider.max_in_flight == 1
+        assert owned.keys == []
 
 
 class TestAFailedStartWhoseStopFails:
