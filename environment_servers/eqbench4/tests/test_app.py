@@ -24,12 +24,14 @@ from environment_servers.eqbench4.app import (
     persona_messages,
     policy_stop_reason,
     published_observations,
+    refused_request_stop_reason,
     scoped_observations,
 )
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest, BaseServerConfig
 from nemo_gym.core import (
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     EpisodeId,
     MaterializedTask,
@@ -102,19 +104,36 @@ def marked_response(*, metadata: dict | None = None, incomplete: str | None = No
     return reply
 
 
-def failed_reply(status: int) -> dict:
+def failed_reply(status: int, body: str = "unavailable") -> dict:
     """A failed model call as an agent session reports it: no output, and the cause in its metadata."""
     return model_response("") | {
         "output": [],
         "status": "failed",
         "usage": None,
-        "error": {"code": "server_error", "message": f"Model HTTP {status}: unavailable"},
+        "error": {"code": "server_error", "message": f"Model HTTP {status}: {body}"},
         "metadata": {
             AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
                 failure_kind=MODEL_REQUEST_ERROR, status_code=status
             ).model_dump_json()
         },
     }
+
+
+def timed_out_reply() -> dict:
+    """A model call that timed out, as simple_agent's session reports it: the cause and no upstream status."""
+    return model_response("") | {
+        "output": [],
+        "status": "failed",
+        "usage": None,
+        "error": {"code": "server_error", "message": "Model HTTP 504: response timeout"},
+        "metadata": {
+            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT).model_dump_json()
+        },
+    }
+
+
+# A context overflow as vLLM's model server propagates it: a 400 whose body carries OpenAI's error code.
+OVERFLOW_BODY = '{"error": {"message": "maximum context length is 4096 tokens", "code": "context_length_exceeded"}}'
 
 
 class Cookie:
@@ -449,14 +468,18 @@ async def test_a_persona_outage_is_the_environments_failure(outage: Any, termina
     assert closed_every_session(servers)
 
 
-@pytest.mark.parametrize(("status", "terminal"), [(503, False), (500, False)])
+@pytest.mark.parametrize(
+    ("reply", "terminal"),
+    [(failed_reply(503), False), (failed_reply(500), False), (timed_out_reply(), False), (failed_reply(400), True)],
+)
 async def test_a_failed_call_the_persona_session_reports_is_the_environments_failure(
-    status: int, terminal: bool
+    reply: dict, terminal: bool
 ) -> None:
-    server, servers = make_server(policy=["Hi."], persona=[failed_reply(status)])
+    server, servers = make_server(policy=["Hi."], persona=[reply])
     response = await server.run_request(make_request())
+    # An outage or a timeout clears on a later attempt; a request refused as it stands would be refused again.
     assert response.failure.failure_kind == PERSONA_FAILED and response.failure.terminal is terminal
-    assert f"Model HTTP {status}" in response.failure.failure_reason
+    assert reply["error"]["message"] in response.failure.failure_reason
     assert not [path for _, path, _ in servers.calls if path == "/verify"]
 
 
@@ -485,6 +508,8 @@ async def test_a_persona_session_that_cannot_be_seeded_is_the_environments_failu
         (ClientConnectionError("policy endpoint down"), False),
         (ErrorResponse(503), False),
         (FakeResponse(failed_reply(503)), False),
+        # A timed-out call is asked again on a retry of the episode, as single_agent_turn does, never failed for good.
+        (FakeResponse(timed_out_reply()), False),
     ],
 )
 async def test_a_policy_outage_fails_the_episode_so_it_is_retried_not_scored(outage: Any, terminal: bool) -> None:
@@ -501,16 +526,32 @@ async def test_a_policy_outage_fails_the_episode_so_it_is_retried_not_scored(out
     assert closed_every_session(servers)
 
 
-async def test_a_policy_request_the_model_refuses_as_it_stands_is_a_stop_not_asked_again() -> None:
-    # A 400 grades what there is (the outcome policy's verify): asking again would be refused the same way.
-    server, servers = make_server(policy=["Hello.", FakeResponse(failed_reply(400))], persona=[persona_text("Go on.")])
+@pytest.mark.parametrize(
+    ("reply", "reason"),
+    [
+        (failed_reply(400), "request_refused"),
+        (failed_reply(422), "request_refused"),
+        (failed_reply(400, OVERFLOW_BODY), "context_limit"),
+        (failed_reply(413), "context_limit"),
+    ],
+)
+async def test_a_policy_request_the_model_refuses_as_it_stands_is_a_stop_not_asked_again(
+    reply: dict, reason: str
+) -> None:
+    # A 4xx grades what there is (the outcome policy's verify): asking again would be refused the same way.
+    server, servers = make_server(policy=["Hello.", FakeResponse(reply)], persona=[persona_text("Go on.")])
     response = await server.run_request(make_request())
 
     assert response.failure is None
     verify = servers.verify_body()
     assert len(servers.bodies(POLICY)) == 2
-    assert verify["conversation_status"] == "policy_failed"
-    assert verify["conversation_error"] == "no visible policy reply in turn 2 after 1 attempt(s): empty_reply"
+    assert (verify["conversation_status"], verify["policy_stop_reason"]) == ("policy_failed", reason)
+    assert verify["conversation_error"] == f"no visible policy reply in turn 2 after 1 attempt(s): {reason}"
+
+
+def test_a_refused_request_without_the_agents_outcome_is_request_refused() -> None:
+    reply = NeMoGymResponse.model_validate(failed_reply(400) | {"metadata": {}})
+    assert refused_request_stop_reason(reply) == "request_refused"
 
 
 async def test_a_policy_that_never_replies_stops_the_conversation_after_seven_attempts() -> None:
@@ -672,6 +713,36 @@ async def test_a_verifier_outage_fails_the_episode_with_its_evidence() -> None:
     assert carried["conversation_status"] == "persona_ended" and len(carried["transcript"]) == 2
     assert len(failure.agent_observations.records) == 2
     assert closed_every_session(servers)
+
+
+async def test_a_verify_response_that_is_not_a_result_fails_the_episode_with_its_evidence() -> None:
+    server, servers = make_server(policy=["Hi."], persona=[persona_text("Bye.", status="done")])
+    servers.fail = {(RESOURCES, "/verify"): FakeResponse({"comparisons": []})}
+    response = await server.run_request(make_request())
+    failure = response.failure
+    # A verify response without a reward is the verifier's failure; the graded conversation is kept for recovery.
+    assert failure.stage == "verification" and response.result is None
+    assert failure.partial_response.output[0].content[0].text == "Hi."
+    assert len(failure.agent_observations.records) == 2
+    assert closed_every_session(servers)
+
+
+def test_a_timed_out_model_call_is_retried_unless_the_config_names_it() -> None:
+    server, _ = make_server(policy=[], persona=[])
+    assert server.config.agent_outcome_policy.by_failure_kind[MODEL_POLICY_RESPONSE_TIMEOUT] == "retry"
+    # A config's own rules merge into the defaults: the timeout rule stays, and the config's rule is added.
+    server, _ = make_server(policy=[], persona=[], agent_outcome_policy={"by_failure_kind": {"agent_limit": "fail"}})
+    rules = server.config.agent_outcome_policy.by_failure_kind
+    assert rules[MODEL_POLICY_RESPONSE_TIMEOUT] == "retry" and rules["agent_limit"] == "fail"
+    server, _ = make_server(
+        policy=[], persona=[], agent_outcome_policy={"by_failure_kind": {MODEL_POLICY_RESPONSE_TIMEOUT: "fail"}}
+    )
+    assert server.config.agent_outcome_policy.by_failure_kind[MODEL_POLICY_RESPONSE_TIMEOUT] == "fail"
+
+
+def test_the_participants_must_run_on_different_agent_servers() -> None:
+    with pytest.raises(ValueError, match="different agent servers"):
+        make_server(policy=[], persona=[], persona_agent={"type": "responses_api_agents", "name": POLICY})
 
 
 async def test_aggregate_metrics_are_the_resources_servers_with_performance_metrics() -> None:

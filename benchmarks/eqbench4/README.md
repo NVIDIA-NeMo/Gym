@@ -80,10 +80,11 @@ finish, and a trainer cannot learn that stopping avoids a low reward. Its `polic
 
 | `policy_stop_reason` | Cause | Usual fix |
 | --- | --- | --- |
-| `context_limit` | The policy's prompt overflowed its context window (not asked again) | Serve the policy with a longer context |
+| `context_limit` | The policy's prompt overflowed its context window (not asked again), whether the model server marks the reply or refuses the request (413, or 400 with `context_length_exceeded`) | Serve the policy with a longer context |
 | `output_budget` | Seven policy replies cut at `max_output_tokens` before any visible text, often all reasoning | Raise the budget or lower reasoning effort |
 | `content_filter` | A provider's content filter withheld the reply, or the model refused | Check the provider's filter |
 | `empty_reply` | Seven finished replies without visible text | Inspect the policy's replies. A server reasoning parser (such as vLLM's `--reasoning-parser nemotron_v3`) on a model that does not close `</think>` hides the whole reply as reasoning: serve without the parser and set `uses_reasoning_parser=false` on the policy |
+| `request_refused` | The policy's model server refused the request as it stands for another reason (a 400 or 422), such as a parameter the endpoint rejects (not asked again) | Read the model server's error in the rollout and fix the request or the endpoint |
 
 The environment server logs a warning naming the scenario, turn and cause each time. After the run the aggregate
 metrics report `eqbench4_conversations` (all conversations), `eqbench4_policy_stopped_rate` and its breakdown

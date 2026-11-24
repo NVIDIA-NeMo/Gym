@@ -3,6 +3,7 @@
 """EQ-Bench 4 aggregate metrics: the policy's rating on the published leaderboard scale."""
 
 import logging
+import math
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -32,8 +33,9 @@ KEY_METRICS = (
     "eqbench4_win_rate",
 )
 # Why a policy gave no visible reply: the prompt overflowed its context window, its reply was cut at the output-token
-# limit before any visible text (often all reasoning), a provider filter withheld it, or it simply ended empty.
-POLICY_STOP_REASONS = ("context_limit", "output_budget", "content_filter", "empty_reply")
+# limit before any visible text (often all reasoning), a provider filter withheld it, it simply ended empty, or the
+# model server refused the request as it stands for another reason, such as a parameter the endpoint rejects.
+POLICY_STOP_REASONS = ("context_limit", "output_budget", "content_filter", "empty_reply", "request_refused")
 _STOP_ADVICE = {
     "context_limit": "serve the policy with a longer context window",
     "output_budget": "raise max_output_tokens or lower the policy's reasoning effort",
@@ -42,6 +44,7 @@ _STOP_ADVICE = {
         "inspect the policy's replies in the rollouts; a server reasoning parser hides the whole reply as reasoning "
         "when the model does not close </think>"
     ),
+    "request_refused": "read the policy model server's error in the rollouts; the endpoint rejected the request",
 }
 
 
@@ -146,7 +149,9 @@ def eqbench4_metrics(
     traits: dict[str, list[float]] = defaultdict(list)
     for rollout in judged:
         for name, value in (rollout.get("trait_scores") or {}).items():
-            traits[name].append(value)
+            # A saved row may hold a null where the trait judge gave no finite number.
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                traits[name].append(value)
     for name, values in sorted(traits.items()):
         metrics[f"eqbench4_trait/{name}"] = sum(values) / len(values)
     if not outcomes:

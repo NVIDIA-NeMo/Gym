@@ -186,7 +186,9 @@ async def test_a_lost_conversation_is_an_unmasked_low_score(tmp_path: Path) -> N
     assert operation.outcome == "completed"
 
 
-@pytest.mark.parametrize("reason", ["context_limit", "output_budget", "content_filter", "empty_reply"])
+@pytest.mark.parametrize(
+    "reason", ["context_limit", "output_budget", "content_filter", "empty_reply", "request_refused"]
+)
 async def test_a_conversation_the_policy_stopped_is_a_recorded_loss_that_keeps_the_answer(
     tmp_path: Path, reason: str
 ) -> None:

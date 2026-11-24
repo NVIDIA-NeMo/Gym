@@ -227,7 +227,9 @@ async def test_one_readable_order_decides_the_comparison(tmp_path: Path, monkeyp
         assert comparison.unreadable_orders == {"opponent_first": "no JSON verdict in the judge output"}
 
 
-@pytest.mark.parametrize("reason", ["context_limit", "output_budget", "content_filter", "empty_reply", None])
+@pytest.mark.parametrize(
+    "reason", ["context_limit", "output_budget", "content_filter", "empty_reply", "request_refused", None]
+)
 async def test_a_conversation_the_policy_stopped_loses_to_every_opponent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str | None
 ) -> None:

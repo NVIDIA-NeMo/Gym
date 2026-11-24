@@ -18,7 +18,7 @@ A conversation the persona simulator broke never reaches `/verify`: it is the en
 resumed run runs again.
 
 A conversation the policy stopped keeps its `policy_stop_reason` (`context_limit`, `output_budget`,
-`content_filter`, or `empty_reply`, also when no reason is given). It is graded without a judge, inside
+`content_filter`, `empty_reply`, also when no reason is given, or `request_refused`). It is graded without a judge, inside
 `observe_programmatic_grading`, so its grading record is complete and bound to the loss.
 
 For each opponent the pairwise judge reads both conversations twice, policy first and opponent first, filled into the
@@ -68,7 +68,7 @@ other metrics are:
 | --- | --- |
 | `eqbench4_conversations` | All conversations |
 | `eqbench4_policy_stopped_rate`, `eqbench4_policy_stopped_conversations` | Share and count the policy stopped, each scored as a loss (key metric) |
-| `eqbench4_policy_stopped_rate/<cause>`, `eqbench4_policy_stopped/<cause>` | The same per cause: `context_limit`, `output_budget`, `content_filter`, `empty_reply` |
+| `eqbench4_policy_stopped_rate/<cause>`, `eqbench4_policy_stopped/<cause>` | The same per cause: `context_limit`, `output_budget`, `content_filter`, `empty_reply`, `request_refused` |
 
 When the policy stopped any conversation it logs a warning with the counts per cause and the usual fix.
 

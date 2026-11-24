@@ -54,11 +54,14 @@ policy.
 | --- | --- |
 | The policy stopped: no visible reply in its attempts, a context overflow, or a request the model refused as it stands | Graded: a loss to every opponent, with `policy_stop_reason` |
 | The persona gave no usable reply in its attempts, or its endpoint or session failed | Failed, `eqbench4:persona_failed`; retryable unless the request itself was refused (a 4xx) |
+| A policy or persona model call timed out (`model_policy_response_timeout`) | Failed; retryable (`agent_outcome_policy`'s default here, as in `single_agent_turn`) |
 | The policy's call failed (an endpoint outage, or a failed reply that the agent outcome policy retries) | Failed; retryable unless the request itself was refused |
 | A judge outage | Graded by the resources server as `judge_failed`, masked, and re-judged from the saved conversation |
 | The verifier or a session seed or close failed | Failed at that stage; retryable when the dependency's failure is |
 
-A failed episode keeps the policy's last reply and both sessions' observations as evidence.
+A failed episode keeps both sessions' observations as evidence. A conversation that broke off keeps no response, so
+a resumed run runs it again; a failure after the conversation finished (closing a session, or `/verify`) keeps the
+graded response, so recovery grades it again.
 
 ## Configuration
 
@@ -66,8 +69,9 @@ A failed episode keeps the policy's last reply and both sessions' observations a
 participants, and `benchmarks/eqbench4/config.yaml` routes the benchmark's taskset to it. Settings:
 `resources_server`, `agent_server`, `persona_agent`, `persona_responses_create_params`, `persona_max_attempts`,
 `persona_correction_message`, `policy_max_attempts`, `agent_outcome_policy`, and the shared episode limits
-(`default_episode_timeout_seconds`, `cleanup_timeout_seconds`). Episodes restart from their input after a crash
-(`checkpoint_mode: restart_only`).
+(`default_episode_timeout_seconds`, `cleanup_timeout_seconds`). `agent_server` and `persona_agent` must name
+different agent servers, since each participant's invocations are named after its server. Episodes restart from their
+input after a crash (`checkpoint_mode: restart_only`).
 
 ## Tests
 

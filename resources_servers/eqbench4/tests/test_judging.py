@@ -161,3 +161,11 @@ def test_parse_trait_scores() -> None:
     assert parse_trait_scores('{"note": "only text"}') is None
     assert parse_trait_scores("{not json}") is None
     assert parse_trait_scores("nothing") is None
+
+
+def test_parse_trait_scores_leaves_out_scores_that_are_not_finite() -> None:
+    # A saved row would carry NaN as null, which no trait mean can take.
+    assert parse_trait_scores('[SCORES]{"warmth": 7, "challenge": "nan", "humor": "inf"}[/SCORES]') == {"warmth": 7.0}
+    assert parse_trait_scores('[SCORES]{"warmth": NaN, "challenge": 1e999}[/SCORES]') == {}
+    assert parse_trait_scores('{"warmth": 6, "challenge": NaN, "humor": -Infinity}') == {"warmth": 6.0}
+    assert parse_trait_scores('{"warmth": NaN}') is None

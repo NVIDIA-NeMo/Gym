@@ -56,6 +56,16 @@ def test_conversation_statistics_and_traits_without_comparisons(inputs) -> None:
     assert eqbench4_repeat_metrics(tasks, inputs) == {}
 
 
+def test_a_trait_score_saved_as_null_is_left_out_of_the_trait_mean(inputs) -> None:
+    # Rows saved before non-finite trait scores were dropped hold null where the trait judge wrote NaN.
+    tasks = [
+        [_rollout("completed", 8, [], {"warmth": None, "challenge": 2.0})],
+        [_rollout("completed", 8, [], {"warmth": 8.0, "challenge": "high"})],
+    ]
+    metrics = eqbench4_metrics(tasks, inputs, resamples=5)
+    assert metrics["eqbench4_trait/warmth"] == 8.0 and metrics["eqbench4_trait/challenge"] == 2.0
+
+
 def test_rating_uses_reference_and_policy_comparisons_together(inputs) -> None:
     tasks = [
         [_rollout("completed", 8, [("a", 0.3), ("c", 0.6)])],
@@ -116,6 +126,10 @@ def test_policy_stops_and_alerts() -> None:
     assert metrics["eqbench4_policy_stopped/output_budget"] == 1
     assert metrics["eqbench4_policy_stopped/empty_reply"] == 1
     assert metrics["eqbench4_policy_stopped_rate/context_limit"] == 0.0
+    assert metrics["eqbench4_policy_stopped/request_refused"] == 0
+    refused = policy_stop_metrics([{"conversation_status": "policy_failed", "policy_stop_reason": "request_refused"}])
+    assert refused["eqbench4_policy_stopped/request_refused"] == 1
+    assert "request_refused 1 (read the policy model server's error" in policy_stop_alerts(refused)[0]
     assert policy_stop_alerts(metrics) == [
         "EQ-Bench 4: the policy stopped replying in 2 of 4 conversations (50.0%), each scored as a loss to every "
         "opponent: output_budget 1 (raise max_output_tokens or lower the policy's reasoning effort); "

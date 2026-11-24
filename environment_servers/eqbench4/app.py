@@ -56,6 +56,7 @@ from nemo_gym.config import (
     get_first_server_config_dict,
 )
 from nemo_gym.core import (
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     NeMoGymEasyInputMessage,
@@ -67,6 +68,7 @@ from nemo_gym.core import (
     model_sampling_path_segment,
 )
 from nemo_gym.metrics import add_perf_metrics
+from nemo_gym.models.token_capture import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     BaseEnvironmentServer,
@@ -108,6 +110,21 @@ _CONTROL_TAG = re.compile(
 _ENDED = {"ended", "end", "done", "finished", "stop", "stopped"}
 
 
+class EQBench4AgentOutcomePolicyConfig(AgentOutcomePolicyConfig):
+    """Gym's rules for a failed agent reply, with a model call that timed out asked again, as single_agent_turn does.
+
+    A timeout is the endpoint's, not an answer: retrying the episode runs the conversation again instead of failing it
+    for good. Rules set in the config merge into these defaults, so the timeout rule stays unless a config names it.
+    """
+
+    by_failure_kind: dict[str, OutcomeAction] = Field(
+        default_factory=lambda: AgentOutcomePolicyConfig.model_fields["by_failure_kind"].get_default(
+            call_default_factory=True
+        )
+        | {MODEL_POLICY_RESPONSE_TIMEOUT: OutcomeAction.RETRY}
+    )
+
+
 class EQBench4EnvironmentServerConfig(BaseEnvironmentServerConfig):
     """Bind the resources server that grades the conversation and the agents of its two participants."""
 
@@ -129,7 +146,15 @@ class EQBench4EnvironmentServerConfig(BaseEnvironmentServerConfig):
     # overflow is not asked again.
     policy_max_attempts: int = Field(default=7, ge=1)
     # What a failed policy or persona reply does to the episode, by its cause (see agent_outcome_policy).
-    agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
+    agent_outcome_policy: EQBench4AgentOutcomePolicyConfig = Field(default_factory=EQBench4AgentOutcomePolicyConfig)
+
+    @model_validator(mode="after")
+    def _a_session_server_per_participant(self) -> "EQBench4EnvironmentServerConfig":
+        # Each participant's invocations are named after its agent server (see scoped_observations), so two
+        # participants on one server would publish the same invocation IDs.
+        if self.agent_server.name == self.persona_agent.name:
+            raise ValueError("agent_server and persona_agent must name different agent servers")
+        return self
 
 
 class EQBench4Conversation(BaseModel):
@@ -207,6 +232,23 @@ def policy_stop_reason(response: NeMoGymResponse) -> PolicyStopReason:
     if incomplete == "max_output_tokens":
         return "output_budget"
     return "empty_reply"
+
+
+def refused_request_stop_reason(reply: NeMoGymResponse) -> PolicyStopReason:
+    """Why the model server refused a policy request as it stands, from the failed reply the policy's session reported.
+
+    A request too long for the context window is refused with 413, or with 400 and OpenAI's
+    ``context_length_exceeded`` code in the body; any other refusal, such as a parameter the endpoint rejects, is
+    ``request_refused``.
+    """
+    try:
+        status = AgentOutcome.model_validate_json((reply.metadata or {})[AGENT_OUTCOME_METADATA_KEY]).status_code
+    except (KeyError, ValidationError):
+        status = None
+    message = reply.error.message if reply.error else ""
+    if status == 413 or CONTEXT_LENGTH_EXCEEDED_ERROR_CODE in message:
+        return "context_limit"
+    return "request_refused"
 
 
 def visible_text(response: NeMoGymResponse) -> str:
@@ -399,7 +441,7 @@ class EQBench4EnvironmentServer(BaseEnvironmentServer[EQBench4EpisodeRequest, EQ
                     if action != OutcomeAction.VERIFY:
                         raise self._failed_reply_failure(reply, terminal=action == OutcomeAction.FAIL)
                     # The request was refused as it stands, so asking again would be refused the same way.
-                    state.stop_reason = policy_stop_reason(reply)
+                    state.stop_reason = refused_request_stop_reason(reply)
                     break
                 text = visible_text(reply)
                 if text:
@@ -460,8 +502,9 @@ class EQBench4EnvironmentServer(BaseEnvironmentServer[EQBench4EpisodeRequest, EQ
             if response.status == "failed":
                 action = agent_outcome_policy(response, config=self.config.agent_outcome_policy)
                 message = response.error.message if response.error else "the persona's agent reported a failure"
+                # A request refused as it stands would be refused again on a retry.
                 raise self._persona_failure(
-                    f"The persona simulator failed in turn {turn}: {message}", terminal=action == OutcomeAction.FAIL
+                    f"The persona simulator failed in turn {turn}: {message}", terminal=action != OutcomeAction.RETRY
                 )
             reply = PersonaReply(visible_text(response))
             if not reply.problems:
@@ -494,6 +537,7 @@ class EQBench4EnvironmentServer(BaseEnvironmentServer[EQBench4EpisodeRequest, EQ
         response, with both sessions' observations, is the episode's result."""
         task_input = request.task.task_input
         conversation = state.fields()
+        observations = published_observations(policy, persona)
         body = (
             task_input.task_data
             | {
@@ -515,16 +559,11 @@ class EQBench4EnvironmentServer(BaseEnvironmentServer[EQBench4EpisodeRequest, EQ
             )
             await raise_boundary_failure(verify_response)
             payload = await get_response_json(verify_response)
+            return SingleAgentTurnResult.model_validate(payload | {NG_AGENT_OBSERVATIONS_KEY: observations})
         except Exception as error:
             raise dependency_failure(
-                error,
-                stage="verification",
-                partial_response=response,
-                agent_observations=published_observations(policy, persona),
+                error, stage="verification", partial_response=response, agent_observations=observations
             ) from error
-        return SingleAgentTurnResult.model_validate(
-            payload | {NG_AGENT_OBSERVATIONS_KEY: published_observations(policy, persona)}
-        )
 
     async def _activate(
         self,

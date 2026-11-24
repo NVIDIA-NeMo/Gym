@@ -16,7 +16,7 @@ CONVERSATION_METADATA_KEY = "eqbench4_conversation"
 # How a conversation ended and, for one the policy stopped, why: the eqbench4 environment server sends them to
 # /verify, and the resources server reads them from there, so both declare them from here.
 ConversationStatus = Literal["completed", "persona_ended", "policy_failed"]
-PolicyStopReason = Literal["context_limit", "output_budget", "content_filter", "empty_reply"]
+PolicyStopReason = Literal["context_limit", "output_budget", "content_filter", "empty_reply", "request_refused"]
 
 
 class TranscriptMessage(BaseModel):

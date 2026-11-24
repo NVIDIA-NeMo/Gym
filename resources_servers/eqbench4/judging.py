@@ -11,6 +11,7 @@ prompts are rendered from the upstream files at preparation time and travel in t
 """
 
 import json
+import math
 import random
 import re
 import string
@@ -219,14 +220,18 @@ def combine_readings(
 
 
 def parse_trait_scores(text: str) -> dict[str, float] | None:
-    """Numeric trait scores from a trait-judge reply's [SCORES] JSON, or from its first flat JSON object."""
+    """Numeric trait scores from a trait-judge reply's [SCORES] JSON, or from its first flat JSON object.
+
+    A score that is not a finite number (``NaN``, ``"inf"``) is left out: it has no place in a trait's mean, and a saved
+    row would carry it as null.
+    """
     section = _SCORES_SECTION.search(text)
     if section:
         match = _GREEDY_OBJECT.search(section.group(1).strip())
         if match:
             try:
-                scores = json.loads(match.group(0))
-                return {key: float(value) for key, value in scores.items()}
+                scores = {key: float(value) for key, value in json.loads(match.group(0)).items()}
+                return {key: value for key, value in scores.items() if math.isfinite(value)}
             except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
                 pass
     match = _FLAT_OBJECT.search(text)
@@ -238,7 +243,7 @@ def parse_trait_scores(text: str) -> dict[str, float] | None:
         numeric = {
             key: float(value)
             for key, value in scores.items()
-            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
         }
         return numeric or None
     return None
