@@ -14,7 +14,6 @@ maintainers:
 capabilities:
 - retrieval_and_grounding
 - retrieval_and_grounding/evidence_synthesis
-- retrieval_and_grounding/open_retrieval
 - reasoning
 - reasoning/quantitative_reasoning
 - knowledge
