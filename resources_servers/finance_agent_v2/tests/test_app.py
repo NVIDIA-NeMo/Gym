@@ -332,6 +332,14 @@ class TestInitialization:
         assert server._tools["parse_html_page"] is not None
         assert server._tools["submit_final_result"] is not None
 
+    def test_reward_mode_defaults_to_partial_credit(self) -> None:
+        assert _make_server().config.reward_mode == "partial_credit"
+        assert _make_server(reward_mode="all_pass").config.reward_mode == "all_pass"
+
+    def test_reward_mode_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValidationError):
+            _make_server(reward_mode="allpass")
+
 
 # ============================================================================
 # Tool surface / caching wiring
@@ -820,6 +828,23 @@ class TestVerifyRubricJudge:
         by_criterion = {j.criteria: j for j in res.rubric_judgements}
         assert by_criterion[_C2].score == 0
         assert by_criterion[_C2].votes == [0, 0, 0]
+
+    @pytest.mark.asyncio
+    async def test_all_pass_mode_zeroes_one_failed_criterion(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [0, 0, 0], _C3: [1, 1, 1]}, reward_mode="all_pass")
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2, _C3)))
+
+        assert res.reward == 0.0
+        assert res.rubric_all_pass is False
+        assert res.rubric_partial_credit == pytest.approx(2 / 3)
+
+    @pytest.mark.asyncio
+    async def test_all_pass_mode_rewards_full_pass(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 1], _C2: [1, 1, 1]}, reward_mode="all_pass")
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1, _C2)))
+
+        assert res.reward == 1.0
+        assert res.rubric_all_pass is True
 
     @pytest.mark.asyncio
     async def test_severity_and_dealbreakers_flow_from_rubric_to_reward(self) -> None:

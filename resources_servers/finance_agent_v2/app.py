@@ -268,6 +268,12 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         "own MAX_END_DATE (2026-03-01); this server does not re-clamp. A row's as_of_date caps "
         "web_search, edgar_search and price_history dates further.",
     )
+    reward_mode: Literal["partial_credit", "all_pass"] = Field(
+        default="partial_credit",
+        description="Reward for rubric-graded rows. partial_credit: Vals's Partial Credit (severity-weighted "
+        "pass fraction, 0.0 when any must_pass criterion fails). all_pass: 1.0 only when every criterion "
+        "passes, else 0.0.",
+    )
 
     # --- FrontierFinance grading ---------------------------------------------
     frontier_finance_grader: Optional[FrontierFinanceGraderConfig] = Field(
@@ -409,10 +415,11 @@ class _JudgeAttempt(NamedTuple):
 class FinanceAgentV2VerifyResponse(BaseVerifyResponse):
     """Verify response for Finance Agent v2 tasks.
 
-    ``reward`` is Vals's Partial Credit: the severity-weighted pass fraction, forced
-    to 0.0 if any ``must_pass`` criterion failed. It is therefore graded, not binary,
+    ``reward`` is Vals's Partial Credit by default: the severity-weighted pass fraction,
+    forced to 0.0 if any ``must_pass`` criterion failed. It is therefore graded, not binary,
     and **not comparable to rewards from runs scored before Aug 2026**, which were
-    all-or-nothing. That older number survives as ``rubric_all_pass``.
+    all-or-nothing. That older number survives as ``rubric_all_pass``, and
+    ``reward_mode: all_pass`` makes it the reward.
     """
 
     expected_answer: Optional[str] = None
@@ -1261,9 +1268,14 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             scores["rubric_partial_credit"],
         )
 
+        if self.config.reward_mode == "all_pass":
+            reward = 1.0 if scores["rubric_all_pass"] else 0.0
+        else:
+            reward = scores["rubric_partial_credit"]
+
         return FinanceAgentV2VerifyResponse(
             **body.model_dump(),
-            reward=scores["rubric_partial_credit"],
+            reward=reward,
             rubric_judgements=list(judgements),
             **scores,
             judge_error=judge_error,
