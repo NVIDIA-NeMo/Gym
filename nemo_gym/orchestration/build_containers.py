@@ -925,17 +925,30 @@ class MooncakeBuilder(BaseBuilder):
         }
 
 
+def _print_stage_progress(stages: dict[str, str]) -> None:
+    """Print the ordered build plan as plain text so redirected logs stay readable."""
+    print(
+        "\n" + "\n".join(f"{index}. [{name}] {status}" for index, (name, status) in enumerate(stages.items(), 1)),
+        flush=True,
+    )
+
+
 @contextmanager
-def _timed_stage(name: str) -> Iterator[None]:
-    """Report wall time, including preflight checks and time waiting for Slurm."""
+def _timed_stage(name: str, stages: dict[str, str]) -> Iterator[None]:
+    """Report progress and wall time, including preflight checks and Slurm waits."""
     start = perf_counter()
-    print(f"[{name}] starting", flush=True)
-    status = "failed"
+    stages[name] = "Starting"
+    _print_stage_progress(stages)
+    status = "Failed"
     try:
         yield
-        status = "completed"
+        status = "Completed"
     finally:
-        print(f"[{name}] {status} in {perf_counter() - start:.1f}s", flush=True)
+        stages[name] = f"{status} in {perf_counter() - start:.1f}s"
+        # The next stage prints the updated plan. Also print it when no next
+        # stage will run, so success/failure never leaves a stale Starting row.
+        if status == "Failed" or name == next(reversed(stages)):
+            _print_stage_progress(stages)
 
 
 class BuildContainerHelper(BaseModel):
@@ -952,33 +965,6 @@ class BuildContainerHelper(BaseModel):
         return {env_var: str(self.config.slurm[key]) for key, env_var in mapping.items() if key in self.config.slurm}
 
     async def run(self) -> None:
-        try:
-            await self._run()
-        except:
-            await self._clean_on_failure()
-            raise
-
-        # Installation has succeeded. Warmup writes to a temporary image and
-        # replaces the built image only on success, so failures can preserve it.
-        if self.config.warmup is not None:
-            print("Running warmup. Currently, the warmup logs aren't printed and need to be checked manually.")
-            with _timed_stage("Warmup"):
-                await self._warmup_container()
-
-    async def _run(self) -> None:
-        print(f"""Resolved fpaths:
-- Input container: {self.config.input_container_fpath}
-- Output container: {self.config.output_container_fpath}
-- Log file: {self.config.log_file}
-""")
-        self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
-        self.config.log_file.unlink(missing_ok=True)
-        self.config.output_container_fpath.parent.mkdir(parents=True, exist_ok=True)
-
-        with _timed_stage("Copy container"):
-            shutil.copy(self.config.input_container_fpath, self.config.output_container_fpath)
-        print("Copied input container fpath to output (not finished, just starting)")
-
         builders: list[BaseBuilder] = []
         if self.config.vllm is not None:
             builders.append(VLLMBuilder(config=self.config.vllm, log_file=self.config.log_file))
@@ -991,8 +977,40 @@ class BuildContainerHelper(BaseModel):
         if self.config.mooncake is not None:
             builders.append(MooncakeBuilder(config=self.config.mooncake, log_file=self.config.log_file))
 
+        stages = {"Copy container": "Not started"}
+        stages.update({type(builder).__name__.removesuffix("Builder"): "Not started" for builder in builders})
+        if self.config.warmup is not None:
+            stages["Warmup"] = "Not started"
+
+        try:
+            await self._run(builders, stages)
+        except:
+            await self._clean_on_failure()
+            raise
+
+        # Installation has succeeded. Warmup writes to a temporary image and
+        # replaces the built image only on success, so failures can preserve it.
+        if self.config.warmup is not None:
+            print("Running warmup. Currently, the warmup logs aren't printed and need to be checked manually.")
+            with _timed_stage("Warmup", stages):
+                await self._warmup_container()
+
+    async def _run(self, builders: list[BaseBuilder], stages: dict[str, str]) -> None:
+        print(f"""Resolved fpaths:
+- Input container: {self.config.input_container_fpath}
+- Output container: {self.config.output_container_fpath}
+- Log file: {self.config.log_file}
+""")
+        self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.config.log_file.unlink(missing_ok=True)
+        self.config.output_container_fpath.parent.mkdir(parents=True, exist_ok=True)
+
+        with _timed_stage("Copy container", stages):
+            shutil.copy(self.config.input_container_fpath, self.config.output_container_fpath)
+        print("Copied input container fpath to output (not finished, just starting)")
+
         for builder in builders:
-            with _timed_stage(type(builder).__name__.removesuffix("Builder")):
+            with _timed_stage(type(builder).__name__.removesuffix("Builder"), stages):
                 await builder.perform_preflight_checks()
                 command_output = await self._run_single_srun(
                     builder_command_str=builder.get_srun_command_str(),

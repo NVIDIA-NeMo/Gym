@@ -958,7 +958,7 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
         assert container_config.output_container_fpath.read_text() == "warmup"
     assert container_config.input_container_fpath.read_text() == "base"
     output = capsys.readouterr().out
-    assert "[Copy container] completed in 5.0s" in output
+    assert "1. [Copy container] Completed in 5.0s" in output
     labels = {
         "build-vllm": "VLLM",
         "build-flashinfer": "FlashInfer",
@@ -966,13 +966,25 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
         "build-mooncake": "Mooncake",
         "warmup": "Warmup",
     }
-    for stage, label in labels.items():
+    final_rows = ["1. [Copy container] Completed in 5.0s"]
+    for index, (stage, label) in enumerate(labels.items(), 2):
         if stage not in stages:
-            assert f"[{label}]" not in output
-            continue
-        status = "failed" if stage == failed_stage else "completed"
-        assert f"[{label}] starting" in output
-        assert f"[{label}] {status} in 5.0s" in output
+            assert f"[{label}] Starting" not in output
+            status = "Not started"
+        else:
+            status = f"{'Failed' if stage == failed_stage else 'Completed'} in 5.0s"
+            assert f"{index}. [{label}] Starting" in output
+            # At each transition the completed durations, active stage, and
+            # waiting stages appear together in execution order.
+            rows = ["1. [Copy container] Completed in 5.0s"]
+            for row_index, row_label in enumerate(labels.values(), 2):
+                row_status = (
+                    "Completed in 5.0s" if row_index < index else "Starting" if row_index == index else "Not started"
+                )
+                rows.append(f"{row_index}. [{row_label}] {row_status}")
+            assert "\n".join(rows) in output
+        final_rows.append(f"{index}. [{label}] {status}")
+    assert "\n".join(final_rows) in output
 
 
 @pytest.mark.parametrize("selection", ["fused_moe_trtllm_sm100", "checkpointing_ssu_*,replayssm_materialize_*"])
