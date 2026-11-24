@@ -402,7 +402,6 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
         shell = LocalShell(payload["workdir"], scratch)
         observer.watch_model_calls(client)
-        replies = _Replies.watch(client)
         observer.watch_tool_calls(NeMoAgent)
         observer.shell = shell
         agent = NeMoAgent(
@@ -431,6 +430,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             **({"system_prompt": system_prompt} if system_prompt else {}),
         )
         observer.watch_compaction(agent)
+        replies = _Replies.watch(client, agent)
         started = time.time()
         stop_reason = None
         model_error = None
@@ -497,30 +497,45 @@ def _completed_turns(session: Any, messages: list[Any]) -> list[list[Any]]:
 
 
 class _Replies:
-    """The policy model's last reply, as Stirrup's client returned it (``generate``)."""
+    """The reply of the policy turn that is running, as Stirrup's client returned it (``generate``).
+
+    Each model call clears it first, so a call that the end of the run cuts off leaves none. A compaction summary is
+    not a policy turn: its reply is never kept, although it can call tools, since its first attempts offer them.
+    """
 
     def __init__(self) -> None:
         self.last: Any = None
+        self._compacting = False
 
     @classmethod
-    def watch(cls, client: Any) -> "_Replies":
+    def watch(cls, client: Any, agent: Any) -> _Replies:
         replies = cls()
         generate = client.generate
+        summarize = agent.summarize_messages
 
         async def recorded_generate(*args: Any, **kwargs: Any) -> Any:
+            replies.last = None
             reply = await generate(*args, **kwargs)
-            replies.last = reply
+            if not replies._compacting:
+                replies.last = reply
             return reply
 
+        async def unrecorded_summarize(*args: Any, **kwargs: Any) -> Any:
+            replies._compacting = True
+            try:
+                return await summarize(*args, **kwargs)
+            finally:
+                replies._compacting = False
+
         client.generate = recorded_generate
+        agent.summarize_messages = unrecorded_summarize
         return replies
 
 
 def _with_reply_in_flight(history: list[list[Any]], reply: Any) -> list[list[Any]]:
     """``history`` ending with the turn that was running: its reply, whose tool calls had not answered yet.
 
-    Only a reply that calls tools and is not in the history yet is the running turn's; a compaction summary calls
-    none.
+    Only a policy reply that calls tools and is not in the history yet is the running turn's.
     """
     if reply is None or not getattr(reply, "tool_calls", None):
         return history
