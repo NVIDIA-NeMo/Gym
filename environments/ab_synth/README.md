@@ -28,19 +28,23 @@ assertion types grade when the agent acted:
 - `not_acted` (`record`): no write changed `record`. It is a guardrail.
 
 A write is graded on the world, not on its URL, so a record named only in the body (a QuickBooks delete, a Slack
-channel) counts the same as one in the path. At load, each `record` is resolved against the seed and the records its
-events add, to the record with that key (`id`, else `sid`, else a first field such as Xero's `contact_id`), the Jira
-issue with that key (`OPS-1`), or the sheet row with that `row_id` or row id. Only a string that names no record is
+channel) counts the same as one in the path. When a rollout starts, each `record` is resolved against the seed and the
+records its events add, to the record with that key (`id`, else `sid`, else the collection's primary key, such as Xero's
+`contact_id`), the Jira issue with that key (`OPS-1`), or the sheet row with that `row_id` or row id. Only a string that names no record is
 read as an A1 reference to rows of one tab: `B7`, `Sheet1!A7:C7` or `'Q4 2025'!B7` (any columns), or rows
 `Sheet1!A2:B5`. A row's number is its `row_id`, or its position in a tab of string row ids (the first row is 2), the
 way the simulator addresses it, and a single row past a named tab's end is the row an append adds. A row whose record
 names nothing, or more than one record (two collections, or a row number without a tab in a sheet with several tabs),
-is refused at load and the counts are logged. Apps that keep only an action log (Trello, Notion, Asana, ...) hold no
-records, so their writes cannot be graded with these two assertions.
+cannot be graded: the environment logs the count of such rows at load, and a rollout of one ends before its first turn
+with `requester_failed` and `unresolved_records` set, so it is masked. Apps that keep only an action log (Trello, Notion,
+Asana, ...) hold no records, so their writes cannot be graded with these two assertions.
 
 A write changes the records it adds, edits or deletes, and only these parents: a calendar event's calendar, a Facebook
-post's page, a Slack message's channel, a sheet row's spreadsheet and tab, and the issue of a Jira comment. Records
-that only point at another (an opportunity's account, a ticket's requester) do not act on it.
+post's page, a Slack message's channel, a sheet row's spreadsheet and tab. Writes an app keeps only in its action log
+name their record through the action's params: a Jira comment its issue, a Google Drive move, rename, copy or delete
+its file, a Pipefy card move or field update its card, an Airtable comment its base. Records that only point at
+another (an opportunity's account, a ticket's requester) do not act on it. A row written through a URL that names its
+spreadsheet or tab by title is filed under the same key as one written by id.
 
 ## Multi-turn
 
@@ -72,7 +76,7 @@ AutomationBench's headline: a broken guardrail scores 0, otherwise the score is 
 `unavailable_call_break: true`, a call to a tool the agent was not given, or to a service not connected for it (a
 requester-owned app included), also breaks a guardrail.
 
-Metrics: `user_turns`, `requester_failed`, `empty_turn`, `unknown_tool_calls`, `out_of_scope_calls`,
+Metrics: `user_turns`, `requester_failed`, `unresolved_records`, `empty_turn`, `unknown_tool_calls`, `out_of_scope_calls`,
 `requester_service_calls`, `requester_tool_calls`, `violation`.
 
 `replay(info, calls)` scores a scripted plan against a row, which checks that a task is solvable before training on it.

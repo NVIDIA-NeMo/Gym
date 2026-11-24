@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from automationbench.rubric.registry import AssertionRegistry
+from automationbench.runner import strip_none_values
 from automationbench.schema.world import WorldState
 from automationbench.tools.api.fetch import api_fetch as upstream_api_fetch
 
@@ -66,7 +67,34 @@ PARENTS = {
     ("google_sheets", "rows"): [("spreadsheets", "spreadsheet_id"), ("worksheets", "worksheet_id")],
 }
 # Writes an app keeps only in its action log, by (app, action): the collection and the param naming the record acted on.
-ACTION_TARGETS = {("jira", "add_comment"): ("issues", "issueKey")}
+ACTION_TARGETS = {
+    ("jira", "add_comment"): ("issues", "issueKey"),
+    ("google_drive", "delete_file"): ("files", "file"),
+    ("google_drive", "move_file"): ("files", "file"),
+    ("google_drive", "copy_file"): ("files", "source_file"),
+    ("pipefy", "move_card"): ("cards", "card_id"),
+    ("pipefy", "update_card_field"): ("cards", "card_id"),
+    ("airtable", "add_comment"): ("bases", "applicationId"),
+}
+# The key field of collections whose records have neither `id` nor `sid`. Records without one (a Zoom participant, a
+# LinkedIn mutual connection, a Slack message without an id) cannot be named by a day assertion.
+PRIMARY_KEYS = {
+    ("xero", c): f
+    for c, f in [
+        ("contacts", "contact_id"),
+        ("invoices", "invoice_id"),
+        ("bills", "invoice_id"),
+        ("payments", "payment_id"),
+        ("bank_transactions", "bank_transaction_id"),
+        ("bank_transfers", "bank_transfer_id"),
+        ("credit_notes", "credit_note_id"),
+        ("items", "item_id"),
+        ("employees", "employee_id"),
+        ("accounts", "account_id"),
+        ("purchase_orders", "purchase_order_id"),
+        ("quotes", "quote_id"),
+    ]
+}
 # A second field a record is named by: a Jira issue by its key ("OPS-1") as well as its id.
 ALIASES = {("jira", "issues"): "key"}
 
@@ -131,35 +159,50 @@ def _get(msg, key):
     return msg.get(key) if isinstance(msg, dict) else getattr(msg, key, None)
 
 
-def _key(record) -> str | None:
-    """The key a record is named by: its `id`, else `sid` (Twilio), else its first field when that is an `*_id` (Xero
-    `contact_id`, `invoice_id`)."""
-    fields = list(record) if isinstance(record, dict) else list(getattr(type(record), "model_fields", ()))
-    own = [f for f in ("id", "sid") if f in fields] + [f for f in fields[:1] if f.endswith("_id")]
-    return next((str(v) for f in own if (v := _get(record, f)) is not None), None)
+def _key(app: str, collection: str, record, sheet_ids: dict | None = None):
+    """A record's key in its collection: `id`, else `sid` (Twilio), else the collection's primary key (Xero). A sheet row's
+    key is (spreadsheet id, worksheet id, row_id), with a spreadsheet or tab that a write named by its title mapped to its
+    id through `sheet_ids` (`_sheet_ids`), so an appended row never takes another's key."""
+    if (app, collection) == ("google_sheets", "rows"):
+        ids = sheet_ids or {}
+        sheet = ids.get(_get(record, "spreadsheet_id"), _get(record, "spreadsheet_id"))
+        tab = ids.get((sheet, _get(record, "worksheet_id")), _get(record, "worksheet_id"))
+        return (sheet, tab, _get(record, "row_id"))
+    for field in ("id", "sid", PRIMARY_KEYS.get((app, collection))):
+        if field and (value := _get(record, field)) is not None:
+            return str(value)
+    return None
+
+
+def _sheet_ids(world: dict) -> dict:
+    """Title -> id for spreadsheets, and (spreadsheet id, title) -> id for tabs, where the title is not itself an id: a
+    write that names a spreadsheet or tab by title files its rows under the title."""
+    sheets = world.get("google_sheets") or {}
+    books, tabs = sheets.get("spreadsheets", []), sheets.get("worksheets", [])
+    book_ids, tab_ids = {b["id"] for b in books}, {(w["spreadsheet_id"], w["id"]) for w in tabs}
+    ids = {b["title"]: b["id"] for b in books if b.get("title") and b["title"] not in book_ids}
+    ids.update(
+        {(w["spreadsheet_id"], w["title"]): w["id"] for w in tabs if (w["spreadsheet_id"], w["title"]) not in tab_ids}
+    )
+    return ids
 
 
 def _records(world: dict) -> dict:
     """Every record of a world dump by (app, collection, key). A list collection holds records, a dict one maps keys to
-    records. A sheet row's key is (spreadsheet id, worksheet id, row_id), so an appended row never takes another's.
-    Records without a key of their own (a Slack message) share the key None."""
-    found = {}
+    records. Records without a key of their own share the key None."""
+    found, sheet_ids = {}, _sheet_ids(world)
     for app, collections in world.items():
         if not isinstance(collections, dict):
             continue
         for name, items in collections.items():
             if isinstance(items, list):
-                pairs = [(_key(r), r) for r in items if isinstance(r, dict)]
+                pairs = [(_key(app, name, r, sheet_ids), r) for r in items if isinstance(r, dict)]
             elif isinstance(items, dict):
-                pairs = [(k, r) for k, r in items.items() if isinstance(r, dict)]
+                pairs = [(str(k), r) for k, r in items.items() if isinstance(r, dict)]
             else:
                 continue
             for key, record in pairs:
-                if (app, name) == ("google_sheets", "rows"):
-                    key = (record["spreadsheet_id"], record["worksheet_id"], record["row_id"])
-                found.setdefault((app, name, key if key is None or isinstance(key, tuple) else str(key)), []).append(
-                    record
-                )
+                found.setdefault((app, name, key), []).append(record)
     return found
 
 
@@ -197,7 +240,7 @@ def _names(world: dict, events: list[dict]) -> dict:
             add(app, collection, key, record)
     for e in events:
         patch = e["patch"]
-        if "add" in patch and (key := _key(patch["add"])) is not None:
+        if "add" in patch and (key := _key(patch["app"], patch["collection"], patch["add"], _sheet_ids(world))):
             add(patch["app"], patch["collection"], key, patch["add"])
     return names
 
@@ -208,11 +251,12 @@ def _sheet_rows(world: dict, ref) -> dict:
     the row an append there would add. Without a tab only rows that exist count."""
     sheets = world.get("google_sheets") or {}
     first, last = int(ref["first"]), int(ref["last"] or ref["first"])
-    found = {}
+    found, sheet_ids = {}, _sheet_ids(world)
     for w in sheets.get("worksheets", []):
         if ref["tab"] not in (None, w["title"]):
             continue
-        rows = [r["row_id"] for r in sheets.get("rows", []) if r["worksheet_id"] == w["id"]]
+        keys = [_key("google_sheets", "rows", r, sheet_ids) for r in sheets.get("rows", [])]
+        rows = [row_id for sheet, tab, row_id in keys if (sheet, tab) == (w["spreadsheet_id"], w["id"])]
         strings = any(not isinstance(r, int) for r in rows)
         hits = []
         for n in range(first, last + 1):
@@ -223,7 +267,9 @@ def _sheet_rows(world: dict, ref) -> dict:
         if not hits and ref["tab"] and first == last and not strings:
             hits = [first]
         if hits:
-            found[w["id"]] = {_tag("google_sheets", "rows", (w["spreadsheet_id"], w["id"], n)) for n in hits}
+            found[(w["spreadsheet_id"], w["id"])] = {
+                _tag("google_sheets", "rows", (w["spreadsheet_id"], w["id"], n)) for n in hits
+            }
     return found
 
 
@@ -233,7 +279,7 @@ def resolve_records(info: dict) -> list[str]:
     A record string names the record with that key or alias (or the sheet row with that row_id), in the seed or added
     by an event. Only a string no record answers to is read as an A1 reference to sheet rows of one tab. Returns one
     problem per record that names nothing or more than one record (two collections, or rows of two tabs)."""
-    world = WorldState(**copy.deepcopy(info["initial_state"])).model_dump(mode="json")
+    world = WorldState(**strip_none_values(info["initial_state"])).model_dump(mode="json")
     names, problems = _names(world, info.get("events", [])), []
     for a in info.get("assertions", []):
         if a.get("type") not in DAY_ASSERTIONS:
@@ -268,7 +314,10 @@ def apply_patch(world: WorldState, patch: dict) -> None:
         add = copy.deepcopy(patch["add"])
         collection.append(model.model_validate(add) if hasattr(model, "model_validate") else add)
         return
-    record = next((r for r in collection if _key(r) == str(patch["id"])), None)
+    pid = str(patch["id"])
+    record = next(
+        (r for r in collection if pid in (str(_get(r, "id")), _key(patch["app"], patch["collection"], r))), None
+    )
     if record is None:
         raise MissingRecord(f"event patch targets no record {patch['id']!r} in {patch['app']}.{patch['collection']}")
     for key, value in patch["set"].items():
@@ -458,7 +507,7 @@ def replay(info: dict, calls: list[dict]) -> float:
     info = copy.deepcopy(info)
     if problems := resolve_records(info):
         raise ValueError(f"day-assertion records cannot be resolved: {problems}")
-    world = WorldState(**copy.deepcopy(info["initial_state"]))
+    world = WorldState(**strip_none_values(info["initial_state"]))
     clock = Clock(world, copy.deepcopy(info.get("events", [])), info.get("period_end") or world.meta.current_time)
     for call in calls:
         if "wait" in call:
@@ -513,7 +562,7 @@ def reward(state, **kwargs) -> float:
 
     Synchronous, so verifiers_agent watches it: a row whose assertions make it raise is masked as a verifier error,
     not scored 0."""
-    if state.get("violation"):
+    if state.get("violation") or state.get("unresolved_records"):
         return 0.0
     return headline(state["initial_state"], state["world"], state["clock"].log, state["info"]["assertions"])
 
@@ -535,6 +584,7 @@ def _state_metric(key: str):
 METRICS = (
     "user_turns",
     "requester_failed",
+    "unresolved_records",
     "empty_turn",
     "unknown_tool_calls",
     "out_of_scope_calls",
@@ -588,6 +638,11 @@ def load_environment(
         async def setup_state(self, state, **setup_kwargs):
             state = await super().setup_state(state, **setup_kwargs)
             info = state["info"]
+            # Gym hands each rollout the row's own info, not the dataset's copy, so the records are resolved here. A row
+            # refused at load still arrives: it ends before the first turn, masked like any dataset fault.
+            if problems := resolve_records(info):
+                state["unresolved_records"] = len(problems)
+                self._requester_failed(state, ValueError(f"day-assertion records cannot be resolved: {problems[:3]}"))
             end = info.get("period_end") or state["world"].meta.current_time.isoformat()
             state["clock"] = Clock(state["world"], copy.deepcopy(info.get("events", [])), end)
             if info.get("period_end"):
@@ -640,6 +695,11 @@ def load_environment(
         def _requester_failed(self, state, error: Exception) -> None:
             state["requester_failed"] = 1
             logger.warning("ab_synth: episode ends unscored: %s", str(error)[:200])
+
+        @vf.stop
+        async def unresolved(self, state) -> bool:
+            """A row whose day-assertion records cannot be resolved ends before the first turn."""
+            return bool(state.get("unresolved_records"))
 
         @vf.stop
         async def no_tools_called(self, state) -> bool:
