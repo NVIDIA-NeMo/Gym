@@ -619,6 +619,8 @@ class TestTrackedBeforeStart:
 
         assert str(raised.value.__context__) == "provider unreachable", "the failed stop rides along as context"
         assert owned.keys == ["session"], "the sandbox whose stop failed stays owned"
+        assert owned.get("session") is None
+        assert "session" not in owned
         assert _states(provider) == ["running"]
         unreachable = False
         await owned.stop("session")
