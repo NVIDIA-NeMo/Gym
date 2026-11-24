@@ -108,6 +108,12 @@ class TestExtractSql:
     def test_no_block(self, text) -> None:
         assert extract_sql_from_response(text) is None
 
+    def test_an_opening_fence_is_not_taken_as_a_closing_one(self) -> None:
+        # Seen in a model's answer: the fence opened twice. The official few-shot extraction takes the SQL after the
+        # last opening, and so does this.
+        assert extract_sql_from_response("```sql\n```sql\nSELECT 1\n```") == "SELECT 1"
+        assert extract_sql_from_response("```sql\nSELECT 1\n```sql\nSELECT 2\n```") == "SELECT 2"
+
     def test_block_without_a_letter_does_not_swallow_the_next(self) -> None:
         text = "```sql\n123\n```\nThen:\n```sql\nSELECT 1\n```"
         assert extract_sql_from_response(text) == "SELECT 1"

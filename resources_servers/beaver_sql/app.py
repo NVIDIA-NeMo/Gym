@@ -92,7 +92,8 @@ def extract_sql_from_response(text: Optional[str]) -> Optional[str]:
         content = text[start.end() : end]
         if re.search(r"[a-zA-Z]", content):
             last_content = content
-        position = end + 3
+        # A fence that opens the next block (```sql ```sql ...) isn't this block's closing fence to skip.
+        position = end if opening.match(text, end) else end + 3
     if last_content is None:
         return None
     return re.sub(r"^\*\*.*\*\*", "", last_content.strip()).strip()
