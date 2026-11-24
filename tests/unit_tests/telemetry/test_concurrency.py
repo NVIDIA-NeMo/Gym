@@ -245,13 +245,21 @@ def test_a_wait_that_times_out_records_no_wait(collected):  # noqa: F811
 
 
 def test_nothing_is_exported_while_metrics_are_off(collected, monkeypatch):  # noqa: F811
+    """With metrics off, a meter Gym can still reach, such as another library's, receives nothing."""
+    gym_metrics._reset_for_testing()
     monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", False)
     semaphore = _driver_limit(2)
 
-    exported = asyncio.run(_export_while(collected, semaphore, holders=2, waiters=1))
+    exported_while_queued = asyncio.run(_export_while(collected, semaphore, holders=2, waiters=1))
+    exported_after_admission = collected()
 
-    for name in (*STATE_INSTRUMENTS, concurrency.ADMISSION_CANCELLED_INSTRUMENT):
-        assert name not in exported
+    for exported in (exported_while_queued, exported_after_admission):
+        for name in (
+            *STATE_INSTRUMENTS,
+            concurrency.ADMISSION_CANCELLED_INSTRUMENT,
+            gym_metrics.CONCURRENCY_QUEUE_WAIT_INSTRUMENT,
+        ):
+            assert name not in exported
 
 
 def test_a_component_without_a_limit_reports_no_series(collected):  # noqa: F811

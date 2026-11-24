@@ -564,6 +564,11 @@ def record_run_summary(summary: Mapping[str, float], *, run_id: Optional[str]) -
 
 def record_concurrency_queue_wait(duration_ms: float, attributes: dict[str, str]) -> None:
     """Record how long one admitted caller queued for a concurrency-limit slot (``MeteredSemaphore`` attributes)."""
+    from nemo_gym.telemetry.setup import is_metrics_exporter_active
+
+    # Like the limit's other series: the telemetry handle can export traces only and still reach a meter.
+    if not is_metrics_exporter_active():
+        return
     _record_histogram(
         CONCURRENCY_QUEUE_WAIT_INSTRUMENT,
         "ms",
