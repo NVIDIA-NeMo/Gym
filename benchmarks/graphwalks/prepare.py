@@ -147,6 +147,10 @@ def prepare(
     dataset = load_dataset("openai/graphwalks", split="train")
     if num_workers == 1:
         _initialize_worker(tokenizer_name)
+    else:
+        # Load once first: a tokenizer with remote code is copied into the shared Hugging Face modules cache on
+        # first load, and workers that copy it concurrently can import a partially written module.
+        _build_token_counter(tokenizer_name)
     # Spawn avoids inheriting initialized tokenizer thread pools from a caller.
     workers = (
         get_context("spawn").Pool(num_workers, initializer=_initialize_worker, initargs=(tokenizer_name,))
