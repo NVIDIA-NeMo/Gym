@@ -18,7 +18,7 @@ shared_run_warmup_env_vars:
   VLLM_PREFILL_ENGINES_PER_NODE: 4
   VLLM_DECODE_ENGINES_PER_NODE: 1
   ENABLE_MOONCAKE_DISK_OFFLOAD: 1
-  MOONCAKE_SSD_PATH: /tmp
+  MOONCAKE_SSD_PATH: "/tmp"
   MOONCAKE_CPU_CACHE_GIB: 600
   MOONCAKE_DISK_QUOTA_GIB: 16384
   # Prefill APIs are DP1; decode's API balances its four DP ranks internally.
