@@ -2190,28 +2190,45 @@ def test_a_command_is_told_where_to_write_and_how_to_reach_the_policy(tmp_path):
     assert "NEMO_GYM_POLICY_MODEL_NAME=super" in script
     assert "NEMO_GYM_POLICY_API_KEY=dummy" in script
     # The capture directory `gym eval run` would get; the command's own Gym processes read it as their default.
-    assert _driver_step_env(tmp_path, script, "NEMO_GYM_MODEL_CALL_CAPTURE_DIR") == str(bench_dir / "model-calls")
+    assert _capture_dir_the_command_sees(tmp_path) == str(bench_dir / "model-calls")
 
 
-def _driver_step_env(tmp_path, script, name):
-    """`name` as the driver step's `srun` receives it, from the rendered driver line run with a stub `srun`."""
-    driver_line = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
-    # The step's entrypoint continues on the following lines; what precedes `srun` sets the step's environment.
-    driver_env, found, _ = driver_line.partition(" srun ")
-    assert found, driver_line
+def _run_command_step(tmp_path, command, **driver):
+    """Run the rendered driver step of a `command` benchmark with a stub `srun` that runs its entrypoint."""
+    lines = _render_command(tmp_path, command, **driver).splitlines()
+    start = next(i for i, line in enumerate(lines) if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("'"))
+    # The step's `bash -c` block closes with `' &`; run it in the foreground for its output and status.
+    step = "\n".join([*lines[start:end], "'"])
     bin_dir = tmp_path / "driver-step-bin"
     bin_dir.mkdir()
-    (bin_dir / "srun").write_text(f'#!/bin/bash\n[[ -v {name} ]] || exit 3\nprintf %s "${name}"\n')
+    (bin_dir / "srun").write_text('#!/bin/bash\nwhile [[ $1 == --* ]]; do shift; done\nexec "$@"\n')
     (bin_dir / "srun").chmod(0o755)
-    result = subprocess.run(
-        ["bash", "-c", f"{driver_env} srun"],
+    return subprocess.run(
+        ["bash", "-c", step],
         env={"PATH": f"{bin_dir}:/usr/bin:/bin", "SLURM_JOB_ID": "1"},
         capture_output=True,
         text=True,
         timeout=10,
     )
+
+
+def _capture_dir_the_command_sees(tmp_path, **driver):
+    """NEMO_GYM_MODEL_CALL_CAPTURE_DIR as the command itself reads it, or None when it is unset."""
+    result = _run_command_step(
+        tmp_path,
+        '[[ -v NEMO_GYM_MODEL_CALL_CAPTURE_DIR ]] || exit 3; printf %s "$NEMO_GYM_MODEL_CALL_CAPTURE_DIR"',
+        **driver,
+    )
     assert result.returncode in (0, 3), result.stderr
     return result.stdout if result.returncode == 0 else None
+
+
+def test_a_command_derives_a_capture_dir_per_collection_from_its_bench_dir(tmp_path):
+    result = _run_command_step(tmp_path, 'printf %s "$NEMO_GYM_BENCH_DIR/model-calls/smoke"')
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(tmp_path / "jobs" / "x" / "osworld" / "model-calls" / "smoke")
 
 
 @pytest.mark.parametrize(
@@ -2222,9 +2239,7 @@ def _driver_step_env(tmp_path, script, name):
     ],
 )
 def test_a_command_driver_env_overrides_the_capture_dir(tmp_path, declared, exported):
-    script = _render_command(tmp_path, "harness", env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": declared})
-
-    assert _driver_step_env(tmp_path, script, "NEMO_GYM_MODEL_CALL_CAPTURE_DIR") == exported
+    assert _capture_dir_the_command_sees(tmp_path, env={"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": declared}) == exported
 
 
 def test_a_run_benchmark_gets_no_capture_dir_variable(tmp_path):
