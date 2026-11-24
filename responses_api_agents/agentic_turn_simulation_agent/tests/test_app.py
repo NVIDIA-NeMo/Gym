@@ -18,10 +18,10 @@ from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
-from nemo_gym.server_runtime import TOOL_CALL_ID_HEADER, DirectHTTPToolAccess
+from nemo_gym.server_runtime import TOOL_CALL_ID_HEADER, AgentContext, DirectHTTPToolAccess
 from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationVerifyRequest
 from resources_servers.agentic_turn_simulation.cline_xml import NO_TOOLS_USED
-from resources_servers.agentic_turn_simulation.schemas import PROTOCOL_METADATA_KEY, STOP_TOOLS_METADATA_KEY
+from resources_servers.agentic_turn_simulation.schemas import TurnHarnessContext
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
 from resources_servers.agentic_turn_simulation.tests import support as env
 from responses_api_agents.agentic_turn_simulation_agent.app import (
@@ -886,10 +886,33 @@ def _grant(base_url: str = GRANT_URL) -> DirectHTTPToolAccess:
     )
 
 
-def _session_body(stop_tools: Optional[List[str]] = None, protocol: str = "native", **kw: Any):
-    """The request the agent_arena environment server sends: the row's prompt, its harness in the metadata."""
-    harness = {STOP_TOOLS_METADATA_KEY: json.dumps(stop_tools or ["ask_user"]), PROTOCOL_METADATA_KEY: protocol}
-    return _body(metadata={"row": "7", **harness}, **kw)
+ROW_TOOLS = ["ask_user", "bash", "read_file"]
+CLINE_TOOLS = ["attempt_completion", "execute_command", "read_file"]
+
+
+def _harness(
+    stop_tools: Optional[List[str]] = None, protocol: str = "native", tool_names: Optional[List[str]] = None
+) -> TurnHarnessContext:
+    """The row's harness, as the agent_arena environment server sends it in the seed's context."""
+    return TurnHarnessContext(
+        stop_tools=stop_tools or ["ask_user"], protocol=protocol, tool_names=tool_names or ROW_TOOLS
+    )
+
+
+def _session_body(**kw: Any):
+    """The request the agent_arena environment server sends: the row's prompt as the row has it."""
+    return _body(metadata={"row": "7"}, **kw)
+
+
+def _seed(task_id: str = "0", harness: Optional[TurnHarnessContext] = None, **kw: Any) -> AgentSeedSessionRequest:
+    context = AgentContext(values=(harness or _harness()).model_dump(mode="json"))
+    return AgentSeedSessionRequest(
+        agent_session_id="agent-session",
+        episode_id=EpisodeId(rollout_id="0-0", attempt=0),
+        task_id=TaskId(taskset="agent_arena", task_id=task_id),
+        agent_context=context,
+        **kw,
+    )
 
 
 class GrantScript:
@@ -907,14 +930,16 @@ class GrantScript:
         return _http(f"result of {kw['headers'][TOOL_CALL_ID_HEADER]}", cookies={"session": "after-tool"})
 
 
-async def _granted_episode(agent: AgenticTurnSimulationAgent, grant: GrantScript, body=None, **kw: Any):
+async def _granted_episode(agent: AgenticTurnSimulationAgent, grant: GrantScript, body=None, harness=None, **kw: Any):
     with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
-        return await _episode(agent, body or _session_body(), tool_access=_grant(), in_session=True, **kw)
+        return await _episode(
+            agent, body or _session_body(), tool_access=_grant(), in_session=True, harness=harness or _harness(), **kw
+        )
 
 
 class TestAgentSessions:
     """An Environment Server's episode calls the row's tools only through the session's grant, with the row's harness
-    from the request's metadata."""
+    from the seed's context."""
 
     async def test_each_tool_call_goes_to_its_route_through_the_grant(self) -> None:
         agent, script = _agent(_model(_fc("bash", "c1", '{"command": "ls"}')), _model(_msg("done")))
@@ -926,8 +951,8 @@ class TestAgentSessions:
         assert (tool["method"], tool["url"], tool["json"]) == ("POST", f"{GRANT_URL}/bash", {"command": "ls"})
         assert tool["headers"] == GRANT_HEADERS | {TOOL_CALL_ID_HEADER: "c1"} and tool["_internal"]
         assert response.output[1].output == "result of c1"
-        # The model never sees the harness keys; the row's other metadata goes through. Nothing else asks the resources
-        # server; the session's cookies follow the tool replies.
+        # The row's metadata goes through as it is. Nothing else asks the resources server; the session's cookies follow
+        # the tool replies.
         assert all(c["json"].metadata == {"row": "7"} for c in script.model_calls)
         assert (
             script.harness_calls == [] and script.tool_calls == [] and resources_cookies == {"session": "after-tool"}
@@ -943,17 +968,20 @@ class TestAgentSessions:
                 tool_access=_grant(f"{GRANT_URL}/ng-rollout/0-0-attempt0"),
                 resources_prefix="/ng-rollout/0-0-attempt1",
                 in_session=True,
+                harness=_harness(),
             )
         assert [c["url"] for c in grant.calls] == [f"{GRANT_URL}/ng-rollout/0-0-attempt1/bash"]
 
-    async def test_the_rows_harness_from_the_metadata_drives_the_turn(self) -> None:
+    async def test_the_rows_harness_from_the_seed_drives_the_turn(self) -> None:
         agent, script = _agent(
             _model(_msg("<read_file>\n<path>a.py</path>\n</read_file>")),
             _model(_msg("<attempt_completion>\n<result>Fixed.</result>\n</attempt_completion>")),
         )
         grant = GrantScript()
-        response, *_ = await _granted_episode(agent, grant, _session_body(CLINE_STOP_TOOLS, "cline_xml"))
-        # Cline's XML protocol and stop tools, as the metadata named them: the completion ends the turn unrun.
+        response, *_ = await _granted_episode(
+            agent, grant, harness=_harness(CLINE_STOP_TOOLS, "cline_xml", CLINE_TOOLS)
+        )
+        # Cline's XML protocol and stop tools, as the seed named them: the completion ends the turn unrun.
         assert [(c["url"], c["json"]) for c in grant.calls] == [(f"{GRANT_URL}/read_file", {"path": "a.py"})]
         assert response.metadata["stop_reason"] == "attempt_completion" and response.metadata["steps"] == "2"
         assert script.harness_calls == []
@@ -967,38 +995,57 @@ class TestAgentSessions:
         grant = GrantScript(
             _http(f"[read_file for 'a.py'] Result:\nA{details}"), _http(f"[read_file for 'b.py'] Result:\nB{details}")
         )
-        response, *_ = await _granted_episode(agent, grant, _session_body(CLINE_STOP_TOOLS, "cline_xml"))
+        response, *_ = await _granted_episode(
+            agent, grant, harness=_harness(CLINE_STOP_TOOLS, "cline_xml", CLINE_TOOLS)
+        )
         message = response.output[1].content[0]["text"]
         assert message == f"[read_file for 'a.py'] Result:\nA\n[read_file for 'b.py'] Result:\nB{details}"
 
-    @pytest.mark.parametrize("missing", [STOP_TOOLS_METADATA_KEY, PROTOCOL_METADATA_KEY])
-    async def test_a_request_that_names_no_harness_fails_before_any_call(self, missing: str) -> None:
+    async def test_a_session_turn_without_the_rows_harness_fails_before_any_call(self) -> None:
         # Never the bare request's fallback (the config's stop tools, native calls): a Cline row would be scored.
         agent, script = _agent()
-        body = _session_body()
-        body.metadata.pop(missing)
-        with pytest.raises(RuntimeError, match="must name the row's harness"):
-            await _granted_episode(agent, GrantScript(), body)
+        with pytest.raises(RuntimeError, match="the row's harness"):
+            await _episode(agent, _session_body(), tool_access=_grant(), in_session=True)
         assert script.model_calls == []
 
     @pytest.mark.parametrize(
-        ("call", "reply", "reason"),
+        ("values", "detail"),
         [
-            (
-                _fc("browse", "c1", '{"url": "x"}'),
-                _http({"detail": "no tool"}, status=404),
-                "there is no tool named 'browse'",
-            ),
-            (_fc("bash", "c1", "{not json"), None, "its arguments are not a JSON object"),
-            (_fc("../run", "c1"), None, "there is no tool named '../run'"),
+            (None, "agent_context does not satisfy"),
+            ({"stop_tools": ["ask_user"], "protocol": "xml", "tool_names": ["bash"]}, "protocol"),
+            ({"stop_tools": "ask_user", "protocol": "native", "tool_names": ["bash"]}, "stop_tools"),
+            (_harness().model_dump(mode="json") | {"extra": 1}, "does not accept agent_context keys ['extra']"),
         ],
     )
-    async def test_a_call_the_server_cannot_take_is_answered_here(self, call, reply, reason) -> None:
-        # The turn's scoring gates such a call (nonexistent_tool, malformed_arguments), so it is not retried or masked.
-        agent, _ = _agent(_model(call), _model(_msg("done")))
-        grant = GrantScript(*([reply] if reply is not None else []))
+    def test_a_seed_without_a_valid_harness_is_refused(self, values: Optional[Dict[str, Any]], detail: str) -> None:
+        # A terminal 422 at the seed, before any turn: no retry would pass.
+        agent, script = _agent()
+        client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+        seed = _seed(tool_accesses=[_grant()]).model_copy(
+            update={"agent_context": AgentContext(values=values) if values is not None else None}
+        )
+        reply = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+        assert reply.status_code == 422 and detail in reply.text
+        assert script.model_calls == []
+
+    @pytest.mark.parametrize(
+        ("call", "reason"),
+        [
+            (_fc("browse", "c1", '{"url": "x"}'), "there is no tool named 'browse'"),
+            (_fc("bash", "c1", "{not json"), "its arguments are not a JSON object"),
+            (_fc("../run", "c1"), "there is no tool named '../run'"),
+            # Names of the server's own routes: sent, they would reach the route (403), not a tool.
+            (_fc("run", "c1"), "there is no tool named 'run'"),
+            (_fc("docs", "c1"), "there is no tool named 'docs'"),
+        ],
+    )
+    async def test_a_call_no_tool_of_the_row_takes_is_answered_here(self, call, reason) -> None:
+        # The turn's scoring gates such a call (nonexistent_tool, malformed_arguments), so it is answered, never sent,
+        # retried or masked.
+        agent, script = _agent(_model(call), _model(_msg("done")))
+        grant = GrantScript()
         response, *_ = await _granted_episode(agent, grant)
-        assert len(grant.calls) == (1 if reply is not None else 0)
+        assert grant.calls == [] and len(script.model_calls) == 2
         assert reason in response.output[1].output and not response.output[1].output.startswith("[tool simulator")
 
     async def test_a_failing_tool_route_is_retried_then_masked(self, sleep: AsyncMock) -> None:
@@ -1007,9 +1054,10 @@ class TestAgentSessions:
         response, *_ = await _granted_episode(agent, grant)
         assert len(grant.calls) == 2 and response.output[1].output == simulator_failure("HTTP 503: busy")
 
-    @pytest.mark.parametrize("status", [401, 403, 410])
+    @pytest.mark.parametrize("status", [401, 403, 404, 410, 422])
     async def test_a_refused_grant_fails_the_turn_unretried(self, status: int, sleep: AsyncMock) -> None:
-        # A bad token or an ended episode is the setup's fault: not a simulator failure the scoring would mask.
+        # A bad token, an ended episode, or a grant that does not serve the row's tools (404 for one of them) is the
+        # setup's fault: not a simulator failure the scoring would mask, nor a missing tool it would score 0.
         agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("done")))
         grant = GrantScript(_http({"detail": "refused"}, status=status))
         with pytest.raises(RuntimeError, match=f"tool grant was refused for 'bash': HTTP {status}"):
@@ -1026,11 +1074,7 @@ class TestAgentSessions:
     def test_a_seed_without_a_direct_grant_is_refused(self) -> None:
         agent, _ = _agent()
         client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
-        seed = AgentSeedSessionRequest(
-            agent_session_id="agent-session",
-            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-            task_id=TaskId(taskset="agent_arena", task_id="0"),
-        )
+        seed = _seed()
         reply = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
         assert reply.status_code == 422 and "direct HTTP tool access" in reply.text
         agent.server_client.post.assert_not_awaited()
@@ -1039,12 +1083,7 @@ class TestAgentSessions:
         # The agent plays the whole turn, so it has no unresolved calls to hand back: it would run the tools anyway.
         agent, _ = _agent(execute_tools=False)
         client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
-        seed = AgentSeedSessionRequest(
-            agent_session_id="agent-session",
-            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-            task_id=TaskId(taskset="agent_arena", task_id="0"),
-            tool_accesses=[_grant()],
-        )
+        seed = _seed(tool_accesses=[_grant()])
         with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=AssertionError("no tool call"))):
             reply = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
         assert reply.status_code == 422 and "execute_tools=true" in reply.text
@@ -1055,12 +1094,7 @@ class TestAgentSessions:
         agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("done")), observability=True)
         grant = GrantScript()
         client = TestClient(agent.setup_webserver())
-        seed = AgentSeedSessionRequest(
-            agent_session_id="agent-session",
-            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-            task_id=TaskId(taskset="agent_arena", task_id="row-7"),
-            tool_accesses=[_grant()],
-        )
+        seed = _seed("row-7", tool_accesses=[_grant()])
         assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
         with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
             reply = client.post(
@@ -1081,6 +1115,7 @@ class TestAgentSessions:
         assert (trajectory["task_id"], trajectory["rollout_id"]) == ("row-7", "0-0")
         assert {turn["task_id"] for turn in trajectory["turns"]} == {"row-7"}
         assert [(c["tool_call_id"], c["output"]) for c in trajectory["tool_calls"]] == [("c1", "result of c1")]
+        assert [i["in_session"] for i in trajectory["invocations"]] == [True]
 
     def test_a_cline_session_closes_with_each_calls_output(self) -> None:
         # A Cline result is in a user message, not a function_call_output item, so only the agent's own trajectory
@@ -1092,14 +1127,9 @@ class TestAgentSessions:
         )
         grant = GrantScript()
         client = TestClient(agent.setup_webserver())
-        seed = AgentSeedSessionRequest(
-            agent_session_id="agent-session",
-            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-            task_id=TaskId(taskset="agent_arena", task_id="0"),
-            tool_accesses=[_grant()],
-        )
+        seed = _seed(harness=_harness(CLINE_STOP_TOOLS, "cline_xml", CLINE_TOOLS), tool_accesses=[_grant()])
         assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
-        body = _session_body(CLINE_STOP_TOOLS, "cline_xml")
+        body = _session_body()
         with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
             reply = client.post("/ng-rollout/0-0/v1/responses", json=body.model_dump(mode="json", exclude_none=True))
         assert reply.status_code == 200 and reply.json()["metadata"]["stop_reason"] == "attempt_completion"

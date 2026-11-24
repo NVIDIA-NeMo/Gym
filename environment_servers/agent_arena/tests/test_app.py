@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from aiohttp import ClientConnectionError
+from aiohttp import ClientConnectionError, ClientResponseError
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
@@ -42,8 +42,6 @@ from nemo_gym.server_runtime import (
 from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER
 from resources_servers.agentic_turn_simulation.cline_xml import KNOWN_TOOLS
 from resources_servers.agentic_turn_simulation.schemas import (
-    PROTOCOL_METADATA_KEY,
-    STOP_TOOLS_METADATA_KEY,
     AgenticTurnSimulationRunRequest,
     AgenticTurnSimulationVerifyRequest,
     SimulateToolCallRequest,
@@ -141,7 +139,8 @@ class World:
         self.app = server.setup_webserver()
         self.calls: list[dict[str, Any]] = []
         self.grant = None
-        self.metadata: dict[str, str] = {}
+        self.agent_context = None
+        self.metadata: dict[str, str] | None = {}
         self.outputs: dict[str, str] = {}
         self.statuses: dict[str, int] = {}
         self.tool_errors: dict[str, bool] = {}
@@ -162,7 +161,9 @@ class World:
             return reply
         assert server_name == AGENT, server_name
         if url_path == "/v1/agent_sessions":
-            (self.grant,) = AgentSeedSessionRequest.model_validate(body).tool_accesses
+            seed = AgentSeedSessionRequest.model_validate(body)
+            (self.grant,) = seed.tool_accesses
+            self.agent_context = seed.agent_context
             return http({"agent_session_id": body["agent_session_id"]})
         if url_path == "/v1/agent_sessions/close":
             return http({"agent_session_id": body["agent_session_id"]})
@@ -277,12 +278,16 @@ class TestEpisode:
             (AGENT, "/v1/agent_sessions/close"),
             ("judge_0", "/v1/chat/completions"),
         ]
-        # The agent gets the row's prompt only, with the row's harness in its metadata, and one grant: this server's
-        # URL, with the episode's token.
+        # The agent gets the row's prompt only, as the row has it; the row's harness (stop tools, protocol, the tools
+        # this server answers) comes with the seed's context. One grant: this server's URL, with the episode's token.
         prompt = world.calls[1]["json"]
         assert len(prompt["input"]) == len(HISTORY) and prompt["input"][-1]["content"] == "Make the heading blue."
-        assert "verifier_metadata" not in prompt
-        assert world.metadata == {STOP_TOOLS_METADATA_KEY: '["ask_user"]', PROTOCOL_METADATA_KEY: "native"}
+        assert "verifier_metadata" not in prompt and not world.metadata
+        assert world.agent_context.values == {
+            "stop_tools": ["ask_user"],
+            "protocol": "native",
+            "tool_names": sorted(tool["name"] for tool in TOOLS),
+        }
         assert str(world.grant.base_url).rstrip("/") == f"http://{ENVIRONMENT}:8000"
         assert world.grant.name == f"{ENVIRONMENT}.direct_http" and world.grant.required
         assert EPISODE_TOKEN_HEADER in world.grant.headers
@@ -367,16 +372,50 @@ class TestEpisode:
         assert response.failure.failure_kind == MODEL_TRANSPORT_ERROR
         assert ("judge_0", "/v1/chat/completions") not in _paths(world) and server._open_episodes == {}
 
-    async def test_a_judge_that_cannot_be_reached_is_a_retryable_verification_failure(self) -> None:
+    @pytest.mark.parametrize(
+        "judge_error",
+        [
+            ClientConnectionError("judge down"),
+            # A conversation too long for the judge: a 4xx no retry would pass.
+            ClientResponseError(
+                request_info=MagicMock(real_url="http://judge_0"),
+                history=(),
+                status=400,
+                message="maximum context length",
+            ),
+        ],
+    )
+    async def test_a_judge_that_gives_no_verdict_masks_the_turn_as_verify_does(self, judge_error: Exception) -> None:
+        # The resources server's /verify (judge_failsafe) answers it with a masked judge_failed row, which collection
+        # keeps and `gym eval reverify --judge-failed-only` re-judges: the policy's turn is not played again.
         server = _server(judge_max_attempts=1)
-        world = _world(server, judge=[ClientConnectionError("judge down")])
+        world = _world(server, judge=[judge_error])
 
         response = await server.run_request(_request())
 
-        assert response.result is None
-        assert (response.failure.stage, response.failure.terminal) == ("verification", False)
-        assert response.failure.partial_response.id == "response"
+        assert response.failure is None, response.failure
+        result = response.result.model_dump(mode="json")
+        assert (result["reward"], result["mask_sample"], result["failure_kind"]) == (0.0, True, "judge_failed")
+        assert result["_ng_failure_class"] == "judge_failed" and result["response"]["id"] == "response"
+        # Rollout collection accepts an episode result's `_ng_` keys only as these judge-failure markers.
+        judge_markers = {"_ng_failure_class", "_ng_failure_judge_error", "_ng_failure_events", "_ng_failure_id"}
+        assert {key for key in result if key.startswith("_ng_")} <= judge_markers | {"_ng_failure_events_omitted"}
+        assert [path for path in _paths(world) if path[1].endswith("/v1/responses")] == [
+            (AGENT, "/ng-rollout/7-0/v1/responses")
+        ]
         assert world.calls[-1]["server_name"] == "judge_0" and server._open_episodes == {}
+
+    async def test_a_task_context_that_sets_the_harness_is_refused_before_the_seed(self) -> None:
+        # Never overridden: the episode would run without the context it was given.
+        server = _server()
+        world = _world(server)
+        row = ROW | {"agent_context": {"agent": {"values": {"protocol": "cline_xml"}}}}
+
+        response = await server.run_request(_request(row))
+
+        assert response.result is None and response.failure.terminal
+        assert "sets ['protocol']" in response.failure.failure_reason
+        assert world.calls == [] and server._open_episodes == {}
 
     async def test_an_agent_that_cannot_be_seeded_leaves_no_session(self) -> None:
         server = _server()
@@ -389,18 +428,19 @@ class TestEpisode:
 
     @pytest.mark.parametrize("context", [None, {"agent": {"values": {"tag": "x"}}}])
     async def test_the_tasks_agent_context_reaches_the_seed(self, context: dict[str, Any] | None) -> None:
-        # The agent validates or refuses it; a row without one seeds as before. It reaches neither the prompt nor the
-        # scoring.
+        # Beside the row's harness; the agent validates or refuses it. It reaches neither the prompt nor the scoring.
         server = _server()
         world = _world(server)
         await server.run_request(_request(ROW | ({"agent_context": context} if context else {})))
         seed = world.calls[0]
         assert seed["url_path"] == "/v1/agent_sessions"
-        if context is None:
-            assert "agent_context" not in seed["json"]
-        else:
-            assert seed["json"]["agent_context"]["values"] == {"tag": "x"}
-        assert "agent_context" not in world.calls[1]["json"] and "agent_context" not in world.metadata
+        harness = {
+            "stop_tools": ["ask_user"],
+            "protocol": "native",
+            "tool_names": sorted(tool["name"] for tool in TOOLS),
+        }
+        assert seed["json"]["agent_context"]["values"] == ({"tag": "x"} if context else {}) | harness
+        assert "agent_context" not in world.calls[1]["json"] and not world.metadata
 
     def test_obstacle_injection_is_refused_at_startup(self) -> None:
         # An obstacle's decision needs the reply a call belongs to, which a call through the grant does not carry.
@@ -532,6 +572,36 @@ class TestToolset:
             "command": "ls"
         }
 
+    async def test_a_call_id_the_model_reuses_later_keeps_both_calls(self) -> None:
+        # Some tool-call parsers take ids from the model's text, which may repeat one in a later step; only a resend
+        # directly follows its own call.
+        def record(name: str, call_id: str, output: str) -> ToolCallRecord:
+            return ToolCallRecord(
+                name=name, arguments={}, output=output, is_error=False, duration_seconds=0, call_id=call_id
+            )
+
+        toolset = self._toolset(ROW)
+        toolset.bind(
+            [
+                record("read_file", "c0", "A"),
+                record("bash", "c1", "B"),
+                record("read_file", "c0", "C"),
+                # The same id on the very next call, for another tool: a reused id, not a resend.
+                record("bash", "c0", "D"),
+                # The reply to this one was lost on its way back; the agent sent it again.
+                record("bash", "c2", "E"),
+                record("bash", "c2", "E again"),
+            ]
+        )
+        turn = toolset.turn_so_far("bash", {"command": "ls"})
+        assert [item["output"] for item in turn if item["type"] == "function_call_output"] == [
+            "A",
+            "B",
+            "C",
+            "D",
+            "E again",
+        ]
+
     async def test_the_simulator_sees_only_the_results_the_policy_saw(self) -> None:
         def record(name: str, call_id: str, output: Any, is_error: bool = False) -> ToolCallRecord:
             return ToolCallRecord(
@@ -604,7 +674,14 @@ class TestScoringParity:
         assert episode["failure_kind"] == "agentic_turn_simulation:time_cap"
         # The outcome policy's decision is saved with the row, as the resources server saves it.
         assert (episode["failure_outcome_action"], episode["failure_outcome_attribution"]) == ("retry", "evaluation")
-        assert episode["_ng_failure_stage"] == verified.model_extra["_ng_failure_stage"] == "agent"
+        # Rollout collection refuses an episode result that sets one of its own `_ng_` keys; the flat result, read as
+        # an agent's /run row, keeps the stage the resources server saves.
+        assert verified.model_extra["_ng_failure_stage"] == "agent"
+        assert not [key for key in episode if key.startswith("_ng_")]
+        flat = await server.run_legacy(
+            ROW | {"_ng_task_index": 7, "_ng_rollout_index": 0, "agent_ref": {"name": AGENT}}
+        )
+        assert (flat["mask_sample"], flat["_ng_failure_stage"]) == (True, "agent")
 
     async def test_the_metrics_are_the_resources_servers(self) -> None:
         rows = [
@@ -636,10 +713,12 @@ class TestFlatRows:
         assert "episode_id" not in result and result["verifier_metadata"] == ROW["verifier_metadata"]
 
     async def test_a_failure_is_a_flat_failure_row(self) -> None:
-        server = _server(judge_max_attempts=1)
-        _world(server, judge=[ClientConnectionError("judge down")])
+        server = _server()
+        outcome = json.dumps({"failure_kind": MODEL_TRANSPORT_ERROR})
+        reply = _agent_reply({"p1": "", "p2": ""}, status="failed", metadata={AGENT_OUTCOME_METADATA_KEY: outcome})
+        _world(server, reply=reply)
         result = await server.run_legacy(self._row())
-        assert (result["_ng_failure_stage"], result["_ng_failure_terminal"]) == ("verification", False)
+        assert (result["_ng_failure_stage"], result["_ng_failure_terminal"]) == ("agent", False)
         assert result["agent_ref"] == {"name": AGENT} and "reward" not in result
 
     @pytest.mark.parametrize(

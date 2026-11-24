@@ -71,12 +71,15 @@ class TurnToolset:
 
         Only results the policy saw: a call the server refused or failed (a record it wrote itself, ``{"detail": ...}``:
         no such tool, a failed or timed-out call) is left out, since the agent answers a refusal with its own text and
-        retries a failure under the same call id. Of a call id's records, the last is the one the policy saw.
+        retries a failure under the same call id. Of a call resent right after (a reply lost on the way back: the same
+        id, tool and arguments), the last record is the one the policy saw. An id the model reuses for another call keeps
+        both calls: the episode's calls run one at a time, so only a resend directly follows its own call.
         """
-        last = {record.call_id: index for index, record in enumerate(self._calls) if record.call_id is not None}
+        seen = [(index, record) for index, record in enumerate(self._calls) if not _server_failure(record)]
         items: list[dict[str, Any]] = []
-        for index, record in enumerate(self._calls):
-            if _server_failure(record) or (record.call_id is not None and last[record.call_id] != index):
+        for position, (index, record) in enumerate(seen):
+            following = seen[position + 1][1] if position + 1 < len(seen) else None
+            if record.call_id is not None and following is not None and _resent(record, following):
                 continue
             call_id = record.call_id or f"ng_call_{index}"
             output = record.output if isinstance(record.output, str) else json.dumps(record.output, ensure_ascii=False)
@@ -92,6 +95,11 @@ class TurnToolset:
         current = json.dumps(arguments, ensure_ascii=False)
         items.append({"type": "function_call", "call_id": _CURRENT_CALL_ID, "name": name, "arguments": current})
         return items
+
+
+def _resent(record: ToolCallRecord, following: ToolCallRecord) -> bool:
+    """Whether ``following`` is the agent's resend of ``record``: the same call id, tool and arguments."""
+    return (following.call_id, following.name, following.arguments) == (record.call_id, record.name, record.arguments)
 
 
 def _server_failure(record: ToolCallRecord) -> bool:

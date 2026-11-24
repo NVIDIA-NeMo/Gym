@@ -86,6 +86,8 @@ JUDGE_DEFAULT_MAX_TOKENS = 20_000
 # Responses statuses of a request the model server did not complete (Responses-native servers pass them on, partial
 # output and all). "incomplete" is not one: a reply cut off by its output budget is the policy's.
 FAILED_RESPONSE_STATUSES = frozenset({"failed", "cancelled", "queued", "in_progress"})
+# The originating stage a masked turn's outcome decision saves (`_ng_failure_stage`): an episode fault is the agent's.
+OUTCOME_STAGE = "agent"
 # A cap on concurrent model calls; nullcontext when uncapped.
 ConcurrencyLimit = asyncio.Semaphore | nullcontext[None]
 
@@ -488,7 +490,9 @@ class TurnSimulation:
 
     def _decision(self, failure_kind: str) -> dict[str, Any]:
         """The saved outcome decision of an episode fault: the originating stage is the agent's, whatever the action."""
-        return applied_outcome_fields(failure_kind=failure_kind, stage="agent", config=self.config.outcome_policy)
+        return applied_outcome_fields(
+            failure_kind=failure_kind, stage=OUTCOME_STAGE, config=self.config.outcome_policy
+        )
 
     def _mask_reason(
         self,

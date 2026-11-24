@@ -6,9 +6,9 @@ answers the tool calls and scores the turn. It inherits `simple_agent`'s `/run`,
 and replaces only the episode loop.
 
 That server is the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server in an agent
-session: it serves the row's tools behind the session's direct HTTP grant, and names the row's harness in the request's
-metadata. A session seeded without such a grant, or with `execute_tools: false` (the agent plays the whole turn, so it
-has no unresolved calls to hand back), is refused (422). On the deprecated `/run` relay it is the configured
+session: it serves the row's tools behind the session's direct HTTP grant, and sends the row's harness with the seed, in
+its `agent_context`. A session seeded without such a grant or harness, or with `execute_tools: false` (the agent plays
+the whole turn, so it has no unresolved calls to hand back), is refused (422). On the deprecated `/run` relay it is the configured
 `resources_server`, with the cookies its `/seed_session` set, through its `/harness` and `/simulate_tool_call`. A turn
 on the relay logs a deprecation warning once per process; see
 [Migrating from the legacy_agent relay](../../environment_servers/agent_arena/README.md#migrating-from-the-legacy_agent-relay).
@@ -16,9 +16,9 @@ on the relay logs a deprecation warning once per process; see
 ## What the episode does differently
 
 - **The row's harness**: its stop tools and tool protocol (native function calls, or Cline's XML).
-  - In an agent session, the request's metadata names it (`agentic_turn_simulation_stop_tools`, a JSON list, and
-    `agentic_turn_simulation_protocol`). The agent takes both keys out before it calls the model. A session request
-    without them fails the rollout instead of running a Cline row as native.
+  - In an agent session, the seed's `agent_context` values name it (`TurnHarnessContext`: `stop_tools`, `protocol`, and
+    `tool_names`, the tools the server answers). A seed without them, or with a malformed one, is refused (422) instead
+    of running a Cline row as native. The request to the model is the row's, as it is.
   - On the relay, the agent asks the resources server's `/harness`, with the session the row was seeded with. A bare
     `/v1/responses` call without a seeded session uses the config's `stop_tools` and native calls. A 404 for a seeded
     session (the call reached another resources-server worker under `num_workers` > 1, or the server restarted) fails
@@ -30,9 +30,11 @@ on the relay logs a deprecation warning once per process; see
   turn that got an error page as a tool result.
   - In an agent session, a call goes to `POST /<tool name>` through the grant: the arguments object is the body, the
     call id is in `X-NeMo-Gym-Tool-Call-Id`, with the grant's headers and the session's cookies. The server rebuilds
-    the simulator's view of the turn from the episode's earlier calls. A call it cannot take is answered by the agent
-    without a retry: arguments that are not a JSON object, a name no grant can carry, or a tool the row lacks (the
-    server's 404). Scoring gives such a turn 0 (`malformed_arguments`, `nonexistent_tool`) whatever the call returned.
+    the simulator's view of the turn from the episode's earlier calls. A call no tool of the row can take is answered
+    by the agent without a request: arguments that are not a JSON object, or a name outside `tool_names` (a name such
+    as `run` would otherwise reach one of the server's own routes). Scoring gives such a turn 0
+    (`malformed_arguments`, `nonexistent_tool`) whatever the call returned. A reply that refuses a call the agent sent
+    (401, 403, 404, 410, 422) means the grant does not serve the row's tools: the turn fails, unretried.
   - On the relay, a call goes to `/simulate_tool_call` with its `call_id`, `name`, raw `arguments` (parseable or not)
     and the turn so far without reasoning.
 - **What ends the turn** (`response.metadata.stop_reason`, with `steps`, `elapsed_seconds` and the per-call

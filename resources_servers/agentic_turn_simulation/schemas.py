@@ -127,11 +127,19 @@ class AgenticTurnSimulationVerifyRequest(AgenticTurnSimulationRunRequest, BaseVe
     pass
 
 
-# The agent_arena environment server names the row's harness in the metadata of the agent's request, in place of
-# /harness: its stop tools (a JSON list) and its tool-call protocol. agentic_turn_simulation_agent takes them out before
-# it calls the model.
-STOP_TOOLS_METADATA_KEY = "agentic_turn_simulation_stop_tools"
-PROTOCOL_METADATA_KEY = "agentic_turn_simulation_protocol"
+class TurnHarnessContext(BaseModel):
+    """The row's harness as the agent_arena environment server sends it in the agent session's seed
+    (``agent_context.values``), in place of the legacy ``/harness``. agentic_turn_simulation_agent declares it as its
+    ``agent_context_model``, so a seed without it, or with a malformed one, is refused (422) before the turn starts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A call to one of these ends the turn unexecuted.
+    stop_tools: list[str]
+    protocol: ToolCallProtocol
+    # The tools the environment server answers: the set the scoring's nonexistent_tool gate accepts. The agent answers
+    # a call to any other name itself, as a tool the row lacks.
+    tool_names: list[str]
 
 
 class HarnessResponse(BaseModel):

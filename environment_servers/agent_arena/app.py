@@ -11,12 +11,13 @@ runs the agent and scores the turn. No Resources Server takes part in the episod
 2. Serves the row's tools for the episode (`serve_tools`, with a `TurnToolset`): the agent calls ``POST /<tool name>``
    with the episode token of its grant, and each call is answered as the resources server's ``/simulate_tool_call``
    answers it.
-3. Seeds an agent session with that grant and invokes the agent with the row's ``responses_create_params``. Their
-   metadata name the row's stop tools and tool-call protocol (`STOP_TOOLS_METADATA_KEY`, `PROTOCOL_METADATA_KEY`),
-   which the agent takes out before it calls the model. Then it closes the agent's session.
+3. Seeds an agent session with that grant and the row's harness in its ``agent_context`` (`TurnHarnessContext`: the
+   stop tools, the tool-call protocol and the tool names this server answers), and invokes the agent with the row's
+   ``responses_create_params`` as they are. Then it closes the agent's session.
 4. Scores the turn in process (`TurnSimulation.verify`: code gates, judges, masking). The result has the fields the
-   ``agentic_turn_simulation`` resources server's ``/verify`` returns, so the metrics are the same. With
-   ``skip_verification`` (this server's, else the agent's), the turn gets the fixed reward instead, unscored.
+   ``agentic_turn_simulation`` resources server's ``/verify`` returns, so the metrics are the same, and a judge that
+   gives no verdict masks the turn as that ``/verify`` does (``judge_failsafe``). With ``skip_verification`` (this
+   server's, else the agent's), the turn gets the fixed reward instead, unscored.
 
 The tool simulator, judge and scoring settings are those of the resources server the config names
 (``resources_server``): overrides of that server's settings apply here too, and ``gym eval reverify`` through that
@@ -38,6 +39,7 @@ from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from omegaconf import OmegaConf
 from pydantic import ConfigDict, Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError
@@ -80,7 +82,6 @@ from nemo_gym.core import (
     FailureBoundary,
     FailureReportRow,
     NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     RequestFailureLog,
     maybe_rollout_id_from_run_body,
@@ -89,10 +90,12 @@ from nemo_gym.core import (
     model_sampling_from_run_body,
     model_sampling_path_segment,
     skips_token_capture,
+    verifier_invocation_context,
 )
 from nemo_gym.data import materialize_task
 from nemo_gym.metrics import add_perf_metrics, compute_aggregate_metrics
 from nemo_gym.server_runtime import (
+    AgentContext,
     BaseEnvironmentServerWithTools,
     BaseEnvironmentServerWithToolsConfig,
     CleanupContext,
@@ -113,14 +116,18 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import judge_failsafe
 from resources_servers.agentic_turn_simulation.schemas import (
-    PROTOCOL_METADATA_KEY,
-    STOP_TOOLS_METADATA_KEY,
     AgenticTurnSimulationRunRequest,
     AgenticTurnSimulationSettings,
     AgenticTurnSimulationVerifyRequest,
+    TurnHarnessContext,
 )
-from resources_servers.agentic_turn_simulation.turns import TurnSession, TurnSimulation
+from resources_servers.agentic_turn_simulation.turns import OUTCOME_STAGE, TurnSession, TurnSimulation
+
+
+# Where a masked turn's outcome decision saves its originating stage (`applied_outcome_fields`).
+FAILURE_STAGE_KEY = "_ng_failure_stage"
 
 
 class AgentArenaEnvironmentServerConfig(BaseEnvironmentServerWithToolsConfig):
@@ -211,6 +218,7 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
             task_input.task_data | {"responses_create_params": task_input.responses_create_params}
         )
         session = self._turns.new_session(row)
+        agent_context = _agent_context(request, session)
         toolset = TurnToolset(self._turns, session, row, call_context=self._caller_sampling)
         # Registered first, so it runs last: the agent session closes before its tools go away.
         served = await self.serve_tools(request, toolset, cleanup)
@@ -224,9 +232,9 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
 
         # Registered before the seed, so a seed whose reply is lost is still closed.
         agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
-        await self._seed_agent(request, agent, served.tool_accesses)
+        await self._seed_agent(request, agent, served.tool_accesses, agent_context)
         try:
-            response = await self._invoke_agent(request, agent, session)
+            response = await self._invoke_agent(request, agent)
         except NgFailureEvent as failure:
             if not is_handled_episode_failure(failure):
                 raise
@@ -284,12 +292,14 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
             self._verify_body(request, response) | verification_failure_fields(response)
         )
         try:
-            with self._caller_sampling():
-                verified = await self._turns.verify(body, session)
+            # The judges' calls belong to this verifier invocation, as a resources server's /verify calls do.
+            with self._caller_sampling(), verifier_invocation_context(f"verify-{uuid4().hex}"):
+                # A judge that gives no verdict masks the turn (reward 0, judge_failed), as the resources server's
+                # /verify does: an inconclusive grade is not retried by running the whole turn again.
+                verified = await judge_failsafe(self._turns.verify)(body=body, state=session)
         except Exception as error:
-            # A judge that could not be reached fails the row as the resources server's failed /verify does: another
-            # attempt may reach it. A judge that refused the call (a 4xx, such as a conversation too long for it) would
-            # refuse it again.
+            # Any other failure of the scoring (judge failures are masked above) fails the row as the resources
+            # server's failed /verify does: retried when another attempt may pass, else terminal.
             cause = error.__cause__ if isinstance(error, NgFailureEvent) and error.__cause__ is not None else error
             raise dependency_failure(
                 error,
@@ -299,7 +309,11 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
                 agent_observations=observations,
                 trajectory=trajectory,
             ) from error
-        return SingleAgentTurnResult.model_validate(verified.model_dump(mode="json"))
+        payload = json.loads(verified.body) if isinstance(verified, JSONResponse) else verified.model_dump(mode="json")
+        # Rollout collection keeps `_ng_failure_stage` for itself in an episode result; the flat result restores it
+        # (`_legacy_result`), as the relay's row has it.
+        payload.pop(FAILURE_STAGE_KEY, None)
+        return SingleAgentTurnResult.model_validate(payload)
 
     def _skipped_verification_reward(self) -> float | None:
         """The fixed reward that replaces scoring, or None to score the turn.
@@ -321,7 +335,11 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
         return reward
 
     async def _seed_agent(
-        self, request: SingleAgentTurnRequest, agent: _AgentSession, tool_accesses: list[ToolAccess]
+        self,
+        request: SingleAgentTurnRequest,
+        agent: _AgentSession,
+        tool_accesses: list[ToolAccess],
+        agent_context: AgentContext,
     ) -> None:
         try:
             http = await self.server_client.post(
@@ -332,8 +350,8 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses,
-                    # The agent validates or refuses the typed task's context; None is left out of the seed.
-                    agent_context=request.task.task_input.agent_seed_context,
+                    # The row's harness, with the typed task's own context, which the agent validates or refuses.
+                    agent_context=agent_context,
                 ).model_dump(mode="json"),
             )
             await raise_boundary_failure(http)
@@ -344,15 +362,13 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
         except Exception as error:
             raise dependency_failure(error, stage="agent") from error
 
-    async def _invoke_agent(
-        self, request: SingleAgentTurnRequest, agent: _AgentSession, session: TurnSession
-    ) -> NeMoGymResponse:
+    async def _invoke_agent(self, request: SingleAgentTurnRequest, agent: _AgentSession) -> NeMoGymResponse:
         try:
             http = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path=self._agent_responses_path(request),
-                # The row's prompt only, with its harness in the metadata: the rest of the row stays here.
-                json=_agent_request(request, session),
+                # The row's prompt only: the rest of the row stays here, and its harness went with the seed.
+                json=request.task.task_input.responses_create_params,
                 cookies=agent.cookies,
                 # The episode's only activation.
                 headers={AGENT_ACTIVATION_HEADER: "1"},
@@ -507,20 +523,36 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
         result = response.result.model_dump(mode="json")
         if result.get(NG_AGENT_OBSERVATIONS_KEY) is None:
             result.pop(NG_AGENT_OBSERVATIONS_KEY, None)
+        if "failure_outcome_action" in result:
+            # A masked turn's outcome decision, saved as the resources server's /verify saves it.
+            result[FAILURE_STAGE_KEY] = OUTCOME_STAGE
         result["agent_ref"] = agent_ref
         if response.failure_report is not None:
             FailureReportRow.merged_into(result, response.failure_report)
         return result
 
 
-def _agent_request(request: SingleAgentTurnRequest, session: TurnSession) -> NeMoGymResponseCreateParamsNonStreaming:
-    """The row's ``responses_create_params``, with the row's stop tools and tool-call protocol in their metadata."""
-    params = request.task.task_input.responses_create_params
-    harness = {
-        STOP_TOOLS_METADATA_KEY: json.dumps(list(session.harness.stop_tools)),
-        PROTOCOL_METADATA_KEY: session.harness.protocol,
-    }
-    return params.model_copy(update={"metadata": {**(params.metadata or {}), **harness}})
+def _agent_context(request: SingleAgentTurnRequest, session: TurnSession) -> AgentContext:
+    """The agent session's context: the row's harness (`TurnHarnessContext`) beside the typed task's own context.
+
+    A task context that sets one of the harness's keys is refused rather than overridden: the episode never runs
+    without context it was given.
+    """
+    harness = TurnHarnessContext(
+        stop_tools=list(session.harness.stop_tools),
+        protocol=session.harness.protocol,
+        tool_names=sorted(session.tool_names, key=str),
+    ).model_dump(mode="json")
+    task = request.task.task_input.agent_seed_context or AgentContext()
+    taken = sorted(task.fields().keys() & harness.keys())
+    if taken:
+        raise handled_episode_failure(
+            stage="agent",
+            operation="seed",
+            failure_reason=f"The task's agent_context sets {taken}, which agent_arena sends from the row's harness",
+            terminal=True,
+        )
+    return AgentContext(values={**task.values, **harness}, artifacts=task.artifacts)
 
 
 def _agent_failure_kind(response: NeMoGymResponse) -> str | None:

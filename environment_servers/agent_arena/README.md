@@ -14,13 +14,19 @@ the episode's tools.
 2. **Serve** the row's tools for the episode (`serve_tools`). Each is `POST /<tool name>` on this server, reached with
    the episode token of the agent's grant. A call is answered as the resources server's `/simulate_tool_call` answers
    it: in code from the model of the files, else by the tool simulator LLM, or with the row's obstacle. The tools are
-   the ones the scoring accepts (the row's, or Cline's for a Cline row), so a call to another tool gets 404 here and
-   `nonexistent_tool` at scoring.
-3. **Seed** an agent session with that grant, and **invoke** the agent with the row's `responses_create_params`. Their
-   metadata name the row's stop tools and tool-call protocol, which the agent takes out before it calls the model.
+   the ones the scoring accepts (the row's, or Cline's for a Cline row); the agent answers a call to another tool
+   itself, and scoring gates it as `nonexistent_tool`.
+3. **Seed** an agent session with that grant and the row's harness in its `agent_context` (`TurnHarnessContext`: the
+   stop tools, the tool-call protocol and the tool names), and **invoke** the agent with the row's
+   `responses_create_params` as they are. A task row's own `agent_context` goes with it, and the agent validates it:
+   `agentic_turn_simulation_agent` accepts only the harness keys, so it refuses (422) a row that carries any context.
+   A row context that sets a harness key fails the episode before the seed.
 4. **Close** the agent session. A failed agent reply goes through `agent_outcome_policy` (retry, fail or score).
 5. **Score** the turn in process: masking, code gates, judges. The result carries the same fields as the resources
    server's `/verify` response, and `/aggregate_metrics` computes the same metrics (plus Gym's performance metrics).
+   A judge that gives no verdict (unreachable, or refusing a conversation too long for it) masks the turn with
+   `failure_kind: judge_failed`, as that `/verify` does, so `gym eval reverify --judge-failed-only` re-judges it from
+   the saved answer.
    With `skip_verification`, the turn gets `skip_verification_reward` instead, unscored and marked
    `verification_skipped: true`, and `/aggregate_metrics` reports the performance metrics only.
 6. **Stop** serving the tools in the episode's cleanup.
@@ -53,7 +59,7 @@ agentic_turn_simulation_environment_server:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `agent_server` | required | The agent that plays the turn: `agentic_turn_simulation_agent`, or one that reads the row's harness from the request's metadata and calls the tools through its direct HTTP grant the same way. |
+| `agent_server` | required | The agent that plays the turn: `agentic_turn_simulation_agent`, or one that takes the row's harness from its seed's `agent_context` (`TurnHarnessContext`) and calls the tools through its direct HTTP grant the same way. |
 | `resources_server` | required | The `agentic_turn_simulation` instance whose tool simulator, judge and scoring settings the episode uses. No call goes to it during an episode; `gym eval reverify` re-scores saved rows through it, with the same settings. |
 | `agent_outcome_policy` | Gym's default | What a failed agent reply does: retry the episode, fail it, or score the turn. |
 | `default_episode_timeout_seconds` | `21600` | The episode's wall-clock bound. The agent's own `max_time_seconds` usually ends the turn first. |
@@ -104,7 +110,8 @@ the result fields and metrics, and `gym eval reverify`. What changes:
 
 - The simulator no longer sees what the policy wrote between its tool calls (see "What the simulator sees").
 - `obstacle_injection` is refused at startup; keep the relay config to run obstacle injection.
-- The resources server may run several workers; this server routes each tool call to the worker that runs its episode.
+- This server may run several workers; it routes each tool call to the worker that runs its episode. Each worker
+  keeps its own `tool_simulator_max_concurrency` and `judge_max_concurrency` limits.
 
 On all 433 AgentArena validation rows, two rollouts each, with one checkpoint as policy, simulator and judge, the mean
 measured reward was 0.952 here and 0.949 on the relay: a paired difference by task of +0.0013 (standard error 0.0109).
