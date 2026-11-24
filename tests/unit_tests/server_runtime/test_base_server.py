@@ -433,7 +433,7 @@ class TestServerUtils:
     def test_dry_run_skips_webserver_spinup(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_ray_return_value(monkeypatch, True)
 
-        get_global_config_dict_mock = MagicMock()
+        get_global_config_dict_mock = MagicMock(return_value={DRY_RUN_KEY_NAME: True})
         monkeypatch.setattr(nemo_gym.server_runtime.base_server, "get_global_config_dict", get_global_config_dict_mock)
 
         ServerClient_mock = MagicMock(spec=ServerClient)
