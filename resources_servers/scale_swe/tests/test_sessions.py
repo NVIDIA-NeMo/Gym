@@ -1004,3 +1004,49 @@ async def test_golden_patch_mode_refuses_episode_seeds(server):
 
     assert error.value.status_code == 422
     server._create_sandbox.assert_not_awaited()
+
+
+async def test_reseed_during_capture_keeps_the_new_sandbox(server, grading, sandboxes):
+    request = SimpleNamespace(session={SESSION_ID_KEY: "cookie"})
+    await server.seed_session(request, ScaleSWESeedSessionRequest.model_validate(ROW))
+    old = sandboxes[0]
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_capture(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return PatchCapture(patch="diff --git a/x b/x\n", mode="worktree", source="worktree")
+
+    grading.capture.side_effect = slow_capture
+    verifying = asyncio.create_task(server.verify(request, verify_body()))
+    await asyncio.wait_for(started.wait(), 5)
+    await server.seed_session(request, ScaleSWESeedSessionRequest.model_validate(ROW))
+    new = server._session_id_to_sandbox["cookie"]
+    assert new is not old
+    release.set()
+    await asyncio.wait_for(verifying, 5)
+    assert new.stop.await_count == 0, "the old verification stopped the replacement sandbox"
+    assert server._session_id_to_sandbox.get("cookie") is new, "the old verification forgot the replacement sandbox"
+    # The re-seed found no sandbox to stop, so the capture's own sandbox is stopped once, after its capture.
+    old.stop.assert_awaited_once()
+    assert server._session_id_to_base_commit["cookie"] == BASE_COMMIT
+    assert "cookie" in server._session_id_to_pristine_untracked
+
+
+async def test_slow_task_stop_leaves_no_cookie_state(server, grading, sandboxes):
+    server.config.sandbox_stop_timeout_seconds = 0.05
+    request = SimpleNamespace(session={SESSION_ID_KEY: "cookie"})
+    await server.seed_session(request, ScaleSWESeedSessionRequest.model_validate(ROW))
+
+    async def slow_stop(*args, **kwargs):
+        await asyncio.sleep(0.3)
+
+    sandboxes[0].stop.side_effect = slow_stop
+    await server.verify(request, verify_body())
+    await asyncio.sleep(0.5)
+    left = (
+        "cookie" in server._session_id_to_sandbox,
+        "cookie" in server._session_id_to_base_commit,
+        "cookie" in server._session_id_to_pristine_untracked,
+    )
+    assert left == (False, False, False)

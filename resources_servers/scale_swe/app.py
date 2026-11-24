@@ -123,8 +123,8 @@ class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfi
             "failed seed, after patch capture) and each verifier sandbox. The stop itself is never cut short. One "
             "that is still running, or that failed, stays with the session, and close or shutdown waits for it again "
             "or retries it. Shutdown also uses it for every sandbox still held, cookie sessions included, and as "
-            "the longest wait for a session's request in progress. The cookie path's stops inside requests are not "
-            "bounded."
+            "the longest wait for a session's request in progress. On the cookie path, the task sandbox stop after "
+            "patch capture gets this wait, but its verifier sandbox stops do not."
         ),
     )
     sandbox_provider: str
@@ -450,10 +450,20 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
 
         Raises ``_UnreadablePatchError`` when git fails on the repository the agent left, and ``_PatchCaptureError``
         when the capture failed for any other reason. The patch is graded in a fresh sandbox, so the agent's sandbox
-        is stopped either way; a stop that fails or runs long leaves it with the session for close.
+        is stopped either way. For an episode session, a stop that fails or runs long leaves it with the session for
+        close. A cookie session has no close, so the cookie path takes the sandbox and its state out of the session
+        before the capture. A new ``/seed_session`` with the same cookie then keeps its own sandbox, and a stop that
+        fails leaves the captured sandbox to the provider's TTL.
         """
-        sandbox = self._session_id_to_sandbox.get(session_id)
-        base_commit = self._session_id_to_base_commit.get(session_id, "")
+        cookie_path = session_id not in self._resources_sessions
+        if cookie_path:
+            sandbox = self._session_id_to_sandbox.pop(session_id, None)
+            base_commit = self._session_id_to_base_commit.pop(session_id, "")
+            pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
+        else:
+            sandbox = self._session_id_to_sandbox.get(session_id)
+            base_commit = self._session_id_to_base_commit.get(session_id, "")
+            pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
         try:
             if sandbox is None:
                 raise _PatchCaptureError(
@@ -471,7 +481,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                     workdir,
                     base_commit,
                     mode=self.config.patch_capture_mode,
-                    pristine_untracked=self._session_id_to_pristine_untracked.get(session_id, frozenset()),
+                    pristine_untracked=pristine_untracked,
                     drop_sections=drop_patch_sections,
                 )
             except CaptureCommandError as error:
@@ -492,11 +502,12 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 raise _PatchCaptureError(VERIFIER_ERROR, f"Failed to extract model patch: {error}") from error
         finally:
             try:
-                await self._stop_session_sandbox(session_id)
+                if not cookie_path:
+                    await self._stop_session_sandbox(session_id)
+                elif sandbox is not None:
+                    await self._wait_for_stop(sandbox)
             except Exception:
-                LOG.exception(
-                    "Failed to stop Scale-SWE task sandbox %s after patch capture; close can retry", session_id
-                )
+                LOG.exception("Failed to stop Scale-SWE task sandbox %s after patch capture", session_id)
 
     async def seed_session(
         self, request: Request, body: ScaleSWESeedSessionRequest | ResourcesSeedSessionRequest
