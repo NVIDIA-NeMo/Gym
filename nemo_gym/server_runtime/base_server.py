@@ -431,6 +431,8 @@ class SimpleServer(BaseServer):
                 )
         if self.lends_sandboxes:
             blocks_by_field.setdefault("sandbox_provider", [])
+        if not blocks_by_field:
+            return
         global_config = self._global_config()
         for provider_field, blocks in blocks_by_field.items():
             reference = getattr(self.config, provider_field, None)
