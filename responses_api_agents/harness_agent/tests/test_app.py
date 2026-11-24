@@ -41,7 +41,6 @@ from responses_api_agents.harness_agent.app import (
     HarnessAgent,
     HarnessAgentConfig,
     HarnessAgentRunRequest,
-    resolve_agent,
     sandbox_infra_failure_kind,
     stage_and_run_eval,
 )
@@ -123,7 +122,7 @@ def test_only_the_main_process_logs_the_deprecation_once(caplog, monkeypatch, wo
 
     warnings = [record.getMessage() for record in caplog.records if record.name == app.__name__]
     assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
-    for phrase in ("harness_agent", "legacy /run", "claude_code_agent", "swe_atlas_qa", "harness_agent/README.md"):
+    for phrase in ("harness_agent", "legacy /run", "claude_code_agent", "harness_agent/README.md"):
         assert phrase in app.DEPRECATION_WARNING
 
 
@@ -132,30 +131,6 @@ def test_config_defaults():
     assert cfg.sandbox_image == "python:3.12-slim"
     assert cfg.sandbox_python == "python3"
     assert cfg.require_tool_call is False
-
-
-def test_registry_exposes_all_harness_agents():
-    assert resolve_agent("simple_strands") == (
-        "responses_api_agents.simple_strands_agent.app",
-        "SimpleStrandsAgent",
-        "SimpleStrandsAgentConfig",
-    )
-    assert resolve_agent("opencode") == (
-        "responses_api_agents.opencode_agent.app",
-        "OpenCodeAgent",
-        "OpenCodeAgentConfig",
-    )
-    for name in ("deepagents", "mini_swe"):
-        assert resolve_agent(name) == (
-            "responses_api_agents.nemo_fabric_agent.app",
-            "NeMoFabricAgent",
-            "NeMoFabricAgentConfig",
-        )
-
-
-def test_unknown_agent_is_rejected():
-    with pytest.raises(ValueError, match="Unknown agent: unknown"):
-        resolve_agent("unknown")
 
 
 def test_named_sandbox_provider_is_resolved_with_metadata():

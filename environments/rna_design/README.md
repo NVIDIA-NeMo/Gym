@@ -4,8 +4,8 @@ RNA inverse folding benchmark and a training environment: given a target seconda
 sequences that fold into it. Each rollout is one design campaign with a fixed budget of tool calls. The tools are a
 generator (gRNAde), a folding engine (EternaFold), a structure predictor that handles pseudoknots (RibonanzaNet-SS)
 and the suite's scorers: fold match (the EternaFold fold against the target, as pair F1), ensemble defect, and the
-sequence constraints (fixed bases and the puzzle's own limits). The [mode](#modes) sets who picks the calls: a model,
-Claude Code, or a fixed script. When the budget is used, the whole pool of designs is re-scored with the suite's
+sequence constraints (fixed bases and the puzzle's own limits). The [mode](#modes) sets who picks the calls: a model or
+a fixed script. When the budget is used, the whole pool of designs is re-scored with the suite's
 metric (fold match, or crossing-pair F1 on the pseudoknotted suites) and gate (the constraints), and the reward is
 1.0 if the campaign solved the target.
 
@@ -16,7 +16,7 @@ metric (fold match, or crossing-pair F1 on the pseudoknotted suites) and gate (t
 
 The code is in [`responses_api_agents/rna_design_agent`](../../responses_api_agents/rna_design_agent/README.md) (the
 fixed workflow, agent loop and tools) and [`resources_servers/rna_design`](../../resources_servers/rna_design/README.md) (the same
-tools over MCP, for harnesses such as Claude Code).
+tools over MCP).
 
 ## Setup
 
@@ -31,7 +31,7 @@ EternaFold, which scores every design, and the suites are built on first start. 
 
 ## Run
 
-The agent mode needs no sandbox:
+Run the agent mode:
 
 ```bash
 # 20 Eterna100 v2 targets as dataset rows
@@ -52,30 +52,8 @@ Every mode gets the same tools and budget, and is scored the same way. For anoth
 | fixed | `rna_design/config_fixed` | `rna_design_fixed` | a fixed cycle: generate, then score, until the budget runs out |
 | fixed_deep | `rna_design/config_fixed_deep` | `rna_design_fixed_deep` | the fixed cycle plus every other scorer the suite offers |
 | generator | `rna_design/config_generator` | `rna_design_generator` | one pass of the generator, then the score |
-| Claude Code | `rna_design/claude_code` | `rna_design_claude_code_agent` | Claude Code harness in a sandbox per rollout, calling the same tools over MCP |
 
 The model-free modes never call the model, but Gym still starts a model server, so `policy_base_url` must be set.
-
-### Claude Code
-
-The version set in `claude_code.yaml` and `manifest.yaml`. Each rollout runs Claude Code in its own sandbox, which
-calls back to the Gym node for the model and the tools. The config sets `use_absolute_ip: true`, so Gym listens on
-the node's address and works out the URLs itself. The sandbox must be able to reach the node. If it can only go
-through a relay, point the harness's `sandbox_model_base_url` at the relay.
-
-This environment was tested with the [OpenSandbox](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox)
-and [Apptainer](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/apptainer) providers.
-
-The env config does not pick a [sandbox provider](../../nemo_gym/sandbox/providers): pass the provider's config to
-`gym env start`. For Apptainer (no root needed, e.g. `conda install -c conda-forge apptainer`), use the config in this
-folder. For OpenSandbox, export `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` and use
-`nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`.
-
-```bash
-gym env start --environment rna_design/claude_code --config environments/rna_design/apptainer.yaml --model-type vllm_model
-gym eval run --no-serve --environment rna_design/claude_code --model-type vllm_model --agent rna_design_claude_code_agent \
-    --input resources_servers/rna_design/data/example.jsonl --output resources_servers/rna_design/data/example_rollouts.jsonl
-```
 
 ## Reward
 
@@ -83,13 +61,11 @@ gym eval run --no-serve --environment rna_design/claude_code --model-type vllm_m
 `0.0`. Most suites need an exact fold (1.0). The pseudoknotted ones (ArchiveII, anta pseudo) need 0.8 of the
 crossing pairs. A rollout that measured nothing about the model is masked instead of scored: a timeout, a crashed
 worker, a tool that could not run on this machine, a model that was never reached, or a model endpoint that failed
-partway with nothing solved. Calls that fail on the model's own arguments count against it. Claude Code stopping at
-its own time limit is not a timeout here: the designs it made are scored.
+partway with nothing solved. Calls that fail on the model's own arguments count against it.
 
 gRNAde and RibonanzaNet-SS run on the first GPU whenever the worker can see one. On Linux `prepare.py --setup` installs
 the CUDA 12.8 build of torch, so starting Gym on a GPU node is all it takes. EternaFold runs on CPU. On CPU only, long
-targets are slow: raise `rollout_timeout_s`. For Claude Code, also raise the resources server's `call_timeout_s` and
-the agent's `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`, which cap one tool call at 30 minutes. On CPU
+targets are slow: raise `rollout_timeout_s`.
 gRNAde still charges its time to `gpu_seconds`, so one call can spend most of the budget. Benchmark numbers compare
 across machines only when gRNAde runs on a GPU.
 

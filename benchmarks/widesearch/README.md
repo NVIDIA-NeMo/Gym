@@ -29,8 +29,8 @@ an end-to-end check before running all 200 tasks.
 Complete long-run config copies for all supported harnesses are in
 [`configs`](configs). Each file includes the WideSearch verifier, agent
 settings, sandbox settings, prompt, and dataset. The files do not inherit from
-a shared agent config. The `agent` field selects a name from Gym’s shared
-`harness_agent` registry, and `agent_kwargs` contains that agent’s settings.
+a shared agent config. The `agent` field selects a name from the
+`harness_exa_search` adapter registry, and `agent_kwargs` contains that agent’s settings.
 Switching agents also requires the matching settings and dependency setup;
 use the corresponding config copy as the starting point.
 

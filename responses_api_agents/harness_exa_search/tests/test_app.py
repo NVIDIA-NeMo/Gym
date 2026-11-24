@@ -21,6 +21,31 @@ from responses_api_agents.harness_exa_search.app import (
     HarnessExaSearchConfig,
     _pump_model_relay,
 )
+from responses_api_agents.harness_exa_search.registry import resolve_agent
+
+
+def test_registry_exposes_all_harness_agents() -> None:
+    assert resolve_agent("simple_strands") == (
+        "responses_api_agents.simple_strands_agent.app",
+        "SimpleStrandsAgent",
+        "SimpleStrandsAgentConfig",
+    )
+    assert resolve_agent("opencode") == (
+        "responses_api_agents.opencode_agent.app",
+        "OpenCodeAgent",
+        "OpenCodeAgentConfig",
+    )
+    for name in ("deepagents", "mini_swe"):
+        assert resolve_agent(name) == (
+            "responses_api_agents.nemo_fabric_agent.app",
+            "NeMoFabricAgent",
+            "NeMoFabricAgentConfig",
+        )
+
+
+def test_unknown_agent_is_rejected() -> None:
+    with raises(ValueError, match="Unknown agent: unknown"):
+        resolve_agent("unknown")
 
 
 async def test_model_relay_round_trip(unused_tcp_port_factory) -> None:
