@@ -3,6 +3,7 @@
 
 """Prepare source rows for the terminal_bench_2_1 benchmark."""
 
+import argparse
 import json
 import re
 import tomllib
@@ -15,46 +16,52 @@ BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_PATH = BENCHMARK_DIR / "data" / "benchmark.jsonl"
 NUM_TASKS = 89
 TASK_REPOSITORY = "https://github.com/harbor-framework/terminal-bench-2-1"
-_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
-def _git(repo_path: Path, *args: str) -> str:
-    return run(["git", "-C", str(repo_path), *args], check=True, capture_output=True, text=True).stdout.strip()
+def _git(repository: Path, *arguments: str) -> str:
+    return run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    ).stdout.strip()
 
 
-def _check_out(repo_path: Path, task_revision: str) -> None:
-    """Leave the task repository checked out at exactly ``task_revision``."""
-    # The verifier uploads every non-hidden file under a task's tests directory, so a change anywhere in the checkout,
-    # an untracked file, or an ignored file under tasks/*/tests/ counts. Ignored files elsewhere (bytecode caches from
-    # an earlier run) are not uploaded and do not. The flags also override a user's status.showUntrackedFiles setting.
-    if _git(repo_path, "status", "--porcelain", "--untracked-files=all") or _git(
-        repo_path, "status", "--porcelain", "--untracked-files=all", "--ignored", "--", "tasks/*/tests/*"
-    ):
-        # The checkout is never reset under a run.
-        raise ValueError(f"Task checkout {repo_path} is modified. Move it aside and retry; it will not be reset.")
-    if _git(repo_path, "rev-parse", "HEAD") == task_revision:
-        return
-    if run(["git", "-C", str(repo_path), "cat-file", "-e", f"{task_revision}^{{commit}}"]).returncode != 0:
-        _git(repo_path, "fetch", "--quiet", "origin", task_revision)
-    _git(repo_path, "checkout", "--quiet", "--detach", task_revision)
+def prepare(*, task_revision: str | None = None, task_repository: str = TASK_REPOSITORY) -> Path:
+    """Prepare task rows, optionally checking out a full task commit before reading them.
 
-
-def prepare(*, task_revision: str | None = None) -> Path:
-    """Write the benchmark rows from the task repository.
-
-    ``task_revision`` is the full commit of the task repository to check out. Without it the checkout is whatever
-    ``git clone`` or an existing ``terminal-bench-2-1`` directory provides, so two runs can read different tasks.
+    Without a revision, preserve the existing checkout or clone the repository's default branch.
+    Pinned preparation refuses local changes, including ignored files that could alter verifier assets.
     """
-    if task_revision is not None and not _FULL_COMMIT.fullmatch(task_revision):
-        raise ValueError(f"task_revision must be a full 40-character commit hash, got {task_revision!r}")
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if task_revision is not None:
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", task_revision):
+            raise ValueError("task_revision must be a full 40-character commit SHA")
+        task_revision = task_revision.lower()
 
     repo_path = BENCHMARK_DIR / "terminal-bench-2-1"
     if not repo_path.exists():
-        run(["git", "clone", TASK_REPOSITORY], cwd=str(BENCHMARK_DIR), check=True)
+        BENCHMARK_DIR.mkdir(parents=True, exist_ok=True)
+        run(["git", "clone", "--", task_repository, str(repo_path)], check=True)
     if task_revision is not None:
-        _check_out(repo_path, task_revision)
+        if _git(repo_path, "remote", "get-url", "origin") != task_repository:
+            raise ValueError(
+                f"Task checkout {repo_path} has a different origin; move it aside or use its repository URL"
+            )
+        # The verifier uploads every non-hidden file under a task's tests directory, so a change anywhere, an untracked
+        # file, or an ignored file under tasks/*/tests/ counts. Ignored files elsewhere (bytecode caches) do not.
+        if _git(repo_path, "status", "--porcelain", "--untracked-files=all") or _git(
+            repo_path, "status", "--porcelain", "--ignored", "--untracked-files=all", "--", ":(glob)tasks/*/tests/**"
+        ):
+            raise ValueError(f"Task checkout {repo_path} has local changes; move them aside before pinning a revision")
+        available = run(["git", "-C", str(repo_path), "cat-file", "-e", task_revision], capture_output=True)
+        if available.returncode:
+            _git(repo_path, "fetch", "origin", task_revision)
+        if _git(repo_path, "cat-file", "-t", task_revision) != "commit":
+            raise ValueError("task_revision must identify a commit, not another Git object")
+        _git(repo_path, "checkout", "--detach", task_revision)
 
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     num_samples = 0
     task_ids = set()
     f_out = open(OUTPUT_PATH, "w")
@@ -88,4 +95,10 @@ def prepare(*, task_revision: str | None = None) -> Path:
 
 
 if __name__ == "__main__":
-    prepare()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--task-revision", help="Full task commit SHA; defaults to the existing checkout or repository HEAD"
+    )
+    parser.add_argument("--task-repository", default=TASK_REPOSITORY, help="Task repository URL to clone")
+    args = parser.parse_args()
+    prepare(task_revision=args.task_revision, task_repository=args.task_repository)

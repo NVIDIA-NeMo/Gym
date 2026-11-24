@@ -136,18 +136,19 @@ in the task sandbox through Gym's Environment Server.
 Run from the Gym checkout with the benchmark's preparation dependencies installed:
 
 ```bash
-git clone https://github.com/harbor-framework/terminal-bench-2-1 \
-  benchmarks/terminal_bench_2_1/terminal-bench-2-1
-git -C benchmarks/terminal_bench_2_1/terminal-bench-2-1 \
-  checkout --detach 7131e4375048a0e408a8fb404b5f499d726b695b
-python benchmarks/terminal_bench_2_1/prepare.py
+python benchmarks/terminal_bench_2_1/prepare.py \
+  --task-revision 7131e4375048a0e408a8fb404b5f499d726b695b
 ```
 
-`prepare()` also takes `task_revision`, a full commit of the task repository. It checks that commit out, cloning
-first if the checkout is missing, so two runs read the same tasks. Through the CLI, pass it as
-`++prepare_script_args.task_revision=<commit>` at the top level; in a YAML config it is the top-level
-`prepare_script_args: {task_revision: <commit>}`. Without it the checkout is left as it is, and a fresh
-clone reads the repository's default branch.
+`--task-revision` accepts a full 40-character commit SHA. Preparation checks out that
+commit in detached HEAD mode and refuses modified task checkouts, including untracked
+files and ignored verifier files. Use `--task-repository URL` to select a fork; an
+existing checkout must have that origin when pinning a revision. Without
+`--task-revision`, preparation keeps the existing checkout or clones the repository's
+default branch. Python callers can pass `prepare(task_revision=..., task_repository=...)`. Through the Gym CLI, pass
+the revision as `++prepare_script_args.task_revision=<commit>` at the top level; in a YAML config it is the
+top-level `prepare_script_args: {task_revision: <commit>}`.
+Pinning task source does not freeze mutable Docker image tags.
 
 Keep task tests and solutions on the host; do not mount the benchmark checkout
 into task containers. Resources uploads verifier assets after the agent closes
