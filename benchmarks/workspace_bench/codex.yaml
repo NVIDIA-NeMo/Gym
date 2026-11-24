@@ -19,8 +19,7 @@ workspace_bench_codex_agent:
         name: policy_model
       model: ${policy_model_name}
       timeout: 7200
-      # As harness_agent did: a run whose CLI exits with an error is still graded, and Codex's shell sees the
-      # task image's environment.
+      # Grade runs whose CLI exits with an error and expose the task image's environment to the shell.
       verify_after_agent_error: true
       inherit_sandbox_environment: true
       codex_version: 0.144.4

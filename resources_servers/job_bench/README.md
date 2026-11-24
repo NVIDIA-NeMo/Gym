@@ -19,7 +19,7 @@ An Environment Server (`single_agent_turn_legacy` for the flat benchmark rows) s
   stop raises and keeps the sandbox for the retried close.
 - A session that is never closed expires after the sandbox's `ttl_s`, and shutdown stops every sandbox still open.
 
-The deprecated `harness_agent`'s `/run` still seeds with the row and gets the sandbox descriptor back; its verify
+A caller that seeds directly with a row receives the sandbox descriptor. On this path, verification
 stops the sandbox, even when it fails before collecting the output. Two answers differ from before: a verify with no
 live sandbox is masked instead of answering 400, and a task folder without `TASK_INSTRUCTIONS.txt` gets 422 instead of
 500. The session behavior comes from `SandboxSessionResourcesServer` in `resources_servers/swebench/sandbox_sessions.py`.

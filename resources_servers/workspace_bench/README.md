@@ -27,7 +27,7 @@ them on this server, and lends the sandbox to the agent through `sandbox_access`
   seed gets 409. A failed stop raises and keeps the sandbox for the retried close.
 - A session that is never closed expires after the sandbox's `ttl_s`, and shutdown stops every sandbox still open.
 
-The deprecated `harness_agent`'s `/run` still seeds with the row and gets the sandbox descriptor back; a second seed
+A caller that seeds directly with a row receives the sandbox descriptor. On this path, a second seed
 of the same session gets 409, and its verify stops the sandbox, even when it fails before collecting the files. Two
 answers differ from before: a verify with no live sandbox is masked instead of answering 400, and a task without a
 usable `metadata.json` gets 422 instead of 500. The session behavior comes from `SandboxSessionResourcesServer` in

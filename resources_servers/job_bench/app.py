@@ -100,7 +100,7 @@ class JobBenchResourcesServer(SandboxSessionResourcesServer):
     """Serves Job-Bench tasks in a task sandbox the agent works in, and grades its ``/workspace/output``.
 
     An Environment Server seeds an episode session and lends the agent the sandbox through ``sandbox_access``;
-    ``harness_agent``'s ``/run`` seeds with the row and gets the sandbox descriptor.
+    A caller that seeds directly with a row receives the sandbox descriptor.
     """
 
     # Its judge calls go through an external SDK client that notes no model request.

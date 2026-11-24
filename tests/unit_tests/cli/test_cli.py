@@ -1835,7 +1835,7 @@ class TestListEnvironments:
             (["simple_agent"], "simple_agent"),
             (["simple_agent", "simple_agent"], "simple_agent"),
             # Two different agents: the file alone does not say which one runs.
-            (["simple_agent", "harness_agent"], None),
+            (["simple_agent", "opencode_agent"], None),
         ],
     )
     @pytest.mark.parametrize(

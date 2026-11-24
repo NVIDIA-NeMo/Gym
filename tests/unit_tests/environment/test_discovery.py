@@ -368,7 +368,7 @@ class TestTolerantInterpolationParse:
         included.write_text(
             "agent:\n"
             "  responses_api_agents:\n"
-            "    harness_agent:\n"
+            "    opencode_agent:\n"
             "      entrypoint: app.py\n"
             "      sandbox_image: ${oc.env:GYM_TEST_LISTING_IMAGE}\n"
             "      model: ${oc.env:GYM_TEST_LISTING_MODEL}\n"
@@ -383,7 +383,7 @@ class TestTolerantInterpolationParse:
         )
         config = OmegaConf.create({"config_paths": [str(included)]})
         resolved = _parse_no_environment_tolerating_unset_values(config)
-        agent = resolved.agent.responses_api_agents.harness_agent
+        agent = resolved.agent.responses_api_agents.opencode_agent
         assert agent.sandbox_image == _UNSET_VALUE_PLACEHOLDER
         assert agent.model == "configured-model"
         assert agent.fallback == "default-image"
