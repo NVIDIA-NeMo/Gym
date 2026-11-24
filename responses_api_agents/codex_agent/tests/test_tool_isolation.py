@@ -14,6 +14,7 @@ from responses_api_agents.codex_agent.sandbox import harness_kill_evidence
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import (  # noqa: F401 - fixtures
     close_body,
     events,
+    keep_failure_artifacts,
     seed,
     setup,
 )
@@ -225,7 +226,7 @@ def test_deadline_is_never_a_harness_kill():
 @pytest.mark.parametrize("isolated", [False, True])
 def test_killed_harness_is_labelled_apart_from_other_failures(setup, tmp_path, isolated):
     agent, sandbox = setup
-    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    keep_failure_artifacts(agent, tmp_path)
     if isolated:
         _seed_with_tool_namespace(agent, sandbox, tmp_path)
     # Observed 10-15: a tool command's `pkill -f node` ends Codex mid-turn; the runner exits 128+15.

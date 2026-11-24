@@ -708,6 +708,16 @@ def test_unreadable_startup_stderr_does_not_hold_the_activation(setup):
     assert elapsed < 5
 
 
+def keep_failure_artifacts(agent: CodexAgent, tmp_path: Path) -> None:
+    """Have the agent keep failure artifacts under ``tmp_path/failures``.
+
+    ``session_close_timeout_seconds`` bounds the copy, and this session's stop, capture and close. The fixture's
+    1 s can run out on a busy CI runner before failure.json is written, so these tests allow 30 s.
+    """
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    agent.config.session_close_timeout_seconds = 30
+
+
 def _supervisor_left_no_receipt(sandbox):
     """Seen in a real run: Codex ran, the launch exec returned, no cleanup.json."""
 
@@ -721,7 +731,7 @@ def _supervisor_left_no_receipt(sandbox):
 
 def test_missing_receipt_confirmed_by_provider_completes_and_keeps_diagnostics(setup, tmp_path):
     agent, sandbox = setup
-    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    keep_failure_artifacts(agent, tmp_path)
     _supervisor_left_no_receipt(sandbox)
     sandbox.exec_processes_terminated = AsyncMock(return_value=True)
     with TestClient(agent.setup_webserver()) as client:
@@ -751,7 +761,7 @@ def test_failure_logs_are_trimmed_inside_the_sandbox_before_the_download(setup, 
     from responses_api_agents.codex_agent import sandbox as sandbox_module
 
     agent, sandbox = setup
-    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    keep_failure_artifacts(agent, tmp_path)
     _supervisor_left_no_receipt(sandbox)
     sandbox.exec_processes_terminated = AsyncMock(return_value=True)
     monkeypatch.setattr(sandbox_module, "FAILURE_ARTIFACT_MAX_BYTES", 10)
@@ -769,7 +779,7 @@ def test_failure_logs_are_trimmed_inside_the_sandbox_before_the_download(setup, 
 
 def test_unprovable_missing_receipt_fails_closed_and_preserves_logs(setup, tmp_path):
     agent, sandbox = setup
-    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    keep_failure_artifacts(agent, tmp_path)
     _supervisor_left_no_receipt(sandbox)  # this provider cannot prove termination
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
