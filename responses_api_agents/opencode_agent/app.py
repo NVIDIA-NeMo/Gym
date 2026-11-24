@@ -1426,8 +1426,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if not isinstance(state, OpenCodeSandboxSession):
                 raise TypeError(f"no open OpenCode session {key!r}")
             if state.session is None:
-                # Restored and not re-bound yet: what the checkpoint it came from kept is still its state.
+                # Restored and not re-bound yet: what the checkpoint it came from kept is still its state. Skills a
+                # failed re-bind still owes stay owed: the snapshot may hold the files that re-bind put back.
                 exported[key] = dict(state.restored or {})
+                if state.task_skills_pending:
+                    exported[key]["task_skills_pending"] = True
                 continue
             exported[key] = {
                 "request": state.request.model_dump(mode="json"),
@@ -1480,6 +1483,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 completed_reply=saved.get("completed_reply"),
                 completed_request_digest=saved.get("completed_request_digest"),
                 task_skills=saved.get("task_skills"),
+                task_skills_pending=bool(saved.get("task_skills_pending")),
                 restored=dict(saved),
             )
         for key, state in restored.items():
@@ -1538,6 +1542,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self._check_sandbox_setup(check, present)
             if present.return_code != 0:
                 LOG.warning("Restored OpenCode session %s lacks its runtime or files; installing them again", root)
+                # The fork may lack the skills the seed copied under the session root as well. They stay owed until
+                # a copy succeeds, although a seed retried after this attempt fails finds the files it put back.
+                state.task_skills_pending = state.task_skills is not None
                 command = _sandbox_prepare_command(
                     access.workdir,
                     root,
@@ -1564,11 +1571,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     ripgrep=self._pinned_file("ripgrep"),
                     plugin_dependencies=self._pinned_file("plugin_dependencies"),
                 )
-                if state.task_skills is not None:
-                    # The fork may lack the skills the seed copied under the session root as well: copy them again
-                    # from the folder the checkpoint names. task.json is under /tmp too, so the fork has usually lost
-                    # it, and reading it would leave the session without its skills.
-                    await stage_task_skills(sandbox, f"{root}/config/opencode/skills", skills_dir=state.task_skills)
+            if state.task_skills_pending:
+                # Copied again from the folder the checkpoint names. task.json is under /tmp too, so the fork has
+                # usually lost it, and reading it would leave the session without its skills. A copy that timed out
+                # may have copied only some of them, so only one that succeeds settles what is owed.
+                await stage_task_skills(sandbox, f"{root}/config/opencode/skills", skills_dir=state.task_skills)
+                state.task_skills_pending = False
         except BaseException:
             # The seed that re-binds is retried: do not leave one connection behind per attempt.
             try:

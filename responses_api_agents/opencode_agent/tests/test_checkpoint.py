@@ -1659,6 +1659,116 @@ async def test_a_restored_session_keeps_the_skill_tool_its_task_skills_allowed(
     assert sandbox.exec.await_count == 1
 
 
+class _RestoringParticipant(_Participant):
+    """A participant whose restore installed session ``s`` for attempt 2 of rollout ``r``, which seeds it again."""
+
+    @asynccontextmanager
+    async def seeding(self, session_key: str, episode_id: EpisodeId) -> Any:
+        yield
+
+    def restored_episode(self, session_key: str) -> EpisodeId:
+        return EpisodeId(rollout_id="r", attempt=2)
+
+
+class _ForkThatLostTheSessionFiles:
+    """A fork without the session's files, whose copies of the task's skills end as ``copy_results`` says in turn.
+
+    The files are there once ``_install_session_files`` has run; a copy that timed out may have copied some skills.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *copy_results: SandboxExecResult) -> None:
+        self.files_installed = False
+        self.copies: list[str] = []
+        self.copy_results = iter(copy_results)
+        self.sandbox = MagicMock(sandbox_id="fork")
+        self.sandbox.exec = AsyncMock(side_effect=self.run)
+        self.sandbox.disconnect = AsyncMock()
+        self.install = AsyncMock(side_effect=self.put_files_back)
+        connect = SimpleNamespace(connect=AsyncMock(return_value=self.sandbox))
+        monkeypatch.setattr("responses_api_agents.opencode_agent.app.AsyncSandbox", connect)
+        monkeypatch.setattr(OpenCodeAgent, "_install_session_files", self.install)
+        files = {"session_root": "/sessions/s", "session_dir": "/sessions/s", "launch_started": True}
+        self.session = SimpleNamespace(root_dir="/sessions/s", checkpoint_state=lambda: files)
+        monkeypatch.setattr(SandboxSession, "rebind", staticmethod(lambda *_, **__: self.session))
+
+    async def run(self, command: str, **_: Any) -> SandboxExecResult:
+        if command.startswith("[ -e /rt/opencode ]"):
+            return SandboxExecResult(stdout="", stderr="", return_code=0 if self.files_installed else 1)
+        if " cp -RL -- " in command:
+            self.copies.append(command)
+            return next(self.copy_results)
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    async def put_files_back(self, *_: Any, **__: Any) -> None:
+        self.files_installed = True
+
+
+_COPY_TIMED_OUT = SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type="timeout")
+_COPIED = SandboxExecResult(stdout="", stderr="", return_code=0)
+_COPY_FAILED = "skills_dir '/workspace/skills': timeout"
+
+
+async def _restored_with_skills(fixture: OpenCodeFixture) -> tuple[OpenCodeAgent, OpenCodeSandboxSession]:
+    """Session ``s``, whose seed staged the task's skills, restored in a new agent for attempt 2."""
+    seeded = _agent(fixture)
+    _open_session(seeded).task_skills = "/workspace/skills"
+    saved = await _checkpoint(seeded)
+    agent = _agent(fixture)
+    agent._checkpoint_participant = _RestoringParticipant()
+    return agent, await _restore(agent, saved)
+
+
+async def test_a_seed_retried_after_its_re_bind_failed_to_copy_the_task_skills_copies_them_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent, restored = await _restored_with_skills(OpenCodeFixture(tmp_path, monkeypatch))
+    fork = _ForkThatLostTheSessionFiles(monkeypatch, _COPY_TIMED_OUT, _COPY_TIMED_OUT, _COPIED)
+    seed = _borrowed_seed(attempt=2)
+
+    for attempt in (1, 2):
+        with pytest.raises(RuntimeError, match=_COPY_FAILED):
+            await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed)
+        # The identical seed is retried: the session stays restored, bound to no sandbox.
+        assert agent._session_records["s"].restored and restored.session is None
+        assert len(fork.copies) == attempt and fork.sandbox.disconnect.await_count == attempt
+    # The first attempt put the session's files back, so the second found them, and copied the skills all the same:
+    # a copy that timed out may have copied only some of them.
+    assert fork.install.await_count == 1
+
+    await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed)
+
+    # The seed is accepted only once a copy succeeded.
+    assert len(fork.copies) == 3 and fork.copies[-1].endswith(" /sessions/s/config/opencode/skills/")
+    assert restored.session is fork.session and not agent._session_records["s"].restored
+    assert restored.task_skills == "/workspace/skills" and not restored.task_skills_pending
+
+
+async def test_a_checkpoint_of_a_session_whose_skills_copy_failed_has_its_next_restore_copy_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = OpenCodeFixture(tmp_path, monkeypatch)
+    agent, restored = await _restored_with_skills(fixture)
+    fork = _ForkThatLostTheSessionFiles(monkeypatch, _COPY_TIMED_OUT, _COPIED)
+    with pytest.raises(RuntimeError, match=_COPY_FAILED):
+        await agent._rebind_restored_agent_session_state(restored, _borrowed_seed(attempt=2))
+
+    # A checkpoint before the seed is retried snapshots the fork with the session's files that attempt put back, and
+    # perhaps some of the skills: the restore from it copies the skills, although it finds the files.
+    saved = await _checkpoint(agent)
+    again = _agent(fixture)
+    restored_again = await _restore(again, saved, attempt=3)
+    await again._rebind_restored_agent_session_state(restored_again, _borrowed_seed(attempt=3))
+
+    assert fork.install.await_count == 1 and len(fork.copies) == 2
+    assert restored_again.session is fork.session and not restored_again.task_skills_pending
+
+    # The next checkpoint's snapshot holds the copied skills: a restore from it copies nothing again.
+    saved = await _checkpoint(again)
+    last = _agent(fixture)
+    await last._rebind_restored_agent_session_state(await _restore(last, saved, attempt=4), _borrowed_seed(attempt=4))
+    assert "task_skills_pending" not in saved and len(fork.copies) == 2
+
+
 # -- checkpoint declarations -------------------------------------------------------------------------------------
 
 

@@ -226,6 +226,9 @@ class OpenCodeSandboxSession(AgentSessionState):
     model_call_labels: bool = False
     # The task's ``skills_dir``, when the seed copied it into OpenCode's skills folder; its runs allow the skill tool.
     task_skills: str | None = None
+    # Whether a re-bind of this restored session found the fork without the session's files and has not copied the
+    # task's skills back since. A retried re-bind copies them even when it finds the files a failed attempt put back.
+    task_skills_pending: bool = False
     _export_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
     # Gaps of the latest capture's store translation, added to that capture's observations.
     _capture_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
