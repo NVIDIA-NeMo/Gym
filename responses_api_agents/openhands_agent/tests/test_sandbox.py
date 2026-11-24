@@ -61,8 +61,8 @@ class LocalSandbox:
 
 def test_the_runtime_installs_the_pinned_harness_and_checks_its_imports():
     requirements = {Requirement(line).name: Requirement(line) for line in adapter.RUNTIME.requirements}
-    assert str(requirements["openhands-sdk"].specifier) == "==1.59.0"
-    assert str(requirements["openhands-tools"].specifier) == "==1.59.0"
+    assert str(requirements["openhands-sdk"].specifier) == "==1.62.0"
+    assert str(requirements["openhands-tools"].specifier) == "==1.62.0"
     # func-timeout publishes only an sdist; a direct URL with its digest is built on the host.
     digest = "74cd3c428ec94f4edfba81f9b2f14904846d5ffccc27c92433b8b5939b5575dd"  # pragma: allowlist secret
     assert requirements["func-timeout"].url.endswith(f"/func_timeout-4.3.5.tar.gz#sha256={digest}")

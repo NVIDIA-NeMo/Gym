@@ -28,6 +28,14 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["verify", "metrics"]},
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Stable task identifier, when the benchmark has several rows per problem and `problem_id` alone is not "
+            "unique (IOI 2026: the problem and the subtask)."
+        ),
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     competition_id: Optional[str] = Field(
         default=None,
         description="Competition the problem belongs to (e.g. 'usaco25'); scopes the evaluator lookup.",
