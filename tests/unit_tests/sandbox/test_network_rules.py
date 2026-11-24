@@ -45,7 +45,7 @@ class TestSandboxConfigNetwork:
             ({"network_access": "no_network", "allowed_hosts": ["h"]}, "hosts_only"),
             ({"allowed_hosts": ["h"]}, "allowed_hosts"),
             ({"network_access": "no_network", "provider_options": {"network_policy": {}}}, "set only network"),
-            ({"network_access": "inherit", "provider_options": {"network_access": "none"}}, "set only network"),
+            ({"network_access": "inherit", "provider_options": {"network": "none"}}, "set only network"),
             ({"network_access": "open"}, "network"),
         ],
     )
