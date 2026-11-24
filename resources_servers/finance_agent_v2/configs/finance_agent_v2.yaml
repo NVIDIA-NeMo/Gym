@@ -27,6 +27,7 @@ finance_agent_v2_resources_server:
       edgar_search_mode: ${oc.select:edgar_search_mode,null}
       local_edgar_index_path: ${oc.select:local_edgar_index_path,null}
       local_edgar_metadata_path: ${oc.select:local_edgar_metadata_path,null}
+      local_edgar_stage_dir: ${oc.select:local_edgar_stage_dir,null}
       # Local mode only: parse_html_page reads SEC filings from this corpus after the cache.
       sec_dump_path: ${oc.select:sec_dump_path,null}
       # live: price_history queries Tiingo. local: it reads local_pricing_dir and never uses the network.

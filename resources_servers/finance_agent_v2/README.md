@@ -40,10 +40,11 @@ can route around it.
 | `live` | sec-api.io | Cache, then sec.gov | `sec_api_key` |
 
 With `local_edgar_stage_dir` set (off by default), the server copies the local
-index, its metadata sidecar and its WAL into that node-local folder at startup and
-reads the copy. Use it when the index is on shared storage. A copy whose size and
-modification time match the source is reused, so only the first server on a node
-copies it.
+index and its metadata sidecar into that node-local folder at startup and reads
+the copy. Each source index gets its own subfolder of that folder, so two indexes
+with the same file name do not overwrite each other. Use it when the index is on
+shared storage. A copy whose size and modification time match the source is
+reused, so only the first server on a node copies it.
 
 The benchmark config sets `live`. Asking for `local` without an index fails at
 startup. The
@@ -383,7 +384,7 @@ unweighted dataset scores as a plain pass fraction.
 | `rubric_dealbreakers_failed` / `rubric_dealbreakers_total` | how many `must_pass` criteria there were, and how many failed |
 | `rubric_unresolved` | criteria that never got enough parsable verdicts (always 0 on a scored row) |
 | `rubric_judgements[]` | per-criterion votes, evidence, weights used, and sampled failed replies |
-| `judge_error` | set when scoring could not complete; such rows are masked |
+| `judge_error` | set only on a row masked as `verifier_error` (no rubric, or no judge configured). A `judge_failed` row has no `judge_error`: its cause is in `failure_reason` |
 
 A criterion the judge never resolved (failed calls, no parseable verdict, or a
 reply cut at the judge's own output limit) is a judge failure, not a miss. The
@@ -391,8 +392,8 @@ whole row is then masked (`mask_sample: true`, `failure_kind: judge_failed`), so
 it leaves training and the score means and lands in the failures sidecar. A row
 with no rubric at all, or a server with no judge configured, is masked with
 `failure_kind: verifier_error` and `judge_error` set, so the agent and tools can
-still be validated before labels exist. A rollout that never called
-`submit_final_result` is the model's failure and scores 0, unmasked.
+still be validated before labels exist. A rollout with no submission scores 0,
+unmasked, even when the agent stopped on a failed policy call or an aborted tool.
 
 The agent records why its loop ended in `response.metadata.stop_reason`
 (`done_tool`, `max_turns`, `max_time`, `max_output_tokens`, `error`). Under

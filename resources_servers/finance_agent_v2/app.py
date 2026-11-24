@@ -38,6 +38,7 @@ Tools implement ``async execute(args, state, logger)`` and share a per-session
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -95,7 +96,7 @@ from resources_servers.finance_agent_v2.frontier_finance_grading import (
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
 from resources_servers.finance_agent_v2.task_data import AsOfDateField, FrontierFinanceTaskFields
 from resources_servers.sec_local_index.cache import ToolCache
-from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
+from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch, default_sidecar_path
 
 
 # Support both package import (tests: resources_servers.finance_agent_v2.app) and flat
@@ -117,28 +118,28 @@ except ImportError:  # pragma: no cover - exercised only under flat entrypoint e
 logger = logging.getLogger(__name__)
 
 
-def stage_local_edgar_files(
-    index_path: str, metadata_path: Optional[str], stage_dir: str
-) -> tuple[str, Optional[str]]:
-    """Copy the local EDGAR index, its metadata sidecar and WAL into stage_dir; return the staged paths.
+def stage_local_edgar_files(index_path: str, metadata_path: str | None, stage_dir: str) -> tuple[str, str | None]:
+    """Copy the local EDGAR index and its metadata sidecar into a subfolder of stage_dir; return the staged paths.
 
     A runtime SQLite database should not be read in place on shared storage, so the server reads a node-local copy.
-    The index (and a configured sidecar) must exist. A staged copy whose size and modification time match its source
-    is kept; anything else is copied again, through a ``.partial`` name and a rename, under a lock on the stage
-    directory so that concurrent server processes on a node copy each file once. An optional file (the WAL, or the
-    default sidecar) that the source lacks is removed from the stage, so a stale copy never pairs with a new index.
+    Each source index gets its own subfolder of stage_dir, named by a hash of its absolute path, so two indexes with
+    the same file name never overwrite each other's copy. The index (and a configured sidecar) must exist. A staged
+    copy whose size and modification time match its source is kept; anything else is copied again, through a
+    ``.partial`` name and a rename, under a lock on the subfolder so that concurrent server processes on a node copy
+    each file once. A default sidecar that the source lacks is removed from the stage, so a stale copy never pairs
+    with a new index.
     """
-    stage = Path(stage_dir)
-    stage.mkdir(parents=True, exist_ok=True)
     index = Path(index_path)
     if not index.is_file():
         raise FileNotFoundError(f"Local EDGAR index not found: {index}")
-    sidecar = Path(metadata_path) if metadata_path else Path(str(index) + ".metadata")
+    stage = Path(stage_dir) / hashlib.sha256(os.path.abspath(index_path).encode()).hexdigest()[:16]
+    stage.mkdir(parents=True, exist_ok=True)
+    sidecar = Path(metadata_path) if metadata_path else default_sidecar_path(index)
     if metadata_path and not sidecar.is_file():
         raise FileNotFoundError(f"Local EDGAR metadata sidecar not found: {sidecar}")
     with open(stage / ".stage.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        for source in (index, Path(str(index) + "-wal"), sidecar):
+        for source in (index, sidecar):
             target = stage / source.name
             if not source.is_file():
                 target.unlink(missing_ok=True)
@@ -150,8 +151,11 @@ def stage_local_edgar_files(
                     continue
             started = time.monotonic()
             partial = target.with_name(target.name + ".partial")
-            shutil.copy2(source, partial)
-            os.replace(partial, target)
+            try:
+                shutil.copy2(source, partial)
+                os.replace(partial, target)
+            finally:
+                partial.unlink(missing_ok=True)
             logger.info("edgar_search: staged %s to %s in %.0f s", source, target, time.monotonic() - started)
     return str(stage / index.name), (str(stage / sidecar.name) if metadata_path else None)
 
@@ -193,10 +197,11 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         "resources_servers/sec_local_index/scripts/build_local_edgar_metadata.py. Defaults to the index path "
         "plus '.metadata' when that file exists. Searches are far slower without it.",
     )
-    local_edgar_stage_dir: Optional[str] = Field(
+    local_edgar_stage_dir: str | None = Field(
         default=None,
-        description="Node-local directory to copy the local index (and its metadata sidecar and WAL) into once at "
-        "startup; the server then reads the copy. For an index on shared storage, where a runtime database should not "
+        description="Node-local directory to copy the local index (and its metadata sidecar) into once at "
+        "startup; the server then reads the copy. Each source index gets its own subfolder of this directory. "
+        "For an index on shared storage, where a runtime database should not "
         "be read in place.",
     )
     sec_dump_path: Optional[str] = Field(
@@ -1223,7 +1228,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         Partial Credit, which becomes the reward. A criterion the judge never resolved
         (call failures, no parseable verdict, or a reply cut at its token limit) raises
         JudgeError, so judge_failsafe masks the row: a judge outage is not the model's
-        fault. A missing submission is, and scores 0. With ``frontier_finance_grader``
+        fault. A rollout with no submission scores 0, unmasked, even when the agent
+        stopped on a failed policy call or an aborted tool. With ``frontier_finance_grader``
         set, the FrontierFinance grader scores ``rubrics`` instead.
         """
         session_id = request.session.get(SESSION_ID_KEY)
@@ -1273,6 +1279,9 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 rubric_total=len(criteria),
             )
 
+        if len(generated_answer) > 50_000:
+            generated_answer = generated_answer[:50_000] + "\n[answer truncated]"
+
         # Missing task data or judge configuration is not the model's fault: mask.
         if not criteria:
             reason = "no usable rubric criteria — unlabeled dry run, not scorable"
@@ -1311,6 +1320,7 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         # judge_failsafe masks it as judge_failed; the message keeps the first cause.
         unresolved = [j for j in judgements if j.score is None]
         if unresolved:
+            logger.error("Unresolved criteria, failed judge replies: %s", [j.failed_reply_samples for j in unresolved])
             raise JudgeError(f"{len(unresolved)}/{len(judgements)} criteria unresolved (e.g. {unresolved[0].error})")
 
         scores = aggregate_rubric_scores(judgements)
@@ -1438,18 +1448,15 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         return {name: value for name, value in self.compute_metrics(tasks).items() if name.startswith("mean/")}
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
-        """Headline metrics: the usual mean/* plus judge-health counters.
+        """Headline metrics: the usual mean/* plus the submission and dealbreaker counters.
 
-        The counters are promoted deliberately — a run whose judge failed on a
-        third of its criteria should not be read as a low score, and that is only
-        obvious if the failure count sits next to the score.
+        A judge failure does not reach these metrics: verify() masks the row, so it
+        leaves the score, and Gym reports it as a masked failure.
         """
         if self._frontier_finance_grader is not None:
             return frontier_finance_key_metrics(agent_metrics)
         key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
         for k in (
-            "rubric/criteria_unresolved",
-            "rubric/rollouts_with_judge_error",
             "rubric/rollouts_without_submission",
             "rubric/dealbreakers_failed",
         ):

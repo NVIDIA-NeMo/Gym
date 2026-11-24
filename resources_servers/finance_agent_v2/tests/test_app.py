@@ -21,6 +21,7 @@ via the resource server's requirements.txt).
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -459,6 +460,11 @@ def _identity(path: Path) -> tuple[int, int]:
     return stat.st_ino, stat.st_mtime_ns
 
 
+def _per_source(stage: Path, index: Path) -> Path:
+    """The stage folder that stage_local_edgar_files keeps for one configured index path."""
+    return stage / hashlib.sha256(os.path.abspath(index).encode()).hexdigest()[:16]
+
+
 class TestLocalEdgarStaging:
     def test_the_server_reads_the_staged_copy(self, tmp_path) -> None:
         index = _source_index(tmp_path)
@@ -468,8 +474,8 @@ class TestLocalEdgarStaging:
             edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
         )
 
-        assert server._local_edgar.index_path == stage / "index.sqlite"
-        assert (stage / "index.sqlite").read_bytes() == index.read_bytes()
+        assert server._local_edgar.index_path == _per_source(stage, index) / "index.sqlite"
+        assert (_per_source(stage, index) / "index.sqlite").read_bytes() == index.read_bytes()
 
     def test_without_a_stage_dir_the_index_is_read_in_place(self, tmp_path) -> None:
         index = _source_index(tmp_path)
@@ -487,7 +493,7 @@ class TestLocalEdgarStaging:
             edgar_search_mode="local", local_edgar_index_path=str(index), local_edgar_stage_dir=str(stage)
         )
 
-        assert server._local_edgar.metadata_path == stage / "index.sqlite.metadata"
+        assert server._local_edgar.metadata_path == _per_source(stage, index) / "index.sqlite.metadata"
 
     def test_a_configured_sidecar_is_staged_and_returned(self, tmp_path) -> None:
         index = _source_index(tmp_path)
@@ -497,53 +503,49 @@ class TestLocalEdgarStaging:
 
         staged_index, staged_sidecar = stage_local_edgar_files(str(index), str(sidecar), str(stage))
 
-        assert staged_index == str(stage / "index.sqlite")
-        assert staged_sidecar == str(stage / "custom.metadata")
-        assert (stage / "custom.metadata").read_bytes() == sidecar.read_bytes()
+        assert staged_index == str(_per_source(stage, index) / "index.sqlite")
+        assert staged_sidecar == str(_per_source(stage, index) / "custom.metadata")
+        assert (_per_source(stage, index) / "custom.metadata").read_bytes() == sidecar.read_bytes()
 
     def test_an_unchanged_source_is_copied_once(self, tmp_path) -> None:
         index = _source_index(tmp_path)
         stage = tmp_path / "node_local"
         stage_local_edgar_files(str(index), None, str(stage))
-        first = _identity(stage / "index.sqlite")
+        first = _identity(_per_source(stage, index) / "index.sqlite")
 
         stage_local_edgar_files(str(index), None, str(stage))
 
-        assert _identity(stage / "index.sqlite") == first
+        assert _identity(_per_source(stage, index) / "index.sqlite") == first
 
     def test_a_changed_source_is_copied_again(self, tmp_path) -> None:
         """Same size is not enough: an index rebuilt in place keeps its size but not its modification time."""
         index = _source_index(tmp_path)
         stage = tmp_path / "node_local"
         stage_local_edgar_files(str(index), None, str(stage))
-        first = _identity(stage / "index.sqlite")
+        first = _identity(_per_source(stage, index) / "index.sqlite")
         mtime_ns = index.stat().st_mtime_ns + 10**9
         os.utime(index, ns=(mtime_ns, mtime_ns))
 
         stage_local_edgar_files(str(index), None, str(stage))
 
-        assert _identity(stage / "index.sqlite") != first
-        assert (stage / "index.sqlite").stat().st_mtime_ns == mtime_ns
+        assert _identity(_per_source(stage, index) / "index.sqlite") != first
+        assert (_per_source(stage, index) / "index.sqlite").stat().st_mtime_ns == mtime_ns
 
-    def test_a_stale_staged_wal_is_removed(self, tmp_path) -> None:
-        """A WAL left by an earlier index must not be replayed into a newly staged one."""
-        index = _source_index(tmp_path)
-        stage = tmp_path / "node_local"
-        stage.mkdir()
-        (stage / "index.sqlite-wal").write_bytes(b"stale")
-
-        stage_local_edgar_files(str(index), None, str(stage))
-
-        assert not (stage / "index.sqlite-wal").exists()
-
-    def test_a_source_wal_is_staged(self, tmp_path) -> None:
-        index = _source_index(tmp_path)
-        Path(str(index) + "-wal").write_bytes(b"wal frames")
+    def test_sources_with_the_same_file_name_are_staged_apart(self, tmp_path) -> None:
+        """Even with equal size and modification time, each source keeps its own copy."""
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        a = _source_index(tmp_path / "a")
+        b = _source_index(tmp_path / "b")
+        os.utime(b, ns=(a.stat().st_atime_ns, a.stat().st_mtime_ns))
         stage = tmp_path / "node_local"
 
-        stage_local_edgar_files(str(index), None, str(stage))
+        staged_a, _ = stage_local_edgar_files(str(a), None, str(stage))
+        staged_b, _ = stage_local_edgar_files(str(b), None, str(stage))
 
-        assert (stage / "index.sqlite-wal").read_bytes() == b"wal frames"
+        assert staged_a != staged_b
+        assert Path(staged_a).read_bytes() == a.read_bytes()
+        assert Path(staged_b).read_bytes() == b.read_bytes()
 
     def test_a_missing_index_fails_naming_the_source(self, tmp_path) -> None:
         missing = tmp_path / "shared" / "index.sqlite"
@@ -1453,9 +1455,8 @@ class TestAggregateMetrics:
         assert key["mean/rubric_fraction"] == 0.75
         assert key["mean/rubric_partial_credit"] == 0.5
         assert "std/reward" not in key
-        # A run whose judge failed must not read as a low score.
-        assert key["rubric/criteria_unresolved"] == 2
-        assert key["rubric/rollouts_with_judge_error"] == 1
+        assert "rubric/criteria_unresolved" not in key
+        assert "rubric/rollouts_with_judge_error" not in key
         # Dealbreakers explain most of the gap between weighted and gated scores.
         assert key["rubric/dealbreakers_failed"] == 4
         assert "rubric/parse_failures" not in key
