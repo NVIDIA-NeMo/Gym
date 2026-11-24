@@ -485,6 +485,28 @@ class TestResponsesToAnthropicResponse:
         assert message.stop_reason == "tool_use"
         assert message.content[1].input == {"a": 1}
 
+    @pytest.mark.parametrize("blank", ["", " ", "\n\t"])
+    def test_mixed_response_preserves_blank_text_and_other_blocks(self, blank):
+        content = [
+            {"type": "thinking", "thinking": "keep reasoning", "signature": ""},
+            {"type": "text", "text": blank},
+            {"type": "text", "text": "  keep this text\n"},
+            {"type": "tool_use", "id": "call-1", "name": "check", "input": {}},
+        ]
+        conv, response = self._response_from_anthropic({"content": content, "stop_reason": "tool_use"})
+        # Build distinct Responses text parts: the inverse converter coalesces
+        # adjacent Anthropic text blocks before this serialization boundary.
+        payload = response.model_dump(mode="json")
+        for item in payload["output"]:
+            if item["type"] == "message":
+                item["content"] = [
+                    {"type": "output_text", "text": block["text"], "annotations": []} for block in content[1:3]
+                ]
+        response = type(response).model_validate(payload)
+        served = conv.responses_to_anthropic_response(response, model="m")
+        assert served["content"] == content
+        assert served["stop_reason"] == "tool_use"
+
     def test_empty_output_yields_empty_content(self) -> None:
         # Defensive: a downstream response carrying no output items maps to empty content,
         # which is still a valid Anthropic Message. (Realistic empty responses arrive as an
@@ -528,7 +550,7 @@ class TestAnthropicResponseToSSE:
                 ],
                 "stop_reason": "tool_use",
                 "stop_sequence": None,
-                "usage": {"input_tokens": 3, "output_tokens": 4},
+                "usage": {"input_tokens": 3, "output_tokens": 4, "cache_read_input_tokens": 2},
             }
         )
         types = [t for t, _ in events]
@@ -545,6 +567,12 @@ class TestAnthropicResponseToSSE:
         ]
         # message_start carries an empty content list
         assert events[0][1]["message"]["content"] == []
+        assert events[0][1]["message"]["stop_reason"] is None
+        assert events[0][1]["message"]["usage"] == {
+            "input_tokens": 3,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 2,
+        }
         # text delta
         assert events[2][1]["delta"] == {"type": "text_delta", "text": "hi"}
         # tool_use input arrives as input_json_delta
@@ -553,6 +581,12 @@ class TestAnthropicResponseToSSE:
         # message_delta carries stop_reason + output usage
         assert events[7][1]["delta"]["stop_reason"] == "tool_use"
         assert events[7][1]["usage"] == {"output_tokens": 4}
+
+    def test_missing_usage_stays_absent(self) -> None:
+        events = self._events({"content": [{"type": "text", "text": "hi"}], "stop_reason": "end_turn"})
+        assert "usage" not in events[0][1]["message"]
+        assert "usage" not in events[-2][1]
+        assert events[-2][1]["delta"]["stop_reason"] == "end_turn"
 
     def test_thinking_block_delta(self) -> None:
         events = self._events(
@@ -755,7 +789,7 @@ class TestCacheUsage:
         start = next(event for event in events if event["type"] == "message_start")
         delta = next(event for event in events if event["type"] == "message_delta")
         # The split arrives with message_start; message_delta adds only the output, as Anthropic streams it.
-        assert start["message"]["usage"] == out["usage"]
+        assert start["message"]["usage"] == {**out["usage"], "output_tokens": 0}
         assert delta["usage"] == {"output_tokens": 50}
 
     def test_responses_usage_without_a_cache_count_has_no_cache_reads(self) -> None:

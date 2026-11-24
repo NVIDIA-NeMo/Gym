@@ -65,6 +65,7 @@ ACCUMULATED_WALLTIME_NAME = ".gym_accumulated_walltime"
 RETRY_EXTENSION_NAME = ".gym_infra_retry_extension"
 # The driver step's environment names the file, <job dir>/.gym_driver_failure.<allocation>, where a driver failure
 # that the next segment would repeat leaves its registered kind (see the guard in executors/slurm/resume_script.py).
+DRIVER_FAILURE_NAME = ".gym_driver_failure"
 DRIVER_FAILURE_ENV = "GYM_DRIVER_FAILURE_FILE"
 # The driver failure kinds the next segment's prologue turns into its own stop and remedy (its guard). A segment whose
 # driver exits 76 with one of them keeps its follow-up for that stop; the guard handles each (see the prologue's case).

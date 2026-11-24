@@ -3,6 +3,7 @@
 """Prime Agent runtime, input staging and artifact capture over Gym's shared sandbox lifecycle."""
 
 import asyncio
+import base64
 import hashlib
 import io
 import json
@@ -24,6 +25,7 @@ from nemo_gym.agents import (
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
+from responses_api_agents.prime_agent.runtime_lock import stage_runtime_inputs
 
 
 LOG = logging.getLogger(__name__)
@@ -58,6 +60,12 @@ NODE_SHA256 = {
     "aarch64": "013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30",  # pragma: allowlist secret
 }
 NODE_ARCH = {"x86_64": "x64", "aarch64": "arm64"}
+# Official GitHub release asset digests for the shared bootstrap's uv 0.10.12 archives.
+UV_VERSION = "0.10.12"
+UV_SHA256 = {
+    "aarch64": "55bd1c1c10ec8b95a8c184f5e18b566703c6ab105f0fc118aaa4d748aabf28e4",  # pragma: allowlist secret - public release checksum
+    "x86_64": "adccf40b5d1939a5e0093081ec2307ea24235adf7c2d96b122c561fa37711c46",  # pragma: allowlist secret - public release checksum
+}
 CLI = "lib/node_modules/prime-agent/dist/bundle/cli.js"
 SESSION_ROOT = "/tmp/nemo-gym-prime-sessions"
 RUNTIME_ROOT = "/tmp/nemo-gym-prime-runtime"
@@ -126,10 +134,9 @@ class PrimeSession(AgentSessionState):
     async def install(self, *, timeout: float) -> None:
         """Create the session directory and install (or reuse) Node.js and the pinned Prime Agent package.
 
-        The agent server downloads the Node.js build, the four Prime release archives and the kernel's Python and uv
-        once, checks every pinned SHA-256 (uv has none), points the Prime manifests' release-host dependencies at the
-        uploaded archives and uploads everything, so the sandbox needs no download tools; npm and uv install the
-        remaining dependencies from their package indexes.
+        The agent server verifies Node, Python, uv and all four Prime release archives, then stages the shared
+        dependency locks. npm ci verifies every registry artifact's locked integrity; uv constrains runtime and
+        isolated build dependencies to tested versions. A recipe fingerprint prevents reuse of an older runtime.
         """
         # Shared host-side download cache for pinned sandbox assets.
         from responses_api_agents.miniswe_sandboxed_agent.bootstrap import (
@@ -162,6 +169,8 @@ class PrimeSession(AgentSessionState):
         )
         # The installer requires glibc, so the kernel uses the glibc Python build.
         uv, python = await bootstrap_assets(arch_name, "gnu")
+        if hashlib.sha256(uv.read_bytes()).hexdigest() != UV_SHA256[arch_name]:
+            raise RuntimeError(f"Prime bootstrap uv {UV_VERSION} checksum mismatch for {arch_name}")
         await sandbox.upload(node, f"{directory}/{name}")
         # Each release archive's sandbox path, which the rewritten manifests name as a `file:` dependency.
         uploads = {release: f"{directory}/{release}.tgz" for release in PRIME_RELEASE_PACKAGES}
@@ -170,6 +179,7 @@ class PrimeSession(AgentSessionState):
             for release, path in uploads.items()
         }
         checksums = {}
+        integrities = {}
         with tempfile.TemporaryDirectory(prefix="gym-prime-release-") as temporary:
             for release, pinned in PRIME_RELEASE_PACKAGES.items():
                 source = await cached_download(
@@ -179,12 +189,35 @@ class PrimeSession(AgentSessionState):
                 checksums[release] = await asyncio.to_thread(
                     _localize_release_package, source, localized, replacements
                 )
+                integrities[release] = "sha512-" + base64.b64encode(
+                    hashlib.sha512(localized.read_bytes()).digest()
+                ).decode("ascii")
                 await sandbox.upload(localized, uploads[release])
-        dependency_checks = " ".join(
-            f"{quote(uploads[release])} {quote(checksum)}"
-            for release, checksum in checksums.items()
-            if release != "prime-agent"
+        runtime_identity = json.dumps(
+            {
+                "prime_version": PRIME_AGENT_VERSION,
+                "release_sha256": PRIME_RELEASE_PACKAGES,
+                "architecture": arch_name,
+                "node_version": NODE_VERSION,
+                "node_sha256": NODE_SHA256[arch_name],
+                "python_sha256": PYTHON_SHA256[arch_name, "gnu"],
+                "uv_version": UV_VERSION,
+                "uv_sha256": UV_SHA256[arch_name],
+            },
+            sort_keys=True,
         )
+        runtime_inputs = stage_runtime_inputs(
+            archive_directory=directory, archive_integrities=integrities, runtime_identity=runtime_identity
+        )
+        checksum_pairs = [
+            (uploads[release], checksum) for release, checksum in checksums.items() if release != "prime-agent"
+        ]
+        for filename, content in runtime_inputs.items():
+            destination = f"{directory}/{filename}"
+            await upload_text(sandbox, path=destination, text=content.decode("utf-8"))
+            checksum_pairs.append((destination, hashlib.sha256(content).hexdigest()))
+        checksum_pairs.append((f"{directory}/uv.tar.gz", UV_SHA256[arch_name]))
+        dependency_checks = " ".join(f"{quote(path)} {quote(checksum)}" for path, checksum in checksum_pairs)
         await sandbox.upload(python, f"{directory}/python.tar.gz")
         await sandbox.upload(uv, f"{directory}/uv.tar.gz")
         result = await sandbox.exec(
