@@ -76,6 +76,33 @@ class TestExtractVerdict:
         verdict, _ = _extract_verdict(text)
         assert verdict == "FAIL"
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "C1 fails because no passenger capacity is given. C2 fails. The response scores 0.",
+            "The passport number is missing from the response.",
+            "Passing this criterion needs a date.",
+            "0 out of 3 passed",
+            "FAIL, but it would PASS with a date.",
+        ],
+        ids=["passenger", "passport", "passing", "passed", "both-words"],
+    )
+    def test_keyword_fallback_reads_only_a_whole_verdict_word(self, text):
+        """A word that only contains PASS or FAIL is no verdict, and neither is a line that names both."""
+        verdict, _ = _extract_verdict(text)
+        assert verdict is None
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("The response gives the date in the required format.\nPASS", "PASS"),
+            ("The passenger count is missing.\nVerdict: FAIL", "FAIL"),
+        ],
+    )
+    def test_keyword_fallback_reads_a_whole_verdict_word(self, text, expected):
+        verdict, _ = _extract_verdict(text)
+        assert verdict == expected
+
     @pytest.mark.parametrize("text", ["I'm not sure what to say here.", ""], ids=["prose", "empty-reply"])
     def test_no_verdict(self, text):
         """When nothing is extractable, there is no verdict; the server decides between masking and FAIL."""
