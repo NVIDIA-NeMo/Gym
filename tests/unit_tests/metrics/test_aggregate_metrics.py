@@ -1608,6 +1608,17 @@ class TestCapturedCallSummary:
             False,
         )
 
+    def test_a_saved_zero_call_summary_does_not_count_as_covered(self) -> None:
+        responses = [
+            self._rollout(0, {}),
+            self._rollout(1, {"agent": {"calls": 1, "calls_without_usage": 0}}),
+        ]
+
+        captured = compute_aggregate_metrics(responses).perf_summary["captured_calls"]
+
+        assert (captured["calls"], captured["rollouts_with_capture"], captured["total_rollouts"]) == (1, 1, 2)
+        assert compute_captured_call_summary([{"calls": 0, "by_role": {}}], total_rollouts=1) is None
+
     def test_capture_off_reports_no_totals_rather_than_zero(self) -> None:
         responses = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {}}]
 

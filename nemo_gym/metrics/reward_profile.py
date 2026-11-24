@@ -1137,8 +1137,14 @@ def compute_captured_call_summary(
     ``rollouts_with_capture`` out of ``total_rollouts`` says how much of the run the totals cover; a run
     with capture off has no records and returns ``None``, never a zero total. ``calls_without_usage``
     counts calls whose tokens are unknown, which the token totals do not include. ``call_latency_ms`` is
-    summed call time, not run wall-clock: calls overlap.
+    summed call time, not run wall-clock: calls overlap. A saved summary with no calls is unknown usage, not a
+    covered rollout, so it is left out.
     """
+    captured_call_records = [
+        record
+        for record in captured_call_records
+        if any(totals.get("calls") for totals in (record.get("by_role") or {}).values())
+    ]
     if total_rollouts <= 0 or not captured_call_records:
         return None
     by_role: Dict[str, Dict[str, Any]] = {}
