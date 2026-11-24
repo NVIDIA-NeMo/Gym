@@ -147,6 +147,16 @@ def model_sampling_path_segment(segment: Optional[str]) -> str:
 _GENERATION_API_PATHS = frozenset({"/v1/chat/completions", "/v1/responses", "/v1/messages"})
 
 
+def parse_generation_path(path: str) -> tuple[CorrelationContext, str] | None:
+    """Return the correlation context and API route of a valid model generation path."""
+    try:
+        parsed = parse_path(path)
+    except CorrelationPathError:
+        return None
+    context, api_path = parsed if parsed is not None else (CorrelationContext(), path)
+    return (context, api_path) if api_path in _GENERATION_API_PATHS else None
+
+
 def with_model_sampling_segment(url_path: str, segment: Optional[str]) -> str:
     """Insert ``/ng-sampling/<segment>`` into a Model Server generation path, where its correlation prefix puts it.
 
@@ -155,12 +165,11 @@ def with_model_sampling_segment(url_path: str, segment: Optional[str]) -> str:
     if segment is None:
         return url_path
     path, separator, query = url_path.partition("?")
-    try:
-        parsed = parse_path(path)
-    except CorrelationPathError:
+    parsed = parse_generation_path(path)
+    if parsed is None:
         return url_path
-    context, api_path = parsed if parsed is not None else (CorrelationContext(), path)
-    if context.model_sampling is not None or api_path not in _GENERATION_API_PATHS:
+    context, api_path = parsed
+    if context.model_sampling is not None:
         return url_path
     return f"{encode(dataclasses.replace(context, model_sampling=segment))}{api_path}{separator}{query}"
 

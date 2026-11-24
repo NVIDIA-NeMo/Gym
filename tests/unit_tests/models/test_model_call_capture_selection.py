@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Which model calls the evaluation capture store records: the server allowlist, per-rollout-group sampling,
+"""Which model calls the evaluation capture store records: the server allowlist, per-rollout sampling,
 the free-space floor, and the calling server named on each record."""
 
 import logging
@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 import nemo_gym.models.model_call_capture as model_call_capture
 from nemo_gym.core.episode_context import CALLER_SERVER_HEADER
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.models.model_call_capture import (
     CaptureStore,
     ModelCallCaptureConfig,
@@ -72,8 +73,7 @@ def test_default_gate_never_checks_free_space(tmp_path, monkeypatch) -> None:
         raise AssertionError("statvfs must not be called without a free-space floor")
 
     monkeypatch.setattr(model_call_capture.os, "statvfs", _no_statvfs)
-    gate = _CaptureGate(tmp_path, sample_every=1, min_free_gib=0.0)
-    assert all(gate.admits(f"r{i}_g{i}") for i in range(20))
+    assert _CaptureGate(tmp_path, sample_every=1, min_free_gib=0.0).has_space()
 
 
 def test_server_allowlist_records_only_listed_servers(tmp_path) -> None:
@@ -91,40 +91,77 @@ def test_server_allowlist_records_only_listed_servers(tmp_path) -> None:
     assert call.model_ref is not None and call.model_ref.name == "judge_model"
 
 
+@pytest.mark.parametrize("extra_names", [[], ["typo", "env_a", "observability_enabled"]])
+def test_server_allowlist_warns_about_names_that_are_not_local_model_servers(tmp_path, caplog, extra_names) -> None:
+    config = ModelCallCaptureConfig(
+        observability_enabled=True,
+        model_call_capture_dir=tmp_path,
+        model_call_capture_servers=["judge_model", *extra_names],
+    )
+    global_config = {
+        "judge_model": {"responses_api_models": {"vllm_model": {}}},
+        "env_a": {"resources_servers": {"env": {}}},
+        "observability_enabled": True,
+    }
+    with caplog.at_level(logging.WARNING, logger=model_call_capture.logger.name):
+        install_model_call_capture(
+            FastAPI(), config, model_server_name="judge_model", global_config_dict=global_config
+        )
+    warnings = [
+        record.getMessage() for record in caplog.records if "model_call_capture_servers" in record.getMessage()
+    ]
+    if extra_names:
+        [warning] = warnings
+        assert all(name in warning for name in extra_names)
+        assert "judge_model" not in warning
+    else:
+        assert warnings == []
+
+
 @pytest.mark.parametrize(
-    "rollout_id, group",
+    "capture_key, rollout_id",
     [
         ("abc", "abc"),
-        ("abc_g0", "abc"),
-        ("abc_g12", "abc"),
-        ("abc_g3-a1", "abc"),
-        ("a_g1_b_g2", "a_g1_b"),
+        ("abc_g0", "abc_g0"),
+        ("abc_g3-a1", "abc_g3"),
+        ("foo-a0", "foo-a0"),
+        ("task-a01-a1", "task-a01"),
+        ("x-a1-a2", "x-a1-a2"),  # Opaque key outside Gym's episode ID grammar.
         # Rollout collection's own keys are `<task>-<rollout>`, and a re-dispatch appends `-a<n>`.
         ("3-0", "3-0"),
         ("3-0-a1", "3-0"),
         ("3-0-a12", "3-0"),
     ],
 )
-def test_capture_group_drops_sibling_and_attempt_suffixes(rollout_id: str, group: str) -> None:
-    assert _CaptureGate.group_of(rollout_id) == group
+def test_capture_group_uses_the_logical_rollout_id(capture_key: str, rollout_id: str) -> None:
+    assert _CaptureGate.group_of(capture_key) == rollout_id
 
 
-def test_sample_every_keeps_or_drops_whole_prompt_groups(tmp_path) -> None:
+def test_sample_every_keeps_or_drops_all_gym_attempts_of_a_rollout(tmp_path) -> None:
     sample_every = 4
-    groups = [f"group{i}" for i in range(16)]
-    assert {_group_admitted(group, sample_every) for group in groups} == {True, False}
+    rollout_ids = [
+        "3-0",
+        "3-1",
+        "foo-a0",
+        "task-a01",
+        # NeMo RL sends each generation's own ID, including its attempt UUID for token capture.
+        "prompt-g0-t0",
+        "prompt-g3-t0",
+        f"prompt_g0_a{0:032x}",
+        f"prompt_g1_a{1:032x}",
+    ]
+    assert {_group_admitted(rollout_id, sample_every) for rollout_id in rollout_ids} == {True, False}
     client = TestClient(_app(tmp_path, model_server_name="judge_model", model_call_capture_sample_every=sample_every))
+    store = CaptureStore(tmp_path)
+    for rollout_id in rollout_ids:
+        expected_records = 1 if _group_admitted(rollout_id, sample_every) else 0
+        for attempt in (0, 1, 2):
+            key = EpisodeId(rollout_id=rollout_id, attempt=attempt).capture_key
+            assert client.post(f"/ng-rollout/{key}/v1/responses", json={"input": "x"}).status_code == 200
+            assert len(store.read(key)) == expected_records, key
 
-    for group in groups:
-        expected_records = 1 if _group_admitted(group, sample_every) else 0
-        # A prompt's sibling generations and their retries all share the group's decision, and so does the retry
-        # of a rollout whose key has no sibling suffix.
-        for rollout_id in (f"{group}_g0", f"{group}_g7", f"{group}_g7-a1", group, f"{group}-a1"):
-            assert client.post(f"/ng-rollout/{rollout_id}/v1/responses", json={"input": "x"}).status_code == 200
-            assert len(CaptureStore(tmp_path).read(rollout_id)) == expected_records, rollout_id
 
-
-def test_sample_every_keeps_about_one_group_in_n(tmp_path) -> None:
+def test_sample_every_keeps_about_one_rollout_in_n(tmp_path) -> None:
     gate = _CaptureGate(tmp_path, sample_every=8, min_free_gib=0.0)
     kept = sum(gate.samples(f"prompt-{i}_g0") for i in range(4000))
     assert 400 < kept < 600
@@ -151,6 +188,7 @@ def test_free_space_floor_stops_and_resumes_recording(tmp_path, monkeypatch, cap
         response = client.post("/ng-rollout/low_g0/v1/responses", json={"input": "x"})
     assert response.status_code == 200  # the call itself is unaffected
     assert CaptureStore(tmp_path).read("low_g0") == []
+    assert CaptureStore(tmp_path).is_incomplete("low_g0")
     assert any("paused" in record.getMessage() for record in caplog.records)
 
     caplog.clear()
@@ -158,7 +196,11 @@ def test_free_space_floor_stops_and_resumes_recording(tmp_path, monkeypatch, cap
     with caplog.at_level(logging.WARNING, logger=model_call_capture.logger.name):
         client.post("/ng-rollout/ok_g0/v1/responses", json={"input": "x"})
     assert len(CaptureStore(tmp_path).read("ok_g0")) == 1
+    assert not CaptureStore(tmp_path).is_incomplete("ok_g0")
     assert any("resumed" in record.getMessage() for record in caplog.records)
+    assert client.post("/ng-rollout/low_g0/v1/responses", json={"input": "x"}).status_code == 200
+    assert len(CaptureStore(tmp_path).read("low_g0")) == 1
+    assert CaptureStore(tmp_path).is_incomplete("low_g0")
 
 
 def test_free_space_check_is_rate_limited(tmp_path, monkeypatch) -> None:
@@ -203,8 +245,13 @@ def test_disabled_capture_ignores_the_new_settings(tmp_path) -> None:
 
     install_model_call_capture(
         app,
-        ModelCallCaptureConfig(model_call_capture_servers=["judge_model"], model_call_capture_sample_every=3),
+        ModelCallCaptureConfig(
+            model_call_capture_dir=tmp_path,
+            model_call_capture_servers=["judge_model"],
+            model_call_capture_sample_every=3,
+        ),
         model_server_name="judge_model",
     )
-    assert TestClient(app).post("/ng-rollout/r_g0/v1/responses", json={"input": "x"}).json() == {"ok": True}
+    assert _group_admitted("a", 3)
+    assert TestClient(app).post("/ng-rollout/a/v1/responses", json={"input": "x"}).json() == {"ok": True}
     assert not any(os.scandir(tmp_path))

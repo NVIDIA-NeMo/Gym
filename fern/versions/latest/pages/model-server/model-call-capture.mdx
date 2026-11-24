@@ -382,7 +382,7 @@ which calls the capture store records. Their defaults record every call.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `model_call_capture_servers` | `list[str]` | `null` | Names of the model servers that record, for example the judge and not the policy. `null` records every model server. An unlisted server still serves rollout-prefixed calls and keeps training token capture. |
-| `model_call_capture_sample_every` | `int` | `1` | Record one rollout group in every N, chosen by a hash of the group. The group is the rollout id without its `-a<n>` attempt suffix and, for a NeMo RL id (`<group>_g<i>`), its `_g<i>` sibling suffix. A rollout's retries, and a NeMo RL prompt's sibling generations, are kept or left out together. |
+| `model_call_capture_sample_every` | `int` | `1` | Select about one rollout in every N by hashing its rollout ID. Gym retries share the same decision because the hash excludes the Gym attempt suffix (such as `-a1`). Each NeMo RL generation has its own rollout ID and is sampled independently. |
 | `model_call_capture_min_free_gib` | `float` | `0` | Stop recording new calls while the capture directory's filesystem has less free space than this, and resume when space returns. Each model server process checks at most every 30 seconds and logs a warning when it pauses or resumes. `0` turns the check off. |
 
 ```yaml
@@ -393,9 +393,13 @@ model_call_capture_sample_every: 8
 model_call_capture_min_free_gib: 50
 ```
 
-The rollout-record attachment and rollout health checks read only the recorded calls, so they see the calls
-left out as missing. Use these fields when you need only the calls you keep, for example judge calls during
-training, and not for an evaluation run whose rollout health you check.
+Use these settings for training runs that need a subset of calls, such as judge calls. Server selection and
+sampling omit calls without marking a rollout incomplete. When the free-space floor skips a selected call,
+Gym attempts to mark that rollout's capture incomplete.
+
+Keep full capture for evaluation runs. Rollout-record attachment, rollout health checks, and the agent-timeout
+retry decision on resume rely on the recorded calls. If a skipped call failed on the model server, resume can
+keep the timed-out result instead of retrying the rollout.
 
 ### Trajectory schema selection
 

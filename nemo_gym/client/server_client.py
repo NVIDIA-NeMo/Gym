@@ -19,6 +19,7 @@ import logging
 from importlib import import_module
 from os import getenv
 from typing import Any, Literal, Optional, Union, Unpack
+from urllib.parse import urlsplit
 
 import requests
 from aiohttp import (
@@ -59,6 +60,7 @@ from nemo_gym.core.episode_context import (
 from nemo_gym.core.model_call_sampling import (
     current_model_sampling_segment,
     model_sampling_path_segment,
+    parse_generation_path,
     with_model_sampling_segment,
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
@@ -205,11 +207,15 @@ class ServerClient(BaseModel):
         """Call another server. ``_control`` sends the call over the reserved control pool."""
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
+        model_base_prefix = ""
         if model_server_base_url and server_name == model_server_name:
             # Subprocess agents do not inherit the current rollout context.
             # The launcher provides a model URL that already contains the rollout prefix.
             # Use that URL instead of rebuilding it from global server configuration.
             base_url = model_server_base_url.rstrip("/")
+            base_path = urlsplit(base_url).path
+            if base_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
+                model_base_prefix = base_path
         else:
             base_url = self._resolve_base_url(server_name)
 
@@ -225,7 +231,8 @@ class ServerClient(BaseModel):
             self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
         )
         server_entry = self.global_config_dict.get(server_name)
-        if server_entry is not None and "responses_api_models" in server_entry:
+        is_model_server = server_entry is not None and "responses_api_models" in server_entry
+        if is_model_server:
             note_verifier_model_request(server_name)
         rollout_id = current_rollout_id()
         if attribute_rollout and server_entry is not None and "resources_servers" in server_entry:
@@ -234,24 +241,23 @@ class ServerClient(BaseModel):
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
                 url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
-        if (
-            rollout_id is not None
-            and attribute_rollout
-            and server_entry is not None
-            and "responses_api_models" in server_entry
-            and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
-            and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
-        ):
-            url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
-            verifier_invocation_id = current_verifier_invocation_id()
-            if verifier_invocation_id is not None:
-                kwargs["headers"] = {
-                    **(kwargs.get("headers") or {}),
-                    VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
-                }
-            caller_server = getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
-            if caller_server:
-                kwargs["headers"] = {**(kwargs.get("headers") or {}), CALLER_SERVER_HEADER: caller_server}
+        if attribute_rollout and is_model_server:
+            path = model_base_prefix + url_path.partition("?")[0]
+            generation = parse_generation_path(path)
+            if generation is not None:
+                correlation, api_path = generation
+                capture_key = correlation.capture_key
+                if rollout_id is not None and path == api_path:
+                    capture_key = rollout_id
+                    url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
+                    verifier_invocation_id = current_verifier_invocation_id()
+                    if verifier_invocation_id is not None:
+                        kwargs["headers"] = {
+                            **(kwargs.get("headers") or {}),
+                            VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
+                        }
+                if capture_key is not None and (caller_server := getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)):
+                    kwargs["headers"] = {**(kwargs.get("headers") or {}), CALLER_SERVER_HEADER: caller_server}
 
         if server_entry is not None and (
             "responses_api_models" in server_entry or "responses_api_agents" in server_entry

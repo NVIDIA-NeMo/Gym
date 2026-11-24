@@ -30,6 +30,7 @@ import os
 import re
 import time
 import zlib
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Optional, TypedDict
@@ -43,6 +44,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve
 from nemo_gym.core.episode_context import CALLER_SERVER_HEADER, VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
@@ -124,9 +126,7 @@ class ModelCallCaptureConfig(BaseModel):
     # records only the named servers, e.g. the judge and simulator servers and not the policy. Unlisted servers still
     # strip the rollout prefix and keep token capture.
     model_call_capture_servers: Optional[list[str]] = None
-    # Record the calls of one rollout group in every N. The group is the capture key without its `-a<attempt>` suffix
-    # and, for a NeMo RL key, its `_g<index>` sibling suffix, so a rollout's retries, and a NeMo RL prompt's sibling
-    # generations, are kept or dropped together.
+    # Sample by logical rollout ID so all Gym attempts of a rollout share the same decision.
     model_call_capture_sample_every: int = Field(default=1, ge=1)
     # Stop recording new calls while the capture directory's filesystem has less free space than
     # this (checked at most every 30 s per process). 0 disables the check.
@@ -147,13 +147,8 @@ class ModelCallCaptureConfig(BaseModel):
         return self.model_call_capture_servers is None or model_server_name in self.model_call_capture_servers
 
 
-# The sibling suffix of a NeMo RL capture key (`<group>_g<i>`) and the `-a<n>` attempt suffix that any capture key
-# carries on a retry (`maybe_rollout_id_from_run_body` reserves it).
-_CAPTURE_GROUP_SUFFIX = re.compile(r"(?:_g\d+)?(?:-a\d+)?\Z")
-
-
 class _CaptureGate:
-    """Per-rollout-group sampling and a free-space floor for the evaluation capture store."""
+    """Per-rollout sampling and a free-space floor for the evaluation capture store."""
 
     _SPACE_CHECK_INTERVAL_S = 30.0
 
@@ -165,8 +160,12 @@ class _CaptureGate:
         self._space_ok = True
 
     @staticmethod
-    def group_of(rollout_id: str) -> str:
-        return _CAPTURE_GROUP_SUFFIX.sub("", rollout_id)
+    def group_of(capture_key: str) -> str:
+        try:
+            return EpisodeId.from_capture_key(capture_key).rollout_id
+        except ValueError:
+            # A caller can use an opaque correlation key outside Gym's episode ID grammar.
+            return capture_key
 
     def samples(self, rollout_id: str) -> bool:
         if self._sample_every <= 1:
@@ -194,9 +193,6 @@ class _CaptureGate:
                 )
             self._space_ok = space_ok
         return self._space_ok
-
-    def admits(self, rollout_id: str) -> bool:
-        return self.samples(rollout_id) and self.has_space()
 
 
 _PENDING_SUFFIX = ".capture.pending"
@@ -991,16 +987,20 @@ class _CaptureMiddleware:
             if not known_non_generating and not response_started:
                 await _mark_unobserved_incomplete("completed without starting a response")
             return
-        # A sampled-out rollout group, or a full disk, records nothing, exactly as with no store.
         store = self._store
-        if (
-            store is not None
-            and self._capture_gate is not None
-            and rollout_from_path is not None
-            and dialect is not None
-            and not self._capture_gate.admits(rollout_from_path)
-        ):
-            store = None
+        gate = self._capture_gate
+        if store is not None and gate is not None and rollout_from_path is not None and dialect is not None:
+            if not gate.samples(rollout_from_path):
+                store = None
+            elif not gate.has_space():
+                # Free space can change between calls, leaving an otherwise plausible partial record.
+                try:
+                    store.mark_incomplete(rollout_from_path)
+                except (OSError, ValueError):
+                    logger.warning(
+                        "Could not mark rollout %s capture as incomplete.", rollout_from_path, exc_info=True
+                    )
+                store = None
         if (store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
             # Publish the id to this handler's current_rollout_id() even on the plain
             # forward path -- this is the common case for a model server with capture
@@ -1353,6 +1353,16 @@ def install_model_call_capture(
                 await _close_capture_endpoints()
 
         app.router.lifespan_context = _capture_lifespan
+
+    if config.observability_enabled and config.model_call_capture_servers and global_config_dict is not None:
+        unknown = [
+            name
+            for name in config.model_call_capture_servers
+            if not isinstance(entry := global_config_dict.get(name), Mapping) or "responses_api_models" not in entry
+        ]
+        if unknown:
+            logger.warning("Unknown model_call_capture_servers entries in this configuration: %s", unknown)
+
     # Only the configured servers record, through the sampling and free-space gate.
     store = make_capture_store(config) if config.records_server(model_server_name) else None
     capture_gate = (
