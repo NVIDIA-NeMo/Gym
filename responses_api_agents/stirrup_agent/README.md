@@ -151,9 +151,14 @@ turn that is redone can overflow again, so recovery can repeat without progress.
 ### Keeping the recorded history
 
 Training on recorded tokens (token capture) needs each model call of an episode to continue the previous call as the
-model wrote it. A context summary and a dropped turn both change that history, so the next call matches no recorded
-call. To keep the history, a training config sets `context_summarization_cutoff: null` and keeps
-`context_overflow_recovery` off, its default. Long episodes then end at the context limit.
+model wrote it. A context summary, a dropped turn and the one-time instruction of a truncation recovery turn each
+change that history, so the next call matches no recorded call. To keep the history, a training config sets
+`context_summarization_cutoff: null` and keeps `context_overflow_recovery` and `truncation_recovery` off, their
+defaults. Long episodes then end at the context limit.
+
+Two rewrites stay. An assistant turn with no parsed tool call goes back to the model without its `<tool_call>` and
+`<function=` text. Reasoning that the model server returns in its own field, not inline as `<think>`, is not sent
+back. The call after such a turn does not continue it.
 
 ## Licensing
 

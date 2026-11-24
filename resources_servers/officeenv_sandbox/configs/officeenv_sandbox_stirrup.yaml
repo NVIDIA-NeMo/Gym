@@ -2,8 +2,8 @@
 # (`cli`: sandbox/prepare_rows.py --exposure cli). Stirrup borrows each episode's sandbox and runs its runner there; the
 # model reaches the apps through their commands and moves files with the file API, all in Stirrup's shell (code_exec),
 # so the episode grants no MCP tools. Compose and run as configs/officeenv_sandbox.yaml shows, with this config and
-# `--agent officeenv_sandbox_stirrup_agent`. Stirrup installs its runtime in each sandbox at session start (Python
-# packages), so its sandboxes need the package index, or an image with the runtime installed.
+# `--agent officeenv_sandbox_stirrup_agent`. Stirrup's Python runtime is built on the agent server's host and uploaded
+# into each sandbox at session start, so its sandboxes need no internet (the host needs the package index).
 #
 # Once the episode's task has ended (complete_task), the environment server stops Stirrup's run before its next model
 # call (end_on_task_state, as for Pi): the run answers as completed and ends with the call that ended the task.
