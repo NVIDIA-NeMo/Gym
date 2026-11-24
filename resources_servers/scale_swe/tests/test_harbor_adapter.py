@@ -31,6 +31,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from nemo_gym.data.tasks.harbor import RECORD_VERSION, load_task
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ADAPTER_PATH = REPO_ROOT / "resources_servers/scale_swe/harbor/adapter.py"
@@ -353,6 +355,25 @@ def test_settings_read_from_native_config(tmp_path: Path, rows: Path) -> None:
     assert {k: v for k, v in pairing.items() if k != "README.md"} == {
         k: v for k, v in default.items() if k != "README.md"
     }
+
+
+def test_native_env_outside_the_basic_multilingual_plane_loads_as_a_task(tmp_path: Path, rows: Path) -> None:
+    env = {
+        "TASK_LABEL": "Hello \U0001f600",
+        "ASCII": "plain text",
+        "BMP": "caf\u00e9 \u2603",
+        "BACKSLASH": "C:\\new \\ud83d\\ude00 \\\\",
+        "QUOTE": 'say "hi"',
+        "CONTROL": "tab\there\nnext\x7f\x01",
+        'LABEL \U0001f600 "q" \\ud83d': "quoted key",
+    }
+    config = _native_config(tmp_path, **{"sandbox_config.env": env})
+    assert _convert(rows, tmp_path / "ds", "--native-config", str(config)) == 0
+    image = _row("repo_a_pr1")["image_url"]
+    record = {"os": "linux", "architecture": "amd64", "image": image, "config": {}, "record_version": RECORD_VERSION}
+    task = load_task(tmp_path / "ds" / "repo_a_pr1", image_configs={image: record})
+    assert task.config.environment.env == env
+    assert task.config.verifier.environment.env == env
 
 
 def test_dataset_readme_records_provenance(tmp_path: Path, rows: Path) -> None:

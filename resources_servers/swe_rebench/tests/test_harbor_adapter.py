@@ -297,6 +297,20 @@ def test_text_outside_the_basic_multilingual_plane_loads_as_toml(
     assert toml["metadata"]["language"] == row["language"]
 
 
+def test_native_env_name_outside_the_basic_multilingual_plane_loads_as_toml(
+    tmp_path: Path, rows: Path, parser_repo: Path
+) -> None:
+    env = {'LABEL \U0001f600 "q" \\ud83d': "Hello \U0001f600", "CONTROL": "tab\there\x7f"}
+    document = yaml.safe_load(adapter.SERVER_CONFIG.read_text())
+    server = document[adapter.SERVER_INSTANCE]["resources_servers"]["swe_rebench"]
+    server["sandbox_config"] = {**(server.get("sandbox_config") or {}), "env": env}
+    config = tmp_path / "native.yaml"
+    config.write_text(yaml.safe_dump(document))
+    assert _convert(rows, tmp_path / "ds", parser_repo, "--native-config", str(config)) == 0
+    toml = tomllib.loads((tmp_path / "ds" / _first_row(rows)["instance_id"] / "task.toml").read_text())
+    assert {key: toml["environment"]["env"][key] for key in env} == env
+
+
 def test_ids_order_native_rows_and_id_map(tmp_path: Path, rows: Path, parser_repo: Path) -> None:
     ids = list(reversed(_ids(rows)))[:3]
     ids_file = tmp_path / "ids.txt"

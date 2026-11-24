@@ -485,7 +485,7 @@ def _solve_script(workdir: str) -> str:
 
 
 def _toml_key(key: str) -> str:
-    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else _toml_value(key)
 
 
 def _toml_value(value: Any) -> str:

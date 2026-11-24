@@ -497,7 +497,7 @@ def _solve_script(workdir: str) -> str:
 
 
 def _toml_key(key: str) -> str:
-    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else _toml_value(key)
 
 
 def _toml_value(value: Any) -> str:
@@ -507,7 +507,13 @@ def _toml_value(value: Any) -> str:
     if isinstance(value, int):
         return str(value)
     if isinstance(value, str):
-        return json.dumps(value).replace("\x7f", "\\u007f")
+        # json.dumps writes a character outside the Basic Multilingual Plane as a surrogate pair, which TOML
+        # rejects: write that pair as one \UXXXXXXXX escape. An escaped backslash is matched first, as a unit.
+        return re.sub(
+            r"\\\\|\\ud[89ab][0-9a-f]{2}\\ud[c-f][0-9a-f]{2}",
+            lambda match: match[0] if match[0] == "\\\\" else "\\U{:08x}".format(ord(json.loads(f'"{match[0]}"'))),
+            json.dumps(value).replace("\x7f", "\\u007f"),
+        )
     if isinstance(value, list):
         return "[" + ", ".join(_toml_value(item) for item in value) + "]"
     if isinstance(value, dict):
