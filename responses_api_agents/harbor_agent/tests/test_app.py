@@ -359,6 +359,23 @@ class TestApp:
         segment = f"/ng-sampling/{encode_model_sampling(sampling)}" if sampled else ""
         assert api_base == f"http://policy-host:9000{segment}/v1"
 
+    async def test_run_redacts_credentials_in_trial_metadata(self):
+        server = _make_server()
+        result = {
+            **DEFAULT_TRIAL_RESULT,
+            "settings": [{"api_key": "synthetic-provider-value", "region": "west"}],
+            "diagnostic": "key synthetic-provider-value, status 503",
+            "messages": ["authorization: Bearer synthetic-auth-value"],
+        }
+        with _harbor_run_mocks(trial_result=result, trajectory=DEFAULT_TRAJECTORY):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 1.0
+        assert response.metadata["settings"] == [{"api_key": "[REDACTED]", "region": "west"}]
+        assert response.metadata["diagnostic"] == "key [REDACTED], status 503"
+        assert response.metadata["messages"] == ["authorization: Bearer [REDACTED]"]
+        assert response.metadata["verifier_result"] == result["verifier_result"]
+
     async def test_run_with_token_details(self):
         server = _make_server()
         with _harbor_run_mocks(trajectory=DEFAULT_TRAJECTORY):
