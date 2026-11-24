@@ -9,9 +9,8 @@ from environment_servers.swe_together.judge_evidence import aggregate_judge_evid
 from nemo_gym.agents import AgentCloseSessionResponse
 from nemo_gym.rollouts.harness_capabilities import inspect_record
 from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
-from nemo_gym.trajectory import AgentObservationBundle, ModelCallRef, TrajectoryRecord
+from nemo_gym.trajectory import NG_TRAJECTORY_KEY, AgentObservationBundle, ModelCallRef, TrajectoryRecord
 from nemo_gym.trajectory.captured_calls import build_captured_calls
-from nemo_gym.trajectory.trajectory_record import NG_TRAJECTORY_KEY
 
 
 MODEL = {"type": "responses_api_models", "name": "grading"}
