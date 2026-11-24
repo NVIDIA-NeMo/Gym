@@ -631,8 +631,8 @@ class SupportsSandboxSidecars(Protocol):
     """Optional provider capability to run sidecar containers next to the sandbox.
 
     The provider creates the sidecars declared in ``SandboxSpec.sidecars`` together with the sandbox, then runs
-    commands in them and reads files from them through these calls. A command is an argv. A provider runs it without
-    a shell where it can, so a sidecar image can be distroless; its documentation says when the image needs a shell.
+    commands in them and reads files from them through these calls. Commands run as an argv without a shell,
+    because sidecar images can be distroless.
     """
 
     async def sidecar_exec(

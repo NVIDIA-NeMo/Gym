@@ -4200,9 +4200,13 @@ class OpenSandboxProvider:
         timeout_s: int | float,
         on_stdout: Callable[[str], None] | None = None,
     ) -> SandboxExecResult:
-        """Run ``argv`` in the sidecar's sandbox. execd runs it through a shell, which the sidecar image needs."""
+        """Run ``argv`` in the sidecar's sandbox as execd's argv, without a shell, so the image can be distroless.
+
+        Needs ``ARGV_SDK_REQUIREMENT``; with an older SDK it raises ``SandboxExecArgvUnsupportedError`` before
+        anything runs.
+        """
         return await self._exec(
-            self._sidecar_handle(handle, sidecar), shlex.join(argv), timeout_s=timeout_s, on_stdout=on_stdout
+            self._sidecar_handle(handle, sidecar), list(argv), timeout_s=timeout_s, on_stdout=on_stdout
         )
 
     async def download_sidecar_file(

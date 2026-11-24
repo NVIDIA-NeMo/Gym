@@ -31,7 +31,12 @@ pytest.importorskip("opensandbox", reason="opensandbox optional sandbox dependen
 from nemo_gym.core.failure_kinds import PROVIDER_SETUP_FAILED
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.providers.base import PLACEMENT_GROUP_KEY, SandboxSpec, SupportsSandboxSidecars
+from nemo_gym.sandbox.providers.base import (
+    PLACEMENT_GROUP_KEY,
+    SandboxExecArgvUnsupportedError,
+    SandboxSpec,
+    SupportsSandboxSidecars,
+)
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 
 
@@ -197,10 +202,20 @@ async def test_sidecar_commands_and_downloads_go_to_the_sidecars_sandbox(provide
     result = await sandbox.sidecar("tools").exec("serve", "--dir", "/my data", timeout_s=5, on_stdout=streamed.append)
     await sandbox.sidecar("tools").download("/out/log.txt", tmp_path / "log.txt")
 
-    # The argv is quoted into one shell command, and stdout arrives line by line, each line ended once.
-    assert result.stdout == "sandbox-1: serve --dir '/my data'"
+    # The argv reaches execd as a list, with no shell to quote it for, and stdout arrives line by line, each line
+    # ended once.
+    assert result.stdout == "sandbox-1: ['serve', '--dir', '/my data']"
     assert streamed == ["PORT 8080\n", "ready\n"]
     assert (tmp_path / "log.txt").read_text() == "sandbox-1:/out/log.txt"
+
+
+async def test_a_sidecar_command_needs_an_sdk_that_sends_argv(provider, monkeypatch: pytest.MonkeyPatch) -> None:
+    sandbox = await AsyncSandbox(provider, _SPEC).start()
+    monkeypatch.setattr(opensandbox_provider, "_sdk_sends_argv", lambda: False)
+
+    # No shell to fall back on: the sidecar image may have none.
+    with pytest.raises(SandboxExecArgvUnsupportedError):
+        await sandbox.sidecar("tools").exec("serve", timeout_s=5)
 
 
 def _polled_provider() -> opensandbox_provider.OpenSandboxProvider:
@@ -327,7 +342,7 @@ async def test_a_reconnected_sandbox_reaches_its_sidecars(provider) -> None:
     borrowed = await AsyncSandbox.connect(descriptor, provider=borrower)
     result = await borrowed.sidecar("tools").exec("status", timeout_s=5)
 
-    assert result.stdout == "sandbox-1: status"
+    assert result.stdout == "sandbox-1: ['status']"
 
 
 async def test_a_sandbox_whose_sidecar_cannot_be_reached_is_not_reattached(provider) -> None:
@@ -382,7 +397,7 @@ async def test_a_borrower_releases_the_sidecar_handles_it_connected(provider) ->
     # Released, not deleted: the owner still reaches the sidecar.
     assert borrower._sidecars == {} and borrower._connected_sidecars == {}
     assert FakeSandbox.closed == ["sandbox-1"] and FakeSandbox.killed == []
-    assert (await owner.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: status"
+    assert (await owner.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: ['status']"
 
 
 async def test_a_reconnect_on_the_owners_provider_keeps_the_owners_sidecar_handles(provider) -> None:
@@ -511,7 +526,7 @@ async def test_borrowers_on_one_provider_share_the_sidecar_handles_until_the_las
     await first.disconnect()
 
     # The second borrower still reaches the sidecar; the handles go only with the last disconnect.
-    assert (await second.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: status"
+    assert (await second.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: ['status']"
     assert FakeSandbox.closed == []
     await second.disconnect()
     assert shared._sidecars == {} and shared._connected_sidecars == {}
@@ -547,7 +562,7 @@ async def test_concurrent_connects_on_one_provider_share_one_set_of_sidecar_hand
     assert FakeSandbox.closed == ["sandbox-1"]
     await first.disconnect()
 
-    assert (await second.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: status"
+    assert (await second.sidecar("tools").exec("status", timeout_s=5)).stdout == "sandbox-1: ['status']"
     await second.disconnect()
     assert shared._sidecars == {} and shared._connected_sidecars == {}
     assert FakeSandbox.closed == ["sandbox-1", "sandbox-1"]

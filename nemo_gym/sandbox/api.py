@@ -1159,11 +1159,9 @@ class AsyncSandboxSidecar:
     async def exec(
         self, *argv: str, timeout_s: int | float, on_stdout: Callable[[str], None] | None = None
     ) -> SandboxExecResult:
-        """Run ``argv`` and wait for it to exit.
+        """Run ``argv`` without a shell (sidecar images can be distroless) and wait for it to exit.
 
-        A provider runs it without a shell where it can, so a sidecar image can be distroless; its documentation
-        says when the image needs a shell. ``on_stdout`` receives stdout text as it arrives, so a caller can follow
-        a long-running service.
+        ``on_stdout`` receives stdout text as it arrives, so a caller can follow a long-running service.
         """
         return await self._provider.sidecar_exec(
             self._handle, self.name, list(argv), timeout_s=timeout_s, on_stdout=on_stdout
