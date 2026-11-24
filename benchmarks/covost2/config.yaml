@@ -1,0 +1,34 @@
+config_paths:
+- resources_servers/audio_eval/configs/audio_eval.yaml
+
+covost2_resources_server:
+  _inherit_from: audio_eval
+  resources_servers:
+    audio_eval:
+      profile_contracts: benchmarks/covost2/profiles.json
+
+covost2_simple_agent:
+  _inherit_from: audio_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: covost2_resources_server
+      datasets:
+      - name: covost2
+        type: benchmark
+        jsonl_fpath: benchmarks/covost2/data/covost2_benchmark.jsonl
+        prepare_script: benchmarks/covost2/prepare.py
+        prepare_dependencies:
+        - soundfile
+        - soxr
+        license: Creative Commons Zero 1.0 Universal
+
+covost2_environment_server:
+  _inherit_from: audio_eval_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: covost2_simple_agent
+      resources_server:
+        type: resources_servers
+        name: covost2_resources_server

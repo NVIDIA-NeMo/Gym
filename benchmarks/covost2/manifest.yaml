@@ -1,0 +1,29 @@
+name: covost2
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: asr
+description: CoVoST 2 test clips in 22 languages by default (17 for the model-card subset), scored as speech recognition (corpus WER or CER) and as speech translation between English and 21 languages (BLEU).
+modality: audio
+licensing: CC0-1.0
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 0.0
+  higher_is_better: true
+determinism: unknown
+resources_server: audio_eval
+agent_server: simple_agent
+datasets:
+- name: covost2
+  type: benchmark
+  jsonl_fpath: benchmarks/covost2/data/covost2_benchmark.jsonl
+  prepare_script: benchmarks/covost2/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active

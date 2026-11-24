@@ -497,6 +497,7 @@ benchmark that declares another resources server (for example [Asr With Pc](reso
 
 | Benchmark | Evaluates | Metric | License |
 | --- | --- | --- | --- |
+| [`covost2`](benchmarks/covost2/README.md) | ASR and speech translation on CoVoST 2 (22 languages) | WER or CER, BLEU | CC0-1.0 |
 
 ## 📖 Documentation & Resources
 
