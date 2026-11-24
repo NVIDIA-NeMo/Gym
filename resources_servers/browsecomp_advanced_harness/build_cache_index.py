@@ -21,6 +21,13 @@ replace). Server processes load this base file plus their own append shards.
 Payloads store "norm" before the (large) "results" field, so a bounded head
 read + regex avoids parsing 400k full JSON bodies; falls back to a full parse.
 
+With a pack (pack/MANIFEST.json), packed search entries whose flat file is gone
+are indexed too, so deleting flat files after packing keeps their queries
+visible to fuzzy matching. Each shard <ab> is one task: its flat files are
+scanned first, and a packed entry with a flat file is skipped. For the rest only
+a prefix of the blob is read and inflated (the same head read as a flat file);
+an entry whose norm lies past that prefix is read in full.
+
 Usage:
     python build_cache_index.py <cache_root> [--workers N]
 """
@@ -30,14 +37,21 @@ import json
 import os
 import re
 import sys
+import zlib
+from collections import Counter
 from multiprocessing import Pool
 from os import PathLike
 
 from resources_servers.browsecomp_advanced_harness.search_cache import INDEX_BASE, INDEX_DIR
 from resources_servers.browsecomp_advanced_harness.search_cache_pack import (
     INDEX_HEAD_SIZE,
+    LEN_MASK,
     REC_SIZE,
+    RECORD,
+    STORED,
+    load_manifest,
     open_pack,
+    pack_root_of,
     read_index_head,
     shard_paths,
 )
@@ -49,54 +63,95 @@ from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (
 
 
 _HEAD_BYTES = 8192
+# Compressed bytes read for a packed entry's head; at the pack's ~3x ratio they
+# inflate to more than _HEAD_BYTES.
+_PACK_PREFIX_BYTES = 4096
 _NORM_RE = re.compile(r'"norm":\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _norm_in_head(head):
+    m = _NORM_RE.search(head)
+    return json.loads(f'"{m.group(1)}"') if m else None
 
 
 def _extract_norm(path):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             head = f.read(_HEAD_BYTES)
-        m = _NORM_RE.search(head)
-        if m:
-            return json.loads(f'"{m.group(1)}"')
+        norm = _norm_in_head(head)
+        if norm is not None:
+            return norm
         with open(path, "r", encoding="utf-8") as f:  # norm beyond head (huge query) — rare
             return json.load(f).get("norm")
     except (OSError, json.JSONDecodeError, ValueError):
         return None
 
 
-def _scan_subdir(subdir):
+def _packed_norm_from_prefix(fd, offset, length, stored):
+    """The norm from the first bytes of a packed blob, or None when it is not in them."""
+    try:
+        if stored:
+            head = os.pread(fd, min(length, _HEAD_BYTES), offset)
+        else:
+            head = zlib.decompressobj().decompress(os.pread(fd, min(length, _PACK_PREFIX_BYTES), offset), _HEAD_BYTES)
+        return _norm_in_head(head.decode("utf-8", errors="replace"))
+    except (OSError, zlib.error, ValueError):
+        return None
+
+
+def _packed_norm_in_full(fd, offset, length, raw_len, stored):
+    """The norm from the whole blob, or None if it is unreadable."""
+    try:
+        blob = os.pread(fd, length, offset)
+        raw = blob if stored else zlib.decompress(blob, 15, raw_len)
+        norm = json.loads(raw.decode("utf-8")).get("norm")
+        return norm if isinstance(norm, str) else None
+    except (OSError, zlib.error, ValueError, AttributeError):
+        return None
+
+
+def _packed_shard_norms(pack_root, ab, flat_names, counts):
+    """Norms of the packed search entries of shard <ab> that have no flat file in flat_names."""
+    idx_path, dat_path = shard_paths(pack_root, "search", ab)
+    with open(idx_path, "rb") as f:
+        data = f.read()
+    count, _ = read_index_head(data[:INDEX_HEAD_SIZE], len(data), idx_path)
     norms = []
-    for dirpath, _, fnames in os.walk(subdir):
+    fd = os.open(dat_path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        for i in range(count):
+            digest, offset, length, raw_len = RECORD.unpack_from(data, INDEX_HEAD_SIZE + i * REC_SIZE)
+            if digest.hex() in flat_names:
+                counts["skipped_flat"] += 1
+                continue
+            stored, length = bool(length & STORED), length & LEN_MASK
+            norm = _packed_norm_from_prefix(fd, offset, length, stored)
+            if norm is not None:
+                counts["prefix"] += 1
+            else:
+                norm = _packed_norm_in_full(fd, offset, length, raw_len, stored)
+                counts["full" if norm is not None else "unreadable"] += 1
+            if norm:
+                norms.append(norm)
+    finally:
+        os.close(fd)
+    return norms
+
+
+def _scan_shard(task):
+    """(norms, counts) of one shard: the flat files under search/<ab>/, then the packed entries without one."""
+    cache_root, ab, pack_root = task
+    norms, flat_names, counts = [], set(), Counter()
+    for dirpath, _, fnames in os.walk(os.path.join(cache_root, "search", ab)):
         for fname in fnames:
             if fname.endswith(".json"):
+                flat_names.add(fname[: -len(".json")])
                 norm = _extract_norm(os.path.join(dirpath, fname))
                 if norm:
                     norms.append(norm)
-    return norms
-
-
-def _packed_norms(cache_root):
-    """Norms of the packed search entries: once their flat files are removed, the pack is their only copy."""
-    reader = open_pack(cache_root)
-    if reader is None:
-        return []
-    norms = []
-    try:
-        for b in range(256):
-            idx_path, _ = shard_paths(reader.pack_root, "search", f"{b:02x}")
-            with open(idx_path, "rb") as f:
-                data = f.read()
-            count, _ = read_index_head(data[:INDEX_HEAD_SIZE], len(data), idx_path)
-            for i in range(count):
-                start = INDEX_HEAD_SIZE + i * REC_SIZE
-                entry = reader.load("search", data[start : start + 32])
-                norm = entry.get("norm") if isinstance(entry, dict) else None
-                if isinstance(norm, str) and norm:
-                    norms.append(norm)
-    finally:
-        reader.close()
-    return norms
+    if pack_root is not None:
+        norms.extend(_packed_shard_norms(pack_root, ab, flat_names, counts))
+    return norms, counts
 
 
 def build_index(cache_root: str | PathLike[str], *, workers: int = 1, tokenizer: str = DEFAULT_TOKENIZER) -> int:
@@ -111,15 +166,30 @@ def build_index(cache_root: str | PathLike[str], *, workers: int = 1, tokenizer:
     norms cached since this build. See SearchCache._unmerged_norms.
     """
     search_dir = os.path.join(cache_root, "search")
-    subdirs = sorted(
-        os.path.join(search_dir, d) for d in os.listdir(search_dir) if os.path.isdir(os.path.join(search_dir, d))
-    )
+    subdirs = set()
+    if os.path.isdir(search_dir):  # with a pack, the flat tree can be gone
+        subdirs = {d for d in os.listdir(search_dir) if os.path.isdir(os.path.join(search_dir, d))}
+    # open_pack refuses a pack whose shard files do not match MANIFEST.json; only shards it lists are read.
+    reader = open_pack(cache_root)
+    packed = set()
+    if reader is not None:
+        reader.close()
+        packed = {key.split("/", 1)[1] for key in load_manifest(cache_root)["shards"] if key.startswith("search/")}
+    pack_root = pack_root_of(cache_root)
+    tasks = [(str(cache_root), ab, pack_root if ab in packed else None) for ab in sorted(subdirs | packed)]
     if workers > 1:
         with Pool(workers) as pool:
-            chunks = pool.map(_scan_subdir, subdirs)
+            results = pool.map(_scan_shard, tasks)
     else:
-        chunks = [_scan_subdir(d) for d in subdirs]
-    norms = sorted({n for chunk in chunks for n in chunk}.union(_packed_norms(cache_root)))
+        results = [_scan_shard(t) for t in tasks]
+    counts = sum((c for _, c in results), Counter())
+    if packed:
+        print(
+            f"packed search entries: {counts['prefix']} read from a prefix, {counts['full']} read in full, "
+            f"{counts['skipped_flat']} skipped (flat file present), {counts['unreadable']} unreadable",
+            file=sys.stderr,
+        )
+    norms = sorted({n for chunk, _ in results for n in chunk})
 
     index_dir = os.path.join(cache_root, INDEX_DIR)
     os.makedirs(index_dir, exist_ok=True)

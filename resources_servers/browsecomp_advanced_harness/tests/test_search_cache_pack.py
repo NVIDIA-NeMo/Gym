@@ -30,6 +30,7 @@ import io
 import json
 import os
 import random
+import re
 import shutil
 import threading
 
@@ -297,6 +298,44 @@ class TestPackWithCacheFeatures:
         assert build_index(root) == 1
         cache = SearchCache(root, fuzzy_threshold=0.8)
         assert cache.get_search("68th session CSW 2024 countries elected") == ("tavily", SMALL)
+
+    @staticmethod
+    def _rebuild(root, capsys) -> tuple[int, dict[str, int]]:
+        """build_index on root: (norm count, the packed-entry counts it reports)."""
+        from resources_servers.browsecomp_advanced_harness.build_cache_index import build_index
+
+        n = build_index(root)
+        m = re.search(
+            r"(\d+) read from a prefix, (\d+) read in full, (\d+) skipped \(flat file present\), (\d+) unreadable",
+            capsys.readouterr().err,
+        )
+        return n, dict(zip(("prefix", "full", "skipped_flat", "unreadable"), map(int, m.groups())))
+
+    def test_index_rebuild_reads_an_entry_with_a_flat_file_once_from_the_flat_file(self, packed_root, capsys) -> None:
+        n, counts = self._rebuild(packed_root, capsys)
+        assert n == 3
+        assert counts == {"prefix": 0, "full": 0, "skipped_flat": 3, "unreadable": 0}
+
+    def test_index_rebuild_reads_a_pack_only_entry_from_a_prefix(self, packed_root, capsys) -> None:
+        """Compressed and stored-raw entries alike: no blob is read in full."""
+        _drop_flats(packed_root)
+        n, counts = self._rebuild(packed_root, capsys)
+        assert n == 3
+        assert counts == {"prefix": 3, "full": 0, "skipped_flat": 0, "unreadable": 0}
+        norms = open(os.path.join(packed_root, "index", "search_norms.txt")).read().split("\n")
+        assert {"small query", "compressible query", "large query"} <= set(norms)
+
+    def test_index_rebuild_reads_a_norm_past_the_prefix_in_full(self, tmp_path, stage, capsys) -> None:
+        """The query comes before the norm, so a long query pushes the norm past the head read."""
+        root = str(tmp_path / "cache")
+        long_query = " ".join(f"word{i}" for i in range(2000))
+        SearchCache(root).put_search(long_query, SMALL, provider="tavily")
+        _make_pack(root, stage)
+        _drop_flats(root)
+        n, counts = self._rebuild(root, capsys)
+        assert n == 1
+        assert counts == {"prefix": 0, "full": 1, "skipped_flat": 0, "unreadable": 0}
+        assert open(os.path.join(root, "index", "search_norms.txt")).read() == normalize_query(long_query) + "\n"
 
     def test_concurrent_reads(self, tmp_path, stage, monkeypatch) -> None:
         root = str(tmp_path / "cache")
