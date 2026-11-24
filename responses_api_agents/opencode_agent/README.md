@@ -222,7 +222,10 @@ limit for each model call, as `simple_agent` does, and NeMo RL sets it on every 
 it is at least the configured `max_output_tokens`, OpenCode's limit for each call; a smaller value
 returns 422. As in `simple_agent`, nothing limits the sum of output tokens over a session's calls. Other controls, history replay and
 required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
-their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
+their tools as `<grant>_<tool>`. OpenCode writes characters other than letters, digits, `_` and `-` as `_`
+there, and a tool under a name already taken replaces the earlier one without a word, so a seed refuses two
+grants whose tools could share a name: one named as the other followed by `_` (`company` and `company_files`),
+or two that differ only where OpenCode writes `_`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
 fails after about 300 seconds, Bun's default `fetch` timeout. Before the first model call,
 `required_mcp.mjs` checks
@@ -705,6 +708,7 @@ opencode_agent:
 | --- | --- | --- |
 | `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on storage the sandbox snapshot covers. Each session keeps its supervisor files and OpenCode's HOME and data, with the saved conversation, in a directory under it. A restore that does not find the conversation starts the task afresh. |
 | `checkpoint_pause_allowance_seconds` | `3600` | Bounds the time a launch spends paused (see "Pause limits"). Size it to cover the longest checkpoint commit. `0` extends nothing and sets no limit on one pause. |
+| `sandbox_model_relay_port` | `18431` | Sandbox port of the model relay, on providers whose snapshots keep processes. |
 
 - **At a checkpoint** the activation parks and OpenCode is paused in place: the process supervisor sends `SIGSTOP` to
   every process the launch reaches and `SIGCONT` once the checkpoint resumes. Nothing is copied; the resources server
@@ -743,6 +747,33 @@ opencode_agent:
 - **Permissions.** `opencode run` rejects permission requests. The reprompt helper rejects them the same way, so a
   relaunch behaves like a first launch for configs with `ask` rules.
 
+On a sandbox whose snapshots keep its processes (an AgentENV memory snapshot, `capabilities.snapshot_keeps`), nothing is
+relaunched when it need not be:
+
+- **At a checkpoint** OpenCode keeps running: the supervisor holds the pause without signalling anything, and OpenCode's
+  model calls wait. OpenCode reaches the model through a relay in the sandbox (`nemo_gym/agents/utils/model_relay.mjs`, on
+  `127.0.0.1:sandbox_model_relay_port`), which holds new calls while a pause is open. OpenCode's own binary runs it
+  as Bun (`BUN_BE_BUN=1`, set for the relay alone), so the relay needs nothing from the task image.
+- **After a crash** the restored sandbox is still running the launch. The re-bind checks, in one command, that its
+  supervisor, its held pause and its relay survived. If so, the activation points the relay at the replacement
+  attempt's model URL, continues the pause and waits for the launch to finish: the relay re-sends the call the
+  checkpoint cut, byte for byte, and OpenCode sees only a slow call. A launch that had already ended is only collected,
+  and its relay is left alone; one that a stop ended, or whose held pause expired before the take-over, is relaunched.
+  If the check cannot run twice, the re-bind fails and its retry checks again. Otherwise the launch is killed, nothing
+  of it continuing, and relaunched as above; so is a launch when it or the replacement attempt has MCP tools
+  (configured or granted), since a running process keeps the MCP servers it was launched with. A kill or stop that
+  cannot be confirmed fails the re-bind or activation that asked, so nothing is relaunched beside the launch; a close
+  goes on, and the sandbox's owner stops the sandbox.
+- **If the relay does not come up** OpenCode calls the model server directly, and a restore relaunches it; this is logged
+  as a warning (`relay_unavailable`), since every image can run the relay.
+- **The wall clock** is the provider's to keep: OpenCode orders a conversation by message IDs it makes from the clock,
+  so a clock that jumps while OpenCode runs can put a message out of order. On AgentENV set the provider's
+  `snapshots.keep_guest_clock`, and a restored sandbox continues from the clock its snapshot was taken at.
+
+The agent logs `OpenCode resumed in place:` once a take-over has continued the launch, and `OpenCode cannot resume
+in place:` and `OpenCode abandoned a restored launch:`, all at WARNING, except that for a checkpoint taken before the
+launch's relay started (`relay_gone`) or a launch with MCP tools (`mcp_tool_grants`) the last two are at INFO.
+
 These sessions are restart-only, so their episodes start over after a crash: sandboxes the agent owns, multi-turn
 continuation sessions, sessions that continue an imported conversation (`session_import_path`), and OpenCode 2
 sessions (the reprompt uses OpenCode 1's server API and store). Local calls (unseeded requests and `/run`) are
@@ -751,4 +782,5 @@ restarts too.
 A checkpointed session's reply carries `metadata.harness_launches`, the number of OpenCode launches for the
 activation: `"1"` means no checkpoint or crash caused a relaunch. The session's checkpoint export keeps one record
 per launch: `launch`, `reprompted`, `interrupted_tool_calls`, `outcome` (`finished` or `stopped`), `return_code` and
-`paused_s`, the time the activation has spent parked so far.
+`paused_s`, the time the activation has spent parked so far. The record of a launch that a restore brought back and the
+activation took over where it was also has `resumed_in_place: true`.

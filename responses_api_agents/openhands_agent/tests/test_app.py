@@ -589,7 +589,7 @@ def test_request_sampling_becomes_the_runs_llm_settings():
 
 
 def test_runner_input_carries_the_mcp_grants_and_finish_tools():
-    instance = agent(finish_tool_names=["finish", "abandon_task_finish"], mcp_tool_timeout_seconds=300)
+    instance = agent(finish_tool_names=["finish", "abandon_task_finish"], mcp_tool_timeout_seconds=1.2345)
     state = session_state()
     state.request = seed(
         tool_accesses=[
@@ -610,7 +610,7 @@ def test_runner_input_carries_the_mcp_grants_and_finish_tools():
             "url": "http://resources:8080/mcp",
             "headers": {"x-nemo-gym-mcp-session": "token"},
             "required": True,
-            "timeout": 300,
+            "timeout": 1235,
         }
     }
     assert runner_input["finish_tool_names"] == ["finish", "abandon_task_finish"]

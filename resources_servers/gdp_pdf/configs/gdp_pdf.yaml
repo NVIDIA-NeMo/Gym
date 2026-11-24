@@ -25,6 +25,11 @@ gdp_pdf:
       # mean_criterion_pass are reported in every mode.
       reward_mode: mean_criteria  # mean_criteria | strict_pass | mixed
       mixed_reward_alpha: 0.5  # mixed: (1 - alpha) * mean_criterion_pass + alpha * all_pass
+      # Training-only reasoning-length penalty, off while the start is null: 0 up to start reasoning
+      # tokens, linear to -reasoning_penalty_max at end, flat after (e.g. 24576 / 40960 / 0.1).
+      reasoning_penalty_start_tokens: null
+      reasoning_penalty_end_tokens: null
+      reasoning_penalty_max: 0.1
       judge_max_attempts: 5
       # 500 rollouts x ~12.8 criteria/rollout is ~6,400 judge calls; at 64 concurrent
       # against the shared gpt-5.6-luna Azure deployment this sustained enough 429s to

@@ -696,9 +696,11 @@ def test_container_builder_forwards_configs_to_prepare_and_setup(checkout, extra
     assert result.returncode == 0, result.stderr
     # Execute that script with system changes stubbed; only Gym argument recording has effects.
     stubs = "\n".join(
-        f"{command}() {{ :; }}"
-        for command in ("source", "cd", "uv", "git", "apt-get", "gdown", "python3", "mkdir", "rm")
+        f"{command}() {{ :; }}" for command in ("source", "cd", "uv", "git", "apt-get", "python3", "mkdir", "rm")
     )
+    # SciCode's test data must exist after the download, so this stub leaves it where the build checks for it.
+    (root / "benchmarks/scicode/data").mkdir(parents=True, exist_ok=True)
+    stubs += "\ngdown() { printf data > benchmarks/scicode/data/test_data.h5; }"
     stubs += '\ngym() { printf "%s\\0" "$@" > "$CAPTURE/$2-args"; }\n'
     result = run_shell(stubs + (root / "build-command").read_text(), root, env)
     assert result.returncode == 0, result.stderr
@@ -730,3 +732,45 @@ def test_container_builder_rejects_invalid_config_arguments(checkout, args: list
     assert result.returncode == 2
     assert "Usage:" in result.stderr
     assert output.read_text() == "existing image"
+
+
+@pytest.mark.parametrize(
+    ("gdown", "skip", "builds"),
+    [
+        ("gdown() { return 1; }", "0", False),
+        ("gdown() { return 1; }", "1", True),
+        ("gdown() { :; }", "0", False),  # exits 0 but leaves no test_data.h5
+        ("gdown() { :; }", "1", True),
+        ("gdown() { printf data > benchmarks/scicode/data/test_data.h5; }", "0", True),
+    ],
+)
+def test_container_builder_fails_on_missing_scicode_data_unless_skipped(
+    checkout, gdown: str, skip: str, builds: bool
+) -> None:
+    """A SciCode data download that fails, or leaves no test_data.h5, fails the build; SKIP_SCICODE_DATA=1 opts out."""
+    root, env = checkout
+    env.update(
+        INPUT_CONTAINER="base.sqsh",
+        OUTPUT_CONTAINER=str(root / "built.sqsh"),
+        MOUNTS="",
+        GYM_CONFIG="base.yaml",
+        VLLM_ROUTER_WHEEL=str(root / "router.whl"),
+        SKIP_PREPARE="1",
+        SKIP_SCICODE_DATA=skip,
+    )
+    (root / "router.whl").touch()
+    (root / "benchmarks/scicode/data").mkdir(parents=True, exist_ok=True)
+    capture = 'srun() { cat > "$CAPTURE/build-command"; touch "$OUTPUT_CONTAINER.partial"; }\n'
+    result = run_shell(capture + shlex.join(["source", str(BUILDER)]), root, env)
+    assert result.returncode == 0, result.stderr
+    # The generated script is what runs in the container: execute it, with the system changes stubbed.
+    stubs = "\n".join(
+        f"{command}() {{ :; }}" for command in ("source", "cd", "uv", "git", "apt-get", "python3", "mkdir", "rm")
+    )
+    stubs += f"\n{gdown}\ngym() {{ :; }}\n"
+
+    result = run_shell(stubs + (root / "build-command").read_text(), root, env)
+
+    assert (result.returncode == 0) is builds, result.stderr
+    if not builds:
+        assert "SKIP_SCICODE_DATA=1" in result.stderr
