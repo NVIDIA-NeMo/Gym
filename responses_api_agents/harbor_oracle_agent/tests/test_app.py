@@ -530,8 +530,7 @@ def test_solution_exiting_127_itself_is_a_solution_failure(monkeypatch):
 
 def test_a_failed_solution_leaves_its_exit_code_beside_oracle_txt_as_harbors_oracle_does(monkeypatch):
     """Harbor 0.22.0's oracle writes `str(return_code)` to exit-code.txt in the trial's agent folder (/logs/agent in
-    the environment) after a non-zero solve.sh, and no trajectory.json. A verifier that falls back to oracle.txt and
-    exit-code.txt when no coding-agent records exist reads that pair."""
+    the environment) after a non-zero solve.sh, so a verifier that reads the oracle's exit code finds it there."""
     sandbox = FakeSandbox(result=SandboxExecResult(stdout="half done\n", stderr="boom", return_code=2))
     agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
     client = TestClient(agent.setup_webserver())

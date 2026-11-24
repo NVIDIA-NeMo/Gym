@@ -10,8 +10,9 @@ folder itself. Verification then scores the result exactly as it would score a m
 
 `solve.sh` runs with `DEBIAN_FRONTEND=noninteractive` under the task's `[agent].timeout_sec`, capped by
 `max_solve_timeout_s` when that is set, and its output lands in `/logs/agent/oracle.txt`. A non-zero exit code is
-written to `/logs/agent/exit-code.txt`, and the environment server writes no `/logs/agent/trajectory.json` for the
-oracle, so the verifier sees what Harbor's oracle leaves there. Each turn of a multi-step task first removes the
+written to `/logs/agent/exit-code.txt`, as Harbor's oracle does. Unlike Harbor's oracle, which writes no transcript,
+the oracle's verifier also finds `/logs/agent/trajectory.json`: the environment server writes it for every harness,
+so a task verifier that reads it works under the oracle too. Each turn of a multi-step task first removes the
 previous turn's `oracle.txt` and `exit-code.txt`, as Harbor empties `/logs/agent` before every step. The response
 metadata records `oracle=solved|failed|unvalidated` with the exit code and any error type. Tasks without
 `solution/solve.sh` are reported as `unvalidated` and are never failed.

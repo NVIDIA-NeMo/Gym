@@ -3997,13 +3997,14 @@ GREETING = "hi"
         seed = server.server_client.seed_bodies()[0]
         assert "env" not in seed["sandbox_access"]
 
-    @pytest.mark.parametrize(("implementation", "placed"), [("harbor_oracle_agent", False), ("hermes_agent", True)])
-    async def test_only_the_oracles_verifier_gets_no_transcript_in_the_sandbox(
-        self, tmp_path, monkeypatch, implementation, placed
+    @pytest.mark.parametrize("implementation", ["harbor_oracle_agent", "hermes_agent"])
+    async def test_the_oracles_verifier_gets_the_transcript_as_every_harness_does(
+        self, tmp_path, monkeypatch, implementation
     ):
-        """Harbor's oracle writes no /logs/agent/trajectory.json (``SUPPORTS_ATIF`` is false), so its verifier finds
-        only oracle.txt and exit-code.txt there; every other harness's verifier reads the server's ATIF transcript.
-        The reserved path is cleared before test.sh either way, and Gym keeps the transcript with the verifier logs."""
+        """Harbor's oracle writes no /logs/agent/trajectory.json, but Gym writes the server's ATIF transcript there for
+        the oracle as for any other harness, so a task verifier that reads it also passes under the oracle. The
+        reserved path is cleared, then the transcript uploaded, before test.sh, and the same bytes are kept with the
+        verifier logs."""
         server, task, sandbox, _ = make_server(
             tmp_path, monkeypatch, toml=self.SOLUTION_TOML, agent_implementation=implementation, solution=True
         )
@@ -4016,12 +4017,11 @@ GREETING = "hi"
         commands = [c["command"] for c in sandbox.execs]
         test_sh = next(i for i, c in enumerate(commands) if "test.sh" in c and "timeout" in c)
         cleared = next(i for i, c in enumerate(commands) if "rm -rf -- /logs/agent/trajectory.json" in c)
-        assert cleared < test_sh
-        uploads = [i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent;" in c]
-        assert len(uploaded_file(sandbox, "trajectory.json")) == len(uploads) == int(placed)
-        assert all(i < test_sh for i in uploads)
-        transcript = json.loads((Path(result.verifier_logs_dir) / "trajectory.json").read_bytes())
-        assert transcript["steps"][0]["message"] == "Create hello.txt"
+        (upload,) = [i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent;" in c]
+        assert cleared < upload < test_sh
+        host_copy = (Path(result.verifier_logs_dir) / "trajectory.json").read_bytes()
+        assert uploaded_file(sandbox, "trajectory.json") == [host_copy]
+        assert json.loads(host_copy)["steps"][0]["message"] == "Create hello.txt"
 
     async def test_a_task_without_a_solution_uploads_nothing_for_the_oracle(self, tmp_path, monkeypatch):
         """The oracle finds no /solution/solve.sh and reports the task unvalidated; the seed is not at fault."""

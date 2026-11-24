@@ -24,5 +24,3 @@ async def test_an_unresolvable_implementation_warns_and_places_no_solution(tmp_p
     assert response.failure is None, response.failure
     assert [c for c in sandbox.execs if "tar -xzf" in c["command"] and "-C /solution" in c["command"]] == []
     assert "no single responses_api_agents implementation" in caplog.text and "no solution is placed" in caplog.text
-    # Nor is it given the oracle's /logs/agent layout: its verifier gets the transcript, as any other harness's does.
-    assert [c for c in sandbox.execs if "tar -xzf" in c["command"] and "-C /logs/agent;" in c["command"]] != []
