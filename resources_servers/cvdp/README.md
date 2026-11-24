@@ -83,6 +83,18 @@ with a real harness agent (`hermes_agent`, `opencode_agent` or `claude_code_agen
 Apptainer reattaches a sandbox only on the host and as the user that started it, so the resources server and the
 agent must run on one node, as a single `gym env start` does.
 
+The task sandbox is not network-isolated. An Apptainer instance started without `--net` shares the host's network, so
+the agent's shell can reach the Gym servers on that host, the rest of the cluster network and the internet. Leaving
+web tools out limits the agent's tools, not its traffic. The legacy `cvdp_agent_generic_*` configs have the same
+exposure. Gym restricts egress only on OpenSandbox (`network_access: model_only`), so run untrusted models where the
+host network is acceptable to them. The containment hides the host's `/etc/resolv.conf` and `/etc/hosts` as well, so
+`cvdp_agentic.yaml` binds both back read-only.
+
+Hermes and Claude Code copy their runtimes in from the agent server. OpenCode installs its own inside the task sandbox:
+it downloads the OpenCode runtime and ripgrep from GitHub (`sandbox_ripgrep_download: true`, since the simulation image
+has no `rg`) and its plugin dependencies from the npm registry, so it needs that access from the host. The legacy
+OpenCode config built its runtime on the host instead.
+
 ```bash
 gym env start \
     --config resources_servers/cvdp/configs/cvdp_agentic_hermes.yaml \

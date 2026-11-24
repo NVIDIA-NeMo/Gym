@@ -22,7 +22,15 @@ cvdp_agentic_sandbox:
       # grader do: they hold other episodes' workspaces (each /code is a host temporary directory), the grader's
       # hidden test files and the servers' data. With containment the provider gives each sandbox a private /tmp
       # and home on disk (its --workdir), owned by the user that started it.
-      extra_start_args: [--writable-tmpfs, --containall, --no-mount, "hostfs,bind-paths,cwd"]
+      # --no-mount bind-paths also drops the host's /etc/resolv.conf and /etc/hosts, leaving the sandbox no name
+      # resolution; bind them back read-only. OpenCode downloads its runtime and ripgrep into the sandbox from GitHub.
+      extra_start_args:
+        - --writable-tmpfs
+        - --containall
+        - --no-mount
+        - hostfs,bind-paths,cwd
+        - --bind
+        - /etc/resolv.conf:/etc/resolv.conf:ro,/etc/hosts:/etc/hosts:ro
     exec:
       # Harness agents install their runtime under /tmp, outside /code. The provider copies such uploads in as "root"
       # through --fakeroot, which fails where the user has no /etc/subuid entry ("Failed to enter in user namespace").

@@ -30,6 +30,10 @@ cvdp_agentic_opencode_agent:
       # cvdp_agent's harness timeout.
       timeout: 900
       sandbox_install_timeout_seconds: 600
+      # OpenCode's grep and glob tools need ripgrep, and the CVDP simulation image has none. Let OpenCode download
+      # it on first use, as the legacy flavor's OpenCode did; the lent sandbox shares the host's network. On a host
+      # without GitHub access, use a simulation image that ships rg instead.
+      sandbox_ripgrep_download: true
       session_close_timeout_seconds: 60
       session_close_retry_window_seconds: 300
       opencode_config:

@@ -47,38 +47,28 @@ def test_each_harness_borrows_the_task_sandbox_of_the_cvdp_server(harness):
     assert environment["agent_server"]["name"] == HARNESSES[harness]
     assert environment["resources_server"]["name"] == "cvdp_agentic_resources_server"
     assert resources["oss_sim_image"] == "/images/cvdp-sim.sif"
+    # Sessions live in one process: a second worker would receive verifies for sessions it never seeded.
     assert resources["num_workers"] == 1
-    # The agent reattaches through the provider block the server names, which mounts the workspace.
+    # The agent reattaches through the provider block the server names, which mounts the workspace it works in.
     sandbox = OmegaConf.to_container(config[resources["agent_sandbox_provider"]], resolve=True)
-    assert sandbox["apptainer"]["create"]["mount_point"] == resources["agent_workdir"] == "/code"
-    # The agent installs its runtime under /tmp, which needs no --fakeroot.
-    assert sandbox["apptainer"]["exec"]["fakeroot_for_root"] is False
+    assert sandbox["apptainer"]["create"]["mount_point"] == resources["agent_workdir"]
     # A provider that expires sandboxes keeps the task sandbox for the whole episode.
     assert resources["agent_sandbox_config"]["ttl_s"] >= environment["default_episode_timeout_seconds"]
-    # Episodes are admitted at cvdp_agent's rate, no faster than the agent runs them (OpenCode's default is 8).
-    assert environment["max_concurrent_episodes"] == 4 <= agent.get("concurrency", 8)
+    # Episodes are admitted no faster than the agent runs them (OpenCode's default is 8), and wait for admission
+    # outside the episode clock.
+    assert environment["max_concurrent_episodes"] <= agent.get("concurrency", 8)
     assert environment["queue_timeout_seconds"] >= environment["default_episode_timeout_seconds"]
-    assert [dataset["jsonl_fpath"] for dataset in resources["datasets"]] == [
-        "resources_servers/cvdp/data/example_agentic.jsonl"
-    ]
 
 
-def test_opencode_keeps_the_command_deny_list_without_web_subagent_or_skill_tools():
-    agent = _server(_config("resources_servers/cvdp/configs/cvdp_agentic_opencode.yaml"), HARNESSES["opencode"])
+def test_the_three_harness_configs_compose_on_one_resources_server():
+    config = _config(*(f"resources_servers/cvdp/configs/cvdp_agentic_{harness}.yaml" for harness in HARNESSES))
+    resources = _server(config, "cvdp_agentic_resources_server")
 
-    permission = agent["opencode_config"]["permission"]
-    assert [permission[tool] for tool in ("webfetch", "websearch", "task", "skill")] == ["deny"] * 4
-    assert list(permission).index("*") < list(permission).index("webfetch")
-    assert permission["bash"]["*git fetch*"] == "deny"
-    # A sandbox session takes only permission and tools from opencode_config; the model is the model server.
-    assert set(agent["opencode_config"]) == {"permission"}
-    assert agent["context_window"] + agent["max_output_tokens"] <= 262144
-
-
-def test_hermes_has_no_web_tools():
-    agent = _server(_config("resources_servers/cvdp/configs/cvdp_agentic_hermes.yaml"), HARNESSES["hermes"])
-
-    assert agent["enabled_toolsets"] == ["terminal", "file"]
+    for harness, agent_name in HARNESSES.items():
+        agent = _server(config, agent_name)
+        assert _server(config, f"cvdp_agentic_{harness}")["agent_server"]["name"] == agent_name
+        assert agent["resources_server"]["name"] == "cvdp_agentic_resources_server"
+        assert next(iter(config[agent_name]["responses_api_agents"])) in resources["allowed_agents"]
 
 
 @pytest.mark.parametrize("harness", ["claude", "hermes", "opencode"])

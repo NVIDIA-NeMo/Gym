@@ -635,7 +635,12 @@ class CVDPResourcesServer(SimpleResourcesServer):
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def retire_session_state(self, session_id: str) -> None:
-        """Release resources when checkpoint retirement ends an attempt."""
+        """Release resources when checkpoint retirement ends an attempt.
+
+        Unlike the base contract, which keeps a retired session ID restorable, this fences it: CVDP restarts an attempt
+        rather than exporting checkpoints, so nothing restores it. Drop the fence if CVDP adds an exported checkpoint
+        mode.
+        """
         async with self._locks.locked(session_id):
             session = self._sessions.get(session_id)
             if session is not None:
