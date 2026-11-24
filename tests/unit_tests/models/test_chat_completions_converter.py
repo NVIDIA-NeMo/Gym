@@ -55,7 +55,7 @@ from nemo_gym.models.chat_completions_converter import (
     chat_completion_usage_to_response_usage,
     split_responses_input_output_items,
 )
-from nemo_gym.trajectory.model_call_record import _cache_signal
+from nemo_gym.trajectory.model_call_record import _cache_signal, extract_token_stats
 
 
 FIXED_UUID = "123"
@@ -140,94 +140,58 @@ def test_chat_completion_usage_to_response_usage():
     }
 
 
-def test_a_converted_usage_keeps_cache_writes_through_to_the_model_call_record():
-    from nemo_gym.observability.model_calls import extract_token_stats
-
-    raw = CompletionUsage(
-        prompt_tokens=300,
-        completion_tokens=20,
-        total_tokens=320,
-        prompt_tokens_details=PromptTokensDetails(cached_tokens=100, cache_write_tokens=60),
-    )
-
-    usage = chat_completion_usage_to_response_usage(raw)
-
-    assert usage.input_tokens_details.cache_write_tokens == 60
-    # The record of the converted response counts the same writes as the raw usage.
-    assert extract_token_stats(usage.model_dump())["cache_creation_tokens"] == 60
-    assert extract_token_stats(raw.model_dump())["cache_creation_tokens"] == 60
-
-
-@pytest.mark.parametrize("reported", [None, -1], ids=["absent", "negative"])
-def test_an_unreported_or_invalid_cache_write_count_stays_unknown(reported):
-    details = {"cached_tokens": 0} if reported is None else {"cached_tokens": 0, "cache_write_tokens": reported}
-
-    usage = chat_completion_usage_to_response_usage(
-        CompletionUsage(
-            prompt_tokens=10,
-            completion_tokens=2,
-            total_tokens=12,
-            prompt_tokens_details=PromptTokensDetails(**details),
-        )
-    )
-
-    assert usage.input_tokens_details.cache_write_tokens is None
-
-
 @pytest.mark.parametrize(
-    ("usage", "expected"),
+    ("reported", "expected"),
     [
-        ({"prompt_tokens_details": {"cache_write_tokens": 60}, "cache_creation_input_tokens": 9}, 9),
-        ({"prompt_tokens_details": {"cache_write_tokens": 60, "cache_creation_tokens": 7}}, 60),
+        ({"cache_creation_input_tokens": 60}, 60),
+        ({"cache_creation_input_tokens": 9, "prompt_tokens_details": {"cache_write_tokens": 60}}, 9),
+        ({"cache_creation_input_tokens": 0, "prompt_tokens_details": {"cache_write_tokens": 60}}, 0),
+        ({"prompt_tokens_details": {"cache_write_tokens": 60}}, 60),
         ({"prompt_tokens_details": {"cache_creation_tokens": 7}}, 7),
-        ({"prompt_tokens_details": {}}, None),
-        ({"prompt_tokens_details": {"cache_write_tokens": True}}, None),
+        ({"prompt_tokens_details": {"cache_creation_tokens": 0}}, 0),
+        ({"prompt_tokens_details": {"cache_write_tokens": 60, "cache_creation_tokens": 7}}, 60),
+        ({"prompt_tokens_details": {"cached_tokens": 4}}, None),
+        ({"prompt_tokens_details": {"cache_write_tokens": -1}}, None),
         ({"cache_creation_input_tokens": "60"}, None),
+        ({"cache_creation_input_tokens": True}, None),
+        ({"prompt_tokens_details": {"cache_creation_tokens": "7"}}, None),
+        ({"prompt_tokens_details": {"cache_creation_tokens": True}}, None),
     ],
-    ids=["top-level first", "openai nested next", "litellm nested last", "none reported", "boolean", "string"],
+    ids=[
+        "anthropic",
+        "anthropic wins over openai",
+        "anthropic zero wins over openai",
+        "openai",
+        "litellm",
+        "litellm zero",
+        "openai wins over litellm",
+        "none reported",
+        "openai negative",
+        "anthropic string",
+        "anthropic boolean",
+        "litellm string",
+        "litellm boolean",
+    ],
 )
-def test_cache_writes_are_read_from_each_provider_spelling_in_order(usage, expected):
-    from nemo_gym.models.chat_completions_converter import _cache_write_tokens
-
-    assert _cache_write_tokens(usage) == expected
-
-
-def test_raw_and_converted_usage_record_the_same_cache_writes_when_spellings_conflict():
-    from nemo_gym.observability.model_calls import extract_token_stats
-
-    raw = CompletionUsage(
-        prompt_tokens=300,
-        completion_tokens=20,
-        total_tokens=320,
-        prompt_tokens_details=PromptTokensDetails(cached_tokens=100, cache_write_tokens=60),
-        cache_creation_input_tokens=9,
+def test_converted_usage_counts_the_cache_writes_the_provider_reported(reported, expected):
+    raw_usage = {"prompt_tokens": 300, "completion_tokens": 20, "total_tokens": 320} | reported
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "c1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+            "usage": raw_usage,
+        }
     )
 
-    converted = chat_completion_usage_to_response_usage(raw)
+    converted = chat_completion_usage_to_response_usage(completion.usage)
 
-    assert (
-        extract_token_stats(converted.model_dump())["cache_creation_tokens"]
-        == extract_token_stats(raw.model_dump())["cache_creation_tokens"]
-    )
-
-
-def test_cache_writes_are_summed_and_an_unknown_count_stays_unknown():
-    from nemo_gym.core.responses_api_types import NeMoGymResponseUsage, accumulate_response_usage
-
-    def usage(cache_write_tokens):
-        return chat_completion_usage_to_response_usage(
-            CompletionUsage(
-                prompt_tokens=10,
-                completion_tokens=2,
-                total_tokens=12,
-                prompt_tokens_details=PromptTokensDetails(cached_tokens=0, cache_write_tokens=cache_write_tokens),
-            )
-        )
-
-    assert accumulate_response_usage(usage(60), usage(40)).input_tokens_details.cache_write_tokens == 100
-    assert accumulate_response_usage(usage(60), usage(None)).input_tokens_details.cache_write_tokens is None
-    assert NeMoGymResponseUsage.sum_from_list([usage(60), usage(40)]).input_tokens_details.cache_write_tokens == 100
-    assert NeMoGymResponseUsage.sum_from_list([usage(60), usage(None)]).input_tokens_details.cache_write_tokens is None
+    assert converted.input_tokens_details.cache_write_tokens == expected
+    # The model-call records of the provider's call and of the converted response count the same writes.
+    assert extract_token_stats(raw_usage)["cache_creation_tokens"] == expected
+    assert extract_token_stats(converted.model_dump())["cache_creation_tokens"] == expected
 
 
 def test_usage_detail_prefers_nested_details_in_mappings():

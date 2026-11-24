@@ -172,23 +172,48 @@ class TestNormalizeToResponse:
         assert validated.usage.input_tokens_details.cached_tokens is None
         assert validated.usage.output_tokens_details.reasoning_tokens is None
 
-    def test_chat_completion_cache_writes_reach_the_response_usage(self) -> None:
+    @pytest.mark.parametrize(
+        "cache_write",
+        [
+            {"prompt_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 60}},
+            {"prompt_tokens_details": {"cached_tokens": 100, "cache_creation_tokens": 60}},
+            {"prompt_tokens_details": {"cached_tokens": 100}, "cache_creation_input_tokens": 60},
+        ],
+        ids=["openai", "litellm", "anthropic"],
+    )
+    def test_chat_completion_cache_writes_reach_the_response_usage(self, cache_write) -> None:
         data = {
             "object": "chat.completion",
             "id": "c1",
             "model": "m",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": 300,
-                "completion_tokens": 20,
-                "total_tokens": 320,
-                "prompt_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 60},
-            },
+            "usage": {"prompt_tokens": 300, "completion_tokens": 20, "total_tokens": 320} | cache_write,
         }
 
         result = _normalize_to_response(data)
 
         assert result["usage"]["input_tokens_details"] == {"cached_tokens": 100, "cache_write_tokens": 60}
+
+    def test_native_response_cache_writes_reach_the_response_usage(self) -> None:
+        data = deepcopy(NATIVE_RESPONSE)
+        data["usage"] = {
+            "prompt_tokens": 300,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 100, "cache_creation_tokens": 60},
+        }
+
+        result = _normalize_to_response(data)
+
+        assert result["usage"]["input_tokens_details"] == {"cached_tokens": 100, "cache_write_tokens": 60}
+        assert NeMoGymResponse.model_validate(result).usage.input_tokens_details.cache_write_tokens == 60
+
+    def test_hybrid_response_cache_writes_reach_the_response_usage(self) -> None:
+        data = deepcopy(HYBRID_RESPONSE)
+        data["usage"]["input_tokens_details"] = {"cached_tokens": 2, "cache_write_tokens": 3}
+
+        result = _normalize_to_response(data)
+
+        assert result["usage"]["input_tokens_details"]["cache_write_tokens"] == 3
 
     def test_native_response_reasoning_item_normalized(self) -> None:
         """Native response reasoning item missing summary and with output_text is normalized."""

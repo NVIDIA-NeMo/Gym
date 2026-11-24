@@ -22,7 +22,11 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.trajectory.atif_export import AtifExportError, encode_atif_trajectory, transcript_to_atif
-    from nemo_gym.trajectory.model_call_record import ModelCallRecord, build_model_call_record
+    from nemo_gym.trajectory.model_call_record import (
+        ModelCallRecord,
+        build_model_call_record,
+        extract_cache_write_tokens,
+    )
     from nemo_gym.trajectory.tool_timing import normalize_operation_timing, normalize_tool_calls, tool_attempt_id
     from nemo_gym.trajectory.trajectory_format import project_bundle_v1, project_trajectory_v1
     from nemo_gym.trajectory.trajectory_record import (
@@ -83,6 +87,7 @@ _PUBLIC_API = {
     "VerifierInvocation": "trajectory_record",
     "build_model_call_record": "model_call_record",
     "encode_atif_trajectory": "atif_export",
+    "extract_cache_write_tokens": "model_call_record",
     "failure_observations": "trajectory_record",
     "grading_result_binding": "trajectory_record",
     "join_agent_model_calls": "trajectory_record",
