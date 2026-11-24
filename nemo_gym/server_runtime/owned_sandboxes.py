@@ -799,9 +799,11 @@ class OwnedSandboxes:
         """
         self._closed = True
         # What runs now is stopped first: a create cancelled at shutdown may take its whole start to settle.
-        await self._stop_at_shutdown([key for key in self._entries if key not in self._pending])
+        running = [key for key in self._entries if key not in self._pending]
+        await self._stop_at_shutdown(running)
         await self._none_pending.wait()
-        await self._stop_at_shutdown(list(self._entries))
+        # Each key is tried once per call; one whose stop failed stays for the next call.
+        await self._stop_at_shutdown([key for key in self._entries if key not in running])
         await self.settle()
         if self._owns_provider and not self._entries and not self._unstopped_forks:
             # Last, and only once nothing is left to stop, so a later call can still retry a failed stop. Closing
