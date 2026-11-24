@@ -412,22 +412,6 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             task = a_interact.read_request(*request_texts(body))
         except a_interact.AInteractTextError as error:
             raise HTTPException(422, str(error)) from error
-        bought = {name: await self._call_granted_tool(state.tool_access, name) for name in a_interact.PURCHASES}
-        knowledge, children = c_interact.interactive_knowledge(
-            a_interact.knowledge_entries(bought[a_interact.KNOWLEDGE_TOOL]["observation"]),
-            self._knowledge_children(task.database),
-        )
-        payload = {
-            "pipeline": "interactive",
-            "mode": "a_interact",
-            "database": task.database,
-            "question": task.question,
-            "schema": bought[a_interact.SCHEMA_TOOL]["observation"],
-            "knowledge": knowledge,
-            "knowledge_children": children,
-            "budget": {"initial": task.budget, "remaining": bought[a_interact.PURCHASES[-1]]["coins_left"]},
-            "tools": {name: tool_endpoint(state.tool_access, name) for name in a_interact.EPISODE_TOOLS},
-        }
         _, message = request_texts(body)
         invocation = AgentInvocation(
             invocation_id="root",
@@ -435,8 +419,25 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             in_session=True,
             conversation=[NeMoGymEasyInputMessage(role="user", content=message)],
         )
+        # The invocation covers buying the task's context too: a purchase that fails fails it.
         started = perf_counter()
         try:
+            bought = {name: await self._call_granted_tool(state.tool_access, name) for name in a_interact.PURCHASES}
+            knowledge, children = c_interact.interactive_knowledge(
+                a_interact.knowledge_entries(bought[a_interact.KNOWLEDGE_TOOL]["observation"]),
+                self._knowledge_children(task.database),
+            )
+            payload = {
+                "pipeline": "interactive",
+                "mode": "a_interact",
+                "database": task.database,
+                "question": task.question,
+                "schema": bought[a_interact.SCHEMA_TOOL]["observation"],
+                "knowledge": knowledge,
+                "knowledge_children": children,
+                "budget": {"initial": task.budget, "remaining": bought[a_interact.PURCHASES[-1]]["coins_left"]},
+                "tools": {name: tool_endpoint(state.tool_access, name) for name in a_interact.EPISODE_TOOLS},
+            }
             state.episode = episode = await self._run_in_sandbox(state, payload)
         except BaseException as error:
             state.invocations.append(

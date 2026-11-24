@@ -463,6 +463,25 @@ class Budget:
         return max(0, int(spare // COIN_COSTS["ask"]))
 
 
+class ServerAccountError(RuntimeError):
+    """The server's balance differs from the agent's account, which charges BIRD-Interact's reference prices."""
+
+
+def check_balance(budget: Budget, reply: dict[str, Any]) -> None:
+    """Fail when a charged reply's ``coins_left`` is not the agent's balance.
+
+    The agent's account charges ``COIN_COSTS``, the bird_interact server's default ``action_costs``. On a server with
+    other prices, the agent could spend the coins it keeps for a submission or the follow-up. After a submission that
+    spends the budget, the account reads exhausted, whatever the server's balance.
+    """
+    coins_left = reply.get("coins_left")
+    if coins_left is not None and not budget.exhausted and float(coins_left) != budget.remaining:
+        raise ServerAccountError(
+            f"The server has {coins_left:g} coins left where the agent's account has {budget.remaining:g}: the "
+            "pairing needs the bird_interact server's default action_costs"
+        )
+
+
 class ChargedConnector:
     """A database connector whose queries the server charges as ``execute``, before they run on this sandbox's copy.
 
@@ -482,6 +501,10 @@ class ChargedConnector:
         self._base, self._budget, self._execute, self._calls, self._phase = base, budget, execute, calls, phase
         # Phase 1 keeps its floor; the follow-up clears it.
         self.reserve = PHASE_1_FLOOR
+        # The first query that the server may have charged without answering, or charged at other prices. Auto
+        # Ontology's SQL tool turns what execute raises into feedback for the model, so the runner raises this once
+        # the pipeline's step returns.
+        self.failure: Exception | None = None
         self._lock = threading.Lock()
 
     def cost_status(self) -> str:
@@ -505,16 +528,19 @@ class ChargedConnector:
     def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
         with self._lock:
             charged = self._budget.charge("execute", reserve=self.reserve)
-            reply = call_charged_tool(self._execute, {"sql": sql}) if charged else None
-            self._calls.append(
-                {
-                    "name": "execute",
-                    "arguments": {"sql": sql[:2000]},
-                    "charged": charged,
-                    "coins_left": None if reply is None else reply.get("coins_left"),
-                }
-            )
-        if not charged or (reply is not None and reply["observation"] == BUDGET_SPENT_REPLY):
+            call = {"name": "execute", "arguments": {"sql": sql[:2000]}, "charged": charged, "coins_left": None}
+            self._calls.append(call)
+            reply = None
+            if charged:
+                try:
+                    reply = call_charged_tool(self._execute, {"sql": sql})
+                    call["coins_left"] = reply.get("coins_left")
+                    check_balance(self._budget, reply)
+                except Exception as error:
+                    call["error"] = f"{type(error).__name__}: {error}"[:2000]
+                    self.failure = self.failure or error
+                    raise
+        if reply is None or reply["observation"] == BUDGET_SPENT_REPLY:
             raise BudgetExhausted(f"Query refused ({self._budget.remaining:.1f} remaining).")
         return self._base.execute(sql, *args, **kwargs)
 
@@ -587,13 +613,17 @@ def run_a_interact(task: dict[str, Any]) -> dict[str, Any]:
     sql, reply, reason, steps, coins_left = None, None, "max_agent_steps", 0, None
 
     def next_action() -> Any:
-        return step(
+        action = step(
             session,
             turn_type=turn_type,
             debug_error=debug_error,
             initial_question=task["question"],
             follow_up_question=follow_up,
         )
+        # The pipeline's queries ran on in spite of a failed one; the task does not.
+        if connector.failure is not None:
+            raise connector.failure
+        return action
 
     while steps < MAX_A_INTERACT_STEPS:
         steps += 1
@@ -613,6 +643,7 @@ def run_a_interact(task: dict[str, Any]) -> dict[str, Any]:
                 reason = "ask_unaffordable"
                 break
             answered = call_charged_tool(tools["ask"], {"question": action.question})
+            check_balance(budget, answered)
             answer, coins_left = answered["observation"], answered.get("coins_left")
             if answer.strip() == USER_FAILED_REPLY:
                 questions_blocked = True
@@ -636,6 +667,7 @@ def run_a_interact(task: dict[str, Any]) -> dict[str, Any]:
         budget.charge("submit")
         sql = without_database_qualifier(action.sql)
         graded = call_charged_tool(tools["submit"], {"sql": sql})
+        check_balance(budget, graded)
         reply, coins_left = graded["observation"], graded.get("coins_left")
         calls.append({"name": "submit", "arguments": {"sql": sql}, "reply": reply})
         result = submission_result(reply)

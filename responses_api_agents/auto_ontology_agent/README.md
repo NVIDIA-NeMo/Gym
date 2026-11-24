@@ -92,6 +92,12 @@ the server's `execute`, which charges it, or refuses it once the budget is spent
 own copy of the database: `execute` shows at most 20 rows as text, and Auto Ontology needs the whole result, as
 auto-ontology-eval's connector returns it. The ReAct agent is told the balance, in auto-ontology-eval's words.
 
+The agent's account charges BIRD-Interact's reference prices, which are the `bird_interact` server's default
+`action_costs`; the pairing needs them. The task fails, rather than goes on, when a reply's `coins_left` departs from
+the account, or when a query, question or submission gets no reply: the server may have charged it. The failure ends
+the activation when the call returns, or, for a query, which Auto Ontology's SQL tool turns into feedback, once the
+pipeline's step returns.
+
 A seed for the interactive pipeline must grant the server's tools over direct HTTP and carry no task context.
 
 ## The sandbox's network

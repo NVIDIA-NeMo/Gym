@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import sys
 from pathlib import Path
@@ -152,6 +153,66 @@ def test_a_query_the_server_refuses_does_not_run(monkeypatch: pytest.MonkeyPatch
     with pytest.raises(episode_runner.BudgetExhausted):
         connector.execute("SELECT 1")
     assert database.ran == []
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        (http.client.IncompleteRead(b'{"observation": "1 ro', 40), http.client.IncompleteRead),
+        # The server charged 2 for the query: its balance is 8 where the agent's account has 9.
+        ({"observation": "1 rows\n(1,)", "coins_left": 8.0}, episode_runner.ServerAccountError),
+    ],
+    ids=["reply lost", "other price"],
+)
+def test_a_query_the_server_did_not_answer_as_charged_fails_the_task_after_the_step(
+    monkeypatch: pytest.MonkeyPatch, reply: Any, error: type[Exception]
+) -> None:
+    sent: list[str] = []
+
+    def call(endpoint: dict, arguments: dict) -> dict:
+        name = endpoint["url"].rsplit("/", 1)[1]
+        sent.append(name)
+        if name != "execute":
+            return {"observation": "Phase 1 correct! (Reward: 0.7). Task finished.\nReward: 0.7", "coins_left": None}
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(episode_runner, "call_charged_tool", call)
+    _fake_auto_ontology(monkeypatch, [SubmitSQLAction("SELECT 1")])
+    interactive = sys.modules["auto_ontology.retrieval.interactive"]
+    pipeline_step = interactive.step
+    queried: list[str] = []
+
+    def step(session: Any, **options: Any) -> Any:
+        # Auto Ontology's SQL tool runs a query and turns what it raises into feedback for the model.
+        try:
+            session.connectors[0].execute("SELECT 1")
+        except Exception as failure:
+            queried.append(type(failure).__name__)
+        return pipeline_step(session, **options)
+
+    monkeypatch.setattr(interactive, "step", step)
+    task = _task()
+    task["budget"]["remaining"] = 10.0
+
+    with pytest.raises(error):
+        episode_runner.run(task)
+    # The step went on after the failed query, but the task did not submit.
+    assert queried == [error.__name__]
+    assert sent == ["execute"]
+
+
+def test_a_question_charged_at_another_price_fails_the_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    def call(endpoint: dict, arguments: dict) -> dict:
+        # 15 - 4 where the reference price of a question is 2.
+        return {"observation": "Visits this year.", "coins_left": 11.0}
+
+    monkeypatch.setattr(episode_runner, "call_charged_tool", call)
+    _fake_auto_ontology(monkeypatch, [AskUserAction("What is active?"), SubmitSQLAction("SELECT 1")])
+
+    with pytest.raises(episode_runner.ServerAccountError, match="server has 11 coins left"):
+        episode_runner.run(_task())
 
 
 def test_the_react_agent_is_told_what_its_queries_cost(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -456,6 +517,35 @@ async def test_an_a_interact_activation_buys_the_task_s_context_then_runs_the_ta
     assert state.invocations[0].stop_reason == "done"
     # The non-reasoning role keeps its own sampling; the policy takes the rollout's.
     assert resolved == {"policy_model": True, "non_reasoning_model": False}
+
+
+async def test_a_purchase_that_fails_fails_the_activation_s_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def request(method: str, url: str, **kwargs: Any) -> _Reply:
+        if url.endswith("/get_all_knowledge_definitions"):
+            raise RuntimeError("503 Service Unavailable")
+        return _Reply({"observation": "{}", "coins_left": 17.0})
+
+    async def raise_for_status(response: _Reply) -> None:
+        pass
+
+    monkeypatch.setattr(agent_app, "request", request)
+    monkeypatch.setattr(agent_app, "raise_for_status", raise_for_status)
+    agent = _agent(pipeline="interactive")
+    seed = _a_interact_seed()
+    state = AutoOntologySessionState(
+        request=seed,
+        task=None,
+        session=_FakeSession({}),  # type: ignore[arg-type]
+        catalog_port=34567,
+        tool_access=agent.effective_tool_accesses(seed)[0],
+    )
+
+    with pytest.raises(RuntimeError, match="503"):
+        await agent._run_episode(state, _request())
+
+    [invocation] = state.invocations
+    assert (invocation.status, invocation.error_type) == ("failed", "RuntimeError")
+    assert invocation.duration_ms is not None
 
 
 async def test_an_a_interact_activation_with_the_server_s_tools_runs(monkeypatch: pytest.MonkeyPatch) -> None:
