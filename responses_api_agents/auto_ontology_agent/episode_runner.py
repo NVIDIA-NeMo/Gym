@@ -23,6 +23,7 @@ replies with the error, which the model reads as the tool's result.
 An episode that raises writes RESULT_JSON with ``error`` and exits 1, so the agent reports the cause.
 """
 
+import http.client
 import json
 import os
 import sys
@@ -109,8 +110,9 @@ def call_tool(endpoint: dict[str, Any], arguments: dict[str, Any]) -> str:
     except urllib.error.HTTPError as error:
         body = error.read().decode(errors="replace")
         raise ToolCallError(f"The tool call failed with HTTP {error.code}: {body[:2000]}", refused=error.code < 500)
-    except (urllib.error.URLError, TimeoutError) as error:
-        raise ToolCallError(f"The tool call failed: {error}", refused=False) from error
+    except (OSError, http.client.HTTPException) as error:
+        # No reply, or a reply cut short (IncompleteRead, a reset connection): the server may have counted the call.
+        raise ToolCallError(f"The tool call failed: {type(error).__name__}: {error}", refused=False) from error
     try:
         output = json.loads(reply)
     except json.JSONDecodeError:

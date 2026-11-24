@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import http.client
 import io
 import json
 import urllib.error
@@ -658,6 +659,24 @@ async def test_c_interact_turns_ask_the_user_submit_through_the_server_and_remem
     assert all(invocation.duration_ms is not None for invocation in invocations)
 
 
+async def test_a_c_interact_turn_whose_model_call_failed_fails_for_the_outcome_policy(
+    monkeypatch: pytest.MonkeyPatch, staged: dict[str, str]
+) -> None:
+    monkeypatch.setattr(AutoOntologyAgent, "resolve_model_base_url", lambda *args, **kwargs: MODEL_URL)
+    agent = _agent()
+    failure = {"status_code": 429, "no_reply": False, "error": "RateLimitError: 429"}
+    result = {"sql": None, "reason": "model_error", "environment_tool_calls": [], "model_failure": failure}
+    state = _c_interact_state(agent, _TurnSession([result], staged))
+
+    reply = await agent._activate_agent_session_state(state, _first_turn(), activation_id=1)
+
+    assert reply.status == "failed"
+    assert agent_outcome_policy(reply) == OutcomeAction.RETRY
+    closed = await agent._close_agent_session_state(state)
+    [invocation] = closed.trajectory.invocations
+    assert (invocation.status, invocation.stop_reason) == ("failed", "model_error")
+
+
 def test_a_first_turn_without_the_instruction_is_refused() -> None:
     agent = _agent()
     state = _c_interact_state(agent, _TurnSession([], {}))
@@ -805,6 +824,42 @@ def test_an_unanswered_question_fails_the_episode_after_the_loop(
     with pytest.raises(episode_runner.ToolCallError):
         ask(question="What is active?")
     assert calls[0]["refused"] is False and "connection refused" in calls[0]["error"]
+
+
+@pytest.mark.parametrize(
+    "error", [http.client.IncompleteRead(b'"A vis', 20), ConnectionResetError("reset by peer")], ids=type
+)
+def test_a_reply_cut_short_fails_the_episode_after_the_loop(
+    monkeypatch: pytest.MonkeyPatch, extra_tool_module: None, error: Exception
+) -> None:
+    """The server answered 200 and may have counted the question, but its reply did not arrive whole."""
+
+    class Reply:
+        def __enter__(self) -> "Reply":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def read(self) -> bytes:
+            raise error
+
+    monkeypatch.setattr(episode_runner.urllib.request, "urlopen", lambda request, timeout: Reply())
+    calls: list[dict[str, Any]] = []
+    tool = {"definition": {"type": "function", "function": {"name": "ask_user"}}, "url": "http://env/ask_user"}
+    [ask] = episode_runner.extra_tools({"tools": [tool]}, calls)
+
+    with pytest.raises(episode_runner.ToolCallError):
+        ask.run(question="What is active?")
+    # Recorded as a call that got no reply, which run() raises once the loop returns, so the question is not repeated.
+    assert calls == [
+        {
+            "name": "ask_user",
+            "arguments": {"question": "What is active?"},
+            "error": f"The tool call failed: {type(error).__name__}: {error}",
+            "refused": False,
+        }
+    ]
 
 
 def test_an_episode_that_raises_writes_its_error(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001

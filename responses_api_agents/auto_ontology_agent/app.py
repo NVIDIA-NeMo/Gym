@@ -496,7 +496,8 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         state.invocations.append(
             invocation.model_copy(
                 update={
-                    "status": "completed",
+                    # A turn whose model call the loop gave up on failed; its reply says so.
+                    "status": "failed" if response.status == "failed" else "completed",
                     "stop_reason": str(episode.get("reason")),
                     "duration_ms": (perf_counter() - started) * 1000,
                     "conversation": [*invocation.conversation, *response.output],
