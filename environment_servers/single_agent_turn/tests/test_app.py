@@ -55,6 +55,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
+    NG_SANDBOX_ACCESS_KEY,
     AgentContext,
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
@@ -648,7 +649,9 @@ async def test_skip_verification_returns_the_fixed_reward_and_still_closes_both_
 ) -> None:
     environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
 
-    result = await environment_server.run_request(_request())
+    request = _request()
+    request.task.task_input.task_data[NG_SANDBOX_ACCESS_KEY] = "task metadata"
+    result = await environment_server.run_request(request)
 
     assert result.failure is None
     assert [path for _, path, _ in client.calls] == [
@@ -661,6 +664,7 @@ async def test_skip_verification_returns_the_fixed_reward_and_still_closes_both_
     dumped = result.result.model_dump()
     assert dumped["reward"] == reward
     assert dumped["verification_skipped"] is True
+    assert NG_SANDBOX_ACCESS_KEY not in dumped
     # The same flat shape a verified result has: the verify body plus the reward.
     assert dumped["instance_id"] == "task"
     assert dumped["response"]["id"] == "response"

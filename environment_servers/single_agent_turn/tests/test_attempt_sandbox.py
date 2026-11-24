@@ -180,7 +180,9 @@ async def test_a_sandbox_the_resources_seed_lends_is_lent_on_and_none_is_started
     }
     client.responses[0] = _Response({"resources_session_id": "resources-session", "sandbox_access": resources_access})
 
-    result = await server.run_request(_request())
+    request = _request()
+    request.task.task_input.task_data[NG_SANDBOX_ACCESS_KEY] = "task metadata"
+    result = await server.run_request(request)
 
     assert result.failure is None, result.failure
     # No provider was built, not even by the cleanup that stops an attempt sandbox, and no cleanup failed.
