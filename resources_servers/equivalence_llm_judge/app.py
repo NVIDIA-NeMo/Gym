@@ -526,9 +526,14 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
             generated_full = _extract_last_assistant_text(
                 body, extract_regex=None, extraction_failure_message=self.config.msg_extraction_failure
             )
-            second_equal, second_eval = await self._judge_verdict(
-                question=question, expected_answer=expected, generated_answer=generated_full
-            )
+            try:
+                second_equal, second_eval = await self._judge_verdict(
+                    question=question, expected_answer=expected, generated_answer=generated_full
+                )
+            except JudgeError as error:
+                if error.failure_kind != JUDGE_UNPARSEABLE:
+                    raise
+                return self._make_response(body, expected, reward=0.0, evaluations=[first_eval])
 
             reward = self.config.reward_if_full_generation_succeeds if second_equal else 0.0
             return self._make_response(body, expected, reward, [first_eval, second_eval])
@@ -637,6 +642,10 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         )
         response = evaluation.response
         cut = response is not None and (response.status == "incomplete" or response.incomplete_details is not None)
+        # A reply cut before any output token means that the judge server refused the prompt for its length: the
+        # answer, which the policy controls, did not fit the judge's window. It scores as not equal.
+        if cut and response.usage is not None and response.usage.output_tokens == 0:
+            return False, evaluation
         if cut or evaluation.verdict_label is None:
             try:
                 text = response.output[-1].content[-1].text

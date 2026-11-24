@@ -314,7 +314,7 @@ class TestApp:
         assert res.reward == approx(0.0)
         assert len(res.judge_evaluations) == 1
 
-    @mark.parametrize("case", ["no label", "cut with a label", "rescue pass without a label", "swap pass cut"])
+    @mark.parametrize("case", ["no label", "cut with a label", "swap pass cut"])
     async def test_a_judge_reply_without_a_usable_verdict_masks_the_row(
         self, config: LLMJudgeResourcesServerConfig, case: str
     ) -> None:
@@ -324,7 +324,6 @@ class TestApp:
             "no label": [("no label present", {})],
             # A label in a reply cut at the judge's output limit is not trusted either.
             "cut with a label": [("[[A=B]] so far", cut)],
-            "rescue pass without a label": [("[[A!=B]]", {}), ("no label present", {})],
             "swap pass cut": [("[[A=B]]", {}), ("[[A=B]]", cut)],
         }[case]
         if case == "swap pass cut":
@@ -353,7 +352,6 @@ class TestApp:
                 tools=[],
             ),
             expected_answer="x",
-            template_metadata={"output_regex": r"ANSWER: (.*)"} if case.startswith("rescue") else None,
         )
         with raises(JudgeError, match="cut off" if "cut" in case else "no verdict") as error:
             await rs.verify(req)
@@ -365,6 +363,59 @@ class TestApp:
         assert (row["reward"], row["mask_sample"], row["failure_kind"]) == (0.0, True, JUDGE_UNPARSEABLE)
         assert row["_ng_failure_class"] == "judge_failed"
         assert row["response"] == req.response.model_dump(mode="json")
+
+    async def test_a_prompt_the_judge_refused_for_its_length_scores_zero(
+        self, config: LLMJudgeResourcesServerConfig
+    ) -> None:
+        # vllm_model answers a prompt longer than the judge's window with an empty reply cut before any output token.
+        refused = json.loads(self._create_response("f", self._msg(""))) | {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+        server_mock = MagicMock(spec=ServerClient)
+        server_mock.post = AsyncMock(return_value=MagicMock(read=AsyncMock(return_value=json.dumps(refused))))
+        rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse.model_validate_json(self._create_response("policy", self._msg("text"))),
+            expected_answer="x",
+        )
+
+        res = await rs.verify(req)
+
+        assert (res.reward, res.mask_sample) == (0.0, False)
+        assert server_mock.post.await_count == 1
+
+    async def test_a_rescue_pass_without_a_verdict_keeps_the_first_pass_zero(
+        self, config: LLMJudgeResourcesServerConfig
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        replies = []
+        for text in ("[[A!=B]]", "no label present"):
+            reply = MagicMock()
+            reply.read = AsyncMock(return_value=self._create_response("f", self._msg(text)))
+            replies.append(reply)
+        server_mock.post = AsyncMock(side_effect=replies)
+        rs = LLMJudgeResourcesServer(config=config, server_client=server_mock)
+        req = LLMJudgeVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=NeMoGymResponse.model_validate_json(self._create_response("policy", self._msg("text"))),
+            expected_answer="x",
+            template_metadata={"output_regex": r"ANSWER: (.*)"},
+        )
+
+        res = await rs.verify(req)
+
+        assert (res.reward, res.mask_sample) == (0.0, False)
+        assert [evaluation.verdict_label for evaluation in res.judge_evaluations] == ["[[A!=B]]"]
+        assert server_mock.post.await_count == 2
 
     @mark.parametrize("expected_answer", [None, ""])
     async def test_a_row_without_its_expected_answer_is_masked_without_calling_the_judge(
