@@ -97,7 +97,8 @@ def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Di
     A verified row's ``question_id`` is the 0-indexed position of the row it replaces in ``train.json``. Matching on
     that (rather than on question text) is robust because verification sometimes edits the question itself; the
     original text is then kept in ``original_question`` (``None`` when unchanged). Verified rows are appended after
-    the untouched originals, so the result has the same length as ``train_entries``.
+    the untouched originals, so the result has the same length as ``train_entries``. Each original gets its own
+    position in ``train.json`` as ``question_id``, so every row of the result has one.
     """
     replaced = set()
     mismatched = []
@@ -112,7 +113,8 @@ def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Di
         raise ValueError(
             f"{len(mismatched)} verified rows do not match train.json at their question_id: {mismatched[:10]}"
         )
-    uberset = [e for i, e in enumerate(train_entries) if i not in replaced] + list(verified_entries)
+    originals = [{**e, "question_id": i} for i, e in enumerate(train_entries) if i not in replaced]
+    uberset = originals + list(verified_entries)
     assert len(uberset) == len(train_entries), "uberset must be the same size as train.json"
     return uberset
 
@@ -235,6 +237,7 @@ def prepare(
                 question = entry["question"]
             assert question, f"Entry {i} (db_id={db_id!r}) has no question"
             row = {
+                "task_id": str(entry["question_id"]),
                 "question": question,
                 "gt_sql": entry["SQL"],
                 "sql_context": db_handles[db_id].sql_context_for_question(question),

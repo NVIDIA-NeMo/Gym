@@ -96,6 +96,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SupportsSandboxSnapshot,
+    provider_capabilities,
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 
@@ -154,6 +155,10 @@ class SandboxCheckpointState(BaseModel):
 
     ``spec`` is written as the fork needs it, which includes the sandbox environment (``env``) in plain text: a
     checkpoint directory holds whatever the sandboxes were started with.
+
+    ``keeps_processes`` says the provider's snapshot kept the sandbox's running processes as well as its files, so
+    the fork starts with them running (``"processes"`` in the provider's ``capabilities.snapshot_keeps``). States
+    written before the field existed read as files only.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -164,6 +169,7 @@ class SandboxCheckpointState(BaseModel):
     snapshot_id: str
     spec: dict[str, JsonValue]
     snapshot_ready_ts: float
+    keeps_processes: bool = False
 
 
 class SandboxCheckpointError(RuntimeError):
@@ -683,6 +689,7 @@ class SandboxSessionCheckpointer:
             snapshot_id=snapshot_id,
             spec=spec,
             snapshot_ready_ts=time.time(),
+            keeps_processes="processes" in provider_capabilities(self._provider).snapshot_keeps,
         )
         return state.model_dump(mode="json")
 

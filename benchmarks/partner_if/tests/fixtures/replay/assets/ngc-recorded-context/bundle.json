@@ -1,0 +1,27 @@
+{
+  "files": {
+    "/workspace/input/prompt_latest.txt": "Check the neighboring namespace before giving advice.",
+    "/workspace/input/request.txt": "Synthetic public fixture.",
+    "/opt/agent/skills/registry-access/SKILL.md": "Use the read-only probe to check the exact version first.",
+    "/opt/agent/skills/registry-access/scripts/readonly_probe.py": "# Synthetic fixture: execution is modeled, not performed.",
+    "/opt/agent/skills/due-diligence-review/SKILL.md": "Read the actual session transcript before giving findings.",
+    "/opt/agent/skills/due-diligence-review/references/registry.yaml": "reviewers: []\n",
+    "/opt/agent/skills/staging-env-access/scripts/example_api_get.sh": "# Synthetic recorded GET wrapper."
+  },
+  "skills": {
+    "registry-access": "/opt/agent/skills/registry-access/SKILL.md",
+    "due-diligence-review": "/opt/agent/skills/due-diligence-review/SKILL.md"
+  },
+  "recorded_commands": {},
+  "primary": {
+    "input_uri": "registry.example.invalid/primary/widget/v1",
+    "http_status": 404,
+    "exists": false
+  },
+  "sibling": {
+    "input_uri": "registry.example.invalid/neighbor/widget/v1",
+    "http_status": 200,
+    "exists": true,
+    "version": "v1"
+  }
+}
