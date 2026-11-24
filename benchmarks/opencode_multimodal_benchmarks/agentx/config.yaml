@@ -24,7 +24,7 @@ opencode_multimodal_benchmarks:
         - numpy
         - opencv-python-headless==4.11.0.86
         num_repeats: 1
-        taskset: visual_tasks
+        taskset: opencode_multimodal_benchmarks/agentx
       judge_concurrency: 4
       judge_timeout: 300
       judge_attempts: 10
@@ -54,4 +54,4 @@ visual_environment:
 
 environment_routing_mode: taskset
 environment_server_routes:
-  visual_tasks: visual_environment
+  opencode_multimodal_benchmarks/agentx: visual_environment

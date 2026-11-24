@@ -13,7 +13,7 @@ config_paths:
 
 environment_routing_mode: taskset
 environment_server_routes:
-  "swebench:multilingual": swebench_multilingual_opencode_single_agent_turn
+  "swebench/multilingual": swebench_multilingual_opencode_single_agent_turn
 
 swebench_multilingual_opencode_agent_resources_server:
   _inherit_from: swebench_resources_server
@@ -28,7 +28,7 @@ swebench_multilingual_opencode_agent_resources_server:
       datasets:
         - name: swebench_multilingual
           type: benchmark
-          taskset: "swebench:multilingual"
+          taskset: "swebench/multilingual"
           jsonl_fpath: benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl
           prepare_script: benchmarks/swebench/multilingual/prepare.py
           num_repeats: 3

@@ -26,7 +26,7 @@ config_paths:
 
 environment_routing_mode: taskset
 environment_server_routes:
-  "swebench:verified": swebench_verified_opencode_single_agent_turn
+  "swebench/verified": swebench_verified_opencode_single_agent_turn
 
 swebench_verified_opencode_agent_resources_server:
   _inherit_from: swebench_resources_server
@@ -44,7 +44,7 @@ swebench_verified_opencode_agent_resources_server:
       datasets:
         - name: swebench_verified
           type: benchmark
-          taskset: "swebench:verified"
+          taskset: "swebench/verified"
           jsonl_fpath: benchmarks/swebench/data/swebench_verified_benchmark.jsonl
           prepare_script: benchmarks/swebench/verified/prepare.py
           num_repeats: 3

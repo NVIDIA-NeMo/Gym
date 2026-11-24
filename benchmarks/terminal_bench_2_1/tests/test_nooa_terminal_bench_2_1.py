@@ -76,7 +76,7 @@ def test_nooa_recipe_prepares_and_routes_canonical_terminal_tasks(
     assert benchmark is not None
     assert benchmark.agent_name == "agent"
     assert benchmark.environment_server == "experiment"
-    assert benchmark.dataset.taskset == "terminal-bench-2.1"
+    assert benchmark.dataset.taskset == "terminal_bench_2_1"
     assert benchmark.dataset.prepare_script == Path("benchmarks/terminal_bench_2_1/prepare.py")
     assert benchmark.dataset.jsonl_fpath == Path("benchmarks/terminal_bench_2_1/data/benchmark.jsonl")
 
@@ -150,7 +150,7 @@ def test_nooa_recipe_prepares_and_routes_canonical_terminal_tasks(
         )
     )
     assert row["_ng_environment_server"] == environment.name
-    assert row["task_id"] == {"taskset": "terminal-bench-2.1", "task_id": "fixture"}
+    assert row["task_id"] == {"taskset": "terminal_bench_2_1", "task_id": "fixture"}
     RolloutCollectionHelper._validate_environment_servers([row], config)
     task = SingleAgentTurnTaskInput.model_validate(row["task_input"])
     assert task.task_data == {
@@ -304,14 +304,14 @@ def test_documented_cli_uses_imported_dataset_and_private_overrides(
         (benchmark,) = prepared
         assert benchmark.agent_name == "agent"
         assert benchmark.environment_server == "experiment"
-        assert benchmark.dataset.taskset == "terminal-bench-2.1"
+        assert benchmark.dataset.taskset == "terminal_bench_2_1"
         assert benchmark.dataset.jsonl_fpath == Path("benchmarks/terminal_bench_2_1/data/benchmark.jsonl")
     else:
         config = global_config.get_global_config_dict()
         assert config.policy_model.responses_api_models.vllm_model.sampling_overrides.temperature == 0.37
         assert config.benchmark.resources_servers.terminal_bench_2_1.sandbox_config.resources.cpu == 8
         if command == "resolve":
-            assert "terminal-bench-2.1: experiment" in capsys.readouterr().out
+            assert "terminal_bench_2_1: experiment" in capsys.readouterr().out
         else:
             collected.assert_awaited_once()
             collection_config = collected.call_args.args[0]
@@ -320,5 +320,5 @@ def test_documented_cli_uses_imported_dataset_and_private_overrides(
                 == output.with_suffix("") / "preprocessed_datasets/benchmark.jsonl"
             )
             (row,) = RolloutCollectionHelper()._preprocess_rows_from_config(collection_config)
-            assert row["task_id"] == {"taskset": "terminal-bench-2.1", "task_id": "fixture"}
+            assert row["task_id"] == {"taskset": "terminal_bench_2_1", "task_id": "fixture"}
             assert row["_ng_environment_server"] == "experiment"

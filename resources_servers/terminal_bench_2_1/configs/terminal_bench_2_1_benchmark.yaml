@@ -23,7 +23,7 @@ benchmark:
       datasets:
         - name: terminal_bench_2_1
           type: benchmark
-          taskset: terminal-bench-2.1
+          taskset: terminal_bench_2_1
           jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
           prepare_script: benchmarks/terminal_bench_2_1/prepare.py
           num_repeats: 1

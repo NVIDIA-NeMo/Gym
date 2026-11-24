@@ -125,7 +125,7 @@ class TestPrepare:
 
         assert output == tmp_path / "data" / "full" / "a_interact.jsonl"
         (task,) = [json.loads(line) for line in output.read_text().splitlines()]
-        assert task["task_id"] == {"taskset": "bird_interact:a_interact", "task_id": "q1"}
+        assert task["task_id"] == {"taskset": "bird_interact/full/a_interact", "task_id": "q1"}
         assert task["task_input"]["instance_id"] == "q1" and task["task_input"]["sol_sql"] == ["SELECT 1"]
         assert "kept 1 of 2 tasks; left out: 1 with no ground truth" in capsys.readouterr().out
 

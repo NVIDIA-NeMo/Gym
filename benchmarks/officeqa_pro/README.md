@@ -140,7 +140,7 @@ get the tolerance and `no_answer` metrics.
 Five example questions cover the June 2001 bulletin. They test retrieval and
 arithmetic without the gated Pro question CSV. They use the same pinned PDF
 corpus, prompt, document tools and OpenCode harness as the benchmark. The
-examples form a separate taskset, `officeqa_pro_examples`, with one attempt per
+examples form a separate taskset, `officeqa_pro:examples`, with one attempt per
 question. Do not report their scores as OfficeQA Pro results.
 
 ```bash

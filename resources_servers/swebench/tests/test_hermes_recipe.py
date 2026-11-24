@@ -27,7 +27,7 @@ def recipe():
 def test_recipe_routes_the_verified_taskset_to_a_session_environment(recipe) -> None:
     assert recipe.environment_routing_mode == "taskset"
     assert OmegaConf.to_container(recipe.environment_server_routes) == {
-        "swebench:verified": "swebench_verified_hermes"
+        "swebench/verified": "swebench_verified_hermes"
     }
 
     environment = SingleAgentTurnEnvironmentServerConfig(
@@ -46,7 +46,7 @@ def test_recipe_routes_the_verified_taskset_to_a_session_environment(recipe) -> 
     )
     # The dataset's taskset is the route key, so its rows reach this environment.
     [dataset] = block["datasets"]
-    assert dataset["taskset"] == "swebench:verified" and dataset["type"] == "benchmark"
+    assert dataset["taskset"] == "swebench/verified" and dataset["type"] == "benchmark"
     assert block["allowed_agents"] == ["hermes_agent"] and block["num_workers"] == 1
     assert resources.apply_anti_cheating is False
     # The session lives as long as the sandbox, so it must outlive the episode deadline the agent runs under.

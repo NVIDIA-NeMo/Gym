@@ -37,7 +37,7 @@ gym env publish opencode_multimodal_benchmarks/hrbench8k
 
 Preparation writes `benchmarks/opencode_multimodal_benchmarks/data/hrbench8k.jsonl`.
 Collation wraps the prepared rows in typed `task_id`/`task_input` tasks.
-The `visual_tasks` route selects `single_agent_turn`, which owns the agent session
+The `opencode_multimodal_benchmarks/hrbench8k` route selects `single_agent_turn`, which owns the agent session
 and verification lifecycle; the source JSONL is unchanged.
 The offline verifier fixtures use synthetic answers and scripted judge replies,
 not a hosted judge or benchmark images. Publication checks are local validation,

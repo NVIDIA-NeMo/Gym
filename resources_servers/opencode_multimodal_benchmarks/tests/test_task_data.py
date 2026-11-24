@@ -280,7 +280,9 @@ def test_flat_legacy_and_materialized_tasks(benchmark, tmp_path):
     assert adapter.validate_python(metadata).answer == "A"
     validator = TaskDataValidator("opencode_multimodal_benchmarks", adapter, "synthetic.jsonl")
     validator.validate_row(0, row)
-    validator.validate_row(1, {"task_id": {"taskset": "visual_tasks", "task_id": "1"}, "task_input": row})
+    validator.validate_row(
+        1, {"task_id": {"taskset": "opencode_multimodal_benchmarks/vstar", "task_id": "1"}, "task_input": row}
+    )
     assert validator.report.clean, validator.report.summary()
     assert "private answer" not in str(row["responses_create_params"])
     with pytest.raises(ValidationError):

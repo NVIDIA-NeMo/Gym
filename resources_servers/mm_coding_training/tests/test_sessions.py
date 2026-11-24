@@ -59,7 +59,7 @@ def typed_seed(body):
         {
             "resources_session_id": "session-1",
             "episode_id": {"rollout_id": "rollout", "attempt": 0},
-            "task_id": {"taskset": "mm-coding:opencode", "task_id": f"{body.task.benchmark}:{body.task.task_id}"},
+            "task_id": {"taskset": "mm_coding_opencode", "task_id": f"{body.task.benchmark}:{body.task.task_id}"},
             "task_data": {"task": body.task.model_dump()},
         }
     )
@@ -336,7 +336,7 @@ async def test_missing_answer_zero_survives_full_reverification_after_restart(se
     first = await session_server.verify(http_request(), body)
     assert first.reward == 0 and first.evaluation_completed and not first.mask_sample
     row = {
-        "task_id": {"taskset": "mm-coding:opencode", "task_id": "mmsvg_text2svg:task-1"},
+        "task_id": {"taskset": "mm_coding_opencode", "task_id": "mmsvg_text2svg:task-1"},
         "task_input": {
             "task_data": {"task": body.task.model_dump()},
             "responses_create_params": body.responses_create_params.model_dump(mode="json"),

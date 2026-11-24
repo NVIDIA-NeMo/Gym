@@ -14,7 +14,7 @@ config_paths:
 
 environment_routing_mode: taskset
 environment_server_routes:
-  "swebench:multimodal": swebench_multimodal_opencode_single_agent_turn
+  "swebench/multimodal": swebench_multimodal_opencode_single_agent_turn
 
 swebench_multimodal_opencode_agent_resources_server:
   _inherit_from: swebench_resources_server
@@ -29,7 +29,7 @@ swebench_multimodal_opencode_agent_resources_server:
       datasets:
         - name: swebench_multimodal
           type: benchmark
-          taskset: "swebench:multimodal"
+          taskset: "swebench/multimodal"
           jsonl_fpath: benchmarks/swebench/data/swebench_multimodal_benchmark.jsonl
           prepare_script: benchmarks/swebench/multimodal/prepare.py
           num_repeats: 3

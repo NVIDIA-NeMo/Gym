@@ -48,7 +48,7 @@ def _seed(*, session_id: str = "session", task_id: str = "caller-row-0") -> Reso
     return ResourcesSeedSessionRequest(
         resources_session_id=session_id,
         episode_id=EpisodeId(rollout_id="rollout", attempt=0),
-        task_id=TaskId(taskset="swebench:multimodal", task_id=task_id),
+        task_id=TaskId(taskset="swebench/multimodal", task_id=task_id),
         task_data=mod.SWEBenchInstanceRequest.model_validate(VERIFY_BODY).model_dump(),
     )
 

@@ -156,7 +156,7 @@ def prepare(release: str = "lite", mode: str = "c_interact", ground_truth_jsonl:
     kept, left_out = select_tasks(rows, ground_truth)
     output.parent.mkdir(parents=True, exist_ok=True)
     # Materialized for the mode's taskset, so manifest validation reads each row as the server's task input.
-    taskset = f"bird_interact:{mode}"
+    taskset = f"bird_interact/{release}/{mode}"
     output.write_text("".join(json.dumps(materialize_task(row, taskset=taskset)) + "\n" for row in kept))
     reasons = ", ".join(f"{count} with {reason}" for reason, count in sorted(left_out.items())) or "none"
     print(f"BIRD-Interact {release}: kept {len(kept)} of {len(rows)} tasks; left out: {reasons}.")
