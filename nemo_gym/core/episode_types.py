@@ -63,7 +63,11 @@ class TaskId(BaseModel):
 
     taskset: str = Field(
         min_length=1,
-        description="Run-unique taskset name; use the '<environment>:<taskset>' convention for blended runs.",
+        description=(
+            "Run-unique taskset name: '<catalog name>[:<label>]', the catalog name of the benchmark or environment the "
+            "task belongs to, such as 'swebench/verified', with an optional run-local label such as a split "
+            "(':train') or a harness route (':opencode')."
+        ),
     )
     task_id: str = Field(min_length=1)
 
