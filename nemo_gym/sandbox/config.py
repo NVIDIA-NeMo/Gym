@@ -256,7 +256,7 @@ def validate_volume_sources(sources: Any, source: str = "the sandbox block") -> 
 
 
 # provider_options entries that set a sandbox's network themselves, which a typed ``network_access`` rule replaces. Today
-# only OpenSandbox reads one (network_policy); the other providers set their network in the provider block.
+# OpenSandbox and E2B read network_policy; other providers set their network in the provider block.
 PROVIDER_NETWORK_OPTIONS = ("network_policy", "network")
 
 
@@ -310,7 +310,7 @@ class SandboxConfig(BaseModel):
             if conflicting:
                 raise ValueError(
                     f"network {rule!r} and provider_options {conflicting} both set this sandbox's network; set only "
-                    "network"
+                    "network_access"
                 )
         return self
 
@@ -350,12 +350,12 @@ class SandboxConfig(BaseModel):
     ) -> SandboxSpec:
         """Build the spec of one sandbox; ``metadata`` adds to the provider's and the config's metadata.
 
-        ``network_options`` are the provider options that apply the block's ``network_access`` rule, such as OpenSandbox's
+        ``_network_options`` are the provider options that apply the block's ``network_access`` rule, such as OpenSandbox's
         ``network_policy`` or Docker's ``run_args``, built by the owner's ``OwnedSandboxes.spec``. They replace
         ``provider_options``, and a restricted rule needs them.
 
         Raises:
-            ValueError: For a restricted rule without ``network_options``, so that a block that asks
+            ValueError: For a restricted rule without ``_network_options``, so that a block that asks
                 for restricted egress never starts a sandbox with the provider's default egress.
         """
         provider_options = dict(self.provider_options)

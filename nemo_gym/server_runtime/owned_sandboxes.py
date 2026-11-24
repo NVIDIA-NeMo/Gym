@@ -757,7 +757,7 @@ class OwnedSandboxes:
         rule = config.network_access
         # An inline provider block with the default metadata beside the provider, all SandboxConfig.spec reads of it.
         provider_block = {self._provider_name(): {}, "default_metadata": self._default_metadata}
-        if rule is None:
+        if rule is None and getattr(config, "network", None) is None:
             self._warn_untyped_network(config)
         if rule not in NETWORK_RULES or rule == "inherit":
             return config.spec(provider_block, image=image, workdir=workdir, metadata=metadata, files=files)
