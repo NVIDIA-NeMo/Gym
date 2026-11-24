@@ -1273,6 +1273,60 @@ contested: second_inner
 
         assert OmegaConf.to_container(config) == {"profile": {"a": 1, "b": 2}, "clone": {"a": 1, "b": 2, "c": 3}}
 
+    @mark.parametrize("run_args", [["--env", "AGENT=${agent}", ["${agent}"], {"name": "${agent}"}], "${args}"])
+    @mark.parametrize(
+        "entries",
+        [
+            {"target": {"_inherit_from": "base", "server": {"port": 1}}},
+            {"target": "${inherit_from:base}"},
+            {"target": {"_copy": "base"}},
+            {"profile": {"_inherit_from": "base"}, "target": {"_inherit_from": "profile"}},
+        ],
+    )
+    def test_inherited_list_interpolations_resolve_against_the_root(self, run_args, entries) -> None:
+        # An inherited source is resolved in a detached copy; its list elements must reach the target unresolved,
+        # so `${agent}` resolves against the root, as it does when the whole list is a reference (`${args}`).
+        config = DictConfig(
+            {
+                "agent": "codex",
+                "args": ["--env", "AGENT=${agent}", ["${agent}"], {"name": "${agent}"}],
+                "base": {"server": {"run_args": run_args}},
+                **entries,
+            }
+        )
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config.target.server.run_args, resolve=True) == [
+            "--env",
+            "AGENT=codex",
+            ["codex"],
+            {"name": "codex"},
+        ]
+
+    @mark.parametrize(
+        "entries",
+        [
+            # The source deletes one of its own keys, as an overlay that drops a shipped key does.
+            {"base": {"_delete_key": "extra", "server": {"mode": "embedded"}, "extra": "${agent}"}},
+            # A link of the chain deletes a key its source sets.
+            {
+                "base": {"server": {"mode": "embedded"}, "extra": "${agent}"},
+                "profile": {"_inherit_from": "base", "_delete_key": "extra"},
+            },
+        ],
+    )
+    def test_inherited_source_deletes_an_interpolated_key(self, entries) -> None:
+        source = "profile" if "profile" in entries else "base"
+        config = DictConfig({"agent": "codex", **entries, "target": {"_inherit_from": source}})
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config, resolve=True) == {
+            "agent": "codex",
+            "target": {"server": {"mode": "embedded"}},
+        }
+
     def test_inherit_cycle_is_reported(self) -> None:
         config = DictConfig({"first": {"_inherit_from": "second"}, "second": {"_inherit_from": "first"}})
 
