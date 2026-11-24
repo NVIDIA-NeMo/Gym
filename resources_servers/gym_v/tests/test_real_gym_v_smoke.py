@@ -38,7 +38,18 @@ def test_real_frozenlake_invalid_action_is_normal_feedback() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("env_id", ["Spatial/Empty-v0", "Spatial/DoorKey-v0"])
+@pytest.mark.parametrize(
+    "env_id",
+    [
+        "Spatial/Empty-v0",
+        "Spatial/DoorKey-v0",
+        "Spatial/DynamicObstacles-v0",
+        "Spatial/FourRooms2D-v0",
+        "Spatial/LavaGap-v0",
+        "Spatial/MultiRoom-v0",
+        "Spatial/Unlock-v0",
+    ],
+)
 async def test_spatial_invalid_action_counts_toward_horizon_without_mask(monkeypatch, env_id) -> None:
     from resources_servers.gym_v import app as gymv_app
     from resources_servers.gym_v.schemas import GymVCloseRequest, GymVSeedSessionRequest, GymVStepRequest

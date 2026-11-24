@@ -54,7 +54,7 @@ from resources_servers.gym_v.schemas import (
     GymVStepResponse,
     GymVTaskRow,
 )
-from responses_api_agents.visual_context import visual_context_client
+from responses_api_agents.gymv_agent.visual_context import visual_context_client
 
 
 _MUTATION_MAX_TRIES = 1
@@ -97,8 +97,36 @@ def _as_core_input_message(message: Any) -> Any:
 logger = logging.getLogger(__name__)
 
 
-# Matches the last `\boxed{...}` in the assistant's plain text.
-BOXED_PATTERN = re.compile(r"\\boxed\{\s*(.*?)\s*\}", re.S)
+# Brace-balanced action extraction, matching visgym_agent.
+BOXED_START_PATTERN = re.compile(r"\\boxed\{")
+LATEX_TEXT_WRAP = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
+
+
+def _strip_latex_wrappers(value: str) -> str:
+    while True:
+        match = LATEX_TEXT_WRAP.fullmatch(value)
+        if not match:
+            break
+        value = match.group(1)
+    return value
+
+
+def _iter_boxed_contents(text: str) -> list[str]:
+    """Return every top-level ``\\boxed{...}`` payload, in order, brace-balanced."""
+    contents = []
+    for match in BOXED_START_PATTERN.finditer(text):
+        depth = 1
+        inner_start = match.end()
+        for index, char in enumerate(text[inner_start:], start=inner_start):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            if depth == 0:
+                inner = text[inner_start:index].strip()
+                contents.append(_strip_latex_wrappers(inner).strip())
+                break
+    return contents
 
 
 class GymVAgentConfig(BaseResponsesAPIAgentConfig):
@@ -122,12 +150,8 @@ class GymVAgentConfig(BaseResponsesAPIAgentConfig):
     )
     max_total_sequence_length: int | None = Field(
         default=None,
-        description=(
-            "If set, the rollout will stop when the agent state exceeds this "
-            "length. If not set, will rely on a vLLM exception to tell us when "
-            "we've exceeded the model's token limit. Setting this simply avoids "
-            "that exception."
-        ),
+        ge=1,
+        description="Compatibility alias for context_history.guards.max_total_tokens; requires context_history.",
     )
     done_if_no_boxed_answer: bool = Field(
         default=False,
@@ -160,6 +184,15 @@ class GymVAgentConfig(BaseResponsesAPIAgentConfig):
             "variant without regenerating data."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_context_limits(self) -> "GymVAgentConfig":
+        if self.max_total_sequence_length is not None and self.context_history is None:
+            raise ValueError("max_total_sequence_length requires measured context_history guards")
+        if self.context_history is not None:
+            if self.max_steps is None or self.max_steps > self.context_history.max_model_calls:
+                raise ValueError("max_steps must be explicit and no greater than context_history.max_model_calls")
+        return self
 
 
 class GymVAgentRunRequest(BaseRunRequest):
@@ -321,7 +354,7 @@ class GymVAgent(SimpleResponsesAPIAgent):
         recoverable failure rather than passed verbatim to /step (where it
         would fail the env's parser with a less useful error message).
         """
-        matches = BOXED_PATTERN.findall(text)
+        matches = _iter_boxed_contents(text)
         if not matches:
             return None
         return matches[-1].strip() or None
@@ -398,12 +431,20 @@ class GymVAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
-        # Inject the agent's system prompt as the first message of the
-        # conversation, unless the caller already provided one. The OpenAI
-        # Responses → chat-completions converter in vllm_model silently drops
-        # the top-level `instructions` field, so embedding the prompt as a
-        # system *message* is the only way to actually deliver it.
-        body.input = self._maybe_prepend_system_prompt(body.input)
+        # Current model servers honor instructions. Add the default only when
+        # neither instructions nor an explicit system message supplied it.
+        if not body.instructions:
+            body.input = self._maybe_prepend_system_prompt(body.input)
+
+        # The task index has a Pydantic alias; use wire keys for Gym capture identity.
+        # Internal run fields are excluded from ordinary serialization, but the
+        # capture route must preserve the dispatcher-assigned identity/settings.
+        run_identity = req.model_dump(by_alias=True) | {
+            field.alias or name: getattr(req, name)
+            for name, field in BaseRunRequest.model_fields.items()
+            if field.exclude
+        }
+        model_url_path = self.url_path_for_run("/v1/responses", run_identity)
 
         seed_session_response = await self._seed_session(req.task_idx, task_row)
 
@@ -433,9 +474,6 @@ class GymVAgent(SimpleResponsesAPIAgent):
         pending_obs: list[GymVEnvStateEasyInputMessage | NeMoGymEasyInputMessage] = []
         model_server_cookies = None
 
-        # The task index has a Pydantic alias; use wire keys for Gym capture identity.
-        model_url_path = self.url_path_for_run("/v1/responses", req.model_dump(by_alias=True))
-
         step = 0
         loop_completed = False
         context_rejected = False
@@ -443,7 +481,7 @@ class GymVAgent(SimpleResponsesAPIAgent):
             context_client = visual_context_client(
                 self,
                 config=self.config.context_history,
-                logical_rollout_id=self.rollout_id_from_run(req.model_dump(by_alias=True)),
+                logical_rollout_id=self.rollout_id_from_run(run_identity),
                 initial_request=agent_state,
             )
             while True:
@@ -476,27 +514,31 @@ class GymVAgent(SimpleResponsesAPIAgent):
                     }
                     break
                 except (json.JSONDecodeError, aiohttp.ClientResponseError) as e:
-                    if context_client is not None:
+                    content = getattr(e, "response_content", None) or b""
+                    detail = (content.decode(errors="replace") if isinstance(content, bytes) else str(content)).lower()
+                    context_limit = (
+                        isinstance(e, aiohttp.ClientResponseError)
+                        and e.status in (400, 413)
+                        and ("context_length_exceeded" in detail or "maximum context length" in detail)
+                    )
+                    if context_client is not None or model_response is None or not context_limit:
                         raise
-                    response_text: Any = "<response unavailable>"
-                    if raw_model_response is not None:
-                        response_text = getattr(raw_model_response, "text", response_text)
-                        if callable(response_text):
-                            try:
-                                response_text = await response_text()
-                            except Exception:
-                                response_text = "<response body unavailable>"
-                    logger.warning("Error calling /v1/responses: %r. Response: %r.", e, response_text)
+                    context_rejected = True
+                    model_response.metadata = dict(model_response.metadata or {}) | {
+                        "termination_reason": "context_length_exceeded"
+                    }
                     break
 
-                try:
-                    model_response = NeMoGymResponse.model_validate(model_response_json)
-                    total_usage = accumulate_response_usage(total_usage, model_response.usage)
-                except ValidationError as e:
-                    if context_client is not None:
-                        raise
-                    logger.warning(f"Error validating model response: {e!r}. Response: {model_response_json!r}.")
+                candidate = NeMoGymResponse.model_validate(model_response_json)
+                if (candidate.metadata or {}).get("nemo_gym_context_window_exceeded") == "true":
+                    context_rejected = True
+                    if model_response is not None:
+                        model_response.metadata = dict(model_response.metadata or {}) | {
+                            "termination_reason": "context_length_exceeded"
+                        }
                     break
+                model_response = candidate
+                total_usage = accumulate_response_usage(total_usage, model_response.usage)
 
                 if pending_obs:
                     all_messages.extend(pending_obs)

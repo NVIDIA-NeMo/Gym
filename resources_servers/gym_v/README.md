@@ -120,13 +120,15 @@ NLTK setup during import/construction; installing its Python package alone is
 not an offline-ready deployment. Missing assets are setup failures, never
 model wrong answers. No corpus is redistributed in this contribution.
 
-`Spatial/Empty-v0` and `Spatial/DoorKey-v0` are explicit exceptions to the
+`Spatial/Empty-v0`, `Spatial/DoorKey-v0`, `Spatial/DynamicObstacles-v0`,
+`Spatial/FourRooms2D-v0`, `Spatial/LavaGap-v0`, `Spatial/MultiRoom-v0` and
+`Spatial/Unlock-v0` are explicit exceptions to the
 normal invalid-action return convention: their pinned MiniGrid wrappers raise
-before stepping. The adapter checks these two action maps before dispatch,
+before stepping. The adapter checks these seven action maps before dispatch,
 returns corrective feedback without mutating the simulator, and counts the
 attempt toward the task horizon. This is audited against Gym-V revision
 `7ccf14ecb5241f37372dd530accf77f7e7ef5fc6`,
-`gym_v/envs/multi_turn/spatial/2d/{empty,doorkey}.py`. Other exceptions remain
+`gym_v/envs/multi_turn/spatial/2d/{empty,doorkey,dynamicobstacles,fourrooms,lavagap,multiroom,unlock}.py`. Other exceptions remain
 masked; matching an exception's text is never used to classify it.
 
 The adapter uses the provider's native dataset construction. It does not monkeypatch

@@ -9,8 +9,7 @@ gym_v_resources_server:
       description: "Env-id-parametric wrapper around any gym_v.Env."
       # Deprecated compatibility path. Stateless clients pass the full
       # GymVTaskRow to /seed_session, so the server no longer needs a task
-      # JSONL at startup. Tests still cover task_idx fallback with explicit
-      # per-test JSONLs.
+      # JSONL at startup. task_idx remains available for configured JSONL files.
       task_jsonl_fpaths: []
       image_format: "PNG"
       image_jpeg_quality: 90
@@ -19,7 +18,7 @@ gym_v_resources_server:
       return_transitions: false
       disable_text_feedback: true
       # Gym-V has no universal success flag. These predicates are an exact
-      # allowlist audited against the revision pinned in requirements.txt.
+      # allowlist audited against the revision pinned in pyproject.toml and uv.lock.
       require_success_criterion: true
       success_criteria_by_env_id:
         Games/FrozenLake-v0:

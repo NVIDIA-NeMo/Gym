@@ -41,6 +41,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     SimpleResourcesServer,
     lost_session_verification,
     reject_partial_typed_seed,
@@ -55,7 +56,6 @@ from resources_servers.gym_v.schemas import (
     GymVAgentVerifyResponse,
     GymVCloseRequest,
     GymVCloseResponse,
-    GymVEnvStateEasyInputMessage,
     GymVResourcesServerConfig,
     GymVSeedSessionRequest,
     GymVSeedSessionResponse,
@@ -166,7 +166,7 @@ class GymVResourcesServer(SimpleResourcesServer):
         if isinstance(body, ResourcesSeedSessionRequest):
             return await super().seed_session(body, request=request)
         if body.env_id is not None and (self.session_is_closed(body.env_id) or self.session_is_verified(body.env_id)):
-            raise HTTPException(status_code=409, detail="Cannot recreate a closed or verified session.")
+            raise ResourcesSessionConflictError("Cannot recreate a closed or verified session.")
         return await self._seed_native_session(request, body)
 
     async def _seed_native_session(
@@ -192,7 +192,9 @@ class GymVResourcesServer(SimpleResourcesServer):
             row = GymVTaskRow.model_validate(self.task_rows[body.task_idx])
 
         success_criterion = row.success_criterion or self.config.success_criteria_by_env_id.get(row.env_id)
-        if self.config.require_success_criterion and success_criterion is None:
+        if (
+            self.config.require_success_criterion or self.config.reward_mode == "task_success"
+        ) and success_criterion is None:
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -246,7 +248,7 @@ class GymVResourcesServer(SimpleResourcesServer):
                 # is still constructing/resetting. It marks the reservation
                 # before waiting for this lock, so never publish a late orphan.
                 if operation.close_requested:
-                    raise HTTPException(status_code=409, detail=f"env_id={env_id} was closed while being seeded.")
+                    raise ResourcesSessionConflictError(f"env_id={env_id} was closed while being seeded.")
 
                 self.env_id_to_env[env_id] = env
                 self.env_id_to_task_row[env_id] = row_dict
@@ -300,7 +302,7 @@ class GymVResourcesServer(SimpleResourcesServer):
         # The legacy endpoints have no episode field. Do not let a caller bypass
         # typed ownership by supplying someone else's ID to /step or /close.
         if self.session_identity(env_id) is not None and request.session.get(SESSION_ID_KEY) != env_id:
-            raise HTTPException(status_code=409, detail="Typed session requires its owning session cookie.")
+            raise ResourcesSessionConflictError("Typed session requires its owning session cookie.")
 
     async def step(self, request: Request, body: GymVStepRequest) -> GymVStepResponse:
         self._check_typed_session_cookie(request, body.env_id)
@@ -343,7 +345,19 @@ class GymVResourcesServer(SimpleResourcesServer):
         # These pinned MiniGrid wrappers reject malformed actions before stepping.
         # Validate at that boundary; never classify an arbitrary ValueError as a
         # model error. Other families keep their provider-defined action semantics.
-        if env_id_str in {"Spatial/Empty-v0", "Spatial/DoorKey-v0"} and answer not in env.unwrapped._action_map:
+        if (
+            env_id_str
+            in {
+                "Spatial/Empty-v0",
+                "Spatial/DoorKey-v0",
+                "Spatial/DynamicObstacles-v0",
+                "Spatial/FourRooms2D-v0",
+                "Spatial/LavaGap-v0",
+                "Spatial/MultiRoom-v0",
+                "Spatial/Unlock-v0",
+            }
+            and answer not in env.unwrapped._action_map
+        ):
             allowed = ", ".join(env.unwrapped._action_map)
             image = None if self.config.skip_images else await _run_in_threadpool_to_completion(env.render)
             obs_dict = {"agent_0": Observation(image=image, text=f"Invalid action. Use one of: {allowed}.")}
@@ -480,7 +494,7 @@ class GymVResourcesServer(SimpleResourcesServer):
         env_id = body.response.env_id
         self._check_typed_session_cookie(request, env_id)
         if env_id in self.env_id_to_env:
-            raise HTTPException(status_code=409, detail="Close the native environment before verification.")
+            raise ResourcesSessionConflictError("Close the native environment before verification.")
         fingerprint = hashlib.sha256(json.dumps(body.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()
         async with self.verifying(env_id) as verification:
             if verification.is_lost:
@@ -585,9 +599,9 @@ class GymVResourcesServer(SimpleResourcesServer):
         # No await in this critical section: one event-loop turn atomically
         # checks and publishes the reservation.
         if self._has_active_cleanup_tombstone(env_id):
-            raise HTTPException(status_code=409, detail=f"env_id={env_id} was already closed.")
+            raise ResourcesSessionConflictError(f"env_id={env_id} was already closed.")
         if self._session_id_in_use(env_id):
-            raise HTTPException(status_code=409, detail=f"env_id={env_id} is already in use.")
+            raise ResourcesSessionConflictError(f"env_id={env_id} is already in use.")
         operation = _SessionOperation()
         self.env_id_to_operation[env_id] = operation
         return operation
@@ -708,22 +722,6 @@ class GymVResourcesServer(SimpleResourcesServer):
     def _agent_0_info(info_dict: dict[str, Any]) -> dict[str, Any]:
         info = info_dict.get("agent_0", info_dict)
         return info if isinstance(info, dict) else {"info": info}
-
-    def _recovery_message(
-        self,
-        env_id_str: str,
-        text: str,
-        env_info: dict[str, Any],
-    ) -> GymVEnvStateEasyInputMessage:
-        recovery = observation_to_user_message(
-            Observation(image=None, text=text, metadata=env_info),
-            env_id=env_id_str,
-            prefix_text=None,
-            image_format=self.config.image_format,
-            image_jpeg_quality=self.config.image_jpeg_quality,
-            max_image_wh=self.config.max_image_wh,
-        )
-        return _attach_env_info(recovery, env_info)
 
 
 VERIFIER_FIXTURE = VerifierFixture(

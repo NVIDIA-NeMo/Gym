@@ -11,9 +11,9 @@ from aiohttp import ServerDisconnectedError
 from omegaconf import OmegaConf
 
 from nemo_gym.agents.context_management import ContextGuardRejected, ContextHistoryConfig
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.visual_context import visual_context_client
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from responses_api_agents.gymv_agent.visual_context import visual_context_client
 
 
 def history_config(enabled=True):
@@ -101,7 +101,9 @@ class Episode:
         self.turns, self.feedback = turns, feedback
         self.reject_at, self.failure_at, self.failure = reject_at, failure_at, failure
         client = MagicMock(spec=ServerClient)
-        client.global_config_dict = {"token_id_capture": {"enabled": True, "all_agents": True}}
+        client.global_config_dict = {
+            "token_id_capture": {"enabled": True, "all_agents": True, "parent_resolution": "source_history"}
+        }
         client.post = AsyncMock(side_effect=self.post)
         self.agent = agent_type(
             config=config_type(
@@ -286,6 +288,7 @@ class VisualContextContract:
     )
     def test_admission_guards(self, invalid):
         agent = MagicMock()
+        agent.server_client.global_config_dict = {"token_id_capture": {"parent_resolution": "source_history"}}
         agent._token_id_capture_enabled.return_value = invalid != "capture"
         agent.config.return_transitions = invalid == "transitions"
         agent.config.max_no_boxed_truncation_retries = 1 if invalid == "budget_growth" else 0
@@ -299,7 +302,19 @@ class VisualContextContract:
             cfg.guards.reserved_generation_tokens = 1
         if invalid == "missing_limit":
             cfg.guards.max_total_tokens = None
-        with pytest.raises(ValueError):
+        messages = {
+            "capture": "enabled token capture",
+            "owner": "dispatched rollout ID",
+            "reserve": "reserve the complete",
+            "transitions": "return_transitions=false",
+            "retry": "resampling retries",
+            "context": "max_total_sequence_length",
+            "images": "max_images",
+            "budget_growth": "fixed per-call output budget",
+            "missing_limit": "explicit max_total_tokens",
+            "missing_budget": "reserve the complete",
+        }
+        with pytest.raises(ValueError, match=messages[invalid]):
             visual_context_client(
                 agent,
                 config=cfg,
@@ -328,18 +343,20 @@ class VisualContextContract:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("drop_path", [None, "/context/measure", "/v1/responses"])
-    async def test_real_http_capture_cookie_and_no_ambiguous_replay(self, drop_path):
+    @pytest.mark.parametrize("owner", [None, "tq-dispatched-row"])
+    async def test_real_http_capture_cookie_and_no_ambiguous_replay(self, drop_path, owner):
         import asyncio
         from collections import Counter
 
         from aiohttp import web
 
-        from nemo_gym.client.http_client import get_global_aiohttp_client
-        from nemo_gym.config.config_types import BaseServerConfig
+        from nemo_gym.client import get_global_aiohttp_client
+        from nemo_gym.config import BaseServerConfig
 
         episode = self.episode()
         counts = Counter()
-        prefix = "/ng-rollout/7-2-a1/training-token-capture"
+        episode.request.capture_rollout_id = owner
+        prefix = f"/ng-rollout/{owner or '7-2'}-a1/training-token-capture"
 
         async def handle(request):
             payload = await request.json()
@@ -368,7 +385,7 @@ class VisualContextContract:
             head_server_config=BaseServerConfig(host="127.0.0.1", port=port),
             global_config_dict=OmegaConf.create(
                 {
-                    "token_id_capture": {"enabled": True, "all_agents": True},
+                    "token_id_capture": {"enabled": True, "all_agents": True, "parent_resolution": "source_history"},
                     "model": {"responses_api_models": {"test": {"host": "127.0.0.1", "port": port}}},
                     "resources": {"resources_servers": {"test": {"host": "127.0.0.1", "port": port}}},
                 }

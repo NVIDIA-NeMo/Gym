@@ -8,7 +8,7 @@ gym_v_smoke_resources_server:
       reward_mode: task_success
 
 gym_v_smoke_agent:
-  _inherit_from: gym_v_agent
+  _inherit_from: gymv_agent
   responses_api_agents:
     gymv_agent:
       resources_server:

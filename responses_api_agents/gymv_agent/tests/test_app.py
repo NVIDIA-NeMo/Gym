@@ -27,7 +27,6 @@ from nemo_gym.core import (
 from resources_servers.gym_v.schemas import GymVNeMoGymResponse
 from responses_api_agents.gymv_agent import app as gymv_agent_app
 from responses_api_agents.gymv_agent.app import (
-    BOXED_PATTERN,
     GymVAgent,
     GymVAgentConfig,
     GymVAgentRunRequest,
@@ -114,8 +113,18 @@ class TestExtractBoxed:
         text = "before \\boxed{0 0 1\n1 0 0\n0 1 0} after"
         assert GymVAgent._extract_boxed(text) == "0 0 1\n1 0 0\n0 1 0"
 
-    def test_pattern_constant(self) -> None:
-        assert BOXED_PATTERN.pattern == r"\\boxed\{\s*(.*?)\s*\}"
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            (r"\boxed{\text{forward}}", "forward"),
+            (r"\boxed{map{a,b}}", "map{a,b}"),
+            (r"\boxed{first} then \boxed{truncated", "first"),
+            (r"\boxed{unclosed", None),
+            (r"\boxed{first} then \boxed{}", None),
+        ],
+    )
+    def test_balanced_boxes(self, text, expected):
+        assert GymVAgent._extract_boxed(text) == expected
 
 
 class TestExtractAssistantText:
@@ -423,44 +432,32 @@ class TestTokenCoveredOutputBoundary:
     async def test_failed_next_model_call_omits_pending_observation(self) -> None:
         import aiohttp
 
+        from responses_api_agents.gymv_agent.tests.test_review_contract import error_response
+
         agent = _make_agent(max_steps=2)
         env_id = str(uuid.uuid4())
 
-        seed_mock = AsyncMock()
-        seed_mock.json = AsyncMock(return_value=_seed_session(env_id=env_id))
-        seed_mock.raise_for_status = MagicMock()
+        def reply(payload):
+            result = MagicMock(ok=True, cookies=None)
+            result.json = AsyncMock(return_value=payload)
+            return result
 
-        first_model_mock = AsyncMock()
-        first_model_mock.json = AsyncMock(return_value=_model_response("\\boxed{step}"))
-        first_model_mock.raise_for_status = MagicMock()
-        first_model_mock.cookies = None
-
-        step_mock = AsyncMock()
-        step_mock.json = AsyncMock(return_value=_step(obs_text="Uncovered obs", done=False))
-
-        failed_model_mock = AsyncMock()
-        failed_model_mock.raise_for_status = MagicMock(
-            side_effect=aiohttp.ClientResponseError(
-                request_info=MagicMock(), history=(), status=500, message="context full"
-            )
-        )
-        failed_model_mock.text = "context full"
-
-        close_mock = AsyncMock()
-        close_mock.json = AsyncMock(return_value={"message": "ok", "success": True})
         agent.server_client.post = AsyncMock(
-            side_effect=[seed_mock, first_model_mock, step_mock, failed_model_mock, close_mock]
+            side_effect=[
+                reply(_seed_session(env_id=env_id)),
+                reply(_model_response(r"\boxed{step}")),
+                reply(_step(obs_text="Uncovered obs", done=False)),
+                error_response(500, b"inference failed"),
+                reply({"message": "ok", "success": True}),
+            ]
         )
-
-        result = await agent.responses(
-            GymVAgentRunRequest(
-                task_idx=0,
-                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        with pytest.raises(aiohttp.ClientResponseError):
+            await agent.responses(
+                GymVAgentRunRequest(
+                    task_idx=0, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+                )
             )
-        )
-
-        assert [item.role for item in result.output] == ["assistant"]
-        assert all(getattr(item, "content", None) != "Uncovered obs" for item in result.output)
+        assert agent.server_client.post.await_args_list[-1].kwargs["json"]["discard_reward"]
 
 
 class TestDoneIfNoBoxedAnswer:
@@ -654,11 +651,9 @@ class TestCloseLifecycle:
         seed_mock.raise_for_status = MagicMock()
         seed_mock.cookies = None
 
-        model_err_mock = AsyncMock()
-        model_err_mock.raise_for_status = MagicMock(
-            side_effect=aiohttp.ClientResponseError(request_info=MagicMock(), history=(), status=500, message="boom")
-        )
-        model_err_mock.text = "boom"
+        from responses_api_agents.gymv_agent.tests.test_review_contract import error_response
+
+        model_err_mock = error_response(500, b"boom")
 
         close_mock = AsyncMock()
         close_mock.json = AsyncMock(return_value=close_data)
@@ -671,7 +666,7 @@ class TestCloseLifecycle:
             task_idx=0,
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         )
-        with pytest.raises(AssertionError):
+        with pytest.raises(aiohttp.ClientResponseError):
             await agent.responses(request)
 
         urls = [c[1]["url_path"] for c in agent.server_client.post.await_args_list]

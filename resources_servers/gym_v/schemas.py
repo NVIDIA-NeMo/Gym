@@ -12,25 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Literal, TypeAlias, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
-    NeMoGymEasyInputMessageForTraining,
-    NeMoGymFunctionCallOutput,
-    NeMoGymMessage,
-    NeMoGymMessageForTraining,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseReasoningItem,
-    NeMoGymResponseReasoningItemForTraining,
+    NeMoGymResponseOutputItem,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -40,24 +31,6 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
 )
 from resources_servers.gym_v.task_data import SuccessCriterion
-
-
-GymVNeMoGymResponseOutputItem: TypeAlias = Union[
-    # Training variants must come first. Otherwise Pydantic validates a
-    # token-bearing assistant message as the non-training base class and drops
-    # prompt_token_ids/generation_token_ids/generation_log_probs.
-    NeMoGymEasyInputMessageForTraining,
-    NeMoGymMessageForTraining,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseFunctionToolCallForTraining,
-    NeMoGymResponseReasoningItemForTraining,
-    NeMoGymEasyInputMessage,
-    NeMoGymMessage,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymFunctionCallOutput,
-    NeMoGymResponseReasoningItem,
-]
 
 
 class GymVTaskRow(BaseModel):
@@ -273,7 +246,7 @@ class GymVNeMoGymResponse(NeMoGymResponse):
             "responses."
         ),
     )
-    output: list[GymVNeMoGymResponseOutputItem] | list[list[GymVNeMoGymResponseOutputItem]]
+    output: list[NeMoGymResponseOutputItem] | list[list[NeMoGymResponseOutputItem]]
 
 
 class GymVAgentVerifyRequest(BaseVerifyRequest):

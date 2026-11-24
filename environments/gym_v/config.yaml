@@ -16,7 +16,7 @@ gym_v:
       return_transitions: false
       disable_text_feedback: true
       # Gym-V has no universal success flag. These predicates are an exact
-      # allowlist audited against the revision pinned in requirements.txt.
+      # allowlist audited against the revision pinned in pyproject.toml and uv.lock.
       require_success_criterion: true
       success_criteria_by_env_id:
         Games/FrozenLake-v0:
@@ -39,7 +39,7 @@ gym_v:
           type: terminal_step_reward
           comparison: equal
           threshold: 1.0
-gym_v_agent:
+gymv_agent:
   responses_api_agents:
     gymv_agent:
       entrypoint: app.py
@@ -63,4 +63,4 @@ gym_v_environment_server:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
-        name: gym_v_agent
+        name: gymv_agent

@@ -1019,3 +1019,14 @@ async def test_simulator_fault_masks_whole_episode_without_restepping(monkeypatc
     assert failed.failure_kind == "gym_v:simulator_failed"
     assert ("provider failed" if isinstance(fault, type) else "nonfinite") in failed.failure_reason
     _assert_no_session_state(server)
+
+
+@pytest.mark.asyncio
+async def test_task_success_mode_requires_criterion_before_constructing_env(monkeypatch):
+    env = StubGymVEnv()
+    server = _server(monkeypatch, env, reward_mode="task_success", require_success_criterion=False)
+    make = MagicMock(return_value=env)
+    monkeypatch.setattr(gymv_app.gym_v, "make", make)
+    with pytest.raises(HTTPException, match="no audited binary success criterion"):
+        await server.seed_session(_request(), GymVSeedSessionRequest(task_row=_row()))
+    make.assert_not_called()

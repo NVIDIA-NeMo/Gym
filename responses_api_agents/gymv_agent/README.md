@@ -12,8 +12,7 @@ in the assistant's plain text.
 Requires the shared `nemo_gym.agents.context_management` API from
 [Gym #3368](https://github.com/NVIDIA-NeMo/Gym/pull/3368), including the
 per-observation omission-marker repair (RecencyHistoryPolicy v3). This adapter
-does not include a private copy of that framework. Until the dependency lands,
-this branch depends on #3368 and is not a standalone main-compatible release.
+does not include a private copy of that framework. #3368 is merged into Gym main.
 
 Merge `configs/first_last_two.yaml` after the ordinary agent config, with the
 same top-level agent name. It keeps the first and latest two reasoning blocks
@@ -33,13 +32,17 @@ selection. Keep measurement and generation template settings identical. When
 using NeMo-RL serving, provide explicit request sampling values matching its
 configured profile; do not rely on model-generation defaults.
 
-Token capture must be enabled and the dispatcher must supply the logical rollout
-identity. The model server must support the capture-owned `/context/measure`
-and `/v1/responses` routes. The client owns prompt compaction, measurement,
+Token capture must be enabled with `token_id_capture.parent_resolution: source_history`,
+and the dispatcher must supply the logical rollout identity. The model server
+must support the capture-owned `/context/measure` and `/v1/responses` routes. The client owns prompt compaction, measurement,
 response acceptance and finalization. The adapter returns the full accepted
 execution history and summed usage, not just the compacted model view.
 
-- Omit `context_history` for the existing full-history path.
+- Omit `context_history` for the existing full-history path. This path stops on
+  explicit model-server context-limit refusals; it does not measure token budgets.
+  `max_total_sequence_length` requires measured `context_history` guards and must
+  match their `max_total_tokens`. With context management, set `max_steps` no
+  higher than `context_history.max_model_calls`.
 - Set `context_history.enabled: false` with valid guards for a capture-backed
   identity control using the same client.
 - Model resampling and changing the per-call output budget are rejected.
@@ -48,7 +51,7 @@ execution history and summed usage, not just the compacted model view.
   not published as a captured prompt. If the first call is rejected, the agent
   raises and discards the resource session's reward. It never fabricates a
   response or a scored zero. A typed pre-generation rejection envelope is not
-  part of this adapter's pending dependency contract.
+  part of this adapter's contract.
 - A lost model acknowledgement or malformed response aborts the episode and
   discards its reward. It cannot return a previous successful response as if
   the uncertain call had not happened.
