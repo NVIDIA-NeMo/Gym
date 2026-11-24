@@ -11,9 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
 import pytest
 from omegaconf import OmegaConf
 from pydantic import ValidationError
@@ -94,6 +96,33 @@ def test_validate_server_configs_reports_a_removed_option_at_its_full_path():
         False,
     )
     assert "removed options that are no longer supported: `judge_only`" in problem.message
+
+
+@pytest.mark.parametrize("configured", [" 0.7 ", "0.7", None])
+def test_run_provenance_records_the_aa_briefcase_lite_temperature_the_agent_samples_with(
+    configured, tmp_path, monkeypatch
+):
+    from nemo_gym.rollouts import provenance
+    from nemo_gym.utils.path_utils import materialized_path_for
+
+    if configured is None:
+        monkeypatch.delenv("AA_BRIEFCASE_TEMPERATURE", raising=False)
+    else:
+        monkeypatch.setenv("AA_BRIEFCASE_TEMPERATURE", configured)
+    monkeypatch.setattr(provenance, "served_models", lambda servers: {})
+    path = "aa_briefcase_lite_stirrup_agent.responses_api_agents.stirrup_agent"
+    benchmark = OmegaConf.load(Path(__file__).parents[3] / "benchmarks/aa_briefcase_lite/config.yaml")
+    config = OmegaConf.create({"aa_briefcase_lite_stirrup_agent": benchmark.aa_briefcase_lite_stirrup_agent})
+    agent = StirrupAgentWrapperConfig.model_validate(
+        {**OmegaConf.to_container(OmegaConf.select(config, path), resolve=True), "name": "agent", "host": "0.0.0.0", "port": 8080}
+    )
+    output = tmp_path / "rollouts.jsonl"
+    materialized_path_for(output).write_bytes(b"")
+
+    record = orjson.loads(provenance.write_run_provenance(output, config).read_bytes())
+
+    assert agent.temperature == (1.0 if configured is None else 0.7)
+    assert record["sampling_parameters"][path] == {"temperature": agent.temperature}
 
 
 def _report(**fields) -> dict:
