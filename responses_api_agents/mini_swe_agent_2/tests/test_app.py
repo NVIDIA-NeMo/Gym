@@ -47,6 +47,8 @@ except ModuleNotFoundError as exc:
 from responses_api_agents.mini_swe_agent_2 import app as mini_swe_app_module
 from responses_api_agents.mini_swe_agent_2.app import (
     E2B_API_KEY_ENV,
+    LUXOR_API_KEY_ENV,
+    LUXOR_AUTH_TOKEN_ENV,
     OPENSANDBOX_API_KEY_ENV,
     MiniSWEAgent,
     MiniSWEAgentConfig,
@@ -401,6 +403,30 @@ class TestApp:
         assert "api_key" not in connection_for_disk
         assert connection_for_disk["headers"] == headers
         assert connection_for_disk["api_headers"] == api_headers
+
+    def test_luxor_sandbox_provider_secrets_are_kept_out_of_config_dump(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        provider = {
+            "luxor": {
+                "connection": {
+                    "base_url": "https://api.example",
+                    "api_key": "fixture-key",  # pragma: allowlist secret
+                    "auth_token": "fixture-token",  # pragma: allowlist secret
+                }
+            }
+        }
+
+        provider_for_disk = _sandbox_provider_for_config_dump(provider)
+        assert provider_for_disk["luxor"]["connection"] == {"base_url": "https://api.example"}
+        assert _sandbox_runtime_env(provider)["env_vars"] == {
+            LUXOR_API_KEY_ENV: "fixture-key",  # pragma: allowlist secret
+            LUXOR_AUTH_TOKEN_ENV: "fixture-token",  # pragma: allowlist secret
+        }
+
+        monkeypatch.setenv(LUXOR_API_KEY_ENV, "host-key")  # pragma: allowlist secret
+        assert _sandbox_runtime_env({"luxor": {}})["env_vars"] == {
+            LUXOR_API_KEY_ENV: "host-key"  # pragma: allowlist secret
+        }
+        assert "env_vars" not in _sandbox_runtime_env({"opensandbox": {"connection": {}}})
 
     def test_split_trajectory_and_resolution_helpers_cover_edge_cases(self) -> None:
         input_messages, output_items, raw_responses = _split_trajectory_for_responses(

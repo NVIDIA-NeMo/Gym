@@ -1651,6 +1651,20 @@ wheels = [
 ]
 
 [[package]]
+name = "luxor-ai"
+version = "1.5.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+    { name = "websocket-client" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/3c/49b5cbc53a2ef46a45e82b33cb4ef80b62171db1f37ab4bebb09887d7e00/luxor_ai-1.5.3.tar.gz", hash = "sha256:aaf18eec0ee9de2312a253c866162c088e4cae46dc1de73670cd732ac11ba60f", size = 368114, upload-time = "2026-11-17T13:01:48.412Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4d/35/48e1e489cd5cdb51c9e3fa4c6a8a0e6a659b877b1ab1e82e10b1ee28ff36/luxor_ai-1.5.3-py3-none-any.whl", hash = "sha256:840d9f5a166bf0a5e2dcbd3995bd40b275c7afbc2f9f0ab6173186c8e5c8c742", size = 241153, upload-time = "2026-11-17T13:01:46.729Z" },
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1959,6 +1973,7 @@ sandbox = [
     { name = "boto3" },
     { name = "daytona" },
     { name = "e2b" },
+    { name = "luxor-ai" },
     { name = "opensandbox" },
     { name = "tenacity" },
 ]
@@ -1989,6 +2004,7 @@ requires-dist = [
     { name = "itsdangerous" },
     { name = "jinja2", marker = "extra == 'ray'", specifier = ">=3.1" },
     { name = "jsonschema", specifier = ">=4.18,<5" },
+    { name = "luxor-ai", marker = "extra == 'sandbox'", specifier = ">=1.5.3,<2" },
     { name = "mcp", specifier = ">=1.28.1,<3" },
     { name = "mlflow", marker = "extra == 'mlflow'", specifier = ">=3.16.1" },
     { name = "mlflow-skinny", marker = "extra == 'mlflow'", specifier = ">=3.16.1" },
@@ -3644,6 +3660,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bd/07/b7a9162a804bc0f7d03fe84c93e374d3e1c4d828043d5f9b797f7d4e30e0/wcmatch-11.2.tar.gz", hash = "sha256:1605bde546fbde4c063628c7d89eda486909fd4337e51d73a873987fbcb2554c", size = 134939, upload-time = "2026-10-22T00:37:57.622Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/34/96/b6cebd4bd75320743a291fed494c79f07c01b58fa9b187d12aeb5110f002/wcmatch-11.2-py3-none-any.whl", hash = "sha256:952bab83c75c233836007a69550a3a8753cf06964c1eb3b84ff11ad5bff1c272", size = 44361, upload-time = "2026-10-22T00:37:56.293Z" },
+]
+
+[[package]]
+name = "websocket-client"
+version = "1.9.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/cb/a5abcc2891249f393827c650c6296660ce40374ac22d99ab9aea41f9d2a2/websocket_client-1.9.2.tar.gz", hash = "sha256:0fcb57545848be86992e128218fd96dd87a6769ffdb1a968dff79632b85604d0", size = 84110, upload-time = "2026-08-31T14:08:40.964Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d5/d2/cc4dc1271e464942db7ee278baae2daa99ee77cb2af744025c04da585a3e/websocket_client-1.9.2-py3-none-any.whl", hash = "sha256:e1a673830a9c7bfa47b1cd3d5e4178f4c9651d80a4eab02c9c23a1c3ec6250ce", size = 95786, upload-time = "2026-08-31T14:08:39.899Z" },
 ]
 
 [[package]]

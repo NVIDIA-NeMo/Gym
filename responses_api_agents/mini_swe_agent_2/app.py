@@ -57,11 +57,17 @@ E2B_PROVIDER_NAME = "e2b"
 E2B_API_KEY_ENV = "E2B_API_KEY"  # pragma: allowlist secret
 E2B_HEADERS_ENV = "NEMO_GYM_E2B_HEADERS"
 E2B_API_HEADERS_ENV = "NEMO_GYM_E2B_API_HEADERS"
+LUXOR_PROVIDER_NAME = "luxor"
+LUXOR_API_KEY_ENV = "LUXOR_API_KEY"  # pragma: allowlist secret
+LUXOR_AUTH_TOKEN_ENV = "LUXOR_AUTH_TOKEN"  # pragma: allowlist secret
 
 _SANDBOX_API_KEY_ENV_BY_PROVIDER = {
     OPENSANDBOX_PROVIDER_NAME: OPENSANDBOX_API_KEY_ENV,
     E2B_PROVIDER_NAME: E2B_API_KEY_ENV,
+    LUXOR_PROVIDER_NAME: LUXOR_API_KEY_ENV,
 }
+# Providers whose SDK reads the API key from the environment when the config omits it.
+_SDK_ENV_KEY_PROVIDERS = frozenset({E2B_PROVIDER_NAME, LUXOR_PROVIDER_NAME})
 _E2B_HEADER_ENV_BY_CONNECTION_FIELD = {
     "headers": E2B_HEADERS_ENV,
     "api_headers": E2B_API_HEADERS_ENV,
@@ -193,6 +199,9 @@ def _sandbox_provider_for_config_dump(provider: dict[str, Any]) -> dict[str, Any
     if e2b_connection is not None:
         for field_name in _E2B_HEADER_ENV_BY_CONNECTION_FIELD:
             e2b_connection.pop(field_name, None)
+    luxor_connection = _sandbox_provider_connection(provider_for_disk, LUXOR_PROVIDER_NAME)
+    if luxor_connection is not None:
+        luxor_connection.pop("auth_token", None)
     return provider_for_disk
 
 
@@ -203,12 +212,12 @@ def _sandbox_runtime_env(provider: dict[str, Any] | None) -> dict[str, Any]:
         connection = _sandbox_provider_connection(provider, provider_name)
         api_key = connection.get("api_key") if connection is not None else None
         if (
-            provider_name == E2B_PROVIDER_NAME
+            provider_name in _SDK_ENV_KEY_PROVIDERS
             and not api_key
             and provider is not None
             and isinstance(provider.get(provider_name), dict)
         ):
-            # E2B's public SDK reads E2B_API_KEY directly. Preserve that
+            # These SDKs read their API key from the environment. Preserve that
             # fallback when an inline config omits connection.api_key.
             api_key = os.getenv(env_name)
         if api_key:
@@ -219,6 +228,9 @@ def _sandbox_runtime_env(provider: dict[str, Any] | None) -> dict[str, Any]:
             headers = e2b_connection.get(field_name)
             if headers:
                 env_vars[env_name] = json.dumps(headers)
+    luxor_connection = _sandbox_provider_connection(provider, LUXOR_PROVIDER_NAME)
+    if luxor_connection is not None and luxor_connection.get("auth_token"):
+        env_vars[LUXOR_AUTH_TOKEN_ENV] = str(luxor_connection["auth_token"])
     if env_vars:
         runtime_env["env_vars"] = env_vars
     return runtime_env
