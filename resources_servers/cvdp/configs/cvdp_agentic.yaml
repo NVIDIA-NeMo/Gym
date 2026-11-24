@@ -50,6 +50,10 @@ cvdp_agentic_resources_server:
         # The whole episode (default_episode_timeout_seconds): providers that expire sandboxes would otherwise end
         # it early, as OpenSandbox does 10 minutes after creation. Apptainer ignores it.
         ttl_s: 3600
+        # Commands in an Apptainer instance inherit the caller's environment, and a host TMPDIR is not visible in a
+        # contained sandbox: the simulators would fail to write their temporary files.
+        env:
+          TMPDIR: /tmp
       # The agentic prompts name /code paths.
       agent_workdir: /code
       datasets:

@@ -359,6 +359,42 @@ def test_a_file_name_that_is_not_utf8_is_left_out_instead_of_failing_the_verify(
     assert graded == [{"rtl/top.sv": TOP, "verif/tb.sv": TESTBENCH + "// more checks\n", "verif/sim.out": "compiled"}]
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes to a read-only directory anyway")
+def test_a_read_only_workspace_root_cannot_mask_a_failed_attempt(server, root, stopped, graded):
+    # The archive is written to the workspace root: an agent that made it read-only must still be graded.
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    _solve(root)
+    root.chmod(0o555)
+
+    verified = _verify(client)
+
+    assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+    assert graded[0]["rtl/top.sv"] == TOP
+
+
+def test_a_target_that_is_not_utf8_is_graded_as_empty_not_replaced_by_the_response_text(server, root, stopped, graded):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    (root / "rtl" / "top.sv").write_bytes(b"module top; // caf\xe9\nendmodule\n")
+
+    verified = _verify(client, _verify_body(f"```systemverilog\n{TOP}```"))
+
+    assert verified["mask_sample"] is False
+    assert graded == [{"rtl/top.sv": ""}], "the file the agent wrote is graded, not RTL parsed from the text"
+
+
+def test_the_harvest_reads_only_an_uncompressed_archive(tmp_path):
+    archive = tmp_path / "workspace.tar"
+    with tarfile.open(archive, "w:gz") as tar:
+        top = tarfile.TarInfo("rtl/top.sv")
+        top.size = len(TOP)
+        tar.addfile(top, io.BytesIO(TOP.encode()))
+
+    with pytest.raises(tarfile.ReadError):
+        app_module._collect_harvest(archive, tmp_path / "workspace", ["rtl/**/*"], {}, ["rtl/top.sv"])
+
+
 def test_files_that_changed_while_tar_read_them_still_grade(server, root, stopped, graded, monkeypatch):
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed())

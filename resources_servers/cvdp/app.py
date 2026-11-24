@@ -335,13 +335,14 @@ def _harvest_command(workdir: str, roots: List[str], archive: str) -> str:
     A workspace that cannot be entered exits ``_WORKSPACE_MISSING_EXIT``.
 
     The agent decides which files are readable, so an unreadable file must not fail the archive: tar exit 2 masks
-    the sample. The command first makes the agent's files readable again (it runs as their owner, or as root), and
-    GNU tar then leaves out whatever still is not with a warning. A target left out is graded as missing, a failure
-    of the model; write failures, such as a full disk, still exit 2.
+    the sample. The archive is written to the workspace root, so the command first makes that writable again, then
+    makes the agent's files readable again (it runs as their owner, or as root), and GNU tar then leaves out
+    whatever still is not with a warning. A target left out is graded as missing, a failure of the model; write
+    failures, such as a full disk, still exit 2.
     """
     candidates = " ".join(shlex.quote(root) for root in roots)
     return (
-        f"cd {shlex.quote(workdir)} || exit {_WORKSPACE_MISSING_EXIT}; set --; "
+        f"cd {shlex.quote(workdir)} || exit {_WORKSPACE_MISSING_EXIT}; chmod u+w . 2>/dev/null; set --; "
         f'for p in {candidates}; do if [ -e "$p" ]; then set -- "$@" "$p"; fi; done; '
         f'if [ "$#" -eq 0 ]; then exit {_NOTHING_TO_HARVEST_EXIT}; fi; '
         'chmod -R u+rX -- "$@" 2>/dev/null; '
@@ -360,7 +361,8 @@ def _collect_harvest(
     the agent's work; a declared target file counts whenever it exists. Files that are not UTF-8 text, hidden harness
     paths and generated directories are skipped.
     """
-    with tarfile.open(archive) as tar:
+    # Uncompressed only: the command writes a plain tar, and nothing in the workspace may swap in a compressed one.
+    with tarfile.open(archive, "r:") as tar:
         regular = {m.name for m in tar.getmembers() if m.isreg() and _safe_rel(m.name)}
         # tar stores a second path to an archived file as a hard link to the first; keep it when that one is kept.
         members = [
@@ -396,8 +398,14 @@ def _collect_harvest(
                 continue
             produced[rel] = content
     for rel in target_files:
-        if rel not in produced and _safe_rel(rel) and (content := read(dest / rel)) is not None:
+        if rel in produced or not _safe_rel(rel):
+            continue
+        if (content := read(dest / rel)) is not None:
             produced[rel] = content
+        elif rel in present:
+            # The agent wrote the target, but not as UTF-8 text: graded as an empty file, a miss, never replaced by
+            # RTL parsed out of the response text.
+            produced[rel] = ""
     return produced, present
 
 
@@ -504,8 +512,8 @@ class CVDPResourcesServer(SimpleResourcesServer):
     # The session lifecycle overrides seed_session, close_resources_session and retire_session_state instead of
     # implementing the session state hooks (initialize_session_state, release_session_state, has_session_state),
     # because the hooks' flow differs in three ways:
-    # - The seed must return sandbox_access, the descriptor the agent reattaches with. The hooks' typed seed returns
-    #   only the resources_session_id.
+    # - The hooks are class-wide: they would make the seed of cvdp_agent's simple flavor, which this server also
+    #   serves, keep state too. (A thin seed_session override can attach sandbox_access to a hooks seed.)
     # - verify, not close, stops the sandbox, and only once the files are out: a failed harvest keeps the sandbox for
     #   a resent verify. ``verifying`` releases the state when it exits, even when scoring raises.
     # - Only the harvest holds the session lock; grading in the task harness runs outside it.
