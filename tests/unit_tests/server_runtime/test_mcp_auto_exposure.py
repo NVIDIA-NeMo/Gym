@@ -56,7 +56,7 @@ from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
     mcp_session_token_serializer,
     normalize_tool_name,
 )
-from nemo_gym.server_runtime.base_server import SimpleServer  # noqa: E402
+from nemo_gym.server_runtime.base_server import SimpleServer, run_session_secret  # noqa: E402
 from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
     bind_route,
@@ -67,6 +67,7 @@ from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware  # noqa: E402
 from nemo_gym.server_runtime.request_handling.exception_handling import ExceptionHandlingMiddleware  # noqa: E402
 from nemo_gym.server_runtime.request_handling.session_id import SessionIDMiddleware  # noqa: E402
+from nemo_gym.server_runtime.tool_access import MCPStreamableHTTPConnection, MCPToolAccess  # noqa: E402
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -569,6 +570,213 @@ def test_session_hook_restricts_that_sessions_token():
         assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
 
 
+_SECRET = "a secret, not the server's name"
+
+
+def _company_server(cls=SessionScoped, mcp_server_name: str = "company") -> SimpleResourcesServer:
+    """A server whose endpoint presents itself as an ordinary one (mcp_server_name, mcp_bearer_token), and signs its
+    tokens with a secret, as a server that hands out bearer tokens must."""
+    cfg = BaseResourcesServerConfig(
+        host="",
+        port=0,
+        entrypoint="",
+        name="store",
+        expose_tools_over_mcp=True,
+        mcp_server_name=mcp_server_name,
+        mcp_bearer_token=True,
+    )
+
+    class Signed(cls):
+        def get_session_secret(self) -> str:
+            return _SECRET
+
+    return Signed(config=cfg, server_client=MagicMock(spec=ServerClient))
+
+
+def test_bearer_token_and_advertised_name_present_an_ordinary_endpoint():
+    """The seed hands out a bearer token under the advertised name; tools/list needs it and shows only the
+    session's grant; a tool outside the grant is answered as an unknown one; the errors name no framework."""
+    server = _company_server()
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        mcp = client.post("/seed_session", json={"allowed_tools": ["append"]}).json()["mcp"]
+        assert mcp["server_name"] == "company" and list(mcp["headers"]) == ["Authorization"]
+        scheme, _, token = mcp["headers"]["Authorization"].partition(" ")
+        assert scheme == "Bearer"
+        _handshake(client)
+        bearer = {**RPC_HEADERS, "Authorization": f"Bearer {token}"}
+
+        def rpc(method: str, params: dict, headers: dict) -> dict:
+            body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+            return client.post("/mcp", headers=headers, json=body).json()
+
+        assert "error" in rpc("tools/list", {}, RPC_HEADERS)  # no token: nothing is listed
+        assert "error" in rpc("tools/list", {}, {**RPC_HEADERS, TOKEN_HEADER: token})  # nor in Gym's header
+        assert [t["name"] for t in rpc("tools/list", {}, bearer)["result"]["tools"]] == ["append"]
+        for name in ("raw_step", "nope"):  # outside the grant, or nowhere: the same answer
+            result = rpc("tools/call", {"name": name, "arguments": {}}, bearer)["result"]
+            assert result["isError"] is True
+            assert result["content"][0]["text"] == f"Unknown tool: {name!r}. Available tools: ['append']"
+        appended = rpc("tools/call", {"name": "append", "arguments": {"value": "x"}}, bearer)["result"]
+        assert _payload(appended) == {"values": ["x"]}
+        for headers, error in [
+            (RPC_HEADERS, "Missing session token (Authorization header)."),
+            ({**RPC_HEADERS, "Authorization": "Bearer forged"}, "Invalid session token."),
+            ({**RPC_HEADERS, "Authorization": f"Basic {token}"}, "Missing session token (Authorization header)."),
+        ]:
+            refused = rpc("tools/call", {"name": "append", "arguments": {"value": "y"}}, headers)["result"]
+            assert refused["isError"] is True and refused["content"][0]["text"] == error
+    shapes = _company_server(Shapes)  # a tool's HTTP error names the tool, not the route it is served at
+    app = shapes.setup_webserver()
+    maybe_auto_expose(shapes, app)
+    with TestClient(app) as client:
+        grant = client.post("/seed_session", json={}).json()["mcp"]["headers"]["Authorization"]
+        _handshake(client)
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "teapot", "arguments": {}}}
+        text = client.post("/mcp", headers={**RPC_HEADERS, "Authorization": grant}, json=body).json()["result"]
+        assert text["content"][0]["text"].startswith("HTTP 418 from teapot: ") and "short and stout" in str(text)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"mcp_server_name": "company"},
+        {"mcp_bearer_token": True},
+        {"mcp_server_name": "company", "mcp_bearer_token": True},
+    ],
+)
+def test_the_endpoints_options_need_the_endpoint(options: dict):
+    from pydantic import ValidationError
+
+    base = {"host": "", "port": 0, "entrypoint": "", "name": "r"}
+    with pytest.raises(ValidationError, match="expose_tools_over_mcp: true"):
+        BaseResourcesServerConfig(**base, **options)
+    assert BaseResourcesServerConfig(**base, **options, expose_tools_over_mcp=True).expose_tools_over_mcp
+
+
+@pytest.mark.parametrize(
+    ("name", "refusal"),
+    [
+        # MCP clients name tools mcp__<name>__<tool>, from the same alphabet as the tools' own names.
+        *[(name, "should match pattern") for name in ("", "my company", "mcp/company", "company.tools", ".company")],
+        # An Environment Server grants agents the endpoint under this name, and a grant's name starts with a letter
+        # or a digit.
+        *[(name, "is not a name an MCP grant takes") for name in ("_company", "-company")],
+    ],
+)
+def test_an_advertised_name_tool_names_or_grants_cannot_carry_is_refused(name: str, refusal: str):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match=rf"mcp_server_name\n.*{refusal}"):
+        BaseResourcesServerConfig(
+            host="", port=0, entrypoint="", name="r", expose_tools_over_mcp=True, mcp_server_name=name
+        )
+
+
+@pytest.mark.parametrize("name", ["company", "company_x", "company-x", "9company"])
+def test_an_advertised_name_the_config_takes_names_an_mcp_grant(name: str):
+    """The seed metadata gives the endpoint the configured name, and an MCP grant takes that name unchanged."""
+    server = _company_server(mcp_server_name=name)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        mcp = client.post("/seed_session", json={}).json()["mcp"]
+
+    grant = MCPToolAccess(
+        name=mcp["server_name"],
+        required=True,
+        connection=MCPStreamableHTTPConnection(url=f"http://store:8000{mcp['url_path']}", headers=mcp["headers"]),
+    )
+    assert grant.name == name
+    assert list(grant.connection.headers) == ["Authorization"]
+
+
+def test_bearer_tokens_are_signed_with_a_secret_made_for_the_run():
+    """Code that reads a bearer token could sign one for another session with the server's public session middleware
+    key, so a server that hands out bearer tokens signs them with a secret made for the run, from its config alone. An
+    override of get_session_secret() that returns the public key keeps the endpoint from starting."""
+    import itsdangerous
+
+    config = BaseResourcesServerConfig(
+        host="", port=0, entrypoint="", name="store", expose_tools_over_mcp=True, mcp_bearer_token=True
+    )
+    store = SessionScoped(config=config, server_client=MagicMock(spec=ServerClient))
+    app = store.setup_webserver()
+    maybe_auto_expose(store, app)
+    with TestClient(app) as client:
+        token = client.post("/seed_session", json={}).json()["mcp"]["headers"]["Authorization"].removeprefix("Bearer ")
+    assert "sid" in mcp_session_token_serializer(run_session_secret("store")).loads(token)
+    with pytest.raises(itsdangerous.BadSignature):
+        mcp_session_token_serializer(store.get_session_middleware_key()).loads(token)
+
+    class PublicKey(SessionScoped):
+        def get_session_secret(self) -> str:
+            return self.get_session_middleware_key()
+
+    public = PublicKey(config=config, server_client=MagicMock(spec=ServerClient))
+    app = public.setup_webserver()
+    with pytest.raises(
+        ValueError, match=r"^'store' sets mcp_bearer_token .* PublicKey\.get_session_secret\(\) must return a secret"
+    ):
+        maybe_auto_expose(public, app)
+    assert "/mcp" not in {getattr(r, "path", None) for r in app.routes}
+
+    signed = _company_server()
+    app = signed.setup_webserver()
+    maybe_auto_expose(signed, app)
+    with TestClient(app) as client:
+        grant = client.post("/seed_session", json={}).json()["mcp"]["headers"]["Authorization"]
+    assert "sid" in mcp_session_token_serializer(_SECRET).loads(grant.removeprefix("Bearer "))
+
+    # Without bearer tokens, the endpoint starts with the default key and signs Gym's header token with it, as before.
+    with _mcp(SessionScoped) as (_, token):
+        assert "sid" in mcp_session_token_serializer(_server(SessionScoped).get_session_middleware_key()).loads(token)
+
+
+def test_without_the_options_the_endpoint_answers_as_before():
+    """Gym's header, the server's own name, tools/list without a token, every tool named on a miss, and the errors'
+    wording."""
+    with _mcp(SessionScoped) as (client, token):
+        assert {"append", "raw_step"} <= {t["name"] for t in _list(client)}
+        missed = _call(client, "nope", {}, token=token)["content"][0]["text"]
+        assert "'raw_step'" in missed and "'append'" in missed
+        missing = _call(client, "append", {"value": "x"})["content"][0]["text"]
+        assert missing == f"Missing {TOKEN_HEADER} for Gym MCP tool call."
+        assert _call(client, "append", {"value": "x"}, token="forged")["content"][0]["text"] == (
+            "Invalid Gym MCP session token."
+        )
+    with _mcp(Shapes, "shapes") as (client, token):
+        assert (
+            "HTTP 418 from POST /teapot: short and stout"
+            in _call(client, "teapot", {}, token=token)["content"][0]["text"]
+        )
+    server = _server(SessionScoped)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        mcp = client.post("/seed_session", json={"allowed_tools": ["append"]}).json()["mcp"]
+        assert mcp["server_name"] == "store" and list(mcp["headers"]) == [TOKEN_HEADER]
+
+
+def test_verify_strips_the_advertised_names_namespace():
+    """Clients namespace tools by the name the endpoint lists itself under, so verify strips that one."""
+    seen: dict[str, list] = {}
+
+    class Recorder(Store):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            seen["names"] = [o.name for o in body.response.output if o.type == "function_call"]
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    server = _company_server(Recorder)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        resp = client.post("/verify", json=_verify_body(["mcp__company__append", "mcp__store__append"]))
+        assert resp.status_code == 200, resp.text
+    assert seen["names"] == ["append", "mcp__store__append"]
+
+
 def _typed_seed_body(task_data: dict) -> dict:
     return {
         "resources_session_id": "resources-session-1",
@@ -644,6 +852,26 @@ def test_a_token_minted_without_checkpointing_names_only_its_session_and_tools()
     assert payload == {"sid": payload["sid"], "tools": None}
     # Byte for byte the token every harness got before checkpointing existed.
     assert token == mcp_session_token_serializer(server.get_session_middleware_key()).dumps(payload)
+
+
+class SecretSigned(Store):
+    def get_session_secret(self) -> str:
+        return "a secret, not the server's name"
+
+
+def test_a_server_with_its_own_secret_signs_its_tokens_with_it():
+    server = _server(SecretSigned)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        token = _seed(client)
+        _handshake(client)
+        payload = mcp_session_token_serializer("a secret, not the server's name").loads(token)
+        assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
+        # The same claims signed with the server's public name are refused.
+        forged = mcp_session_token_serializer(server.get_session_middleware_key()).dumps(payload)
+        assert _call(client, "append", {"value": "y"}, token=forged)["isError"] is True
+        assert server.session_state[payload["sid"]] == ["x"]
 
 
 def test_a_token_minted_with_checkpointing_names_the_attempt_that_seeded_it():

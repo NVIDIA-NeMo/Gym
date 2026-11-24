@@ -194,7 +194,10 @@ limit for each model call, as `simple_agent` does, and NeMo RL sets it on every 
 it is at least the configured `max_output_tokens`, OpenCode's limit for each call; a smaller value
 returns 422. As in `simple_agent`, nothing limits the sum of output tokens over a session's calls. Other controls, history replay and
 required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
-their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
+their tools as `<grant>_<tool>`. OpenCode writes characters other than letters, digits, `_` and `-` as `_`
+there, and a tool under a name already taken replaces the earlier one without a word, so a seed refuses two
+grants whose tools could share a name: one named as the other followed by `_` (`company` and `company_files`),
+or two that differ only where OpenCode writes `_`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
 fails after about 300 seconds, Bun's default `fetch` timeout. Before the first model call,
 `required_mcp.mjs` checks
