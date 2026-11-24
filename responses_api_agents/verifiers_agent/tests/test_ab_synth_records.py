@@ -5,10 +5,15 @@ for the seed, events and the write log, and credited through explicit primary ke
 
 import asyncio
 import copy
+import json
+import tempfile
 import unittest
 import unittest.mock
+from datetime import datetime
 
 import ab_synth_env as env
+import verifiers as vf
+from verifiers.legacy.types import AssistantMessage, ToolCall
 
 from responses_api_agents.verifiers_agent.tests.test_ab_synth_env import (
     INFO,
@@ -435,6 +440,248 @@ class NullSeedReplayTest(unittest.TestCase):
         initial["hubspot"]["contacts"][0]["email"] = None
 
         self.assertEqual(env.replay({"initial_state": initial, "assertions": [PROMOTED]}, [PROMOTE]), 1.0)
+
+
+class LoadRefusalTest(unittest.TestCase):
+    def test_a_bad_row_is_refused_alone_and_the_rest_load(self):
+        bad = {"initial_state": INITIAL_STATE, "assertions": [{**PROMOTED, "property": "closeDate"}]}  # a date field
+        rows = [{"responses_create_params": {"input": PROMPT}, "info": info} for info in (INFO, bad, INFO)]
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:
+            f.writelines(json.dumps(r) + "\n" for r in rows)
+            f.flush()
+            with self.assertLogs("ab_synth_env", "WARNING") as logs:
+                vf_env = env.load_environment(
+                    tasks_path=f.name, requester_base_url="http://127.0.0.1:9/v1", requester_model="m"
+                )
+
+        self.assertEqual(len(vf_env.dataset), 2)
+        self.assertIn("refused 1 of 3 rows", "\n".join(logs.output))
+
+
+# F1: an event on a worksheet the agent deleted must be skipped and the rollout scored, not masked.
+class EventOnDeletedWorksheetTest(unittest.TestCase):
+    def test_an_event_on_a_tab_the_policy_deleted_is_scored_not_masked(self):
+        initial = {
+            **INITIAL_STATE,
+            "google_sheets": {
+                "spreadsheets": [{"id": "ss_abc", "title": "Tracker"}],
+                "worksheets": [
+                    {"id": "ws1", "spreadsheet_id": "ss_abc", "title": "Queue"},
+                    {"id": "ws2", "spreadsheet_id": "ss_abc", "title": "Archive"},
+                ],
+            },
+        }
+        event = {
+            "at": "2026-03-04T08:00:00",
+            "patch": {"app": "google_sheets", "collection": "worksheets", "id": "ws2", "set": {"title": "Old"}},
+        }
+        info = {
+            **INFO,
+            "initial_state": initial,
+            "events": [event],
+            "assertions": [PROMOTED, {"type": "not_acted", "record": "ws2"}],
+        }
+        vf_env, state = load(info)
+        self.assertNotIn("env_row_invalid", state)
+        # The policy deletes tab ws2 on day one, a mistake the not_acted guardrail exists to catch.
+        state["clock"].fetch(
+            "POST",
+            "https://sheets.googleapis.com/v4/spreadsheets/ss_abc:batchUpdate",
+            body={"requests": [{"deleteSheet": {"sheetId": "ws2"}}]},
+        )
+        self.assertEqual([w.id for w in state["world"].google_sheets.worksheets], ["ws1"])
+
+        call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "2026-03-05T09:00:00"}))
+        try:
+            asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
+        except vf.ToolCallError as e:
+            self.fail(f"wait was masked as a requester failure: {e.__cause__!r} <- {e.__cause__.__cause__!r}")
+
+        self.assertNotIn("requester_failed", state)
+        self.assertEqual(state["clock"].now(), datetime(2026, 3, 5, 9))
+        self.assertEqual(env.reward(state), 0.0)
+
+
+# F2: a write naming a spreadsheet by title credits the spreadsheet upstream wrote into (separator-normalized
+# title match, first match wins), as a write naming it by id does.
+TITLE_DAY = "2026-03-02"
+
+
+def titles_seed(books):
+    return {
+        "meta": {"current_time": "2026-03-02T09:00:00"},
+        "google_sheets": {
+            "spreadsheets": [{"id": ss, "title": title} for ss, title in books],
+            "worksheets": [
+                {"id": f"ws_{ss}", "spreadsheet_id": ss, "title": "Sheet1", "headers": ["A", "B"]} for ss, _ in books
+            ],
+            "rows": [
+                {"spreadsheet_id": ss, "worksheet_id": f"ws_{ss}", "row_id": 2, "cells": {"A": "n2", "B": "open"}}
+                for ss, _ in books
+            ],
+        },
+    }
+
+
+def title_append(spreadsheet):
+    return {
+        "method": "POST",
+        "url": f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet}/values/Sheet1:append",
+        "params": {"valueInputOption": "RAW"},
+        "body": {"values": [["x", "y"]]},
+    }
+
+
+def title_landed_in(info, call) -> set:
+    """The spreadsheets upstream's own resolution puts the appended row in."""
+    from automationbench.runner import strip_none_values
+    from automationbench.schema.world import WorldState
+
+    world = WorldState(**strip_none_values(copy.deepcopy(info["initial_state"])))
+    clock = env.Clock(world, [], world.meta.current_time.isoformat())
+    clock.fetch(call["method"], call["url"], call["params"], call["body"])
+    gs = world.google_sheets
+    added = gs.rows[len(info["initial_state"]["google_sheets"]["rows"]) :]
+    return {gs._resolve_spreadsheet_id(r.spreadsheet_id) for r in added}
+
+
+class TitleResolutionTest(unittest.TestCase):
+    def test_a_separator_variant_of_the_title_credits_the_spreadsheet_upstream_wrote_into(self):
+        for name in ("q4_budget", "Q4-Budget"):
+            info = {
+                "initial_state": titles_seed([("ss_live", "Q4 Budget")]),
+                "assertions": [{"type": "acted_on_day", "record": "ss_live", "day": TITLE_DAY}],
+            }
+            self.assertEqual(
+                title_landed_in(info, title_append(name)), {"ss_live"}, name
+            )  # upstream wrote into ss_live
+
+            self.assertEqual(env.replay(info, [title_append(name)]), 1.0, name)
+
+    def test_a_title_two_spreadsheets_share_credits_the_first_as_upstream_resolves_it(self):
+        info = {
+            "initial_state": titles_seed([("ss_a", "Tracker"), ("ss_b", "tracker")]),
+            "assertions": [
+                {"type": "acted_on_day", "record": "ss_a", "day": TITLE_DAY},
+                {"type": "not_acted", "record": "ss_b"},
+            ],
+        }
+        self.assertEqual(title_landed_in(info, title_append("Tracker")), {"ss_a"})  # upstream takes the first match
+
+        self.assertEqual(env.replay(info, [title_append("Tracker")]), 1.0)
+
+
+# F3: a tab write (addSheet, deleteSheet, updateSheetProperties) acts on its spreadsheet, as a row write does.
+TAB_DAY = "2026-03-02"
+TAB_BATCH = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc:batchUpdate"
+
+
+def tab_seed():
+    return {
+        **copy.deepcopy(INITIAL_STATE),
+        "google_sheets": {
+            "spreadsheets": [{"id": "ss_abc", "title": "Tracker"}],
+            "worksheets": [
+                {"id": "ws1", "spreadsheet_id": "ss_abc", "title": "Queue"},
+                {"id": "ws2", "spreadsheet_id": "ss_abc", "title": "Archive"},
+            ],
+        },
+    }
+
+
+def tab_batch(request):
+    return {"method": "POST", "url": TAB_BATCH, "body": {"requests": [request]}}
+
+
+class TabWriteCreditsSpreadsheetTest(unittest.TestCase):
+    def test_a_tab_write_on_the_due_day_passes_acted_on_day_on_its_spreadsheet(self):
+        info = {
+            "initial_state": tab_seed(),
+            "assertions": [{"type": "acted_on_day", "record": "ss_abc", "day": TAB_DAY}],
+        }
+        for request in (
+            {"addSheet": {"properties": {"title": "Summary"}}},
+            {"deleteSheet": {"sheetId": "ws2"}},
+            {"updateSheetProperties": {"properties": {"sheetId": "ws2", "title": "Old"}, "fields": "title"}},
+        ):
+            self.assertEqual(env.replay(info, [tab_batch(request)]), 1.0, next(iter(request)))
+
+    def test_deleting_a_tab_breaks_a_not_acted_guardrail_on_its_spreadsheet(self):
+        info = {
+            "initial_state": tab_seed(),
+            "assertions": [
+                {"type": "acted_on_day", "record": "101", "day": TAB_DAY},  # the objective
+                {"type": "not_acted", "record": "ss_abc"},
+            ],
+        }
+
+        self.assertEqual(env.replay(info, [PROMOTE, tab_batch({"deleteSheet": {"sheetId": "ws2"}})]), 0.0)
+
+
+# F4: an acted_on_day whose `day` is not a YYYY-MM-DD date is caught by the row check (or still grades a correct
+# plan), instead of loading as a row no plan can pass.
+def day_row(day=...):
+    info = copy.deepcopy(INFO)
+    acted = {"type": "acted_on_day", "record": "101"}
+    if day is not ...:
+        acted["day"] = day
+    info["assertions"] = [acted, {"type": "not_acted", "record": "1010"}]
+    return info
+
+
+class DayValidationTest(unittest.TestCase):
+    def test_a_well_formed_day_loads_and_a_correct_plan_scores_one(self):  # the control
+        info = day_row("2026-03-04")
+        self.assertEqual(env.row_problems(info, requester=True), [])
+        self.assertEqual(env.replay(info, [{"wait": "2026-03-04T09:00:00"}, PROMOTE]), 1.0)
+
+    def test_a_malformed_day_is_refused_or_still_grades_the_correct_plan(self):
+        for day in ("2026-03-04T00:00:00", "2026-3-4"):
+            info = day_row(day)
+            if env.row_problems(info, requester=True):
+                continue  # refused at the day_row check: a correct outcome
+            self.assertEqual(env.replay(info, [{"wait": "2026-03-04T09:00:00"}, PROMOTE]), 1.0, day)
+
+    def test_a_missing_day_is_refused_by_the_row_check(self):
+        self.assertNotEqual(env.row_problems(day_row(), requester=True), [])
+
+
+# F5: a write that changes the world and then raises is still logged, so day assertions see the change.
+RAISE_BATCH = "https://sheets.googleapis.com/v4/spreadsheets/ss_abc:batchUpdate"
+
+
+class PartialWriteThenRaiseTest(unittest.TestCase):
+    def test_a_rename_applied_before_the_call_raises_breaks_the_tabs_not_acted_guardrail(self):
+        initial = {
+            **copy.deepcopy(INITIAL_STATE),
+            "google_sheets": {
+                "spreadsheets": [{"id": "ss_abc", "title": "Tracker"}],
+                "worksheets": [{"id": "ws1", "spreadsheet_id": "ss_abc", "title": "Queue"}],
+            },
+        }
+        info = {"initial_state": initial, "assertions": [PROMOTED, {"type": "not_acted", "record": "ws1"}]}
+        vf_env, state = load(info)
+        self.assertNotIn("env_row_invalid", state)
+        state["clock"].fetch(**PROMOTE)  # the objective
+
+        # One batchUpdate: the first request renames ws1, the second is malformed and makes upstream raise.
+        body = {
+            "requests": [
+                {"updateSheetProperties": {"properties": {"sheetId": "ws1", "title": "Renamed"}, "fields": "title"}},
+                {"addSheet": {"properties": "oops"}},
+            ]
+        }
+        args = {"method": "POST", "url": RAISE_BATCH, "body": body}
+        call = ToolCall(id="c1", name="api_fetch", arguments=json.dumps(args))
+        out = asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
+
+        # The policy sees an error, the rollout goes on, and the rename stays in the world.
+        self.assertIn("has no attribute 'get'", str(out[0].content))
+        self.assertEqual(state["world"].google_sheets.worksheets[0].title, "Renamed")
+        self.assertNotIn("requester_failed", state)
+        tag = env._tag("google_sheets", "worksheets", ("ss_abc", "ws1"))
+        self.assertTrue(any(tag in e["targets"] for e in state["clock"].log), state["clock"].log)
+        self.assertEqual(env.reward(state), 0.0)
 
 
 if __name__ == "__main__":

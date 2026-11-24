@@ -11,7 +11,8 @@ the dataset, not from the benchmark. Each row turns features on through keys in 
   simulated time and the records they added, changed or deleted, so two more assertion types can grade when the
   agent acted: `acted_on_day` (`record`, `day`, optional `body_contains`: the first write that changed `record`
   happened on `day`) and `not_acted` (`record`: no write changed it, a guardrail). Each `record` is resolved to one
-  record of the seed at load (`resolve_records`), and a row whose record names nothing or several is refused.
+  record of the seed (`resolve_records`), at load and again in each rollout, and a row whose record names nothing or
+  several is refused.
 - Multi-turn (`user_card`): when the agent ends a turn without tool calls, a simulated requester answers from its
   private notes. The requester is an OpenAI-compatible chat endpoint (`requester_base_url`, `requester_model`) that
   sees only the visible conversation. It answers at most `max_user_turns` times and replies DONE when it has nothing
@@ -64,6 +65,7 @@ PARENTS = {
     ("google_calendar", "events"): [("calendars", "calendarid")],
     ("facebook_pages", "posts"): [("pages", "page_id")],
     ("slack", "messages"): [("channels", "channel_id")],
+    ("google_sheets", "worksheets"): [("spreadsheets", "spreadsheet_id")],
 }
 # Writes an app keeps only in its action log, by (app, action): the collections and params naming the records acted on.
 ACTION_TARGETS = {
@@ -161,20 +163,18 @@ def _get(msg, key):
     return msg.get(key) if isinstance(msg, dict) else getattr(msg, key, None)
 
 
-def _key(app: str, collection: str, record, sheet_ids: dict | None = None):
+def _key(app: str, collection: str, record, sheets=None):
     """A record's key in its collection: `id`, else `sid` (Twilio), else the collection's primary key (Xero). A worksheet's
-    key is (spreadsheet id, id), a sheet row's (spreadsheet id, worksheet id, row_id), with a spreadsheet or tab that a
-    write named by its title mapped to its id through `sheet_ids` (`_sheet_ids`), so an appended row never takes
-    another's key."""
+    key is (spreadsheet id, id), a sheet row's (spreadsheet id, worksheet id, row_id). A spreadsheet or tab that a write
+    named by its title is mapped to its id by the simulator's own resolvers on `sheets` (the world's google_sheets), so
+    the key cannot drift from how the simulator reads titles and an appended row never takes another's key."""
     if (app, collection) == ("google_sheets", "worksheets"):
         return (_get(record, "spreadsheet_id"), str(_get(record, "id")))
     if (app, collection) == ("google_sheets", "rows"):
-        ids = sheet_ids or {"books": set(), "tabs": set(), "titles": {}}
         sheet, tab = _get(record, "spreadsheet_id"), _get(record, "worksheet_id")
-        if sheet not in ids["books"]:
-            sheet = ids["titles"].get(str(sheet).casefold(), sheet)
-        if (sheet, tab) not in ids["tabs"]:
-            tab = ids["titles"].get((sheet, str(tab).casefold()), tab)
+        if sheets is not None:
+            sheet = sheets._resolve_spreadsheet_id(str(sheet))
+            tab = sheets._resolve_worksheet_id(sheet, str(tab))
         return (sheet, tab, _get(record, "row_id"))
     for field in ("id", "sid", PRIMARY_KEYS.get((app, collection))):
         if field and (value := _get(record, field)) is not None:
@@ -182,30 +182,16 @@ def _key(app: str, collection: str, record, sheet_ids: dict | None = None):
     return None
 
 
-def _sheet_ids(world: dict) -> dict:
-    """The spreadsheet and tab ids of a world dump, and their titles (case-insensitive, as upstream reads them) mapped
-    to the ids: a write that names a spreadsheet or tab by title files its rows under the title."""
-    sheets = world.get("google_sheets") or {}
-    books, tabs = sheets.get("spreadsheets", []), sheets.get("worksheets", [])
-    titles = {str(b.get("title")).casefold(): b["id"] for b in books if b.get("title")}
-    titles.update({(w["spreadsheet_id"], str(w["title"]).casefold()): w["id"] for w in tabs if w.get("title")})
-    return {
-        "books": {b["id"] for b in books},
-        "tabs": {(w["spreadsheet_id"], w["id"]) for w in tabs},
-        "titles": titles,
-    }
-
-
-def _records(world: dict) -> dict:
+def _records(world: dict, sheets=None) -> dict:
     """Every record of a world dump by (app, collection, key). A list collection holds records, a dict one maps keys to
     records. Records without a key of their own share the key None."""
-    found, sheet_ids = {}, _sheet_ids(world)
+    found = {}
     for app, collections in world.items():
         if not isinstance(collections, dict):
             continue
         for name, items in collections.items():
             if isinstance(items, list):
-                pairs = [(_key(app, name, r, sheet_ids), r) for r in items if isinstance(r, dict)]
+                pairs = [(_key(app, name, r, sheets), r) for r in items if isinstance(r, dict)]
             elif isinstance(items, dict):
                 pairs = [(str(k), r) for k, r in items.items() if isinstance(r, dict)]
             else:
@@ -232,7 +218,12 @@ def _actions(world: dict) -> dict:
     }
 
 
-def _names(world: dict, events: list[dict]) -> dict:
+def _known(records: dict) -> set:
+    """(app, collection, name) for every record, by its key and by its `id`: the names a dated event's `id` can use."""
+    return {(a, c, n) for (a, c, k), rs in records.items() for r in rs for n in (k, str(r.get("id")))}
+
+
+def _names(world: dict, events: list[dict], sheets=None) -> dict:
     """Every name a record answers to (its key, its alias, a sheet row's row_id and id) -> the tags of the records with
     it, over the seed and the records its events add."""
     names = {}
@@ -244,27 +235,28 @@ def _names(world: dict, events: list[dict]) -> dict:
         if alias and record.get(alias) is not None:
             names.setdefault(str(record[alias]), set()).add(tag)
 
-    for (app, collection, key), records in _records(world).items():
+    for (app, collection, key), records in _records(world, sheets).items():
         for record in records if key is not None else ():
             add(app, collection, key, record)
     for e in events:
         patch = e["patch"]
-        if "add" in patch and (key := _key(patch["app"], patch["collection"], patch["add"], _sheet_ids(world))):
+        if "add" in patch and (key := _key(patch["app"], patch["collection"], patch["add"], sheets)):
             add(patch["app"], patch["collection"], key, patch["add"])
     return names
 
 
-def _sheet_rows(world: dict, ref) -> dict:
+def _sheet_rows(world: dict, ref, sheets) -> dict:
     """The rows an A1 reference names, by worksheet. A row is the one with that row_id, else, in a tab of string row
     ids, the one at that position (the first row is 2), as upstream addresses them. A single row past a tab's rows is
-    the row an append there would add. Without a tab only rows that exist count."""
-    sheets = world.get("google_sheets") or {}
+    the row an append there would add. Without a tab only rows that exist count. A tab title resolves as the simulator
+    resolves it (`sheets`, the world's google_sheets)."""
+    tabs = world.get("google_sheets") or {}
     first, last = int(ref["first"]), int(ref["last"] or ref["first"])
-    found, sheet_ids = {}, _sheet_ids(world)
-    for w in sheets.get("worksheets", []):
-        if ref["tab"] is not None and ref["tab"].casefold() != str(w["title"]).casefold():
+    found = {}
+    for w in tabs.get("worksheets", []):
+        if ref["tab"] is not None and sheets._resolve_worksheet_id(w["spreadsheet_id"], ref["tab"]) != w["id"]:
             continue
-        keys = [_key("google_sheets", "rows", r, sheet_ids) for r in sheets.get("rows", [])]
+        keys = [_key("google_sheets", "rows", r, sheets) for r in tabs.get("rows", [])]
         rows = [row_id for sheet, tab, row_id in keys if (sheet, tab) == (w["spreadsheet_id"], w["id"])]
         strings = any(not isinstance(r, int) for r in rows)
         hits = []
@@ -295,6 +287,8 @@ def row_problems(info: dict, *, requester: bool) -> list[str]:
             )
         if a.get("type") in DAY_ASSERTIONS and not isinstance(a.get("record"), (str, int)):
             problems.append(f"{a['type']} has no record (got {a.get('record')!r})")
+        if a.get("type") == "acted_on_day" and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(a.get("day"))):
+            problems.append(f"acted_on_day day {a.get('day')!r} is not YYYY-MM-DD")
     if info.get("period_end"):
         if missing := [k for k in ("wait_tool_description", "wait_until_description") if not info.get(k)]:
             problems.append(f"a multi-day row needs {missing}")
@@ -318,15 +312,16 @@ def resolve_records(info: dict) -> list[str]:
     A record string names the record with that key or alias (or the sheet row with that row_id), in the seed or added
     by an event. Only a string no record answers to is read as an A1 reference to sheet rows of one tab. Returns one
     problem per record that names nothing or more than one record (two collections, or rows of two tabs)."""
-    world = WorldState(**strip_none_values(info["initial_state"])).model_dump(mode="json")
-    names, problems = _names(world, info.get("events", [])), []
+    seed = WorldState(**strip_none_values(info["initial_state"]))
+    world, sheets = seed.model_dump(mode="json"), seed.google_sheets
+    names, problems = _names(world, info.get("events", []), sheets), []
     for a in info.get("assertions", []):
         if a.get("type") not in DAY_ASSERTIONS:
             continue
         name = str(a["record"])
         found, tabs = names.get(name, set()), {}
         if not found and (ref := ROW_REF.fullmatch(name)):
-            tabs = _sheet_rows(world, ref)
+            tabs = _sheet_rows(world, ref, sheets)
             found = set().union(*tabs.values()) if len(tabs) == 1 else set()
         if len(found) == 1 or (len(tabs) == 1 and found):
             a["targets"] = sorted(found)
@@ -378,7 +373,7 @@ class Clock:
         self.zone = world.meta.current_time.tzinfo or timezone.utc
         # Records that existed at the seed or after an event, so an event on one that is gone now can be told from an
         # event on a record that never existed.
-        self.known = set(_records(world.model_dump(mode="json")))
+        self.known = _known(_records(world.model_dump(mode="json"), world.google_sheets))
 
     def now(self) -> datetime:
         return _time(self.world.meta.current_time.isoformat())
@@ -400,7 +395,7 @@ class Clock:
                 if key not in self.known:
                     raise
                 logger.info("ab_synth: event skipped, %s.%s %s was deleted", *key)
-            self.known |= set(_records(self.world.model_dump(mode="json")))
+            self.known |= _known(_records(self.world.model_dump(mode="json"), self.world.google_sheets))
         # Keep the seed's awareness: upstream date queries read a naive time as host-local time.
         aware = self.world.meta.current_time.tzinfo is not None
         self.world.meta.current_time = target.replace(tzinfo=timezone.utc) if aware else target
@@ -419,47 +414,47 @@ class Clock:
         their parents, and the records its logged actions name. Failed writes (whatever shape their error reply has) and
         read-only POSTs such as searches change nothing and are not acts."""
         params, body = _as_json_text(params), _as_json_text(body)
-        write = method.upper() in WRITE_METHODS
-        before = self.world.model_dump(mode="json") if write else None
-        out = upstream_api_fetch(self.world, method, url, params, body)
-        after = self.world.model_dump(mode="json") if write else None
-        if after != before:
-            now = self.now()
-            day = now.replace(tzinfo=timezone.utc).astimezone(self.zone).date().isoformat()
-            old, new = _records(before), _records(after)
-            changed = [k for k in old.keys() | new.keys() if old.get(k) != new.get(k)]
-            targets = {_tag(*k) for k in changed if k[2] is not None}
-            for k in changed:
-                # Only the records that were added, changed or deleted credit their parent, not their unchanged peers.
-                o, n = old.get(k, []), new.get(k, [])
-                moved = [r for r in o if r not in n] + [r for r in n if r not in o]
-                for parent, field in PARENTS.get(k[:2], ()):
-                    targets |= {_tag(k[0], parent, str(r[field])) for r in moved if r.get(field)}
-                if k[:2] == ("google_sheets", "rows"):  # a row's spreadsheet and tab, by its key's mapped ids
-                    targets |= {
-                        _tag("google_sheets", "spreadsheets", k[2][0]),
-                        _tag("google_sheets", "worksheets", k[2][:2]),
-                    }
-            done, names = _actions(before), None
-            for (app, action, id_), params in _actions(after).items():
-                if (app, action, id_) in done:
-                    continue
-                for collection, param in ACTION_TARGETS.get((app, action), []):
-                    names = names or _names(after, [])
-                    values = params.get(param)
-                    for value in values if isinstance(values, list) else [values]:
-                        targets |= {t for t in names.get(str(value), ()) if json.loads(t)[:2] == [app, collection]}
-            self.log.append(
-                {
-                    "at": now.isoformat(),
-                    "day": day,
-                    "method": method.upper(),
-                    "url": url,
-                    "body": body,
-                    "targets": sorted(targets),
+        if method.upper() not in WRITE_METHODS:
+            return upstream_api_fetch(self.world, method, url, params, body)
+        # The records before the write, with sheet titles resolved against the world as it was then.
+        before = self.world.model_dump(mode="json")
+        old = _records(before, self.world.google_sheets)
+        try:
+            return upstream_api_fetch(self.world, method, url, params, body)
+        finally:  # a write that changed the world and then raised is still an act
+            after = self.world.model_dump(mode="json")
+            if after != before:
+                self._log_write(method.upper(), url, body, before, old, after)
+
+    def _log_write(self, method: str, url: str, body: str, before: dict, old: dict, after: dict) -> None:
+        now = self.now()
+        day = now.replace(tzinfo=timezone.utc).astimezone(self.zone).date().isoformat()
+        new = _records(after, self.world.google_sheets)
+        changed = [k for k in old.keys() | new.keys() if old.get(k) != new.get(k)]
+        targets = {_tag(*k) for k in changed if k[2] is not None}
+        for k in changed:
+            # Only the records that were added, changed or deleted credit their parent, not their unchanged peers.
+            o, n = old.get(k, []), new.get(k, [])
+            moved = [r for r in o if r not in n] + [r for r in n if r not in o]
+            for parent, field in PARENTS.get(k[:2], ()):
+                targets |= {_tag(k[0], parent, str(r[field])) for r in moved if r.get(field)}
+            if k[:2] == ("google_sheets", "rows"):  # a row's spreadsheet and tab, by its key's resolved ids
+                targets |= {
+                    _tag("google_sheets", "spreadsheets", k[2][0]),
+                    _tag("google_sheets", "worksheets", k[2][:2]),
                 }
-            )
-        return out
+        done, names = _actions(before), None
+        for (app, action, id_), params in _actions(after).items():
+            if (app, action, id_) in done:
+                continue
+            for collection, param in ACTION_TARGETS.get((app, action), []):
+                names = names or _names(after, [], self.world.google_sheets)
+                values = params.get(param)
+                for value in values if isinstance(values, list) else [values]:
+                    targets |= {t for t in names.get(str(value), ()) if json.loads(t)[:2] == [app, collection]}
+        self.log.append(
+            {"at": now.isoformat(), "day": day, "method": method, "url": url, "body": body, "targets": sorted(targets)}
+        )
 
 
 def _body_strings(body: str) -> list[str]:
@@ -903,22 +898,35 @@ def load_environment(
 
     with open(tasks_path) as f:
         rows = [json.loads(line) for line in f if line.strip()]
+    # Each row is checked and its day-assertion records resolved here, the same checks every rollout's setup_state
+    # repeats. A row that fails is refused (counted and logged) so one bad row does not stop the rest; a multi-turn row
+    # without a configured requester is a configuration error and stops the load.
+    requester = bool(requester_base_url and requester_model)
+    refused = {}
     for i, r in enumerate(rows):
-        if problems := row_problems(r["info"], requester=bool(requester_base_url and requester_model)):
-            raise ValueError(f"row {i}: {problems[0]}")
-    # Resolve the day-assertion records against each seed. A row whose record names nothing or more than one record
-    # cannot be graded and is refused; the counts are logged.
-    refused = {i: problems for i, r in enumerate(rows) if (problems := resolve_records(r["info"]))}
+        if problems := row_problems(r["info"], requester=requester) or resolve_records(r["info"]):
+            refused[i] = problems
+    if not requester and any("requester_base_url" in p for problems in refused.values() for p in problems):
+        raise ValueError(
+            "multi-turn rows (user_card or requester_services) need requester_base_url and requester_model"
+        )
     if refused:
-        kinds = collections.Counter(p.split(":")[0] for problems in refused.values() for p in problems)
+        first = next(iter(refused))
+        kinds = collections.Counter(
+            p.split(":")[0] if p.startswith(("ambiguous", "unresolvable")) else "row check"
+            for problems in refused.values()
+            for p in problems
+        )
         logger.warning(
-            "ab_synth: refused %d of %d rows with day-assertion records that cannot be resolved (%s), e.g. row %d: %s",
+            "ab_synth: refused %d of %d rows (%s), e.g. row %d: %s",
             len(refused),
             len(rows),
-            dict(kinds),
-            next(iter(refused)),
-            next(iter(refused.values()))[:3],
+            dict(kinds.most_common(6)),
+            first,
+            refused[first][:3],
         )
+        if len(refused) == len(rows):
+            raise ValueError(f"no row can be run; row {first}: {refused[first][0]}")
         rows = [r for i, r in enumerate(rows) if i not in refused]
     dataset = Dataset.from_list(
         [

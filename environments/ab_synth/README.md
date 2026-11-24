@@ -16,8 +16,9 @@ The `wait` tool moves the clock forward. Each dated event (an approval arrives, 
 changes) is applied when the clock passes its time, so the agent has to wait for the right day, read the world again
 and act then. `events` is `[{"at": iso time, "patch": {...}}]`: a patch sets fields on a record (`app`, `collection`,
 `id`, `set`, where `id` is the record's key as below) or adds one (`app`, `collection`, `add`). The `wait` reply gives the new time in the seed's zone (naive
-UTC for a naive seed). The environment refuses to load a multi-day row without the two wait texts or with a time
-that is not ISO 8601.
+UTC for a naive seed). A multi-day row without the two wait texts, with a time that is not ISO 8601, or with an
+`acted_on_day` whose `day` is not YYYY-MM-DD is refused. A refused row is left out at load (each refusal is counted and
+logged, and the load fails only when no row is left) and, when it reaches a rollout anyway, masked as `env_row_invalid`.
 
 Every `api_fetch` write that changes the world is logged with the simulated time and the records it added, changed
 or deleted (a failed write or a read-only POST such as a search changes nothing and is not an act). Two more
@@ -48,7 +49,8 @@ its file and the folders it adds to or leaves, a new Drive file its folder, a Pi
 an Airtable record create, update or comment its base. Records that only point at
 another (an opportunity's account, a ticket's requester) do not act on it. A row written through a URL that names its
 spreadsheet or tab by title (in any case, as the simulator reads titles) is filed under, and credits, the same
-spreadsheet and tab as one written by id. A tab is keyed within its spreadsheet.
+spreadsheet and tab as one written by id: titles are mapped to ids by the simulator's own resolvers, so they match the
+way it reads them. A tab is keyed within its spreadsheet, and a write to a tab acts on its spreadsheet.
 
 ## Multi-turn
 
@@ -93,7 +95,7 @@ from the requester model.
 Simulated time reaches the world's clock (`meta.current_time`, which upstream date queries read) and the write log
 that `acted_on_day` and `not_acted` grade. It does not reach records the agent creates: many upstream AutomationBench
 routes and schema defaults stamp new records with the wall clock (`datetime.now()`), for example QuickBooks `txn_date`
-and Google Ads `conversion_time`. Only `acted_on_day` and `not_acted` grade timing. The environment refuses to load a row whose
+and Google Ads `conversion_time`. Only `acted_on_day` and `not_acted` grade timing. The environment refuses a row whose
 world assertion names a date or time field (a key such as `txn_date` or `created_at`, or a `field`, `property` or
 `column` such as `closeDate`), since its result would depend on the date of the run.
 
