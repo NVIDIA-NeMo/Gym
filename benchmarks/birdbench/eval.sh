@@ -19,7 +19,8 @@
 #   --output_dir DIR         Default: benchmarks/birdbench/results/<split>_<dialect>/<sanitized model name>
 #                              (benchmarks/birdbench/data/ is reserved for input/prepared data)
 #   --max-output-tokens N     Default: 16000
-#   --temperature T            Default: 1.0
+#   --temperature T            Default: 1.0. Both are pinned on the policy Model Server (its sampling_overrides), so
+#                                --model-type must be vllm_model or switchyard_model.
 #   --num-repeats N              Default: 1 = exactly one rollout per task (1534 rollouts). The dataset itself is
 #                                  never repeated (config.yaml's num_repeats is 1); this flag is the only repeat
 #                                  control, so N > 1 gives 1534 x N rollouts.
@@ -170,6 +171,21 @@ case "${DIALECT}" in
         exit 1
         ;;
 esac
+# BIRD dev's rows are typed tasks, which refuse run-level sampling (gym eval run's --temperature and
+# --max-output-tokens), so the policy Model Server pins it on every call it serves. Only these Model Servers have
+# sampling_overrides; another would ignore it and sample with the endpoint's defaults.
+case "${MODEL_TYPE}" in
+    vllm_model|switchyard_model) ;;
+    *)
+        echo "--model-type ${MODEL_TYPE} cannot pin --temperature and --max-output-tokens: only vllm_model and" \
+            "switchyard_model have sampling_overrides." >&2
+        exit 1
+        ;;
+esac
+SAMPLING_ARGS=(
+    "++policy_model.responses_api_models.${MODEL_TYPE}.sampling_overrides.temperature=${TEMPERATURE}"
+    "++policy_model.responses_api_models.${MODEL_TYPE}.sampling_overrides.max_output_tokens=${MAX_OUTPUT_TOKENS}"
+)
 OVERRIDES=()
 if [[ "${SPLIT}" == "train" ]]; then
     OVERRIDES=(
@@ -211,8 +227,7 @@ gym eval run \
     --model-type "${MODEL_TYPE}" \
     --split benchmark \
     --output "${OUTPUT_DIR}/rollouts.jsonl" \
-    --temperature "${TEMPERATURE}" \
-    --max-output-tokens "${MAX_OUTPUT_TOKENS}" \
+    "${SAMPLING_ARGS[@]}" \
     --num-repeats "${NUM_REPEATS}" \
     --concurrency "${CONCURRENCY}" \
     "${MODEL_ARGS[@]}" \

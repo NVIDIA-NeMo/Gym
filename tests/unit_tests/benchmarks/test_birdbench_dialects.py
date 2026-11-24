@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""BIRD dev's dialects: each is a benchmark of its own, whose manifest name, config and taskset share one ID."""
+"""BIRD dev's dialect benchmarks, and eval.sh, which prepares and runs them."""
 
 import json
 import os
@@ -64,16 +64,15 @@ def test_a_dialect_s_config_prepares_and_grades_in_that_dialect(dialect):
     assert dataset["num_repeats"] == 1
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="eval.sh is a bash script")
-@pytest.mark.parametrize("split", birdbench_prepare.SPLITS)
-@pytest.mark.parametrize("dialect", birdbench_prepare.DIALECTS)
-def test_eval_sh_prepares_and_runs_the_dialect_s_benchmark(dialect, split, tmp_path):
+def _run_eval_sh(tmp_path: Path, *args: str) -> tuple[subprocess.CompletedProcess, list[list[str]]]:
+    """Run eval.sh with stub commands; return the process and the arguments of each `gym` call it made."""
     calls = tmp_path / "gym_calls.jsonl"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    record = "import json, sys; print(json.dumps(sys.argv[1:]))"
     # gym records each call; java passes eval.sh's JDK check; ps lists no process, so the exit trap stops none.
     stubs = {
-        "gym": f"#!/bin/sh\nexec python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' \"$@\" >> {shlex.quote(str(calls))}\n",
+        "gym": f'#!/bin/sh\nexec python3 -c {shlex.quote(record)} "$@" >> {shlex.quote(str(calls))}\n',
         "java": "#!/bin/sh\nexit 0\n",
         "ps": "#!/bin/sh\nexit 0\n",
     }
@@ -82,11 +81,19 @@ def test_eval_sh_prepares_and_runs_the_dialect_s_benchmark(dialect, split, tmp_p
         (bin_dir / name).chmod(0o755)
     env = {key: value for key, value in os.environ.items() if key not in ("JAVA_HOME", "BIRD_PG_ADMIN_DSN")}
     env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", BIRD_PG_DSN="postgresql://reader@db.invalid/bird")
-    command = ["bash", str(BENCHMARK_DIR / "eval.sh"), "--model", "m", "--dialect", dialect, "--split", split]
-    subprocess.run([*command, "--output_dir", str(tmp_path / "out")], env=env, check=True, capture_output=True)
+    command = ["bash", str(BENCHMARK_DIR / "eval.sh"), "--model", "m", *args, "--output_dir", str(tmp_path / "out")]
+    process = subprocess.run(command, env=env, capture_output=True, text=True)
+    return process, [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="eval.sh is a bash script")
+@pytest.mark.parametrize("split", birdbench_prepare.SPLITS)
+@pytest.mark.parametrize("dialect", birdbench_prepare.DIALECTS)
+def test_eval_sh_prepares_and_runs_the_dialect_s_benchmark(dialect, split, tmp_path):
+    process, (prepare, run) = _run_eval_sh(tmp_path, "--dialect", dialect, "--split", split)
+    assert process.returncode == 0, process.stderr
 
     benchmark = BENCHMARK_IDS[dialect]
-    prepare, run = (json.loads(line) for line in calls.read_text().splitlines())
     assert (prepare[:2], run[:2]) == (["eval", "prepare"], ["eval", "run"])
     for call in (prepare, run):
         assert call[call.index("--benchmark") + 1] == benchmark
@@ -99,3 +106,22 @@ def test_eval_sh_prepares_and_runs_the_dialect_s_benchmark(dialect, split, tmp_p
             assert f"jsonl_fpath:benchmarks/birdbench/data/birdbench_{dialect}_train.jsonl," in override
             assert override.endswith(f",taskset:{benchmark}}}]")
         assert len([arg for arg in call if ".bird_sql.postgres_dsn=" in arg]) == (dialect == "postgres")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="eval.sh is a bash script")
+@pytest.mark.parametrize("model_type", ["vllm_model", "switchyard_model"])
+def test_eval_sh_pins_sampling_on_the_policy_model_server(model_type, tmp_path):
+    """Typed task rows refuse `gym eval run --temperature/--max-output-tokens`, so the policy Model Server pins them."""
+    args = ("--model-type", model_type, "--temperature", "0.6", "--max-output-tokens", "4096")
+    process, (_, run) = _run_eval_sh(tmp_path, *args)
+    assert process.returncode == 0, process.stderr
+    pinned = f"++policy_model.responses_api_models.{model_type}.sampling_overrides"
+    assert {f"{pinned}.temperature=0.6", f"{pinned}.max_output_tokens=4096"} <= set(run)
+    assert not {"--temperature", "--max-output-tokens"} & set(run)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="eval.sh is a bash script")
+def test_eval_sh_refuses_a_model_server_that_cannot_pin_sampling(tmp_path):
+    process, calls = _run_eval_sh(tmp_path, "--model-type", "openai_model")
+    assert (process.returncode, calls) == (1, [])
+    assert "cannot pin --temperature and --max-output-tokens" in process.stderr
