@@ -5,7 +5,7 @@
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
@@ -210,6 +210,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     # With sandbox_provider set, it lends the attempt's sandbox to the agent and to the Resources Server, so startup
     # refuses a provider no other process can connect to, such as the local provider that runs commands on this host.
     lends_sandboxes: ClassVar[bool] = True
+    # It starts the attempt sandbox from sandbox_config through self.sandboxes, so startup checks that block's network
+    # rule against sandbox_provider.
+    owned_sandbox_blocks: ClassVar[Mapping[str, str]] = {"sandbox_config": "sandbox_provider"}
 
     def check_sandbox_provider(self) -> None:
         """Refuse at startup an attempt sandbox the provider cannot start, apply the rule to, or lend.
