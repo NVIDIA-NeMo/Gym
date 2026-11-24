@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.base_resources_server import (
         NEMO_GYM_MCP_METADATA_KEY,
         NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
+        NG_SANDBOX_ACCESS_KEY,
         BaseMultiRewardVerifyResponse,
         BaseResourcesServerConfig,
         BaseRunRequest,
@@ -199,6 +200,7 @@ _PUBLIC_API = {
     "OwnedSandboxes": "owned_sandboxes",
     "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
+    "NG_SANDBOX_ACCESS_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
     "ParticipantControlPlane": "_checkpoint.control",
     "ResourcesCloseSessionRequest": "base_resources_server",

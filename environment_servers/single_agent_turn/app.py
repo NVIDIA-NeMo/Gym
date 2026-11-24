@@ -58,6 +58,7 @@ from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.sandbox import SandboxAccess, SandboxConfig
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    NG_SANDBOX_ACCESS_KEY,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
@@ -93,8 +94,6 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 LOGGER = logging.getLogger(__name__)
 
-# The /verify body field that lends the Resources Server the sandbox this server started for the attempt.
-VERIFY_SANDBOX_ACCESS_FIELD = "ng_sandbox_access"
 # Provider label values stay within the common 63-character limit.
 _LABEL_LIMIT = 63
 
@@ -121,7 +120,8 @@ class SessionHandles(BaseModel):
     # Whether the agent borrows a sandbox the resources server lent in its seed reply.
     # A restore rebuilds that sandbox under a new id, so the replacement attempt seeds both sessions again.
     borrowed_sandbox: bool = False
-    # Whether this server started the attempt's sandbox and lent it to the agent, because Resources lent none.
+    # Whether this server started the attempt's sandbox and lent it to the agent, because the Resources Server lent
+    # none.
     attempt_sandbox: bool = False
 
     @classmethod
@@ -139,9 +139,10 @@ class AttemptSandboxConfig(SandboxConfig):
 
     The agent borrows it for its turn, and the Resources Server borrows it for ``/verify``; this server stops it after
     the episode. ``network`` must name a rule, so no attempt starts with the provider's default egress by accident:
-    ``model_only``, with ``model_server`` set to the agent's model server, for an agent that only calls the model.
-    ``ttl_s`` must be set, so the provider reclaims a sandbox this server could not stop; set it above the episode
-    timeout plus the cleanup timeout.
+    ``model_only``, with ``model_server`` set to the agent's model server, for an agent that only calls the model;
+    ``model_and_tools`` with ``tool_servers`` naming every server whose tools the episode grants. A rule allows a
+    server's whole host. ``ttl_s`` must be set, so the provider reclaims a sandbox this server could not stop; it must
+    exceed the episode timeout plus the cleanup timeout.
 
     Attributes:
         image: The sandbox image.
@@ -187,6 +188,14 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     def _sandbox_provider_and_config_together(self) -> "SingleAgentTurnEnvironmentServerConfig":
         if (self.sandbox_provider is None) != (self.sandbox_config is None):
             raise ValueError("set sandbox_provider and sandbox_config together, or neither")
+        if self.sandbox_config is not None and self.default_episode_timeout_seconds is not None:
+            # The provider must not reclaim a sandbox while its episode, or the episode's cleanup, still uses it.
+            lifetime = self.default_episode_timeout_seconds + self.cleanup_timeout_seconds
+            if self.sandbox_config.ttl_s <= lifetime:
+                raise ValueError(
+                    f"sandbox_config.ttl_s ({self.sandbox_config.ttl_s}) must exceed default_episode_timeout_seconds "
+                    f"plus cleanup_timeout_seconds ({lifetime})"
+                )
         return self
 
 
@@ -198,9 +207,34 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     checkpoint_mode = "exported"
     applies_model_sampling = True
     response_model = SingleAgentTurnResponse
-    # With sandbox_provider set, it lends the attempt's sandbox to the agent and to Resources, so startup refuses a
-    # provider no other process can connect to, such as the local provider that runs commands on this host.
+    # With sandbox_provider set, it lends the attempt's sandbox to the agent and to the Resources Server, so startup
+    # refuses a provider no other process can connect to, such as the local provider that runs commands on this host.
     lends_sandboxes: ClassVar[bool] = True
+
+    def check_sandbox_provider(self) -> None:
+        """Refuse at startup an attempt sandbox the provider cannot start, apply the rule to, or lend.
+
+        Beyond the base checks, the network rule must allow every server whose tools an episode grants, since a harness
+        in the sandbox calls them from there, and the provider is built now, so a bad provider block fails startup
+        instead of every attempt.
+
+        Raises:
+            ValueError: Naming the first need the configuration or the provider cannot meet.
+        """
+        super().check_sandbox_provider()
+        config = self.config.sandbox_config
+        if config is None:
+            return
+        granted = {*([self.config.resources_server.name] if self.config.resources_tool_transports else [])}
+        granted.update(self.tool_server_names)
+        # inherit leaves egress open, and hosts_only names hosts rather than servers, so neither can be checked here.
+        missing = sorted(granted - set(config.tool_servers))
+        if missing and config.network in ("no_network", "model_only", "model_and_tools"):
+            raise ValueError(
+                f"sandbox_config network {config.network!r} does not allow {missing}, whose tools the episode grants; "
+                "use network: model_and_tools with these servers in tool_servers"
+            )
+        self.sandboxes  # noqa: B018 - builds the provider, which raises for a bad provider block
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -533,25 +567,29 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         await self.checkpoint_restart(request)
         key = self._attempt_sandbox_key(handles)
         try:
-            if key not in self.sandboxes:
-                spec = self.sandboxes.spec(
-                    config,
-                    image=config.image,
-                    workdir=config.workdir,
-                    metadata={
-                        "task_id": request.task.task_id.task_id[:_LABEL_LIMIT],
-                        "rollout_id": request.episode_id.capture_key[:_LABEL_LIMIT],
-                    },
-                )
-                await self.sandboxes.create(key, spec)
+            spec = self.sandboxes.spec(
+                config,
+                image=config.image,
+                workdir=config.workdir,
+                metadata={
+                    "task_id": request.task.task_id.task_id[:_LABEL_LIMIT],
+                    "rollout_id": request.episode_id.capture_key[:_LABEL_LIMIT],
+                },
+            )
+            await self.sandboxes.create(key, spec)
             handles.attempt_sandbox = True
             return await self.sandboxes.access(key, workdir=config.workdir)
         except Exception as error:
             raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
 
     async def _stop_attempt_sandbox(self, handles: "SessionHandles") -> None:
-        """Stop the attempt's sandbox; a no-op when none was started, so cleanup may repeat it."""
-        await self.sandboxes.stop(self._attempt_sandbox_key(handles))
+        """Stop the attempt's sandbox; a no-op when none was started, so cleanup may repeat it.
+
+        An episode whose Resources Server lent the sandbox never builds this server's provider here.
+        """
+        owned = self._owned_sandboxes.get("sandbox_provider")
+        if owned is not None:
+            await owned.stop(self._attempt_sandbox_key(handles))
 
     @staticmethod
     def _attempt_sandbox_key(handles: "SessionHandles") -> str:
@@ -840,20 +878,27 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         trajectory: TrajectoryRecord | None = None,
     ) -> SingleAgentTurnResult:
         verifier_invocations = None
+        sandbox_field = {}
+        if handles.attempt_sandbox:
+            # The sandbox this server started for the attempt, lent to the verifier now that the agent has closed
+            # (BaseVerifyRequest.sandbox_access). A sandbox that cannot be described any more is an infrastructure
+            # failure: the attempt is retried, never graded without it.
+            try:
+                access = await self.sandboxes.access(
+                    self._attempt_sandbox_key(handles), workdir=self.config.sandbox_config.workdir
+                )
+            except Exception as error:
+                raise dependency_failure(
+                    error,
+                    stage="verification",
+                    terminal=False,
+                    name_error_type=True,
+                    partial_response=agent_response,
+                    agent_observations=observations,
+                    trajectory=trajectory,
+                ) from error
+            sandbox_field = {NG_SANDBOX_ACCESS_KEY: access.model_dump(mode="json")}
         try:
-            # The sandbox this server started for the attempt, lent to the verifier now that the agent has closed. A
-            # verifier that grades in it declares the field; every other one ignores it.
-            sandbox_field = (
-                {
-                    VERIFY_SANDBOX_ACCESS_FIELD: (
-                        await self.sandboxes.access(
-                            self._attempt_sandbox_key(handles), workdir=self.config.sandbox_config.workdir
-                        )
-                    ).model_dump(mode="json")
-                }
-                if handles.attempt_sandbox
-                else {}
-            )
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
@@ -887,6 +932,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
                 raise
             await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
+            # A verifier that echoes its request body back must not store the lent sandbox's access in the result.
+            if isinstance(payload, dict):
+                payload.pop(NG_SANDBOX_ACCESS_KEY, None)
             return SingleAgentTurnResult.model_validate(payload)
         except Exception as error:
             raise dependency_failure(

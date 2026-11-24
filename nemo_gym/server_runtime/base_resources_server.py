@@ -194,8 +194,17 @@ class BaseRunRequest(BaseModel):
     )
 
 
+# The /verify body field that lends the verifier the sandbox the episode ran in, when the Environment Server started
+# it (see BaseVerifyRequest.sandbox_access).
+NG_SANDBOX_ACCESS_KEY = "ng_sandbox_access"
+
+
 class BaseVerifyRequest(BaseRunRequest):
     response: NeMoGymResponse
+    # Operate-scope access to the sandbox the episode ran in, lent for grading by an Environment Server that started it
+    # (single_agent_turn with sandbox_provider). A verifier that grades in it borrows it with borrow(); its owner stops
+    # it after the episode. Excluded from dumps, so a verify response built from the request never stores it.
+    sandbox_access: SandboxAccess | None = Field(default=None, alias=NG_SANDBOX_ACCESS_KEY, exclude=True)
 
 
 class BaseVerifyResponse(BaseVerifyRequest):
