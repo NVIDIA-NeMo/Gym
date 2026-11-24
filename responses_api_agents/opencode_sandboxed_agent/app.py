@@ -1124,6 +1124,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 ).get("exa_cache_root")
                 if cache_root:
                     env["NEMO_GYM_EXA_BASE_URL"] = get_server_url(self.config.resources_server.name) + "/mcp"
+                    proxy_keys = str(
+                        (
+                            get_first_server_config_dict(get_global_config_dict(), self.config.resources_server.name)
+                            or {}
+                        ).get("exa_proxy_api_keys")
+                        or ""
+                    ).strip()
+                    if proxy_keys:
+                        # The proxy adds the key upstream; the sandbox, where the model runs commands, gets none.
+                        env.pop("EXA_API_KEY", None)
+                        env.pop("EXA_API_KEYS", None)
             # SystemExit is deliberate alongside Exception. get_global_config_dict() loads the
             # Hydra config, and Hydra reports a resolution failure by catching its own
             # MissingConfigException and calling sys.exit(1) -- a BaseException that `except
