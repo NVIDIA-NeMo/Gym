@@ -859,11 +859,31 @@ class TestTheOwnersOwnChecks:
 
         with pytest.raises(KeyError, match="has no running sandbox"):
             await owned.access("session", workdir="/work")
+        assert "session" not in owned and owned.get("session") is None
+        assert owned.keys == ["session"], "the key is taken while it starts"
 
         provider.create_gate.set()
-        await creating
+        sandbox = await creating
+        assert "session" in owned and owned.get("session") is sandbox
         assert (await owned.access("session", workdir="/work")).workdir == "/work"
         await owned.aclose()
+
+    async def test_a_discard_waits_for_the_keys_create_and_stops_what_it_started(self) -> None:
+        provider = _GatedProvider()
+        owned = _owned(provider)
+        provider.create_gate.clear()
+        creating = asyncio.create_task(owned.create("session", _spec()))
+        await _until(lambda: provider.in_flight == 1)
+
+        discarding = asyncio.create_task(owned.discard(["session"]))
+        await asyncio.sleep(0.01)
+        assert not discarding.done(), "the discard waits for the start"
+        provider.create_gate.set()
+        await creating
+        await discarding
+
+        assert owned.keys == []
+        assert _states(provider) == ["stopped"], "nothing is left running untracked"
 
     async def test_an_instance_from_a_checkpoint_config_bounds_starts_and_stops_by_its_parallelism(self) -> None:
         provider = _GatedProvider()
@@ -908,6 +928,30 @@ class TestAFailedStartWhoseStopFails:
         provider.close = real_close  # type: ignore[method-assign]
         await owned.stop("session")
         assert owned.keys == []
+
+    async def test_it_is_neither_returned_nor_lent(self) -> None:
+        provider = FakeSnapshotProvider()
+        owned = _owned(provider, provider_config_ref="sandbox")
+        real_close = provider.close
+
+        async def unreachable(handle: Any) -> None:
+            raise RuntimeError("provider unreachable")
+
+        async def failing_upload(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("upload refused")
+
+        provider.close = unreachable  # type: ignore[method-assign]
+        provider.upload_file = failing_upload  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="upload refused"):
+            await owned.create("session", SandboxSpec(image="image", ttl_s=60, files={"/task": "x"}))
+
+        assert "session" not in owned and owned.get("session") is None
+        with pytest.raises(KeyError, match="has no running sandbox"):
+            await owned.access("session", workdir="/work")
+        assert owned.keys == ["session"], "kept, so a stop or aclose stops it again"
+        provider.close = real_close  # type: ignore[method-assign]
+        await owned.aclose()
+        assert owned.keys == [] and _states(provider) == ["stopped"]
 
 
 class TestStopDuringRestore:

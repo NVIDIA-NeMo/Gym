@@ -441,9 +441,9 @@ async def _start_to_the_end(sandbox: AsyncSandbox, *, settle_s: float, **start_k
 class _Entry:
     sandbox: AsyncSandbox
     spec: SandboxSpec
-    # False for a sandbox whose start failed and whose stop failed too: it stays tracked until a stop succeeds, but
-    # an export never snapshots it, since its setup never finished.
-    exportable: bool = True
+    # False while a create starts the sandbox, and for good if its start failed and its stop failed too: such an
+    # entry stays tracked, so a stop or aclose stops it, but get, in, access and export pass it over.
+    ready: bool = True
 
 
 @dataclass
@@ -643,7 +643,8 @@ class OwnedSandboxes:
 
     @property
     def keys(self) -> list[str]:
-        """The keys that currently have a sandbox, including one whose stop failed and awaits a retry."""
+        """Every key with a tracked sandbox: also one still starting, and one whose start or stop failed and that the
+        next stop or :meth:`aclose` stops again."""
         return list(self._entries)
 
     @property
@@ -666,13 +667,18 @@ class OwnedSandboxes:
         return f"{prefix}{name_hash(checkpoint_id)}-{name_hash(key)}-{attempt}"
 
     def __contains__(self, key: object) -> bool:
-        """Whether ``key`` currently has a sandbox."""
-        return key in self._entries
+        """Whether ``key`` has a sandbox ready to use: not one still starting, nor one whose start failed."""
+        entry = self._entries.get(key)  # type: ignore[call-overload]
+        return entry is not None and entry.ready
 
     def get(self, key: str) -> AsyncSandbox | None:
-        """``key``'s current sandbox, or ``None``; after a restore it is the fork, under a new id."""
+        """``key``'s sandbox if it is ready to use, else ``None``; after a restore it is the fork, under a new id.
+
+        A sandbox still starting, or one whose start failed and whose stop failed too, is not returned; :attr:`keys`
+        still lists its key.
+        """
         entry = self._entries.get(key)
-        return entry.sandbox if entry is not None else None
+        return entry.sandbox if entry is not None and entry.ready else None
 
     def add(self, key: str, sandbox: AsyncSandbox, spec: SandboxSpec) -> None:
         """Track a sandbox the owner started itself; ``spec`` is what a restore re-creates its fork from.
@@ -701,12 +707,13 @@ class OwnedSandboxes:
         The key is taken from the first moment, so a second create for it is refused while the first is starting. A
         create of a key that an export is snapshotting waits for that export; creates of other keys do not.
 
-        The sandbox is tracked before it starts. A start that fails or is cancelled is stopped here, shielded from the
-        cancellation. A start cancelled before the provider returned the sandbox is first let finish, shielded and
-        bounded by ``STOP_TIMEOUT_S``: a provider create cut short can leave a sandbox with no handle to stop, and not
-        every provider applies ``ttl_s`` (Enroot does not). Only a start still running after that is cut short, and
-        the spec's ``ttl_s`` is all that reclaims what it made. If the stop fails too, the key stays tracked, so the
-        next :meth:`stop` of the key or :meth:`aclose` stops it again, an export leaves it out, and the start's error
+        The sandbox is tracked before it starts, but :meth:`get`, ``in`` and :meth:`access` show it only once its start
+        succeeded. A start that fails or is cancelled is stopped here, shielded from the cancellation. A start
+        cancelled before the provider returned the sandbox is first let finish, shielded and bounded by
+        ``STOP_TIMEOUT_S``: a provider create cut short can leave a sandbox with no handle to stop, and not every
+        provider applies ``ttl_s`` (Enroot does not). Only a start still running after that is cut short, and the
+        spec's ``ttl_s`` is all that reclaims what it made. If the stop fails too, the key stays tracked, so the next
+        :meth:`stop` of the key or :meth:`aclose` stops it again, it is never lent or exported, and the start's error
         is raised with the stop's as its context.
 
         Raises:
@@ -722,15 +729,15 @@ class OwnedSandboxes:
         try:
             async with self._key_locks.locked(key):
                 sandbox = AsyncSandbox(self._provider, spec, owns_provider=False)
-                entry = _Entry(sandbox=sandbox, spec=spec)
+                entry = _Entry(sandbox=sandbox, spec=spec, ready=False)
                 self._entries[key] = entry
                 try:
                     async with self._start_slot():
                         # A create queued for a slot when the shutdown began starts nothing.
                         self._require_open()
                         await _start_to_the_end(sandbox, settle_s=_settle_s(spec))
+                    entry.ready = True
                 except BaseException as error:
-                    entry.exportable = False
                     try:
                         await self._stop_key(key)
                     except Exception as stop_error:
@@ -783,7 +790,7 @@ class OwnedSandboxes:
         """
         entry = self._entries.get(key)
         # A key is tracked from before its start, so being tracked does not mean there is a sandbox to lend.
-        if entry is None or not entry.sandbox.started or not entry.exportable:
+        if entry is None or not entry.ready or not entry.sandbox.started:
             raise KeyError(f"{key!r} has no running sandbox")
         provider_config_ref = provider_config_ref or self._provider_config_ref
         if provider_config_ref is None:
@@ -897,7 +904,7 @@ class OwnedSandboxes:
 
     async def _export_one(self, key: str, checkpoint_id: str) -> dict[str, JsonValue] | None:
         entry = self._entries.get(key)
-        if entry is None or not entry.exportable or not entry.sandbox.started:
+        if entry is None or not entry.ready or not entry.sandbox.started:
             return None
         provider = self._provider
         if not isinstance(provider, SupportsSandboxSnapshot):
@@ -1265,13 +1272,21 @@ class OwnedSandboxes:
     async def discard(self, keys: Iterable[str]) -> None:
         """Give up the sandboxes of ``keys`` and stop them; for the forks of a restore its owner could not install.
 
-        Unlike :meth:`stop`, every key can be restored again at once, whether or not the stops succeed. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the
-        forks that :meth:`settle`, the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped.
+        Unlike :meth:`stop`, every key can be restored again at once, whether or not the stops succeed. A sandbox
+        whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is logged and joins the forks that :meth:`settle`,
+        the next restore and :meth:`aclose` stop again. A key without a sandbox is skipped. A create, export, stop or
+        restore of a key that is running is let finish first, so a sandbox still starting is not left running
+        untracked.
         """
-        for key in keys:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self._unstopped_forks.append(entry.sandbox)
+        keys = sorted(set(keys))
+        async with contextlib.AsyncExitStack() as held:
+            # In one order, as a restore takes them, so two calls that share keys cannot wait on each other.
+            for key in keys:
+                await held.enter_async_context(self._key_locks.locked(key))
+            for key in keys:
+                entry = self._entries.pop(key, None)
+                if entry is not None:
+                    self._unstopped_forks.append(entry.sandbox)
         await self._stop_forks()
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
