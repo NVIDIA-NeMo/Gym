@@ -9,8 +9,9 @@ is written for Gym, not copied: the official repository has no license file.
 Running a query:
 
 - Each query gets its own connection and 10 seconds, counted on its own thread from the start of the connection to
-  the last row read into a ``pandas.DataFrame``. A query that runs longer is a timeout. The query is then stopped on
-  the server (``KILL QUERY``); the official evaluator abandons it, which leaves it loading the server for later queries.
+  the last row read into a ``pandas.DataFrame``. A query that runs longer is a timeout, whatever it then returns (rows,
+  an error or a lost connection). The query is then stopped on the server (``KILL QUERY``); the official evaluator
+  abandons it, which leaves it loading the server for later queries.
 - A query that fails or times out, like a missing prediction, is an empty result. That holds for the gold query too.
 - A failure to reach the data (no server, wrong password, unknown database) is not a result: it raises
   ``MySqlUnavailableError`` so the verifier can mask the row instead of scoring it.
@@ -119,7 +120,9 @@ def results_match(gold: QueryOutcome, pred: QueryOutcome) -> bool:
 @dataclass
 class _Attempt:
     """State shared between the event loop and the thread running one query. ``started`` and ``ended`` are read on the
-    query's own thread, so a busy event loop can't make a fast query look slow."""
+    query's own thread, so a busy event loop can't make a fast query look slow. ``finished`` is set when the outcome is
+    known, ``done`` once the query's connection is cleaned up too: the outcome is decided on the first, the slot is
+    released on the second."""
 
     notify: Callable[[], None] = lambda: None
     connection_id: Optional[int] = None
@@ -127,6 +130,7 @@ class _Attempt:
     unavailable: Optional[BaseException] = None
     started: Optional[float] = None
     ended: Optional[float] = None
+    finished: threading.Event = field(default_factory=threading.Event)
     done: threading.Event = field(default_factory=threading.Event)
     cancelled: threading.Event = field(default_factory=threading.Event)
 
@@ -135,22 +139,25 @@ class MySqlRunner:
     """Runs queries on the BEAVER MySQL server, at most ``max_concurrency`` at a time.
 
     Each query runs on its own thread, which times it and wakes the event loop when it ends; the loop's own timer only
-    decides when to stop waiting. A timed-out query keeps its slot while ``KILL QUERY`` is repeated, until its thread
-    ends or ``stop_grace_s`` passes, so stopped queries don't pile up on the server behind new ones, and one the server
-    can't stop doesn't hold the slot forever. A request cancelled while its query runs stops the query the same way
-    before giving up its slot. A string with several statements runs them all, as the driver does officially, but only
-    the first result counts, and the connection is killed before the rest can run on unwatched.
+    decides when to stop waiting. A query keeps its slot until its thread has closed its connection. A timed-out query
+    keeps it while ``KILL QUERY`` is repeated, until its thread ends or ``stop_grace_s`` passes, so stopped queries don't
+    pile up on the server behind new ones, and one the server can't stop doesn't hold the slot forever. A request
+    cancelled while its query runs stops the query the same way, and a cancellation that arrives while a query is being
+    stopped waits for the stop, so the slot is never released early. A string with several statements runs them all, as
+    the driver does officially, but only the first result counts, and the connection is killed before the rest can run
+    on unwatched.
     """
 
     def __init__(
         self,
         dsn: str,
         *,
+        password: Optional[str] = None,
         max_concurrency: int = 8,
         timeout_s: float = QUERY_TIMEOUT_S,
         connection_timeout_s: int = CONNECTION_TIMEOUT_S,
     ) -> None:
-        self._params = parse_mysql_dsn(dsn)
+        self._params = parse_mysql_dsn(dsn, password)
         self._params.pop("database", None)
         self._semaphore = asyncio.Semaphore(max_concurrency)
         # Its own threads for stopping queries, so they never queue behind other work on the default executor.
@@ -180,13 +187,15 @@ class MySqlRunner:
             except asyncio.TimeoutError:
                 pass
             except asyncio.CancelledError:
-                # The request went away: stop the query before the slot is released, even if cancelled again.
+                # The request went away: stop the query before the slot is released.
                 attempt.cancelled.set()
-                await asyncio.shield(loop.run_in_executor(self._executor, self._stop, attempt, self.stop_grace_s))
+                await self._settle(attempt)
                 raise
-            if not attempt.done.is_set():
+            timed_out = not attempt.finished.is_set()
+            if timed_out:
                 attempt.cancelled.set()
-                stopped = await loop.run_in_executor(self._executor, self._stop, attempt, self.stop_grace_s)
+            stopped = await self._settle(attempt)
+            if timed_out:
                 if attempt.connection_id is None:
                     # Still connecting after the whole limit: the server is unreachable or overloaded, which says
                     # nothing about the query. (The official evaluator would score this as an empty result.)
@@ -200,15 +209,40 @@ class MySqlRunner:
                         "BEAVER query on %s still running %g s after KILL QUERY; abandoned", db_id, self.stop_grace_s
                     )
                 return QueryOutcome(status="timeout", error="timeout", seconds=self.timeout_s)
+            seconds = attempt.ended - attempt.started
+            if attempt.connection_id is not None and seconds > self.timeout_s:
+                # Ended after the limit (the loop was busy when it passed): the official evaluator has already given up
+                # on it, whether it then returned rows, failed or lost its connection.
+                return QueryOutcome(status="timeout", error="timeout", seconds=seconds)
             if attempt.unavailable is not None:
                 raise MySqlUnavailableError(str(attempt.unavailable)) from attempt.unavailable
             outcome = attempt.outcome
             assert outcome is not None
-            outcome.seconds = attempt.ended - attempt.started
-            if outcome.status == "ok" and outcome.seconds > self.timeout_s:
-                # Finished, but after the limit: the official evaluator has already given up on it.
-                return QueryOutcome(status="timeout", error="timeout", seconds=outcome.seconds)
+            outcome.seconds = seconds
             return outcome
+
+    async def _settle(self, attempt: _Attempt) -> bool:
+        """Wait, up to ``stop_grace_s``, until the query's thread is done (its connection closed), stopping the query
+        first if it was given up on. Returns whether the thread was done in time.
+
+        A cancellation meanwhile doesn't cut the wait short: the slot stays held until the wait is over, and the
+        cancellation is raised then.
+        """
+        if attempt.done.is_set():
+            return True
+        stopping = asyncio.get_running_loop().run_in_executor(self._executor, self._stop, attempt, self.stop_grace_s)
+        cancelled: Optional[asyncio.CancelledError] = None
+        while True:
+            try:
+                stopped = await asyncio.shield(stopping)
+                break
+            except asyncio.CancelledError as e:
+                if stopping.done():
+                    raise
+                cancelled = e
+        if cancelled is not None:
+            raise cancelled
+        return stopped
 
     def _connect(self, database: str):
         import mysql.connector
@@ -264,20 +298,25 @@ class MySqlRunner:
                 # Anything else reading the result (an undecodable value, say) fails the query, as it does officially.
                 attempt.outcome = QueryOutcome(status="error", error=type(e).__name__)
         finally:
+            # The query's time ends here; cleaning up its connection isn't part of it.
             attempt.ended = self._clock()
-            attempt.done.set()
+            attempt.finished.set()
             attempt.notify()
-            if conn is not None:
-                if attempt.connection_id is not None and _more_results_pending(conn):
-                    # Statements after the first would run on after close, unwatched.
-                    self._kill(attempt.connection_id, "CONNECTION")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+            try:
+                if conn is not None:
+                    if attempt.connection_id is not None and _more_results_pending(conn):
+                        # Statements after the first would run on after close, unwatched.
+                        self._kill(attempt.connection_id, "CONNECTION")
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            finally:
+                attempt.done.set()
 
     def _stop(self, attempt: _Attempt, grace_s: float) -> bool:
-        """Stop a timed-out query on the server; return whether its thread ended within ``grace_s``.
+        """Wait for a query's thread to be done; return whether it was within ``grace_s``. While a query that was given
+        up on (``cancelled``) still runs, stop it on the server.
 
         ``KILL QUERY`` sent just before the query starts would stop nothing, so it is repeated every second. Each attempt
         is bounded by ``_KILL_IO_TIMEOUT_S``. The grader's user may kill its own connections' queries without extra
@@ -285,7 +324,7 @@ class MySqlRunner:
         """
         deadline = time.monotonic() + grace_s
         while not attempt.done.is_set() and time.monotonic() < deadline:
-            if attempt.connection_id is not None:
+            if attempt.cancelled.is_set() and not attempt.finished.is_set() and attempt.connection_id is not None:
                 self._kill(attempt.connection_id, "QUERY")
             attempt.done.wait(min(1.0, max(0.0, deadline - time.monotonic())))
         return attempt.done.is_set()

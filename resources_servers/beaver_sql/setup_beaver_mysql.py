@@ -73,19 +73,34 @@ def require_case_insensitive_names(cur) -> None:
         raise RuntimeError(CASE_INSENSITIVE_NAMES_HELP)
 
 
-def parse_mysql_dsn(dsn: str) -> Dict[str, object]:
-    """``mysql://user:password@host:port[/database]`` as ``mysql.connector.connect`` keyword arguments.
+# `user:anything@` in the user info, also when the password holds a character urlparse would split the URL at.
+_DSN_PASSWORD = re.compile(r"^[^:/?#]*://[^/?#@:]*:[^@]*@")
 
-    The database part is optional: the grader picks the database per query.
+
+def parse_mysql_dsn(dsn: str, password: Optional[str] = None) -> Dict[str, object]:
+    """``mysql://user@host:port[/database]`` and the user's password as ``mysql.connector.connect`` keyword arguments.
+
+    The password comes apart from the DSN (``mysql_password`` in the server's config, from the environment), and a DSN
+    that holds one is refused: a run records its DSN as a setting, and a password must never be in it. The database
+    part is optional: the grader picks the database per query.
     """
     parsed = urlparse(dsn)
     if parsed.scheme != "mysql":
         raise ValueError(f"expected a mysql:// DSN, got scheme {parsed.scheme!r}")
+    if parsed.password is not None or _DSN_PASSWORD.match(dsn):
+        raise ValueError(
+            "the MySQL DSN holds a password: leave it out of the DSN and set mysql_password (mysql_admin_password for "
+            "the admin DSN) instead, for example from ${oc.env:BEAVER_MYSQL_PASSWORD}"
+        )
+    try:
+        port = parsed.port or 3306
+    except ValueError:
+        raise ValueError("the MySQL DSN's port is not a number") from None
     params: Dict[str, object] = {
         "user": unquote(parsed.username or ""),
-        "password": unquote(parsed.password or ""),
+        "password": password or "",
         "host": parsed.hostname or "127.0.0.1",
-        "port": parsed.port or 3306,
+        "port": port,
     }
     database = unquote(parsed.path.lstrip("/"))
     if database:
@@ -184,10 +199,10 @@ def create_table_statements(dump_path: Path) -> List[str]:
     return [s for s in dump_statements(dump_path) if s.lstrip().upper().startswith("CREATE TABLE")]
 
 
-def _connect(dsn: str, **overrides):
+def _connect(dsn: str, password: Optional[str] = None, **overrides):
     import mysql.connector
 
-    params = parse_mysql_dsn(dsn)
+    params = parse_mysql_dsn(dsn, password)
     params.update(overrides)
     return mysql.connector.connect(**params)
 
@@ -215,16 +230,27 @@ def load_dump(conn, db_id: str, dump_path: Path, owned: bool) -> int:
     """Create database ``db_id`` from ``dump_path`` and record it. Returns the number of tables created.
 
     ``owned``: the database is recorded as this module's, so it is dropped and created again. Otherwise it is only
-    created, which fails if someone else created a database of that name since the caller checked.
+    created, which fails if someone else created a database of that name since the caller checked, and recorded once
+    created.
+
+    While loading, the record holds a mark instead of the pinned hash: if the load stops part-way, the next start finds
+    the mark, owns the database and loads it again. An owned database is marked before it is dropped. A new one is
+    marked only after its ``CREATE`` succeeds, so a ``CREATE`` that fails on someone else's database leaves no record
+    that would let a later start drop it; a stop between the two leaves an unrecorded database, which the next start
+    refuses to touch.
     """
     cur = conn.cursor()
-    # Mark the database as this loader's, mid-load, before touching it: if the load stops part-way, the next start
-    # finds the mark (not the pinned hash), owns the database and loads it again.
-    cur.execute(f"REPLACE INTO `{META_DB}`.loaded (db_id, dump_sha256, tables) VALUES (%s, %s, 0)", (db_id, _LOADING))
-    conn.commit()
+    mark = f"REPLACE INTO `{META_DB}`.loaded (db_id, dump_sha256, tables) VALUES (%s, %s, 0)"
+    create = f"CREATE DATABASE `{db_id}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
     if owned:
+        cur.execute(mark, (db_id, _LOADING))
+        conn.commit()
         cur.execute(f"DROP DATABASE IF EXISTS `{db_id}`")
-    cur.execute(f"CREATE DATABASE `{db_id}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
+        cur.execute(create)
+    else:
+        cur.execute(create)
+        cur.execute(mark, (db_id, _LOADING))
+        conn.commit()
     cur.execute(f"USE `{db_id}`")
     tables = 0
     for statement in dump_statements(dump_path):
@@ -244,14 +270,14 @@ def load_dump(conn, db_id: str, dump_path: Path, owned: bool) -> int:
     return tables
 
 
-def _ensure_reader(cur, admin_user: str, reader_dsn: str, db_ids: List[str]) -> None:
+def _ensure_reader(cur, admin_user: str, reader_dsn: str, reader_password: Optional[str], db_ids: List[str]) -> None:
     """Create the grader's user (from ``reader_dsn``) if it doesn't exist, and grant it ``SELECT`` on the BEAVER databases
     and the meta table.
 
     An existing user keeps its password (this never resets an account it may not own); the startup check then refuses it
-    if it holds anything beyond ``SELECT``, or if the DSN's password is wrong.
+    if it holds anything beyond ``SELECT``, or if ``reader_password`` is wrong.
     """
-    params = parse_mysql_dsn(reader_dsn)
+    params = parse_mysql_dsn(reader_dsn, reader_password)
     user, password = str(params["user"]), str(params["password"])
     if not user or user == admin_user:
         raise RuntimeError("the grader's DSN must use its own read-only user, not the loader's")
@@ -261,13 +287,23 @@ def _ensure_reader(cur, admin_user: str, reader_dsn: str, db_ids: List[str]) -> 
         cur.execute(f"GRANT SELECT ON `{db}`.* TO %s@%s", (user, "%"))
 
 
-def ensure_beaver_mysql(cache_dir: Path, db_ids: List[str], admin_dsn: str, reader_dsn: str) -> None:
+def ensure_beaver_mysql(
+    cache_dir: Path,
+    db_ids: List[str],
+    admin_dsn: str,
+    reader_dsn: str,
+    *,
+    admin_password: Optional[str] = None,
+    reader_password: Optional[str] = None,
+) -> None:
     """Load every ``db_id`` not yet loaded from the pinned dump, then create the grader's read-only user.
 
     Idempotent. A ``db_id`` recorded with another dump hash is reloaded; a database of that name this module didn't
     record is never touched (error).
     """
-    conn = _connect(admin_dsn, autocommit=False)
+    # Both DSNs are checked before anything changes, so a DSN holding a password fails here, not after a load.
+    parse_mysql_dsn(reader_dsn, reader_password)
+    conn = _connect(admin_dsn, admin_password, autocommit=False)
     try:
         cur = conn.cursor()
         require_case_insensitive_names(cur)
@@ -292,7 +328,7 @@ def ensure_beaver_mysql(cache_dir: Path, db_ids: List[str], admin_dsn: str, read
                 load_dump(conn, db_id, dumps[db_id], owned=db_id in recorded)
         cur.execute("SELECT CURRENT_USER()")
         admin_user = str(cur.fetchone()[0]).split("@")[0]
-        _ensure_reader(cur, admin_user, reader_dsn, db_ids)
+        _ensure_reader(cur, admin_user, reader_dsn, reader_password, db_ids)
         conn.commit()
         cur.close()
     finally:
@@ -321,14 +357,16 @@ def grader_privilege_problems(grants: List[str]) -> List[str]:
     return problems
 
 
-def check_beaver_mysql(reader_dsn: str, db_ids: List[str], connection_timeout: Optional[int] = 10) -> None:
+def check_beaver_mysql(
+    reader_dsn: str, db_ids: List[str], connection_timeout: Optional[int] = 10, *, password: Optional[str] = None
+) -> None:
     """Raise unless the grader's user holds only ``SELECT`` and can read every table of every ``db_id``, loaded from the
     pinned dump.
 
     Run at startup: a missing database or grant would otherwise score every model query as an empty result, and a user
     that can write would let a model's query change the data.
     """
-    conn = _connect(reader_dsn, connection_timeout=connection_timeout)
+    conn = _connect(reader_dsn, password, connection_timeout=connection_timeout)
     try:
         cur = conn.cursor()
         require_case_insensitive_names(cur)

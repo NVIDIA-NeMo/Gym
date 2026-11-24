@@ -55,8 +55,8 @@ def tiny(tmp_path, monkeypatch) -> Path:
 
 
 def test_parse_mysql_dsn() -> None:
-    assert parse_mysql_dsn("mysql://u:p%2Fw@host:3307/db") == {
-        "user": "u",
+    assert parse_mysql_dsn("mysql://u%40x@host:3307/db", "p/w") == {
+        "user": "u@x",
         "password": "p/w",
         "host": "host",
         "port": 3307,
@@ -65,6 +65,30 @@ def test_parse_mysql_dsn() -> None:
     assert parse_mysql_dsn("mysql://u@host") == {"user": "u", "password": "", "host": "host", "port": 3306}
     with pytest.raises(ValueError, match="mysql://"):
         parse_mysql_dsn("postgresql://u@h/db")
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "mysql://u:hunter2@h:3306",
+        "mysql://u:hunter2%40x@h",
+        "mysql://u:@h",
+        # Characters a URL can't hold unescaped, which make urlparse misread the password as a host or a fragment.
+        "mysql://u:hunter2/x@h:3306",
+        "mysql://u:hunter2#x@h",
+        "mysql://u:hunter2?x@h",
+    ],
+)
+def test_a_dsn_holding_a_password_is_refused_without_echoing_it(dsn) -> None:
+    with pytest.raises(ValueError, match="holds a password.*mysql_password") as error:
+        parse_mysql_dsn(dsn, "other")
+    assert "hunter2" not in str(error.value)
+
+
+def test_a_bad_port_is_refused_without_echoing_it() -> None:
+    with pytest.raises(ValueError, match="port is not a number") as error:
+        parse_mysql_dsn("mysql://u@h:hunter2")
+    assert "hunter2" not in str(error.value)
 
 
 def test_dump_statements(tmp_path) -> None:
@@ -121,8 +145,10 @@ class _FakeMySql:
         self.unreadable: set = set()
         self.lock_free = True
         self.current_role, self.mandatory_roles = "NONE", ""
+        self.connects: List[Dict[str, Any]] = []
 
     def connect(self, **params: Any) -> "_FakeConn":
+        self.connects.append(params)
         return _FakeConn(self, params)
 
 
@@ -227,17 +253,23 @@ def fake_mysql(monkeypatch):
     return install
 
 
-ADMIN, READER = "mysql://root:pw@h:3306", "mysql://beaver_reader:rpw@h:3306"
+ADMIN, READER = "mysql://root@h:3306", "mysql://beaver_reader@h:3306"
 
 
 def test_load_then_check(tmp_path, tiny, fake_mysql) -> None:
     server = fake_mysql()
-    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER, admin_password="pw", reader_password="rpw")
+    assert server.connects[0]["user"] == "root" and server.connects[0]["password"] == "pw"
     assert server.loaded["tiny"] == (setup.DUMPS["tiny"].sha256, 1)
     assert server.users == {"beaver_reader@%": "rpw"}
     assert server.grants == [("_beaver_meta", "beaver_reader@%"), ("tiny", "beaver_reader@%")]
     assert "INSERT INTO `T` VALUES (1,'a;b'),(2,'c');" in server.statements
-    check_beaver_mysql(READER, ["tiny"])
+    # A new database is recorded as loading only once it is created.
+    assert server.statements.index("CREATE DATABASE `tiny` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci") < next(
+        i for i, s in enumerate(server.statements) if s.startswith("REPLACE INTO `_beaver_meta`.loaded")
+    )
+    check_beaver_mysql(READER, ["tiny"], password="rpw")
+    assert server.connects[-1]["user"] == "beaver_reader" and server.connects[-1]["password"] == "rpw"
     # Loaded already: a second run loads nothing.
     loads = [s for s in server.statements if s.startswith("CREATE TABLE `T`")]
     ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
@@ -277,8 +309,20 @@ def test_wrong_table_count_is_an_error(tmp_path, tiny, fake_mysql, monkeypatch) 
 def test_reader_same_as_admin_is_refused(tmp_path, tiny, fake_mysql) -> None:
     server = fake_mysql()
     with pytest.raises(RuntimeError, match="its own read-only user"):
-        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, "mysql://root:pw@h:3306")
+        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, "mysql://root@h:3306")
     assert server.users == {} and server.grants == []
+
+
+@pytest.mark.parametrize(
+    "admin,reader", [(ADMIN, "mysql://beaver_reader:rpw@h:3306"), ("mysql://root:pw@h:3306", READER)]
+)
+def test_a_password_in_either_dsn_is_refused_before_anything_changes(
+    tmp_path, tiny, fake_mysql, admin, reader
+) -> None:
+    server = fake_mysql()
+    with pytest.raises(ValueError, match="holds a password"):
+        ensure_beaver_mysql(tmp_path, ["tiny"], admin, reader)
+    assert server.connects == [] and server.statements == []
 
 
 def test_existing_reader_keeps_its_password(tmp_path, tiny, fake_mysql) -> None:
@@ -309,6 +353,11 @@ def test_a_database_created_by_someone_else_meanwhile_is_not_dropped(tmp_path, t
 
     monkeypatch.setattr(setup, "ensure_beaver_dumps", download_then_race)
     with pytest.raises(mysql.connector.errors.DatabaseError, match="database exists"):
+        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    # The failed CREATE left no record, so the next start sees someone else's database and leaves it alone.
+    assert "tiny" not in server.loaded
+    monkeypatch.setattr(setup, "ensure_beaver_dumps", real)
+    with pytest.raises(RuntimeError, match="didn't create"):
         ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
     assert not any(s.startswith("DROP DATABASE") for s in server.statements)
 
@@ -375,8 +424,11 @@ def test_check_without_meta_table(tiny, fake_mysql) -> None:
         check_beaver_mysql(READER, ["tiny"])
 
 
+# DSNs without passwords; the passwords in BEAVER_MYSQL_TEST_ADMIN_PASSWORD and BEAVER_MYSQL_TEST_PASSWORD.
 _LIVE_ADMIN = os.environ.get("BEAVER_MYSQL_TEST_ADMIN_DSN")
 _LIVE_READER = os.environ.get("BEAVER_MYSQL_TEST_DSN")
+_LIVE_ADMIN_PASSWORD = os.environ.get("BEAVER_MYSQL_TEST_ADMIN_PASSWORD")
+_LIVE_READER_PASSWORD = os.environ.get("BEAVER_MYSQL_TEST_PASSWORD")
 
 
 @pytest.mark.skipif(
@@ -389,9 +441,16 @@ def test_live_load_check_and_read_only(tmp_path, tiny) -> None:
     from resources_servers.beaver_sql.ex_acc import MySqlRunner
 
     try:
-        ensure_beaver_mysql(tmp_path, ["tiny"], _LIVE_ADMIN, _LIVE_READER)
-        check_beaver_mysql(_LIVE_READER, ["tiny"])
-        runner = MySqlRunner(_LIVE_READER, timeout_s=2.0)
+        ensure_beaver_mysql(
+            tmp_path,
+            ["tiny"],
+            _LIVE_ADMIN,
+            _LIVE_READER,
+            admin_password=_LIVE_ADMIN_PASSWORD,
+            reader_password=_LIVE_READER_PASSWORD,
+        )
+        check_beaver_mysql(_LIVE_READER, ["tiny"], password=_LIVE_READER_PASSWORD)
+        runner = MySqlRunner(_LIVE_READER, password=_LIVE_READER_PASSWORD, timeout_s=2.0)
         # No session settings: the model's SQL sees the server's own value.
         seen = asyncio.run(runner.run("tiny", "SELECT @@session.max_execution_time = @@global.max_execution_time"))
         assert seen.frame.iloc[0, 0] == 1
@@ -409,7 +468,7 @@ def test_live_load_check_and_read_only(tmp_path, tiny) -> None:
         # A second statement doesn't run on after the first result: its connection is killed.
         two = asyncio.run(runner.run("tiny", "SELECT 1; DO SLEEP(5)"))
         assert two.status == "ok" and two.frame.iloc[0, 0] == 1
-        admin = setup._connect(_LIVE_ADMIN)
+        admin = setup._connect(_LIVE_ADMIN, _LIVE_ADMIN_PASSWORD)
         try:
             cur = admin.cursor()
             cur.execute("SELECT COUNT(*) FROM information_schema.processlist WHERE state = 'User sleep'")
@@ -418,7 +477,7 @@ def test_live_load_check_and_read_only(tmp_path, tiny) -> None:
             admin.close()
     finally:
         # Leave the server as found: the test database, its record and the grader's grant on it go.
-        conn = setup._connect(_LIVE_ADMIN)
+        conn = setup._connect(_LIVE_ADMIN, _LIVE_ADMIN_PASSWORD)
         try:
             cur = conn.cursor()
             cur.execute("DROP DATABASE IF EXISTS `tiny`")

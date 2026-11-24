@@ -22,7 +22,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, SecretStr
 
 from nemo_gym.core import (
     VERIFIER_ERROR,
@@ -102,17 +102,24 @@ def extract_sql_from_response(text: Optional[str]) -> Optional[str]:
 class BeaverSqlResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "beaver_sql"
-    # The grader's (read-only) user; the database is chosen per task. Password in the DSN; pass it with an
-    # `${oc.env:...}` override so it stays off the command line.
+    # The grader's (read-only) user; the database is chosen per task. A DSN holding a password is refused: a run records
+    # its DSN, so the password goes in mysql_password, set from the environment (`${oc.env:BEAVER_MYSQL_PASSWORD}`).
+    # Gym redacts credential-named settings such as mysql_password in what a run saves.
     mysql_dsn: str = "mysql://beaver_reader@127.0.0.1:3306"
+    mysql_password: Optional[SecretStr] = None
     # With an admin DSN, startup downloads the pinned dumps, loads any missing database and creates the grader's user.
     mysql_admin_dsn: Optional[str] = None
+    mysql_admin_password: Optional[SecretStr] = None
     # Databases checked (and, with mysql_admin_dsn, loaded) at startup. dw_real questions use dw.
     databases: List[str] = ["dw"]
     cache_dir: str = "resources_servers/beaver_sql/.beaver"
     max_concurrency: int = 8
     query_timeout_s: float = QUERY_TIMEOUT_S
     connection_timeout_s: int = CONNECTION_TIMEOUT_S
+
+
+def _secret(value: Optional[SecretStr]) -> Optional[str]:
+    return value.get_secret_value() if value is not None else None
 
 
 class BeaverSqlVerifyRequest(BaseVerifyRequest):
@@ -277,16 +284,22 @@ class BeaverSqlResourcesServer(BeaverSqlVerifier, SimpleResourcesServer):
         # Imported here so the unit tests and the verifier fixture need no MySQL driver.
         from resources_servers.beaver_sql.setup_beaver_mysql import check_beaver_mysql, ensure_beaver_mysql
 
+        password = _secret(self.config.mysql_password)
         if self.config.mysql_admin_dsn:
             ensure_beaver_mysql(
                 self._resolve_dir(self.config.cache_dir),
                 self.config.databases,
                 self.config.mysql_admin_dsn,
                 self.config.mysql_dsn,
+                admin_password=_secret(self.config.mysql_admin_password),
+                reader_password=password,
             )
-        check_beaver_mysql(self.config.mysql_dsn, self.config.databases, self.config.connection_timeout_s)
+        check_beaver_mysql(
+            self.config.mysql_dsn, self.config.databases, self.config.connection_timeout_s, password=password
+        )
         self._runner = MySqlRunner(
             self.config.mysql_dsn,
+            password=password,
             max_concurrency=self.config.max_concurrency,
             timeout_s=self.config.query_timeout_s,
             connection_timeout_s=self.config.connection_timeout_s,

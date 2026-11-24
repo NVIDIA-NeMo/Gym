@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+from pathlib import Path
 from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
+from omegaconf import OmegaConf
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
@@ -233,7 +235,7 @@ class TestMetrics:
     def _server(self, monkeypatch) -> BeaverSqlResourcesServer:
         from resources_servers.beaver_sql import setup_beaver_mysql
 
-        monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", lambda *a: None)
+        monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", lambda *a, **k: None)
         return BeaverSqlResourcesServer(config=_config(), server_client=MagicMock(spec=ServerClient))
 
     def test_nonempty_gold_and_counts(self, monkeypatch) -> None:
@@ -272,32 +274,55 @@ class TestStartup:
         from resources_servers.beaver_sql import setup_beaver_mysql
 
         calls = []
-        monkeypatch.setattr(setup_beaver_mysql, "ensure_beaver_mysql", lambda *a: calls.append(("ensure", a)))
-        monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", lambda *a: calls.append(("check", a)))
+        monkeypatch.setattr(setup_beaver_mysql, "ensure_beaver_mysql", lambda *a, **k: calls.append(("ensure", a, k)))
+        monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", lambda *a, **k: calls.append(("check", a, k)))
         server = BeaverSqlResourcesServer(
-            config=_config(mysql_dsn="mysql://r:p@h:1", databases=["dw", "neutron"]),
+            config=_config(mysql_dsn="mysql://r@h:1", mysql_password="rpw", databases=["dw", "neutron"]),
             server_client=MagicMock(spec=ServerClient),
         )
-        assert calls == [("check", ("mysql://r:p@h:1", ["dw", "neutron"], 10))]
+        assert calls == [("check", ("mysql://r@h:1", ["dw", "neutron"], 10), {"password": "rpw"})]
         assert isinstance(server._runner, app_module.MySqlRunner)
         assert server._runner.timeout_s == 10.0
+        assert server._runner._params["user"] == "r" and server._runner._params["password"] == "rpw"
 
     def test_admin_dsn_loads_first(self, monkeypatch) -> None:
         from resources_servers.beaver_sql import setup_beaver_mysql
 
         calls = []
-        monkeypatch.setattr(setup_beaver_mysql, "ensure_beaver_mysql", lambda *a: calls.append("ensure"))
-        monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", lambda *a: calls.append("check"))
+        monkeypatch.setattr(setup_beaver_mysql, "ensure_beaver_mysql", lambda *a, **k: calls.append(("ensure", k)))
+        monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", lambda *a, **k: calls.append(("check", k)))
         BeaverSqlResourcesServer(
-            config=_config(mysql_admin_dsn="mysql://root:p@h:1", cache_dir="/tmp/beaver-cache"),
+            config=_config(
+                mysql_admin_dsn="mysql://root@h:1",
+                mysql_admin_password="apw",
+                mysql_password="rpw",
+                cache_dir="/tmp/beaver-cache",
+            ),
             server_client=MagicMock(spec=ServerClient),
         )
-        assert calls == ["ensure", "check"]
+        assert calls == [
+            ("ensure", {"admin_password": "apw", "reader_password": "rpw"}),
+            ("check", {"password": "rpw"}),
+        ]
+
+    def test_a_dsn_holding_a_password_stops_startup(self, monkeypatch) -> None:
+        from resources_servers.beaver_sql import setup_beaver_mysql
+
+        monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", lambda *a, **k: None)
+        with pytest.raises(ValueError, match="holds a password") as error:
+            BeaverSqlResourcesServer(
+                config=_config(mysql_dsn="mysql://r:hunter2@h:1"), server_client=MagicMock(spec=ServerClient)
+            )
+        assert "hunter2" not in str(error.value)
+
+    def test_passwords_are_hidden_in_the_config(self) -> None:
+        config = _config(mysql_password="hunter2", mysql_admin_password="hunter3")
+        assert "hunter" not in repr(config) and "hunter" not in str(config.model_dump())
 
     def test_failed_check_stops_startup(self, monkeypatch) -> None:
         from resources_servers.beaver_sql import setup_beaver_mysql
 
-        def _fail(*a):
+        def _fail(*a, **k):
             raise RuntimeError("BEAVER MySQL is not ready: dw: not loaded")
 
         monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", _fail)
@@ -307,3 +332,33 @@ class TestStartup:
     def test_resolve_dir(self) -> None:
         assert BeaverSqlResourcesServer._resolve_dir("/abs").as_posix() == "/abs"
         assert BeaverSqlResourcesServer._resolve_dir("rel/x").as_posix().endswith("rel/x")
+
+
+class TestRunRecords:
+    """The files a run saves beside its rollouts (the manifest and its identity sidecar) never hold a MySQL password."""
+
+    @pytest.mark.parametrize("source", ["environment", "literal"])
+    def test_no_file_a_run_writes_holds_a_password(self, tmp_path: Path, monkeypatch, source: str) -> None:
+        from nemo_gym.rollouts.rollout_recovery import RunManifest, config_identity_path_for
+
+        canary = "CANARY-MYSQL-PASSWORD-123"  # pragma: allowlist secret
+        monkeypatch.setenv("BEAVER_MYSQL_PASSWORD", canary)
+        monkeypatch.setenv("BEAVER_MYSQL_ADMIN_PASSWORD", canary)
+        # The shipped server config, which takes both passwords from the environment.
+        shipped = OmegaConf.to_container(OmegaConf.load(Path(app_module.__file__).parent / "configs/beaver_sql.yaml"))
+        global_config = {"beaver_sql_resources_server": shipped["beaver_sql_resources_server"]}
+        settings = global_config["beaver_sql_resources_server"]["resources_servers"]["beaver_sql"]
+        settings["mysql_admin_dsn"] = "mysql://root@127.0.0.1:3306"
+        if source == "literal":
+            settings["mysql_password"] = settings["mysql_admin_password"] = canary
+        tasks = tmp_path / "input.jsonl"
+        tasks.write_text("{}\n")
+        path = tmp_path / "rollouts_manifest.json"
+
+        RunManifest.create(tasks, [], {}, global_config).write(path)
+
+        assert config_identity_path_for(path).exists()
+        assert sorted(p.name for p in tmp_path.iterdir() if canary.encode() in p.read_bytes()) == []
+        # The settings that say what was measured stay readable.
+        identity = config_identity_path_for(path).read_text()
+        assert "mysql://beaver_reader@127.0.0.1:3306" in identity and "mysql://root@127.0.0.1:3306" in identity

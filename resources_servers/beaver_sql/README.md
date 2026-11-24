@@ -36,8 +36,10 @@ wrong), when the server runs out of memory, threads, disk or temporary space (My
 `failure_kind` `verifier_error` and `failure_reason` `database_unavailable`; a crash in the grader is masked as
 `unknown_error`. Any other error in the model's query, access denied included, is the query's and scores as an empty
 result. A request cancelled while its query runs stops the query first. A stateless reverify grades the saved answer once the cause is fixed. **Time
-contract:** 10 seconds per query (`query_timeout_s`), enforced by `MySqlRunner.run` on the event loop's monotonic
-clock; an expired query is an empty result. There is no episode deadline in the server; the agent's token cap applies.
+contract:** 10 seconds per query (`query_timeout_s`), connecting included, timed on the query's own thread
+(`MySqlRunner.run`). A query that ends after the limit is a timeout, an empty result, whether it returned rows, failed
+or lost its connection; one that never connected masks the row. There is no episode deadline in the server; the
+agent's token cap applies.
 
 ## MySQL server
 
@@ -84,20 +86,24 @@ existing user's password; it refuses a grader DSN that names its own (admin) use
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mysql_dsn` | `mysql://beaver_reader@127.0.0.1:3306` | The grader's read-only user; password in the DSN |
+| `mysql_dsn` | `mysql://beaver_reader@127.0.0.1:3306` | The grader's read-only user, without a password |
+| `mysql_password` | `${oc.env:BEAVER_MYSQL_PASSWORD,null}` | The grader's password |
 | `mysql_admin_dsn` | `null` | Set to load data and create the grader's user at startup |
+| `mysql_admin_password` | `${oc.env:BEAVER_MYSQL_ADMIN_PASSWORD,null}` | The admin user's password |
 | `databases` | `[dw]` | Databases checked (and loaded) at startup; add `neutron` or `nova` for those questions |
 | `cache_dir` | `resources_servers/beaver_sql/.beaver` | Download cache for `beaver_db.zip` (git-ignored) |
 | `max_concurrency` | `8` | Queries at a time |
 | `query_timeout_s` | `10.0` | BEAVER's limit; change it only on purpose |
 
-Keep passwords off the command line with an interpolation:
+**Passwords never go in a DSN.** A run records its configuration, DSNs included, beside its rollouts (the identity file
+next to `rollouts_manifest.json`), so a DSN that holds a password is refused at startup. The passwords come from the
+environment, and Gym redacts credential-named settings such as `mysql_password` in everything a run saves:
 
 ```bash
-export BEAVER_MYSQL_DSN='mysql://beaver_reader:<password>@127.0.0.1:3306'
-export BEAVER_MYSQL_ADMIN_DSN='mysql://root:<admin password>@127.0.0.1:3306'
+export BEAVER_MYSQL_PASSWORD='<grader password>'
+export BEAVER_MYSQL_ADMIN_PASSWORD='<admin password>'
+export BEAVER_MYSQL_ADMIN_DSN=mysql://root@127.0.0.1:3306
 gym env start --model-type vllm_model --resources-server beaver_sql \
-    '+beaver_sql_resources_server.resources_servers.beaver_sql.mysql_dsn=${oc.env:BEAVER_MYSQL_DSN}' \
     '+beaver_sql_resources_server.resources_servers.beaver_sql.mysql_admin_dsn=${oc.env:BEAVER_MYSQL_ADMIN_DSN}'
 ```
 
@@ -120,16 +126,17 @@ query, which then scores as a timeout; nothing stops that short of a user per co
 every rollout, so with `--num-repeats` above 1 a gold near the time limit can time out on some rollouts and not others
 (and its task's `gold_result` subset follows the first rollout); report `gold-sql-timeout_count` with the headline.
 
-**Where this departs from the official evaluator,** on purpose: a gold query that *errors* masks the row instead of
-counting as an empty result (none of the 6,925 `dw`, `dw_real` and `neutron` golds errors on a correctly set-up
+**Where this departs from the official evaluator,** on purpose: a gold query that *errors* within the time limit masks
+the row instead of counting as an empty result (none of the 6,925 `dw`, `dw_real` and `neutron` golds errors on a correctly set-up
 server; `nova` isn't checked); a failure to connect or a lost connection masks the row; a result over the size limit
 never matches; and statements after the first are stopped rather than left running.
 
 ## Tests
 
 `gym env test --resources-server beaver_sql` runs the unit tests and the verifier fixture with a fake driver. With
-`BEAVER_MYSQL_TEST_ADMIN_DSN` and `BEAVER_MYSQL_TEST_DSN` set (a MySQL 8 server with `--lower-case-table-names=1`), a
-live test also loads a one-table dump and checks that the grader's user can't write. With `BEAVER_OFFICIAL_EX_ACC`
+`BEAVER_MYSQL_TEST_ADMIN_DSN` and `BEAVER_MYSQL_TEST_DSN` set (DSNs without passwords, on a MySQL 8 server with
+`--lower-case-table-names=1`) and their passwords in `BEAVER_MYSQL_TEST_ADMIN_PASSWORD` and
+`BEAVER_MYSQL_TEST_PASSWORD`, a live test also loads a one-table dump and checks that the grader's user can't write. With `BEAVER_OFFICIAL_EX_ACC`
 pointing at a copy of the official `ex_acc.py`, the comparison cases also run against it.
 
 ## Licensing information

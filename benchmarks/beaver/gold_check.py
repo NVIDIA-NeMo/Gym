@@ -13,16 +13,18 @@ It also reports how long the gold queries take: one close to the 10-second limit
 changes its task's class from run to run. Writes ``results.jsonl`` (id, domain, class, error, seconds) and prints
 counts. Never prints a query or a result.
 
-Run: ``python -m benchmarks.beaver.gold_check <prepared jsonl> <out_dir> --dsn <reader dsn> [--concurrency N]``.
+Run: ``python -m benchmarks.beaver.gold_check <prepared jsonl> <out_dir> --dsn <reader dsn> [--concurrency N]``, with
+the DSN's password in ``BEAVER_MYSQL_PASSWORD`` (never in the DSN).
 """
 
 import argparse
 import asyncio
 import json
+import os
 import time
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from resources_servers.beaver_sql.ex_acc import MySqlRunner, MySqlUnavailableError
 
@@ -33,8 +35,10 @@ def gold_class(status: str, empty: bool) -> str:
     return status
 
 
-async def check(rows: List[Dict[str, Any]], dsn: str, concurrency: int) -> List[Dict[str, Any]]:
-    runner = MySqlRunner(dsn, max_concurrency=concurrency)
+async def check(
+    rows: List[Dict[str, Any]], dsn: str, concurrency: int, password: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    runner = MySqlRunner(dsn, password=password, max_concurrency=concurrency)
 
     async def one(row: Dict[str, Any]) -> Dict[str, Any]:
         try:
@@ -74,13 +78,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("prepared", help="Prepared BEAVER rows (benchmarks/beaver/data/beaver_*.jsonl)")
     parser.add_argument("out_dir")
-    parser.add_argument("--dsn", required=True, help="The grader's MySQL DSN (read-only user)")
+    parser.add_argument(
+        "--dsn", required=True, help="The grader's MySQL DSN (read-only user; password in BEAVER_MYSQL_PASSWORD)"
+    )
     parser.add_argument("--concurrency", type=int, default=8, help="Queries at a time; the grader's default is 8")
     args = parser.parse_args()
 
     rows = [json.loads(line) for line in Path(args.prepared).read_text().splitlines() if line.strip()]
     start = time.monotonic()
-    results = asyncio.run(check(rows, args.dsn, args.concurrency))
+    results = asyncio.run(check(rows, args.dsn, args.concurrency, os.environ.get("BEAVER_MYSQL_PASSWORD")))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "results.jsonl").open("w") as f:

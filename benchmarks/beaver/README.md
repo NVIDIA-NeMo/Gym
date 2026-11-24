@@ -78,13 +78,16 @@ gym eval prepare --benchmark beaver '+prepare_script_args.sample=0' '+prepare_sc
 Start MySQL (server README), then:
 
 ```bash
-export BEAVER_MYSQL_DSN='mysql://beaver_reader:<password>@127.0.0.1:3306'
-export BEAVER_MYSQL_ADMIN_DSN='mysql://root:<admin password>@127.0.0.1:3306'
+export BEAVER_MYSQL_PASSWORD='<grader password>'
+export BEAVER_MYSQL_ADMIN_PASSWORD='<admin password>'
+export BEAVER_MYSQL_ADMIN_DSN=mysql://root@127.0.0.1:3306
 gym eval run --benchmark beaver --model-type openai_model --split benchmark \
     --output results/beaver/rollouts.jsonl --num-repeats 1 \
-    '+beaver_sql_resources_server.resources_servers.beaver_sql.mysql_dsn=${oc.env:BEAVER_MYSQL_DSN}' \
     '+beaver_sql_resources_server.resources_servers.beaver_sql.mysql_admin_dsn=${oc.env:BEAVER_MYSQL_ADMIN_DSN}'
 ```
+
+The passwords stay in the environment, never in a DSN (the server refuses one there), and Gym redacts them in what a
+run saves.
 
 For `neutron` or `nova` questions, add the database to the server's `databases` list.
 

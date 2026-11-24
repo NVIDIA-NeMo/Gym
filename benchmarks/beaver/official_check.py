@@ -18,13 +18,15 @@ carry a ``reward`` (another grader's verdict, such as auto-ontology-eval's), tha
 verdict too.
 
 Run: ``python -m benchmarks.beaver.official_check <prepared jsonl> <out_dir> --dsn <reader dsn>
-(--rollouts <jsonl> | --gold-as-prediction) [--concurrency N]``.
+(--rollouts <jsonl> | --gold-as-prediction) [--concurrency N]``, with the DSN's password in ``BEAVER_MYSQL_PASSWORD``
+(never in the DSN).
 """
 
 import argparse
 import asyncio
 import importlib.util
 import json
+import os
 import time
 import urllib.request
 from collections import Counter
@@ -117,9 +119,11 @@ def tasks_from(prepared: List[Dict[str, Any]], rollouts: Optional[List[Dict[str,
     return tasks
 
 
-async def check(tasks: List[Dict[str, Any]], dsn: str, official, concurrency: int) -> List[Dict[str, Any]]:
-    runner = MySqlRunner(dsn, max_concurrency=concurrency)
-    params = parse_mysql_dsn(dsn)
+async def check(
+    tasks: List[Dict[str, Any]], dsn: str, official, concurrency: int, password: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    runner = MySqlRunner(dsn, password=password, max_concurrency=concurrency)
+    params = parse_mysql_dsn(dsn, password)
     pool = ThreadPoolExecutor(max_workers=concurrency)
     loop = asyncio.get_running_loop()
 
@@ -177,7 +181,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("prepared", help="Prepared BEAVER rows (benchmarks/beaver/data/beaver_*.jsonl)")
     parser.add_argument("out_dir")
-    parser.add_argument("--dsn", required=True, help="The grader's MySQL DSN (read-only user)")
+    parser.add_argument(
+        "--dsn", required=True, help="The grader's MySQL DSN (read-only user; password in BEAVER_MYSQL_PASSWORD)"
+    )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--rollouts", help="Rollouts with id and model_output")
     source.add_argument("--gold-as-prediction", action="store_true", help="Score each gold query against itself")
@@ -189,7 +195,7 @@ def main() -> None:
     tasks = tasks_from(read(args.prepared), None if args.gold_as_prediction else read(args.rollouts))
     official = load_official(Path(args.official_cache))
     start = time.monotonic()
-    results = asyncio.run(check(tasks, args.dsn, official, args.concurrency))
+    results = asyncio.run(check(tasks, args.dsn, official, args.concurrency, os.environ.get("BEAVER_MYSQL_PASSWORD")))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with (out_dir / "results.jsonl").open("w") as f:

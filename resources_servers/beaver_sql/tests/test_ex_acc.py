@@ -123,6 +123,10 @@ class _FakeServer:
         self.next_id = 100
         self.lock = threading.Lock()
         self.interrupt = threading.Event()
+        # How long closing a connection takes, and when each connection (by id) was opened and closed.
+        self.close_delay = 0.0
+        self.opened: Dict[int, float] = {}
+        self.closed: Dict[int, float] = {}
 
     def connect(self, **params: Any) -> "_FakeConnection":
         self.connects.append(params)
@@ -132,6 +136,7 @@ class _FakeServer:
             raise self.connect_error
         with self.lock:
             self.next_id += 1
+            self.opened[self.next_id] = time.monotonic()
             return _FakeConnection(self, self.next_id)
 
 
@@ -152,7 +157,9 @@ class _FakeConnection:
         return _FakeCursor(self)
 
     def close(self) -> None:
-        pass
+        if self.server.close_delay:
+            time.sleep(self.server.close_delay)
+        self.server.closed[self.connection_id] = time.monotonic()
 
 
 class _FakeCursor:
@@ -209,7 +216,7 @@ def _run(runner: MySqlRunner, sql: str) -> QueryOutcome:
 
 def test_runner_rows_and_params(fake) -> None:
     server = fake({"Q": (["a", "b"], [(1, "x")]), "SET @x = 1": None})
-    runner = MySqlRunner("mysql://reader:p%40ss@db.example:3307/ignored", max_concurrency=2)
+    runner = MySqlRunner("mysql://reader@db.example:3307/ignored", password="p@ss", max_concurrency=2)
     outcome = _run(runner, "Q")
     assert outcome.status == "ok" and list(outcome.frame.columns) == ["a", "b"] and not outcome.empty
     assert server.connects[0] == {
@@ -239,32 +246,32 @@ def test_runner_rows_and_params(fake) -> None:
 )
 def test_runner_query_failures(fake, error, status) -> None:
     fake({"Q": error})
-    assert _run(MySqlRunner("mysql://r:p@h"), "Q").status == status
+    assert _run(MySqlRunner("mysql://r@h"), "Q").status == status
 
 
 @pytest.mark.parametrize("errno", [1038, 1114, 1037])
 def test_runner_server_resource_errors_are_the_query_failure(fake, errno) -> None:
     # A runaway sort or GROUP BY causes these itself; officially they're errors, scored as an empty result.
     fake({"Q": mysql.connector.errors.DatabaseError("out of sort memory", errno=errno)})
-    assert _run(MySqlRunner("mysql://r:p@h"), "Q").status == "error"
+    assert _run(MySqlRunner("mysql://r@h"), "Q").status == "error"
 
 
 @pytest.mark.parametrize("errno", [2013, 2006])
 def test_runner_unavailable_during_query(fake, errno) -> None:
     fake({"Q": mysql.connector.errors.OperationalError("gone", errno=errno)})
     with pytest.raises(MySqlUnavailableError):
-        _run(MySqlRunner("mysql://r:p@h"), "Q")
+        _run(MySqlRunner("mysql://r@h"), "Q")
 
 
 def test_runner_unavailable_at_connect(fake) -> None:
     fake({}, connect_error=mysql.connector.errors.InterfaceError("refused", errno=2003))
     with pytest.raises(MySqlUnavailableError):
-        _run(MySqlRunner("mysql://r:p@h"), "Q")
+        _run(MySqlRunner("mysql://r@h"), "Q")
 
 
 def test_runner_timeout_kills_the_query(fake) -> None:
     server = fake({"SLOW": 5.0})
-    runner = MySqlRunner("mysql://r:p@h", timeout_s=0.2)
+    runner = MySqlRunner("mysql://r@h", timeout_s=0.2)
     start = time.monotonic()
     outcome = _run(runner, "SLOW")
     assert outcome.status == "timeout" and outcome.empty
@@ -274,7 +281,7 @@ def test_runner_timeout_kills_the_query(fake) -> None:
 
 def test_runner_releases_a_query_the_server_will_not_stop(fake) -> None:
     server = fake({"STUCK": ("ignores kill", 3.0)})
-    runner = MySqlRunner("mysql://r:p@h", timeout_s=0.2)
+    runner = MySqlRunner("mysql://r@h", timeout_s=0.2)
     runner.stop_grace_s = 0.5
     start = time.monotonic()
     assert _run(runner, "STUCK").status == "timeout"
@@ -286,7 +293,7 @@ def test_runner_stops_reading_a_large_result_after_the_limit(fake, monkeypatch) 
     monkeypatch.setattr("resources_servers.beaver_sql.ex_acc._FETCH_CHUNK_ROWS", 10)
     server = fake({"BIG": (["x"], [(i,) for i in range(1000)])})
     server.fetch_delay = 0.05
-    runner = MySqlRunner("mysql://r:p@h", timeout_s=0.2)
+    runner = MySqlRunner("mysql://r@h", timeout_s=0.2)
     start = time.monotonic()
     assert _run(runner, "BIG").status == "timeout"
     assert time.monotonic() - start < 2.0
@@ -295,21 +302,60 @@ def test_runner_stops_reading_a_large_result_after_the_limit(fake, monkeypatch) 
 def test_runner_reads_a_result_in_chunks(fake, monkeypatch) -> None:
     monkeypatch.setattr("resources_servers.beaver_sql.ex_acc._FETCH_CHUNK_ROWS", 3)
     fake({"Q": (["x"], [(i,) for i in range(10)])})
-    assert _run(MySqlRunner("mysql://r:p@h"), "Q").frame.shape == (10, 1)
+    assert _run(MySqlRunner("mysql://r@h"), "Q").frame.shape == (10, 1)
 
 
 def test_runner_slow_connect_is_unavailable(fake) -> None:
     fake({"Q": (["x"], [(1,)])}, connect_delay=0.5)
     with pytest.raises(MySqlUnavailableError, match="could not connect"):
-        _run(MySqlRunner("mysql://r:p@h", timeout_s=0.2), "Q")
+        _run(MySqlRunner("mysql://r@h", timeout_s=0.2), "Q")
 
 
-def test_runner_result_after_limit_is_a_timeout(fake) -> None:
-    fake({"Q": (["x"], [(1,)])})
-    runner = MySqlRunner("mysql://r:p@h", timeout_s=5.0)
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (["x"], [(1,)]),
+        mysql.connector.errors.ProgrammingError("syntax", errno=1064),
+        mysql.connector.errors.OperationalError("gone", errno=2013),
+    ],
+    ids=["rows", "error", "connection lost"],
+)
+def test_runner_outcome_after_limit_is_a_timeout(fake, answer) -> None:
+    # The query's thread saw it end after the limit, though the loop was too busy to stop waiting in time. The official
+    # evaluator has given up by then: rows, an error or a lost connection all count as the timeout (a gold query's error
+    # would otherwise be masked rather than scored as an empty gold result).
+    fake({"Q": answer})
+    runner = MySqlRunner("mysql://r@h", timeout_s=5.0)
     clock = iter([0.0, 6.0])
     runner._clock = lambda: next(clock)
     assert _run(runner, "Q").status == "timeout"
+
+
+def test_runner_connect_failure_after_limit_is_still_unavailable(fake) -> None:
+    fake({}, connect_error=mysql.connector.errors.InterfaceError("refused", errno=2003))
+    runner = MySqlRunner("mysql://r@h", timeout_s=5.0)
+    clock = iter([0.0, 6.0])
+    runner._clock = lambda: next(clock)
+    with pytest.raises(MySqlUnavailableError):
+        _run(runner, "Q")
+
+
+def test_the_slot_is_released_only_after_the_connection_is_closed(fake) -> None:
+    # Closing takes longer than the limit: the query still finished in time, and the next one waits for the close.
+    server = fake({"Q": (["x"], [(1,)])})
+    server.close_delay = 0.5
+    runner = MySqlRunner("mysql://r@h", max_concurrency=1, timeout_s=0.3)
+
+    async def scenario():
+        first = asyncio.create_task(runner.run("dw", "Q"))
+        await asyncio.sleep(0.05)
+        second = asyncio.create_task(runner.run("dw", "Q"))
+        return await first, await second
+
+    first, second = asyncio.run(scenario())
+    assert first.status == second.status == "ok" and first.seconds < 0.3
+    # The first query's connection is 101, the second's 102.
+    assert server.opened[102] >= server.closed[101]
 
 
 def test_kill_query_failure_is_ignored(fake, monkeypatch) -> None:
@@ -319,7 +365,7 @@ def test_kill_query_failure_is_ignored(fake, monkeypatch) -> None:
         raise mysql.connector.errors.InterfaceError("refused", errno=2003)
 
     monkeypatch.setattr(mysql.connector, "connect", refuse)
-    runner = MySqlRunner("mysql://r:p@h")
+    runner = MySqlRunner("mysql://r@h")
     runner._kill(7, "QUERY")
     assert runner.kill_failures == 1
 
@@ -327,24 +373,24 @@ def test_kill_query_failure_is_ignored(fake, monkeypatch) -> None:
 def test_runner_grader_out_of_memory_is_unavailable(fake) -> None:
     fake({"Q": MemoryError()})
     with pytest.raises(MySqlUnavailableError):
-        _run(MySqlRunner("mysql://r:p@h"), "Q")
+        _run(MySqlRunner("mysql://r@h"), "Q")
 
 
 def test_runner_result_too_large_never_matches(fake, monkeypatch) -> None:
     monkeypatch.setattr("resources_servers.beaver_sql.ex_acc._FETCH_CHUNK_ROWS", 10)
     monkeypatch.setattr("resources_servers.beaver_sql.ex_acc.MAX_RESULT_ROWS", 25)
     fake({"BIG": (["x"], [(i,) for i in range(100)]), "WIDE": (["x"], [("y" * 100,) for _ in range(5)])})
-    big = _run(MySqlRunner("mysql://r:p@h"), "BIG")
+    big = _run(MySqlRunner("mysql://r@h"), "BIG")
     assert (big.status, big.error, big.empty, big.oversized) == ("error", "result too large", False, True)
     # Officially a huge result is non-empty, so it doesn't match an empty gold result either.
     assert not results_match(QueryOutcome(status="ok", frame=pd.DataFrame([], columns=["x"])), big)
     monkeypatch.setattr("resources_servers.beaver_sql.ex_acc.MAX_RESULT_BYTES", 300)
-    assert _run(MySqlRunner("mysql://r:p@h"), "WIDE").error == "result too large"
+    assert _run(MySqlRunner("mysql://r@h"), "WIDE").error == "result too large"
 
 
 def test_cancelled_request_stops_its_query_before_releasing_the_slot(fake) -> None:
     server = fake({"SLOW": 5.0})
-    runner = MySqlRunner("mysql://r:p@h", max_concurrency=1, timeout_s=10.0)
+    runner = MySqlRunner("mysql://r@h", max_concurrency=1, timeout_s=10.0)
 
     async def scenario():
         task = asyncio.create_task(runner.run("dw", "SLOW"))
@@ -362,6 +408,30 @@ def test_cancelled_request_stops_its_query_before_releasing_the_slot(fake) -> No
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("when", ["running, cancelled twice", "after the limit, while being stopped"])
+def test_a_cancellation_during_the_stop_does_not_release_the_slot_early(fake, when) -> None:
+    # The server takes a second to stop the query; the request is cancelled meanwhile.
+    server = fake({"STUCK": ("ignores kill", 1.0)})
+    runner = MySqlRunner("mysql://r@h", max_concurrency=1, timeout_s=10.0 if when.startswith("running") else 0.2)
+
+    async def scenario():
+        task = asyncio.create_task(runner.run("dw", "STUCK"))
+        if when.startswith("running"):
+            await asyncio.sleep(0.2)
+            task.cancel()
+            await asyncio.sleep(0.1)
+            task.cancel()
+        else:
+            await asyncio.sleep(0.4)
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The slot came back only once the query's own connection (the first opened) was closed.
+        assert 101 in server.closed
+
+    asyncio.run(scenario())
+
+
 def test_kill_connection_is_bounded(fake, monkeypatch) -> None:
     seen = {}
 
@@ -370,14 +440,14 @@ def test_kill_connection_is_bounded(fake, monkeypatch) -> None:
         raise mysql.connector.errors.InterfaceError("refused", errno=2003)
 
     monkeypatch.setattr(mysql.connector, "connect", connect)
-    MySqlRunner("mysql://r:p@h")._kill(7, "QUERY")
+    MySqlRunner("mysql://r@h")._kill(7, "QUERY")
     assert seen["read_timeout"] == seen["write_timeout"] == seen["connection_timeout"] == 2
 
 
 def test_a_busy_event_loop_does_not_time_out_a_fast_query(fake) -> None:
     # The query is timed on its own thread: blocking the loop past the limit doesn't turn a 0.05 s query into a timeout.
     fake({"FAST": 0.05})
-    runner = MySqlRunner("mysql://r:p@h", timeout_s=1.0)
+    runner = MySqlRunner("mysql://r@h", timeout_s=1.0)
 
     async def scenario():
         task = asyncio.create_task(runner.run("dw", "FAST"))
@@ -392,7 +462,7 @@ def test_a_busy_event_loop_does_not_time_out_a_fast_query(fake) -> None:
 def test_several_statements_kill_the_connection_after_the_first_result(fake) -> None:
     server = fake({"SELECT 1; DO SLEEP(60)": (["1"], [(1,)])})
     server.more_results = True
-    outcome = _run(MySqlRunner("mysql://r:p@h"), "SELECT 1; DO SLEEP(60)")
+    outcome = _run(MySqlRunner("mysql://r@h"), "SELECT 1; DO SLEEP(60)")
     assert outcome.status == "ok" and outcome.frame.iloc[0, 0] == 1
     # The query's own connection (the first one opened), from a second connection.
     assert server.killed_connections == [101]
@@ -400,7 +470,7 @@ def test_several_statements_kill_the_connection_after_the_first_result(fake) -> 
 
 def test_one_statement_kills_nothing(fake) -> None:
     server = fake({"Q": (["x"], [(1,)])})
-    _run(MySqlRunner("mysql://r:p@h"), "Q")
+    _run(MySqlRunner("mysql://r@h"), "Q")
     assert server.killed_connections == [] and server.killed == []
 
 
@@ -408,4 +478,4 @@ def test_one_statement_kills_nothing(fake) -> None:
 def test_runner_connect_errors_are_unavailable(fake, errno) -> None:
     fake({}, connect_error=mysql.connector.errors.ProgrammingError("not loaded", errno=errno))
     with pytest.raises(MySqlUnavailableError):
-        _run(MySqlRunner("mysql://r:p@h"), "Q")
+        _run(MySqlRunner("mysql://r@h"), "Q")

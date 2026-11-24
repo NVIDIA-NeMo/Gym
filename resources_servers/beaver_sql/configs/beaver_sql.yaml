@@ -8,11 +8,13 @@ beaver_sql_resources_server:
   resources_servers:
     beaver_sql:
       entrypoint: app.py
-      # The grader's read-only user. Keep the password off the command line, for example
-      # `+beaver_sql_resources_server.resources_servers.beaver_sql.mysql_dsn='${oc.env:BEAVER_MYSQL_DSN}'`.
+      # The grader's read-only user, with no password in the DSN (one there is refused): the password comes from the
+      # environment and is redacted in what a run saves.
       mysql_dsn: mysql://beaver_reader@127.0.0.1:3306
-      # Set to load the data and create the grader's user at startup (`${oc.env:BEAVER_MYSQL_ADMIN_DSN}`).
+      mysql_password: ${oc.env:BEAVER_MYSQL_PASSWORD,null}
+      # Set to load the data and create the grader's user at startup, for example mysql://root@127.0.0.1:3306.
       mysql_admin_dsn: null
+      mysql_admin_password: ${oc.env:BEAVER_MYSQL_ADMIN_PASSWORD,null}
       databases: [dw]
       cache_dir: resources_servers/beaver_sql/.beaver
       max_concurrency: 8
