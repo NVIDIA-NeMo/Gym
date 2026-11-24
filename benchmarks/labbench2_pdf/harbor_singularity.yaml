@@ -23,7 +23,7 @@ harbor_agent_general:
         jobs_dir: "results/labbench2_pdf/harbor_jobs"
 
         datasets:
-          - path: "environments/labbench2_pdf/data/tasks_singularity"
+          - path: "benchmarks/labbench2_pdf/data/tasks_singularity"
 
         environment:
           type: singularity

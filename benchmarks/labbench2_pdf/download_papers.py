@@ -31,7 +31,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from environments.labbench2_pdf.data_utils import (
+from benchmarks.labbench2_pdf.data_utils import (
     DEFAULT_PAPERS_DIR,
     SOURCE_POLICIES,
     SUPPORTED_BENCHMARKS,

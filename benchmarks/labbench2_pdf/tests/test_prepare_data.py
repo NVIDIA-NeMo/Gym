@@ -6,8 +6,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from environments.labbench2_pdf import prepare_data as prepare_data_module
-from environments.labbench2_pdf.prepare_data import PreparationOptions, prepare_data
+from benchmarks.labbench2_pdf import prepare_data as prepare_data_module
+from benchmarks.labbench2_pdf.prepare_data import PreparationOptions, prepare_data
 
 
 def _write_question(questions_dir: Path, benchmark: str = "litqa3") -> None:

@@ -13,9 +13,9 @@ import pytest
 from datasets.exceptions import DatasetNotFoundError
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
 
-from environments.labbench2_pdf import download_questions as download_questions_module
-from environments.labbench2_pdf.data_utils import QUESTION_FIELDS
-from environments.labbench2_pdf.download_questions import QuestionDownloadOptions, download_questions
+from benchmarks.labbench2_pdf import download_questions as download_questions_module
+from benchmarks.labbench2_pdf.data_utils import QUESTION_FIELDS
+from benchmarks.labbench2_pdf.download_questions import QuestionDownloadOptions, download_questions
 
 
 def _row(item_id: str, benchmark: str) -> dict:

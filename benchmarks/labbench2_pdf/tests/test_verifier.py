@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from environments.labbench2_pdf.verifier import (
+from benchmarks.labbench2_pdf.verifier import (
     call_judge,
     deterministic_match,
     extract_final_answer,

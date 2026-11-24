@@ -7,8 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 
-from environments.labbench2_pdf import download_papers as download_papers_module
-from environments.labbench2_pdf.download_papers import (
+from benchmarks.labbench2_pdf import download_papers as download_papers_module
+from benchmarks.labbench2_pdf.download_papers import (
     DownloadCandidate,
     DownloadResult,
     HTTPResponse,

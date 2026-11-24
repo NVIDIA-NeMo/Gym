@@ -17,25 +17,25 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from environments.labbench2_pdf.data_utils import (  # noqa: E402
+from benchmarks.labbench2_pdf.data_utils import (  # noqa: E402
     DEFAULT_PAPERS_DIR,
     DEFAULT_QUESTIONS_DIR,
     SOURCE_POLICIES,
     SUPPORTED_BENCHMARKS,
     load_questions,
 )
-from environments.labbench2_pdf.download_papers import (  # noqa: E402
+from benchmarks.labbench2_pdf.download_papers import (  # noqa: E402
     DEFAULT_USER_AGENT,
     PaperDownloadOptions,
     download_corpus,
 )
-from environments.labbench2_pdf.download_questions import (  # noqa: E402
+from benchmarks.labbench2_pdf.download_questions import (  # noqa: E402
     DEFAULT_HF_REPO_ID,
     DEFAULT_HF_REVISION,
     QuestionDownloadOptions,
     download_questions,
 )
-from environments.labbench2_pdf.prepare import (  # noqa: E402
+from benchmarks.labbench2_pdf.materialize import (  # noqa: E402
     DEFAULT_AGENT_NAME,
     DEFAULT_IMAGE,
     DEFAULT_OUTPUT_DIRS,
@@ -228,7 +228,7 @@ def prepare_data(options: PreparationOptions) -> dict[str, Any]:
     preparation = {
         "schema_version": "labbench2_pdf_preparation.v1",
         "created_at": datetime.now(UTC).isoformat(),
-        "generator": "environments/labbench2_pdf/prepare_data.py",
+        "generator": "benchmarks/labbench2_pdf/prepare_data.py",
         "questions": question_source,
         "papers": paper_source,
         "source_policy": options.source_policy,

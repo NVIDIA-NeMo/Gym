@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from environments.labbench2_pdf.prepare import MaterializationOptions, build_parser, materialize
+from benchmarks.labbench2_pdf.materialize import MaterializationOptions, build_parser, materialize
 
 
 def _write_questions(path: Path, benchmark: str, rows: list[dict]) -> None:

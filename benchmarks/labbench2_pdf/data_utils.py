@@ -13,9 +13,9 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 
-ENV_ROOT = Path(__file__).resolve().parent
-DEFAULT_QUESTIONS_DIR = ENV_ROOT / "data" / "source" / "questions"
-DEFAULT_PAPERS_DIR = ENV_ROOT / "data" / "source" / "papers"
+BENCHMARK_DIR = Path(__file__).resolve().parent
+DEFAULT_QUESTIONS_DIR = BENCHMARK_DIR / "data" / "source" / "questions"
+DEFAULT_PAPERS_DIR = BENCHMARK_DIR / "data" / "source" / "papers"
 SUPPORTED_BENCHMARKS = ("litqa3", "figqa2", "tableqa2")
 QUESTION_FIELDS = ("id", "tag", "version", "question", "ideal", "sources")
 REQUIRED_QUESTION_FIELDS = ("id", "tag", "question", "ideal", "sources")

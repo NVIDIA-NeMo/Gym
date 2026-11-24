@@ -90,15 +90,15 @@ def test_benchmark_config_is_discoverable_and_uses_generated_tasks() -> None:
     assert "harbor_agent_general_environment_server" not in resolved
     assert agent.harbor_resolve_paths_from_gym_root is True
     assert agent.harbor_unique_job_names is True
-    assert agent.job.datasets[0].path == "environments/labbench2_pdf/data/tasks_docker"
+    assert agent.job.datasets[0].path == "benchmarks/labbench2_pdf/data/tasks_docker"
     assert len(agent.datasets) == 1
     assert agent.datasets[0].type == "benchmark"
 
 
-@pytest.mark.parametrize("profile", ["config.yaml", "config_singularity.yaml"])
-def test_environment_profiles_declare_server_without_legacy_fallback(profile: str) -> None:
+@pytest.mark.parametrize("profile", ["harbor_docker.yaml", "harbor_singularity.yaml"])
+def test_harbor_profiles_declare_server_without_legacy_fallback(profile: str) -> None:
     initial_config = OmegaConf.merge(
-        OmegaConf.load(BENCHMARK_DIR.parents[1] / "environments/labbench2_pdf" / profile),
+        OmegaConf.load(BENCHMARK_DIR / profile),
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         {"error_on_agent_without_environment_server": True},
     )

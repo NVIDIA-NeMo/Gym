@@ -4,10 +4,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BENCHMARK_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 IMAGE_TAG="${1:-nemo-gym-labbench2-pdf:2.0}"
 
 docker build \
   --tag "${IMAGE_TAG}" \
   --file "${SCRIPT_DIR}/labbench2-pdf-runtime.Dockerfile" \
-  "${ENV_ROOT}"
+  "${BENCHMARK_DIR}"

@@ -10,9 +10,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from environments.labbench2_pdf.data_utils import SUPPORTED_BENCHMARKS
-from environments.labbench2_pdf.prepare import DEFAULT_OUTPUT_DIRS
-from environments.labbench2_pdf.prepare_data import PreparationOptions, prepare_data
+from benchmarks.labbench2_pdf.data_utils import SUPPORTED_BENCHMARKS
+from benchmarks.labbench2_pdf.materialize import DEFAULT_OUTPUT_DIRS
+from benchmarks.labbench2_pdf.prepare_data import PreparationOptions, prepare_data
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parent

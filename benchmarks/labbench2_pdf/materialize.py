@@ -27,8 +27,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from environments.labbench2_pdf.data_utils import (
-    ENV_ROOT,
+from benchmarks.labbench2_pdf.data_utils import (
+    BENCHMARK_DIR,
     SOURCE_POLICIES,
     SUPPORTED_BENCHMARKS,
     build_coverage_audit,
@@ -38,10 +38,10 @@ from environments.labbench2_pdf.data_utils import (
 
 
 DEFAULT_OUTPUT_DIRS = {
-    "docker": ENV_ROOT / "data" / "tasks_docker",
-    "singularity": ENV_ROOT / "data" / "tasks_singularity",
+    "docker": BENCHMARK_DIR / "data" / "tasks_docker",
+    "singularity": BENCHMARK_DIR / "data" / "tasks_singularity",
 }
-DEFAULT_DOCKERFILE = ENV_ROOT / "docker" / "labbench2-pdf-runtime.Dockerfile"
+DEFAULT_DOCKERFILE = BENCHMARK_DIR / "docker" / "labbench2-pdf-runtime.Dockerfile"
 DEFAULT_IMAGE = "nemo-gym-labbench2-pdf:2.0"
 DEFAULT_AGENT_NAME = "harbor_agent_general"
 
@@ -305,7 +305,7 @@ def _write_task(
     else:
         _stage_singularity_papers(view_dir, environment_dir)
 
-    verifier_source = (ENV_ROOT / "verifier.py").read_text(encoding="utf-8")
+    verifier_source = (BENCHMARK_DIR / "verifier.py").read_text(encoding="utf-8")
     (tests_dir / "verifier.py").write_text(verifier_source, encoding="utf-8")
     _write_json(
         tests_dir / "gold_metadata.json",
@@ -511,7 +511,7 @@ def materialize(options: MaterializationOptions) -> dict[str, Any]:
     manifest = {
         "schema_version": "labbench2_pdf_materialization.v1",
         "created_at": datetime.now(UTC).isoformat(),
-        "generator": "environments/labbench2_pdf/prepare.py",
+        "generator": "benchmarks/labbench2_pdf/materialize.py",
         "questions_dir": str(questions_dir),
         "questions_sha256": question_files_digest(questions_dir, options.benchmarks),
         "papers_dir": str(papers_dir),
@@ -555,7 +555,7 @@ def build_docker_image(image: str) -> None:
             image,
             "--file",
             str(DEFAULT_DOCKERFILE),
-            str(ENV_ROOT),
+            str(BENCHMARK_DIR),
         ],
         check=True,
     )

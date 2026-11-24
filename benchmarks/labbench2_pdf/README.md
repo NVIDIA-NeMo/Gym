@@ -7,9 +7,9 @@ cache, source hint, or gold answer to the agent. The agent may choose to extract
 text, render pages, crop figures, run OCR, or use any other installed tool.
 
 The source checkout calls the table task `tableqa2`, so this integration keeps
-that upstream name. The environment implementation and detailed acquisition,
-licensing, task-layout, and troubleshooting notes live in
-[`environments/labbench2_pdf`](../../environments/labbench2_pdf/README.md).
+that upstream name. Detailed acquisition, licensing, task-layout, and
+troubleshooting notes, and how to run the Harbor profiles directly, are in
+[`harbor-tasks.md`](harbor-tasks.md).
 
 ## Configure endpoints
 
@@ -63,7 +63,7 @@ resolve its DOI papers from public open-access sources, builds the Docker
 runtime, skips questions missing any required PDF, and creates the Harbor task
 registry. It writes Gym's generated index to
 `benchmarks/labbench2_pdf/data/labbench2_pdf_benchmark.jsonl`; generated tasks
-and PDF caches stay gitignored under `environments/labbench2_pdf/data/`.
+and PDF caches stay gitignored under `benchmarks/labbench2_pdf/data/`.
 
 To use a local paper snapshot instead of downloading PDFs:
 
@@ -89,7 +89,7 @@ Cached questions are reused even when upstream `main` changes. To fetch the
 latest questions before preparing the benchmark again, run:
 
 ```bash
-python environments/labbench2_pdf/download_questions.py --overwrite
+python benchmarks/labbench2_pdf/download_questions.py --overwrite
 gym eval prepare --benchmark labbench2_pdf
 ```
 
@@ -114,7 +114,7 @@ start the benchmark server and use the generated FigQA2 index:
 ```bash
 gym env start --benchmark labbench2_pdf
 
-sed -n '1p' environments/labbench2_pdf/data/tasks_docker/figqa2_input.jsonl \
+sed -n '1p' benchmarks/labbench2_pdf/data/tasks_docker/figqa2_input.jsonl \
   > /tmp/labbench2_figqa2_single.jsonl
 
 gym eval run --no-serve \
@@ -140,13 +140,13 @@ and wrote and checked `/app/answer.txt`. Its answer, `PBMC (12k)`, matched the
 reference exactly and received reward 1.0 without a judge request. This run
 does not demonstrate explicit page rendering, image cropping, or PNG inspection.
 
-The reviewable evidence is committed with the environment's example data:
+The reviewable evidence is committed with the example data:
 
-- [Gym rollout](../../environments/labbench2_pdf/data/example_rollouts.jsonl)
-- [Original Harbor ATIF trajectory](../../environments/labbench2_pdf/data/example_harbor_trajectory.json)
-- [Verifier details](../../environments/labbench2_pdf/data/example_verifier_details.json)
-- [Aggregate rollout metrics](../../environments/labbench2_pdf/data/example_rollouts_aggregate_metrics.json)
-- [Rollout health report](../../environments/labbench2_pdf/data/example_rollout_health.json)
+- [Gym rollout](data/example_rollouts.jsonl)
+- [Original Harbor ATIF trajectory](data/example_harbor_trajectory.json)
+- [Verifier details](data/example_verifier_details.json)
+- [Aggregate rollout metrics](data/example_rollouts_aggregate_metrics.json)
+- [Rollout health report](data/example_rollout_health.json)
 
 The run used 74,733 input tokens (43,904 cached) and 380 output tokens. This is
 one representative smoke rollout, not a full benchmark baseline. Gym's health
@@ -162,19 +162,19 @@ the artifacts for this example):
 
 ```bash
 gym env start --benchmark labbench2_pdf \
-  ++labbench2_pdf_benchmark_harbor_agent.responses_api_agents.harbor_agent_general.job.jobs_dir=environments/labbench2_pdf/data/harbor_jobs/pr-figqa2-retry1/jobs
+  ++labbench2_pdf_benchmark_harbor_agent.responses_api_agents.harbor_agent_general.job.jobs_dir=benchmarks/labbench2_pdf/data/harbor_jobs/pr-figqa2-retry1/jobs
 ```
 
 Once the server is ready, collect exactly one FigQA2 task in another terminal:
 
 ```bash
-head -n 1 environments/labbench2_pdf/data/tasks_docker/figqa2_input.jsonl \
+head -n 1 benchmarks/labbench2_pdf/data/tasks_docker/figqa2_input.jsonl \
   > /tmp/labbench2_figqa2_single.jsonl
 
 gym eval run --no-serve \
   --agent labbench2_pdf_benchmark_harbor_agent \
   --input /tmp/labbench2_figqa2_single.jsonl \
-  --output environments/labbench2_pdf/data/harbor_jobs/pr-figqa2-retry1/rollouts.jsonl \
+  --output benchmarks/labbench2_pdf/data/harbor_jobs/pr-figqa2-retry1/rollouts.jsonl \
   --num-repeats 1 \
   --concurrency 1
 ```
@@ -201,7 +201,7 @@ The jobs had distinct UUID-suffixed names, and the first trajectory remained
 byte-for-byte unchanged after the second collection. The server started with
 `+error_on_agent_without_environment_server=true`, confirming explicit routing
 without the deprecated automatic fallback. Local raw evidence is retained
-under `environments/labbench2_pdf/data/harbor_jobs/review-20261013/` as
+under `benchmarks/labbench2_pdf/data/harbor_jobs/review-20261013/` as
 `first.jsonl`, `second.jsonl`, and the original trajectories under `jobs/`;
 these additional local artifacts remain gitignored.
 
@@ -222,7 +222,7 @@ Compatibility limits:
 
 - There is no catalog `manifest.yaml`; Gym lists this benchmark with status
   `no-manifest`. This does not prevent discovery or execution.
-- Both environment profiles and the benchmark declare an explicit Environment
+- Both Harbor profiles and the benchmark declare an explicit Environment
   Server using Gym's `legacy_agent` adapter. They do not require the deprecated
   automatic relay, including when `error_on_agent_without_environment_server`
   is enabled.
@@ -241,7 +241,7 @@ Compatibility limits:
 ## Test
 
 ```bash
-.venv/bin/pytest -q benchmarks/labbench2_pdf/tests environments/labbench2_pdf/tests
+.venv/bin/pytest -q benchmarks/labbench2_pdf/tests
 
 # After Gym has installed the Harbor agent's isolated environment:
 responses_api_agents/harbor_agent_general/.venv/bin/python -m pytest -q \
