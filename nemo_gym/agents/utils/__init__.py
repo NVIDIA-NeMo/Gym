@@ -18,8 +18,7 @@ and providers live in :mod:`nemo_gym.sandbox`.
 """
 
 from nemo_gym.agents.utils.agent_sandbox_config import AgentSandboxConfig
-from nemo_gym.agents.utils.sandbox_borrow import BorrowedSandbox, BorrowedSandboxError, borrow
 from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
 
 
-__all__ = ["AgentSandboxConfig", "BorrowedSandbox", "BorrowedSandboxError", "borrow", "lifecycle_observation"]
+__all__ = ["AgentSandboxConfig", "lifecycle_observation"]

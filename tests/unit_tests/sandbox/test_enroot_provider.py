@@ -16,6 +16,7 @@
 import hashlib
 import io
 import json
+import os
 import secrets
 import shlex
 import shutil
@@ -25,6 +26,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import anyio
 import pytest
 
 from nemo_gym.sandbox.api import AsyncSandbox
@@ -35,6 +37,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.enroot import provider as enroot_provider
+from tests.unit_tests.sandbox.cli_testing import is_running, requires_sh, stand_in_cli
 
 
 pytestmark = pytest.mark.sandbox
@@ -42,6 +45,33 @@ pytestmark = pytest.mark.sandbox
 
 FAKE_BINARY = "/usr/bin/enroot"
 FAKE_PID = 987654
+
+
+def test_find_container_init_pid_returns_none_when_proc_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unavailable(path: str) -> None:
+        assert path == "/proc"
+        raise FileNotFoundError("/proc unavailable")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(enroot_provider.os, "scandir", unavailable)
+        assert enroot_provider._find_container_init_pid("sleep 86400", "nemo-gym-test") is None
+
+
+def test_find_container_init_pid_closes_iterator_on_early_match(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for pid in (101, 102):
+        (tmp_path / str(pid)).mkdir()
+    entries = os.scandir(tmp_path)
+    try:
+        with monkeypatch.context() as patcher:
+            patcher.setattr(enroot_provider.os, "scandir", lambda _: entries)
+            patcher.setattr(enroot_provider, "_read_proc_cmdline", lambda _: "sh -c sleep 86400 # nemo-gym-test")
+            assert enroot_provider._find_container_init_pid("sleep 86400", "nemo-gym-test") in (101, 102)
+        # The first match returns before the second directory entry is consumed.
+        assert next(entries, None) is None
+    finally:
+        entries.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -371,7 +401,34 @@ async def test_create_builds_argv_and_runs_probe(
     assert _contains_seq(start_argv, ["-e", "NVIDIA_VISIBLE_DEVICES=0"])
     expected_init = f"{enroot_provider.DEFAULT_INIT_COMMAND}  # {handle.sandbox_id}"
     assert start_argv[-4:] == [handle.sandbox_id, "sh", "-c", expected_init]
-    assert _contains_seq(start_argv, ["--rc", "/dev/null"])
+    rc_index = start_argv.index("--rc")
+    bypass_rc_path = Path(start_argv[rc_index + 1])
+    assert bypass_rc_path.parent == staging
+    assert bypass_rc_path.name == ".nemo-gym-bypass-entrypoint-rc"
+    assert bypass_rc_path.is_file()
+    assert bypass_rc_path.stat().st_mode & 0o777 == 0o400
+    shell = shutil.which("sh")
+    if shell is None:
+        pytest.skip("sh is required to exercise the generated entrypoint script")
+    result = subprocess.run(
+        [
+            shell,
+            str(bypass_rc_path),
+            shell,
+            "-c",
+            'printf "%s|%s" "$1" "$2"; exit 7',
+            "init",
+            "with spaces",
+            "literal*",
+        ],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=5,
+        check=False,
+    )
+    assert result.returncode == 7, result.stderr
+    assert result.stdout == "with spaces|literal*"
 
 
 # The generated container name is random; the create test above needs the `list`
@@ -827,6 +884,10 @@ async def test_close_success(
 ) -> None:
     staging = tmp_path / "staging"
     staging.mkdir()
+    locked = staging / "runtime"
+    locked.mkdir()
+    (locked / "artifact").write_text("sandbox output")
+    locked.chmod(0o555)
     provider, rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
     await provider.close(_make_handle(staging, start_pgid=12345))
 
@@ -879,7 +940,7 @@ async def test_close_staging_removal_failure_is_logged(
     def boom(path: Any, ignore_errors: bool = False) -> None:
         raise OSError("locked")
 
-    monkeypatch.setattr(enroot_provider.shutil, "rmtree", boom)
+    monkeypatch.setattr(enroot_provider, "_remove_writable_tree", boom)
     with caplog.at_level("WARNING"):
         await provider.close(_make_handle(staging))
     assert "failed to remove staging dir" in caplog.text
@@ -951,12 +1012,14 @@ async def test_connect_preserves_exec_and_borrower_disconnect(
         ("sqsh_path", None, ValueError, "non-empty sqsh_path"),
         ("image", "", ValueError, "non-empty image"),
         ("container_pid", 0, ValueError, "positive container_pid"),
+        ("container_pid", -1, ValueError, "positive container_pid"),
         ("container_pid", True, ValueError, "positive container_pid"),
         # Relative but existing, so is_absolute() is what rejects it.
         ("staging_dir", ".", ValueError, "staging directory"),
         # The creator already stopped and removed it.
         ("staging_dir", "/nonexistent/nemo-gym-staging", ValueError, "staging directory"),
         ("mount_point", "relative", ValueError, "mount point"),
+        ("mount_point", None, ValueError, "non-empty mount_point"),
         ("start_pgid", -1, ValueError, "positive integer"),
     ],
 )
@@ -1141,3 +1204,14 @@ async def test_start_detached_does_not_await_exit(fake_binary: str, tmp_path: Pa
         await proc.wait()
         out_f.close()
         err_f.close()
+
+
+@requires_sh
+async def test_a_cancelled_enroot_command_is_killed(fake_binary: str, tmp_path: Path) -> None:
+    cli = stand_in_cli(tmp_path)
+    provider = enroot_provider.EnrootProvider()
+    with anyio.move_on_after(0.5):
+        await provider._run([str(cli.path)], timeout_s=None)
+    assert not is_running(cli.last_pid())
+    cli.hang.unlink()
+    assert (await provider._run([str(cli.path)], timeout_s=10))[0] == 0

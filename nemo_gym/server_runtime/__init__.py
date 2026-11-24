@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
         seed_rebinds_tool_accesses,
+        seed_resources_session_id,
         seed_restarts,
         seed_verify_step_type,
     )
@@ -122,13 +123,19 @@ if TYPE_CHECKING:
         install_auto_exposure,
         maybe_auto_expose,
     )
-    from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
+    from nemo_gym.server_runtime.owned_sandboxes import (
+        OwnedSandboxes,
+        SandboxCheckpointConfig,
+        SandboxCheckpointError,
+        checkpoint_state_dir,
+    )
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
     from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
     from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
-    from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
+    from nemo_gym.server_runtime.sandbox_borrow import BorrowedSandbox, BorrowedSandboxError, borrow
+    from nemo_gym.server_runtime.sandbox_lending import SHUTDOWN_STOP_CONCURRENCY, STOP_TIMEOUT_S, LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnAgentContext,
         SingleAgentTurnFailure,
@@ -139,6 +146,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
+        END_ACTIVATION_HEADER,
         TOOL_CALL_ID_HEADER,
         TOOL_ERROR_HEADER,
         DirectHTTPToolAccess,
@@ -198,6 +206,9 @@ _PUBLIC_API = {
     "LentSandboxes": "sandbox_lending",
     "MCPToolAccess": "tool_access",
     "OwnedSandboxes": "owned_sandboxes",
+    "BorrowedSandbox": "sandbox_borrow",
+    "BorrowedSandboxError": "sandbox_borrow",
+    "borrow": "sandbox_borrow",
     "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NG_SANDBOX_ACCESS_KEY": "base_resources_server",
@@ -221,6 +232,10 @@ _PUBLIC_API = {
     "RolloutContextMiddleware": "request_handling.rollout_context",
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
+    "SHUTDOWN_STOP_CONCURRENCY": "sandbox_lending",
+    "STOP_TIMEOUT_S": "sandbox_lending",
+    "SandboxCheckpointConfig": "owned_sandboxes",
+    "SandboxCheckpointError": "owned_sandboxes",
     "ServedTools": "base_environment_server",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
@@ -233,6 +248,7 @@ _PUBLIC_API = {
     "StaleAttemptError": "_checkpoint.errors",
     "StepType": "_checkpoint.steps",
     "TOKEN_HEADER": "mcp_auto_exposure",
+    "END_ACTIVATION_HEADER": "tool_access",
     "TOOL_CALL_ID_HEADER": "tool_access",
     "TOOL_ERROR_HEADER": "tool_access",
     "ToolAccess": "tool_access",
@@ -242,6 +258,7 @@ _PUBLIC_API = {
     "ToolSpec": "episode_tools",
     "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
+    "checkpoint_state_dir": "owned_sandboxes",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
     "episode_tool": "episode_tools",
@@ -263,6 +280,7 @@ _PUBLIC_API = {
     "require_rollout": "_checkpoint.agent",
     "seed_rebinds_tool_accesses": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
+    "seed_resources_session_id": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
     "write_participant_state": "_checkpoint.store",

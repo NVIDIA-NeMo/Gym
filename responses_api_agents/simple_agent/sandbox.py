@@ -30,8 +30,8 @@ from yarl import URL
 
 import nemo_gym
 from nemo_gym.agents import SandboxCommand, SandboxPythonRuntime, SandboxSession
-from nemo_gym.agents.utils import BorrowedSandbox
 from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.server_runtime import BorrowedSandbox
 
 
 # The loop's import closure: these distributions and their dependencies, at this server's versions. A unit test

@@ -13,11 +13,13 @@ claude_code_agent:
       system_prompt: null
       allowed_tools: null
       disallowed_tools: null
+      tools: null  # restrict the available built-in tool set (--tools)
+      session_name: null  # explicit session name (--name)
       claude_code_version: null  # sandbox sessions require an exact version, e.g. "2.1.108"
       # Runtime capabilities. Defaults keep the runtime isolated/reproducible.
       bare: true  # set false to auto-discover skills, hooks, plugins, MCP, memory, CLAUDE.md
       mcp_config: null  # path to an MCP server config file (--mcp-config); works even with bare: true
-      settings: null  # path to a settings JSON layered into the per-run CLAUDE_CONFIG_DIR
+      settings: null  # settings mapping or JSON file path, layered into the per-run CLAUDE_CONFIG_DIR
       # Sandbox sessions install/reuse a versioned runtime inside the task sandbox.
       # The optional local runtime installs lazily on the first unseeded call.
       sandbox_provider: null  # top-level provider ref; unused with borrowed SandboxAccess

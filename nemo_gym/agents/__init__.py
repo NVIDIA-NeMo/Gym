@@ -62,21 +62,34 @@ if TYPE_CHECKING:
     )
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
+    from nemo_gym.agents.testing.checkpoint_conformance import HarnessFixture, check_harness_checkpointing
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
     from nemo_gym.agents.utils.agent_context import resolve_agent_context_artifact
+    from nemo_gym.agents.utils.agent_sandbox_config import AgentSandboxConfig
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
+    from nemo_gym.agents.utils.run_with_checkpoint_pauses import (
+        LaunchFinished,
+        LaunchStopped,
+        ParkingActivation,
+        run_with_checkpoint_pauses,
+    )
     from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
-    from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime, probe_sandbox_platform
+    from nemo_gym.agents.utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime, probe_sandbox_platform
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
         HARNESS_RUNNER_FILE,
         HARNESS_RUNNER_SCRIPT,
+        HarnessPauseResult,
+        NothingCapturedError,
         SandboxCommand,
         SandboxSession,
+        SandboxSessionCheckpoint,
+        prefer_oom_kill_setup,
         shell_assignments,
     )
+    from nemo_gym.agents.utils.setup_retry import exec_idempotent
     from nemo_gym.agents.utils.supervisor_client import (
         CLEANUP_PHASE_COUNT,
         DEFAULT_CLEANUP_TIMEOUT,
@@ -97,6 +110,7 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "ActivationConflictError": "utils.ordered_operations",
+    "AgentSandboxConfig": "utils.agent_sandbox_config",
     "AGENT_ACTIVATION_HEADER": "base_responses_api_agent",
     "AGENT_OUTCOME_METADATA_KEY": "agent_outcome",
     "AGENT_SESSION_COOKIE_KEY": "base_responses_api_agent",
@@ -124,10 +138,16 @@ _PUBLIC_API = {
     "HARNESS_RUNNER_FILE": "utils.sandbox_session",
     "HARNESS_RUNNER_SCRIPT": "utils.sandbox_session",
     "HARNESS_STEP_LIMIT_METADATA_KEY": "agent_outcome",
+    "HarnessFixture": "testing.checkpoint_conformance",
+    "HarnessPauseResult": "utils.sandbox_session",
+    "LaunchFinished": "utils.run_with_checkpoint_pauses",
+    "LaunchStopped": "utils.run_with_checkpoint_pauses",
+    "NothingCapturedError": "utils.sandbox_session",
     "OUTPUT_LOG_FILE": "utils.supervisor_client",
     "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
     "OutcomePolicyConfig": "agent_outcome",
+    "ParkingActivation": "utils.run_with_checkpoint_pauses",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
     "RolloutStopRequest": "base_responses_api_agent",
     "STOP_REQUEST_FILE": "utils.supervisor_client",
@@ -135,26 +155,32 @@ _PUBLIC_API = {
     "SUPERVISOR_SCRIPT": "utils.supervisor_client",
     "SandboxCommand": "utils.sandbox_session",
     "SandboxNetworkAccess": "utils.sandbox_network",
+    "SandboxPlatform": "utils.sandbox_python",
     "SandboxPythonRuntime": "utils.sandbox_python",
     "SandboxSession": "utils.sandbox_session",
+    "SandboxSessionCheckpoint": "utils.sandbox_session",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
     "agent_outcome_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",
+    "check_harness_checkpointing": "testing.checkpoint_conformance",
     "confirmed_policy_response_timeout": "agent_outcome",
     "queued_policy_response_timeout": "agent_outcome",
+    "exec_idempotent": "utils.setup_retry",
     "exec_timeout": "utils.supervisor_client",
     "failure_outcome_policy": "agent_outcome",
     "harness_termination_failure": "utils.supervisor_client",
     "is_harness_termination_failure": "utils.supervisor_client",
     "lifecycle_observation": "utils.sandbox_observation",
     "parse_cleanup_receipt": "utils.supervisor_client",
+    "prefer_oom_kill_setup": "utils.sandbox_session",
     "probe_sandbox_platform": "utils.sandbox_python",
     "raises_agent_failure": "testing.failure_assertions",
     "resolve_agent_context_artifact": "utils.agent_context",
     "resolve_agent_timeout": "utils.task_timeout",
     "restrict_sandbox_network": "utils.sandbox_network",
     "restricted_network_policy": "agent_tools",
+    "run_with_checkpoint_pauses": "utils.run_with_checkpoint_pauses",
     "sandbox_server_url": "agent_tools",
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",
