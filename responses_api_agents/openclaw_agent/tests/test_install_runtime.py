@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from responses_api_agents.openclaw_agent.app import _EXEC_HELPER_CHECK
 from responses_api_agents.openclaw_agent.setup_openclaw import DEFAULT_NODE_VERSION
@@ -345,8 +346,8 @@ def test_installer_installs_the_default_node_release():
 
 
 DEPS_SCRIPTS = (
-    "responses_api_agents/openclaw_agent/scripts/openclaw_agent_deps.sh",
-    "responses_api_agents/anyswe_agent/setup_scripts/openclaw_agent_deps.sh",
+    ("responses_api_agents/openclaw_agent/scripts/openclaw_agent_deps.sh", "anyterminal", "2026.6.11"),
+    ("responses_api_agents/anyswe_agent/setup_scripts/openclaw_agent_deps.sh", "anyswe", "2026.11.5"),
 )
 
 
@@ -355,12 +356,14 @@ def _executable(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
-@pytest.mark.parametrize("script", DEPS_SCRIPTS)
+@pytest.mark.parametrize(("script", "wrapper", "version"), DEPS_SCRIPTS)
 @pytest.mark.parametrize(
     ("existing", "downloads"),
     [(None, True), ("v22.19.0", True), (f"v{DEFAULT_NODE_VERSION}", False), ("broken", True)],
 )
-def test_deps_script_replaces_a_node_that_is_not_the_pinned_release(tmp_path, script, existing, downloads):
+def test_deps_script_replaces_a_node_that_is_not_the_pinned_release(
+    tmp_path, script, wrapper, version, existing, downloads
+):
     run_dir = tmp_path / "script"
     run_dir.mkdir()
     target = run_dir / "openclaw_agent_deps.sh"
@@ -378,7 +381,7 @@ def test_deps_script_replaces_a_node_that_is_not_the_pinned_release(tmp_path, sc
     _executable(tools / "curl", f'#!/bin/sh\necho "curl $*" >> {log}\n')
     _executable(tools / "tar", f'#!/bin/sh\ncat >/dev/null\necho "tar $*" >> {log}\n')
     _executable(deps / "bin/npm", f'#!/bin/sh\necho "npm $*" >> {log}\n')
-    _executable(deps / "bin/openclaw", "#!/bin/sh\necho 2026.11.5\n")
+    _executable(deps / "bin/openclaw", f"#!/bin/sh\necho {version}\n")
     _executable(deps / "bin/python3", "#!/bin/sh\nexit 0\n")
     env = {
         "PATH": f"{tools}:/usr/bin:/bin",
@@ -392,4 +395,8 @@ def test_deps_script_replaces_a_node_that_is_not_the_pinned_release(tmp_path, sc
     calls = log.read_text().splitlines()
     url = f"https://nodejs.org/dist/v{DEFAULT_NODE_VERSION}/node-v{DEFAULT_NODE_VERSION}-linux-x64.tar.xz"
     assert (f"curl -fsSL {url}" in calls) is downloads
-    assert calls[-1] == f"npm install -g --prefix {deps} openclaw@2026.11.5"
+    assert calls[-1] == f"npm install -g --prefix {deps} openclaw@{version}"
+    preset = f"{wrapper}_openclaw"
+    config = Path(__file__).resolve().parents[2] / f"{wrapper}_agent/configs/{preset}.yaml"
+    settings = yaml.safe_load(config.read_text())[preset]["responses_api_agents"][f"{wrapper}_agent"]
+    assert settings["agent_kwargs"]["openclaw_version"] == version

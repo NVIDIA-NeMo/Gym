@@ -162,6 +162,9 @@ class Sandbox:
         raise AssertionError("This provider supports exec only; no PTY API")
 
     async def run_exec(self, command, **kwargs):
+        if command.startswith("test -f ") and command.endswith(" || echo missing"):
+            path = f"{kwargs['cwd']}/{shlex.split(command)[2]}"
+            return SandboxExecResult(stdout="" if path in self.files else "missing\n", stderr="", return_code=0)
         if "--receipt" in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
         if "stop.request" in command:
@@ -2697,6 +2700,7 @@ def keep_history_in_sqlite(sandbox, export):
 
 def test_sqlite_transcript_is_exported_when_the_jsonl_is_absent(setup):
     agent, sandbox = setup
+    sandbox.download = AsyncMock(wraps=sandbox.download)
     calls = []
 
     async def export(argv, **kwargs):
@@ -2725,6 +2729,9 @@ def test_sqlite_transcript_is_exported_when_the_jsonl_is_absent(setup):
     assert sandbox.files[script] == Path(openclaw_sandbox.__file__).with_name("export_sessions.mjs").read_text()
     assert launcher == f"{runtime}/openclaw/node_modules/openclaw/openclaw.mjs"
     assert state_dir == f"{directory}/home/.openclaw"
+    downloaded = [call.args[0] for call in sandbox.download.await_args_list]
+    assert f"{directory}/home/.openclaw/agents/main/sessions/{session_id}.jsonl" not in downloaded
+    assert f"{destination}/main/sessions/{session_id}.jsonl" in downloaded
     assert destination.startswith(f"{directory}/transcripts-")
     assert session_id == directory.rsplit("/", 1)[-1]
     assert kwargs == {"cwd": directory, "timeout_s": 30}

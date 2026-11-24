@@ -284,6 +284,26 @@ class TestParseOpenclawSession:
         assert isinstance(items[2], NeMoGymResponseOutputMessage)
         assert items[2].content[0].text == "The answer is 6."
 
+    @pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+    def test_unicode_separators_survive_in_tool_results_and_final_answers(self, separator: str) -> None:
+        text = f"first{separator}second"
+        messages = [
+            {
+                "role": "toolResult",
+                "toolCallId": "c1",
+                "toolName": "read",
+                "content": [{"type": "text", "text": text}],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": text}]},
+        ]
+        events = [{"type": "message", "message": message} for message in messages]
+        transcript = "".join(json.dumps(event, ensure_ascii=False) + "\r\n" for event in events)
+
+        assert parse_openclaw_session_events(transcript) == events
+        result, answer = parse_openclaw_session(transcript)
+        assert result.output == text
+        assert answer.content[0].text == text
+
     def test_user_messages_ignored(self) -> None:
         line = self._msg("user", [{"type": "text", "text": "hi"}])
         assert parse_openclaw_session(line) == []

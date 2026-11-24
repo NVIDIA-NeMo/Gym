@@ -18,7 +18,8 @@ if [ -z "${NODE_ARCH:-}" ]; then
         *) echo "unsupported node architecture: $(uname -m)" >&2; exit 1 ;;
     esac
 fi
-OPENCLAW_SPEC="${OPENCLAW_SPEC:-openclaw@2026.11.5}"
+# Match the AnyTerminal preset on task images with glibc 2.31.
+OPENCLAW_SPEC="${OPENCLAW_SPEC:-openclaw@2026.6.11}"
 
 install_portable_python
 install_nemo_gym_deps

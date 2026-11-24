@@ -5,8 +5,8 @@ OpenClaw runs its own tools internally.
 Resources server is used for verifier.
 
 Pinned release: OpenClaw 2026.11.5 on Node.js 24.22.3. Capability level: Observability; training capture, below,
-is opt-in. The Terminal-Bench 2.1 preset `terminal_bench_2_1/openclaw` keeps 2026.6.11, because two of its task images
-ship a glibc older than 2.33 (see [EnvironmentServer sandbox sessions](#environmentserver-sandbox-sessions)).
+is opt-in. The Terminal-Bench 2.1 preset `terminal_bench_2_1/openclaw` and the AnyTerminal OpenClaw preset keep
+2026.6.11 so the exec tool works on task images with glibc 2.31 (see [EnvironmentServer sandbox sessions](#environmentserver-sandbox-sessions)).
 
 Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
 the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the agent's `token_id_capture: true`

@@ -203,6 +203,24 @@ class OpenClawSandboxSession(AgentSessionState):
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
+    async def _read_transcript(self, transcript: str, session_id: str) -> str:
+        directory = self.session.session_dir
+        # Both layouts are normal. Only request a download for a file that exists.
+        try:
+            check = await self.session.sandbox.exec(
+                f"test -f {shlex.quote(transcript)} || echo missing", cwd=directory, timeout_s=30
+            )
+        except Exception:
+            LOG.debug("OpenClaw transcript existence check failed for %s", session_id, exc_info=True)
+        else:
+            if check.return_code == 0 and not check.error_type and (check.stdout or "").strip() == "missing":
+                return await self._read_sqlite_transcript(session_id)
+        try:
+            return await self.read_text(transcript)
+        except Exception:
+            LOG.debug("OpenClaw JSONL transcript unavailable for %s", session_id, exc_info=True)
+            return await self._read_sqlite_transcript(session_id)
+
     async def _read_sqlite_transcript(self, session_id: str) -> str:
         """Export this session's SQLite history with the runtime's OpenClaw SDK and return it as JSONL."""
         directory = self.session.session_dir
@@ -235,14 +253,9 @@ class OpenClawSandboxSession(AgentSessionState):
                 LOG.warning("OpenClaw artifact unavailable: %s", name, exc_info=True)
         transcript = f"home/.openclaw/agents/main/sessions/{session_id}.jsonl"
         try:
-            artifacts[transcript] = await self.read_text(transcript)
+            artifacts[transcript] = await self._read_transcript(transcript, session_id)
         except Exception:
-            # 2026.11.5 keeps the history in SQLite instead of this file.
-            LOG.debug("OpenClaw JSONL transcript unavailable for %s", session_id, exc_info=True)
-            try:
-                artifacts[transcript] = await self._read_sqlite_transcript(session_id)
-            except Exception:
-                LOG.warning("OpenClaw transcript unavailable for %s", session_id, exc_info=True)
+            LOG.warning("OpenClaw transcript unavailable for %s", session_id, exc_info=True)
         try:
             runtime = json.loads(await self.read_text("runtime.json"))
         except Exception:

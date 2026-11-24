@@ -110,6 +110,7 @@ from responses_api_agents.openclaw_agent.observability import (
     build_openclaw_observation_tree,
     build_openclaw_observations,
     discover_openclaw_session_tree,
+    parse_openclaw_session_events,
     reconcile_openclaw_calls,
 )
 from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK, OpenClawSandboxSession
@@ -438,17 +439,6 @@ def openclaw_session_conversation(
 def parse_openclaw_session(session_text: str) -> list[Any]:
     """Convert an OpenClaw session .jsonl into Gym output items, including tool calls."""
     return parse_openclaw_session_items(parse_openclaw_session_events(session_text))
-
-
-def parse_openclaw_session_events(session_text: str) -> list[dict[str, Any]]:
-    events = []
-    for line in session_text.splitlines():
-        try:
-            event = json.loads(line)
-        except (json.JSONDecodeError, RecursionError):
-            event = {"raw": line}
-        events.append(event if isinstance(event, dict) else {"raw": line})
-    return events
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
