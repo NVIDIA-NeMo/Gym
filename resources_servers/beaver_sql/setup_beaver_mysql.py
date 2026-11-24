@@ -18,6 +18,7 @@ Questions and loader adapted from auto-ontology-eval's BEAVER seeder
 
 import hashlib
 import logging
+import re
 import shutil
 import zipfile
 from dataclasses import dataclass
@@ -208,15 +209,17 @@ def _existing_databases(cur) -> List[str]:
     return [row[0] for row in cur.fetchall()]
 
 
-def load_dump(conn, db_id: str, dump_path: Path) -> int:
-    """(Re)create database ``db_id`` from ``dump_path`` and record it. Returns the number of tables created.
+def load_dump(conn, db_id: str, dump_path: Path, owned: bool) -> int:
+    """Create database ``db_id`` from ``dump_path`` and record it. Returns the number of tables created.
 
-    The caller has checked that ``db_id`` is either absent or recorded as loaded by this module.
+    ``owned``: the database is recorded as this module's, so it is dropped and created again. Otherwise it is only
+    created, which fails if someone else created a database of that name since the caller checked.
     """
     cur = conn.cursor()
     cur.execute(f"DELETE FROM `{META_DB}`.loaded WHERE db_id = %s", (db_id,))
     conn.commit()
-    cur.execute(f"DROP DATABASE IF EXISTS `{db_id}`")
+    if owned:
+        cur.execute(f"DROP DATABASE IF EXISTS `{db_id}`")
     cur.execute(f"CREATE DATABASE `{db_id}` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci")
     cur.execute(f"USE `{db_id}`")
     tables = 0
@@ -235,18 +238,18 @@ def load_dump(conn, db_id: str, dump_path: Path) -> int:
 
 
 def _ensure_reader(cur, admin_user: str, reader_dsn: str, db_ids: List[str]) -> None:
-    """Create the grader's user (from ``reader_dsn``) with ``SELECT`` on the BEAVER databases and the meta table only.
+    """Create the grader's user (from ``reader_dsn``) if it doesn't exist, and grant it ``SELECT`` on the BEAVER databases
+    and the meta table.
 
-    No other privilege: it can't write, create temporary tables, or read files on the server (``FILE``).
+    An existing user keeps its password (this never resets an account it may not own); the startup check then refuses it
+    if it holds anything beyond ``SELECT``, or if the DSN's password is wrong.
     """
     params = parse_mysql_dsn(reader_dsn)
     user, password = str(params["user"]), str(params["password"])
     if not user or user == admin_user:
-        logger.warning("BEAVER MySQL: grader DSN uses the loader's user %r; no read-only user is enforced", user)
-        return
+        raise RuntimeError("the grader's DSN must use its own read-only user, not the loader's")
     # The host is a parameter too: the driver's C extension leaves a literal '%%' as two characters.
     cur.execute("CREATE USER IF NOT EXISTS %s@%s IDENTIFIED BY %s", (user, "%", password))
-    cur.execute("ALTER USER %s@%s IDENTIFIED BY %s", (user, "%", password))
     for db in (META_DB, *db_ids):
         cur.execute(f"GRANT SELECT ON `{db}`.* TO %s@%s", (user, "%"))
 
@@ -261,6 +264,10 @@ def ensure_beaver_mysql(cache_dir: Path, db_ids: List[str], admin_dsn: str, read
     try:
         cur = conn.cursor()
         require_case_insensitive_names(cur)
+        # One loader at a time per server (released when this connection closes).
+        cur.execute("SELECT GET_LOCK('beaver_sql_loader', 3600)")
+        if cur.fetchone()[0] != 1:
+            raise RuntimeError("another BEAVER loader holds the lock on this MySQL server")
         _ensure_meta(cur)
         conn.commit()
         recorded = _recorded(cur)
@@ -275,7 +282,7 @@ def ensure_beaver_mysql(cache_dir: Path, db_ids: List[str], admin_dsn: str, read
             dumps = ensure_beaver_dumps(cache_dir, stale)
             for db_id in stale:
                 logger.info("Loading BEAVER %s into MySQL ...", db_id)
-                tables = load_dump(conn, db_id, dumps[db_id])
+                tables = load_dump(conn, db_id, dumps[db_id], owned=db_id in recorded)
                 if tables != _dump(db_id).tables:
                     raise RuntimeError(f"BEAVER {db_id}: loaded {tables} tables, expected {_dump(db_id).tables}")
         cur.execute("SELECT CURRENT_USER()")
@@ -287,15 +294,45 @@ def ensure_beaver_mysql(cache_dir: Path, db_ids: List[str], admin_dsn: str, read
         conn.close()
 
 
-def check_beaver_mysql(reader_dsn: str, db_ids: List[str], connection_timeout: Optional[int] = 10) -> None:
-    """Raise unless every ``db_id`` is loaded from the pinned dump and the grader's user can see all of its tables.
+_GRANT = re.compile(r"^GRANT (.+?) ON (\S+) TO ")
 
-    Run at startup: a missing database or grant would otherwise score every model query as an empty result.
+
+def grader_privilege_problems(grants: List[str]) -> List[str]:
+    """The grants (``SHOW GRANTS`` lines) that give the grader's user more than reading BEAVER: a role, any privilege
+    but ``SELECT`` and ``USAGE``, or ``SELECT`` beyond the BEAVER databases and the meta table (``*.*`` would expose
+    the ``mysql`` system tables)."""
+    readable = {f"`{db}`.*" for db in (META_DB, *DUMPS)}
+    problems = []
+    for grant in grants:
+        match = _GRANT.match(grant)
+        if match is None:
+            problems.append(grant)  # a role grant
+            continue
+        privileges = {p.strip().upper() for p in match.group(1).split(",")}
+        if privileges == {"USAGE"}:
+            continue
+        if privileges != {"SELECT"} or match.group(2) not in readable:
+            problems.append(grant)
+    return problems
+
+
+def check_beaver_mysql(reader_dsn: str, db_ids: List[str], connection_timeout: Optional[int] = 10) -> None:
+    """Raise unless the grader's user holds only ``SELECT`` and can read every table of every ``db_id``, loaded from the
+    pinned dump.
+
+    Run at startup: a missing database or grant would otherwise score every model query as an empty result, and a user
+    that can write would let a model's query change the data.
     """
     conn = _connect(reader_dsn, connection_timeout=connection_timeout)
     try:
         cur = conn.cursor()
         require_case_insensitive_names(cur)
+        cur.execute("SHOW GRANTS")
+        extra = grader_privilege_problems([g for (g,) in cur.fetchall()])
+        if extra:
+            raise RuntimeError(
+                "the grader's MySQL user must hold only SELECT (and USAGE); it also has: " + "; ".join(extra)
+            )
         try:
             cur.execute(f"SELECT db_id, dump_sha256, tables FROM `{META_DB}`.loaded")
         except Exception as e:
@@ -312,10 +349,23 @@ def check_beaver_mysql(reader_dsn: str, db_ids: List[str], connection_timeout: O
             if sha != _dump(db_id).sha256:
                 problems.append(f"{db_id}: loaded from another dump")
                 continue
-            cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = %s", (db_id,))
-            visible = cur.fetchone()[0]
-            if visible != tables:
-                problems.append(f"{db_id}: the grader's user sees {visible} of {tables} tables")
+            cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = %s", (db_id,))
+            visible = [name for (name,) in cur.fetchall()]
+            if len(visible) != tables:
+                problems.append(f"{db_id}: the grader's user sees {len(visible)} of {tables} tables")
+                continue
+            # Seeing a table isn't reading it (a REFERENCES grant shows it too): read each one.
+            unreadable = []
+            for name in visible:
+                try:
+                    cur.execute(f"SELECT * FROM `{db_id}`.`{name}` LIMIT 0")
+                    cur.fetchall()
+                except Exception:
+                    unreadable.append(name)
+            if unreadable:
+                problems.append(
+                    f"{db_id}: the grader's user can't read {len(unreadable)} tables, e.g. {unreadable[:3]}"
+                )
         cur.close()
     finally:
         conn.close()

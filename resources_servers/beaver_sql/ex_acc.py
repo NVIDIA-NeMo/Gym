@@ -47,14 +47,21 @@ logger = logging.getLogger(__name__)
 QUERY_TIMEOUT_S = 10.0
 CONNECTION_TIMEOUT_S = 10
 
-# Any failure to connect means the grader couldn't reach the data. Once the query runs, only a lost connection (2006,
-# 2013, 2055) does; every other error is the query's, scored as an empty result. That includes access denied (1044,
-# 1142): the grader's user may only read, so a query that writes, creates a temporary table or uses another database
-# fails, as it would for a read-only user anywhere.
-_CONNECTION_LOST_ERRNOS = frozenset({2006, 2013, 2055})
-# The query was stopped: by our KILL QUERY (1317) or by the server's max_execution_time (3024).
+# Any failure to connect means the grader couldn't reach the data. Once the query runs, a lost connection (2006, 2013,
+# 2055) or the server running out of a resource (memory 1037, 1038, 1041; threads 1135; disk 1021; temporary table
+# space 1114; storage engine 1030) does too: the row is masked. Every other error is the query's, scored as an empty
+# result. That includes access denied (1044, 1142): the grader's user may only read, so a query that writes, creates
+# a temporary table or uses another database fails, as it would for a read-only user anywhere.
+_SERVER_FAULT_ERRNOS = frozenset({1021, 1030, 1037, 1038, 1041, 1114, 1135, 2006, 2013, 2055})
+# The query was stopped: by our KILL QUERY (1317) or by a server-wide max_execution_time (3024).
 _INTERRUPTED_ERRNOS = frozenset({1317, 3024})
 _FETCH_CHUNK_ROWS = 10_000
+# A result over this size isn't compared; it scores as the query's failure. The largest BEAVER gold result (dw, dw_real,
+# neutron) has 622,224 rows. Text and binary cells count by length, other cells as 8 bytes.
+MAX_RESULT_ROWS = 5_000_000
+MAX_RESULT_BYTES = 1 << 30
+# A KILL QUERY connection may take this long to connect, send and read before it's given up on.
+_KILL_IO_TIMEOUT_S = 2
 
 
 class MySqlUnavailableError(RuntimeError):
@@ -78,6 +85,10 @@ class QueryOutcome:
 def missing_prediction() -> QueryOutcome:
     """No query to run: an empty result, as a missing prediction file is officially."""
     return QueryOutcome(status="missing")
+
+
+def _approx_bytes(rows: List[Tuple[Any, ...]]) -> int:
+    return sum(len(c) if isinstance(c, (str, bytes, bytearray)) else 8 for row in rows for c in row)
 
 
 def _rows_as_text(frame: pd.DataFrame) -> List[Tuple[Any, ...]]:
@@ -114,7 +125,7 @@ class MySqlRunner:
 
     A timed-out query keeps its slot while ``KILL QUERY`` is repeated, until its thread ends or ``stop_grace_s`` passes,
     so stopped queries don't pile up on the server behind new ones, and one the server can't stop doesn't hold the slot
-    forever.
+    forever. A request cancelled while its query runs stops the query the same way before giving up its slot.
     """
 
     def __init__(
@@ -140,7 +151,13 @@ class MySqlRunner:
             start = self._clock()
             thread = threading.Thread(target=self._execute, args=(db_id, sql, attempt), daemon=True)
             thread.start()
-            finished = await asyncio.to_thread(attempt.done.wait, self.timeout_s)
+            try:
+                finished = await asyncio.to_thread(attempt.done.wait, self.timeout_s)
+            except asyncio.CancelledError:
+                # The request went away: stop the query before the slot is released, even if cancelled again.
+                attempt.cancelled.set()
+                await asyncio.shield(asyncio.to_thread(self._stop, attempt, self.stop_grace_s))
+                raise
             if not finished:
                 attempt.cancelled.set()
                 stopped = await asyncio.to_thread(self._stop, attempt, self.stop_grace_s)
@@ -151,8 +168,8 @@ class MySqlRunner:
                         f"could not connect to MySQL within {self.timeout_s:g} s: {attempt.unavailable or 'no answer'}"
                     )
                 if not stopped:
-                    # The server didn't stop it: give up on the thread rather than hold the slot. The server-side
-                    # max_execution_time still ends a SELECT; anything else runs on as a read-only statement.
+                    # The server didn't stop it: give up on the thread rather than hold the slot. Its statement runs on
+                    # as the read-only user until the server ends it.
                     logger.warning(
                         "BEAVER query on %s still running %g s after KILL QUERY; abandoned", db_id, self.stop_grace_s
                     )
@@ -179,10 +196,9 @@ class MySqlRunner:
         conn = None
         try:
             try:
+                # No session settings: the model's SQL sees the server's defaults, as under the official evaluator.
                 conn = self._connect(db_id)
                 cur = conn.cursor()
-                # A server-side backstop for SELECTs; the client-side limit above is the one that counts.
-                cur.execute(f"SET SESSION max_execution_time = {int(self.timeout_s * 1000) + 1000}")
             except Exception as e:
                 attempt.unavailable = e
                 return
@@ -197,20 +213,29 @@ class MySqlRunner:
                     columns = [d[0] for d in cur.description]
                     # In chunks, so a timed-out query stops reading a large result (KILL QUERY can't stop the client
                     # reading rows the server has already sent) and memory stays bounded by the time limit.
+                    size = 0
                     while chunk := cur.fetchmany(_FETCH_CHUNK_ROWS):
                         rows.extend(chunk)
+                        size += _approx_bytes(chunk)
                         if attempt.cancelled.is_set():
                             attempt.outcome = QueryOutcome(status="timeout", error="timeout")
+                            return
+                        if len(rows) > MAX_RESULT_ROWS or size > MAX_RESULT_BYTES:
+                            attempt.outcome = QueryOutcome(status="error", error="result too large")
                             return
                 attempt.outcome = QueryOutcome(status="ok", frame=pd.DataFrame(rows, columns=columns))
             except mysql.connector.Error as e:
                 if attempt.cancelled.is_set() or e.errno in _INTERRUPTED_ERRNOS:
                     attempt.outcome = QueryOutcome(status="timeout", error="timeout")
-                elif e.errno in _CONNECTION_LOST_ERRNOS:
+                elif e.errno in _SERVER_FAULT_ERRNOS:
                     attempt.unavailable = e
                 else:
                     attempt.outcome = QueryOutcome(status="error", error=f"mysql {e.errno}")
+            except MemoryError as e:
+                # The grader ran out of memory: not the query's fault.
+                attempt.unavailable = e
             except Exception as e:
+                # Anything else reading the result (an undecodable value, say) fails the query, as it does officially.
                 attempt.outcome = QueryOutcome(status="error", error=type(e).__name__)
         finally:
             attempt.done.set()
@@ -223,8 +248,9 @@ class MySqlRunner:
     def _stop(self, attempt: _Attempt, grace_s: float) -> bool:
         """Stop a timed-out query on the server; return whether its thread ended within ``grace_s``.
 
-        ``KILL QUERY`` sent between a connection's ``SET`` and its query would stop nothing, so it is repeated every
-        second. The grader's user may kill its own connections' queries without extra privileges.
+        ``KILL QUERY`` sent just before the query starts would stop nothing, so it is repeated every second. Each attempt
+        is bounded by ``_KILL_IO_TIMEOUT_S``. The grader's user may kill its own connections' queries without extra
+        privileges.
         """
         deadline = time.monotonic() + grace_s
         while not attempt.done.is_set() and time.monotonic() < deadline:
@@ -237,7 +263,12 @@ class MySqlRunner:
         try:
             import mysql.connector
 
-            conn = mysql.connector.connect(**self._params, connection_timeout=self.connection_timeout_s)
+            conn = mysql.connector.connect(
+                **self._params,
+                connection_timeout=_KILL_IO_TIMEOUT_S,
+                read_timeout=_KILL_IO_TIMEOUT_S,
+                write_timeout=_KILL_IO_TIMEOUT_S,
+            )
             try:
                 conn.cursor().execute(f"KILL QUERY {int(connection_id)}")
             finally:

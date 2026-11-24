@@ -116,6 +116,10 @@ class _FakeMySql:
         self.statements: List[str] = []
         self.users: Dict[str, str] = {}
         self.grants: List[tuple] = []
+        # What the grader's SHOW GRANTS returns, and tables it may see but not read.
+        self.show_grants: Optional[List[str]] = None
+        self.unreadable: set = set()
+        self.lock_free = True
 
     def connect(self, **params: Any) -> "_FakeConn":
         return _FakeConn(self, params)
@@ -150,8 +154,11 @@ class _FakeCur:
         elif sql.startswith("CREATE DATABASE IF NOT EXISTS"):
             s.databases.add(sql.split("`")[1])
         elif sql.startswith("CREATE DATABASE"):
-            s.databases.add(sql.split("`")[1])
-            s.tables[sql.split("`")[1]] = 0
+            name = sql.split("`")[1]
+            if name in s.databases:
+                raise mysql.connector.errors.DatabaseError("database exists", errno=1007)
+            s.databases.add(name)
+            s.tables[name] = 0
         elif sql.startswith("DROP DATABASE"):
             s.databases.discard(sql.split("`")[1])
         elif sql.startswith("USE"):
@@ -173,13 +180,25 @@ class _FakeCur:
             self.result = [(d,) for d in sorted(s.databases)]
         elif sql == "SELECT CURRENT_USER()":
             self.result = [("root@%",)]
-        elif sql.startswith("CREATE USER") or sql.startswith("ALTER USER"):
-            s.users[f"{params[0]}@{params[1]}"] = params[2]
+        elif sql.startswith("CREATE USER"):
+            s.users.setdefault(f"{params[0]}@{params[1]}", params[2])
         elif sql.startswith("GRANT SELECT"):
             s.grants.append((sql.split("`")[1], f"{params[0]}@{params[1]}"))
-        elif sql.startswith("SELECT COUNT(*) FROM information_schema.tables"):
+        elif sql.startswith("SELECT GET_LOCK"):
+            self.result = [(1 if s.lock_free else 0,)]
+        elif sql == "SHOW GRANTS":
+            grants = s.show_grants
+            if grants is None:
+                grants = ["GRANT USAGE ON *.* TO `beaver_reader`@`%`"] + [
+                    f"GRANT SELECT ON `{db}`.* TO `beaver_reader`@`%`" for db, _ in s.grants
+                ]
+            self.result = [(g,) for g in grants]
+        elif sql.startswith("SELECT table_name FROM information_schema.tables"):
             counts = s.visible if s.visible is not None else s.tables
-            self.result = [(counts.get(params[0], 0),)]
+            self.result = [(f"t{i}",) for i in range(counts.get(params[0], 0))]
+        elif sql.startswith("SELECT * FROM `"):
+            if sql.split("`")[3] in s.unreadable:
+                raise mysql.connector.errors.ProgrammingError("SELECT command denied", errno=1142)
 
     def fetchall(self) -> List[tuple]:
         return self.result
@@ -248,10 +267,43 @@ def test_wrong_table_count_is_an_error(tmp_path, tiny, fake_mysql, monkeypatch) 
         ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
 
 
-def test_reader_same_as_admin_is_not_created(tmp_path, tiny, fake_mysql) -> None:
+def test_reader_same_as_admin_is_refused(tmp_path, tiny, fake_mysql) -> None:
     server = fake_mysql()
-    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, "mysql://root:pw@h:3306")
+    with pytest.raises(RuntimeError, match="its own read-only user"):
+        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, "mysql://root:pw@h:3306")
     assert server.users == {} and server.grants == []
+
+
+def test_existing_reader_keeps_its_password(tmp_path, tiny, fake_mysql) -> None:
+    server = fake_mysql()
+    server.users["beaver_reader@%"] = "theirs"
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert server.users == {"beaver_reader@%": "theirs"}
+    assert not any(s.startswith("ALTER USER") for s in server.statements)
+
+
+def test_one_loader_at_a_time(tmp_path, tiny, fake_mysql) -> None:
+    server = fake_mysql()
+    server.lock_free = False
+    with pytest.raises(RuntimeError, match="holds the lock"):
+        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert not any(s.startswith("CREATE DATABASE `tiny`") for s in server.statements)
+
+
+def test_a_database_created_by_someone_else_meanwhile_is_not_dropped(tmp_path, tiny, fake_mysql, monkeypatch) -> None:
+    # Absent when checked; created by another client while the dump downloads.
+    server = fake_mysql()
+    real = setup.ensure_beaver_dumps
+
+    def download_then_race(cache_dir, db_ids):
+        paths = real(cache_dir, db_ids)
+        server.databases.add("tiny")
+        return paths
+
+    monkeypatch.setattr(setup, "ensure_beaver_dumps", download_then_race)
+    with pytest.raises(mysql.connector.errors.DatabaseError, match="database exists"):
+        ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    assert not any(s.startswith("DROP DATABASE") for s in server.statements)
 
 
 @pytest.mark.parametrize(
@@ -268,6 +320,46 @@ def test_check_names_what_is_missing(tiny, fake_mysql, loaded, visible, message)
     server.visible = visible
     with pytest.raises(RuntimeError, match=message):
         check_beaver_mysql(READER, ["tiny"])
+
+
+def test_check_reads_every_table(tmp_path, tiny, fake_mysql) -> None:
+    server = fake_mysql()
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    server.unreadable = {"t0"}  # visible (a REFERENCES grant, say) but not readable
+    with pytest.raises(RuntimeError, match="can't read 1 tables"):
+        check_beaver_mysql(READER, ["tiny"])
+
+
+@pytest.mark.parametrize(
+    "grant",
+    [
+        "GRANT SELECT, INSERT ON `tiny`.* TO `beaver_reader`@`%`",
+        "GRANT ALL PRIVILEGES ON *.* TO `beaver_reader`@`%`",
+        "GRANT SELECT ON *.* TO `beaver_reader`@`%`",
+        "GRANT SELECT ON `mysql`.* TO `beaver_reader`@`%`",
+        "GRANT FILE ON *.* TO `beaver_reader`@`%`",
+        "GRANT `admin_role`@`%` TO `beaver_reader`@`%`",
+    ],
+)
+def test_check_refuses_a_grader_that_can_do_more_than_read_beaver(tmp_path, tiny, fake_mysql, grant) -> None:
+    server = fake_mysql()
+    ensure_beaver_mysql(tmp_path, ["tiny"], ADMIN, READER)
+    server.show_grants = ["GRANT USAGE ON *.* TO `beaver_reader`@`%`", grant]
+    with pytest.raises(RuntimeError, match="must hold only SELECT"):
+        check_beaver_mysql(READER, ["tiny"])
+
+
+def test_grader_privilege_problems_accepts_select_on_beaver() -> None:
+    assert (
+        setup.grader_privilege_problems(
+            [
+                "GRANT USAGE ON *.* TO `beaver_reader`@`%`",
+                "GRANT SELECT ON `dw`.* TO `beaver_reader`@`%`",
+                "GRANT SELECT ON `_beaver_meta`.* TO `beaver_reader`@`%`",
+            ]
+        )
+        == []
+    )
 
 
 def test_check_without_meta_table(tiny, fake_mysql) -> None:
@@ -289,13 +381,35 @@ def test_live_load_check_and_read_only(tmp_path, tiny) -> None:
 
     from resources_servers.beaver_sql.ex_acc import MySqlRunner
 
-    ensure_beaver_mysql(tmp_path, ["tiny"], _LIVE_ADMIN, _LIVE_READER)
-    check_beaver_mysql(_LIVE_READER, ["tiny"])
-    runner = MySqlRunner(_LIVE_READER, timeout_s=2.0)
-    rows = asyncio.run(runner.run("tiny", "SELECT name FROM t ORDER BY id"))
-    assert rows.status == "ok" and rows.frame.iloc[:, 0].tolist() == ["a;b", "c"]
-    for statement in ("DROP TABLE T", "CREATE TEMPORARY TABLE x (a INT)", "SELECT LOAD_FILE('/etc/hosts') IS NULL"):
-        outcome = asyncio.run(runner.run("tiny", statement))
-        assert outcome.status == "error" or outcome.frame.iloc[0, 0] == 1, statement
-    slow = asyncio.run(runner.run("tiny", "SELECT SLEEP(5)"))
-    assert slow.status == "timeout"
+    try:
+        ensure_beaver_mysql(tmp_path, ["tiny"], _LIVE_ADMIN, _LIVE_READER)
+        check_beaver_mysql(_LIVE_READER, ["tiny"])
+        runner = MySqlRunner(_LIVE_READER, timeout_s=2.0)
+        # No session settings: the model's SQL sees the server's own value.
+        seen = asyncio.run(runner.run("tiny", "SELECT @@session.max_execution_time = @@global.max_execution_time"))
+        assert seen.frame.iloc[0, 0] == 1
+        rows = asyncio.run(runner.run("tiny", "SELECT name FROM t ORDER BY id"))
+        assert rows.status == "ok" and rows.frame.iloc[:, 0].tolist() == ["a;b", "c"]
+        for statement in (
+            "DROP TABLE T",
+            "CREATE TEMPORARY TABLE x (a INT)",
+            "SELECT LOAD_FILE('/etc/hosts') IS NULL",
+        ):
+            outcome = asyncio.run(runner.run("tiny", statement))
+            assert outcome.status == "error" or outcome.frame.iloc[0, 0] == 1, statement
+        slow = asyncio.run(runner.run("tiny", "SELECT SLEEP(5)"))
+        assert slow.status == "timeout"
+    finally:
+        # Leave the server as found: the test database, its record and the grader's grant on it go.
+        conn = setup._connect(_LIVE_ADMIN)
+        try:
+            cur = conn.cursor()
+            cur.execute("DROP DATABASE IF EXISTS `tiny`")
+            cur.execute(f"DELETE FROM `{setup.META_DB}`.loaded WHERE db_id = 'tiny'")
+            reader = parse_mysql_dsn(_LIVE_READER)["user"]
+            cur.execute("SELECT COUNT(*) FROM mysql.db WHERE db = 'tiny' AND user = %s", (reader,))
+            if cur.fetchone()[0]:
+                cur.execute("REVOKE SELECT ON `tiny`.* FROM %s@%s", (reader, "%"))
+            conn.commit()
+        finally:
+            conn.close()

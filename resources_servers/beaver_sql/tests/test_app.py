@@ -108,6 +108,11 @@ class TestExtractSql:
     def test_no_block(self, text) -> None:
         assert extract_sql_from_response(text) is None
 
+    def test_block_without_a_letter_does_not_swallow_the_next(self) -> None:
+        text = "```sql\n123\n```\nThen:\n```sql\nSELECT 1\n```"
+        assert extract_sql_from_response(text) == "SELECT 1"
+        assert extract_sql_from_response("```sql\nSELECT 1\n```\n```sql\n42\n```") == "SELECT 1"
+
 
 class TestVerify:
     def test_match(self) -> None:
@@ -152,8 +157,8 @@ class TestVerify:
         r = _verify({"GOLD": EMPTY, "BAD": status}, _sql("BAD"))
         assert (r.reward, r.failure_reason, r.pred_status) == (1.0, FailureCode.NONE, status)
 
-    @pytest.mark.parametrize("status", ["error", "timeout"])
-    def test_failed_gold_is_an_empty_result(self, status) -> None:
+    @pytest.mark.parametrize("status", ["timeout"])
+    def test_gold_timeout_is_an_empty_result(self, status) -> None:
         r = _verify({"GOLD": status, "SELECT 1": ONE}, _sql("SELECT 1"))
         assert (r.reward, r.gold_status, r.gold_result, r.mask_sample) == (0.0, status, "empty_gold", False)
         r = _verify({"GOLD": status, "EMPTY": EMPTY}, _sql("EMPTY"))
@@ -171,6 +176,26 @@ class TestVerify:
         r = asyncio.run(verifier.verify(_request(_sql("SELECT 1"))))
         assert r.mask_sample and r.failure_kind == VERIFIER_ERROR
         assert r.failure_reason == FailureCode.UNKNOWN_ERROR
+
+    def test_gold_query_error_is_masked(self) -> None:
+        r = _verify({"GOLD": "error", "EMPTY": EMPTY}, _sql("EMPTY"))
+        assert r.mask_sample and r.failure_kind == VERIFIER_ERROR
+        assert (r.reward, r.failure_reason) == (0.0, FailureCode.DATABASE_UNAVAILABLE)
+
+    def test_saved_grading_fields_in_the_request_are_ignored(self) -> None:
+        stale = {
+            "model_output": "old answer",
+            "reward": 1.0,
+            "extracted_sql": "SELECT 2",
+            "failure_reason": "none",
+            "execution_match": True,
+            "gold_result": "empty_gold",
+            "mask_sample": True,
+            "failure_kind": "x",
+        }
+        r = _verify({"GOLD": ONE, "SELECT 1": ONE}, _sql("SELECT 1"), **stale)
+        assert (r.reward, r.extracted_sql, r.gold_result, r.mask_sample) == (1.0, "SELECT 1", "nonempty_gold", False)
+        assert r.model_output.startswith("Here it is")
 
     def test_schema_not_echoed(self) -> None:
         r = _verify({"GOLD": ONE, "SELECT 1": ONE}, _sql("SELECT 1"), sql_context="CREATE TABLE t (x INT);")

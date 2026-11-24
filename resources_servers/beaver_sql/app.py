@@ -15,6 +15,7 @@ When the grader can't reach the data (no MySQL, wrong password, a database not l
 loaded and visible to the grader's user, so a setup gap fails there rather than scoring every query empty.
 """
 
+import asyncio
 import logging
 import re
 from enum import Enum
@@ -73,25 +74,24 @@ class FailureCode(str, Enum):
 
 
 def extract_sql_from_response(text: Optional[str]) -> Optional[str]:
-    """The SQL in the last ```` ```sql ```` block of a response, or ``None`` when there is none.
+    """The SQL in the last complete ```` ```sql ```` block that contains a letter, or ``None`` when there is none.
 
-    The same rule as ``bird_sql``'s ``extract_sql_from_response``: the fence tag is matched case-insensitively, the
-    block must contain a letter, comments are left in, and a leading ``**bold**`` header is dropped.
+    As ``bird_sql``'s ``extract_sql_from_response``, the fence tag is matched case-insensitively, comments are left in,
+    and a leading ``**bold**`` header is dropped. Unlike it, each block ends at its own closing fence before the letter
+    check, so a block without a letter (```` ```sql 123``` ````) can't swallow the text after it.
     """
     if not text:
         return None
     opening = re.compile(r"```sql\b", re.IGNORECASE)
-    letter = re.compile(r"[a-zA-Z]")
     last_content = None
     position = 0
     while start := opening.search(text, position):
-        first_letter = letter.search(text, start.end())
-        if first_letter is None:
-            break
-        end = text.find("```", first_letter.end())
+        end = text.find("```", start.end())
         if end == -1:
             break
-        last_content = text[start.end() : end]
+        content = text[start.end() : end]
+        if re.search(r"[a-zA-Z]", content):
+            last_content = content
         position = end + 3
     if last_content is None:
         return None
@@ -158,6 +158,21 @@ def _observe_verifier_failure(reason: str, *, cause: Optional[BaseException] = N
     observe_failure(failure)
 
 
+# Response fields this verifier sets; an incoming request's copies are ignored.
+_COMPUTED_FIELDS = (
+    "reward",
+    "model_output",
+    "extracted_sql",
+    "had_codeblock",
+    "execution_match",
+    "failure_reason",
+    "failure_kind",
+    "mask_sample",
+    "gold_status",
+    "gold_result",
+    "pred_status",
+)
+
 # Per-rollout 0/1 scores reported next to accuracy, each over every rollout. Names are the metric names users see.
 _FAILURE_SCORE_NAMES = (
     "no_sql",
@@ -178,8 +193,9 @@ class BeaverSqlVerifier:
     async def verify(self, body: BeaverSqlVerifyRequest) -> BeaverSqlVerifyResponse:
         generated = body.response.output_text or ""
         payload = body.model_dump()
-        # The schema is in the prompt already; a second copy per rollout only makes the files bigger.
-        for f in ("question", "gt_sql", "db_id", "id", "category", "sql_context"):
+        # The schema is in the prompt already; a second copy per rollout only makes the files bigger. Fields this verifier
+        # computes are dropped too, so a re-verified row that still carries them is graded afresh.
+        for f in ("question", "gt_sql", "db_id", "id", "category", "sql_context", *_COMPUTED_FIELDS):
             payload.pop(f, None)
 
         def _response(**kwargs: Any) -> BeaverSqlVerifyResponse:
@@ -212,8 +228,14 @@ class BeaverSqlVerifier:
 
         try:
             gold = await self._runner.run(body.db_id, body.gt_sql)
+            if gold.status == "error":
+                # Every gold query runs on a correctly set-up server (benchmarks/beaver/gold_check.py), so one that
+                # fails here means the data or server isn't what was checked. (Officially it would be an empty result,
+                # which an empty or failed answer matches.) A gold query that times out is still scored as empty.
+                raise MySqlUnavailableError(f"gold query failed: {gold.error}")
             pred = missing_prediction() if extracted_sql is None else await self._runner.run(body.db_id, extracted_sql)
-            match = results_match(gold, pred)
+            # Off the event loop: a large result takes a while to compare.
+            match = await asyncio.to_thread(results_match, gold, pred)
         except MySqlUnavailableError as e:
             return _verifier_failure(FailureCode.DATABASE_UNAVAILABLE, "BEAVER MySQL is unavailable", e)
         except Exception as e:
