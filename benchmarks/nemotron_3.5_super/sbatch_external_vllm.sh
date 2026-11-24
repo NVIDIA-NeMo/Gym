@@ -153,6 +153,7 @@ if (( ENABLE_MOONCAKE_DISK_OFFLOAD )); then
     mooncake_default_lease_ttl=30000
 else
     # Values are expanded into the generated worker command even when disabled.
+    MOONCAKE_SSD_PATH=""
     MOONCAKE_CPU_CACHE_GIB=0
     MOONCAKE_DISK_QUOTA_GIB=0
 fi

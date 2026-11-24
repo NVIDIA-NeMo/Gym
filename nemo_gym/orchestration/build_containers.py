@@ -958,6 +958,13 @@ class BuildContainerHelper(BaseModel):
             await self._clean_on_failure()
             raise
 
+        # Installation has succeeded. Warmup writes to a temporary image and
+        # replaces the built image only on success, so failures can preserve it.
+        if self.config.warmup is not None:
+            print("Running warmup. Currently, the warmup logs aren't printed and need to be checked manually.")
+            with _timed_stage("Warmup"):
+                await self._warmup_container()
+
     async def _run(self) -> None:
         print(f"""Resolved fpaths:
 - Input container: {self.config.input_container_fpath}
@@ -996,11 +1003,6 @@ class BuildContainerHelper(BaseModel):
                     raise RuntimeError(
                         f"Command failed with returncode {command_output.returncode}. See {self.config.log_file}"
                     )
-
-        if self.config.warmup is not None:
-            print("Running warmup. Currently, the warmup logs aren't printed and need to be checked manually.")
-            with _timed_stage("Warmup"):
-                await self._warmup_container()
 
     async def _warmup_container(self) -> None:
         # TODO @bxyu-nvidia: Eventually this sbatch_external_vllm will migrate to Gym-native orchestration and we can just import the relevant thing

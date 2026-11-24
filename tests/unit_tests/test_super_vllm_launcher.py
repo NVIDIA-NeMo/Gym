@@ -345,8 +345,9 @@ python3() {
                 self.assertEqual("--mem=0" in calls[0], enabled)
                 self.assertEqual((Path(directory) / "disk-checked").exists(), disk)
                 self.assertEqual((Path(directory) / "owner-args").exists(), disk)
-                mounts = "/test:/test" + (",/ssd:/mooncake-ssd" if disk else "")
-                self.assertIn(f'--container-mounts="{mounts}$cache_export_mount" ', batch)
+                # Disk offload uses the configured path inside the container;
+                # the launcher does not add a host SSD bind mount.
+                self.assertIn('--container-mounts="/test:/test$cache_export_mount" ', batch)
                 if not enabled:
                     self.assertFalse((Path(directory) / "master-args").exists())
                     continue

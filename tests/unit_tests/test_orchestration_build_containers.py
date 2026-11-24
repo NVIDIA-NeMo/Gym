@@ -948,7 +948,10 @@ async def test_container_stage_order_and_cleanup(container_config, tmp_path, mon
         with pytest.raises(RuntimeError, match="Command failed"):
             await helper.run()
         assert stages == expected_stages[: expected_stages.index(failed_stage) + 1]
-        assert not container_config.output_container_fpath.exists()
+        if failed_stage == "warmup":
+            assert container_config.output_container_fpath.read_text() == "build-mooncake"
+        else:
+            assert not container_config.output_container_fpath.exists()
     else:
         await helper.run()
         assert stages == expected_stages
@@ -1754,7 +1757,7 @@ sys.exit(7 if outcome == "failure" else 0)
                 with pytest.raises(asyncio.CancelledError):
                     await task
                 assert (tmp_path / "cancelled").read_text().splitlines() == ["--clusters", "test-cluster", "12345"]
-                assert not config.output_container_fpath.exists()
+                assert config.output_container_fpath.read_bytes() == b"base"
             elif outcome == "success":
                 (tmp_path / "release").touch()
                 await task
@@ -1764,7 +1767,7 @@ sys.exit(7 if outcome == "failure" else 0)
                 match = "returncode 7" if outcome == "failure" else "without a nonempty image"
                 with pytest.raises(RuntimeError, match=match):
                     await task
-                assert not config.output_container_fpath.exists()
+                assert config.output_container_fpath.read_bytes() == b"base"
             assert not saved_path.parent.exists()
             assert config.input_container_fpath.read_bytes() == b"base"
             assert not (tmp_path / "INJECTED").exists()
