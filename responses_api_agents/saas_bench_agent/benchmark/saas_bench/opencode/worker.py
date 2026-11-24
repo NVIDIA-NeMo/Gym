@@ -25,7 +25,6 @@ from saas_bench.opencode.core import (
     agent_environment,
     context_overflow_recovered,
     inventory,
-    measured_score,
     opencode_config,
     parse_events,
 )
@@ -33,7 +32,6 @@ from saas_bench.opencode.protocol import execution_health
 from saas_bench.opencode.verifier import (
     VerifierUnavailable,
     probe_onlyoffice_api,
-    verifier_diagnostics,
 )
 
 
@@ -99,9 +97,7 @@ def execute(config: dict) -> dict:
     refresh_directory = None
     try:
         if config.get("harness_version", HARNESS_VERSION) != HARNESS_VERSION:
-            raise ValueError(
-                "Requested harness_version does not match the worker source"
-            )
+            raise ValueError("Requested harness_version does not match the worker source")
         os.chdir(root)  # compose templates and native verifier assets are repo-relative
         revision = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -153,9 +149,7 @@ def execute(config: dict) -> dict:
                     "source_revision": revision.stdout.strip() or None,
                     "harness_version": HARNESS_VERSION,
                     "runtime_sha256": {
-                        str(path.relative_to(root)): hashlib.sha256(
-                            path.read_bytes()
-                        ).hexdigest()
+                        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                         for path in paths
                         if path.is_file()
                     },
@@ -168,8 +162,7 @@ def execute(config: dict) -> dict:
             root,
             config.get("tasks_dir", "tasks"),
             config.get("task_selector", config["task_id"]),
-            require_verifier=config.get("training_reward_mode", "native")
-            != "llm_judge",
+            require_verifier=config.get("training_reward_mode", "native") != "llm_judge",
         )
         if config["task_id"] not in selected:
             raise ValueError("Prepared task is outside the configured task selection")
@@ -209,9 +202,7 @@ def execute(config: dict) -> dict:
             timeout=30,
         ).stdout.strip()
         if actual_version != config["opencode_version"]:
-            raise RuntimeError(
-                f"OpenCode version {actual_version!r}; expected {config['opencode_version']}"
-            )
+            raise RuntimeError(f"OpenCode version {actual_version!r}; expected {config['opencode_version']}")
         workspace = output / "workspace"
         workspace.mkdir()
         # Snapshot task files, not OpenCode's own growing XDG/session storage.
@@ -246,16 +237,9 @@ def execute(config: dict) -> dict:
                 hostname = config.get("hostname", "localhost")
                 slot.start_apps(sites, hostname=hostname)
                 port_map = slot.get_port_map(sites)
-                if (
-                    "onlyoffice" in port_map
-                    and config.get("training_reward_mode", "native") == "native"
-                ):
-                    probe = probe_onlyoffice_api(
-                        f"http://{hostname}:{port_map['onlyoffice']}"
-                    )
-                    (output / "verifier_preflight.json").write_text(
-                        json.dumps(probe, indent=2)
-                    )
+                if "onlyoffice" in port_map and config.get("training_reward_mode", "native") == "native":
+                    probe = probe_onlyoffice_api(f"http://{hostname}:{port_map['onlyoffice']}")
+                    (output / "verifier_preflight.json").write_text(json.dumps(probe, indent=2))
                     if not probe["available"]:
                         result["verifier_diagnostics"] = {
                             "unavailable": True,
@@ -265,9 +249,7 @@ def execute(config: dict) -> dict:
                             "OnlyOffice grading API did not become ready; inspect verifier_preflight.json"
                         )
                 prompt, todo, _ = build_prompt(task, port_map, hostname)
-                browser["allowed_origins"] = [
-                    f"http://{hostname}:{port}" for port in port_map.values()
-                ]
+                browser["allowed_origins"] = [f"http://{hostname}:{port}" for port in port_map.values()]
                 browser_path = output / "browser.json"
                 browser_path.write_text(json.dumps(browser))
                 oc_config = opencode_config(
@@ -283,9 +265,7 @@ def execute(config: dict) -> dict:
                     mcp_timeout_ms=config.get("mcp_timeout_ms", 180000),
                     refresh_socket=refresh_socket,
                 )
-                (workspace / "opencode.json").write_text(
-                    json.dumps(oc_config, indent=2)
-                )
+                (workspace / "opencode.json").write_text(json.dumps(oc_config, indent=2))
                 instruction = (
                     "Complete app interactions using the saas_browser tools. "
                     "Use observe for screenshots and accessibility state. "
@@ -316,6 +296,8 @@ def execute(config: dict) -> dict:
                 (output / "prompt.txt").write_text(instruction)
                 (output / "todo.md").write_text(todo)
                 (files / "todo.md").write_text(todo)
+                browser_fault_path = output / "browser/browser_fault.json"
+                fault_before_stop = False
                 with (
                     (output / "events.jsonl").open("w") as stdout,
                     (output / "opencode.stderr").open("w") as stderr,
@@ -342,23 +324,32 @@ def execute(config: dict) -> dict:
                         stderr=stderr,
                         start_new_session=True,
                     )
+                    deadline = time.monotonic() + config["agent_timeout"]
+                    timed_out = False
                     try:
-                        process.wait(timeout=config["agent_timeout"])
-                        timed_out = False
-                    except subprocess.TimeoutExpired:
-                        timed_out = True
+                        while process.poll() is None:
+                            if browser_fault_path.is_file():
+                                break
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                timed_out = True
+                                break
+                            try:
+                                process.wait(timeout=min(1.0, remaining))
+                            except subprocess.TimeoutExpired:
+                                pass
                     finally:
+                        # Teardown itself disconnects Chromium. Latch only a
+                        # fault observed before the owner's deliberate stop.
+                        fault_before_stop = browser_fault_path.is_file()
                         stop_process(process)
-                events, text = parse_events(
-                    (output / "events.jsonl").read_text(errors="replace")
-                )
+                events, text = parse_events((output / "events.jsonl").read_text(errors="replace"))
                 from saas_bench.opencode.protocol import has_model_turn
+
                 model_turn = has_model_turn(events)
                 recovered = context_overflow_recovered(events)
                 health = execution_health(events, timed_out=timed_out)
-                (output / "execution_health.json").write_text(
-                    json.dumps(health, indent=2)
-                )
+                (output / "execution_health.json").write_text(json.dumps(health, indent=2))
                 result.update(
                     execution_health=health,
                     agent_output=text,
@@ -373,22 +364,28 @@ def execute(config: dict) -> dict:
                     source_sha256=task["source_sha256"],
                     opencode_version=actual_version,
                 )
+                if fault_before_stop:
+                    result["browser_fault"] = json.loads(browser_fault_path.read_text())
+                    health.update(termination="browser_runtime_fault", execution_healthy=False)
+                    (output / "execution_health.json").write_text(json.dumps(health, indent=2))
+                    raise RuntimeError("Chromium runtime failed; retry this row with fresh apps/browser")
                 if timed_out and not model_turn:
                     raise RuntimeError("OpenCode timed out before any model turn; endpoint/runtime unavailable")
                 # A permission abort after real activity still has a verifiable app
                 # state. Keep it explicitly incomplete, rather than losing grading.
                 permission_abort = any(
-                    e.get("type") == "error" and "doom_loop" in json.dumps(e)
-                    for e in events
+                    e.get("type") == "error" and "doom_loop" in json.dumps(e) for e in events
                 ) and any(e.get("type") in {"tool_use", "step_finish"} for e in events)
                 if permission_abort:
                     health["termination"] = "permission_abort"
-                    result["execution_error"] = (
-                        "OpenCode aborted on doom_loop permission"
-                    )
+                    result["execution_error"] = "OpenCode aborted on doom_loop permission"
                 model_endings = {
-                    "timeout", "context_limit", "model_protocol_error",
-                    "malformed_tool_call", "output_token_limit", "permission_abort",
+                    "timeout",
+                    "context_limit",
+                    "model_protocol_error",
+                    "malformed_tool_call",
+                    "output_token_limit",
+                    "permission_abort",
                 }
                 if (not events and not timed_out) or (
                     any(e.get("type") == "error" for e in events)
@@ -396,9 +393,7 @@ def execute(config: dict) -> dict:
                     and not permission_abort
                     and health["termination"] not in model_endings
                 ):
-                    raise RuntimeError(
-                        "OpenCode returned no trajectory or an error event; inspect native artifacts"
-                    )
+                    raise RuntimeError("OpenCode returned no trajectory or an error event; inspect native artifacts")
                 if (
                     process.returncode != 0
                     and not timed_out
@@ -421,15 +416,20 @@ def execute(config: dict) -> dict:
                 if config.get("training_reward_mode", "native") != "native":
                     raise ValueError("Unknown training reward mode")
                 verify = run_verify(
-                    task, slot_id, port_map, hostname, str(output), run_suffix="_r0", inconclusive_verification_retries=config.get("inconclusive_verification_retries", 1)
+                    task,
+                    slot_id,
+                    port_map,
+                    hostname,
+                    str(output),
+                    run_suffix="_r0",
+                    inconclusive_verification_retries=config.get("inconclusive_verification_retries", 1),
                 )
-                diagnostics = verifier_diagnostics(verify)
+                from saas_bench.opencode.verifier import native_verification_outcome
+
+                outcome = native_verification_outcome(verify)
+                diagnostics = outcome["verifier_diagnostics"]
                 result["verifier_diagnostics"] = diagnostics
-                health["task_success"] = (
-                    None
-                    if diagnostics["unavailable"]
-                    else verify.get("status") == "PASS"
-                )
+                health["task_success"] = None if diagnostics["unavailable"] else verify.get("status") == "PASS"
                 if (
                     not diagnostics["unavailable"]
                     and verify.get("status") == "FAIL"
@@ -437,16 +437,11 @@ def execute(config: dict) -> dict:
                 ):
                     health["termination"] = "task_incomplete"
                     health["execution_healthy"] = False
-                (output / "execution_health.json").write_text(
-                    json.dumps(health, indent=2)
-                )
+                (output / "execution_health.json").write_text(json.dumps(health, indent=2))
                 result.update(
                     verify=verify,
-                    reward=0.0
-                    if diagnostics["unavailable"]
-                    else measured_score(verify),
+                    **outcome,
                     status="completed",
-                    mask_sample=diagnostics["unavailable"],
                     failure_kind="saas_bench:verifier"
                     if diagnostics["unavailable"]
                     else "agent_timeout"
@@ -471,9 +466,7 @@ def execute(config: dict) -> dict:
     finally:
         if refresh_directory is not None:
             refresh_directory.cleanup()
-        (output / "result.json").write_text(
-            json.dumps(result, indent=2, ensure_ascii=False)
-        )
+        (output / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
     return result
 
 

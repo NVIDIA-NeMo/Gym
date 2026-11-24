@@ -80,8 +80,6 @@ def test_browser_worker_grades_live_state_and_always_stops(
     (root / "saas_bench/apps.yaml").write_text("apps:\n  fixture: {}\n")
     task = {"task_id": "fixture", "source_sha256": "sha", "meta": {"meta_data": {"sites": ["fixture"]}}}
     monkeypatch.setattr(worker, "inventory", lambda *args: {"fixture": task})
-    monkeypatch.setattr(worker, "measured_score", lambda result: result["score"])
-    monkeypatch.setattr(worker, "verifier_diagnostics", lambda result: {"unavailable": unavailable})
 
     @contextmanager
     def claim(*args):
@@ -99,7 +97,7 @@ def test_browser_worker_grades_live_state_and_always_stops(
     def grade(*args, **kw):
         slot.stop_apps.assert_not_called()
         assert __import__("os").environ["LLM_API_KEY"] == "judge-fixture"
-        return {"status": status, "score": 0.25 if status in {"PASS", "FAIL"} else 0.0}
+        return {"status": status, "score": 1.0 if status == "PASS" else 0.25 if status == "FAIL" else 0.0}
 
     verifier.run_verify = MagicMock(side_effect=grade)
     actor = types.ModuleType("saas_bench.agent")

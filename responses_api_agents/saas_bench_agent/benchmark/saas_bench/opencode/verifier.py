@@ -4,7 +4,11 @@
 
 from __future__ import annotations
 
+import math
 import re
+
+from saas_bench.scoring import SCORING_POLICY, score_validation_errors
+
 
 # These establish a broken grading dependency, not merely an absent task entity.
 _INFRA = re.compile(
@@ -25,11 +29,18 @@ def verifier_diagnostics(verify: dict) -> dict:
     failed checks with a warning. We do not assume every verifier exception is an
     infrastructure problem or remove failed checkpoint weights from denominators.
     """
+    if not isinstance(verify, dict):
+        verify = {"status": "ERROR", "error": "verifier result must be an object"}
     infra, warnings = [], []
-    for check in verify.get("checks", []):
+    validation_errors = score_validation_errors(verify)
+    checks = verify.get("checks", [])
+    if not isinstance(checks, list) or any(not isinstance(check, dict) for check in checks):
+        validation_errors.append("malformed native check list")
+        checks = []
+    for check in checks:
         if check.get("passed"):
             continue
-        detail = check.get("detail", "")
+        detail = str(check.get("detail") or "")
         record = {
             "label": check.get("label"),
             "weight": check.get("weight"),
@@ -39,20 +50,42 @@ def verifier_diagnostics(verify: dict) -> dict:
             infra.append(record)
         elif "exception:" in detail.lower() or "error" in detail.lower():
             warnings.append(record)
+    judge_failures = verify.get("judge_failures") or []
+    if not isinstance(judge_failures, list) or any(
+        not isinstance(fault, dict) or not isinstance(fault.get("failure_kind"), str) for fault in judge_failures
+    ):
+        validation_errors.append("malformed judge-failure records")
+        judge_failures = []
     unavailable = (
         verify.get("status") not in {"PASS", "FAIL"}
         or bool(infra)
-        or bool(verify.get("judge_failures"))
+        or bool(judge_failures)
         or bool(verify.get("error"))
+        or bool(validation_errors)
     )
     return {
         "unavailable": unavailable,
         "infrastructure_checks": infra,
-        "judge_failures": verify.get("judge_failures", []),
+        "judge_failures": judge_failures,
         "warnings": warnings,
-        "raw_score": verify.get("raw_score", verify.get("score")),
+        "validation_errors": validation_errors,
+        "raw_score": verify.get("raw_score", verify.get("score"))
+        if type(verify.get("raw_score", verify.get("score"))) in (int, float)
+        and math.isfinite(verify.get("raw_score", verify.get("score")))
+        else None,
         "raw_status": verify.get("status"),
         "policy": "mask_entire_sample_on_unavailable_grader",
+    }
+
+
+def native_verification_outcome(verify: dict) -> dict:
+    """Keep the native weighted grade; mask inconclusive grading for either harness."""
+    diagnostics = verifier_diagnostics(verify)
+    return {
+        "reward": 0.0 if diagnostics["unavailable"] else float(verify["score"]),
+        "mask_sample": diagnostics["unavailable"],
+        "verifier_diagnostics": diagnostics,
+        "scoring_policy": SCORING_POLICY,
     }
 
 
@@ -86,9 +119,7 @@ def probe_onlyoffice_api(base_url: str, *, timeout: float = 30) -> dict:
         )
         try:
             try:
-                response = urlopen(
-                    request, timeout=max(0.1, min(5, deadline - time.monotonic()))
-                )
+                response = urlopen(request, timeout=max(0.1, min(5, deadline - time.monotonic())))
             except HTTPError as exc:
                 response = exc
             with response:
@@ -108,9 +139,7 @@ def probe_onlyoffice_api(base_url: str, *, timeout: float = 30) -> dict:
                     and isinstance(payload.get("error"), dict)
                     and payload["error"].get("message") == "User authentication failed"
                 )
-                result["expected_auth_rejection"] = (
-                    response.status == 500 and auth_rejected
-                )
+                result["expected_auth_rejection"] = response.status == 500 and auth_rejected
                 result["available"] = (
                     (
                         response.status in {200, 201, 400, 401, 403, 405, 422}
