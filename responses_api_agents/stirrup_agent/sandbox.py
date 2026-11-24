@@ -33,6 +33,32 @@ _PACKAGE_DIR = f"{RUNTIME_DIR}/harness/responses_api_agents/stirrup_agent"
 HARNESS_FILES = ("nemo_agent.py", "nemo_client.py", "stirrup_utils.py", "sandbox_runner.py")
 
 
+def _stopped_before_launch(resources_cookies: dict[str, str]) -> dict[str, Any]:
+    """The runner's report for a run that a rollout stop kept from starting: no model call and no turn.
+
+    It ends as at the time limit, so the agent server reports the stop (``report_rollout_stop``). The observations
+    and usages have the shape of ``Observer.report`` in ``sandbox_runner.py``.
+    """
+    return {
+        "input_items": [],
+        "output_items": [],
+        "elapsed_seconds": 0.0,
+        "resources_cookies": dict(resources_cookies),
+        "stop_reason": "wall_time",
+        "model_error": None,
+        "model_error_status": None,
+        "invalid_output": None,
+        "observations": {
+            "invocation_id": "root",
+            "status": "incomplete",
+            "model_response_ids": [],
+            "tool_calls": [],
+            "compactions": [],
+        },
+        "usages": [],
+    }
+
+
 @dataclass
 class StirrupSessionState(AgentSessionState):
     session: SandboxSession[dict[str, Any]]
@@ -69,6 +95,9 @@ class StirrupSessionState(AgentSessionState):
             )
 
         async def collect() -> dict[str, Any]:
+            if self.session.expired_before_launch:
+                # A rollout stop arrived before launch, so the runner never ran and wrote no output.
+                return _stopped_before_launch(self.resources_cookies)
             try:
                 return json.loads(await read_text(self.session.sandbox, path=output_path))
             except Exception as error:

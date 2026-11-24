@@ -21,8 +21,15 @@ from stirrup.clients.utils import to_openai_tools
 from responses_api_agents.stirrup_agent import nemo_agent as runner_agent
 from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
-from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES
-from responses_api_agents.stirrup_agent.sandbox_runner import LocalShell, Observer, main, remote_tool, run
+from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES, _stopped_before_launch
+from responses_api_agents.stirrup_agent.sandbox_runner import (
+    InvocationStatus,
+    LocalShell,
+    Observer,
+    main,
+    remote_tool,
+    run,
+)
 from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app
 
 
@@ -259,6 +266,22 @@ def test_a_compaction_summary_never_enters_the_output_of_a_run_stopped_after_it(
     replies = [item for item in output["output_items"] if item.get("role") == "assistant"]
     assert "SUMMARY_TEXT" not in json.dumps(replies)
     assert not (workdir / "SUMMARY_ONLY").exists()
+
+
+def test_the_report_of_a_run_stopped_before_launch_has_the_runners_shape(tmp_path, resources):
+    """The agent server reads the report it makes for a run that a stop kept from starting as it reads the runner's."""
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
+    try:
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
+    finally:
+        model.close()
+
+    report = _stopped_before_launch({"session": "seeded"})
+    assert set(report) == set(output)
+    assert {key: report[key] for key in ("observations", "usages")} == Observer().report(InvocationStatus.INCOMPLETE)
+    assert (report["stop_reason"], report["resources_cookies"]) == ("wall_time", {"session": "seeded"})
 
 
 def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):

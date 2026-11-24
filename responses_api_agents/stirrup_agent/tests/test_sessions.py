@@ -300,6 +300,67 @@ def test_a_run_stopped_once_its_task_has_ended_answers_as_completed_and_ends_wit
     assert closed.status_code == 200, closed.text
 
 
+@pytest.mark.parametrize("completed", [True, False])
+@pytest.mark.parametrize("stopped_while", ["seeding", "seeded"])
+def test_a_stop_before_the_runner_starts_answers_without_a_model_call(
+    agent, root, monkeypatch, stopped_while, completed
+):
+    """A rollout stop accepted while the session seeds, or after the seed and before the activation, keeps the runner
+    from starting: the supervisor launches nothing. The activation answers with no turns, the stop's marker and the
+    status the stop asked for, and the session closes with the seed's cookies."""
+    resources = _Resources(_resources_app([]))
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "touch ran"}))])
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    stops = []
+    try:
+        # One event loop for the seed, the activation and the stop, as in a server.
+        with TestClient(agent.setup_webserver()) as client:
+
+            def stop() -> None:
+                stops.append(
+                    client.post(
+                        f"/rollouts/{_EPISODE.capture_key}/stop", json={"reason": "task_ended", "completed": completed}
+                    )
+                )
+
+            if stopped_while == "seeding":
+                install = sandbox.StirrupSessionState.install_runtime
+
+                async def install_after_a_stop(self, *, timeout):
+                    await asyncio.to_thread(stop)
+                    await install(self, timeout=timeout)
+
+                monkeypatch.setattr(sandbox.StirrupSessionState, "install_runtime", install_after_a_stop)
+            seeded = _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
+            if stopped_while == "seeded":
+                stop()
+            response = client.post(
+                f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+                json={"input": [{"role": "user", "content": "Write the report."}], "model": "policy", "tools": _TOOLS},
+            )
+            closed = _close(client)
+    finally:
+        model.close()
+        resources.close()
+
+    assert seeded.status_code == 200, seeded.text
+    (stopped,) = stops
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["stopped"]
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == ("completed" if completed else "incomplete")
+    marker = {"reason": "task_ended", **({"completed": True} if completed else {})}
+    assert json.loads(body["metadata"][ROLLOUT_STOP_METADATA_KEY]) == marker
+    assert "stop_reason" not in body["metadata"]
+    assert body["output"] == []
+    assert model.requests == []
+    assert not (root / "ran").exists()
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["resources_cookies"] == {"session": "seeded"}
+
+
 def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, monkeypatch):
     resources = _Resources(_resources_app([]))
     model = _ModelServer([_call("fetch_web_page", json.dumps({"url": "x"}))])

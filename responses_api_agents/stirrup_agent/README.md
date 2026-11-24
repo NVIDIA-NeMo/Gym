@@ -46,7 +46,9 @@ An environment server can end a run early with `POST /rollouts/{rollout_id}/stop
 ended (`end_on_task_state`). The run then ends as it does at its time limit, but the response metadata carries
 `ng_rollout_stop` in place of `stop_reason: wall_time`. A stop with `completed: true` answers `status: completed`, and
 any other stop keeps `status: incomplete`. When a run ends while a turn's tool calls run, at the time limit or on a
-stop, the response ends with that turn's reply, and those calls have no answers.
+stop, the response ends with that turn's reply, and those calls have no answers. A stop that arrives before the runner
+starts, during the seed or before the activation, keeps it from starting: the response then has no output items and
+no model call ran.
 
 ## Configuration
 
