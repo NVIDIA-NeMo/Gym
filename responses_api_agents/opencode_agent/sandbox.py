@@ -527,11 +527,26 @@ class OpenCodeSandboxSession(AgentSessionState):
             if not key.startswith(("OPENCODE_", "OPENAI_", "NEMO_GYM_"))
         }
         if access_env:
-            # Exported first, over the sandbox's values: the setup then records a HOME or XDG directory among them as
-            # the task's, and the runner applies ``env`` afterwards, so the adapter's own variables keep their values.
+            if payload.get("path_prefix") and "PATH" in access_env:
+                # As below: preinstalled runtime tools come first.
+                access_env["PATH"] = ":".join([*payload["path_prefix"], access_env["PATH"]])
+            # No entry becomes a variable of the runner's shell, where one named like a runner parameter, such as
+            # ``command``, would replace it. The setup runs in a subshell that exports the entries, so it records a
+            # HOME or XDG directory among them as the task's.
             params["setup"] = (
-                shell_assignments({"access_env": access_env}) + 'export "${access_env[@]}"\n' + params["setup"]
+                "(\n"
+                + shell_assignments({"access_env": access_env})
+                + 'export "${access_env[@]}"\n'
+                + params["setup"]
+                + ") || exit 1\n"
             )
+            # env(1) then sets the entries for the CLI alone, over the sandbox's values. The names in ``env`` are left
+            # out, so the adapter's own variables keep their values.
+            params["command"] = [
+                "env",
+                *(f"{key}={value}" for key, value in access_env.items() if key not in env),
+                *command,
+            ]
         if payload.get("path_prefix"):
             # Preinstalled runtime tools come first; the task's own PATH still follows.
             params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"

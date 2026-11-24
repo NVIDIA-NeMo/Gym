@@ -146,6 +146,7 @@ async def test_sandbox_access_env_reaches_opencode_except_opencode_openai_and_ne
         env={
             "TASK_API_TOKEN": "task value",
             "LANG": "C",
+            "PATH": f"/task-bin:{os.environ['PATH']}",
             "HOME": "/task-home",
             "XDG_CONFIG_HOME": "/task-config",
             "OPENCODE_CONFIG_DIR": "must-not-apply",
@@ -153,17 +154,19 @@ async def test_sandbox_access_env_reaches_opencode_except_opencode_openai_and_ne
             "NEMO_GYM_SUPERVISOR": "must-not-apply",
         },
     )
-    names = ("HOME", "TASK_API_TOKEN", "LANG", "OPENCODE_CONFIG_DIR", "OPENAI_BASE_URL", "NEMO_GYM_SUPERVISOR")
+    names = ("HOME", "TASK_API_TOKEN", "LANG", "PATH", "OPENCODE_CONFIG_DIR", "OPENAI_BASE_URL", "NEMO_GYM_SUPERVISOR")
     report = "".join(f'printf "%s|" "${{{name}-unset}}"; ' for name in names)
-    argv = await stage(tmp_path, ["bash", "-c", report], sandbox_access=access)
+    argv = await stage(tmp_path, ["bash", "-c", report], sandbox_access=access, path_prefix=["/opt/tools/bin"])
     # The sandbox's own environment; the process supervisor sets the marker for the harness.
     env = {key: value for key, value in os.environ.items() if key not in access.env and not key.startswith("XDG_")}
-    env |= {"HOME": "/sandbox-home", "LANG": "C.UTF-8", "NEMO_GYM_SUPERVISOR": "marker"}
+    env |= {"HOME": "/sandbox-home", "LANG": "C.UTF-8", "PATH": os.environ["PATH"], "NEMO_GYM_SUPERVISOR": "marker"}
     completed = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
-    # OpenCode keeps its private HOME; an entry replaces the sandbox's value of the same name.
+    # OpenCode keeps its private HOME and the configured PATH prefix; an entry replaces the sandbox's value of the
+    # same name.
     private_home = tmp_path / "private" / "HOME"
-    assert (tmp_path / "stdout.jsonl").read_text() == f"{private_home}|task value|C|unset|unset|marker|"
+    path = f"/opt/tools/bin:/task-bin:{os.environ['PATH']}"
+    assert (tmp_path / "stdout.jsonl").read_text() == f"{private_home}|task value|C|{path}|unset|unset|marker|"
     # Tool shells get the task's directories, which the entries name.
     assert json.loads((tmp_path / "task-env.json").read_text()) == {
         "HOME": "/task-home",
@@ -172,6 +175,22 @@ async def test_sandbox_access_env_reaches_opencode_except_opencode_openai_and_ne
         "XDG_CACHE_HOME": "/task-home/.cache",
         "XDG_STATE_HOME": "/task-home/.local/state",
     }
+
+
+@pytest.mark.parametrize("name", ["command", "cwd", "env", "stdout"])
+async def test_sandbox_access_env_entry_named_like_a_runner_parameter_reaches_opencode_only(tmp_path, name):
+    value = str(tmp_path / "elsewhere")
+    access = SandboxAccess(
+        connection={"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {}},
+        workdir=str(tmp_path),
+        env={name: value},
+    )
+    argv = await stage(tmp_path, ["bash", "-c", f'printf "%s|" "$PWD" "$HOME" "${name}"'], sandbox_access=access)
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    # The runner started the staged command in its working directory, with the private HOME and the staged output file.
+    assert not (tmp_path / "elsewhere").exists()
+    assert (tmp_path / "stdout.jsonl").read_text() == f"{tmp_path}|{tmp_path / 'private' / 'HOME'}|{value}|"
 
 
 async def test_unset_home_falls_back_to_the_account_home(tmp_path):
