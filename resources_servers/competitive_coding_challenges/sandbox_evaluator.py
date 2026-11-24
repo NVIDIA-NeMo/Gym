@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Grade a submission in a fresh provider sandbox instead of the NeMo Skills sandbox.
+"""Grade a submission in a fresh provider sandbox: the only place a submission compiles or runs.
 
-This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py``, which
-runs only in the sandbox, and the unchanged ``ccc_eval.py``, the evaluator the NeMo Skills path
-runs in this server; nothing else from this server is uploaded. The upload and run go through
+This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py`` and
+``ccc_eval.py``, the evaluator, which run only in the sandbox; nothing else from this server is
+uploaded. The server itself only loads problem metadata, for scoring. The upload and run go through
 ``nemo_gym.verification.sandbox_verification.run_verification_sandbox``, which raises
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 The problem's grader files and tests are read from ``problem_data_dir``, which must already
@@ -45,13 +45,13 @@ from nemo_gym.verification import (
 
 _CCC_DIR = Path(__file__).parent
 _RUNNER = _CCC_DIR / "sandbox" / RUNNER_FILE
-# The evaluator the NeMo Skills path runs, uploaded under the same name so the runner can import it.
+# The evaluator, uploaded under the same name so the runner can import it.
 _HARNESS_FILES = ("ccc_eval.py",)
 DEFAULT_WORK_DIR = "/tmp/ccc_verify"
 
 
 class CCCSandboxConfig(SandboxVerificationConfig):
-    """Sandbox settings for compiling and running submissions; used only when ``sandbox_provider`` is set."""
+    """Sandbox settings for compiling and running submissions."""
 
     # Read-only per-problem metadata inside the sandbox, laid out by split_problem_metadata.py.
     problem_data_dir: str = "/data/ccc"

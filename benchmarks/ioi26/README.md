@@ -36,33 +36,22 @@ Emitted by `competitive_coding_challenges`:
   `total.{score,max_score}` plus per-subtask `{score, max_score}`.
 - Plus the standard pass@k/accuracy stats from `compute_pass_majority_metrics`.
 
-## Sandbox prerequisite (local)
+## Sandbox
 
-The CCC server compiles and runs candidate solutions inside the NeMo Skills
-sandbox over HTTP. Bring one up locally before running the benchmark.
-
-There is no published image — build it from the NeMo-Skills repo:
+The CCC server compiles and runs every submission in a fresh sandbox from a Gym sandbox provider;
+nothing runs on the server's host. Build the image, split this benchmark's metadata into one file per
+problem, and write a provider config that mounts it, as
+[the CCC README](../../resources_servers/competitive_coding_challenges/README.md#sandbox) describes.
+After `gym eval prepare --benchmark ioi26`:
 
 ```bash
-git clone --depth 1 https://github.com/NVIDIA-NeMo/Skills.git /tmp/NeMo-Skills \
-  && docker build -t nemo-skills-sandbox --build-arg GITHUB_CI=1 \
-       -f /tmp/NeMo-Skills/dockerfiles/Dockerfile.sandbox /tmp/NeMo-Skills \
-  && docker run --rm -p 6000:6000 -v /tmp:/tmp nemo-skills-sandbox
+export CCC_SANDBOX_IMAGE=<registry>/ccc-verifier:<tag>
+python -m resources_servers.competitive_coding_challenges.split_problem_metadata \
+    benchmarks/ioi26/data/ioi26_metadata.json benchmarks/ioi26/data/problems
 ```
 
-- `--build-arg GITHUB_CI=1` skips the image's SciCode test-data download from
-  Google Drive. CCC does not use that file, and the download fails when the
-  file's Drive quota is used up.
-- `-v /tmp:/tmp` lets the sandbox see the solutions CCC writes to `shared_dir`
-  (default `/tmp`). Without it nothing compiles: each compile stops with
-  `CCC_WORK_DIR_NOT_VISIBLE_TO_SANDBOX`, and `/verify` excludes the sample from
-  scoring (`mask_sample: true`, `failure_kind: provider_unavailable`). If you
-  set `CCC_SHARED_TEMP_DIR`, mount that directory at the same path instead.
-
-CCC defaults to `http://127.0.0.1:6000/execute`; override with
-`NEMO_SKILLS_SANDBOX_HOST` / `NEMO_SKILLS_SANDBOX_PORT` if the sandbox is
-elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
-`nemo_gym_rollouts(with_sandbox=True)` — separate path, not covered here.
+Then mount `benchmarks/ioi26/data/problems` read-only at `/data/ccc`, for example with the CCC README's
+`ccc_docker.yaml` (`<problem_dir>` set to the absolute path of `benchmarks/ioi26/data/problems`).
 
 ## Running
 
@@ -71,6 +60,7 @@ gym eval prepare --benchmark ioi26
 
 gym env start \
     --benchmark ioi26 \
+    --config ccc_docker.yaml \
     --model-type vllm_model
 
 gym eval run --no-serve \

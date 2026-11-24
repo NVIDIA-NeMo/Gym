@@ -54,18 +54,45 @@ from resources_servers.competitive_coding_challenges.app import (
 from resources_servers.competitive_coding_challenges.ccc_eval import GRADED_ANSWER_KEY
 
 
+_SANDBOX_CONFIG = {
+    "sandbox_provider": "sandbox",
+    "sandbox_config": {"image": "ccc-verifier:test", "resources": {"cpu": 8}},
+}
+
+
 def _make_server(**config_overrides) -> CompetitiveCodingChallengesResourcesServer:
     config = CompetitiveCodingChallengesResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="competitive_coding_challenges",
-        **config_overrides,
+        **{**_SANDBOX_CONFIG, **config_overrides},
     )
-    return CompetitiveCodingChallengesResourcesServer(
+    server = CompetitiveCodingChallengesResourcesServer(
         config=config,
         server_client=MagicMock(spec=ServerClient),
     )
+    # Skip global-config resolution: the `local` provider exists, so setup_webserver's startup check passes.
+    server._sandbox_target = ({"local": {}}, {"nemo_gym_server": "competitive_coding_challenges"})
+    return server
+
+
+def _grade_with(evaluator: MagicMock, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Return ``evaluator.eval_single``'s result from verify()'s sandbox call, as the in-sandbox evaluator would."""
+    evaluator.load_metadata = AsyncMock()
+    evaluator.config = {
+        "test_batch_size": 4,
+        "time_scale": 2.0,
+        "run_all_tests": False,
+        "grade_all_subtasks": False,
+        "partial_credit": False,
+    }
+
+    async def _evaluate(entry, **kwargs):
+        return await evaluator.eval_single(entry)
+
+    monkeypatch.setattr(ccc_app, "evaluate_in_sandbox", _evaluate)
+    return evaluator
 
 
 def _make_verify_request(
@@ -118,7 +145,7 @@ def server() -> CompetitiveCodingChallengesResourcesServer:
 
 def test_sanity(server: CompetitiveCodingChallengesResourcesServer) -> None:
     assert server.config.name == "competitive_coding_challenges"
-    assert server.config.local_compile_dir == "/tmp/nemo-gym-compile"
+    assert server.config.sandbox_provider == "sandbox"
 
 
 def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChallengesResourcesServer) -> None:
@@ -130,8 +157,6 @@ def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChalleng
             "test_file": server.config.test_file,
             "test_batch_size": server.config.test_batch_size,
             "time_scale": server.config.time_scale,
-            "shared_dir": server.config.shared_dir,
-            "local_compile_dir": server.config.local_compile_dir,
             "run_all_tests": False,
             "grade_all_subtasks": False,
             "partial_credit": False,
@@ -140,19 +165,6 @@ def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChalleng
     )
     assert app is not None
     assert server._evaluator is evaluator_cls.return_value
-
-
-def test_setup_webserver_warns_when_shared_dir_is_tmp(
-    server: CompetitiveCodingChallengesResourcesServer, caplog: pytest.LogCaptureFixture
-) -> None:
-    with (
-        caplog.at_level("WARNING", logger="resources_servers.competitive_coding_challenges.app"),
-        patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator"),
-    ):
-        server.setup_webserver()
-
-    assert "CCC shared_dir is /tmp" in caplog.text
-    assert "Set CCC_SHARED_TEMP_DIR to a path mounted into both containers" in caplog.text
 
 
 def test_setup_webserver_resolves_a_benchmark_test_file_from_the_gym_root(
@@ -181,17 +193,9 @@ def test_setup_webserver_keeps_a_test_file_found_from_the_server_dir(
     assert evaluator_cls.call_args.kwargs["config"]["test_file"] == "data/test_metadata.jsonl"
 
 
-def test_setup_webserver_allows_disabling_local_compile_staging() -> None:
-    server = _make_server(local_compile_dir=None)
-    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
-        server.setup_webserver()
-
-    assert evaluator_cls.call_args.kwargs["config"]["local_compile_dir"] is None
-
-
 @pytest.mark.asyncio
 async def test_verify_passes_competition_context_and_defaults_name(
-    server: CompetitiveCodingChallengesResourcesServer,
+    server: CompetitiveCodingChallengesResourcesServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request = _make_verify_request()
     evaluator = MagicMock()
@@ -217,7 +221,7 @@ async def test_verify_passes_competition_context_and_defaults_name(
             }
         }
     }
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
     response = await server.verify(request)
 
@@ -232,11 +236,12 @@ async def test_verify_passes_competition_context_and_defaults_name(
             "generation": "```cpp\nint main() { return 0; }\n```",
         }
     )
-    evaluator.get_problem_metadata.assert_called_once_with("prob-1", "comp-1")
+    # Once to find the problem before any sandbox starts, once for the subtask's points.
+    assert [c.args for c in evaluator.get_problem_metadata.call_args_list] == [("prob-1", "comp-1")] * 2
 
 
 @pytest.mark.asyncio
-async def test_verify_partial_subtask_score_returns_zero_reward() -> None:
+async def test_verify_partial_subtask_score_returns_zero_reward(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _make_server()
     request = _make_verify_request(subtask="sub1")
     evaluator = MagicMock()
@@ -259,18 +264,19 @@ async def test_verify_partial_subtask_score_returns_zero_reward() -> None:
             }
         }
     }
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
     response = await server.verify(request)
 
     assert response.reward == 0.0
     assert response.mask_sample is False
     assert response.failure_kind is None
-    evaluator.get_problem_metadata.assert_called_once_with("prob-1", "comp-1")
+    # Once to find the problem before any sandbox starts, once for the subtask's points.
+    assert [c.args for c in evaluator.get_problem_metadata.call_args_list] == [("prob-1", "comp-1")] * 2
 
 
 @pytest.mark.asyncio
-async def test_verify_full_problem_reward_requires_all_subtasks() -> None:
+async def test_verify_full_problem_reward_requires_all_subtasks(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _make_server()
     request = _make_verify_request(subtask=None)
     evaluator = MagicMock()
@@ -294,7 +300,7 @@ async def test_verify_full_problem_reward_requires_all_subtasks() -> None:
             "sub2": {"score": 7.0, "aggregation": "min", "test_names": ["t2"]},
         }
     }
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
     response = await server.verify(request)
 
@@ -321,7 +327,7 @@ def test_setup_webserver_passes_scoring_flags(grade_all_subtasks: bool, partial_
 
 
 @pytest.mark.asyncio
-async def test_verify_fraction_reward_counts_unique_passed_tests() -> None:
+async def test_verify_fraction_reward_counts_unique_passed_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _make_server(reward_mode="fraction")
     request = _make_verify_request(subtask=None)
     evaluator = MagicMock()
@@ -344,7 +350,7 @@ async def test_verify_fraction_reward_counts_unique_passed_tests() -> None:
             }
         }
     )
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
     response = await server.verify(request)
 
@@ -353,12 +359,12 @@ async def test_verify_fraction_reward_counts_unique_passed_tests() -> None:
 
 @pytest.mark.asyncio
 async def test_verify_returns_error_details_when_evaluator_fails(
-    server: CompetitiveCodingChallengesResourcesServer,
+    server: CompetitiveCodingChallengesResourcesServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     request = _make_verify_request()
     evaluator = MagicMock()
     evaluator.eval_single = AsyncMock(side_effect=RuntimeError("boom"))
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
     response = await server.verify(request)
 
@@ -370,12 +376,12 @@ async def test_verify_returns_error_details_when_evaluator_fails(
 
 
 @pytest.mark.asyncio
-async def test_verify_emits_the_extracted_code_that_aggregation_reads() -> None:
+async def test_verify_emits_the_extracted_code_that_aggregation_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     # compute_metrics counts a missing `extracted_code` as no_answer, so verify must emit it for submitted code.
     server = _make_server()
     evaluator = MagicMock()
     evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
     response = await server.verify(_make_verify_request())
 
@@ -385,12 +391,12 @@ async def test_verify_emits_the_extracted_code_that_aggregation_reads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_overwrites_extracted_code_already_on_the_request() -> None:
+async def test_verify_overwrites_extracted_code_already_on_the_request(monkeypatch: pytest.MonkeyPatch) -> None:
     # The request model allows extra fields; one carrying `extracted_code` must not collide with the computed value.
     server = _make_server()
     evaluator = MagicMock()
     evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
     request = CompetitiveCodingChallengesVerifyRequest.model_validate(
         {**_make_verify_request().model_dump(), "extracted_code": "stale"}
     )
@@ -401,11 +407,11 @@ async def test_verify_overwrites_extracted_code_already_on_the_request() -> None
 
 
 @pytest.mark.asyncio
-async def test_verify_reports_an_empty_answer_as_no_answer() -> None:
+async def test_verify_reports_an_empty_answer_as_no_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _make_server()
     evaluator = MagicMock()
     evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
     response = await server.verify(_make_verify_request(text=""))
 
@@ -414,11 +420,11 @@ async def test_verify_reports_an_empty_answer_as_no_answer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_reports_an_empty_code_block_as_no_answer() -> None:
+async def test_verify_reports_an_empty_code_block_as_no_answer(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _make_server()
     evaluator = MagicMock()
     evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
     response = await server.verify(_make_verify_request(text="Here it is:\n```cpp\n  \n```"))
 
@@ -427,7 +433,7 @@ async def test_verify_reports_an_empty_code_block_as_no_answer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_votes_on_the_answer_the_evaluator_graded() -> None:
+async def test_verify_votes_on_the_answer_the_evaluator_graded(monkeypatch: pytest.MonkeyPatch) -> None:
     # SIMULATION problems grade the last ```txt block; voting on a ```cpp block or the whole text would split
     # identical answers wrapped in different explanations (review on #5336).
     server = _make_server()
@@ -435,7 +441,7 @@ async def test_verify_votes_on_the_answer_the_evaluator_graded() -> None:
     evaluator.eval_single = AsyncMock(
         side_effect=lambda _entry: {"test_case_results": {}, GRADED_ANSWER_KEY: "MOVE\n"}
     )
-    server._evaluator = evaluator
+    server._evaluator = _grade_with(evaluator, monkeypatch)
     texts = ["First idea.\n```txt\nMOVE\n```", "Another explanation.\n```txt\nMOVE\n```"]
 
     responses = [(await server.verify(_make_verify_request(text=text))).model_dump() for text in texts]
@@ -445,42 +451,25 @@ async def test_verify_votes_on_the_answer_the_evaluator_graded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_scores_generated_text_that_cannot_be_encoded() -> None:
-    # A lone surrogate in the model's code comes from the model, so masking it would remove its penalty.
+async def test_verify_scores_generated_text_that_cannot_be_encoded(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A lone surrogate in the model's code comes from the model, so masking it would remove its penalty. The
+    # sandbox runner reports it as a result with no passing test (see test_sandbox_evaluator.py).
     server = _make_server()
     evaluator = MagicMock()
-    evaluator.eval_single = AsyncMock(side_effect=lambda _entry: "\ud800".encode("utf-8"))
-    server._evaluator = evaluator
+    evaluator.eval_single = AsyncMock(
+        return_value={"test_case_results": {}, "error": "'utf-8' codec can't encode character: surrogates not allowed"}
+    )
+    evaluator.get_problem_metadata.return_value = {
+        "subtasks": {"samples": {"score": 1.0, "aggregation": "min", "test_names": ["t1"]}}
+    }
+    server._evaluator = _grade_with(evaluator, monkeypatch)
 
-    response = await server.verify(_make_verify_request())
+    response = await server.verify(_make_verify_request(text="```cpp\n\ud800\n```"))
 
     assert response.reward == 0.0
     assert response.mask_sample is False
     assert response.failure_kind is None
     assert "surrogates not allowed" in response.details["error"]
-
-
-@pytest.mark.asyncio
-async def test_verify_masks_a_sandbox_infra_error() -> None:
-    server = _make_server()
-    evaluator = MagicMock()
-    evaluator.eval_single = AsyncMock(
-        return_value={
-            "test_case_results": {"samples": {"score": 0.0, "outputs": [{"compile_success": False, "score": 0.0}]}},
-            "infra_error": "sandbox cannot see the shared work dir",
-        }
-    )
-    evaluator.get_problem_metadata.return_value = {
-        "subtasks": {"samples": {"score": 1.0, "aggregation": "min", "test_names": ["t1"]}}
-    }
-    server._evaluator = evaluator
-
-    response = await server.verify(_make_verify_request())
-
-    assert response.reward == 0.0
-    assert response.mask_sample is True
-    assert response.failure_kind == "provider_unavailable"
-    assert response.failure_reason == "sandbox cannot see the shared work dir"
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +665,7 @@ class TestGetKeyMetrics:
 
 
 class TestSandboxPath:
-    """verify() wiring for sandbox_provider; the sandbox path itself is covered in test_sandbox_evaluator.py."""
+    """verify() wiring for the sandbox; the sandbox path itself is covered in test_sandbox_evaluator.py."""
 
     _EVALUATOR_CONFIG = {
         "test_batch_size": 4,
@@ -687,43 +676,49 @@ class TestSandboxPath:
     }
 
     def _sandbox_server(self) -> CompetitiveCodingChallengesResourcesServer:
-        server = _make_server(
-            sandbox_provider="sandbox",
-            sandbox_config={"image": "ccc-verifier:test", "resources": {"cpu": 8}},
-            test_batch_size=4,
-        )
-        # Skip global-config resolution; evaluate_in_sandbox is replaced in these tests.
-        server._sandbox_target = ({"local": {}}, {"nemo_gym_server": "competitive_coding_challenges"})
+        server = _make_server()
         evaluator = MagicMock()
         evaluator.load_metadata = AsyncMock()
         evaluator.config = {**self._EVALUATOR_CONFIG, "test_file": "metadata.json"}
         server._evaluator = evaluator
         return server
 
+    @pytest.mark.parametrize("overrides", [{}, {"sandbox_provider": None}], ids=["missing", "null"])
+    def test_a_config_without_a_sandbox_provider_is_rejected(self, overrides) -> None:
+        # There is no other place to grade, so a config without a provider must not start.
+        config = {"host": "0.0.0.0", "port": 8080, "entrypoint": "", "name": "competitive_coding_challenges"}
+        with pytest.raises(ValueError):
+            CompetitiveCodingChallengesResourcesServerConfig(
+                **config, sandbox_config=_SANDBOX_CONFIG["sandbox_config"], **overrides
+            )
+
     def test_sandbox_provider_requires_image(self) -> None:
         with pytest.raises(ValueError, match="sandbox_config.image is required"):
-            _make_server(sandbox_provider="sandbox")
+            _make_server(sandbox_config={"resources": {"cpu": 8}})
 
     def test_sandbox_provider_requires_cpu(self) -> None:
         with pytest.raises(ValueError, match="sandbox_config.resources.cpu is required"):
-            _make_server(sandbox_provider="sandbox", sandbox_config={"image": "x"}, test_batch_size=4)
+            _make_server(sandbox_config={"image": "x"})
 
     def test_setup_fails_for_an_unknown_sandbox_provider(self, monkeypatch) -> None:
-        # verify() would otherwise score every sample 0.0 unmasked: the error is not a SandboxVerificationError.
+        # verify() would otherwise mask every sample as a verifier error.
         monkeypatch.setattr(ccc_app, "get_global_config_dict", lambda: {})
-        server = _make_server(
-            sandbox_provider={"opensandboxx": {}},
-            sandbox_config={"image": "x", "resources": {"cpu": 8}},
-            test_batch_size=4,
-        )
+        server = _make_server(sandbox_provider={"opensandboxx": {}})
+        server._sandbox_target = None
         with pytest.raises(ValueError, match="Unknown sandbox provider"):
+            server.setup_webserver()
+
+    def test_setup_fails_without_a_provider_config(self, monkeypatch) -> None:
+        # The shipped config names `sandbox`; without a provider config that binds it, the server must not start.
+        monkeypatch.setattr(ccc_app, "get_global_config_dict", lambda: {})
+        server = _make_server()
+        server._sandbox_target = None
+        with pytest.raises(ValueError, match="'sandbox' is not defined in the merged config"):
             server.setup_webserver()
 
     def test_test_batch_size_must_fit_the_sandbox_cpus(self) -> None:
         with pytest.raises(ValueError, match="must not exceed sandbox_config.resources.cpu"):
-            _make_server(
-                sandbox_provider="sandbox", sandbox_config={"image": "x", "resources": {"cpu": 4}}, test_batch_size=32
-            )
+            _make_server(sandbox_config={"image": "x", "resources": {"cpu": 4}}, test_batch_size=32)
 
     async def test_sandbox_results_are_scored(self, monkeypatch) -> None:
         calls = []

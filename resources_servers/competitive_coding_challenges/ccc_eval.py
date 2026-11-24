@@ -14,6 +14,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, is_dataclass
+from typing import Protocol
 from uuid import uuid4
 
 
@@ -94,77 +95,25 @@ def jdump(obj, f, mode="w", indent=None, default=str):
             handle.write("\n")
 
 
-class LocalSandbox:
-    def __init__(
-        self,
-        host: str = os.getenv("NEMO_SKILLS_SANDBOX_HOST", "127.0.0.1"),
-        port: str = os.getenv("NEMO_SKILLS_SANDBOX_PORT", "6000"),
-    ):
-        # Lazy: ccc_eval.py is also uploaded into the sandbox image, which has only the standard library.
-        import httpx
+class ShellSandbox(Protocol):
+    """Runs one shell command for the evaluator, the way the NeMo Skills sandbox's ``execute_shell`` does.
 
-        self.host = host
-        self.port = port
-        self.http_session = httpx.AsyncClient(
-            limits=httpx.Limits(max_keepalive_connections=2048, max_connections=2048),
-        )
-
-    @property
-    def url(self) -> str:
-        return f"http://{self.host}:{self.port}/execute"
-
-    async def close(self):
-        await self.http_session.aclose()
+    ``sandbox/sandbox_runner.py`` supplies ``ProcessSandbox``, which runs inside the grading sandbox. Returns the
+    result dict (``process_status``, ``stdout``, ``stderr``) and a session id, always ``None`` here.
+    """
 
     async def execute_code(
         self,
         generated_code: str,
         std_input: str = "",
-        language: str = "ipython",
+        language: str = "shell",
         timeout: float = 10.0,
         max_output_characters: int = 1000,
-        session_id=None,
-        traceback_verbosity="plain",
-    ):
-        import httpx
+        session_id: object = None,
+        traceback_verbosity: str = "plain",
+    ) -> tuple[dict[str, str], None]: ...
 
-        if session_id is not None:
-            raise RuntimeError("Stateful execution is not supported by this sandbox client.")
-
-        request = {
-            "generated_code": generated_code,
-            "std_input": std_input,
-            "timeout": timeout,
-            "language": language,
-            "max_output_characters": max_output_characters,
-            "traceback_verbosity": traceback_verbosity.capitalize(),
-        }
-        try:
-            response = await self.http_session.post(
-                url=self.url,
-                content=json.dumps(request),
-                timeout=timeout + 5.0,
-                headers={"Content-Type": "application/json"},
-            )
-            if response.status_code == 502:
-                raise httpx.TimeoutException("502 error")
-            try:
-                output = response.json()
-            except json.JSONDecodeError:
-                output = {"process_status": "error", "stdout": "", "stderr": "Unknown error"}
-        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-            # The request never reached the sandbox, so the result says nothing about the code.
-            output = {
-                "process_status": "timeout",
-                "stdout": "",
-                "stderr": f"{type(e).__name__}: {e}\n",
-                "sandbox_unreachable": True,
-            }
-        except httpx.TimeoutException:
-            output = {"process_status": "timeout", "stdout": "", "stderr": "Client timed out\n"}
-        except httpx.TransportError as e:
-            output = {"process_status": "timeout", "stdout": "", "stderr": f"{type(e).__name__}: {e}\n"}
-        return output, None
+    async def close(self) -> None: ...
 
 
 @nested_dataclass(kw_only=True)
@@ -175,7 +124,6 @@ class CCCEvaluatorConfig(BaseEvaluatorConfig):
     time_scale: float = 2.0
     overwrite: bool = False
     shared_dir: str = "/tmp"
-    local_compile_dir: str | None = "/tmp/nemo-gym-compile"
     run_all_tests: bool = False
     # Grade every subtask of the row's problem, not only the row's own subtask, as NeMo Skills does.
     grade_all_subtasks: bool = False
@@ -189,7 +137,7 @@ _test_loop_tls = threading.local()
 _test_sandbox_tls = threading.local()
 
 
-def _exec_sync(tls: threading.local, sandbox: LocalSandbox, cmd: str, *, language: str = "shell", timeout: int = 120):
+def _exec_sync(tls: threading.local, sandbox: ShellSandbox, cmd: str, *, language: str = "shell", timeout: int = 120):
     loop = getattr(tls, "loop", None)
     if loop is None or loop.is_closed():
         loop = asyncio.new_event_loop()
@@ -197,50 +145,13 @@ def _exec_sync(tls: threading.local, sandbox: LocalSandbox, cmd: str, *, languag
     return loop.run_until_complete(sandbox.execute_code(cmd, language=language, timeout=timeout))[0]
 
 
-# Printed, as the whole stdout, by a guard that runs before compile.sh.
-WORK_DIR_NOT_VISIBLE = "CCC_WORK_DIR_NOT_VISIBLE_TO_SANDBOX"
 # Key under which eval_single returns the answer it graded (the extracted code block, before includes).
 GRADED_ANSWER_KEY = "graded_answer"
 
-
-def _require_visible(work_dir: str, script: str) -> str:
-    """Shell guard: stop before ``script`` runs if the sandbox cannot see ``work_dir``."""
-    return f"[ -f {shlex.quote(os.path.join(work_dir, script))} ] || {{ echo {WORK_DIR_NOT_VISIBLE}; exit 3; }}"
+SandboxFactory = Callable[[], ShellSandbox]
 
 
-def sandbox_unreachable_error(result: dict) -> str | None:
-    """Why a sandbox call never reached the sandbox, or None. No code ran, so the solution cannot have caused it."""
-    if result.get("sandbox_unreachable"):
-        return f"NeMo Skills sandbox unreachable: {result.get('stderr', '').strip()}"
-    return None
-
-
-def compile_infra_error(compile_result: dict) -> str | None:
-    """Why a compile failed for a reason outside the solution, or None.
-
-    The marker counts only here: compile.sh comes from the problem metadata and compiles without running the
-    solution, and compilers print diagnostics to stderr, so the solution cannot make it the whole stdout. run.sh
-    runs the solution, so nothing it prints or returns is trusted.
-    """
-    unreachable = sandbox_unreachable_error(compile_result)
-    if unreachable:
-        return unreachable
-    if (
-        compile_result.get("process_status") != "completed"
-        and compile_result.get("stdout", "").strip() == WORK_DIR_NOT_VISIBLE
-    ):
-        return (
-            "NeMo Skills sandbox cannot see the shared work directory; mount shared_dir into the sandbox at the "
-            "same path (see 'Sandbox prerequisite' in resources_servers/competitive_coding_challenges/README.md)"
-        )
-    return None
-
-
-# Anything with LocalSandbox's async execute_code(); sandbox/sandbox_runner.py supplies a local-process one.
-SandboxFactory = Callable[[], LocalSandbox]
-
-
-def _get_thread_test_sandbox(sandbox_factory: SandboxFactory = LocalSandbox) -> LocalSandbox:
+def _get_thread_test_sandbox(sandbox_factory: SandboxFactory) -> ShellSandbox:
     sandbox = getattr(_test_sandbox_tls, "sandbox", None)
     if sandbox is None or getattr(_test_sandbox_tls, "factory", None) is not sandbox_factory:
         sandbox = sandbox_factory()
@@ -251,81 +162,17 @@ def _get_thread_test_sandbox(sandbox_factory: SandboxFactory = LocalSandbox) -> 
 
 def _compile_in_sandbox(
     tls: threading.local,
-    sandbox: LocalSandbox,
+    sandbox: ShellSandbox,
     work_dir: str,
-    local_compile_dir: str | None,
     *,
     timeout: int = 120,
     ignore_failure: bool = False,
 ) -> dict:
-    """Compile in node-local storage and publish the result to ``work_dir``.
-
-    ``work_dir`` remains on shared storage so a later sandbox request can run on
-    any node. When ``local_compile_dir`` is configured, the compiler only works
-    in a request-unique directory below that node-local root. The completed tree
-    is copied back once after compilation.
-    """
-    quoted_work_dir = shlex.quote(work_dir)
-    if not local_compile_dir:
-        command = f"cd {quoted_work_dir} && ./compile.sh"
-    else:
-        local_work_dir = os.path.join(local_compile_dir, os.path.basename(work_dir.rstrip(os.sep)))
-        quoted_local_work_dir = shlex.quote(local_work_dir)
-        command = f"""
-shared_work_dir={quoted_work_dir}
-local_work_dir={quoted_local_work_dir}
-cleanup_local_compile_dir() {{
-  rm -rf -- "$local_work_dir"
-}}
-trap cleanup_local_compile_dir EXIT
-mkdir -p -- "$local_work_dir"
-cp -R -- "$shared_work_dir"/. "$local_work_dir"/
-cd "$local_work_dir"
-compile_status=0
-./compile.sh || compile_status=$?
-publish_status=0
-cp -R -- "$local_work_dir"/. "$shared_work_dir"/ || publish_status=$?
-if [ "$publish_status" -ne 0 ]; then
-  exit "$publish_status"
-fi
-exit "$compile_status"
-""".strip()
-
-    command = f"{_require_visible(work_dir, 'compile.sh')}\n{command}"
+    """Run ``compile.sh`` in ``work_dir``."""
+    command = f"cd {shlex.quote(work_dir)} && ./compile.sh"
     if ignore_failure:
         command = f"({command}) || true"
     return _exec_sync(tls, sandbox, command, language="shell", timeout=timeout)
-
-
-def wait_for_sandbox(sandbox: LocalSandbox, timeout: float = 240, poll: float = 1.0) -> None:
-    """Wait until the external NeMo Skills sandbox runs a shell command.
-
-    Connection errors are retried until ``timeout``: NeMo Skills' ``with_sandbox=True`` starts the sandbox next to
-    this server, so it may still be booting.
-    """
-    deadline = time.monotonic() + timeout
-    last_problem = "no probe completed"
-    warned = False
-    while time.monotonic() < deadline:
-        try:
-            resp = _exec_sync(_precompile_loop_tls, sandbox, "echo hello world", language="shell", timeout=10)
-            if resp.get("stdout", "").strip() == "hello world":
-                return
-            last_problem = f"process_status={resp.get('process_status')!r}, stderr={resp.get('stderr', '').strip()!r}"
-        except Exception as e:
-            last_problem = f"{type(e).__name__}: {e}"
-        if not warned:
-            warned = True
-            LOG.warning(
-                "NeMo Skills sandbox at %s is not ready (%s); waiting up to %ss.", sandbox.url, last_problem, timeout
-            )
-        time.sleep(poll)
-    raise RuntimeError(
-        f"NeMo Skills sandbox at {sandbox.url} did not run `echo hello world` within {timeout}s "
-        f"(last probe: {last_problem}). Start the sandbox first, see 'Sandbox prerequisite' in "
-        "resources_servers/competitive_coding_challenges/README.md, or set NEMO_SKILLS_SANDBOX_HOST and "
-        "NEMO_SKILLS_SANDBOX_PORT to a running one."
-    )
 
 
 def _safe_fs_name(text: str) -> str:
@@ -481,15 +328,13 @@ def _precompile_problem(
     grader_files,
     compile_code: str,
     run_code: str,
-    sandbox: LocalSandbox,
+    sandbox: ShellSandbox,
     shared_dir: str,
-    local_compile_dir: str | None,
     *,
-    sandbox_factory: SandboxFactory = LocalSandbox,
+    sandbox_factory: SandboxFactory,
 ) -> str:
     if getattr(sandbox, "_owner_tid", None) != threading.get_ident():
         sandbox = sandbox_factory()
-        wait_for_sandbox(sandbox)
         sandbox._owner_tid = threading.get_ident()
 
     pre_dir = f"{shared_dir}/ccc_pre_{_safe_fs_name(problem_key)}_{os.getpid()}"
@@ -513,7 +358,6 @@ def _precompile_problem(
         _precompile_loop_tls,
         sandbox,
         pre_dir,
-        local_compile_dir,
         timeout=120,
         ignore_failure=True,
     )
@@ -538,11 +382,10 @@ def _compile_solution_once(
     generated_code: str,
     precompiled_dir: str,
     shared_dir: str,
-    local_compile_dir: str | None,
     *,
-    sandbox_factory: SandboxFactory = LocalSandbox,
+    sandbox_factory: SandboxFactory,
 ) -> tuple[str, dict]:
-    """Compile one generated solution and publish a reusable shared artifact."""
+    """Compile one generated solution into its own directory, which every test run copies."""
     solution_dir = f"{shared_dir}/ccc_solution_{uuid4().hex}"
     try:
         os.makedirs(os.path.join(solution_dir, "graders"), exist_ok=True)
@@ -560,7 +403,6 @@ def _compile_solution_once(
             _test_loop_tls,
             sandbox,
             solution_dir,
-            local_compile_dir,
             timeout=120,
         )
         return solution_dir, compile_result
@@ -584,7 +426,7 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
         with open(os.path.join(unique_dir, "correct_output.txt"), "w", encoding="latin1") as f:
             f.write(task_args["test_output"])
 
-        sandbox = _get_thread_test_sandbox(task_args.get("sandbox_factory", LocalSandbox))
+        sandbox = _get_thread_test_sandbox(task_args["sandbox_factory"])
         run_timeout = max(30, int(30 * float(task_args.get("time_scale", 1.0))))
         run_start = time.monotonic()
         run_result = _exec_sync(
@@ -596,10 +438,6 @@ def run_test_case(task_args: dict, worker_id: int) -> dict:
         )
         result["run_stdout"] = run_result.get("stdout", "")
         result["run_stderr"] = run_result.get("stderr", "")
-        infra_error = sandbox_unreachable_error(run_result)
-        if infra_error:
-            result["infra_error"] = infra_error
-            return result
         result["run_time_s"] = time.monotonic() - run_start
         try:
             result["score"] = float(result["run_stdout"].strip())
@@ -654,8 +492,12 @@ def add_includes(code: str, problem_header_include: str | None = None, problem_i
 
 class CCCEvaluator(BaseEvaluator):
     def __init__(
-        self, config: dict, num_parallel_requests: int = 20, *, sandbox_factory: SandboxFactory = LocalSandbox
+        self, config: dict, num_parallel_requests: int = 20, *, sandbox_factory: SandboxFactory | None = None
     ):
+        """``sandbox_factory`` runs the evaluator's shell commands; without it only metadata loading and lookups work.
+
+        The Gym server builds it without one: tests run only inside the grading sandbox (sandbox/sandbox_runner.py).
+        """
         super().__init__(config, num_parallel_requests)
         self.eval_cfg = CCCEvaluatorConfig(_init_nested=True, **config)
         self.sandbox_factory = sandbox_factory
@@ -675,9 +517,11 @@ class CCCEvaluator(BaseEvaluator):
             if self.sandbox is not None:
                 return
 
+            if self.sandbox_factory is None:
+                raise RuntimeError("CCCEvaluator runs tests only inside the grading sandbox; pass sandbox_factory")
+
             def _setup():
                 sbox = self.sandbox_factory()
-                wait_for_sandbox(sbox)
                 sbox._owner_tid = threading.get_ident()
                 pool_local = ThreadPoolExecutor(max_workers=self.eval_cfg.test_batch_size)
                 return sbox, pool_local
@@ -748,7 +592,6 @@ class CCCEvaluator(BaseEvaluator):
             problem_metadata["run"],
             self.sandbox,
             self.eval_cfg.shared_dir,
-            self.eval_cfg.local_compile_dir,
             sandbox_factory=self.sandbox_factory,
         )
         self.precompiled_cache[cache_key] = {"grader": grader_dir}
@@ -809,7 +652,6 @@ class CCCEvaluator(BaseEvaluator):
             all_test_items = [(name, data) for name, data in all_test_items if name in target_tests]
         batch_size = self.eval_cfg.test_batch_size
         all_run_times: list[float] = []
-        run_infra_errors: list[str] = []
         for i in range(0, len(all_test_items), batch_size):
             candidate_batch = all_test_items[i : i + batch_size]
             batch = []
@@ -837,8 +679,6 @@ class CCCEvaluator(BaseEvaluator):
             for (test_name, _), result in zip(batch, results):
                 if "run_time_s" in result:
                     all_run_times.append(result["run_time_s"])
-                if result.get("infra_error"):
-                    run_infra_errors.append(result["infra_error"])
                 result["test_name"] = test_name
                 test_group = problem_metadata["all_tests"][test_name].get("group")
                 if test_group is not None:
@@ -873,15 +713,6 @@ class CCCEvaluator(BaseEvaluator):
             "total_test_execution_time_s": sum(all_run_times),
             "mean_test_execution_time_s": sum(all_run_times) / num_tests_run if num_tests_run else 0.0,
         }
-        # No solution code runs before the compile result, so its infra error always counts. Tests run
-        # concurrently, so one test's solution could crash the sandbox for the others: a run-stage infra error
-        # counts only when no test of this solution was measured. Count from all results, not `outputs`, which
-        # `min` aggregation trims after the first failure.
-        infra_error = compile_infra_error(compile_result)
-        if not infra_error and num_tests_run == 0 and run_infra_errors:
-            infra_error = run_infra_errors[0]
-        if infra_error:
-            details["infra_error"] = infra_error
         return details
 
     async def _evaluate_entry(self, entry: dict) -> dict:
@@ -911,7 +742,6 @@ class CCCEvaluator(BaseEvaluator):
             completion,
             pre_dir,
             self.eval_cfg.shared_dir,
-            self.eval_cfg.local_compile_dir,
             sandbox_factory=self.sandbox_factory,
         )
         try:

@@ -6,21 +6,21 @@ competitive_coding_challenges_resources_server:
       description: Execution of competitive programming competition questions
       value: Improve competitive coding capabilities on contest-style problems
       test_file: ${oc.env:CCC_TEST_FILE,data/test_metadata.jsonl}
-      test_batch_size: 32
+      # Tests of one submission run in parallel in its sandbox. Time limits are wall-clock, so this stays at
+      # about half of sandbox_config.resources.cpu: Communication tasks run a manager next to each submission.
+      test_batch_size: 4
       num_parallel_requests: 16
       time_scale: 2.0
-      shared_dir: ${oc.env:CCC_SHARED_TEMP_DIR,${oc.env:SHARED_TEMP_DIR,/tmp}}
-      local_compile_dir: ${oc.env:CCC_LOCAL_COMPILE_DIR,${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}}
       reward_mode: binary
       # Benchmarks set both to grade every subtask with partial credit, as IOI and NeMo Skills do.
       grade_all_subtasks: false
       partial_credit: false
-      # Set to `sandbox` (with a provider config such as
-      # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml) to compile and run each
-      # submission in a fresh sandbox instead of the NeMo Skills sandbox. num_parallel_requests then
-      # caps concurrent sandboxes, and test_batch_size must not exceed sandbox_config.resources.cpu.
-      # See the README ("Running in a provider sandbox") for a complete example config.
-      sandbox_provider: null
+      # Every submission compiles and runs in a fresh sandbox; nothing runs on the server's host. Pass a
+      # provider config that binds `sandbox`, such as
+      # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml, and set CCC_SANDBOX_IMAGE to an
+      # image built from sandbox/Dockerfile. num_parallel_requests caps concurrent sandboxes, and
+      # test_batch_size must not exceed sandbox_config.resources.cpu. See the README ("Sandbox").
+      sandbox_provider: sandbox
       sandbox_config:
         image: ${oc.env:CCC_SANDBOX_IMAGE,null}
         # Read-only problem data from split_problem_metadata.py, mounted or baked into the image.

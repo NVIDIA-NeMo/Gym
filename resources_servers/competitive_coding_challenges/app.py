@@ -18,14 +18,14 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import get_provider_class, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
@@ -109,11 +109,9 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
     # overridden from `run_grpo_nemo_gym.py` via Hydra CLI args instead of being
     # hard-coded in the server implementation.
     test_file: str = "data/test_metadata.jsonl"
-    test_batch_size: int = 32
+    test_batch_size: int = 4
     num_parallel_requests: int = 16
     time_scale: float = 2.0
-    shared_dir: str = "/tmp"
-    local_compile_dir: Optional[str] = "/tmp/nemo-gym-compile"
     reward_mode: Literal["binary", "fraction"] = "binary"
     # Grade every subtask of a row's problem, not only its own, as NeMo Skills does. Benchmarks turn it
     # on so their totals cover every subtask; the reward still uses only the row's own subtask.
@@ -121,22 +119,20 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
     # Score a `min` subtask as its lowest test score times its points, as IOI does, instead of
     # all-or-nothing. Grading of a subtask stops at the first test that settles its score either way.
     partial_credit: bool = False
-    # Compile and run each submission in a fresh provider sandbox instead of the NeMo Skills
-    # sandbox. Names a top-level sandbox block, such as `sandbox` from
+    # Every submission compiles and runs in a fresh sandbox from this provider; nothing runs on the server's host.
+    # Names a top-level sandbox block, such as `sandbox` from
     # nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or is an inline provider mapping.
-    # num_parallel_requests then caps concurrent sandboxes.
-    sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    # num_parallel_requests caps concurrent sandboxes.
+    sandbox_provider: str | dict[str, Any]
     sandbox_config: CCCSandboxConfig = Field(default_factory=CCCSandboxConfig)
 
     @model_validator(mode="after")
     def _check_sandbox_config(self) -> "CompetitiveCodingChallengesResourcesServerConfig":
-        if self.sandbox_provider is None:
-            return self
         if not self.sandbox_config.image:
-            raise ValueError("sandbox_config.image is required when sandbox_provider is set")
+            raise ValueError("sandbox_config.image is required: build it from sandbox/Dockerfile (see the README)")
         cpu = self.sandbox_config.resources.cpu
         if cpu is None:
-            raise ValueError("sandbox_config.resources.cpu is required when sandbox_provider is set")
+            raise ValueError("sandbox_config.resources.cpu is required")
         if self.test_batch_size > cpu:
             # Time limits are wall-clock, so oversubscribed tests turn into spurious time-limit failures.
             raise ValueError(
@@ -365,18 +361,9 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        use_sandbox = self.config.sandbox_provider is not None
-        if use_sandbox:
-            # Fail at startup: verify() scores any error other than SandboxVerificationError as 0.0, so a
-            # missing or unknown provider would otherwise zero every sample without masking it.
-            provider, _ = self._resolve_sandbox_target()
-            get_provider_class(next(iter(provider)))
-
-        if not use_sandbox and os.path.abspath(self.config.shared_dir) == "/tmp":
-            LOG.warning(
-                "CCC shared_dir is /tmp. If the resources server and sandbox run in separate containers, "
-                "/tmp may not be visible to both. Set CCC_SHARED_TEMP_DIR to a path mounted into both containers."
-            )
+        # Fail at startup: a missing or unknown provider would otherwise mask every sample as a verifier error.
+        provider, _ = self._resolve_sandbox_target()
+        get_provider_class(next(iter(provider)))
 
         print(
             f"Initializing CompetitiveCodingChallenges evaluator with config: {self.config.model_dump_json(indent=2)}"
@@ -384,13 +371,12 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
         print(f"CCC_LOG_JSONL_PATH: {LOG_JSONL_PATH}")
 
+        # Loads metadata for scoring only; built without a sandbox_factory, so it cannot run a test here.
         self._evaluator = CCCEvaluator(
             config={
                 "test_file": _resolve_test_file(self.config.test_file),
                 "test_batch_size": self.config.test_batch_size,
                 "time_scale": self.config.time_scale,
-                "shared_dir": self.config.shared_dir,
-                "local_compile_dir": self.config.local_compile_dir,
                 "run_all_tests": self.config.reward_mode == "fraction",
                 "grade_all_subtasks": self.config.grade_all_subtasks,
                 "partial_credit": self.config.partial_credit,
@@ -403,9 +389,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         @app.on_event("startup")
         async def _eager_init():
             print("CCC: pre-loading metadata (~27 GB, ~46s) before first request...")
-            # With sandbox_provider, execution happens in per-verification sandboxes and the
-            # server only needs metadata for scoring.
-            await (evaluator.load_metadata() if use_sandbox else evaluator._initialize_runtime())
+            await evaluator.load_metadata()
             print("CCC: metadata loaded, server ready.")
 
         return app
@@ -434,13 +418,8 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             }
             if payload.get("total_time") is not None:
                 evaluation_entry["total_time"] = payload["total_time"]
-            if self.config.sandbox_provider is None:
-                details = await self._evaluator.eval_single(evaluation_entry)
-            else:
-                details = await self._evaluate_in_sandbox(evaluation_entry)
+            details = await self._evaluate_in_sandbox(evaluation_entry)
             reward = self._compute_reward(body, details)
-            if details.get("infra_error"):
-                failure_kind, failure_reason = PROVIDER_UNAVAILABLE, details["infra_error"]
         except SandboxVerificationError as e:
             # The environment failed, not the policy: exclude the sample rather than score it.
             LOG.warning("competitive_coding_challenges sandbox verification failed (%s): %s", e.failure_kind, e)

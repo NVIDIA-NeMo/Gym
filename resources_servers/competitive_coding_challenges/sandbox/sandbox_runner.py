@@ -17,10 +17,10 @@
 
 Usage: ``python sandbox_runner.py REQUEST_JSON RESULT_JSON``
 
-Grades one submission with the unchanged ``CCCEvaluator``; only the executor differs.
-``ProcessSandbox`` runs each shell command the way the NeMo Skills sandbox's
-``execute_shell`` does, which is what the competitive-coding baselines were scored with.
-The per-test time and memory limits come from each problem's ``run.sh``.
+Grades one submission with ``CCCEvaluator``. ``ProcessSandbox`` runs each of its shell
+commands the way the NeMo Skills sandbox's ``execute_shell`` does, which is what the
+competitive-coding baselines were scored with. The per-test time and memory limits come
+from each problem's ``run.sh``.
 """
 
 import asyncio
@@ -42,9 +42,9 @@ _MEM_LIMIT_KB = 50 * 1024 * 1024
 
 
 class ProcessSandbox:
-    """Local-process stand-in for the NeMo Skills sandbox client used by ``ccc_eval``.
+    """``ccc_eval``'s shell executor inside the grading sandbox.
 
-    Like Skills' ``execute_shell``: runs ``/bin/bash`` on a script file in a new session
+    Like the NeMo Skills sandbox's ``execute_shell``: runs ``/bin/bash`` on a script file in a new session
     with the memory rlimits above, reports ``completed`` only for exit code 0, and cuts
     stdout/stderr at ``max_output_characters``. On a timeout it returns without waiting for
     processes that left bash's process group, such as a submission under run.sh's ``timeout``.
@@ -122,13 +122,15 @@ def main(request_path: Path, result_path: Path) -> None:
             **request["config"],
             "test_file": request["problem_file"],
             "shared_dir": str(work_dir),
-            # The sandbox disk is already local; no staging directory is needed.
-            "local_compile_dir": None,
         },
         sandbox_factory=ProcessSandbox,
     )
     try:
         result = asyncio.run(evaluator.eval_single(request["entry"]))
+    except UnicodeEncodeError as e:
+        # The submission cannot be written as UTF-8 (a lone surrogate). That is the model's output, so it is scored
+        # with no passing test rather than failing the runner, which the server would mask.
+        result = {"test_case_results": {}, "error": str(e)}
     finally:
         if evaluator.pool is not None:
             evaluator.pool.shutdown(wait=True)
