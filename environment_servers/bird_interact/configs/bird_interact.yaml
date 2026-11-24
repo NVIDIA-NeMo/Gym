@@ -40,7 +40,7 @@ bird_interact_agent:
       # submission (the ADK's own agent stops at 60 model calls in an episode).
       max_steps: 40
       # One file, one taskset for each mode. The two entries share a name, so they share the file's metrics.
-      # The Environment Server's task_data.py validates the rows.
+      # The Environment Server's task_input.py validates the rows.
       datasets:
         - name: example
           type: example
