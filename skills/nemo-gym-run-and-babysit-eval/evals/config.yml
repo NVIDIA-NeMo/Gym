@@ -4,9 +4,6 @@ harbor:
   n_attempts: 1
   n_concurrent: 4
   timeout_multiplier: 0.3
-  resources:
-    cpus: 1
-    memory_mb: 2048
 skill_workspace:
   mode: isolated
 grading:
