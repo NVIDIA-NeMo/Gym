@@ -352,6 +352,48 @@ async def test_a_verify_transport_masked_result_is_reverified_and_settled_at_com
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
 
 
+async def test_the_pass_exports_its_metrics_after_it_settles_and_releases_the_run(
+    tmp_path, verifier, monkeypatch
+) -> None:
+    """The export can wait seconds on a slow exporter, so it never holds back settlement or the run lock."""
+    from contextlib import contextmanager
+
+    import nemo_gym.eval.rollout_reverification as reverification
+    from nemo_gym.telemetry import concurrency
+
+    events = []
+    settle, lock = reverification.settle_rejudgments, reverification.run_lock
+
+    def recording_settle(*args, **kwargs):
+        settled = settle(*args, **kwargs)
+        events.append("settled")
+        return settled
+
+    @contextmanager
+    def recording_lock(*args, **kwargs):
+        with lock(*args, **kwargs):
+            yield
+        events.append("released")
+
+    limit = concurrency._LimitKey("rollout_driver", "reverifications", None)
+    limits_at_export = []
+
+    def recording_export() -> None:
+        events.append("exported")
+        limits_at_export.append(concurrency._limit_states().get(limit))
+
+    monkeypatch.setattr(reverification, "settle_rejudgments", recording_settle)
+    monkeypatch.setattr(reverification, "run_lock", recording_lock)
+    monkeypatch.setattr(reverification, "flush_observed_metrics", recording_export)
+    output = _run(tmp_path, [verify_transport_masked()])
+
+    run_config = {"output_jsonl_fpath": str(output), "num_samples_in_parallel": 1}
+    assert await rejudge_saved_judge_failures(run_config, output) == 1
+
+    assert events == ["settled", "released", "exported"]
+    assert [state.limit if state else None for state in limits_at_export] == [1], "the limit still reports"
+
+
 async def test_a_masked_verify_http_error_is_settled_by_verify_alone(tmp_path, verifier) -> None:
     output = _run(tmp_path, [verify_http_error_masked()])
     (identity,) = due_judge_failures(output)

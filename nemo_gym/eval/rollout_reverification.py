@@ -1833,11 +1833,20 @@ class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         # With settle_into_source the source run lock is held from binding through judging to settlement, so a second
         # re-judgment of the same run is refused (non-blocking flock) instead of judging against the same budget.
-        async with observe_event_loop("driver"):
-            with ExitStack() as settle_lock:
-                return await self._run_from_config(config, settle_lock)
+        # ``limits`` keeps the pass's limit reporting until it has been exported once, after settlement and the run
+        # lock, since an export can wait seconds on a slow exporter. Releasing the last observer exports; beside another
+        # observer, such as the head server's, flush_observed_metrics does.
+        limits: List[MeteredSemaphore] = []
+        try:
+            async with observe_event_loop("driver"):
+                with ExitStack() as settle_lock:
+                    return await self._run_from_config(config, settle_lock, limits)
+        finally:
+            flush_observed_metrics()
 
-    async def _run_from_config(self, config: RolloutReverificationConfig, settle_lock: ExitStack) -> List[Dict]:
+    async def _run_from_config(
+        self, config: RolloutReverificationConfig, settle_lock: ExitStack, limits: List[MeteredSemaphore]
+    ) -> List[Dict]:
         # A separate output may reuse selected source answers. Updating a managed
         # run in place still needs the history-aware recovery follow-up.
         for name in (config.output_jsonl_fpath,):
@@ -2032,6 +2041,7 @@ class RolloutReverificationHelper(BaseModel):
             semaphore = MeteredSemaphore(
                 config.num_samples_in_parallel, component="rollout_driver", limit_name="reverifications"
             )
+            limits.append(semaphore)
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         run_labels = rollout_run_labels(payloads_to_reverify)
@@ -2129,8 +2139,6 @@ class RolloutReverificationHelper(BaseModel):
         finally:
             results_file.close()
             failures_file.close()
-            # The pass's limit stops reporting once the pass returns, which can be before the next periodic export.
-            flush_observed_metrics()
 
         # Read the full main jsonl (cached + newly re-verified successes) ONCE — the source of truth,
         # reused for both the rollouts export and aggregate metrics so the file is never re-read.
