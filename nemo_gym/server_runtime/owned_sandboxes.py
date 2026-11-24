@@ -686,7 +686,6 @@ class OwnedSandboxes:
         # Everything that can refuse the config runs before the provider exists, so a refusal leaks no provider.
         provider_config = resolve_provider_config(reference, global_config)
         concurrency = resolve_provider_owner_concurrency(reference, global_config)
-        default_metadata = resolve_provider_metadata(reference, global_config)
         suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
         server_name = _path_component(f"{config.name}{suffix}", "server name")
         if "local" in provider_config:
