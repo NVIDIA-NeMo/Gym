@@ -37,6 +37,7 @@ import logging
 import re
 from asyncio import sleep
 from dataclasses import dataclass, field, fields
+from functools import cache
 from time import monotonic, perf_counter, time
 from typing import Any, NamedTuple, TypedDict
 
@@ -84,6 +85,21 @@ from responses_api_agents.simple_agent.app import (
 
 
 LOG = logging.getLogger(__name__)
+
+RELAY_DEPRECATION_WARNING = (
+    "DEPRECATED: this agent's turn outside an agent session (its legacy /run, which the legacy_agent relay calls) "
+    "will be removed after the Environment Server migration. Use the agent_arena Environment Server instead: "
+    "benchmarks/agent_arena/config.yaml for config_legacy_agent.yaml, and agentic_turn_simulation.yaml for "
+    "agentic_turn_simulation_legacy_agent.yaml. Same rows, agent and scoring; see "
+    "environment_servers/agent_arena/README.md (Migrating from the legacy_agent relay)."
+)
+
+
+@cache
+def _warn_relay_deprecated_once() -> None:
+    # Once per process, at the first turn outside a session.
+    LOG.warning(RELAY_DEPRECATION_WARNING)
+
 
 # How the row's agent calls tools (/harness): function calls, or Cline's XML in the reply text.
 NATIVE = "native"
@@ -355,7 +371,10 @@ class AgenticTurnSimulationAgent(SimpleAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
         """simple_agent's session, refused (422) without a direct HTTP grant: the row's tools are reached only through
-        it, so every turn of such a session would fail."""
+        it, so every turn of such a session would fail. Refused too with ``execute_tools=false``: this agent plays the
+        whole turn, so it has no unresolved calls to return, and it would run the tools anyway."""
+        if not self.config.execute_tools:
+            raise AgentSeedRejectedError("agentic_turn_simulation_agent requires execute_tools=true")
         state = self._new_session_state(body)
         if state.tool_access is None:
             raise AgentSeedRejectedError(
@@ -405,12 +424,14 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         collect_trajectory: bool = False,
         activation: Activation | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
-        # An agent session calls the row's tools only through its direct HTTP grant (the seed refuses one without).
-        # The legacy /run calls the configured resources server with the cookies its seed set. `activation` is not
-        # used: a restored turn starts over from its input. simple_agent's run() and responses() refuse
-        # execute_tools=false.
+        # An agent session calls the row's tools only through its direct HTTP grant (the seed refuses one without, and
+        # refuses execute_tools=false). The legacy /run calls the configured resources server with the cookies its seed
+        # set; simple_agent's run() refuses execute_tools=false. `activation` is not used: a restored turn starts over
+        # from its input.
         if in_session and tool_access is None:
             raise RuntimeError("agentic_turn_simulation_agent needs a direct HTTP tool access in an agent session")
+        if not in_session:
+            _warn_relay_deprecated_once()
         cfg = self.config
         body = self._strip_resource_only_metadata(body.model_copy(deep=True))
         metadata = dict(body.metadata or {})

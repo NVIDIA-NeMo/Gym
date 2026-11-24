@@ -25,8 +25,10 @@ from resources_servers.agentic_turn_simulation.schemas import PROTOCOL_METADATA_
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
 from resources_servers.agentic_turn_simulation.tests import support as env
 from responses_api_agents.agentic_turn_simulation_agent.app import (
+    RELAY_DEPRECATION_WARNING,
     AgenticTurnSimulationAgent,
     AgenticTurnSimulationAgentConfig,
+    _warn_relay_deprecated_once,
     context_overflow_room,
 )
 from responses_api_agents.simple_agent.app import ModelServerRef, ResourcesServerRef, SimpleAgentRunRequest
@@ -1033,6 +1035,21 @@ class TestAgentSessions:
         assert reply.status_code == 422 and "direct HTTP tool access" in reply.text
         agent.server_client.post.assert_not_awaited()
 
+    def test_a_seed_that_disables_tool_execution_is_refused(self) -> None:
+        # The agent plays the whole turn, so it has no unresolved calls to hand back: it would run the tools anyway.
+        agent, _ = _agent(execute_tools=False)
+        client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
+            task_id=TaskId(taskset="agent_arena", task_id="0"),
+            tool_accesses=[_grant()],
+        )
+        with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=AssertionError("no tool call"))):
+            reply = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+        assert reply.status_code == 422 and "execute_tools=true" in reply.text
+        agent.server_client.post.assert_not_awaited()
+
     def test_an_environment_server_episode_through_the_endpoints(self) -> None:
         # Under the rollout's prefix, with observability on, as the agent_arena server calls it.
         agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("done")), observability=True)
@@ -1112,6 +1129,26 @@ class TestUnsupportedEpisodes:
         with pytest.raises(ValueError, match="execute_tools=false"):
             await agent.run(SimpleNamespace(cookies={}), SimpleAgentRunRequest(responses_create_params=_body()))
         agent.server_client.post.assert_not_awaited()
+
+
+class TestRelayDeprecation:
+    """A turn outside an agent session is the legacy_agent relay's: it warns once, naming the replacement configs."""
+
+    async def test_a_turn_outside_a_session_warns_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        _warn_relay_deprecated_once.cache_clear()
+        agent, _ = _agent(_model(_msg("Done.")), _model(_msg("Done.")))
+        with caplog.at_level("WARNING", logger=MOD):
+            await _episode(agent)
+            await _episode(agent)
+        warnings = [r.getMessage() for r in caplog.records if r.getMessage() == RELAY_DEPRECATION_WARNING]
+        assert len(warnings) == 1 and "benchmarks/agent_arena/config.yaml" in warnings[0]
+
+    async def test_a_session_turn_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
+        _warn_relay_deprecated_once.cache_clear()
+        agent, _ = _agent(_model(_msg("done")))
+        with caplog.at_level("WARNING", logger=MOD):
+            await _granted_episode(agent, GrantScript())
+        assert RELAY_DEPRECATION_WARNING not in [r.getMessage() for r in caplog.records]
 
 
 CLINE_STOP_TOOLS = ["ask_followup_question", "attempt_completion", "plan_mode_respond"]

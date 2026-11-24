@@ -15,7 +15,8 @@ runs the agent and scores the turn. No Resources Server takes part in the episod
    metadata name the row's stop tools and tool-call protocol (`STOP_TOOLS_METADATA_KEY`, `PROTOCOL_METADATA_KEY`),
    which the agent takes out before it calls the model. Then it closes the agent's session.
 4. Scores the turn in process (`TurnSimulation.verify`: code gates, judges, masking). The result has the fields the
-   ``agentic_turn_simulation`` resources server's ``/verify`` returns, so the metrics are the same.
+   ``agentic_turn_simulation`` resources server's ``/verify`` returns, so the metrics are the same. With
+   ``skip_verification`` (this server's, else the agent's), the turn gets the fixed reward instead, unscored.
 
 The tool simulator, judge and scoring settings are those of the resources server the config names
 (``resources_server``): overrides of that server's settings apply here too, and ``gym eval reverify`` through that
@@ -24,7 +25,8 @@ server scores a saved row with the same settings. The episode makes no call to i
 No operation runs in a sandbox: a call is answered from the session's model of the files or by a model call, so
 ``sandbox_provider`` is ``local`` and no episode starts one. Checkpointing is restart-only (the base default): after a
 crash the row starts over from its input. With several workers, a tool call reaches the worker that runs its episode
-(the base's session routing).
+(the base's session routing). Obstacle injection is refused at startup: a call reaches this server alone, without the
+reply it belongs to, which an obstacle's decision needs.
 """
 
 import asyncio
@@ -34,10 +36,11 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from omegaconf import OmegaConf
-from pydantic import ConfigDict, Field, PositiveFloat, PrivateAttr, ValidationError
+from pydantic import ConfigDict, Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError
 
 from environment_servers.agent_arena.toolset import TurnToolset
 from nemo_gym.agents import (
@@ -58,6 +61,8 @@ from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SKIP_VERIFICATION_KEY_NAME,
+    SKIP_VERIFICATION_REWARD_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
@@ -100,7 +105,13 @@ from nemo_gym.server_runtime import (
     is_handled_episode_failure,
     is_retryable_dependency_error,
 )
-from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY
+from nemo_gym.trajectory import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
+    AgentObservationBundle,
+    TrajectoryRecord,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_turn_simulation.schemas import (
     PROTOCOL_METADATA_KEY,
@@ -124,6 +135,10 @@ class AgentArenaEnvironmentServerConfig(BaseEnvironmentServerWithToolsConfig):
     # The limits of the legacy_agent relay this server replaces.
     default_episode_timeout_seconds: PositiveFloat | None = 21600
     cleanup_timeout_seconds: PositiveFloat = 180
+    # Unset, each falls back to the bound agent's own setting, which also carries the global flag, so a run moved off
+    # the legacy_agent relay keeps skipping as its agent's /run did (as in single_agent_turn).
+    skip_verification: bool | None = None
+    skip_verification_reward: float | None = None
 
 
 @dataclass
@@ -147,7 +162,17 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        self._turns = TurnSimulation(self._settings(), self.server_client)
+        settings = self._settings()
+        if settings.obstacle_injection.enabled:
+            # An obstacle's decision needs the turn's replies as the policy produced them (a stop tool beside a call,
+            # sibling calls of one reply), and a call reaches this server alone. Refused at startup rather than
+            # deciding obstacles from a history that would contradict the final scoring.
+            raise ValueError(
+                "agent_arena does not support obstacle_injection: run obstacle injection through the legacy_agent "
+                "relay (benchmarks/agent_arena/config_legacy_agent.yaml or "
+                "resources_servers/agentic_turn_simulation/configs/agentic_turn_simulation_legacy_agent.yaml)"
+            )
+        self._turns = TurnSimulation(settings, self.server_client)
 
     def _caller_sampling(self) -> AbstractContextManager[None]:
         """The sampling of this server's own model calls (the tool simulator and the judges) in a training run.
@@ -232,6 +257,29 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
                 evidence={"partial_response": response, "agent_observations": observations, "trajectory": trajectory},
             )
 
+        skipped_reward = self._skipped_verification_reward()
+        if skipped_reward is not None:
+            # No scoring: the flag marks the fixed reward, so anything reading the result can tell it from a measured
+            # one (as in single_agent_turn).
+            result = SingleAgentTurnResult.model_validate(
+                self._verify_body(request, response) | {"reward": skipped_reward, "verification_skipped": True}
+            )
+        else:
+            result = await self._verify(request, response, session, observations, trajectory)
+        return SingleAgentTurnResponse(
+            episode_id=request.episode_id,
+            task_id=request.task.task_id,
+            result=result.model_copy(update={NG_AGENT_OBSERVATIONS_KEY: observations, NG_TRAJECTORY_KEY: trajectory}),
+        )
+
+    async def _verify(
+        self,
+        request: SingleAgentTurnRequest,
+        response: NeMoGymResponse,
+        session: TurnSession,
+        observations: AgentObservationBundle | None,
+        trajectory: TrajectoryRecord | None,
+    ) -> SingleAgentTurnResult:
         body = AgenticTurnSimulationVerifyRequest.model_validate(
             self._verify_body(request, response) | verification_failure_fields(response)
         )
@@ -251,12 +299,26 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
                 agent_observations=observations,
                 trajectory=trajectory,
             ) from error
-        result = SingleAgentTurnResult.model_validate(verified.model_dump(mode="json"))
-        return SingleAgentTurnResponse(
-            episode_id=request.episode_id,
-            task_id=request.task.task_id,
-            result=result.model_copy(update={NG_AGENT_OBSERVATIONS_KEY: observations, NG_TRAJECTORY_KEY: trajectory}),
+        return SingleAgentTurnResult.model_validate(verified.model_dump(mode="json"))
+
+    def _skipped_verification_reward(self) -> float | None:
+        """The fixed reward that replaces scoring, or None to score the turn.
+
+        This server's own setting wins; otherwise the bound agent's applies (the global flag is placed on the agents).
+        The agent's raw values are parsed as the agent's own config parses them, so a string "false" stays false.
+        """
+        agent_config = get_first_server_config_dict(
+            self.server_client.global_config_dict, self.config.agent_server.name
         )
+        skip = self.config.skip_verification
+        if skip is None:
+            skip = TypeAdapter(bool).validate_python(agent_config.get(SKIP_VERIFICATION_KEY_NAME, False))
+        if not skip:
+            return None
+        reward = self.config.skip_verification_reward
+        if reward is None:
+            reward = TypeAdapter(float).validate_python(agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0))
+        return reward
 
     async def _seed_agent(
         self, request: SingleAgentTurnRequest, agent: _AgentSession, tool_accesses: list[ToolAccess]
@@ -270,6 +332,8 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses,
+                    # The agent validates or refuses the typed task's context; None is left out of the seed.
+                    agent_context=request.task.task_input.agent_seed_context,
                 ).model_dump(mode="json"),
             )
             await raise_boundary_failure(http)
@@ -349,9 +413,13 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
     # --- metrics --------------------------------------------------------------------------------------------
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """The resources server's metrics, computed here, plus the performance metrics of the whole batch."""
+        """The resources server's metrics, computed here, plus the performance metrics of the whole batch. With
+        verification skipped, only the performance metrics: a fixed reward is no measured turn score."""
+        skipped = self._skipped_verification_reward() is not None
 
         def aggregate() -> AggregateMetrics:
+            if skipped:
+                return add_perf_metrics(AggregateMetrics(), body.verify_responses)
             # The resources server is sent the rows without their performance summary, which is reduced once below.
             rows = [{key: value for key, value in row.items() if key != "ng_perf"} for row in body.verify_responses]
             metrics = compute_aggregate_metrics(
@@ -368,9 +436,18 @@ class AgentArenaEnvironmentServer(BaseEnvironmentServerWithTools[SingleAgentTurn
         """An episode request gets the episode reply; a flat row (a benchmark's) gets a flat result, as
         single_agent_turn_legacy answers it."""
         is_episode_request = "episode_id" in row and "task" in row
-        request = (
-            SingleAgentTurnRequest.model_validate(row) if is_episode_request else self._episode_request_from_row(row)
-        )
+        try:
+            request = (
+                SingleAgentTurnRequest.model_validate(row)
+                if is_episode_request
+                else self._episode_request_from_row(row)
+            )
+        except ValidationError as error:
+            # A request that fails the episode request model gets a terminal 422, as on the episode request route,
+            # instead of a 500 that a caller retries.
+            raise RequestValidationError(error.errors(include_url=False)) from None
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
         response = await self.run_request(request)
         return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
 

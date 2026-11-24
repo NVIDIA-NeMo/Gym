@@ -194,7 +194,7 @@ def _client(app: Any) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://env")
 
 
-def _global_config(**settings: Any) -> Any:
+def _global_config(agent: dict[str, Any] | None = None, **settings: Any) -> Any:
     return OmegaConf.create(
         {
             RESOURCES: {
@@ -202,17 +202,21 @@ def _global_config(**settings: Any) -> Any:
                     "agentic_turn_simulation": {"entrypoint": "app.py", "domain": "agent", **SETTINGS, **settings}
                 }
             },
-            AGENT: {"responses_api_agents": {"agentic_turn_simulation_agent": {"entrypoint": "app.py"}}},
+            AGENT: {
+                "responses_api_agents": {"agentic_turn_simulation_agent": {"entrypoint": "app.py", **(agent or {})}}
+            },
         }
     )
 
 
-def _server(**settings: Any) -> AgentArenaEnvironmentServer:
+def _server(
+    *, agent: dict[str, Any] | None = None, config: dict[str, Any] | None = None, **settings: Any
+) -> AgentArenaEnvironmentServer:
     client = MagicMock(spec=ServerClient)
-    client.global_config_dict = _global_config(**settings)
+    client.global_config_dict = _global_config(agent, **settings)
     client._resolve_base_url = lambda name: f"http://{name}:8000/"
     client.post = AsyncMock(side_effect=AssertionError("unexpected call"))
-    config = AgentArenaEnvironmentServerConfig(
+    server_config = AgentArenaEnvironmentServerConfig(
         name=ENVIRONMENT,
         host="0.0.0.0",
         port=8000,
@@ -220,8 +224,9 @@ def _server(**settings: Any) -> AgentArenaEnvironmentServer:
         agent_server=AgentServerRef(type="responses_api_agents", name=AGENT),
         resources_server=ResourcesServerRef(type="resources_servers", name=RESOURCES),
         sandbox_provider={"local": {}},
+        **(config or {}),
     )
-    return AgentArenaEnvironmentServer(config=config, server_client=client)
+    return AgentArenaEnvironmentServer(config=server_config, server_client=client)
 
 
 def _world(server: AgentArenaEnvironmentServer, **agent: Any) -> World:
@@ -381,6 +386,66 @@ class TestEpisode:
 
         assert (response.failure.stage, response.failure.terminal) == ("agent", False)
         assert server._open_episodes == {}
+
+    @pytest.mark.parametrize("context", [None, {"agent": {"values": {"tag": "x"}}}])
+    async def test_the_tasks_agent_context_reaches_the_seed(self, context: dict[str, Any] | None) -> None:
+        # The agent validates or refuses it; a row without one seeds as before. It reaches neither the prompt nor the
+        # scoring.
+        server = _server()
+        world = _world(server)
+        await server.run_request(_request(ROW | ({"agent_context": context} if context else {})))
+        seed = world.calls[0]
+        assert seed["url_path"] == "/v1/agent_sessions"
+        if context is None:
+            assert "agent_context" not in seed["json"]
+        else:
+            assert seed["json"]["agent_context"]["values"] == {"tag": "x"}
+        assert "agent_context" not in world.calls[1]["json"] and "agent_context" not in world.metadata
+
+    def test_obstacle_injection_is_refused_at_startup(self) -> None:
+        # An obstacle's decision needs the reply a call belongs to, which a call through the grant does not carry.
+        with pytest.raises(ValueError, match="does not support obstacle_injection"):
+            _server(obstacle_injection={"enabled": True})
+
+
+class TestSkipVerification:
+    """With skip_verification (this server's, else the agent's, which carries the global flag), the turn gets the fixed
+    reward, unscored, as the relay's /run returned it."""
+
+    async def test_the_turn_gets_the_fixed_reward_without_scoring(self) -> None:
+        server = _server(agent={"skip_verification": True, "skip_verification_reward": 0.25})
+        world = _world(server, judge=[AssertionError("the judge is not called")])
+
+        response = await server.run_request(_request())
+
+        assert response.failure is None, response.failure
+        result = response.result.model_dump(mode="json")
+        assert (result["reward"], result["verification_skipped"]) == (0.25, True)
+        assert "judge_0" not in [call["server_name"] for call in world.calls]
+        assert _paths(world)[-1] == (AGENT, "/v1/agent_sessions/close") and server._open_episodes == {}
+
+    @pytest.mark.parametrize(
+        ("agent", "config", "reward"),
+        [
+            ({}, {}, None),
+            ({"skip_verification": "false"}, {}, None),
+            ({"skip_verification": True}, {"skip_verification": False}, None),
+            ({"skip_verification": True}, {}, 0.0),
+            ({}, {"skip_verification": True, "skip_verification_reward": 0.5}, 0.5),
+        ],
+    )
+    def test_the_decision(self, agent: dict[str, Any], config: dict[str, Any], reward: float | None) -> None:
+        assert _server(agent=agent, config=config)._skipped_verification_reward() == reward
+
+    async def test_the_metrics_are_the_performance_metrics_only(self) -> None:
+        # A fixed reward is no measured turn score.
+        body = AggregateMetricsRequest(
+            verify_responses=[
+                {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 0.25, "verification_skipped": True}
+            ]
+        )
+        metrics = (await _server(agent={"skip_verification": True}).aggregate_metrics(body)).model_dump(mode="json")
+        assert "turn_score" not in (metrics.get("key_metrics") or {})
 
 
 class TestToolRoutes:
@@ -577,6 +642,27 @@ class TestFlatRows:
         assert (result["_ng_failure_stage"], result["_ng_failure_terminal"]) == ("verification", False)
         assert result["agent_ref"] == {"name": AGENT} and "reward" not in result
 
-    async def test_a_row_of_another_agent_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="does not match configured agent server"):
-            await _server().run_legacy(self._row() | {"agent_ref": {"name": "other"}})
+    @pytest.mark.parametrize(
+        ("change", "detail"),
+        [
+            ({"agent_ref": {"name": "other"}}, "does not match configured agent server"),
+            ({"_ng_attempt_index": -1}, "Invalid episode attempt"),
+            ({"_ng_skip_token_capture": "yes"}, ""),
+        ],
+    )
+    async def test_an_invalid_row_is_a_terminal_422(self, change: dict[str, Any], detail: str) -> None:
+        # Not a 500 that a caller retries; nothing is called.
+        server = _server()
+        async with _client(server.setup_webserver()) as client:
+            reply = await client.post("/run", json=self._row() | change)
+        assert reply.status_code == 422 and detail in reply.text
+        server.server_client.post.assert_not_awaited()
+
+    async def test_an_invalid_typed_request_is_a_terminal_422(self) -> None:
+        server = _server()
+        typed = _request().model_dump(mode="json")
+        typed["task"]["task_input"]["responses_create_params"] = "not a prompt"
+        async with _client(server.setup_webserver()) as client:
+            reply = await client.post("/run", json=typed)
+        assert reply.status_code == 422
+        server.server_client.post.assert_not_awaited()
