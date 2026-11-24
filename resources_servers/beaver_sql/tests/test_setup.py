@@ -12,6 +12,7 @@ import pytest
 from resources_servers.beaver_sql import setup_beaver_mysql as setup
 from resources_servers.beaver_sql.setup_beaver_mysql import (
     BeaverDump,
+    MySqlDsnError,
     check_beaver_mysql,
     create_table_statements,
     dump_statements,
@@ -63,7 +64,7 @@ def test_parse_mysql_dsn() -> None:
         "database": "db",
     }
     assert parse_mysql_dsn("mysql://u@host") == {"user": "u", "password": "", "host": "host", "port": 3306}
-    with pytest.raises(ValueError, match="mysql://"):
+    with pytest.raises(MySqlDsnError, match="mysql://"):
         parse_mysql_dsn("postgresql://u@h/db")
 
 
@@ -73,22 +74,38 @@ def test_parse_mysql_dsn() -> None:
         "mysql://u:hunter2@h:3306",
         "mysql://u:hunter2%40x@h",
         "mysql://u:@h",
+        "mysql://u@x:hunter2@h",
         # Characters a URL can't hold unescaped, which make urlparse misread the password as a host or a fragment.
         "mysql://u:hunter2/x@h:3306",
         "mysql://u:hunter2#x@h",
         "mysql://u:hunter2?x@h",
+        # urlparse's own errors would quote these.
+        "mysql://u:hunter2／x@h",
+        "mysql://u:hunter2@[h",
     ],
 )
 def test_a_dsn_holding_a_password_is_refused_without_echoing_it(dsn) -> None:
-    with pytest.raises(ValueError, match="holds a password.*mysql_password") as error:
+    with pytest.raises(MySqlDsnError, match="holds a password.*mysql_password") as error:
         parse_mysql_dsn(dsn, "other")
-    assert "hunter2" not in str(error.value)
+    assert "hunter2" not in str(error.value) and error.value.__cause__ is None
 
 
-def test_a_bad_port_is_refused_without_echoing_it() -> None:
-    with pytest.raises(ValueError, match="port is not a number") as error:
-        parse_mysql_dsn("mysql://u@h:hunter2")
-    assert "hunter2" not in str(error.value)
+@pytest.mark.parametrize(
+    "dsn,message",
+    [
+        ("mysql://u@h:hunter2", "not a valid URL"),
+        ("mysql://u@[hunter2", "not a valid URL"),
+        ("mysql://u@h／hunter2", "not a valid URL"),
+        ("mysql:hunter2@h", "of the form"),
+        # A query or fragment could carry a password the driver never sees (and a run would record).
+        ("mysql://u@h/?password=hunter2", "no query or fragment"),
+        ("mysql://u@h/db#hunter2", "no query or fragment"),
+    ],
+)
+def test_a_malformed_dsn_is_refused_without_echoing_it(dsn, message) -> None:
+    with pytest.raises(MySqlDsnError, match=message) as error:
+        parse_mysql_dsn(dsn)
+    assert "hunter2" not in str(error.value) and error.value.__cause__ is None
 
 
 def test_dump_statements(tmp_path) -> None:
@@ -320,7 +337,7 @@ def test_a_password_in_either_dsn_is_refused_before_anything_changes(
     tmp_path, tiny, fake_mysql, admin, reader
 ) -> None:
     server = fake_mysql()
-    with pytest.raises(ValueError, match="holds a password"):
+    with pytest.raises(MySqlDsnError, match="holds a password"):
         ensure_beaver_mysql(tmp_path, ["tiny"], admin, reader)
     assert server.connects == [] and server.statements == []
 

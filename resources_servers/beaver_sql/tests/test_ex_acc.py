@@ -408,6 +408,28 @@ def test_cancelled_request_stops_its_query_before_releasing_the_slot(fake) -> No
     asyncio.run(scenario())
 
 
+def test_a_stop_that_cannot_start_still_holds_the_slot_until_the_query_ends(fake) -> None:
+    # Nothing can send KILL QUERY (the runner's stop threads are gone): the slot is held until the query's thread is
+    # done, within the grace period, rather than released at once.
+    server = fake({"STUCK": ("ignores kill", 0.8)})
+    runner = MySqlRunner("mysql://r@h", max_concurrency=1, timeout_s=0.2)
+    runner._executor.shutdown()
+    start = time.monotonic()
+    assert _run(runner, "STUCK").status == "timeout"
+    assert 101 in server.closed and time.monotonic() - start >= 0.7
+
+
+def test_a_stalled_stop_does_not_hold_the_slot_past_the_grace_period(fake, monkeypatch) -> None:
+    # KILL QUERY hangs (say, resolving the host); the slot comes back after stop_grace_s regardless.
+    fake({"STUCK": ("ignores kill", 3.0)})
+    runner = MySqlRunner("mysql://r@h", timeout_s=0.2)
+    runner.stop_grace_s = 0.5
+    monkeypatch.setattr(runner, "_kill", lambda connection_id, what: time.sleep(2.0))
+    start = time.monotonic()
+    assert _run(runner, "STUCK").status == "timeout"
+    assert time.monotonic() - start < 1.5
+
+
 @pytest.mark.parametrize("when", ["running, cancelled twice", "after the limit, while being stopped"])
 def test_a_cancellation_during_the_stop_does_not_release_the_slot_early(fake, when) -> None:
     # The server takes a second to stop the query; the request is cancelled meanwhile.

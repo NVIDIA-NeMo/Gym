@@ -96,8 +96,9 @@ existing user's password; it refuses a grader DSN that names its own (admin) use
 | `query_timeout_s` | `10.0` | BEAVER's limit; change it only on purpose |
 
 **Passwords never go in a DSN.** A run records its configuration, DSNs included, beside its rollouts (the identity file
-next to `rollouts_manifest.json`), so a DSN that holds a password is refused at startup. The passwords come from the
-environment, and Gym redacts credential-named settings such as `mysql_password` in everything a run saves:
+next to `rollouts_manifest.json`), so a DSN that holds a password, or any query or fragment, is refused at startup,
+with an error that doesn't quote it. The passwords come from the environment, and Gym redacts credential-named
+settings such as `mysql_password` in everything a run saves:
 
 ```bash
 export BEAVER_MYSQL_PASSWORD='<grader password>'

@@ -309,7 +309,8 @@ class TestStartup:
         from resources_servers.beaver_sql import setup_beaver_mysql
 
         monkeypatch.setattr(setup_beaver_mysql, "check_beaver_mysql", lambda *a, **k: None)
-        with pytest.raises(ValueError, match="holds a password") as error:
+        # Raised as is: a ValueError would come wrapped in pydantic's error, which prints the config holding the DSN.
+        with pytest.raises(setup_beaver_mysql.MySqlDsnError, match="holds a password") as error:
             BeaverSqlResourcesServer(
                 config=_config(mysql_dsn="mysql://r:hunter2@h:1"), server_client=MagicMock(spec=ServerClient)
             )

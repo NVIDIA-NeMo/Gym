@@ -77,6 +77,11 @@ def require_case_insensitive_names(cur) -> None:
 _DSN_PASSWORD = re.compile(r"^[^:/?#]*://[^/?#@:]*:[^@]*@")
 
 
+class MySqlDsnError(Exception):
+    """A MySQL DSN the grader refuses. Its message never quotes the DSN. Not a ``ValueError``, so pydantic doesn't wrap
+    it, at server startup, in an error that prints the config holding the DSN."""
+
+
 def parse_mysql_dsn(dsn: str, password: Optional[str] = None) -> Dict[str, object]:
     """``mysql://user@host:port[/database]`` and the user's password as ``mysql.connector.connect`` keyword arguments.
 
@@ -84,25 +89,36 @@ def parse_mysql_dsn(dsn: str, password: Optional[str] = None) -> Dict[str, objec
     that holds one is refused: a run records its DSN as a setting, and a password must never be in it. The database
     part is optional: the grader picks the database per query.
     """
-    parsed = urlparse(dsn)
-    if parsed.scheme != "mysql":
-        raise ValueError(f"expected a mysql:// DSN, got scheme {parsed.scheme!r}")
-    if parsed.password is not None or _DSN_PASSWORD.match(dsn):
-        raise ValueError(
-            "the MySQL DSN holds a password: leave it out of the DSN and set mysql_password (mysql_admin_password for "
-            "the admin DSN) instead, for example from ${oc.env:BEAVER_MYSQL_PASSWORD}"
-        )
+    holds_password = (
+        "the MySQL DSN holds a password: leave it out of the DSN and set mysql_password (mysql_admin_password for "
+        "the admin DSN) instead, for example from ${oc.env:BEAVER_MYSQL_PASSWORD}"
+    )
+    # Checked on the raw string first, and no parsing error is passed on: urlparse's own errors can quote the user
+    # info, password included.
+    if _DSN_PASSWORD.match(dsn):
+        raise MySqlDsnError(holds_password)
     try:
-        port = parsed.port or 3306
+        parsed = urlparse(dsn)
+        scheme, netloc, has_password = parsed.scheme, parsed.netloc, parsed.password is not None
+        username, hostname, path = parsed.username, parsed.hostname, parsed.path
+        extra = parsed.query or parsed.fragment
+        port = parsed.port
     except ValueError:
-        raise ValueError("the MySQL DSN's port is not a number") from None
+        raise MySqlDsnError("the MySQL DSN is not a valid URL of the form mysql://user@host:port") from None
+    if scheme != "mysql" or not netloc:
+        raise MySqlDsnError("expected a MySQL DSN of the form mysql://user@host:port")
+    if has_password:
+        raise MySqlDsnError(holds_password)
+    if extra:
+        # A query can carry a password too (`?password=...`), and the driver would ignore it here anyway.
+        raise MySqlDsnError("the MySQL DSN takes no query or fragment (mysql://user@host:port[/database])")
     params: Dict[str, object] = {
-        "user": unquote(parsed.username or ""),
+        "user": unquote(username or ""),
         "password": password or "",
-        "host": parsed.hostname or "127.0.0.1",
-        "port": port,
+        "host": hostname or "127.0.0.1",
+        "port": port or 3306,
     }
-    database = unquote(parsed.path.lstrip("/"))
+    database = unquote(path.lstrip("/"))
     if database:
         params["database"] = database
     return params

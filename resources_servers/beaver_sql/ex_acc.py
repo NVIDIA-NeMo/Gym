@@ -125,6 +125,7 @@ class _Attempt:
     released on the second."""
 
     notify: Callable[[], None] = lambda: None
+    notify_done: Callable[[], None] = lambda: None
     connection_id: Optional[int] = None
     outcome: Optional[QueryOutcome] = None
     unavailable: Optional[BaseException] = None
@@ -172,15 +173,18 @@ class MySqlRunner:
     async def run(self, db_id: str, sql: str) -> QueryOutcome:
         async with self._semaphore:
             loop = asyncio.get_running_loop()
-            finished = asyncio.Event()
+            finished, released = asyncio.Event(), asyncio.Event()
 
-            def notify() -> None:
-                try:
-                    loop.call_soon_threadsafe(finished.set)
-                except RuntimeError:
-                    pass  # the loop has closed: nobody is waiting
+            def setter(event: asyncio.Event) -> Callable[[], None]:
+                def notify() -> None:
+                    try:
+                        loop.call_soon_threadsafe(event.set)
+                    except RuntimeError:
+                        pass  # the loop has closed: nobody is waiting
 
-            attempt = _Attempt(notify=notify)
+                return notify
+
+            attempt = _Attempt(notify=setter(finished), notify_done=setter(released))
             threading.Thread(target=self._execute, args=(db_id, sql, attempt), daemon=True).start()
             try:
                 await asyncio.wait_for(finished.wait(), self.timeout_s)
@@ -189,12 +193,12 @@ class MySqlRunner:
             except asyncio.CancelledError:
                 # The request went away: stop the query before the slot is released.
                 attempt.cancelled.set()
-                await self._settle(attempt)
+                await self._settle(attempt, released)
                 raise
             timed_out = not attempt.finished.is_set()
             if timed_out:
                 attempt.cancelled.set()
-            stopped = await self._settle(attempt)
+            stopped = await self._settle(attempt, released)
             if timed_out:
                 if attempt.connection_id is None:
                     # Still connecting after the whole limit: the server is unreachable or overloaded, which says
@@ -221,28 +225,37 @@ class MySqlRunner:
             outcome.seconds = seconds
             return outcome
 
-    async def _settle(self, attempt: _Attempt) -> bool:
-        """Wait, up to ``stop_grace_s``, until the query's thread is done (its connection closed), stopping the query
-        first if it was given up on. Returns whether the thread was done in time.
+    async def _settle(self, attempt: _Attempt, released: asyncio.Event) -> bool:
+        """Hold the slot until the query's thread is done (its connection closed), for at most ``stop_grace_s``, and
+        stop the query meanwhile if it was given up on. Returns whether the thread was done in time.
 
-        A cancellation meanwhile doesn't cut the wait short: the slot stays held until the wait is over, and the
-        cancellation is raised then.
+        The time limit is kept here, on the event loop, so a stop that stalls (a ``KILL`` that can't connect) or fails
+        can't hold the slot longer. A cancellation meanwhile doesn't cut the wait short: it is raised once the wait is
+        over.
         """
         if attempt.done.is_set():
             return True
-        stopping = asyncio.get_running_loop().run_in_executor(self._executor, self._stop, attempt, self.stop_grace_s)
-        cancelled: Optional[asyncio.CancelledError] = None
-        while True:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.stop_grace_s
+        if attempt.cancelled.is_set():
             try:
-                stopped = await asyncio.shield(stopping)
-                break
-            except asyncio.CancelledError as e:
-                if stopping.done():
-                    raise
-                cancelled = e
+                stopping = loop.run_in_executor(self._executor, self._stop, attempt, self.stop_grace_s)
+                stopping.add_done_callback(lambda f: f.cancelled() or f.exception())
+            except RuntimeError as e:  # the executor has shut down: nothing can stop the query, so only wait
+                logger.debug("BEAVER stop not started: %s", e)
+        waiter = asyncio.ensure_future(released.wait())
+        cancelled: Optional[asyncio.CancelledError] = None
+        try:
+            while not attempt.done.is_set() and (remaining := deadline - loop.time()) > 0:
+                try:
+                    await asyncio.wait({waiter}, timeout=remaining)
+                except asyncio.CancelledError as e:
+                    cancelled = e
+        finally:
+            waiter.cancel()
         if cancelled is not None:
             raise cancelled
-        return stopped
+        return attempt.done.is_set()
 
     def _connect(self, database: str):
         import mysql.connector
@@ -313,10 +326,11 @@ class MySqlRunner:
                         pass
             finally:
                 attempt.done.set()
+                attempt.notify_done()
 
     def _stop(self, attempt: _Attempt, grace_s: float) -> bool:
-        """Wait for a query's thread to be done; return whether it was within ``grace_s``. While a query that was given
-        up on (``cancelled``) still runs, stop it on the server.
+        """Stop a query that was given up on (``cancelled``) while it still runs, for at most about ``grace_s``; return
+        whether its thread is done. Runs on the runner's own threads; the slot's wait doesn't depend on it.
 
         ``KILL QUERY`` sent just before the query starts would stop nothing, so it is repeated every second. Each attempt
         is bounded by ``_KILL_IO_TIMEOUT_S``. The grader's user may kill its own connections' queries without extra
