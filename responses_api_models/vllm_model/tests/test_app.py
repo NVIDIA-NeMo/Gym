@@ -118,6 +118,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentRunRequest,
 )
 from responses_api_models.vllm_model.app import (
+    EndpointBindingReleaseRequest,
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
@@ -907,6 +908,8 @@ class TestApp:
         route_around_failing_endpoints: bool = False,
         endpoint_failure_threshold: int = 3,
         endpoint_retry_after_s: float = 60.0,
+        endpoint_selection: str = "hash",
+        session_move_margin: int | None = None,
         forward_session_id_as_conversation_id: bool = False,
         session_key_headers: list[str] | None = None,
         return_token_id_information: bool = False,
@@ -928,6 +931,8 @@ class TestApp:
             route_around_failing_endpoints=route_around_failing_endpoints,
             endpoint_failure_threshold=endpoint_failure_threshold,
             endpoint_retry_after_s=endpoint_retry_after_s,
+            endpoint_selection=endpoint_selection,
+            session_move_margin=session_move_margin,
             forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
             session_key_headers=session_key_headers or [],
         )
@@ -2111,6 +2116,189 @@ class TestApp:
         server._note_endpoint_success(own)
         assert server._resolve_client(request) is own
         assert server._resolve_client(request) is own
+
+    def _resolve_rollout(self, server: VLLMModel, capture_key: str) -> NeMoGymAsyncOpenAI:
+        with rollout_context(capture_key):
+            return server._resolve_client(self._request_for_session("a-cookie-session"))
+
+    @staticmethod
+    def _session_counts(server: VLLMModel) -> list[int]:
+        return [server._endpoint_session_counts[client.base_url] for client in server._clients]
+
+    @staticmethod
+    async def _release(server: VLLMModel, capture_key: str) -> bool:
+        return (await server.release_endpoint_binding(EndpointBindingReleaseRequest(session_key=capture_key))).released
+
+    def test_least_sessions_sends_a_new_rollout_to_the_endpoint_with_fewest_sessions(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=False, endpoint_selection="least_sessions")
+        clients = server._clients
+
+        assert [self._resolve_rollout(server, f"task-{i}-0") for i in range(3)] == clients[:3]
+        assert self._resolve_rollout(server, "task-3-0") is clients[3]
+        # Every endpoint holds one rollout: the tie goes to the endpoint listed first.
+        assert self._resolve_rollout(server, "task-4-0") is clients[0]
+        assert self._session_counts(server) == [2, 1, 1, 1]
+
+    async def test_least_sessions_keeps_a_rollout_on_its_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=False, endpoint_selection="least_sessions")
+        for i in range(5):
+            self._resolve_rollout(server, f"task-{i}-0")
+        for i in range(1, 4):
+            assert await self._release(server, f"task-{i}-0")
+
+        assert self._session_counts(server) == [2, 0, 0, 0]
+        # Without session_move_margin a rollout stays where it started, however busy that endpoint is now.
+        assert {self._resolve_rollout(server, "task-4-0") for _ in range(8)} == {server._clients[0]}
+        assert self._session_counts(server) == [2, 0, 0, 0]
+
+    def test_a_released_session_no_longer_counts_against_its_endpoint(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch, endpoint_selection="least_sessions")
+        clients = [MagicMock(spec=NeMoGymAsyncOpenAI, base_url=f"http://engine-{i}/v1") for i in range(2)]
+        for client in clients:
+            client.create_chat_completion = AsyncMock(return_value=self._served_completion("served"))
+        server._clients = clients
+        http = TestClient(server.setup_webserver())
+        chat = {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]}
+
+        # The capture key in a call's /ng-rollout/ prefix, attempt suffix included, is the key its endpoint is
+        # bound under: the key a Harbor episode posts to the release route.
+        for capture_key in ("task-0-0-a2", "task-1-0"):
+            assert http.post(f"/ng-rollout/{capture_key}/v1/chat/completions", json=chat).status_code == 200
+        assert server._rollout_session_to_client == {"task-0-0-a2": clients[0], "task-1-0": clients[1]}
+
+        released = http.post("/endpoint_binding/release", json={"session_key": "task-0-0-a2"})
+
+        assert released.status_code == 200 and released.json() == {"released": True}
+        assert self._session_counts(server) == [0, 1]
+        assert "task-0-0-a2" not in server._rollout_session_to_client
+        assert http.post("/ng-rollout/task-2-0/v1/chat/completions", json=chat).status_code == 200
+        assert server._rollout_session_to_client["task-2-0"] is clients[0]
+        assert [client.create_chat_completion.await_count for client in clients] == [2, 1]
+        # Releasing the same key again finds nothing to release.
+        again = http.post("/endpoint_binding/release", json={"session_key": "task-0-0-a2"})
+        assert again.json() == {"released": False}
+        assert self._session_counts(server) == [1, 1]
+
+    async def test_release_in_hash_mode_only_drops_the_cached_assignment(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=False)
+        picked = self._resolve_rollout(server, "task-0-0")
+
+        assert await self._release(server, "task-0-0")
+
+        assert "task-0-0" not in server._session_id_to_client and not server._endpoint_session_counts
+        assert self._resolve_rollout(server, "task-0-0") is picked
+        assert not await self._release(server, "task-9-0")
+
+    async def test_least_sessions_logs_each_bind_and_release_with_the_counts(
+        self, monkeypatch: MonkeyPatch, caplog
+    ) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=False, endpoint_selection="least_sessions")
+        server._clients = server._clients[:2]
+        first, second = (client.base_url for client in server._clients)
+
+        with caplog.at_level(logging.DEBUG, logger="nemo_gym.vllm_model"):
+            self._resolve_rollout(server, "task-0-0")
+            self._resolve_rollout(server, "task-0-0")
+            await self._release(server, "task-0-0")
+            await self._release(server, "task-0-0")
+
+        # The second call keeps its binding and logs nothing; a release that finds no binding says so.
+        assert [record.getMessage() for record in caplog.records if record.name == "nemo_gym.vllm_model"] == [
+            f"rollout session task-0-0 bound to {first}; sessions per endpoint: {{'{first}': 1, '{second}': 0}}",
+            f"rollout session task-0-0 released from {first}; sessions per endpoint: {{'{first}': 0, '{second}': 0}}",
+            "release of session task-0-0: no endpoint is bound to it",
+        ]
+
+    async def test_session_move_margin_moves_a_session_off_a_much_busier_endpoint(
+        self, monkeypatch: MonkeyPatch, caplog
+    ) -> None:
+        server = self._setup_routing_server(
+            monkeypatch, route_around=False, endpoint_selection="least_sessions", session_move_margin=2
+        )
+        server._clients = server._clients[:2]
+        busy, idle = server._clients
+        # Rollouts alternate between the two endpoints: the even ones on `busy`, the odd ones on `idle`.
+        for i in range(6):
+            self._resolve_rollout(server, f"task-{i}-0")
+        for capture_key in ("task-1-0", "task-3-0"):
+            await self._release(server, capture_key)
+
+        # A gap of 2 is within the margin: the session stays.
+        assert self._session_counts(server) == [3, 1]
+        assert self._resolve_rollout(server, "task-0-0") is busy
+        await self._release(server, "task-5-0")
+        # A gap of 3 moves the session on its next call, and both counts follow it.
+        assert self._session_counts(server) == [3, 0]
+        with caplog.at_level(logging.INFO, logger="nemo_gym.vllm_model"):
+            assert self._resolve_rollout(server, "task-0-0") is idle
+        assert self._session_counts(server) == [2, 1]
+        assert [record.getMessage() for record in caplog.records if record.levelno == logging.INFO] == [
+            f"rollout session task-0-0 moves from {busy.base_url} (3 sessions) to {idle.base_url} (0 sessions): "
+            "more than session_move_margin=2 apart; it loses its prefix cache"
+        ]
+        assert self._resolve_rollout(server, "task-2-0") is busy
+
+    def test_least_sessions_skips_a_failed_endpoint_and_probes_it_with_a_new_session(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        clock = [1000.0]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.monotonic", lambda: clock[0])
+        server = self._setup_routing_server(
+            monkeypatch,
+            route_around=True,
+            endpoint_failure_threshold=1,
+            endpoint_retry_after_s=60.0,
+            endpoint_selection="least_sessions",
+        )
+        failed = server._clients[0]
+        assert self._resolve_rollout(server, "task-0-0") is failed
+        for i in range(1, 4):
+            self._resolve_rollout(server, f"task-{i}-0")
+        server._note_endpoint_failure(failed)
+
+        # The rollout on the failed endpoint moves on its next call, and stays where it moved.
+        moved = self._resolve_rollout(server, "task-0-0")
+        assert moved is not failed and self._resolve_rollout(server, "task-0-0") is moved
+        assert self._session_counts(server)[0] == 0
+        # The failed endpoint holds the fewest sessions, yet new rollouts avoid it until the retry interval is over.
+        clock[0] += 59.0
+        assert failed not in {self._resolve_rollout(server, f"task-{i}-0") for i in range(4, 7)}
+        clock[0] += 1.0
+        # Then one new rollout goes there, as the trial call, and the next one does not.
+        assert self._resolve_rollout(server, "task-7-0") is failed
+        assert self._resolve_rollout(server, "task-8-0") is not failed
+
+    def test_least_sessions_keeps_the_hash_for_calls_without_a_rollout(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_routing_server(monkeypatch, route_around=False, endpoint_selection="least_sessions")
+        hashed = self._hashed_client_idx("session-a", 4)
+        # Rollouts on the endpoints up to the hashed one, so the least-loaded endpoint is another one.
+        for i in range(hashed + 1):
+            self._resolve_rollout(server, f"task-{i}-0")
+        counts = self._session_counts(server)
+
+        picked = server._resolve_client(self._request_for_session("session-a"))
+
+        assert picked is server._clients[hashed]
+        # A session no release will end is not counted.
+        assert self._session_counts(server) == counts
+        assert "session-a" not in server._rollout_session_to_client
+
+    def test_least_sessions_refuses_several_workers(self, monkeypatch: MonkeyPatch) -> None:
+        least_sessions = self._setup_server(monkeypatch, endpoint_selection="least_sessions")
+
+        reason = least_sessions.multiple_workers_unsupported_reason()
+
+        assert reason is not None and "endpoint_selection=least_sessions" in reason
+        assert self._setup_server(monkeypatch).multiple_workers_unsupported_reason() is None
+
+    def test_session_move_margin_requires_least_sessions(self, monkeypatch: MonkeyPatch) -> None:
+        with raises(ValueError, match="session_move_margin requires endpoint_selection=least_sessions"):
+            self._setup_server(monkeypatch, session_move_margin=2)
+        # A margin of 0 would move a session back and forth between two endpoints one session apart.
+        with raises(ValueError, match="greater than or equal to 1"):
+            self._setup_server(monkeypatch, endpoint_selection="least_sessions", session_move_margin=0)
 
     @staticmethod
     def _served_completion(content: str) -> dict:
@@ -8194,6 +8382,7 @@ class TestEndpointFile:
         os.utime(tmp_path / "endpoint.txt", (1000, 1000))
         server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0)
         server._session_id_to_client["session-on-old-host"] = server._clients[0]
+        server._bind_session("rollout-on-old-host", server._clients[0])
 
         server._maybe_rebind_endpoint()
 
@@ -8205,6 +8394,7 @@ class TestEndpointFile:
         assert server._clients[0].max_connection_retries == 8
         assert server._clients[0].max_rate_limit_wait_seconds == 0
         assert not server._session_id_to_client
+        assert not server._rollout_session_to_client and not server._endpoint_session_counts
         # Within endpoint_check_interval_s the filesystem is left alone, so a
         # fresh publish is only seen once the window is over.
         (tmp_path / "endpoint.txt").write_text("http://newer-host:8712/v1\n")

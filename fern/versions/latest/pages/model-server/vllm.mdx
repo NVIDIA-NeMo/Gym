@@ -234,7 +234,7 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `base_url` | `str` or `list[str]` | — | **Required.** vLLM server endpoint(s). Supports list for load balancing. |
+| `base_url` | `str` or `list[str]` | — | **Required.** vLLM server endpoint(s). A list spreads rollouts over replicas, each rollout on one of them; see [Use VLLMModel with multiple replicas](#use-vllmmodel-with-multiple-replicas-of-a-model-endpoint). |
 | `api_key` | `str` | — | **Required.** API key matching vLLM's `--api-key` flag. |
 | `model` | `str` | — | **Required.** Model name as registered in vLLM. |
 | `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
@@ -260,6 +260,8 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `inline_tool_output_images` | `bool` | `false` | Requires `is_responses_native: false`. Send each image part of a Responses tool call output, such as the Codex CLI's `view_image` returns, to the engine as an `image_url` part of the chat tool message. OpenAI's chat tool messages carry text only, so by default such an output is refused, or replaced with a text placeholder under `drop_unrepresentable_request_fields`. vLLM accepts image parts in a tool message and leaves their rendering to the chat template, so a vision model sees the image inside the tool result. Detail `original`, which chat lacks, is sent as `high`. Other part types a tool message cannot carry are still refused. |
 | `preserve_thinking_blocks` | `bool` | `false` | Requires `is_responses_native: false` and `use_completions_api: false`. For an Anthropic model behind a LiteLLM chat endpoint: the answer's signed `thinking_blocks` (`provider_specific_fields`) are carried in the Responses reasoning item's `encrypted_content` and put back, verbatim, on the assistant message of the next turn, which Anthropic requires for a tool-call continuation with thinking on. Such an endpoint also returns `reasoning_content`, so set `uses_reasoning_parser: true`. |
 | `endpoint_connection_retry_timeout_s` | `float` | `null` | Wall-clock seconds one model call may spend retrying connection errors before the last one is raised. See [Bound retries to a dead model server](#bound-retries-to-a-dead-model-server). |
+| `endpoint_selection` | `str` | `hash` | How a rollout is assigned one of the `base_url` endpoints. `hash` uses the sha256 of its session key. `least_sessions` picks the endpoint with the fewest active rollouts and needs `num_workers: 1`. See [Balance rollouts by active sessions](#balance-rollouts-by-active-sessions). |
+| `session_move_margin` | `int` | `null` | `endpoint_selection: least_sessions` only, at least 1. Move a rollout, on its next call, off an endpoint that holds more than this many sessions above the least-loaded serving endpoint. The move loses the rollout's prefix cache. `null` never moves a rollout for load. |
 
 ### Advanced: `chat_template_kwargs`
 
@@ -314,9 +316,29 @@ base_url:
 ```
 
 **How it works**:
-1. **Initial assignment**: New sessions are assigned to endpoints using round-robin (session 1 → endpoint 1, session 2 → endpoint 2, etc.)
-2. **Session affinity**: Once assigned, a session always uses the same endpoint (tracked via HTTP session cookies)
-3. **Why affinity?** Multi-turn conversations and agentic workflows that call the model multiple times in one trajectory need to hit the same model endpoint in order to hit the prefix cache, which significantly speeds up the prefill phase of model inference.
+1. **Session key**: A model call made for a rollout carries the rollout's capture key (`<rollout id>`, or `<rollout id>-a<N>` for attempt N) in its `/ng-rollout/<capture key>/` path prefix, and that key is the call's session. Agents add the prefix when `rollout_correlation`, observability or token capture is on, and harnesses run through agent sessions, such as Terminus 2 under the `harbor` Environment Server, add it with the episode's capture key. A call without the prefix is keyed on its HTTP session cookie instead.
+2. **Assignment**: By default (`endpoint_selection: hash`) a session goes to the endpoint at the sha256 of its key, modulo the number of endpoints, so every server worker picks the same endpoint. `endpoint_selection: least_sessions` picks by load instead; see [Balance rollouts by active sessions](#balance-rollouts-by-active-sessions).
+3. **Session affinity**: Every call of a session goes to its endpoint.
+4. **Why affinity?** Multi-turn conversations and agentic workflows that call the model multiple times in one trajectory need to hit the same model endpoint in order to hit the prefix cache, which significantly speeds up the prefill phase of model inference.
+
+### Balance rollouts by active sessions
+
+The hash spreads rollouts evenly by number, not by work. When rollouts differ a lot in length, as agentic episodes do, several long ones can end up on one endpoint while another one is idle. With `endpoint_selection: least_sessions`, each new rollout goes to the endpoint with the fewest active rollouts (on a tie, the one listed first), and stays there:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      endpoint_selection: least_sessions
+```
+
+- **A rollout counts until it is released.** `POST /endpoint_binding/release` with `{"session_key": "<capture key>"}` ends the rollout's endpoint binding and answers `{"released": true}`, or `false` when no endpoint is bound to that key. The `harbor` Environment Server sends it at the end of every episode, after the episode's sandbox has stopped, when its `policy_model_server` names this server (see [Configure the server](/main/agent-interactions/harbor#configure-the-server)). A failed sandbox stop holds the release back until a later stop succeeds, since the harness may still be calling the model. Without releases the counts only grow, so new rollouts are spread by how many rollouts each endpoint has ever been given.
+- **Only rollouts are counted.** A call without the `/ng-rollout/` prefix keeps the hash, since nothing would release it.
+- **One worker.** The counts live in one process, so the server refuses to start with `num_workers` above 1. A config that raises the policy model's `num_workers` has to set it back to 1 to use this mode.
+- **Moves.** A rollout leaves its endpoint only when `route_around_failing_endpoints` finds that endpoint failing, or, with `session_move_margin: N`, when its endpoint holds more than N rollouts above the least-loaded endpoint that is not failing. A move costs the rollout its prefix cache, and the server logs it at INFO.
+- **Check the balance.** With `--verbose`, the server logs each binding and release with the number of rollouts bound to every endpoint, so you can see the counts stay even and drop as episodes end.
+
+With one `base_url`, an `endpoint_file` or a Dynamo frontend there is only one endpoint to pick, so the setting changes nothing.
 
 ## Use VLLMModel through a Dynamo frontend
 

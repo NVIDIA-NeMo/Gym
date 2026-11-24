@@ -104,6 +104,7 @@ from nemo_gym.config import (
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
+    ModelServerRef,
     get_first_server_config_dict,
     get_global_config_dict,
 )
@@ -335,6 +336,10 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     # The harness that works in the sandbox; it receives a ``SandboxAccess`` when its session is seeded.
     agent_server: AgentServerRef
+    # The vllm_model server the harness's model calls go to. When set, each episode's final cleanup, once the sandbox
+    # has stopped, releases the episode's endpoint binding there (POST /endpoint_binding/release), so
+    # `endpoint_selection: least_sessions` counts only running episodes. None sends nothing.
+    policy_model_server: ModelServerRef | None = None
     # Whether a failed agent response the harness classified is verified, retried or failed ungraded.
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     tasksets: dict[str, HarborTasksetConfig] = Field(default_factory=dict)
@@ -564,6 +569,8 @@ class HarborEnvironmentServer(
         self._ungrantable_overlay_servers: set[str] = set()
         self._pull_retry_gate = asyncio.Semaphore(PULL_RETRY_CONCURRENCY)
         self._shutting_down = False
+        # Set, and logged, at the first release the policy model server answers 404 to.
+        self._policy_model_lacks_release_route = False
         # Each taskset's dataset-level TaskData (task_data.py beside its task folders), imported once here: None
         # for a dataset that ships none, or the error that keeps every episode of the taskset from seeding.
         self._task_data_schemas: dict[str, TaskDataSchema | TaskDataError | None] = {}
@@ -870,8 +877,38 @@ class HarborEnvironmentServer(
                 if _verifier_key(episode_key) in self._sandboxes:
                     await self._stop_sandbox(_verifier_key(episode_key))
 
+        async def release_model_session() -> None:
+            # While the sandbox may still run the harness, its next model call would bind this key again, and nothing
+            # would release it. So the release waits for the sandbox stop, also in the shutdown sweep, which starts
+            # every cleanup at once, and a failed stop fails it too: both stay tracked for the sweep to retry.
+            await sandbox_cleanup.close()
+            # The harness's model calls carry this key in their /ng-rollout/<key> prefix, and the model server binds
+            # their endpoint under it, so the release ends exactly this episode's binding.
+            try:
+                release_http_response = await self.server_client.post(
+                    server_name=self.config.policy_model_server.name,
+                    url_path="/endpoint_binding/release",
+                    json={"session_key": episode_key},
+                )
+                await raise_boundary_failure(release_http_response)
+            except ClientResponseError as error:
+                if error.status != 404:
+                    raise
+                # A model server without the route binds no endpoints, so there is nothing to release. Failing would
+                # keep every episode's cleanup, and the trajectory it holds, tracked until shutdown.
+                if not self._policy_model_lacks_release_route:
+                    self._policy_model_lacks_release_route = True
+                    LOGGER.error(
+                        f"policy_model_server {self.config.policy_model_server.name!r} answered 404 to "
+                        "/endpoint_binding/release: it is not a vllm_model server, so episodes release nothing there"
+                    )
+
         cleanup.register_cleanup("harbor episode key", release_key)
-        cleanup.register_cleanup("harbor sandbox", close_sandbox)
+        if self.config.policy_model_server is not None:
+            # Cleanups run last-registered first, so in the episode's own cleanup the release runs after the
+            # agent-session close and the sandbox stop. A failed release is a cleanup observation only.
+            cleanup.register_cleanup("model session", release_model_session)
+        sandbox_cleanup = cleanup.register_cleanup("harbor sandbox", close_sandbox)
         try:
             # The job-level prompt template wraps the first turn's instruction before anything is provisioned: the
             # harness, the transcript export and the result all see the rendered instruction, as Harbor's agent

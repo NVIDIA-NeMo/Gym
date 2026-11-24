@@ -75,7 +75,14 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import ModelCallSampling, NgFailureEvent, RequestFailureLog, encode_model_sampling, failure_kinds
+from nemo_gym.core import (
+    EpisodeId,
+    ModelCallSampling,
+    NgFailureEvent,
+    RequestFailureLog,
+    encode_model_sampling,
+    failure_kinds,
+)
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DIGEST_KEY,
@@ -1185,6 +1192,9 @@ def task_tool_context_toml(declaration: str) -> str:
     return TASK_TOML + TASK_TOOL_CONTEXT_DECLARATIONS[declaration]
 
 
+POLICY_MODEL_SERVER = {"type": "responses_api_models", "name": "policy_model"}
+
+
 class TestAgentStage:
     @pytest.mark.parametrize("declaration", sorted(TASK_TOOL_CONTEXT_DECLARATIONS))
     async def test_task_tool_context_is_refused_to_a_harness_that_did_not_declare_support(
@@ -1558,6 +1568,130 @@ class TestAgentStage:
         assert not response.failure.terminal
         assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"
         assert sandbox.stopped and not server._sandboxes
+
+    async def test_episode_end_releases_the_policy_model_session(self, tmp_path, monkeypatch):
+        """The released key is the episode's capture key, attempt included, which the harness's model calls carry
+        in their /ng-rollout/ prefix. It is sent after the agent-session close and the sandbox stop."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, policy_model_server=POLICY_MODEL_SERVER)
+        client = server.server_client
+        releases_at_stop = []
+        real_stop = sandbox.stop
+
+        async def recording_stop():
+            releases_at_stop.append(len(client.release_calls()))
+            await real_stop()
+
+        monkeypatch.setattr(sandbox, "stop", recording_stop)
+
+        response = await run_episode(server, task, attempt=2)
+
+        assert response.failure is None, response.failure
+        assert client.paths() == [
+            "/v1/agent_sessions",
+            "/ng-rollout/r1-a2/v1/responses",
+            "/v1/agent_sessions/close",
+            "/endpoint_binding/release",
+        ]
+        assert client.release_calls() == [("policy_model", {"session_key": "r1-a2"})]
+        # A harness builds its model URL's /ng-rollout/ prefix from the seed's episode id (resolve_model_base_url).
+        assert EpisodeId.model_validate(client.seed_bodies()[0]["episode_id"]).capture_key == "r1-a2"
+        assert releases_at_stop == [0] and sandbox.stopped
+
+    async def test_no_release_is_sent_without_a_policy_model_server(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+
+        response = await run_episode(server, task)
+
+        assert server.config.policy_model_server is None
+        assert response.failure is None, response.failure
+        assert server.server_client.release_calls() == []
+
+    async def test_failed_episode_still_releases_the_policy_model_session(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, policy_model_server=POLICY_MODEL_SERVER)
+        server.server_client.fail_path = "/ng-rollout/r1/v1/responses"
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "agent" and not response.failure.terminal
+        assert server.server_client.release_calls() == [("policy_model", {"session_key": "r1"})]
+        assert server.server_client.paths()[-2:] == ["/v1/agent_sessions/close", "/endpoint_binding/release"]
+        assert sandbox.stopped
+
+    async def test_failed_model_release_is_only_a_cleanup_observation(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, policy_model_server=POLICY_MODEL_SERVER)
+        server.server_client.fail_with["/endpoint_binding/release"] = http_error_with_body(503, b"unavailable")
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        assert [(event.failure_kind, event.failure_reason) for event in response.failure_report.events.values()] == [
+            (failure_kinds.SESSION_RELEASE_FAILED, "Episode cleanup failed: model session")
+        ]
+        assert sandbox.stopped and not server._active
+        # The failed release stays tracked, and the shutdown sweep sends it again.
+        await server.finish_running_cleanups()
+        assert len(server.server_client.release_calls()) == 2
+
+    async def test_model_session_is_released_only_after_the_sandbox_stop(self, tmp_path, monkeypatch):
+        """While the sandbox may still run the harness, a release would let its next model call bind the key again.
+        A failed stop withholds the release; the shutdown sweep, which starts every cleanup at once, sends it only
+        once the stop has succeeded."""
+        releases_around_each_stop = []
+
+        class FlakyStopSandbox(FakeSandbox):
+            stop_failures = 2
+
+            async def stop(self):
+                before = len(server.server_client.release_calls())
+                # Yields, so a release that did not wait for the stop would be sent meanwhile.
+                await asyncio.sleep(0.05)
+                releases_around_each_stop.append((before, len(server.server_client.release_calls())))
+                if self.stop_failures:
+                    self.stop_failures -= 1
+                    raise RuntimeError("provider unavailable")
+                self.stopped = True
+
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, FlakyStopSandbox(), policy_model_server=POLICY_MODEL_SERVER
+        )
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        # The episode's cleanup tried the stop twice, on its own and for the release, and sent no release.
+        assert {event.failure_reason for event in response.failure_report.events.values()} == {
+            "Episode cleanup failed: harbor sandbox",
+            "Episode cleanup failed: model session",
+        }
+        assert server.server_client.release_calls() == []
+        assert list(server._sandboxes.values()) == [sandbox]
+
+        await server.finish_running_cleanups()
+
+        assert sandbox.stopped and not server._sandboxes
+        assert server.server_client.release_calls() == [("policy_model", {"session_key": "r1"})]
+        assert releases_around_each_stop == [(0, 0)] * 3
+
+    async def test_a_policy_model_server_without_the_release_route_ends_the_release(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A 404 comes from a model server that binds no endpoints: there is nothing to release, so the release
+        completes and no episode's cleanup stays tracked until shutdown. The error is logged once per run."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, policy_model_server=POLICY_MODEL_SERVER)
+
+        with caplog.at_level("ERROR", logger="environment_servers.harbor.app"):
+            for rollout in ("r1", "r2"):
+                server.server_client.fail_with["/endpoint_binding/release"] = http_error_with_body(404, b"Not Found")
+                response = await run_episode(server, task, rollout=rollout)
+                assert response.failure is None and response.failure_report is None
+
+        assert [body["session_key"] for _, body in server.server_client.release_calls()] == ["r1", "r2"]
+        assert not server._running_cleanups
+        assert [record.getMessage() for record in caplog.records] == [
+            "policy_model_server 'policy_model' answered 404 to /endpoint_binding/release: it is not a vllm_model "
+            "server, so episodes release nothing there"
+        ]
 
 
 class TestVerify:
@@ -4167,6 +4301,7 @@ def test_server_config_holds_only_deployment_settings():
     own = set(HarborEnvironmentServerConfig.model_fields) - set(BaseEnvironmentServerConfig.model_fields)
     assert own == {
         "agent_server",
+        "policy_model_server",
         "agent_outcome_policy",
         "tasksets",
         "sandbox_provider",
@@ -4424,6 +4559,30 @@ class TestSeedGuards:
         release.set()
         await server.shutdown()
         assert sandbox.stopped and not server._sandboxes
+
+    async def test_timed_out_episode_releases_the_policy_model_session(self, tmp_path, monkeypatch):
+        """The episode deadline fires during setup; the bounded final cleanup still releases the model session."""
+
+        class HangingSetupSandbox(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if command.startswith("mkdir"):
+                    await asyncio.get_running_loop().create_future()
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = HangingSetupSandbox()
+        server, task, _, _ = make_server(
+            tmp_path,
+            monkeypatch,
+            sandbox,
+            default_episode_timeout_seconds=0.5,
+            policy_model_server=POLICY_MODEL_SERVER,
+        )
+
+        response = await asyncio.wait_for(run_episode(server, task), 5)
+
+        assert response.failure is not None and "timed out" in response.failure.failure_reason
+        assert server.server_client.release_calls() == [("policy_model", {"session_key": "r1"})]
+        assert sandbox.stopped and not server._sandboxes and not server._active
 
     async def test_seed_gives_up_on_a_create_at_the_ready_timeout(self, tmp_path, monkeypatch):
         """The configured ready timeout is a seed deadline, whatever the provider's own retry budget."""

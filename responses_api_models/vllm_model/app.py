@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
 from threading import Lock
@@ -31,7 +32,7 @@ from fastapi.responses import JSONResponse
 from multidict import CIMultiDict
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from openai.types.shared import ReasoningEffort
-from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym._moved_paths import moved_names_getattr
@@ -553,6 +554,19 @@ class _EndpointHealth:
     failed_at: Optional[float] = None
 
 
+class EndpointBindingReleaseRequest(BaseModel):
+    """Ends a session's binding to its engine endpoint; the caller knows the session will make no more calls."""
+
+    # The session key the session's calls were routed on: the capture key in their /ng-rollout/<key> prefix.
+    session_key: str
+
+
+class EndpointBindingReleaseResponse(BaseModel):
+    """Whether the session had an endpoint bound: false for a key never bound, or released already."""
+
+    released: bool
+
+
 def _redacted_error_repr(error: ClientResponseError) -> str:
     """Describe an upstream HTTP error for the transport log without headers or the URL query string.
 
@@ -861,6 +875,27 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     endpoint_failure_threshold: int = Field(default=3, ge=1)
     endpoint_retry_after_s: float = Field(default=60.0, gt=0)
 
+    endpoint_selection: Literal["hash", "least_sessions"] = Field(
+        default="hash",
+        description=(
+            "How a rollout is assigned an endpoint of base_url. 'hash': the sha256 of its session key, the same "
+            "endpoint in every worker. 'least_sessions': the endpoint with the fewest active rollouts, so that "
+            "rollouts of very different lengths do not pile up on one endpoint. A rollout keeps its endpoint until "
+            "its session is released (POST /endpoint_binding/release, which the Harbor environment server sends "
+            "when its policy_model_server names this server); without releases the counts only grow. Needs "
+            "num_workers=1. A call without a rollout prefix keeps the hash."
+        ),
+    )
+    session_move_margin: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "endpoint_selection=least_sessions only. Move a rollout, on its next call, off an endpoint that holds "
+            "more than this many sessions above the least-loaded serving endpoint; the move loses its prefix cache. "
+            "Unset, a rollout moves only off a failing endpoint (route_around_failing_endpoints)."
+        ),
+    )
+
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``), and ``metadata.audio_ref.archive``.
     # audio_path/audio_paths permit absolute paths; audio_ref archives must
@@ -901,6 +936,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                 "preserve_thinking_blocks requires use_completions_api=false: /v1/completions has no assistant "
                 "messages to carry the thinking blocks on"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_endpoint_selection(self) -> "VLLMModelConfig":
+        if self.session_move_margin is not None and self.endpoint_selection != "least_sessions":
+            raise ValueError("session_move_margin requires endpoint_selection=least_sessions")
         return self
 
     @model_validator(mode="after")
@@ -1170,7 +1211,39 @@ class VLLMModel(SimpleResponsesAPIModel):
         config = token_capture_config(self.server_client.global_config_dict)
         if config.token_id_capture.parent_resolution == "source_history":
             app.post("/context/measure")(self.measure_context)
+        app.post("/endpoint_binding/release")(self.release_endpoint_binding)
         return app
+
+    async def release_endpoint_binding(self, body: EndpointBindingReleaseRequest) -> EndpointBindingReleaseResponse:
+        """Forget the endpoint a finished session was bound to, so it no longer counts against that endpoint.
+
+        Idempotent. Under ``endpoint_selection: least_sessions`` the endpoint's session count drops, so new rollouts
+        can go there again; under ``hash`` only the cached assignment is dropped.
+        """
+        client = self._rollout_session_to_client.pop(body.session_key, None)
+        if client is not None:
+            self._endpoint_session_counts[client.base_url] -= 1
+            LOG.debug(
+                "rollout session %s released from %s; sessions per endpoint: %s",
+                body.session_key,
+                client.base_url,
+                self._sessions_per_endpoint(),
+            )
+        cached = self._session_id_to_client.pop(body.session_key, None)
+        if client is None and cached is None:
+            # Expected for an episode that never called the model. For every episode, it means the releases carry
+            # other keys than the rollouts' calls do, and the counts only grow.
+            LOG.debug("release of session %s: no endpoint is bound to it", body.session_key)
+        return EndpointBindingReleaseResponse(released=client is not None or cached is not None)
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        if self.config.endpoint_selection == "least_sessions":
+            # Only the hash gives every worker the same assignment.
+            return (
+                "endpoint_selection=least_sessions keeps its session counts in one process; with several workers a "
+                "rollout's calls would land on different endpoints, and a release would reach one worker only"
+            )
+        return super().multiple_workers_unsupported_reason()
 
     async def measure_context(self, request: Request, body: dict = Body()) -> dict[str, int]:
         """Render through the generation admission path without writing capture state."""
@@ -1298,6 +1371,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        # endpoint_selection=least_sessions: the rollout sessions it balances, each bound to its endpoint until
+        # released, and how many are bound to each endpoint (by base_url: a client is not hashable). Written only
+        # through _bind_session and the release route.
+        self._rollout_session_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._endpoint_session_counts: Counter[str] = Counter()
         # Keyed by base_url so the record outlives a client rebind to the same address.
         self._endpoint_health: Dict[str, _EndpointHealth] = dict()
         self._generation_cut_control_urls = dict(
@@ -2885,6 +2963,8 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
         # Every session re-resolves onto the new host.
         self._session_id_to_client.clear()
+        self._rollout_session_to_client.clear()
+        self._endpoint_session_counts.clear()
 
     def _note_endpoint_unpublished(self) -> None:
         now = monotonic()
@@ -2910,11 +2990,18 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
+        session_key = current_session_key()
+        if session_key is not None and self.config.endpoint_selection == "least_sessions":
+            # Only a rollout's session is counted, since only it is released when its episode ends. A call with a
+            # cookie session alone (a judge, a harness without the rollout prefix) keeps the hash below.
+            client = self._least_sessions_client(session_key)
+            note_generation_backend(getattr(client, "base_url", None))
+            return client
         # Route by session when the call carries a rollout: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
         # collect them. Keying on the session keeps its turns on one endpoint. This is the same key
         # the outbound session header carries, so an upstream router and this server agree.
-        session_id = current_session_key() or request.session[SESSION_ID_KEY]
+        session_id = session_key or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)
@@ -2954,6 +3041,66 @@ class VLLMModel(SimpleResponsesAPIModel):
         if not serving:
             return client
         return serving[self._hashed_index(session_id, len(serving))]
+
+    def _least_sessions_client(self, session_key: str) -> NeMoGymAsyncOpenAI:
+        """The endpoint for a call of the rollout session ``session_key`` under ``endpoint_selection: least_sessions``.
+
+        A session keeps the endpoint it is bound to, so its turns reuse that endpoint's prefix cache. It is bound to
+        another one when route-around finds its endpoint failed, or when its endpoint holds more than
+        ``session_move_margin`` sessions above the least-loaded serving endpoint. A new session goes to the endpoint
+        with the fewest sessions, ties broken by list order. When that endpoint has failed, it takes the session only
+        as its trial call once the retry interval has run out, so new sessions probe a recovered endpoint; otherwise
+        the session goes to the least-loaded endpoint that has not failed.
+        """
+        serving = [client for client in self._clients if not self._endpoint_failed(client)] or self._clients
+        client = self._rollout_session_to_client.get(session_key)
+        if client is not None and self.config.route_around_failing_endpoints and not self._endpoint_serves(client):
+            client = None
+        if client is not None:
+            least = self._least_loaded(serving)
+            counts = self._endpoint_session_counts
+            margin = self.config.session_move_margin
+            if margin is None or counts[client.base_url] - counts[least.base_url] <= margin:
+                return client
+            LOG.info(
+                "rollout session %s moves from %s (%d sessions) to %s (%d sessions): more than "
+                "session_move_margin=%d apart; it loses its prefix cache",
+                session_key,
+                client.base_url,
+                counts[client.base_url],
+                least.base_url,
+                counts[least.base_url],
+                margin,
+            )
+            client = least
+        else:
+            client = self._least_loaded(self._clients)
+            if not self._endpoint_serves(client):
+                client = self._least_loaded(serving)
+        self._bind_session(session_key, client)
+        return client
+
+    def _least_loaded(self, clients: List[NeMoGymAsyncOpenAI]) -> NeMoGymAsyncOpenAI:
+        # min() keeps the first of equals, so ties go to the endpoint listed first.
+        return min(clients, key=lambda client: self._endpoint_session_counts[client.base_url])
+
+    def _bind_session(self, session_key: str, client: NeMoGymAsyncOpenAI) -> None:
+        """Bind a rollout session to ``client``, moving its count off the endpoint it was bound to before."""
+        previous = self._rollout_session_to_client.get(session_key)
+        if previous is not None:
+            self._endpoint_session_counts[previous.base_url] -= 1
+        self._rollout_session_to_client[session_key] = client
+        self._endpoint_session_counts[client.base_url] += 1
+        LOG.debug(
+            "rollout session %s bound to %s; sessions per endpoint: %s",
+            session_key,
+            client.base_url,
+            self._sessions_per_endpoint(),
+        )
+
+    def _sessions_per_endpoint(self) -> Dict[str, int]:
+        """The rollout sessions bound to each endpoint, for the logs: what least_sessions balances."""
+        return {client.base_url: self._endpoint_session_counts[client.base_url] for client in self._clients}
 
     def _endpoint_failed(self, client: NeMoGymAsyncOpenAI) -> bool:
         health = self._endpoint_health.get(client.base_url)
