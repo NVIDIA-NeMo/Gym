@@ -339,7 +339,8 @@ def chartjs_chrome_flag_edit(karma_config: str) -> str:
 
 
 def patch_swebench_chartjs_chrome_flag(test_spec: TestSpec) -> None:
-    if test_spec.repo != "chartjs/Chart.js":
+    # SWE-bench runs Chart.js 2.x through Gulp, without a direct Karma invocation.
+    if test_spec.repo != "chartjs/Chart.js" or test_spec.version.startswith("2."):
         return
     for index, line in enumerate(test_spec.eval_script_list):
         karma_config = _KARMA_CONFIG.search(line)

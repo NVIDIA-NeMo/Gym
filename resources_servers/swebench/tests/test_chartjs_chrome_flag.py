@@ -18,7 +18,6 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from swebench.harness.run_evaluation import make_test_spec
@@ -63,6 +62,13 @@ def karma_line(script: list[str]) -> int:
 
 
 class TestChartjsChromeFlag:
+    def test_chartjs_2_keeps_its_gulp_runner(self) -> None:
+        data = row("chartjs/Chart.js", "chartjs__Chart.js-gulp", "2.9", "test/specs/controller.bar.tests.js", [], [])
+        upstream = make_test_spec(data, namespace="swebench").eval_script_list
+
+        assert any('su chromeuser -c "gulp test"' in line for line in upstream)
+        assert spec_for(data).eval_script_list == upstream
+
     @pytest.mark.parametrize(
         ("data", "karma_config"),
         [(CHARTJS_3_ROW, "karma.conf.js"), (CHARTJS_4_ROW, "karma.conf.cjs")],
@@ -89,9 +95,8 @@ class TestChartjsChromeFlag:
         assert test_spec.eval_script_list.count(chartjs_chrome_flag_edit("karma.conf.js")) == 1
 
     def test_a_chartjs_script_without_karma_is_rejected(self) -> None:
-        test_spec = SimpleNamespace(
-            repo="chartjs/Chart.js", instance_id="chartjs__Chart.js-1", eval_script_list=["npm test"]
-        )
+        test_spec = make_test_spec(CHARTJS_3_ROW, namespace="swebench")
+        test_spec.eval_script_list = ["npm test"]
 
         with pytest.raises(ValueError, match="does not start Karma"):
             patch_swebench_chartjs_chrome_flag(test_spec)
