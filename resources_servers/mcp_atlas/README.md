@@ -111,16 +111,21 @@ also scored, even when their text says `Client failed to connect` or `session wa
 and files can produce arbitrary text. An actual bridge or provider transport timeout is instead
 `mcp_atlas:sandbox_unreachable`, an infrastructure failure. A legacy saved `tool_timeout` marker does not
 establish that a model program timed out; it retains its historical service-failure masking policy.
-Calling a local program tool before a transport failure does not establish that the program caused the
-failure: provider loss, sandbox TTL expiry and a terminated bridge can report the same error. Attribution
-of model-caused environment destruction requires runtime evidence beyond that ordering; it remains an
-acceptance check before scoring, rather than turning unknown infrastructure failures into model zeroes.
-The attribution gap also applies when a command terminates an enabled server outside that local-tool
-list: returned errors with a recognized leading connection/session diagnostic remain `service_error`,
-masked when `mask_service_errors` is set. Returned errors from the listed local tools are still scored;
-for example, a returned connection error from `memory` or `filesystem` is a model observation.
+Calling a program tool before a transport failure does not by itself establish that the program caused the
+failure: provider loss, sandbox TTL expiry and a terminated bridge can report the same error. So after a
+transport failure `scale_live` asks the provider: when the model has called a tool of `cli-mcp-server`,
+`desktop-commander`, `mcp-code-executor` or `mcp-server-code-runner` in this rollout and the sandbox still
+answers an `exec` probe although its own server does not, the environment was ended from inside. That
+rollout records `environment_destroyed` in `service_errors` and `provenance`, the model sees
+`Error: tool call failed: ...` as upstream's harness would feed back, and the rollout is scored without a
+`failure_kind`, so breaking the environment is not a way out of a zero. A probe the provider fails, a
+shared development environment, and a rollout with no program or command call stay
+`mcp_atlas:sandbox_unreachable`. Returned errors with a recognized leading connection/session diagnostic
+from servers outside the local-tool list remain `service_error`, masked when `mask_service_errors` is set;
+returned errors from the listed local tools are still scored, for example a returned connection error from
+`memory` or `filesystem` is a model observation.
 `service_errors` in a scored verify response lists its recorded failures. `gym eval reverify` recomputes
-the score and mask from saved `service_errors` and `tool_calls`, preserving that legacy attribution.
+the score and mask from saved `service_errors` and `tool_calls`, preserving that attribution.
 
 ### Check rollouts before publishing
 
@@ -225,9 +230,11 @@ development transport may be used for benchmark scores.
   resources server sets no per-task wall-clock deadline.
 - Recognized service-authentication failures reject configuration before judging, instead of becoming
   scored model observations or masked service failures.
-- The local bridge/provider deadline is an infrastructure failure. An error returned by a tool for a
-  model's program remains scored; real package deadline behavior still needs qualification before
-  protocol comparisons.
+- Upstream feeds every tool failure back to the model and scores the task, including a sandbox that
+  stopped answering. Here a bridge/provider deadline or a loss the provider reports is an infrastructure
+  failure and masked; a server ended from inside after a program or command tool is scored as upstream
+  does. An error returned by a tool for a model's program remains scored; real package deadline behavior
+  still needs qualification before protocol comparisons.
 - Upstream counts a claim whose judge call fails 8 times as not fulfilled; here the rollout is masked.
 
 ## Licensing

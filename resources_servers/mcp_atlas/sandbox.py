@@ -136,6 +136,10 @@ class AtlasSandbox:
     last_used_at: float = field(default_factory=monotonic)
     # Known-unavailable service replies seen in this rollout, by KNOWN_UNAVAILABLE_MARKERS name (scale_live).
     tool_outcomes: dict[str, int] = field(default_factory=dict)
+    # Calls so far to tools that run model-written programs or commands (scale_live PROCESS_SERVERS).
+    process_tool_calls: int = 0
+    # Set once the sandbox answered a probe after its own server stopped answering: destroyed from inside.
+    destroyed: bool = False
     # Set once the provider confirmed the stop and the port and capacity slot are free.
     stopped: bool = False
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)

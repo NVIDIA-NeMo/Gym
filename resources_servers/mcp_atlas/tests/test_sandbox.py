@@ -44,6 +44,8 @@ class FakeSandbox:
         self.stopped = False
         self.ready_gate = ready_gate
         self.stop_gate = stop_gate
+        # Set to make the provider lose the sandbox: probes fail as they do when the container is gone.
+        self.provider_lost = False
         self.exec_started = asyncio.Event()
         self.stop_started = asyncio.Event()
         FakeSandbox.instances.append(self)
@@ -52,6 +54,10 @@ class FakeSandbox:
         return self
 
     async def exec(self, command: str, *, timeout_s=None):
+        if command == "true":
+            if self.provider_lost:
+                raise RuntimeError("provider cannot reach the container")
+            return SandboxExecResult("", "", 0)
         if command.startswith("tail "):
             return SandboxExecResult("fake log", "", 0)
         if self.exit_at_start:

@@ -698,6 +698,73 @@ async def test_unreachable_sandbox_masks_the_rollout() -> None:
     assert result.failure_kind == "mcp_atlas:sandbox_unreachable"
 
 
+PROCESS_TOOLS = ["calculator_calculate", "desktop-commander_start_process"]
+PROCESS_META = {**META, "enabled_tools": PROCESS_TOOLS, "servers": ["calculator", "desktop-commander"]}
+
+
+async def _destroy_server_inside(server: MCPAtlasResourcesServer) -> None:
+    """End the sandbox's own server as a model command would, while the provider still has the sandbox."""
+    await server._rollouts["s1"].handle.sandbox.environment.stop()
+
+
+async def test_a_server_killed_from_inside_after_a_program_tool_is_scored_not_masked() -> None:
+    server = make_server("http://unused", judge_client(*["fulfilled"] * 4))
+    server._backend.pool = pool(PROCESS_TOOLS)
+    await seed(server, metadata=PROCESS_META)
+    assert await server.call_tool(http_request(), "desktop-commander_start_process", {"command": "kill 1"}) == "ok"
+    await _destroy_server_inside(server)
+    output = await server.call_tool(http_request(), "calculator_calculate", {"expression": "1"})
+    assert output.startswith("Error: tool call failed: ")
+    # Later calls stay scored transport errors, without probing again.
+    later = await server.call_tool(http_request(), "calculator_calculate", {"expression": "2"})
+    assert later.startswith("Error: tool call failed: ")
+    body = verify_body("Created 2013, registered 2006.")
+    body.verifier_metadata = PROCESS_META
+    result = await server.verify(http_request(), body)
+    assert result.reward == 1.0 and result.mask_sample is False and result.failure_kind is None
+    assert [error.split(":")[0] for error in result.service_errors] == ["environment_destroyed"] * 2
+    assert result.provenance["environment_destroyed"] is True
+    assert result.tool_calls == 3
+    # A saved row keeps the scored attribution through gym eval reverify.
+    saved = MCPAtlasVerifyRequest.model_validate(result.model_dump(mode="json"))
+    again = await server.verify(http_request("reverify"), saved)
+    assert again.mask_sample is False and again.service_errors == result.service_errors
+
+
+async def test_a_server_lost_without_a_program_tool_call_stays_an_infrastructure_failure() -> None:
+    server = make_server("http://unused", judge_client("fulfilled", "fulfilled"))
+    server._backend.pool = pool(PROCESS_TOOLS)
+    await seed(server, metadata=PROCESS_META)
+    assert await server.call_tool(http_request(), "calculator_calculate", {"expression": "1"}) == "ok"
+    await _destroy_server_inside(server)
+    assert (await server.call_tool(http_request(), "calculator_calculate", {"expression": "2"})).startswith(
+        "Error: tool call failed: "
+    )
+    body = verify_body("Created 2013, registered 2006.")
+    body.verifier_metadata = PROCESS_META
+    result = await server.verify(http_request(), body)
+    assert result.mask_sample is True and result.failure_kind == "mcp_atlas:sandbox_unreachable"
+    assert "environment_destroyed" not in result.provenance
+
+
+async def test_a_sandbox_the_provider_lost_after_a_program_tool_stays_an_infrastructure_failure() -> None:
+    server = make_server("http://unused", judge_client("fulfilled", "fulfilled"))
+    server._backend.pool = pool(PROCESS_TOOLS)
+    await seed(server, metadata=PROCESS_META)
+    assert await server.call_tool(http_request(), "desktop-commander_start_process", {"command": "ls"}) == "ok"
+    handle = server._rollouts["s1"].handle
+    handle.sandbox.provider_lost = True
+    await _destroy_server_inside(server)
+    assert (await server.call_tool(http_request(), "calculator_calculate", {"expression": "2"})).startswith(
+        "Error: tool call failed: "
+    )
+    body = verify_body("Created 2013, registered 2006.")
+    body.verifier_metadata = PROCESS_META
+    result = await server.verify(http_request(), body)
+    assert result.mask_sample is True and result.failure_kind == "mcp_atlas:sandbox_unreachable"
+    assert handle.destroyed is False
+
+
 async def test_calls_after_the_sandbox_stopped_are_refused_and_masked(environment) -> None:
     env, url = environment
     server = make_server(url, judge_client("fulfilled", "fulfilled"))

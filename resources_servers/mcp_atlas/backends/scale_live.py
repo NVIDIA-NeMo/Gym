@@ -40,6 +40,7 @@ try:
         BackendStartError,
         BackendTask,
         BackendTransportError,
+        EnvironmentDestroyedError,
         MCPAtlasBackend,
         ToolOutcome,
         ToolResult,
@@ -52,6 +53,7 @@ except ImportError:
         BackendStartError,
         BackendTask,
         BackendTransportError,
+        EnvironmentDestroyedError,
         MCPAtlasBackend,
         ToolOutcome,
         ToolResult,
@@ -110,6 +112,11 @@ MODEL_RESULT_SERVERS = frozenset(
         "mcp-server-code-runner",
     }
 )
+# These tools run model-written programs or commands inside the sandbox, so they can end its own server. A
+# transport failure after one of them, while the provider still answers for the sandbox, is scored (see
+# EnvironmentDestroyedError); the call order alone is not evidence, the probe is.
+PROCESS_SERVERS = frozenset({"cli-mcp-server", "desktop-commander", "mcp-code-executor", "mcp-server-code-runner"})
+PROBE_TIMEOUT_S = 30
 # Services a deployment's egress may be unable to reach. Such a reply is a tool result the model sees and the
 # row is scored, as upstream does; the count lets a report label the affected rows without rescanning
 # trajectories. Each entry: the server, and the text its tools return when the service is unavailable.
@@ -226,18 +233,38 @@ class ScaleLiveBackend(MCPAtlasBackend):
         if tool_name == "met-museum_get-museum-object":
             # Upstream's harness does the same: image blocks do not fit a text tool output.
             arguments = {**arguments, "returnImage": False}
+        server = tool_server_name(tool_name, task.servers)
+        if server in PROCESS_SERVERS:
+            handle.process_tool_calls += 1
         try:
             status, payload = await call_sandbox_tool(handle, tool_name, arguments, timeout_s=timeout_s)
         except asyncio.TimeoutError:
             raise
         except (ClientError, OSError, SandboxError) as exc:
+            if handle.destroyed or await self._destroyed_from_inside(handle):
+                handle.destroyed = True
+                raise EnvironmentDestroyedError(type(exc).__name__, str(exc)) from exc
             raise BackendTransportError(type(exc).__name__, str(exc)) from exc
-        server = tool_server_name(tool_name, task.servers)
         text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
         for counter, (marker_server, marker) in KNOWN_UNAVAILABLE_MARKERS.items():
             if server == marker_server and marker in text:
                 handle.tool_outcomes[counter] = handle.tool_outcomes.get(counter, 0) + 1
         return ToolResult(status, payload)
+
+    async def _destroyed_from_inside(self, handle: AtlasSandbox) -> bool:
+        """Whether the sandbox still answers the provider although its server does not, after a program tool ran.
+
+        A shared development environment has no provider to ask, and a sandbox no program or command ran in
+        has no model-caused explanation, so both stay infrastructure failures.
+        """
+        if not handle.process_tool_calls or handle.sandbox is None or handle.stopped:
+            return False
+        try:
+            result = await handle.sandbox.exec("true", timeout_s=PROBE_TIMEOUT_S)
+        except Exception as exc:
+            logger.info("MCP-Atlas sandbox probe failed after a transport error; provider loss: %s", exc)
+            return False
+        return result.error_type is None and result.return_code == 0
 
     def classify_tool_error(
         self, handle: AtlasSandbox, task: BackendTask, tool_name: str, status: int, diagnostic: str
@@ -262,6 +289,8 @@ class ScaleLiveBackend(MCPAtlasBackend):
         }
         if handle is not None and handle.tool_outcomes:
             record["known_unavailable"] = dict(handle.tool_outcomes)
+        if handle is not None and handle.destroyed:
+            record["environment_destroyed"] = True
         return record
 
     async def stop(self, session_id: str) -> bool:

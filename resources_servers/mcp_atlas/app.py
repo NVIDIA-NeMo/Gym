@@ -54,6 +54,7 @@ if __package__:
         BackendStartError,
         BackendTask,
         BackendTransportError,
+        EnvironmentDestroyedError,
         MCPAtlasBackend,
         ToolOutcome,
         backend_task,
@@ -69,6 +70,7 @@ else:
         BackendStartError,
         BackendTask,
         BackendTransportError,
+        EnvironmentDestroyedError,
         MCPAtlasBackend,
         ToolOutcome,
         backend_task,
@@ -82,9 +84,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_BACKEND = "scale_live"
 EMPTY_RESULT = "success"
 # Failure kinds, most severe first. The first group means the rollout had no working environment and is
-# always masked; the second is masked when mask_service_errors is set.
+# always masked; the second is masked when mask_service_errors is set. The third is recorded in
+# service_errors but scored: the model's own program or command ended the environment.
 HARD_FAILURES = ("session_lost", "sandbox_start_failed", "sandbox_unreachable", "tools_missing")
 SOFT_FAILURES = ("service_error", "tool_timeout")
+SCORED_FAILURES = ("environment_destroyed",)
 
 
 class MCPAtlasResourcesServerConfig(BaseResourcesServerConfig):
@@ -333,6 +337,10 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                 # This is an HTTP/provider deadline, not evidence that model-written code timed out.
                 rollout.failures.append(("sandbox_unreachable", f"{tool_name}: transport timeout"))
                 return "Error: sandbox transport timed out"
+            except EnvironmentDestroyedError as exc:
+                # The model sees the same error upstream's harness would feed back, and the rollout is scored.
+                rollout.failures.append(("environment_destroyed", f"{tool_name}: {exc}"))
+                return f"Error: tool call failed: {exc.kind}"
             except BackendTransportError as exc:
                 rollout.failures.append(("sandbox_unreachable", f"{tool_name}: {exc}"))
                 return f"Error: tool call failed: {exc.kind}"
@@ -449,7 +457,9 @@ class MCPAtlasResourcesServer(SimpleResourcesServer):
                 judged = claims and answer.strip() and not answer.startswith("ERROR:") and not sandbox_down
                 verdicts = await self._judge_claims(claims, answer) if judged else []
                 score = coverage(verdicts, len(claims)) if judged else 0.0
-                masked = bool(kinds & set(HARD_FAILURES)) or (self.config.mask_service_errors and bool(kinds))
+                masked = bool(kinds & set(HARD_FAILURES)) or (
+                    self.config.mask_service_errors and bool(kinds & set(SOFT_FAILURES))
+                )
                 worst = next((kind for kind in HARD_FAILURES + SOFT_FAILURES if kind in kinds), None)
                 # A reverified row carries the fields set below from its first verify; they are computed again.
                 computed = set(MCPAtlasVerifyResponse.model_fields) - set(MCPAtlasVerifyRequest.model_fields)

@@ -37,6 +37,12 @@ class BackendTransportError(RuntimeError):
         self.kind = kind
 
 
+class EnvironmentDestroyedError(BackendTransportError):
+    """The tools stopped answering while the backend confirms their environment is still allocated, after the
+    model ran a program or command in it. The model sees the error and the rollout is scored, as upstream
+    scores every tool failure; only a loss the provider itself reports stays an infrastructure failure."""
+
+
 class ToolOutcome(StrEnum):
     """How the server treats a tool error the backend returned."""
 

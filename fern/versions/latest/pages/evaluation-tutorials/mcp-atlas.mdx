@@ -149,8 +149,8 @@ The [pinned upstream evaluation driver](https://github.com/scaleapi/mcp-atlas/bl
 uses a default 1800 s per-task request deadline and records timeout as an `ERROR` response. This resources
 server sets no per-task wall-clock deadline. The bridge default gives a response that task budget plus
 60 s of transport headroom; it is not a limit enforced on every tool's program. The bridge timeout and
-sandbox TTL do not reproduce the upstream task deadline. Real program deadlines and model-caused
-environment destruction still need runtime qualification before scores are accepted.
+sandbox TTL do not reproduce the upstream task deadline. Real program deadlines still need runtime
+qualification before scores are accepted.
 
 ## Inspect results and failures
 
@@ -166,10 +166,11 @@ separately from model failures. An execution-deadline error actually returned by
 model-written code is scored. Returned errors from local program, command, file and state tools also
 remain model observations even when their text says `Client failed to connect` or `session was closed`.
 An actual bridge/provider transport timeout is an infrastructure failure.
-The order of a program tool call followed by transport loss does not establish that the program caused
-the loss: provider failure, sandbox TTL expiry and a terminated bridge can report the same error.
-Keep such unknown infrastructure failures separate from model zeroes until runtime evidence supplies
-reliable attribution.
+When a transport failure follows a call to a program or command tool, `scale_live` probes the sandbox
+through its provider: a sandbox that still answers while its own server does not was ended from inside,
+and that rollout is scored with `environment_destroyed` in `service_errors`, as upstream feeds every tool
+failure back to the model. A loss the provider reports, or a failure in a rollout that ran no program
+or command, stays a masked infrastructure failure.
 For servers outside the [local-tool list](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/mcp_atlas/README.md#who-failed),
 a returned error with a recognized leading connection/session diagnostic remains `service_error`, masked when
 `mask_service_errors` is set. Returned errors from those local tools are still scored; a returned
