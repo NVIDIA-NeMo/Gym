@@ -497,6 +497,7 @@ benchmark that declares another resources server (for example [Asr With Pc](reso
 
 | Benchmark | Evaluates | Metric | License |
 | --- | --- | --- | --- |
+| [`fleurs_lid`](benchmarks/fleurs_lid/README.md) | Spoken language identification on FLEURS (102 locales by default) | Accuracy | CC-BY-4.0 |
 | [`voxlingua107`](benchmarks/voxlingua107/README.md) | Spoken language identification on VoxLingua107 (33 languages by default) | Accuracy | CC-BY-4.0 |
 
 ## 📖 Documentation & Resources

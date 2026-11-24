@@ -1,0 +1,17 @@
+{
+  "profiles": {
+    "fleurs-lid": {
+      "prompt_override": {
+        "system_prompt": ""
+      },
+      "request": {
+        "preset": "greedy",
+        "max_output_tokens": 16
+      },
+      "skills": {
+        "EVAL_ARGS": "++eval_type=fleurs_lid ++eval_config.cleanup_generation_loops=true",
+        "METRICS_TYPE": "fleurs_lid"
+      }
+    }
+  }
+}

@@ -1,0 +1,33 @@
+config_paths:
+- resources_servers/audio_eval/configs/audio_eval.yaml
+
+fleurs_lid_resources_server:
+  _inherit_from: audio_eval
+  resources_servers:
+    audio_eval:
+      profile_contracts: benchmarks/fleurs_lid/profiles.json
+
+fleurs_lid_simple_agent:
+  _inherit_from: audio_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: fleurs_lid_resources_server
+      datasets:
+      - name: fleurs_lid
+        type: benchmark
+        jsonl_fpath: benchmarks/fleurs_lid/data/fleurs_lid_benchmark.jsonl
+        prepare_script: benchmarks/fleurs_lid/prepare.py
+        prepare_dependencies:
+        - soundfile
+        license: Creative Commons Attribution 4.0 International
+
+fleurs_lid_environment_server:
+  _inherit_from: audio_eval_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: fleurs_lid_simple_agent
+      resources_server:
+        type: resources_servers
+        name: fleurs_lid_resources_server
