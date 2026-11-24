@@ -30,10 +30,12 @@ import nemo_gym.client.http_client as transport
 import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
+from nemo_gym.core.failure_transport import TransportResendHeader, observe_transport_resend
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_records import NG_TRANSPORT_RESENDS_KEY
 from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.helpers.single_agent_turn import _environment_server, _request
+from tests.helpers.single_agent_turn import _Client, _environment_server, _request
 
 
 def _free_port() -> int:
@@ -163,3 +165,72 @@ async def test_a_run_whose_handshake_times_out_is_resent_within_the_grace_and_sa
     failures = config.output_jsonl_fpath.replace(".jsonl", "_failures.jsonl")
     [row] = [json.loads(line) for line in open(failures) if line.strip()]
     assert row["_ng_failure_record"]["delivery"] == "not_sent"
+
+
+async def test_a_gym_replys_resend_count_reaches_the_saved_row_and_the_run_total(tmp_path, monkeypatch):
+    """The environment server reports its resends in its reply header, and collection adds them to its own."""
+
+    class ResendingClient(_Client):
+        async def post(self, server_name: str, url_path: str, **kwargs):
+            if not self.calls:
+                # The environment server's own first call to a server below it took two resends.
+                for _ in range(2):
+                    observe_transport_resend()
+            return await super().post(server_name, url_path, **kwargs)
+
+    environment, _ = _environment_server(client_type=ResendingClient)
+    app = environment.setup_webserver()
+    environment.setup_exception_middleware(app)
+    port = _free_port()
+    config = _config(tmp_path, monkeypatch, port, route_failures_to_sidecar=False)
+    reported = []
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://environment") as endpoint:
+
+        async def handle(reader, writer):
+            headers = await reader.readuntil(b"\r\n\r\n")
+            length = int(
+                next(
+                    line.split(b":", 1)[1]
+                    for line in headers.split(b"\r\n")
+                    if line.lower().startswith(b"content-length:")
+                )
+            )
+            body = json.loads(await reader.readexactly(length))
+            if not reported:
+                # Dropped before any reply: collection resends the /run once.
+                reported.append(None)
+                writer.close()
+                await writer.wait_closed()
+                return
+            reply = await endpoint.post("/run", json=body)
+            reported.append(reply.headers.get(TransportResendHeader.NAME))
+            forwarded = b"".join(
+                f"{name}: {value}\r\n".encode()
+                for name, value in reply.headers.items()
+                if name.lower() not in ("content-length", "connection", "transfer-encoding")
+            )
+            writer.write(
+                f"HTTP/1.1 {reply.status_code} OK\r\n".encode()
+                + forwarded
+                + f"Content-Length: {len(reply.content)}\r\nConnection: close\r\n\r\n".encode()
+                + reply.content
+            )
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", port)
+        try:
+            async with ClientSession() as session:
+                monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
+                await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=30)
+        finally:
+            server.close()
+
+    assert reported == [None, "2"]
+    output = Path(config.output_jsonl_fpath)
+    [row] = [json.loads(line) for line in output.read_text().splitlines() if line.strip()]
+    # One resend by collection, two by the environment server below it.
+    assert row[NG_TRANSPORT_RESENDS_KEY] == 3
+    metrics = RolloutStore.read(output).failure_export_metrics()
+    assert (metrics["transport/resends"], metrics["transport/attempts_counted"]) == (3, 1)
