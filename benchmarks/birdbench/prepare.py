@@ -419,6 +419,7 @@ def _write_schema_only(
         for i, entry in enumerate(entries):
             evidence = (entry.get("evidence") or "").strip() if include_evidence else ""
             row = {
+                "task_id": str(entry["question_id"]),
                 "question": entry["question"],
                 "evidence_section": f"\n\n### Evidence\n{evidence}" if evidence else "",
                 "gt_sql": entry["SQL"],

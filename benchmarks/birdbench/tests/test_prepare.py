@@ -6,8 +6,11 @@ import json
 import sqlite3
 
 import pytest
+from pydantic import TypeAdapter
 
 from benchmarks.birdbench import prepare as birdbench_prepare
+from nemo_gym.data import validate_jsonl_rows
+from resources_servers.bird_sql.task_data import TaskData
 
 
 class _FakeDbHandle:
@@ -313,16 +316,16 @@ class TestVersions:
     def test_named_version_downloads_once_and_tags_rows(self, prepared, release):
         urls = release([_q(7, question="Q7"), _q(9, question="Q9")], suffix=".jsonl")
         rows = prepared([_entry()], version="dev_test")
-        assert [(r["question_id"], r["bird_version"], r["id"]) for r in rows] == [
-            (7, "dev_test", 0),
-            (9, "dev_test", 1),
+        assert [(r["task_id"], r["question_id"], r["bird_version"], r["id"]) for r in rows] == [
+            ("7", 7, "dev_test", 0),
+            ("9", 9, "dev_test", 1),
         ]
         prepared([_entry()], version="dev_test")
         assert len(urls) == 1
 
     def test_default_version_rows_are_unchanged(self, prepared):
         rows = prepared([_entry()])
-        assert set(rows[0]) == {"question", "gt_sql", "sql_context", "difficulty", "db_id", "id"}
+        assert set(rows[0]) == {"task_id", "question", "gt_sql", "sql_context", "difficulty", "db_id", "id"}
 
     def test_hash_mismatch_is_an_error(self, prepared, release, monkeypatch):
         release([_q(1)])
@@ -376,6 +379,15 @@ class TestSchemaOnly:
         assert (rows[0]["question_id"], rows[0]["bird_version"]) == (0, "dev_20240627")
         no_evidence = prepared([_q(0, evidence="b means x")], prompt_format="schema_only", include_evidence=False)
         assert no_evidence[0]["evidence_section"] == ""
+
+    def test_rows_carry_the_question_id_as_task_id(self, prepared):
+        rows = prepared([_q(7), _q(3, question="Q3")], prompt_format="schema_only")
+        assert [(r["task_id"], r["id"]) for r in rows] == [("7", 0), ("3", 1)]
+        lines = [json.dumps(r) for r in rows]
+        report = validate_jsonl_rows(
+            "bird_sql", TypeAdapter(TaskData), "birdbench_sqlite_dev_schema_only.jsonl", lines
+        )
+        assert report.error_rows == 0 and "task_id" not in report.unknown_keys
 
     def test_no_descriptions_leaves_the_dump(self, tmp_path):
         db = tmp_path / "db1"
