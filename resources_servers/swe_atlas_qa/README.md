@@ -5,6 +5,25 @@ Run `python resources_servers/swe_atlas_qa/prepare.py` from the repository root 
 rows from the pinned upstream source. The [benchmark README](../../benchmarks/swe_atlas_qa/README.md) records
 historical results from the retired run presets.
 
+No shipped agent can run these tasks yet. `/seed_session` returns the task sandbox as an untyped
+`sandbox_descriptor`, which only the retired `harness_agent` read; session agents paired through
+`single_agent_turn` expect the sandbox through `sandbox_access` and refuse the extra seed field. A run needs this
+server to lend its sandbox first.
+
+## Configuration
+
+`configs/swe_atlas_qa.yaml` reads these values. Set them in `env.yaml` or on the command line:
+
+| Key | Value |
+|---|---|
+| `judge_base_url`, `judge_model_name` | Rubric judge, reachable from the evaluator sandbox. Required. |
+| `judge_api_key` | Judge key, default `unused`. |
+| `sandbox` | Sandbox provider config, for example `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`. |
+
+Task sandboxes may reach only the model host, so the Gym model server must listen on an address they can reach
+(`+use_absolute_ip=true`); a seed with a loopback model host fails. When they cannot reach this machine, set
+`swe_atlas_qa_resources_server.resources_servers.swe_atlas_qa.sandbox_model_base_url` to a relay URL.
+
 `/seed_session` creates the task sandbox from the task's pinned image with `/app` as its working directory.
 `/verify` collects `/logs/agent/answer.txt`, closes the agent sandbox, and runs the
 upstream evaluator in a separate sandbox. Rubrics, reference answers, and judge credentials never enter the agent

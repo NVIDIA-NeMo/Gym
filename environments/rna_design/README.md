@@ -31,7 +31,7 @@ EternaFold, which scores every design, and the suites are built on first start. 
 
 ## Run
 
-The agent mode needs no sandbox:
+Run the agent mode:
 
 ```bash
 # 20 Eterna100 v2 targets as dataset rows
