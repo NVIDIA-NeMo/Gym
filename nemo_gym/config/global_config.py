@@ -1625,6 +1625,9 @@ For example, on the command line:
         # come back unresolved (so the swap detection below still matches), and a missing ('???')
         # leaf is returned as-is instead of raising MissingMandatoryValue mid-swap. Any genuinely
         # unset values are reported together by raise_on_missing_values, which runs after this pass.
+        # No value is resolved in this pass: _resolve_swap_source walks a detached copy of a source, where an
+        # interpolation such as `${root_key}` has no root to resolve against. So list elements are read as nodes
+        # and deleted keys are removed with `del` (DictConfig.pop resolves the value it returns).
         for k, v in list(dict_config.items_ex(resolve=False)):
             if k not in dict_config:
                 # An earlier sibling's `_inherit_from` moved this entry; resolving it again would re-add it.
@@ -1639,18 +1642,16 @@ For example, on the command line:
                 # but only delete keys that are present in case the key-to-delete comes from a downstream inherit or swap
                 existing_keys = set(k for k in keys_to_delete if k in v)
                 for key in existing_keys:
-                    v.pop(key)
+                    del v[key]
                 keys_to_delete -= existing_keys
 
             if isinstance(v, (DictConfig, dict)):
                 self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config, inherit_chain)
             elif isinstance(v, (ListConfig, list)):
-                # Iterate without resolving so a missing ('???') element doesn't raise mid-swap (it's
-                # a scalar, so it's skipped here and reported later by raise_on_missing_values).
+                # A scalar element (a missing '???' or an interpolation included) is skipped here; a '???'
+                # is reported later by raise_on_missing_values.
                 for i in range(len(v)):
-                    if isinstance(v, ListConfig) and OmegaConf.is_missing(v, i):
-                        continue
-                    inner_v = v[i]
+                    inner_v = v._get_node(i) if isinstance(v, ListConfig) else v[i]
                     if isinstance(inner_v, (DictConfig, dict)):
                         self._recursively_swap_keys_helper(
                             inner_v, original_dict_config, frozen_dict_config, inherit_chain
@@ -1713,7 +1714,7 @@ For example, on the command line:
             if is_delete_property:
                 # Enforce that every key-to-delete exists
                 for key in keys_to_delete:
-                    dict_config[k].pop(key)
+                    del dict_config[k][key]
 
     def _resolve_swap_source(
         self,

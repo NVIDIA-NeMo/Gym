@@ -42,6 +42,8 @@ from nemo_gym.environment.validation import (
         "moldetox",
         "scicodepile",
         "partner_if",
+        # Its user simulator's endpoint is a deployment setting, so composition resolves without it.
+        "bird_interact",
     ],
 )
 def test_current_benchmark_manifests_match_runtime_composition(name: str) -> None:
@@ -54,6 +56,60 @@ def test_current_benchmark_manifests_match_runtime_composition(name: str) -> Non
         resolve_manifest_config_path(path, manifest), dataset_owner=manifest.dataset_owner
     )
     assert _mirror_differences(manifest, composition) == {}
+
+
+def test_static_wiring_fills_an_auxiliary_models_endpoint_but_no_other_missing_value() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.environment.validation import _StaticWiringParser
+
+    config = OmegaConf.create(
+        {
+            "user_model_base_url": "???",
+            "user_model_api_key": "???",
+            "user_model_name": "???",
+            "unrelated_setting": "???",
+            "user_model": {
+                "responses_api_models": {
+                    "vllm_model": {
+                        "base_url": "${user_model_base_url}",
+                        "api_key": "${user_model_api_key}",
+                        "model": "${user_model_name}",
+                    }
+                }
+            },
+        }
+    )
+
+    _StaticWiringParser()._recursively_swap_keys(config)
+
+    assert OmegaConf.to_container(config.user_model, resolve=True) == {
+        "responses_api_models": {
+            "vllm_model": {
+                "base_url": "https://model.invalid/v1",
+                "api_key": "static-validation",
+                "model": "static-validation",
+            }
+        }
+    }
+    assert OmegaConf.is_missing(config, "unrelated_setting")
+
+
+def test_static_wiring_keeps_a_supplied_model_setting() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.environment.validation import _StaticWiringParser
+
+    config = OmegaConf.create(
+        {
+            "user_model_base_url": "https://simulator.example/v1",
+            "user_model": {"responses_api_models": {"vllm_model": {"base_url": "${user_model_base_url}"}}},
+        }
+    )
+
+    _StaticWiringParser()._recursively_swap_keys(config)
+
+    assert config.user_model.responses_api_models.vllm_model.base_url == "https://simulator.example/v1"
 
 
 def test_manifest_resolves_dataset_interpolation_against_its_config(tmp_path: Path, monkeypatch) -> None:

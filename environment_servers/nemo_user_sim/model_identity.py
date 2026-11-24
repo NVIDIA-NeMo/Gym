@@ -8,6 +8,7 @@ from pathlib import Path
 
 from benchmarks.model_identity.prepare import DATA
 from environment_servers.nemo_user_sim.app import UserSimEnvironmentServer
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 SPEC_ENV_VAR = "USERSIM_IDENTITY_DISCLOSURE_SPEC"
@@ -25,3 +26,6 @@ def use_prepared_spec(spec_path: Path = SPEC_PATH) -> None:
 if __name__ == "__main__":
     use_prepared_spec()
     UserSimEnvironmentServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    use_prepared_spec()
+    app = UserSimEnvironmentServer.run_webserver()  # noqa: F401

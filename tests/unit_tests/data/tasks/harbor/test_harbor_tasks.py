@@ -3007,6 +3007,51 @@ def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
     assert environment.cleanup_timeout_seconds == 180 and environment.sandbox_provider == "sandbox"
 
 
+@pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
+@pytest.mark.parametrize("run_args", ['["--env", "GYM_AGENT=${inner_agent}"]', "${container_run_args}"])
+def test_overlay_run_args_interpolate_the_root_in_the_generated_environment_server(tmp_path, monkeypatch, run_args):
+    import sys
+
+    from omegaconf import OmegaConf
+
+    import nemo_gym.config.global_config as global_config
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.cli.main import _merge_config_paths
+    from nemo_gym.config.global_config import get_global_config_dict
+    from nemo_gym.data.tasks.harbor.materialize import environment_server_instance
+
+    # The generated environment server inherits the overlay's `harbor_environment_server` block, so an inline list
+    # there resolves against the root exactly as a whole-list reference does.
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text(
+        "inner_agent: codex_agent\n"
+        'container_run_args: ["--env", "GYM_AGENT=${inner_agent}"]\n'
+        "harbor_environment_server:\n  environment_servers:\n    harbor:\n      sandbox_provider_options:\n"
+        f"        run_args: {run_args}\n"
+    )
+    write_task(tmp_path / "ds" / "a")
+    prepared = prepare_target(str(tmp_path / "ds"), output_root=tmp_path / "out")
+    _, tokens = build_run(
+        prepared,
+        resolve_agent("hermes_agent"),
+        sandbox="opensandbox",
+        overrides=[
+            f"+config_paths=[{PARENT_DIR / 'responses_api_models/openai_model/configs/openai_model.yaml'},{overlay}]",
+            "+policy_model_name=test-model",
+            "+policy_base_url=http://127.0.0.1:1/v1",
+            "+policy_api_key=unused",
+        ],
+    )
+    monkeypatch.setattr(sys, "argv", ["e2e", *_merge_config_paths(tokens)])
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+
+    config = get_global_config_dict()
+
+    options = config[environment_server_instance("ds")].environment_servers.harbor.sandbox_provider_options
+    assert OmegaConf.to_container(options.run_args, resolve=True) == ["--env", "GYM_AGENT=codex_agent"]
+
+
 @pytest.mark.parametrize("skip", [False, True])
 def test_partial_eval_requires_explicit_opt_in_and_records_reasons(tmp_path, monkeypatch, capsys, skip):
     import sys

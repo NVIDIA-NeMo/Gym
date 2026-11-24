@@ -100,6 +100,8 @@ Other features use some of these words in their own senses and keep them:
 | --- | --- |
 | **Model / policy model** | The model being trained or evaluated — local weights or a remote endpoint, usually via the Model server. See [Model Server](/model-server). |
 | **Agent harness** | How the model interacts with the environment: loops model calls, routes tools, manages context, and decides when the task is done. See [Agent Server](/agent-server). |
+| **Pause mode** | How a harness running in a sandbox is paused for a checkpoint: `pause_mode` on `SandboxSession`. In **stop mode** (`stop`, the default) the harness's supervisor sends SIGSTOP to every process it reaches, and SIGCONT to continue them. In **hold mode** (`hold`) it sends no signal: it only acknowledges the pause and names itself, and the harness keeps running. Hold mode is for a provider whose snapshot keeps processes. See [Make a Harness Checkpointable](/main/agent-server/checkpointable-harness). |
+| **Model relay** | A process that runs beside a harness inside its sandbox and forwards the harness's model calls to the model server named in an endpoint file. It holds new calls while a pause is in effect, and when the endpoint changes after a restore it sends each unanswered call again to the model server now named, so a harness that kept running across the restore continues in place. See [Make a Harness Checkpointable](/main/agent-server/checkpointable-harness). |
 | **Agent** | Model + agent harness. |
 | **Rollout driver** | Coordinates an episode and records its trajectory. |
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
