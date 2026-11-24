@@ -418,8 +418,9 @@ class RequesterTest(unittest.TestCase):
         self.assertEqual(state["requester_failed"], 1)
 
     def test_a_broken_dated_event_ends_the_rollout_masked(self):
-        events = [{"at": "2026-03-03T08:00:00", "patch": {"app": "hubspot", "collection": "contacts", "id": "999"}}]
-        vf_env, state = load({**INFO, "events": events})
+        # The simulator rejects this record only when the event fires (an email must be a string).
+        add = {"app": "hubspot", "collection": "contacts", "add": {"id": "303", "email": 5}}
+        vf_env, state = load({**INFO, "events": [{"at": "2026-03-03T08:00:00", "patch": add}]})
         call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "2026-03-04T09:00:00"}))
 
         with self.assertRaises(vf.ToolCallError):
@@ -901,12 +902,13 @@ class EventAfterPolicyDeleteTest(unittest.TestCase):
                 "patch": {"app": "hubspot", "collection": "contacts", "id": "999", "set": {}},
             }
         ]
-        vf_env, state = load({**INFO, "events": events})
+        with self.assertRaisesRegex(ValueError, "targets no record '999' in hubspot.contacts"):
+            load({**INFO, "events": events})
 
-        call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "2026-03-05T09:00:00"}))
-        with self.assertRaises(vf.ToolCallError):
-            asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
-        self.assertEqual(state["requester_failed"], 1)
+        vf_env, _ = load(INFO)
+        raw = {**copy.deepcopy(INFO), "events": events}  # the row as Gym sends it to /run
+        state = asyncio.run(vf_env.setup_state({"prompt": PROMPT, "info": raw, "example_id": 0}))
+        self.assertEqual(state["env_row_invalid"], 1)
 
 
 class RefusedRequesterTest(unittest.TestCase):

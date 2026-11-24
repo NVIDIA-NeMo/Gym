@@ -62,9 +62,14 @@ STAMPED_FIELDS = {
     "updated_at", "updated_date", "date_updated", "last_updated_time",
     "modified_at", "date_modified", "last_modified_date", "last_modified_date_time",
     "edited_at", "generated_at", "status_changed_date_time", "canceled_at", "voided_date_time", "no_show_marked_at",
-    "sent_at", "sent_date_time", "timestamp", "ts", "current_time",
+    "sent_at", "sent_date_time", "timestamp", "current_time",
 }  # fmt: skip
 FIELD_KEYS = {"field", "property"}  # not a sheet `column`: cells hold what the agent writes, nothing is stamped
+VALUE_MAPS = {
+    "cells",
+    "cell_contains",
+    "fields",
+}  # their keys are column names (a Google Forms "Timestamp"), not fields
 REQUESTER_RESULT_CHARS = 30000  # one requester tool result, cut: a whole sheet runs to 70k+ characters
 # An A1 reference to sheet rows: "Tab!B7", "'Q4 2025'!A7:C7", "B7", a bare "7", or rows "2:5".
 ROW_REF = re.compile(r"(?:'?(?P<tab>.+?)'?!)?[A-Za-z]{0,3}(?P<first>\d+)(?::[A-Za-z]{0,3}(?P<last>\d+))?")
@@ -297,10 +302,21 @@ def row_problems(info: dict, *, requester: bool) -> list[str]:
             problems.append(f"{a['type']} has no record (got {a.get('record')!r})")
         if a.get("type") == "acted_on_day" and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(a.get("day"))):
             problems.append(f"acted_on_day day {a.get('day')!r} is not YYYY-MM-DD")
+    events = info.get("events") or []
+    if not isinstance(events, list) or not all(
+        isinstance(e, dict) and isinstance(e.get("patch"), dict) for e in events
+    ):
+        problems.append("events must be a list of {at, patch} objects")
+    elif bad := [
+        e
+        for e in events
+        if not {"app", "collection"} <= e["patch"].keys() or not ("add" in e["patch"] or "id" in e["patch"])
+    ]:
+        problems.append(f"an event patch needs app, collection and add or id: {str(bad[0])[:120]}")
     if info.get("period_end"):
         if missing := [k for k in ("wait_tool_description", "wait_until_description") if not info.get(k)]:
             problems.append(f"a multi-day row needs {missing}")
-        for t in [info["period_end"], *(e.get("at") for e in info.get("events", []))]:
+        for t in [info["period_end"], *(e.get("at") for e in events if isinstance(e, dict))]:
             try:
                 _time(t)
             except (TypeError, ValueError):
@@ -322,7 +338,21 @@ def resolve_records(info: dict) -> list[str]:
     problem per record that names nothing or more than one record (two collections, or rows of two tabs)."""
     seed = WorldState(**strip_none_values(info["initial_state"]))
     world, sheets = seed.model_dump(mode="json"), seed.google_sheets
-    names, problems = _names(world, info.get("events", []), sheets), []
+    names, problems = _names(world, info.get("events") or [], sheets), []
+    # A dated event edits a record of the seed or one an earlier event added; any other target would mask only the rollouts
+    # that wait past it.
+    known = _known(_records(world, sheets))
+    for e in sorted(info.get("events") or [], key=lambda e: _time(e["at"])):
+        patch = e["patch"]
+        if "add" in patch:
+            known |= {
+                (patch["app"], patch["collection"], n)
+                for n in (_key(patch["app"], patch["collection"], patch["add"], sheets), str(patch["add"].get("id")))
+            }
+        elif (patch["app"], patch["collection"], str(patch["id"])) not in known:
+            problems.append(
+                f"unresolvable: event at {e['at']} targets no record {patch['id']!r} in {patch['app']}.{patch['collection']}"
+            )
     for a in info.get("assertions", []):
         if a.get("type") not in DAY_ASSERTIONS:
             continue
@@ -538,6 +568,8 @@ def stamped_fields(assertion: dict) -> list[str]:
     def walk(node) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
+                if key in VALUE_MAPS:
+                    continue
                 if _is_stamped(key):
                     found.append(key)
                 elif key in FIELD_KEYS and isinstance(value, str) and _is_stamped(value):
@@ -560,7 +592,7 @@ def replay(info: dict, calls: list[dict]) -> float:
     if problems := resolve_records(info):
         raise ValueError(f"day-assertion records cannot be resolved: {problems}")
     world = WorldState(**strip_none_values(info["initial_state"]))
-    clock = Clock(world, copy.deepcopy(info.get("events", [])), info.get("period_end") or world.meta.current_time)
+    clock = Clock(world, copy.deepcopy(info.get("events") or []), info.get("period_end") or world.meta.current_time)
     for call in calls:
         if "wait" in call:
             clock.wait(call["wait"])
@@ -914,7 +946,11 @@ def load_environment(
     requester = bool(requester_base_url and requester_model)
     refused = {}
     for i, r in enumerate(rows):
-        if problems := row_problems(r["info"], requester=requester) or resolve_records(r["info"]):
+        try:
+            problems = row_problems(r["info"], requester=requester) or resolve_records(r["info"])
+        except Exception as e:  # noqa: BLE001  a row the checks cannot read is refused with the error, not the whole load
+            problems = [f"row check raised {type(e).__name__}: {str(e)[:200]}"]
+        if problems:
             refused[i] = problems
     if not requester and any("requester_base_url" in p for problems in refused.values() for p in problems):
         raise ValueError(

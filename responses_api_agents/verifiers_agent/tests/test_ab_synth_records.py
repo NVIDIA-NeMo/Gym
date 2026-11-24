@@ -12,6 +12,7 @@ import unittest.mock
 from datetime import datetime
 
 import ab_synth_env as env
+import pytest
 import verifiers as vf
 from verifiers.legacy.types import AssistantMessage, ToolCall
 
@@ -21,6 +22,7 @@ from responses_api_agents.verifiers_agent.tests.test_ab_synth_env import (
     PROMOTE,
     PROMOTED,
     PROMPT,
+    SINGLE_DAY,
     load,
 )
 
@@ -685,6 +687,117 @@ class PartialWriteThenRaiseTest(unittest.TestCase):
         tag = env._tag("google_sheets", "worksheets", ("ss_abc", "ws1"))
         self.assertTrue(any(tag in e["targets"] for e in state["clock"].log), state["clock"].log)
         self.assertEqual(env.reward(state), 0.0)
+
+
+# F1: one row with a bad seed or bad events must be refused on its own, not abort the whole load.
+UNREADABLE_ROWS = {
+    "seed the simulator rejects": {**SINGLE_DAY, "initial_state": {**INITIAL_STATE, "hubspot": {"contacts": "x"}}},
+    "event without patch": {**INFO, "events": [{"at": "2026-03-04T08:00:00"}]},
+    "no info": None,
+}
+
+
+@pytest.mark.parametrize("name", list(UNREADABLE_ROWS))
+def test_one_bad_row_is_refused_and_the_good_row_still_loads(name):
+    rows = [
+        {"responses_create_params": {"input": PROMPT}, "info": copy.deepcopy(SINGLE_DAY)},
+        {"responses_create_params": {"input": PROMPT}, "info": copy.deepcopy(UNREADABLE_ROWS[name])},
+    ]
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:
+        f.write("".join(json.dumps(r) + "\n" for r in rows))
+        f.flush()
+        vf_env = env.load_environment(
+            tasks_path=f.name, requester_base_url="http://127.0.0.1:9/v1", requester_model="m"
+        )
+
+    assert len(vf_env.dataset) == 1
+
+
+def test_a_row_with_null_events_loads_like_a_row_without_events():
+    # Upstream strips null values from a row before a rollout, so `events: null` runs as a row with no events.
+    rows = [{"responses_create_params": {"input": PROMPT}, "info": {**copy.deepcopy(SINGLE_DAY), "events": None}}]
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:
+        f.write("".join(json.dumps(r) + "\n" for r in rows))
+        f.flush()
+        vf_env = env.load_environment(
+            tasks_path=f.name, requester_base_url="http://127.0.0.1:9/v1", requester_model="m"
+        )
+
+    assert len(vf_env.dataset) == 1
+
+
+# F2: a sheet column named "Timestamp" is a cell the agent writes, not a field the simulator stamps.
+FORMS_SEED = {
+    "meta": {"current_time": "2026-03-02T09:00:00"},
+    "google_sheets": {
+        "spreadsheets": [{"id": "ss1", "title": "Form responses"}],
+        "worksheets": [{"id": "ws1", "spreadsheet_id": "ss1", "title": "Sheet1", "headers": ["Timestamp", "Name"]}],
+        "rows": [],
+    },
+}
+FORMS_ROW = {
+    "type": "google_sheets_row_exists",
+    "spreadsheet_id": "ss1",
+    "worksheet_id": "ws1",
+    "cells": {"Timestamp": "2025-11-03 09:00", "Name": "Ana"},
+}
+FORMS_APPEND = {
+    "method": "POST",
+    "url": "https://sheets.googleapis.com/v4/spreadsheets/ss1/values/Sheet1:append",
+    "params": {"valueInputOption": "RAW"},
+    "body": {"values": [["2025-11-03 09:00", "Ana"]]},
+}
+
+
+def test_a_timestamp_column_in_cells_is_gradeable_and_not_refused():
+    info = {"initial_state": FORMS_SEED, "assertions": [FORMS_ROW]}
+
+    assert env.replay(info, [FORMS_APPEND]) == 1.0  # the row is gradeable: the correct append scores 1
+    assert env.row_problems(info, requester=False) == []
+
+
+# F3: a Slack assertion that names a seed message by its `ts` only looks the message up, it reads no stamped value.
+SLACK_TS = "1731400000.000200"
+SLACK_SEED = {
+    "meta": {"current_time": "2026-03-02T09:00:00"},
+    "slack": {
+        "channels": [{"id": "C1", "name": "ops"}],
+        "messages": [{"ts": SLACK_TS, "channel_id": "C1", "user_id": "U1", "text": "Deploy finished"}],
+    },
+}
+SLACK_REACTION = {"type": "slack_message_has_reaction", "channel": "C1", "ts": SLACK_TS, "emoji": "white_check_mark"}
+SLACK_REACT = {
+    "method": "POST",
+    "url": "https://slack.com/api/reactions.add",
+    "body": {"channel": "C1", "timestamp": SLACK_TS, "name": "white_check_mark"},
+}
+
+
+def test_a_reaction_assertion_on_a_seed_message_ts_is_gradeable_and_not_refused():
+    info = {"initial_state": SLACK_SEED, "assertions": [SLACK_REACTION]}
+
+    assert (env.replay(info, [SLACK_REACT]), env.replay(info, [])) == (1.0, 0.0)  # gradeable
+    assert env.row_problems(info, requester=False) == []
+
+
+# F5: a dated event on a record that never existed is a dataset fault known before any rollout. It must be refused
+# at load or masked at setup, not left for only the rollouts that wait past it to find.
+GHOST_EVENT = {
+    "at": "2026-03-04T08:00:00",
+    "patch": {"app": "hubspot", "collection": "contacts", "id": "1O1", "set": {"lifecyclestage": "opportunity"}},
+}
+
+
+def test_an_event_on_a_record_the_seed_never_had_is_refused_or_masked_before_the_first_turn():
+    try:
+        vf_env, state = load({**INFO, "events": [GHOST_EVENT]})
+    except ValueError:
+        return  # refused at load
+    if state.get("env_row_invalid"):
+        return  # masked at setup
+    # Neither: a rollout that never waits past the event is scored as if the row were sound.
+    state["clock"].fetch(**PROMOTE)
+    assert state.get("env_row_invalid") == 1, f"row loaded and scored without waiting: reward {env.reward(state)}"
 
 
 if __name__ == "__main__":
