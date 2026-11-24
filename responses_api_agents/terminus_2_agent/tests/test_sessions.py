@@ -589,6 +589,65 @@ class TestActivation:
         [sandbox] = [record for record in closed.agent_observations.records if isinstance(record, SandboxObservation)]
         assert sandbox.outcome == sandbox_outcome
 
+    @staticmethod
+    def _context_overflow(*agent_steps: dict) -> dict:
+        """A runner result for a context overflow after ``agent_steps``, as the runner saves it."""
+        return _output(
+            stop_reason="error",
+            error_kind="context_limit",
+            error="ContextLengthExceededError: Model test-model context length exceeded",
+            error_type="ContextLengthExceededError",
+            finished_naturally=False,
+            context_length_exceeded=True,
+            trajectory={"steps": [{"source": "user", "message": "task"}, *agent_steps]},
+        )
+
+    async def test_a_context_overflow_before_the_first_reply_fails_when_rollout_details_are_collected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The first model call overflowed, so the trajectory has no agent step.
+        activation = _Activation(monkeypatch, self._context_overflow(), collect_rollout_details=True)
+
+        response = await activation.respond()
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
+
+        assert response.status == "failed"
+        assert response.metadata["stop_reason"] == "context_limit"
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_context_limit"}
+        assert response.error.message == "ContextLengthExceededError: Model test-model context length exceeded"
+        # The output is unchanged: the empty assistant message of a run without agent steps.
+        [message] = response.output
+        assert (message.type, message.role, message.content[0].text) == ("message", "assistant", "")
+        records = closed.agent_observations.records
+        [invocation] = [record for record in records if isinstance(record, AgentInvocation)]
+        assert (invocation.status, invocation.stop_reason) == ("failed", "context_limit")
+        [sandbox] = [record for record in records if isinstance(record, SandboxObservation)]
+        assert (sandbox.outcome, sandbox.error_type) == ("failed", "context_limit")
+
+    @pytest.mark.parametrize(
+        ("metrics", "generation_token_ids"),
+        [
+            ({"prompt_token_ids": [1, 2], "completion_token_ids": [3, 4], "logprobs": [-0.1, -0.2]}, [3, 4]),
+            # A model server that does not return token IDs, such as vllm_model with return_token_id_information off.
+            ({"prompt_tokens": 2, "completion_tokens": 2}, None),
+        ],
+        ids=["with-token-ids", "without-token-ids"],
+    )
+    async def test_a_context_overflow_after_a_reply_stays_incomplete(
+        self, monkeypatch: pytest.MonkeyPatch, metrics: dict, generation_token_ids: list[int] | None
+    ) -> None:
+        step = {"source": "agent", "message": "Looking around.", "metrics": metrics}
+        activation = _Activation(monkeypatch, self._context_overflow(step), collect_rollout_details=True)
+
+        response = await activation.respond()
+
+        assert response.status == "incomplete"
+        assert response.metadata["stop_reason"] == "context_limit"
+        assert "ng_agent_outcome" not in response.metadata
+        assert response.error is None
+        [message] = response.output
+        assert getattr(message, "generation_token_ids", None) == generation_token_ids
+
     async def test_an_unfinished_turn_of_a_failed_run_is_recorded_as_failed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

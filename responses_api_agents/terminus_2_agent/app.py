@@ -54,6 +54,7 @@ from nemo_gym.agents import (
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
@@ -576,6 +577,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         if kind == "output_limit":
             return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
+        if kind == "context_limit":
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         return AgentOutcome(failure_kind="unknown")
 
     @staticmethod
@@ -586,10 +589,14 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             else str(output.get("stop_reason") or "error")
         )
 
-    @staticmethod
-    def _status(output: Mapping[str, Any]) -> Literal["completed", "incomplete", "failed"]:
-        # A context overflow that summarization could not resolve is a limit of the run, graded like a timeout.
+    def _status(self, output: Mapping[str, Any]) -> Literal["completed", "incomplete", "failed"]:
+        # A context overflow that summarization could not resolve is a limit of the run, graded like a timeout. With
+        # rollout details collected, an overflow before the model's first reply fails instead: there is no agent work
+        # to verify. It checks for a reply, not for token IDs, which a model server may not return.
         if output.get("error_kind") == "context_limit":
+            steps = (output.get("trajectory") or {}).get("steps") or []
+            if self.config.collect_rollout_details and not any(step.get("source") == "agent" for step in steps):
+                return "failed"
             return "incomplete"
         return _STATUS_BY_STOP_REASON.get(str(output.get("stop_reason")), "failed")
 
