@@ -571,7 +571,7 @@ def record_model_call_duration(duration_ms: float, *, dialect: str, server_name:
     _record_histogram(
         MODEL_CALL_DURATION_INSTRUMENT,
         "ms",
-        "Time a model server took for one call, to its last response byte.",
+        "Time a model server took for one call, until it handed its last response byte to the connection.",
         duration_ms,
         {MODEL_DIALECT_ATTRIBUTE: dialect, SERVER_NAME_ATTRIBUTE: server_name, MODEL_CALL_OUTCOME_ATTRIBUTE: outcome},
         boundaries=MODEL_CALL_BOUNDARIES_MS,
@@ -583,7 +583,8 @@ def record_model_time_to_first_byte(duration_ms: float, *, dialect: str, server_
     _record_histogram(
         MODEL_TIME_TO_FIRST_BYTE_INSTRUMENT,
         "ms",
-        "Time from a model call's request to its first content byte (keepalives and lifecycle events skipped).",
+        "Time from a model call's request until it handed its first content byte to the connection (keepalives and "
+        "lifecycle events skipped).",
         duration_ms,
         {MODEL_DIALECT_ATTRIBUTE: dialect, SERVER_NAME_ATTRIBUTE: server_name},
         boundaries=MODEL_CALL_BOUNDARIES_MS,

@@ -128,6 +128,20 @@ async def test_the_outcome_is_the_status_class(collected_metrics, status, outcom
     assert attributes["nemo.gym.model.call_outcome"] == outcome
 
 
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        b'event: response.failed\ndata: {"type": "response.failed"}\n\n',
+        b'event: error\ndata: {"error": {"message": "boom"}}\n\n',
+    ],
+)
+async def test_a_stream_that_reports_its_failure_in_band_keeps_its_status_class(collected_metrics, terminal) -> None:
+    await _call(_app(200, [CREATED, terminal]))
+
+    attributes, _ = _only(collected_metrics()[gym_metrics.MODEL_CALL_DURATION_INSTRUMENT])
+    assert attributes["nemo.gym.model.call_outcome"] == "2xx"
+
+
 @pytest.mark.parametrize("failure", [RuntimeError("boom"), asyncio.CancelledError()], ids=["raised", "server cancelled"])
 async def test_a_call_that_fails_mid_response_is_an_error(collected_metrics, failure) -> None:
     with pytest.raises(type(failure)):

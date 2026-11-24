@@ -98,7 +98,7 @@ class ModelCallTimingMiddleware:
                     _finish("cancelled")
                 return
             chunk = message.get("body", b"") or b""
-            # After the send returned, so the time includes waiting on the client.
+            # After the send returned, which waits on the client only while the connection's write buffer is full.
             if (
                 not first_byte_recorded
                 and chunk
