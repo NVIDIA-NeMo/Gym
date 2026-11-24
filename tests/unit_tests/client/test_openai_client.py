@@ -36,6 +36,13 @@ from nemo_gym.client.openai_client import (
 from nemo_gym.core.episode_context import rollout_context
 
 
+TRANSIENT_GATEWAY_AUTH_BODY = (
+    b'{"error":{"message":"Authentication Error, Error querying the database: FATAL: remaining '
+    b'connection slots are reserved for roles with the SUPERUSER attribute",'
+    b'"type":"authentication_error","code":"401"}}'
+)
+
+
 @pytest.fixture(autouse=True)
 def _jitter_at_its_upper_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nemo_gym.client.openai_client.random.uniform", lambda low, high: high)
@@ -425,8 +432,14 @@ class TestOpenAIUtils:
         [
             (b'{"error":{"code":"invalid_api_key"}}', True),
             (b'{"error":{"type":"authentication_error"}}', True),
+            (b'{"error":{"code":"invalid_api_token","message":"Error querying the database"}}', True),
+            (b'{"error":{"type":"authentication_error","message":"Incorrect API key; too many clients"}}', True),
             (b'{"detail":{"error":{"code":"invalid_api_key"}}}', True),
             (b"Incorrect API key provided", True),
+            (TRANSIENT_GATEWAY_AUTH_BODY, False),
+            ('{"error":{"type":"AUTHENTICATION_ERROR","message":"ERROR QUERYING THE DATABASE"}}', False),
+            (b'{"error":{"type":"authentication_error","message":"remaining connection slots are reserved"}}', False),
+            (b'{"error":{"type":"authentication_error","message":"sorry, too many clients already"}}', False),
             (b'{"error":"unauthorized"}', False),
             (b'{"error":{"message":"model not available"}}', False),
         ],
@@ -440,7 +453,9 @@ class TestOpenAIUtils:
             (429, b'{"error":{"code":"budget_exceeded"}}'),
             (429, b'{"error":{"type":"insufficient_quota"}}'),
             (401, b'{"error":{"code":"invalid_api_key"}}'),
+            (401, b'{"error":{"code":"invalid_api_token","message":"Error querying the database"}}'),
             (403, b'{"error":{"type":"authentication_error"}}'),
+            (403, b'{"error":{"type":"authentication_error","message":"Incorrect API key; too many clients"}}'),
         ],
     )
     async def test_permanent_quota_and_auth_errors_fail_fast(self, monkeypatch, status, body):
@@ -461,6 +476,84 @@ class TestOpenAIUtils:
         assert first.value.response_content == body
         request.assert_awaited_once()
         sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_transient_auth_backend_error_retries_once_and_recovers(self, monkeypatch, status):
+        failed = SimpleNamespace(
+            status=status, content=SimpleNamespace(read=AsyncMock(return_value=TRANSIENT_GATEWAY_AUTH_BODY))
+        )
+        recovered = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[failed, recovered, recovered])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_http_attempts=2)
+        payload = {"model": "judge", "input": [{"role": "user", "content": "preserved answer"}]}
+        before = deepcopy(payload)
+
+        assert (
+            await client._request_with_retry(method="POST", url="https://example.com/v1/responses", json=payload)
+            is recovered
+        )
+        assert (
+            await client._request_with_retry(method="POST", url="https://example.com/v1/responses", json=payload)
+            is recovered
+        )
+
+        assert request.await_count == 3
+        assert all(c.kwargs["json"] == before for c in request.await_args_list)
+        assert payload == before
+        failed.content.read.assert_awaited_once()
+        sleep.assert_awaited_once_with(1.0)
+
+    @pytest.mark.parametrize("status", [401, 403])
+    @pytest.mark.parametrize("attempts", [1, 3])
+    @pytest.mark.parametrize("internal", [False, True])
+    async def test_auth_backend_retry_exhaustion_preserves_body_and_allows_future_calls(
+        self, monkeypatch, status, attempts, internal
+    ):
+        replies = [
+            SimpleNamespace(
+                status=status, content=SimpleNamespace(read=AsyncMock(return_value=TRANSIENT_GATEWAY_AUTH_BODY))
+            )
+            for _ in range(attempts)
+        ]
+        request = AsyncMock(side_effect=replies)
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.client.openai_client.request", request)
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
+
+        async def raise_status(response, content=None):
+            assert response is replies[-1]
+            assert content == TRANSIENT_GATEWAY_AUTH_BODY
+            error = ClientResponseError(
+                request_info=SimpleNamespace(method="POST", url="https://example.com/v1/responses"),
+                history=(),
+                status=response.status,
+                message="transient authentication database failure",
+            )
+            error.response_content = content
+            raise error
+
+        monkeypatch.setattr("nemo_gym.client.openai_client.raise_for_status", raise_status)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.com/v1", max_http_attempts=attempts, internal=internal
+        )
+
+        with pytest.raises(ClientResponseError) as error:
+            await client._request_with_retry(url="https://example.com/v1/responses")
+        assert not isinstance(error.value, PermanentEndpointError)
+        assert error.value.status == status
+        assert error.value.response_content == TRANSIENT_GATEWAY_AUTH_BODY
+        assert request.await_count == attempts
+        assert sleep.await_args_list == [call(2.0**i) for i in range(attempts - 1)]
+        for reply in replies:
+            reply.content.read.assert_awaited_once()
+
+        later = SimpleNamespace(status=200)
+        request.side_effect = [later]
+        assert await client._request_with_retry(url="https://example.com/v1/responses") is later
+        assert request.await_count == attempts + 1
 
     async def test_generic_quota_exceeded_429_still_retries(self, monkeypatch):
         failure = SimpleNamespace(
