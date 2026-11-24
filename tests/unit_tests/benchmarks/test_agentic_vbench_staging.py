@@ -699,23 +699,27 @@ def test_hub_allowance_counts_waiting_on_the_hub_not_local_work(hub_judge, monke
             module.real_post("/v1/messages", {"item": 2})
         assert calls == [] and len(module.FAILURES) == 1
         # Expiry during the backoff after a 503: the sleep is bounded by what is left, and the next attempt is not
-        # made (one attempt in all).
+        # made (one attempt in all). The judge reads the test's clock here, so the 503 takes exactly 0.25 s of the
+        # allowance, not the thread's real round trip.
         module.FAILURES.clear()
         monkeypatch.setattr(module, "_HUB_WAITED", 0.0)
         monkeypatch.setattr(module, "HUB_WAIT_SECONDS", 1.5)
         attempts = []
+        clock = [0.0]
 
         def fail_503(request, timeout):
             attempts.append(timeout)
+            clock[0] += 0.25
             raise _http_error(request, 503)
 
         slept = []
-        monkeypatch.setattr(module.time, "sleep", slept.append)
         monkeypatch.setattr(module.urllib.request, "urlopen", fail_503)
-        with pytest.raises(RuntimeError, match="allowance of 1.5 s waiting on the Hub is spent"):
-            module.real_post("/v1/messages", {"item": 3})
-        # The failed call itself took a moment of the allowance; the sleep is what was left.
-        assert len(attempts) == 1 and slept == [pytest.approx(1.5, abs=0.05)] and len(module.FAILURES) == 1
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "time", types.SimpleNamespace(monotonic=lambda: clock[0], sleep=slept.append))
+            with pytest.raises(RuntimeError, match="allowance of 1.5 s waiting on the Hub is spent"):
+                module.real_post("/v1/messages", {"item": 3})
+        # The failed call took 0.25 s of the allowance; the sleep is what was left.
+        assert len(attempts) == 1 and slept == [pytest.approx(1.25)] and len(module.FAILURES) == 1
         # A call in flight ends at the bound: a stalled response with 0.4 s left is a TimeoutError after about
         # 0.4 s, not the socket timeout's 2 s, and a result after the bound would be dropped.
         _hub_env(module, monkeypatch, server)
