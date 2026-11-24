@@ -1,0 +1,15 @@
+
+{
+  "dependencies": {
+    "bcrypt": "5.1.1",
+    "dotenv": "16.4.7",
+    "koa": "2.15.3",
+    "koa-bodyparser": "4.4.1",
+    "koa-router": "13.0.1",
+    "uuid": "11.0.3",
+    "sqlite3": "5.1.7",
+    "@koa/multer": "3.0.2",
+    "jsonwebtoken": "9.0.2",
+    "koa-session": "7.0.2"
+  }
+}
