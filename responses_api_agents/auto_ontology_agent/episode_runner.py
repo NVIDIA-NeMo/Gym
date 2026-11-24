@@ -11,7 +11,8 @@ TASK_JSON holds the task (``question``, ``evidence``, ``database``), the policy'
 image's settings file (``env_file``) and other settings (``environment``). The episode is the one Auto Ontology's own
 ``ReactSQLAgent`` runs for a SQL answer: ``run_episode`` with Auto Ontology's reasoning client, which the settings
 point at the Model Server, so every model call goes through Gym on the rollout's route. RESULT_JSON gets the submitted
-query, or none, and Auto Ontology's record of the episode.
+query, or none, Auto Ontology's record of the episode, and the model call that ended it when the loop gave up on one
+(``model_failure``).
 """
 
 import json
@@ -46,11 +47,25 @@ def episode_environment(task: dict[str, Any]) -> dict[str, str]:
     return settings
 
 
+def model_failure(error: BaseException) -> dict[str, Any]:
+    """What Gym's outcome policy reads of a model call that the episode gave up on: the HTTP status that the Model
+    Server answered, or that the call got no reply."""
+    import openai
+
+    status = getattr(error, "status_code", None)
+    return {
+        "status_code": status if isinstance(status, int) else None,
+        "no_reply": isinstance(error, openai.APIConnectionError),
+        "error": f"{type(error).__name__}: {error}"[:2000],
+    }
+
+
 def run(task: dict[str, Any]) -> dict[str, Any]:
     """Answer the task's question with one ReAct episode, as Auto Ontology's ReactSQLAgent does."""
     os.environ.update(episode_environment(task))
 
     from auto_ontology.connectors import get_connectors
+    from auto_ontology.retrieval.text_to_sql.react import loop
     from auto_ontology.retrieval.text_to_sql.react.context import ToolContext
     from auto_ontology.retrieval.text_to_sql.react.loop import run_episode
     from auto_ontology.retrieval.text_to_sql.react.run_sql import connector_for
@@ -71,6 +86,18 @@ def run(task: dict[str, Any]) -> dict[str, Any]:
         information_answers=False,
         question=task["question"],
     )
+    # The loop ends with "model_error" and keeps only the text of the model call it gave up on: keep the error itself.
+    failures: list[BaseException] = []
+    invoke = loop.invoke_with_retry
+
+    def invoke_with_retry(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return invoke(*args, **kwargs)
+        except Exception as error:
+            failures.append(error)
+            raise
+
+    loop.invoke_with_retry = invoke_with_retry
     result = run_episode(
         get_llm_client(),
         context,
@@ -85,6 +112,7 @@ def run(task: dict[str, Any]) -> dict[str, Any]:
         "reason": result.reason,
         "tool_calls": result.tool_calls,
         "trajectory": result.trajectory,
+        "model_failure": model_failure(failures[-1]) if result.reason == "model_error" else None,
     }
 
 

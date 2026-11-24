@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
@@ -35,6 +36,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionConflictError,
@@ -51,6 +53,8 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -143,6 +147,15 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         self._episodes = asyncio.Semaphore(self.config.max_concurrent_episodes)
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """The model call that ended the episode, from the runner's ``model_failure``."""
+        status = native_result.get("status_code")
+        if isinstance(status, int) and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("no_reply"):
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return AgentOutcome(failure_kind="unknown")
+
     # ----- agent session ----- #
 
     def parse_agent_context(self, request: AgentSeedSessionRequest) -> BaseModel | None:
@@ -168,6 +181,14 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(str(error)) from error
 
         provider = create_provider(provider_config)
+        sandbox = AsyncSandbox(provider)
+        session = SandboxSession[dict[str, Any]](
+            sandbox=sandbox,
+            workdir=None,
+            session_dir=f"{SANDBOX_DIR}/sessions/{uuid4().hex}",
+            owns_sandbox=True,
+            harness="Auto Ontology",
+        )
         try:
             sandbox_config = dict(self.config.sandbox_config)
             sandbox_config.setdefault(
@@ -185,22 +206,14 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
                 tool_urls=[],
                 required_tool_urls=[],
             )
-            sandbox = AsyncSandbox(provider)
             await sandbox.start(spec)
-        except BaseException:
-            await provider.aclose()
-            raise
-
-        session = SandboxSession[dict[str, Any]](
-            sandbox=sandbox,
-            workdir=None,
-            session_dir=f"{SANDBOX_DIR}/sessions/{uuid4().hex}",
-            owns_sandbox=True,
-            harness="Auto Ontology",
-        )
-        try:
             catalog_port = await self._start_catalog(sandbox)
         except BaseException as error:
+            # A sandbox that start() created stays started when start() could not deliver its files and then could
+            # not stop it either. Like one whose catalog did not start, it is stopped through the session.
+            if not sandbox.started:
+                await provider.aclose()
+                raise
             try:
                 await session.close(timeout=self.config.close_timeout_seconds)
             except BaseException:
@@ -299,7 +312,11 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
                     log[-4000:],
                 )
                 raise
-        return NeMoGymResponse(
+        # A model call that Auto Ontology's loop gave up on ended the episode with no answer. The Environment Server's
+        # outcome policy decides whether to grade it, run it again or fail it, by the call's HTTP status: it is not a
+        # task the agent did not answer.
+        failure = state.episode.get("model_failure")
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=self.config.model,
@@ -313,7 +330,11 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
                 "auto_ontology_end_reason": str(state.episode.get("reason")),
                 "auto_ontology_tool_calls": str(state.episode.get("tool_calls")),
             },
+            **(
+                {"status": "failed", "error": {"code": "server_error", "message": failure["error"]}} if failure else {}
+            ),
         )
+        return self.report_outcome(response, failure) if failure else response
 
     # ----- routes ----- #
 

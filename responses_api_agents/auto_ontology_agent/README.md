@@ -50,5 +50,9 @@ taken. On a remote sandbox provider, give the Model Server an address the sandbo
   and the close reports the `model_call_usage_unavailable` gap.
 - **Retries:** a failed activation is not retried in the same sandbox; the Environment Server's retry starts a new
   episode.
+- **Model failures:** when Auto Ontology's loop gives up on a model call, after its own retries, the reply is `failed`
+  and carries the call's failure kind: `model_request_error` with the Model Server's HTTP status, or
+  `model_transport_error` when the call got no reply. The Environment Server's outcome policy then grades, retries or
+  fails the episode. An episode that ends with no query for another reason, such as its tool budget, is graded.
 - **Request controls:** Auto Ontology's loop sets its own sampling, limits and instructions. An activation that sets
   another field, such as `temperature`, `max_output_tokens`, `tool_choice` or `instructions`, is refused with a 422.

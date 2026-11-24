@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
+import openai
 import pytest
 from fastapi import HTTPException
 
@@ -18,6 +20,8 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSessionConflictError,
     AgentSessionSetupError,
+    OutcomeAction,
+    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
@@ -37,7 +41,11 @@ from responses_api_agents.auto_ontology_agent.app import (
     AutoOntologySessionState,
     answer_message,
 )
-from responses_api_agents.auto_ontology_agent.episode_runner import MODEL_SERVER_API_KEY, episode_environment
+from responses_api_agents.auto_ontology_agent.episode_runner import (
+    MODEL_SERVER_API_KEY,
+    episode_environment,
+    model_failure,
+)
 
 
 MODEL_URL = "http://10.0.0.1:9000/ng-rollout/rollout/v1"
@@ -167,6 +175,31 @@ async def test_a_failed_setup_whose_cleanup_fails_keeps_the_sandbox_for_close(sa
     assert "no PGDATA" in str(failed.value.error)
     closed = await agent._close_agent_session_state(failed.value.state)
     assert sandbox.stop.await_count == 2
+    assert closed.cleanup_confirmed is True
+
+
+async def test_a_sandbox_that_start_could_not_stop_is_kept_for_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """start() created the sandbox, failed to deliver the runner, and its own stop timed out, as did the seed's."""
+    provider = AsyncMock()
+    provider.upload_file.side_effect = RuntimeError("upload failed")
+    provider.close.side_effect = [TimeoutError("stop timed out"), TimeoutError("stop timed out"), None]
+    monkeypatch.setattr(AutoOntologyAgent, "resolve_model_base_url", lambda *args, **kwargs: MODEL_URL)
+    monkeypatch.setattr(agent_app, "get_global_config_dict", lambda: {"auto_ontology_sandbox": {"docker": {}}})
+    monkeypatch.setattr(agent_app, "resolve_provider_config", lambda ref, config: config[ref])
+    monkeypatch.setattr(agent_app, "create_provider", lambda config: provider)
+    agent = _agent()
+
+    with pytest.raises(AgentSessionSetupError) as failed:
+        await agent._seed_agent_session_state(_seed())
+
+    # The runner never arrived, so the catalog did not start. The provider's client stays open for the session's
+    # close, which stops the sandbox and then releases it.
+    provider.upload_file.assert_awaited_once()
+    assert not [c for c in provider.exec.await_args_list if "/opt/bird-catalog/start-catalog" in c.args]
+    provider.aclose.assert_not_awaited()
+    closed = await agent._close_agent_session_state(failed.value.state)
+    assert provider.close.await_count == 3
+    provider.aclose.assert_awaited_once()
     assert closed.cleanup_confirmed is True
 
 
@@ -335,6 +368,53 @@ async def test_close_cancels_a_running_episode(sandbox: AsyncMock) -> None:
 
     assert state.activation.cancelled()
     sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("failure", "action"),
+    [
+        ({"status_code": 503, "no_reply": False, "error": "InternalServerError: 503"}, OutcomeAction.RETRY),
+        ({"status_code": 400, "no_reply": False, "error": "BadRequestError: 400"}, OutcomeAction.VERIFY),
+        ({"status_code": None, "no_reply": True, "error": "APIConnectionError: refused"}, OutcomeAction.RETRY),
+    ],
+    ids=["unavailable", "bad request", "no reply"],
+)
+async def test_a_model_call_the_loop_gave_up_on_fails_the_activation_for_the_outcome_policy(
+    activate,  # noqa: ANN001
+    failure: dict[str, Any],
+    action: OutcomeAction,
+) -> None:
+    agent = _agent()
+    activate(agent, _FakeSession({"sql": None, "reason": "model_error", "model_failure": failure}))
+
+    reply = await agent.responses(_request(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+    assert reply.status == "failed"
+    assert reply.error.message == failure["error"]
+    assert agent_outcome_policy(reply) == action
+
+
+async def test_an_episode_that_submitted_nothing_is_graded(activate) -> None:  # noqa: ANN001
+    agent = _agent()
+    activate(agent, _FakeSession({"sql": None, "reason": "budget_exhausted", "model_failure": None}))
+
+    reply = await agent.responses(_request(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+    assert reply.status != "failed"
+    assert agent_outcome_policy(reply) == OutcomeAction.VERIFY
+
+
+def test_the_runner_reports_the_model_server_s_status_or_no_reply() -> None:
+    request = httpx.Request("POST", MODEL_URL)
+    unavailable = openai.InternalServerError("unavailable", response=httpx.Response(503, request=request), body=None)
+    assert model_failure(unavailable)["status_code"] == 503
+    assert model_failure(unavailable)["no_reply"] is False
+    for no_reply in (openai.APIConnectionError(request=request), openai.APITimeoutError(request=request)):
+        assert model_failure(no_reply) == {
+            "status_code": None,
+            "no_reply": True,
+            "error": f"{type(no_reply).__name__}: {no_reply}",
+        }
 
 
 def test_an_episode_without_a_query_says_why() -> None:
