@@ -505,7 +505,15 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 if not cookie_path:
                     await self._stop_session_sandbox(session_id)
                 elif sandbox is not None:
-                    await self._wait_for_stop(sandbox)
+                    try:
+                        await self._wait_for_stop(sandbox)
+                    finally:
+                        # No close comes for a cookie session, so nothing waits for this stop again: drop its task
+                        # once it ends.
+                        if (task := self._stop_tasks.get(sandbox)) is not None:
+                            task.add_done_callback(
+                                lambda done: self._stop_tasks.get(sandbox) is done and self._stop_tasks.pop(sandbox)
+                            )
             except Exception:
                 LOG.exception("Failed to stop Scale-SWE task sandbox %s after patch capture", session_id)
 

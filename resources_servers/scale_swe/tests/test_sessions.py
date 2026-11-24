@@ -1050,3 +1050,17 @@ async def test_slow_task_stop_leaves_no_cookie_state(server, grading, sandboxes)
         "cookie" in server._session_id_to_pristine_untracked,
     )
     assert left == (False, False, False)
+
+
+async def test_slow_task_stop_leaves_no_stop_task(server, grading, sandboxes):
+    server.config.sandbox_stop_timeout_seconds = 0.05
+    request = SimpleNamespace(session={SESSION_ID_KEY: "cookie"})
+    await server.seed_session(request, ScaleSWESeedSessionRequest.model_validate(ROW))
+
+    async def slow_stop(*args, **kwargs):
+        await asyncio.sleep(0.3)
+
+    sandboxes[0].stop.side_effect = slow_stop
+    await server.verify(request, verify_body())
+    await asyncio.sleep(0.5)
+    assert not server._stop_tasks, "a finished stop task of a cookie session was kept"
