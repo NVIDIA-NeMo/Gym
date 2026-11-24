@@ -588,6 +588,38 @@ class TestStartsAndStopsHaveTheirOwnLimits:
 
         assert provider.max_in_flight == 2
 
+    @pytest.mark.parametrize("upload_fails", [False, True])
+    async def test_cancelled_creates_share_the_stop_limit(self, upload_fails: bool) -> None:
+        provider = _GatedProvider()
+        owned = _owned(provider, max_concurrent_stops=1)
+        provider.create_gate.clear()
+        provider.close_gate.clear()
+        spec = _spec()
+        if upload_fails:
+            spec = SandboxSpec(image="image", ttl_s=60, files={"/task": "x"})
+
+            async def failing_upload(*args: Any, **kwargs: Any) -> None:
+                raise RuntimeError("upload refused")
+
+            provider.upload_file = failing_upload  # type: ignore[method-assign]
+
+        creates = [asyncio.create_task(owned.create(key, spec)) for key in ("a", "b", "c")]
+        await _until(lambda: provider.in_flight == len(creates))
+        for create in creates:
+            create.cancel()
+        provider.max_in_flight = 0
+        provider.create_gate.set()
+        try:
+            await _until(lambda: len(provider.boxes) == len(creates) and provider.in_flight > 0)
+        finally:
+            provider.close_gate.set()
+        outcomes = await asyncio.wait_for(asyncio.gather(*creates, return_exceptions=True), timeout=5)
+
+        assert all(isinstance(outcome, asyncio.CancelledError) for outcome in outcomes)
+        assert provider.max_in_flight == 1
+        assert _states(provider) == ["stopped"] * len(creates)
+        assert owned.keys == []
+
     def test_a_limit_below_one_is_refused(self) -> None:
         with pytest.raises(ValueError, match="greater than or equal to 1"):
             _owned(FakeSnapshotProvider(), max_concurrent_starts=0)
@@ -1118,7 +1150,10 @@ class TestStopDuringRestore:
         fork = [box for box in provider.boxes.values() if box["snapshot_id"] is not None]
         assert [box["state"] for box in fork] == ["stopped"]
 
-    async def test_a_restore_cancelled_inside_a_forks_create_stops_the_fork(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("first_stop_fails", [False, True])
+    async def test_a_restore_cancelled_inside_a_forks_create_stops_the_fork(
+        self, tmp_path: Path, first_stop_fails: bool
+    ) -> None:
         # The provider has made the fork before its create returns; cut short there, the fork would run on untracked.
         provider = FakeSnapshotProvider()
         first = _owned(provider, tmp_path / "state")
@@ -1130,6 +1165,8 @@ class TestStopDuringRestore:
 
         async def fork(snapshot_id: str, spec: SandboxSpec) -> Any:
             handle = await real_fork(snapshot_id, spec)
+            if first_stop_fails:
+                provider.fail["close", handle.sandbox_id] = RuntimeError("provider unavailable")
             made.set()
             await ready.wait()
             return handle
@@ -1143,8 +1180,9 @@ class TestStopDuringRestore:
             ready.set()
         await fresh.settle()
 
-        forks = [box for box in provider.boxes.values() if box["snapshot_id"] is not None]
-        assert [box["state"] for box in forks] == ["stopped"]
+        (fork_id,) = [sandbox_id for sandbox_id, box in provider.boxes.items() if box["snapshot_id"] is not None]
+        assert provider.boxes[fork_id]["state"] == "stopped"
+        assert provider.calls.count(("close", fork_id)) == (2 if first_stop_fails else 1)
         assert fresh.keys == []
 
     async def test_forks_take_the_start_limit(self, tmp_path: Path) -> None:
