@@ -293,6 +293,11 @@ def _user_flag(user: str | int) -> str:
     return "0" if user == "root" or user == 0 else str(user)
 
 
+def _picks_network(args: Sequence[str]) -> bool:
+    """Whether ``docker run`` arguments put the container on a network themselves."""
+    return any(arg in ("--network", "--net") or arg.startswith(("--network=", "--net=")) for arg in args)
+
+
 class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
@@ -313,19 +318,19 @@ class DockerProvider:
         Raises:
             ValueError: For a rule that allows hosts, which Docker cannot express per container, for ``no_network``
                 when the provider config already puts every container on another network, or when the sandbox's own
-                ``run_args`` pick a network.
+                ``run_args`` or the provider's ``create.extra_run_args`` pick a network.
         """
         if rule == "inherit":
             return dict(provider_options)
         if rule != "no_network":
             raise ValueError(f"the Docker provider cannot restrict egress to a list of hosts ({rule!r})")
         run_args = _coerce_str_list(provider_options.get("run_args"), "run_args")
-        if any(
-            arg in ("--network", "--net") or arg.startswith(("--network=", "--net="))
-            for arg in [*run_args, *self._create_config.extra_run_args]
-        ):
+        if _picks_network(run_args):
+            raise ValueError("the sandbox's run_args pick a network themselves; set only network: no_network")
+        if _picks_network(self._create_config.extra_run_args):
             raise ValueError(
-                "the sandbox's run_args or provider extra_run_args pick a network themselves; set only network_access: no_network"
+                "the Docker provider's create.extra_run_args pick a network for every container, so it cannot also "
+                "start one with no network"
             )
         if self._create_config.network == "none":
             return dict(provider_options)
@@ -743,14 +748,10 @@ class DockerProvider:
             if probe.stable_delay_s > 0:
                 await asyncio.sleep(probe.stable_delay_s)
 
-    def exec_takes_argv(self) -> bool:
-        """``docker exec`` runs an argument list as the container process's argv (``SupportsSandboxExecArgv``)."""
-        return True
-
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str | Sequence[str],
+        command: str,
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -760,7 +761,6 @@ class DockerProvider:
     ) -> SandboxExecResult:
         """Run ``<shell> -c <command>`` via ``docker exec``; never raises for command failure.
 
-        An argument list goes to ``docker exec`` as the program and its arguments, without the shell.
         ``user`` maps to ``--user`` (root/0 -> 0). A timeout kills the local docker client only; the
         in-container process is reaped when the sandbox is closed.
         """
@@ -779,8 +779,7 @@ class DockerProvider:
             flags += ["--user", _user_flag(user)]
         flags += list(self._exec_config.extra_exec_args)
 
-        process_argv = [inst.shell, "-c", command] if isinstance(command, str) else list(command)
-        argv = [self._binary, "exec", *flags, inst.name, *process_argv]
+        argv = [self._binary, "exec", *flags, inst.name, inst.shell, "-c", command]
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
         try:
             code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)

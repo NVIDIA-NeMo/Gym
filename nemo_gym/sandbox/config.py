@@ -50,6 +50,7 @@ the provider's shared storage root, that stands in for it when a Compose group s
 import ipaddress
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -255,9 +256,48 @@ def validate_volume_sources(sources: Any, source: str = "the sandbox block") -> 
     return dict(sources)
 
 
-# provider_options entries that set a sandbox's network themselves, which a typed ``network_access`` rule replaces. Today
-# OpenSandbox and E2B read network_policy; other providers set their network in the provider block.
+# provider_options entries that set a sandbox's network themselves, which a typed ``network`` rule replaces. Today
+# only OpenSandbox reads one (network_policy); the other providers set their network in the provider block.
 PROVIDER_NETWORK_OPTIONS = ("network_policy", "network")
+
+
+# One DNS label: letters, digits and inner hyphens.
+_HOST_LABEL = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)")
+
+
+def _allowed_host(entry: str) -> str:
+    """``entry`` if egress rules can match it: a host name, ``*.`` and a domain, or an IP address or CIDR block.
+
+    A URL, a ``host:port`` or a path would never match, so the sandbox would silently have no egress to it; a loopback
+    address is the sandbox itself.
+    """
+    try:
+        network = ipaddress.ip_network(entry, strict=False)
+    except ValueError:
+        network = None
+    if network is not None:
+        if network.is_loopback or network.is_unspecified or network.prefixlen == 0:
+            raise ValueError(f"allowed_hosts entry {entry!r} is a loopback or unspecified address, or every address")
+        return entry
+    name = entry.removeprefix("*.").removesuffix(".")
+    if name.lower() == "localhost" or not all(_HOST_LABEL.fullmatch(label) for label in name.split(".")):
+        raise ValueError(
+            f"allowed_hosts entry {entry!r} is not a host name, '*.' and a domain, or an IP address or CIDR block; "
+            "give it without scheme, port or path"
+        )
+    return entry
+
+
+@dataclass(frozen=True)
+class NetworkRuleOptions:
+    """The provider options that apply one network rule, as the owner's ``OwnedSandboxes.spec`` builds them.
+
+    ``SandboxConfig.spec`` takes them in place of the block's ``provider_options`` only for the rule they were built
+    for, so no other mapping can stand in for a rule.
+    """
+
+    rule: NetworkRule
+    provider_options: Mapping[str, Any]
 
 
 class SandboxConfig(BaseModel):
@@ -265,11 +305,11 @@ class SandboxConfig(BaseModel):
 
     Servers that need more, such as a fixed image, subclass it with their own fields.
 
-    ``network_access`` is the egress rule each sandbox starts with (see :data:`~nemo_gym.sandbox.NetworkRule`). The owner's
+    ``network`` is the egress rule each sandbox starts with (see :data:`~nemo_gym.sandbox.NetworkRule`). The owner's
     ``OwnedSandboxes.spec`` turns it into the provider's own policy. ``model_server`` names the model server that
     ``model_only`` and ``model_and_tools`` allow, ``tool_servers`` the servers that ``model_and_tools`` also allows,
     and ``allowed_hosts`` further hosts any restricted rule allows, such as a dependency proxy; ``hosts_only`` allows
-    only those. A block without ``network_access`` keeps the provider's default egress, or the ``network_policy`` its
+    only those. A block without ``network`` keeps the provider's default egress, or the ``network_policy`` its
     ``provider_options`` set, with a deprecation warning from the owner that starts it.
     """
 
@@ -281,17 +321,29 @@ class SandboxConfig(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     metadata: dict[str, str] = Field(default_factory=dict)
     provider_options: dict[str, Any] = Field(default_factory=dict)
-    network_access: NetworkRule | None = None
+    network: NetworkRule | None = None
     model_server: str | None = None
     tool_servers: list[str] = Field(default_factory=list)
     allowed_hosts: list[str] = Field(default_factory=list)
 
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _matchable_hosts(cls, hosts: list[str]) -> list[str]:
+        return [_allowed_host(host) for host in hosts]
+
     @model_validator(mode="after")
     def _consistent_network(self) -> "SandboxConfig":
-        rule = self.network_access
-        # A provider-specific network setting and the portable egress rule cannot both control a sandbox.
-        if rule is not None and getattr(self, "network", None) is not None:
-            raise ValueError("network_access and a subclass's network setting cannot both be set")
+        rule = self.network
+        if rule is not None and rule not in NETWORK_RULES:
+            # A subclass's own network setting, such as partner_if's tool sandbox, keeps its meaning until it moves.
+            # The typed rule's fields would do nothing beside it.
+            typed = [name for name in ("model_server", "tool_servers", "allowed_hosts") if getattr(self, name)]
+            if typed:
+                raise ValueError(
+                    f"{typed} go with a network rule ({', '.join(sorted(NETWORK_RULES))}), not with this block's own "
+                    f"network setting {rule!r}"
+                )
+            return self
         uses_model = rule in ("model_only", "model_and_tools")
         if uses_model != (self.model_server is not None):
             raise ValueError(
@@ -310,26 +362,9 @@ class SandboxConfig(BaseModel):
             if conflicting:
                 raise ValueError(
                     f"network {rule!r} and provider_options {conflicting} both set this sandbox's network; set only "
-                    "network_access"
+                    "network"
                 )
         return self
-
-    @field_validator("allowed_hosts")
-    @classmethod
-    def _valid_allowed_hosts(cls, hosts: list[str]) -> list[str]:
-        for host in hosts:
-            try:
-                ipaddress.ip_network(host, strict=False)
-                continue
-            except ValueError:
-                pass
-            domain = host.removeprefix("*.").removesuffix(".")
-            labels = domain.split(".")
-            if len(domain) > 253 or not all(
-                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels
-            ):
-                raise ValueError(f"allowed_hosts needs a bare host, *.domain or IP/CIDR, got {host!r}")
-        return hosts
 
     @field_validator("resources")
     @classmethod
@@ -346,26 +381,31 @@ class SandboxConfig(BaseModel):
         metadata: Mapping[str, str] | None = None,
         files: Mapping[str, str | bytes] | None = None,
         named_configs: Mapping[str, Any] | None = None,
-        _network_options: Mapping[str, Any] | None = None,
+        network_options: NetworkRuleOptions | None = None,
     ) -> SandboxSpec:
         """Build the spec of one sandbox; ``metadata`` adds to the provider's and the config's metadata.
 
-        ``_network_options`` are the provider options that apply the block's ``network_access`` rule, such as OpenSandbox's
-        ``network_policy`` or Docker's ``run_args``, built by the owner's ``OwnedSandboxes.spec``. They replace
-        ``provider_options``, and a restricted rule needs them.
+        ``network_options`` apply the block's ``network`` rule, such as OpenSandbox's ``network_policy`` or Docker's
+        ``run_args``. Only the owner's ``OwnedSandboxes.spec`` builds them; a subclass that overrides this method
+        passes them on. They replace ``provider_options``, and a restricted rule needs them.
 
         Raises:
-            ValueError: For a restricted rule without ``_network_options``, so that a block that asks
+            ValueError: For a restricted rule without ``network_options`` built for it, so that a block that asks
                 for restricted egress never starts a sandbox with the provider's default egress.
         """
         provider_options = dict(self.provider_options)
-        if self.network_access in NETWORK_RULES and self.network_access != "inherit":
-            if _network_options is None:
+        if self.network in NETWORK_RULES and self.network != "inherit":
+            if network_options is None:
                 raise ValueError(
-                    f"network {self.network_access!r} needs the provider's policy for it: build this spec with the owner's "
+                    f"network {self.network!r} needs the provider's policy for it: build this spec with the owner's "
                     "OwnedSandboxes.spec(), not SandboxConfig.spec() alone"
                 )
-            provider_options = dict(_network_options)
+            if not isinstance(network_options, NetworkRuleOptions) or network_options.rule != self.network:
+                raise ValueError(
+                    f"network {self.network!r} takes the NetworkRuleOptions the owner built for it, not "
+                    f"{network_options!r}"
+                )
+            provider_options = dict(network_options.provider_options)
         return SandboxSpec(
             image=image,
             ttl_s=self.ttl_s,
