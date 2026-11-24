@@ -444,7 +444,10 @@ class NullSeedReplayTest(unittest.TestCase):
 
 class LoadRefusalTest(unittest.TestCase):
     def test_a_bad_row_is_refused_alone_and_the_rest_load(self):
-        bad = {"initial_state": INITIAL_STATE, "assertions": [{**PROMOTED, "property": "closeDate"}]}  # a date field
+        bad = {
+            "initial_state": INITIAL_STATE,
+            "assertions": [{**PROMOTED, "property": "createdAt"}],
+        }  # a clock-stamped field
         rows = [{"responses_create_params": {"input": PROMPT}, "info": info} for info in (INFO, bad, INFO)]
         with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:
             f.writelines(json.dumps(r) + "\n" for r in rows)

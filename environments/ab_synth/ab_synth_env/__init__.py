@@ -53,10 +53,18 @@ WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 DAY_ASSERTIONS = {"acted_on_day", "not_acted"}
 OUT_OF_SCOPE = re.compile(r'"code": 401, "message": "No (\w+) account is connected')
 THINK = re.compile(r"<think>.*?(</think>|\Z)", re.S)  # an unclosed block runs to the end of the message
-# A world assertion on a date or time field: upstream routes and schema defaults stamp created records with the wall
-# clock (datetime.now()), not simulated time, so such an assertion would change from run to run. Refused at load.
-TIME_FIELD = re.compile(r"(?:^|_)(?:date|time|datetime|timestamp|ts|at|created|updated|modified)(?:_|$)")
-FIELD_KEYS = {"field", "property", "column"}
+# Fields the simulator stamps from the wall clock on every create or update, whatever the agent sends (upstream
+# routes and schema defaults call datetime.now()). A world assertion on one cannot match a fixed value from a seed
+# dated in another year, so such a row is refused. Date fields the agent writes from the task (due_date,
+# start.dateTime, close_date) are graded like any other field.
+STAMPED_FIELDS = {
+    "created_at", "created_date", "created_time", "date_created",
+    "updated_at", "updated_date", "date_updated", "last_updated_time",
+    "modified_at", "date_modified", "last_modified_date", "last_modified_date_time",
+    "edited_at", "generated_at", "status_changed_date_time", "canceled_at", "voided_date_time", "no_show_marked_at",
+    "sent_at", "sent_date_time", "timestamp", "ts", "current_time",
+}  # fmt: skip
+FIELD_KEYS = {"field", "property"}  # not a sheet `column`: cells hold what the agent writes, nothing is stamped
 REQUESTER_RESULT_CHARS = 30000  # one requester tool result, cut: a whole sheet runs to 70k+ characters
 # An A1 reference to sheet rows: "Tab!B7", "'Q4 2025'!A7:C7", "B7", a bare "7", or rows "2:5".
 ROW_REF = re.compile(r"(?:'?(?P<tab>.+?)'?!)?[A-Za-z]{0,3}(?P<first>\d+)(?::[A-Za-z]{0,3}(?P<last>\d+))?")
@@ -280,10 +288,10 @@ def row_problems(info: dict, *, requester: bool) -> list[str]:
     multi-turn row without a requester endpoint, a requester service that is no app, a day assertion without a record."""
     problems = []
     for a in info.get("assertions", []):
-        if fields := time_fields(a):
+        if fields := stamped_fields(a):
             problems.append(
-                f"assertion {a.get('type')!r} reads date or time fields {fields}. Records the agent creates carry the "
-                "wall-clock time, not simulated time, so grade timing with acted_on_day or not_acted"
+                f"assertion {a.get('type')!r} reads fields the simulator stamps from the wall clock {fields}, which "
+                "cannot match a fixed value: grade when the agent acted with acted_on_day or not_acted"
             )
         if a.get("type") in DAY_ASSERTIONS and not isinstance(a.get("record"), (str, int)):
             problems.append(f"{a['type']} has no record (got {a.get('record')!r})")
@@ -515,12 +523,14 @@ def headline(initial_state: dict, world: WorldState, log: list[dict], assertions
     return passed / total if total else 0.0
 
 
-def _is_time_field(name: str) -> bool:
-    return bool(TIME_FIELD.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()))  # closeDate -> close_date
+def _is_stamped(name: str) -> bool:
+    """Whether a field name (camelCase or snake_case, or a nested path such as `meta__createdAt`) is a stamped field."""
+    snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()  # lastModifiedDateTime -> last_modified_date_time
+    return any(part.strip("_") in STAMPED_FIELDS for part in snake.split("__"))
 
 
-def time_fields(assertion: dict) -> list[str]:
-    """Date or time fields a world assertion names, as a key or as the `field`/`property`/`column` it checks."""
+def stamped_fields(assertion: dict) -> list[str]:
+    """Stamped fields a world assertion names, as a key or as the `field` or `property` it checks."""
     if assertion.get("type") in DAY_ASSERTIONS:
         return []
     found = []
@@ -528,9 +538,9 @@ def time_fields(assertion: dict) -> list[str]:
     def walk(node) -> None:
         if isinstance(node, dict):
             for key, value in node.items():
-                if _is_time_field(key):
+                if _is_stamped(key):
                     found.append(key)
-                elif key in FIELD_KEYS and isinstance(value, str) and _is_time_field(value):
+                elif key in FIELD_KEYS and isinstance(value, str) and _is_stamped(value):
                     found.append(value)
                 walk(value)
         elif isinstance(node, list):

@@ -93,11 +93,12 @@ from the requester model.
 ## Limitations
 
 Simulated time reaches the world's clock (`meta.current_time`, which upstream date queries read) and the write log
-that `acted_on_day` and `not_acted` grade. It does not reach records the agent creates: many upstream AutomationBench
-routes and schema defaults stamp new records with the wall clock (`datetime.now()`), for example QuickBooks `txn_date`
-and Google Ads `conversion_time`. Only `acted_on_day` and `not_acted` grade timing. The environment refuses a row whose
-world assertion names a date or time field (a key such as `txn_date` or `created_at`, or a `field`, `property` or
-`column` such as `closeDate`), since its result would depend on the date of the run.
+that `acted_on_day` and `not_acted` grade. It does not reach the timestamps the simulator stamps on records with the
+wall clock (`datetime.now()`): `created_at`, `updated_at`, `sent_at`, `ts` and the others in `STAMPED_FIELDS`. A world
+assertion on one of those (as a key, or as the `field` or `property` it checks) cannot match a fixed value, so its row
+is refused. Date fields the agent writes from the task (`due_date`, `start.dateTime`, `close_date`, a sheet column) are
+graded like any other field. A field the simulator fills from the clock only when the agent leaves it out (QuickBooks
+`txn_date`) is graded too, so a task that checks one must name the date.
 
 ## Run
 

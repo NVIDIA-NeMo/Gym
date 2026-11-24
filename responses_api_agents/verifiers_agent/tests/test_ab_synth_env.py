@@ -338,15 +338,29 @@ class RequesterTest(unittest.TestCase):
             load(SINGLE_DAY, requester_max_tries=0)
         load(SINGLE_DAY, requester_base_url=None, requester_model=None)  # single-day rows never call it
 
-    def test_assertions_on_date_or_time_fields_are_refused_at_load(self):
-        txn_date = {"type": "quickbooks_invoice_exists", "customer_id": "7", "txn_date": "2026-03-04"}
-        close_date = {**PROMOTED, "property": "closeDate", "value": "2026-03-04"}
-        nested = {"type": "zapier_action_called", "params": {"start_datetime": "2026-03-04T09:00:00"}}
-        for assertion, field in ((txn_date, "txn_date"), (close_date, "closeDate"), (nested, "start_datetime")):
-            with self.assertRaisesRegex(ValueError, field):
+    def test_assertions_on_clock_stamped_fields_are_refused_and_written_dates_are_graded(self):
+        created = {"type": "quickbooks_invoice_exists", "customer_id": "7", "created_at": "2026-03-04"}
+        updated = {**PROMOTED, "property": "lastModifiedDateTime", "value": "2026-03-04"}
+        nested = {"type": "zapier_action_called", "params": {"sent_at": "2026-03-04T09:00:00"}}
+        for assertion, field in ((created, "created_at"), (updated, "lastModifiedDateTime"), (nested, "sent_at")):
+            with self.assertRaisesRegex(ValueError, f"stamps from the wall clock.*{field}"):
                 load({**SINGLE_DAY, "assertions": [assertion]})
+        # Dates the agent writes from the task are graded like any field, and so is a person field named "updated by".
+        written = [
+            {"type": "quickbooks_invoice_exists", "customer_id": "7", "txn_date": "2026-03-04"},
+            {**PROMOTED, "property": "closeDate", "value": "2026-03-04"},
+            {"type": "zapier_action_called", "params": {"start_datetime": "2026-03-04T09:00:00"}},
+            {**PROMOTED, "property": "Last_Updated_By", "value": "Ann"},
+        ]
         day = {"type": "acted_on_day", "record": "101", "day": "2026-03-04"}
-        load({**SINGLE_DAY, "assertions": [PROMOTED, day, {**PROMOTED, "property": "timezone"}]})
+        load({**SINGLE_DAY, "assertions": [PROMOTED, day, {**PROMOTED, "property": "timezone"}, *written]})
+
+    def test_a_due_date_the_agent_writes_is_graded_normally(self):
+        due = {**PROMOTED, "property": "due_date", "value": "2026-03-09"}
+        write = {"method": "PATCH", "url": CONTACTS + "101", "body": {"properties": {"due_date": "2026-03-09"}}}
+
+        self.assertEqual(env.replay({**SINGLE_DAY, "assertions": [due]}, [write]), 1.0)
+        self.assertEqual(env.replay({**SINGLE_DAY, "assertions": [due]}, [PROMOTE]), 0.0)
 
     def test_requester_body_overrides_sampling_and_the_key_is_sent(self):
         with tempfile.NamedTemporaryFile("w") as key:
