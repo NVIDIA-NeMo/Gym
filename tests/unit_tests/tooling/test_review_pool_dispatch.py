@@ -3,9 +3,15 @@
 """Verify webhook routing and serialization boundaries for review pools."""
 
 import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
+
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -32,6 +38,32 @@ def event(iid: object = 1355) -> dict:
 
 class ReviewPoolDispatchTests(unittest.TestCase):
     """Exercise the boundary between untrusted webhooks and child CI config."""
+
+    def test_invalid_payload_cannot_create_child_and_failure_is_advisory(self) -> None:
+        """Reject malformed payloads without producing runnable child configuration."""
+        config = yaml.safe_load((ROOT / ".gitlab/ci/review-pools.yml").read_text())
+        self.assertTrue(config["gym-review-pools-prepare"]["allow_failure"])
+        self.assertTrue(config["gym-review-pools"]["allow_failure"])
+        with tempfile.TemporaryDirectory() as directory:
+            payload = Path(directory) / "event.json"
+            output = Path(directory) / "child.json"
+            payload.write_text("{invalid")
+            result = subprocess.run(
+                [sys.executable, str(ROOT / ".gitlab/ci/prepare_review_pools.py"), str(payload), str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(output.exists())
+            payload.write_text(json.dumps(event()))
+            subprocess.run(
+                [sys.executable, str(ROOT / ".gitlab/ci/prepare_review_pools.py"), str(payload), str(output)],
+                check=True,
+            )
+            self.assertEqual(
+                json.loads(output.read_text())["gym-review-pools"]["variables"], {"GYM_REVIEW_MR_IID": "1355"}
+            )
 
     def test_independent_mrs_do_not_share_a_lock(self) -> None:
         """Different MRs run concurrently; repeated events share one MR lock."""

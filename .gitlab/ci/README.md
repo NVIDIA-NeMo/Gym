@@ -32,26 +32,6 @@ Focused validation runs with:
 uv run pytest tests/unit_tests/tooling/test_collect_downstream_junit.py
 ```
 
-## EKS staging runner opt-in
-
-For an internal merge request targeting `nv-internal-main`, add the exact MR
-label `ci::eks-staging` and start a new merge request pipeline. The rule applies
-to any source branch. Removing the label and starting another pipeline restores
-the normal corpnet runner path. Existing pipelines retain their selected route;
-retrying a job does not re-evaluate the MR label.
-
-The label selects `GYM_CI_BACKEND=eks-staging` through the existing
-`main-mirror` NeMo CI bridge. Gym lint, core, and server checks use the isolated
-`nemo-gitlab-ci-stg` runner tag, a dedicated ECR executor image, and 24 CPUs /
-128Gi RAM per job. The experimental fleet accepts up to 256 concurrent jobs,
-subject to AWS quota and available capacity. Canary pipelines have a separate
-resource group. Source preparation, image resolution, and JUnit collection keep
-their existing control-job routing.
-
-Unlabeled MRs keep the existing default refs, runner tags, resources, and image
-selection. Branches created before this rule was introduced must first merge or
-rebase onto the updated `nv-internal-main` so their CI configuration contains it.
-
 ## Advisory review pools
 
 Today MR webhooks run the shared adapter on protected `nv-internal-main` and
