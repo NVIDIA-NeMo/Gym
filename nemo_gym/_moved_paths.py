@@ -67,6 +67,9 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.server_runtime._checkpoint.sandbox": MovedPath(
+        new="nemo_gym.server_runtime.owned_sandboxes", since="0.8.0"
+    ),
     "nemo_gym.context_management": MovedPath(new="nemo_gym.agents.context_management", since="0.8.0"),
     "nemo_gym.cli_setup_command": MovedPath(new="nemo_gym.server_runtime.supervisor.server_venv", since="0.8.0"),
     "nemo_gym.benchmarks": MovedPath(new="nemo_gym.environment.benchmarks", since="0.8.0"),
@@ -202,6 +205,16 @@ def _names(new: str, since: str, names: str) -> dict[str, MovedPath]:
 
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
 MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
+    "nemo_gym.server_runtime": {
+        "SandboxSessionCheckpointer": MovedPath(
+            new="nemo_gym.server_runtime.owned_sandboxes:OwnedSandboxes", since="0.8.0"
+        ),
+    },
+    "nemo_gym.server_runtime.owned_sandboxes": {
+        "SandboxSessionCheckpointer": MovedPath(
+            new="nemo_gym.server_runtime.owned_sandboxes:OwnedSandboxes", since="0.8.0"
+        ),
+    },
     "nemo_gym.eval.eval_plan": {
         # The planner's private id lookup, replaced by the shared row_task_id (which also reads materialized rows).
         "_row_task_id": MovedPath(new="nemo_gym.data.task_selection:row_task_id", since="0.8.0"),

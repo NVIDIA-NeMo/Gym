@@ -74,7 +74,7 @@ while [ "$#" -gt 0 ]; do
 done
 test -s "$profile"
 grep -Eq '^[a-f0-9]{64}$' "$profile"
-tar -xzf "$node_archive" -C "$staging" --strip-components=1
+tar --no-same-owner -xzf "$node_archive" -C "$staging" --strip-components=1
 # npm ci clears its node_modules directory. Keep the uploaded Node distribution's npm and corepack outside it
 # while the locked Prime project installs, then restore both so the Node entrypoints remain intact.
 bootstrap_modules="$staging/.node-bundled-modules"
