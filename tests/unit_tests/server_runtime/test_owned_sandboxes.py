@@ -530,6 +530,34 @@ class TestTrackedBeforeStart:
         assert _states(provider) == ["stopped"]
         assert owned.keys == []
 
+    async def test_a_second_cancellation_does_not_end_the_wait_for_the_start(self) -> None:
+        provider = FakeSnapshotProvider()
+        owned = _owned(provider)
+        made = asyncio.Event()
+        ready = asyncio.Event()
+        real_create = provider.create
+
+        async def create(spec: SandboxSpec) -> Any:
+            handle = await real_create(spec)
+            made.set()
+            await ready.wait()
+            return handle
+
+        provider.create = create  # type: ignore[method-assign]
+        creating = asyncio.create_task(owned.create("session", _spec()))
+        await asyncio.wait_for(made.wait(), timeout=5)
+        creating.cancel()
+        await asyncio.sleep(0.01)
+        creating.cancel()
+        await asyncio.sleep(0.01)
+        assert not creating.done(), "the create still waits for its start"
+        ready.set()
+        with pytest.raises(asyncio.CancelledError):
+            await creating
+
+        assert _states(provider) == ["stopped"]
+        assert owned.keys == []
+
     async def test_a_cancelled_start_that_never_returns_is_cut_short_after_the_stop_limit(self, monkeypatch) -> None:
         monkeypatch.setattr(owned_sandboxes_module, "STOP_TIMEOUT_S", 0.05)
         provider = FakeSnapshotProvider()
@@ -774,6 +802,24 @@ class TestTheOwnersOwnChecks:
         assert _states(provider) == ["stopped"]
         assert owned.keys == []
 
+    async def test_the_shutdown_stops_what_runs_before_it_waits_for_a_pending_create(self) -> None:
+        provider = _GatedProvider()
+        owned = _owned(provider)
+        await owned.create("running", _spec())
+        provider.create_gate.clear()
+        pending = asyncio.create_task(owned.create("pending", _spec()))
+        await _until(lambda: provider.in_flight == 1)
+
+        closing = asyncio.create_task(owned.aclose())
+        await _until(lambda: "running" not in owned)
+        assert not closing.done(), "the shutdown still waits for the pending create"
+        provider.create_gate.set()
+        await pending
+        await closing
+
+        assert owned.keys == []
+        assert _states(provider) == ["stopped", "stopped"]
+
     async def test_a_sandbox_still_starting_is_not_lent(self) -> None:
         provider = _GatedProvider()
         owned = _owned(provider, provider_config_ref="sandbox")
@@ -861,6 +907,35 @@ class TestStopDuringRestore:
         assert fresh.keys == []
         fork = [box for box in provider.boxes.values() if box["snapshot_id"] is not None]
         assert [box["state"] for box in fork] == ["stopped"]
+
+    async def test_a_restore_cancelled_inside_a_forks_create_stops_the_fork(self, tmp_path: Path) -> None:
+        # The provider has made the fork before its create returns; cut short there, the fork would run on untracked.
+        provider = FakeSnapshotProvider()
+        first = _owned(provider, tmp_path / "state")
+        await first.create("session", _spec())
+        states = await first.export(["session"], checkpoint_id="c1")
+        made = asyncio.Event()
+        ready = asyncio.Event()
+        real_fork = provider.create_from_snapshot
+
+        async def fork(snapshot_id: str, spec: SandboxSpec) -> Any:
+            handle = await real_fork(snapshot_id, spec)
+            made.set()
+            await ready.wait()
+            return handle
+
+        provider.create_from_snapshot = fork  # type: ignore[method-assign]
+        fresh = _owned(provider, tmp_path / "state")
+        async with anyio.create_task_group() as request:
+            request.start_soon(fresh.restore, states)
+            await asyncio.wait_for(made.wait(), timeout=5)
+            request.cancel_scope.cancel()
+            ready.set()
+        await fresh.settle()
+
+        forks = [box for box in provider.boxes.values() if box["snapshot_id"] is not None]
+        assert [box["state"] for box in forks] == ["stopped"]
+        assert fresh.keys == []
 
     async def test_forks_take_the_start_limit(self, tmp_path: Path) -> None:
         provider = FakeSnapshotProvider()
