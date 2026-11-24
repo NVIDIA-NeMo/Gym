@@ -51,6 +51,10 @@ in an agent error (scored 0 with `agent_error`, for example after `/verify` answ
 training: `gym eval` leaves masked rows out of the score, which can raise the mean. `/run` also verifies a timed-out
 rollout: the resources server scores it 0 without the judge and releases the session's tool sandbox and workspace.
 
+Under NeMo RL's `grpo.masked_reward_policy: exclude_infra`, a masked row stays in its group baseline only when its kind
+is in `grpo.policy_failure_kinds`. A recipe that masks `max_output_tokens` must add `browsecomp_agent:max_output_tokens`
+to that list. The list replaces the default list, so the recipe must also list the default kinds.
+
 Host `/v1/responses` and `/run` are disabled by default. Development-only compatibility requires `allow_host_execution: true`; `/run` also requires an explicit `resources_server`. The resources server independently requires its own host-execution opt-in if its tool sandbox is disabled. These options do not provide isolation.
 
 ## License
