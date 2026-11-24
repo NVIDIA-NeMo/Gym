@@ -22,7 +22,12 @@ gym eval run \
 `terminal_bench_2_1/opencode` runs on the [`harbor` Environment Server](/main/agent-interactions/harbor), so
 `--agent-type` selects the harness that server binds for the same tasks; nothing is composed or renamed.
 
-Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Comparing those across harnesses *is* the ablation — for example (illustrative, not real output):
+Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Because the instance name stays the
+same here, the outputs name the harness that ran: `agent_ref.implementation` in each aggregate entry, and
+`ng_agent_implementation` on each rollout and failure record, hold the agent type (`terminus_2_sandboxed_agent`
+above). Group runs by that field, not by `agent_ref.name`.
+
+Comparing the aggregate files across harnesses *is* the ablation — for example (illustrative, not real output):
 
 | Harness | Pass rate |
 |---|---|

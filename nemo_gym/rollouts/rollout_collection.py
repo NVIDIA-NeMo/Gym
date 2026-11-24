@@ -983,6 +983,33 @@ def _record_policy_model_server(result: dict[str, Any], global_config: Any, agen
         result[NG_POLICY_MODEL_SERVER_KEY] = name
 
 
+NG_AGENT_IMPLEMENTATION_KEY = "ng_agent_implementation"
+
+
+def _agent_implementation(global_config: Any, agent_name: str | None) -> str | None:
+    """The implementation of an agent server instance: the one key under its ``responses_api_agents`` block.
+
+    The instance name does not say which agent harness ran: ``--agent-type`` can run another harness under the
+    instance name the benchmark's config declares. None unless the config declares the instance with exactly one
+    implementation.
+    """
+    if not agent_name:
+        return None
+    try:
+        [implementation] = global_config[agent_name][AGENT_SERVER_TYPE_KEY_NAME]
+    except (KeyError, IndexError, TypeError, AttributeError, ValueError):
+        return None
+    return str(implementation)
+
+
+def _record_agent_implementation(result: dict[str, Any], global_config: Any, agent_name: str | None) -> None:
+    """Name the implementation of the agent that ran the rollout on the record (landed or failed), so a reader can
+    group rollouts by agent harness without the run's config."""
+    implementation = _agent_implementation(global_config, agent_name)
+    if implementation is not None:
+        result[NG_AGENT_IMPLEMENTATION_KEY] = implementation
+
+
 get_max_rollout_attempts = _get_max_rollout_attempts  # Public compatibility alias
 
 
@@ -1265,6 +1292,7 @@ def _shard_record(
     record = _collected_outcome(completed, result).record
     record[RUN_ID_KEY] = run_id
     _record_policy_model_server(record, global_config, agent_name)
+    _record_agent_implementation(record, global_config, agent_name)
     return record
 
 
@@ -4969,7 +4997,9 @@ executions → not run again (left to recovery)
                 # No score exists. Judge failures may still carry real generation evidence.
                 no_result = no_persist or structured_failure or failure_class in _NO_RESULT_FAILURE_CLASSES
 
-                _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
+                attributed_agent = self._agent_name_for_row(row, global_config)
+                _record_policy_model_server(result, global_config, attributed_agent)
+                _record_agent_implementation(result, global_config, attributed_agent)
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off), project ng_trajectory and assemble ng_perf. Never alters the
@@ -5490,12 +5520,19 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # One entry per environment server, labelled by the agent it binds so metric names and
         # `agent_ref` keep today's shape. Servers that front the same agent (a session-based server and its
         # legacy_agent twin) are each labelled by their own name, whatever order their rows arrive in.
+        server_agents = self._server_agents(server_rows, global_config_dict)
         if labels is None:
-            labels = label_runs(self._server_agents(server_rows, global_config_dict))
+            labels = label_runs(server_agents)
         first_error: Optional[Exception] = None
 
         async def _fetch_agent_metrics(server_name: str, agent_name: str, agent_result_list: List[Dict]) -> Dict:
             nonlocal first_error
+            # The label does not say which agent harness ran (see ``_agent_implementation``), so the entry names
+            # the implementation of the agent it is labelled by as well.
+            agent_ref = {"name": agent_name}
+            implementation = _agent_implementation(global_config_dict, server_agents[server_name])
+            if implementation is not None:
+                agent_ref["implementation"] = implementation
             # Strip generated content, but keep provider metrics for request-level
             # aggregation (e.g. SPEED-Bench), along with usage and truncation status.
             stripped = []
@@ -5547,11 +5584,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
                 return {
                     **_aggregation_error_entry(agent_name, exc, getattr(agg_response, "status", None)),
+                    AGENT_REF_KEY_NAME: agent_ref,
                     NG_ENVIRONMENT_SERVER_KEY: server_name,
                 }
 
             agent_entry = {
-                AGENT_REF_KEY_NAME: {"name": agent_name},
+                AGENT_REF_KEY_NAME: agent_ref,
                 NG_ENVIRONMENT_SERVER_KEY: server_name,
                 "agent_metrics": agg_result.agent_metrics,
                 "key_metrics": agg_result.key_metrics,

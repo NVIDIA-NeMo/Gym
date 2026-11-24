@@ -1003,7 +1003,7 @@ class TestRolloutCollection:
         assert sorted(path.name for path in complete_dir.iterdir()) == ["alpha.json", "beta.json"]
         alpha = orjson.loads((complete_dir / "alpha.json").read_bytes())
         assert alpha["schema_version"] == "1"
-        assert alpha[AGENT_REF_KEY_NAME] == {"name": "alpha"}
+        assert alpha[AGENT_REF_KEY_NAME] == {"name": "alpha", "implementation": "impl"}
         assert alpha[NG_ENVIRONMENT_SERVER_KEY] == "alpha_environment_server"
         assert (alpha["expected_rollouts"], alpha["completed_rollouts"]) == (2, 2)
         assert alpha["aggregation_status"] == "complete"
@@ -8871,7 +8871,7 @@ class TestRolloutCollection:
         assert metrics_fpath.exists()
         written = json.loads(metrics_fpath.read_text())
         assert len(written) == 1
-        assert written[0][AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+        assert written[0][AGENT_REF_KEY_NAME] == {"name": "my_agent", "implementation": "impl"}
         assert written[0]["agent_metrics"]["mean/reward"] == 0.5
         assert written[0]["key_metrics"]["mean/reward"] == 0.5
         assert len(written[0]["group_level_metrics"]) == 2
@@ -9117,7 +9117,7 @@ class TestRolloutCollection:
             assert written[0]["key_metrics"]["mean/reward"] == 1.0
             assert AGGREGATION_ERROR_KEY not in written[0]
         assert written[-1] == {
-            AGENT_REF_KEY_NAME: {"name": "agent_b"},
+            AGENT_REF_KEY_NAME: {"name": "agent_b", "implementation": "impl"},
             NG_ENVIRONMENT_SERVER_KEY: "agent_b_environment_server",
             "agent_metrics": {},
             "key_metrics": {},
@@ -14075,7 +14075,7 @@ class TestEnvironmentServerRouting:
             await helper.run_from_config(config)
 
         [entry] = orjson.loads(output.with_name(output.stem + "_aggregate_metrics.json").read_bytes())
-        assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
+        assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes", "implementation": "hermes_agent"}
         assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert entry["key_metrics"]["mean/reward"] == 0.5
         status = orjson.loads(output.with_name(output.stem + "_batch_status.json").read_bytes())
@@ -14090,6 +14090,9 @@ class TestEnvironmentServerRouting:
             assert len(rows) == 2
             assert all(AGENT_REF_KEY_NAME not in row for row in rows)
             assert all(row[NG_ENVIRONMENT_SERVER_KEY] == "environment" for row in rows)
+        # A taskset record names no agent, so the implementation stamp is where it says which agent harness ran.
+        records = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+        assert [record.get("ng_agent_implementation") for record in records] == ["hermes_agent"] * 2
 
     @pytest.mark.parametrize("trailing_input_fragment", [False, True])
     async def test_recorded_environment_rows_keep_dispatched_status_identity(
@@ -14146,7 +14149,7 @@ class TestEnvironmentServerRouting:
         assert set(offline["members"]) == {"hermes"}
         assert offline["members"]["hermes"] == {**member, "aggregation_status": "complete"}
         [entry] = orjson.loads(output.with_name(output.stem + "_aggregate_metrics.json").read_bytes())
-        assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
+        assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes", "implementation": "hermes_agent"}
         assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
         assert entry["key_metrics"]["mean/reward"] == 1.0
         assert {path: path.read_bytes() for path in before} == before
@@ -14196,8 +14199,11 @@ class TestEnvironmentServerRouting:
         written = {entry[NG_ENVIRONMENT_SERVER_KEY]: entry for entry in json.loads(metrics_fpath.read_text())}
         assert set(written) == {"environment", "legacy_environment"}
         # The materialized group is labelled by the agent its environment server binds.
-        assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "hermes"}
-        assert written["legacy_environment"][AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
+        assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "hermes", "implementation": "hermes_agent"}
+        assert written["legacy_environment"][AGENT_REF_KEY_NAME] == {
+            "name": "hermes_legacy",
+            "implementation": "hermes_agent",
+        }
 
     async def test_call_aggregate_metrics_labels_two_servers_of_one_agent_distinctly(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -14229,8 +14235,12 @@ class TestEnvironmentServerRouting:
 
         written = {entry[NG_ENVIRONMENT_SERVER_KEY]: entry for entry in json.loads(metrics_fpath.read_text())}
         # Both servers front hermes, so each is labelled by its own name, whatever order rows arrive in.
-        assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "environment"}
-        assert written["hermes_environment_server"][AGENT_REF_KEY_NAME] == {"name": "hermes_environment_server"}
+        # The label is then a server name, and the implementation still names the agent harness that ran.
+        assert written["environment"][AGENT_REF_KEY_NAME] == {"name": "environment", "implementation": "hermes_agent"}
+        assert written["hermes_environment_server"][AGENT_REF_KEY_NAME] == {
+            "name": "hermes_environment_server",
+            "implementation": "hermes_agent",
+        }
 
     async def test_call_aggregate_metrics_names_a_stamped_server_missing_from_the_config(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -15073,6 +15083,44 @@ class TestRecordPolicyModelServer:
         assert failed_without_capture["ng_policy_model_server"] == "p"
 
 
+class TestRecordAgentImplementation:
+    """A swapped-in agent harness keeps the instance name its benchmark declares, so records name the implementation."""
+
+    SWAPPED = {"terminal_bench_agent": {"responses_api_agents": {"opencode_agent": {"entrypoint": "app.py"}}}}
+
+    @pytest.mark.parametrize("as_dict_config", [True, False])
+    def test_names_the_implementation_behind_an_instance_name(self, as_dict_config: bool) -> None:
+        from nemo_gym.rollouts.rollout_collection import _record_agent_implementation
+
+        config = OmegaConf.create(self.SWAPPED) if as_dict_config else self.SWAPPED
+        for result in ({"reward": 1.0}, {"_ng_failure_class": "timeout_exceeded"}):
+            _record_agent_implementation(result, config, "terminal_bench_agent")
+            assert result["ng_agent_implementation"] == "opencode_agent"
+
+    @pytest.mark.parametrize(
+        ("config", "agent"),
+        [
+            (SWAPPED, None),
+            (SWAPPED, "unknown_agent"),
+            # Not an agent server instance.
+            ({"swe": {"resources_servers": {"swebench_pro": {}}}}, "swe"),
+            # No single implementation to name.
+            ({"agent": {"responses_api_agents": {}}}, "agent"),
+            ({"agent": {"responses_api_agents": {"simple_agent": {}, "opencode_agent": {}}}}, "agent"),
+            ({"agent": {"responses_api_agents": None}}, "agent"),
+        ],
+    )
+    def test_leaves_the_record_unchanged_without_one_declared_implementation(
+        self, config: dict, agent: str | None
+    ) -> None:
+        from nemo_gym.rollouts.rollout_collection import _record_agent_implementation
+
+        for global_config in (config, OmegaConf.create(config)):
+            result = {"reward": 1.0}
+            _record_agent_implementation(result, global_config, agent)
+            assert result == {"reward": 1.0}
+
+
 async def test_collection_persists_policy_alias_for_offline_failed_rollout_timing(tmp_path, monkeypatch):
     import time
 
@@ -15125,6 +15173,7 @@ async def test_collection_persists_policy_alias_for_offline_failed_rollout_timin
         )
     failures = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
     assert [r.get("ng_policy_model_server") for r in failures] == ["policy"]
+    assert [r.get("ng_agent_implementation") for r in failures] == ["pinchbench_agent"]
     assert "ng_model_call_capture" not in failures[0]
     assert failures[0]["_ng_elapsed_s"] == 100.0
 
@@ -18329,7 +18378,7 @@ async def test_offline_environment_status_is_independent_of_input_companion(
     status = orjson.loads(status_path.read_bytes())
     assert status["members"]["environment"] == {**member, "aggregation_status": "complete"}
     [entry] = orjson.loads(output.with_name(output.stem + "_aggregate_metrics.json").read_bytes())
-    assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes"}
+    assert entry[AGENT_REF_KEY_NAME] == {"name": "hermes", "implementation": "hermes_agent"}
     assert entry[NG_ENVIRONMENT_SERVER_KEY] == "environment"
     assert entry["key_metrics"]["mean/reward"] == (0.0 if counted_failure else 0.5 if counted_missing else 1.0)
     assert {p: p.read_bytes() for p in before} == before

@@ -45,7 +45,7 @@ When one `gym eval run` collects rollouts for several agents with aggregation en
 | Field | Value |
 | --- | --- |
 | `schema_version` | `"1"` |
-| `agent_ref` | `{"name": <label>}`, the label the run-wide entry uses |
+| `agent_ref` | `{"name": <label>, "implementation": <agent type>}`, as in the run-wide entry |
 | `_ng_environment_server` | The environment server the agent's rollouts ran through |
 | `expected_rollouts` | The agent's materialized rollouts |
 | `completed_rollouts` | Rollouts with a scored success |
@@ -76,7 +76,7 @@ The output file is a JSON array with one entry per agent:
 ```json
 [
   {
-    "agent_ref": {"name": "my_agent"},
+    "agent_ref": {"name": "my_agent", "implementation": "simple_agent"},
     "agent_metrics": {
       "mean/reward": 0.75,
       "max/reward": 1.0,
@@ -108,7 +108,7 @@ The output file is a JSON array with one entry per agent:
 
 | Field | Description |
 |---|---|
-| `agent_ref` | Agent identity (`{"name": "..."}`) |
+| `agent_ref` | Agent identity: `name` is the entry's label, usually the agent server instance name, and `implementation` is the agent type that ran, the key under the instance's `responses_api_agents` (for example `opencode_agent`). `implementation` is absent when the running config does not declare the agent |
 | `agent_metrics` | Overall stats, custom metrics, `num_repeats` (distinct repeat indices), and cross-repeat aggregates |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
