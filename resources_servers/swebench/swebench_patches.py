@@ -16,6 +16,7 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
+import re
 from typing import Any, Dict, Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
@@ -322,6 +323,34 @@ def patch_swebench_pytest_result_summary(test_spec: TestSpec) -> None:
     if start not in test_spec.eval_script_list:
         raise ValueError(f"The evaluation script of {test_spec.instance_id} has no start-of-test-output marker")
     test_spec.eval_script_list.insert(test_spec.eval_script_list.index(start), PYTEST_RESULT_SUMMARY)
+
+
+# Chart.js runs its Karma suite in Chrome, which keeps renderer shared memory in /dev/shm. A container's default 64 MB
+# /dev/shm is too small for the suite's 1,100-1,600 canvas tests: Chrome crashes part way, Karma never prints its
+# summary, and the failure-only completion check rejects the run, the gold patch's included. A sandbox cannot enlarge
+# /dev/shm without CAP_SYS_ADMIN, so Chrome is told to keep that memory under /tmp instead.
+CHARTJS_CHROME_FLAG = "--disable-dev-shm-usage"
+_KARMA_CONFIG = re.compile(r"karma start \./(karma\.conf\.c?js)\b")
+
+
+def chartjs_chrome_flag_edit(karma_config: str) -> str:
+    """The command that adds ``CHARTJS_CHROME_FLAG`` to the flags of the Chrome launcher in ``karma_config``."""
+    return f"sed -i \"/flags: \\[/a\\          '{CHARTJS_CHROME_FLAG}',\" ./{karma_config}"
+
+
+def patch_swebench_chartjs_chrome_flag(test_spec: TestSpec) -> None:
+    # SWE-bench runs Chart.js 2.x through Gulp, without a direct Karma invocation.
+    if test_spec.repo != "chartjs/Chart.js" or test_spec.version.startswith("2."):
+        return
+    for index, line in enumerate(test_spec.eval_script_list):
+        karma_config = _KARMA_CONFIG.search(line)
+        if karma_config is None:
+            continue
+        edit = chartjs_chrome_flag_edit(karma_config.group(1))
+        if edit not in test_spec.eval_script_list:
+            test_spec.eval_script_list.insert(index, edit)
+        return
+    raise ValueError(f"The evaluation script of {test_spec.instance_id} does not start Karma")
 
 
 ########################################

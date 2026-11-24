@@ -204,9 +204,11 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto`,
+Session `opencode_config` permits only `permission`, `tools`, a boolean `snapshot`, `attachment`, `compaction.auto`,
 the compaction buffer (`compaction.reserved` on OpenCode 1, `compaction.buffer` on OpenCode 2),
 `agent.build.steps` and subagents (below), preserving Gym capture.
+Omit `snapshot` to keep OpenCode's default. Setting it to `false` disables its file snapshot
+and undo history; record this setting when comparing benchmark runs.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
@@ -584,7 +586,8 @@ handled in `opencode2/`:
   private server exits with the CLI.
 - **Configuration.** The adapter writes OpenCode 2's schema for the provider, model, plugins, MCP servers and image
   limits. The session's `opencode_config` keys keep their OpenCode 1 form, which OpenCode 2 migrates: `bash` rules
-  apply to its `shell` tool and `task` rules to `subagent`; `attachment` becomes `media`. The compaction buffer is
+  apply to its `shell` tool and `task` rules to `subagent`; `attachment` becomes `media`, and the boolean `snapshot`
+  becomes `snapshots`. The compaction buffer is
   the exception: set `compaction.buffer`; the config refuses `compaction.reserved`. OpenCode 2 assumes image input for
   a model it does not know, so a text-only session declares `capabilities.input: ["text"]`.
 - **Plugin.** OpenCode 2 loads plugins from directories through a new API, so `opencode2/plugin/index.js` replaces
