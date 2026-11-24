@@ -48,6 +48,7 @@ class FakeSandbox:
     fail_image: str | None = None
     fail_kill: str | None = None
     fail_connect: str | None = None
+    gone: str | None = None
     log_prefix = b"line"
 
     def __init__(self, sandbox_id: str) -> None:
@@ -70,7 +71,13 @@ class FakeSandbox:
         # A real connect waits on the network, so concurrent connects interleave here.
         await asyncio.sleep(0)
         if sandbox_id == cls.fail_connect:
-            raise ValueError("no such sandbox")
+            raise ValueError("connection reset")
+        if sandbox_id == cls.gone:
+            raise ValueError(f"Sandbox {sandbox_id!r} not found")
+        return cls(sandbox_id)
+
+    @classmethod
+    async def resume(cls, sandbox_id: str, **_kwargs: Any) -> "FakeSandbox":
         return cls(sandbox_id)
 
     async def check_ready(self, *_args: Any) -> None:
@@ -127,7 +134,7 @@ class FakeConnectionConfig:
 @pytest.fixture
 def provider(monkeypatch: pytest.MonkeyPatch) -> opensandbox_provider.OpenSandboxProvider:
     FakeSandbox.created, FakeSandbox.killed, FakeSandbox.closed = [], [], []
-    FakeSandbox.fail_image = FakeSandbox.fail_kill = FakeSandbox.fail_connect = None
+    FakeSandbox.fail_image = FakeSandbox.fail_kill = FakeSandbox.fail_connect = FakeSandbox.gone = None
     FakeSandbox.log_prefix = b"line"
     monkeypatch.setattr(
         opensandbox_provider,
@@ -323,7 +330,7 @@ async def test_a_reconnected_sandbox_reaches_its_sidecars(provider) -> None:
     assert result.stdout == "sandbox-1: status"
 
 
-async def test_a_sandbox_whose_sidecar_is_gone_is_not_reattached(provider) -> None:
+async def test_a_sandbox_whose_sidecar_cannot_be_reached_is_not_reattached(provider) -> None:
     sandbox = await AsyncSandbox(provider, _SPEC).start()
     descriptor = await sandbox.serialize()
     FakeSandbox.fail_connect = "sandbox-1"
@@ -336,6 +343,31 @@ async def test_a_sandbox_whose_sidecar_is_gone_is_not_reattached(provider) -> No
     assert FakeSandbox.closed == ["sandbox-2"]
     assert borrower._sidecars == {}
     assert FakeSandbox.killed == []
+
+
+async def test_a_sandbox_whose_sidecar_is_gone_is_reattached_and_can_be_stopped(provider) -> None:
+    sandbox = await AsyncSandbox(provider, _SPEC).start()
+    descriptor = await sandbox.serialize()
+    FakeSandbox.gone = "sandbox-1"
+    restarted = opensandbox_provider.OpenSandboxProvider(probe={"command": None}, operations={"close_timeout_s": 1})
+
+    reattached = await AsyncSandbox.connect(descriptor, provider=restarted)
+
+    with pytest.raises(NgFailureEvent, match="Sidecar 'tools' of sandbox 'sandbox-2' no longer exists"):
+        await reattached.sidecar("tools").exec("status", timeout_s=5)
+    await restarted.close(reattached._handle)
+    assert FakeSandbox.killed == ["sandbox-2"]
+    assert restarted._gone_sidecars == {}
+
+
+async def test_a_resumed_sandbox_gets_its_sidecars_hosts_entries_again(provider, monkeypatch) -> None:
+    hosts = _peers(provider, monkeypatch)
+    sandbox = await AsyncSandbox(provider, _SPEC).start()
+    assert hosts.pop("sandbox-2") == {"tools": "10.0.0.1"}
+
+    await provider.resume(sandbox._handle)
+
+    assert hosts == {"sandbox-2": {"tools": "10.0.0.1"}}
 
 
 async def test_a_borrower_releases_the_sidecar_handles_it_connected(provider) -> None:

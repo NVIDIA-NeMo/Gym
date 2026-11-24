@@ -460,11 +460,13 @@ options, and the default keep-alive entrypoint. Closing the main sandbox deletes
   shell. `on_stdout` receives stdout one line at a time from the streamed request. With
   `operations.background_exec`, it receives what each poll finds new, stdout and stderr together.
 - A snapshot covers the main sandbox only. A sandbox created from a snapshot gets new sidecars from their images.
-- A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs. The
-  connect fails when one of them is gone. Connects to one sandbox through one provider share its sidecar handles, and
-  the last `disconnect` releases them.
+- A sandbox reattached with `AsyncSandbox.connect` reaches the same sidecars: the descriptor carries their IDs. A
+  sidecar that no longer exists does not fail the connect, so the sandbox can still be stopped; using that sidecar
+  raises a provider failure. A sidecar that cannot be reached for another reason fails the connect. Connects to one
+  sandbox through one provider share its sidecar handles, and the last `disconnect` releases them.
 - Pausing and resuming act on the main sandbox only. Its sidecars keep running, and are deleted when their TTL or
-  sandbox lease ends.
+  sandbox lease ends. With `networking.enabled: true`, a resume writes the sidecars' `/etc/hosts` entries again,
+  because a resumed sandbox can start without them.
 
 ## Resource Mapping
 

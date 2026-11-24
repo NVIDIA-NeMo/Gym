@@ -45,6 +45,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_PROTOCOL_ERROR,
     PROVIDER_PTY_BUSY,
     PROVIDER_PTY_UNAVAILABLE,
+    PROVIDER_REQUEST_FAILED,
     PROVIDER_SETUP_FAILED,
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
@@ -1245,6 +1246,8 @@ class OpenSandboxProvider:
         self._connected_sidecars: dict[str, int] = {}
         # Main sandboxes already deleted by a close that left a sidecar behind; a repeated close skips them.
         self._deleted_with_sidecars_left: set[str] = set()
+        # Sidecars that no longer existed when `connect` reattached their main sandbox, by its id.
+        self._gone_sidecars: dict[str, set[str]] = {}
 
     def uploads_independent_of_execs(self) -> bool:
         """A foreground command holds one of the shared HTTP pool's connections for as long as it runs, so
@@ -2030,14 +2033,24 @@ class OpenSandboxProvider:
                 raise opensandbox_failure(operation="connect", sandbox_id=sandbox_id, cause=error) from error
             raise
         sidecars: dict[str, SandboxHandle] = {}
+        gone: set[str] = set()
         if sandbox_id not in self._sidecars:
             try:
                 for name, sidecar_id in (descriptor.get("sidecar_ids") or {}).items():
-                    sidecars[name] = await self.connect({"sandbox_id": sidecar_id})
+                    try:
+                        sidecars[name] = await self.connect({"sandbox_id": sidecar_id})
+                    except NgFailureEvent as error:
+                        if error.__cause__ is None or not _is_missing_sandbox_delete_error(error.__cause__):
+                            raise
+                        # A sidecar that no longer exists does not stop the connect, so a caller that reattaches
+                        # only to stop the sandbox still can. Using that sidecar fails; see `_sidecar_handle`.
+                        gone.add(name)
             except BaseException:
-                # A sandbox whose sidecar is gone is not reattached. Release the local handles connected so far.
+                # A sidecar that cannot be reached fails the connect. Release the local handles connected so far.
                 await self._close_local_handles([handle, *sidecars.values()], operation="close_after_connect_failure")
                 raise
+        if gone:
+            self._gone_sidecars[sandbox_id] = gone
         if sandbox_id in self._sidecars:
             # This provider created the sandbox, or another connect holds its sidecars (also one that finished while
             # this one connected its own): the connects share those handles.
@@ -2066,10 +2079,11 @@ class OpenSandboxProvider:
         The sandboxes keep running.
         """
         shared_by = self._connected_sidecars.get(handle.sandbox_id)
-        if shared_by is None:
-            return
-        if shared_by > 1:
+        if shared_by is not None and shared_by > 1:
             self._connected_sidecars[handle.sandbox_id] = shared_by - 1
+            return
+        self._gone_sidecars.pop(handle.sandbox_id, None)
+        if shared_by is None:
             return
         del self._connected_sidecars[handle.sandbox_id]
         await self._close_local_handles(list(self._sidecars.pop(handle.sandbox_id, {}).values()), operation="close")
@@ -2188,6 +2202,11 @@ class OpenSandboxProvider:
             )
         except Exception as e:
             LOGGER.warning("Failed to close pre-resume OpenSandbox handle %r: %r", handle.sandbox_id, e)
+        # A resume can give the sandbox a fresh runtime, without the hosts entries written at create.
+        if self._networking.enabled and (sidecars := self._sidecars.get(handle.sandbox_id)):
+            await self.set_hosts(
+                handle, {name: await self.network_address(sidecar) for name, sidecar in sidecars.items()}
+            )
 
     async def _await_sdk_call(
         self,
@@ -4150,6 +4169,13 @@ class OpenSandboxProvider:
         try:
             return self._sidecars[handle.sandbox_id][sidecar]
         except KeyError:
+            if sidecar in self._gone_sidecars.get(handle.sandbox_id, ()):
+                raise opensandbox_failure(
+                    operation="sidecar",
+                    sandbox_id=handle.sandbox_id,
+                    failure_kind=PROVIDER_REQUEST_FAILED,
+                    reason=f"Sidecar {sidecar!r} of sandbox {handle.sandbox_id!r} no longer exists",
+                ) from None
             raise RuntimeError(
                 f"OpenSandbox holds no sidecar {sidecar!r} of sandbox {handle.sandbox_id!r}: it was stopped, or the "
                 "sandbox was connected from a descriptor without its sidecar_ids"
@@ -4190,6 +4216,7 @@ class OpenSandboxProvider:
         if not sidecars:
             self._sidecars.pop(sandbox_id, None)
             self._connected_sidecars.pop(sandbox_id, None)
+            self._gone_sidecars.pop(sandbox_id, None)
             return await self._close_one(handle)
         # Each is deleted whatever happens to the others. One that cannot be deleted is retried by a repeated close,
         # which leaves alone a main sandbox it has deleted: that one's SDK handle is closed.
@@ -4205,6 +4232,7 @@ class OpenSandboxProvider:
         if not sidecars:
             del self._sidecars[sandbox_id]
             self._connected_sidecars.pop(sandbox_id, None)
+            self._gone_sidecars.pop(sandbox_id, None)
             self._deleted_with_sidecars_left.discard(sandbox_id)
         for result in results:
             if isinstance(result, BaseException):
