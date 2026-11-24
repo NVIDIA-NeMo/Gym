@@ -1252,13 +1252,13 @@ def test_mcp_session_tokens_are_decoded_with_one_serializer_per_server(monkeypat
     signer = mcp_session_token_serializer(server.get_session_middleware_key())
     token = signer.dumps({"sid": "s", "episode": "r-a1"})
     built: list[str] = []
-    original = itsdangerous.URLSafeSerializer.__init__
+    original = itsdangerous.URLSafeTimedSerializer.__init__
 
     def counting(self: Any, *args: Any, **kwargs: Any) -> None:
         built.append("serializer")
         original(self, *args, **kwargs)
 
-    monkeypatch.setattr(itsdangerous.URLSafeSerializer, "__init__", counting)
+    monkeypatch.setattr(itsdangerous.URLSafeTimedSerializer, "__init__", counting)
 
     def scope(value: bytes) -> dict:
         return {"headers": [(b"x-nemo-gym-session-token", value)]}
@@ -1295,6 +1295,32 @@ def test_mcp_session_tokens_ride_as_bearer_tokens_with_mcp_bearer_token() -> Non
     assert claims((b"x-nemo-gym-session-token", token.encode())) is None
     assert claims((b"authorization", f"Basic {token}".encode())) is None
     assert claims((b"authorization", b"Bearer ")) is None
+
+
+def test_an_mcp_token_older_than_the_max_age_names_no_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A token past mcp_token_max_age_seconds is left to the MCP endpoint, which refuses it, as a forged one is."""
+    import itsdangerous
+
+    from nemo_gym.server_runtime._checkpoint.resources import MCPTokenClaims
+    from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
+
+    server, _ = make_server()
+    signer = mcp_session_token_serializer(server.session_secret)
+    young = signer.dumps({"sid": "s", "episode": "r-a1"})
+    with monkeypatch.context() as patched:
+        now = itsdangerous.TimestampSigner.get_timestamp
+        patched.setattr(itsdangerous.TimestampSigner, "get_timestamp", lambda self: now(self) - 61)
+        old = signer.dumps({"sid": "s", "episode": "r-a1"})
+
+    def claims(token: str) -> Any:
+        return server._mcp_token_claims({"headers": [(b"x-nemo-gym-session-token", token.encode())]})
+
+    expected = MCPTokenClaims("s", EpisodeId(rollout_id="r", attempt=1))
+    # Without a max age, a token of any age names its session.
+    assert claims(old) == claims(young) == expected
+    server.config.mcp_token_max_age_seconds = 60
+    assert claims(young) == expected
+    assert claims(old) is None
 
 
 def test_mcp_session_tokens_are_read_with_the_servers_own_secret() -> None:

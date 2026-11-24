@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from inspect import iscoroutinefunction
-from time import monotonic
+from time import monotonic, time
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
 
 from fastapi import FastAPI, HTTPException, Request
@@ -46,7 +46,7 @@ from starlette.middleware import Middleware
 
 
 if TYPE_CHECKING:
-    from itsdangerous import URLSafeSerializer
+    from itsdangerous import URLSafeTimedSerializer
 
     # Type-only: importing MCPTool at runtime would be circular (mcp_auto_exposure imports this
     # module) and would pull the mcp SDK into agent/model processes that never need it.
@@ -103,21 +103,51 @@ _MCP_TOKEN_SALT = "nemo-gym-mcp-session-token"
 _SESSION_HOOKS = ("export_session_states", "restore_session_states", "retire_session_state")
 
 
-def mcp_session_token_serializer(secret: str) -> "URLSafeSerializer":
-    """The signer of Gym MCP session tokens; build it once per server."""
-    from itsdangerous import URLSafeSerializer
+def mcp_session_token_serializer(secret: str) -> "URLSafeTimedSerializer":
+    """The signer of Gym MCP session tokens; build it once per server.
 
-    return URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
+    A token carries the time it was signed, so a server can refuse one older than ``mcp_token_max_age_seconds``.
+    """
+    from itsdangerous import URLSafeTimedSerializer
+
+    return URLSafeTimedSerializer(secret, salt=_MCP_TOKEN_SALT)
 
 
-def mcp_session_token_payload(serializer: "URLSafeSerializer", token: str) -> Any:
-    """The payload of a Gym MCP session token whose signature verifies, or ``None`` if it does not."""
-    from itsdangerous import BadSignature
+def _verified_mcp_session_token(serializer: "URLSafeTimedSerializer", token: str) -> Optional[tuple[Any, float]]:
+    """The payload of a Gym MCP session token whose signature verifies, and how many seconds ago it was signed;
+    ``None`` for any other string.
+
+    Tokens carry whole seconds. A token signed after now, which a step back of the host's clock makes, has a negative
+    age, which no limit refuses; itsdangerous's own ``max_age`` check would refuse it.
+    """
+    from itsdangerous import BadData
 
     try:
-        return serializer.loads(token)
-    except BadSignature:
+        payload, signed_at = serializer.loads(token, return_timestamp=True)
+    except BadData:
+        # A bad signature, or a valid signature over a payload that does not decode.
         return None
+    return payload, time() - signed_at.timestamp()
+
+
+def mcp_session_token_payload(
+    serializer: "URLSafeTimedSerializer", token: str, *, max_age_seconds: Optional[float] = None
+) -> Any:
+    """The payload of a Gym MCP session token whose signature verifies, or ``None`` if it does not.
+
+    With ``max_age_seconds``, a token signed longer ago than that counts as one that does not verify.
+    """
+    verified = _verified_mcp_session_token(serializer, token)
+    if verified is None:
+        return None
+    payload, age = verified
+    return None if max_age_seconds is not None and age > max_age_seconds else payload
+
+
+def mcp_session_token_expired(serializer: "URLSafeTimedSerializer", token: str, max_age_seconds: float) -> bool:
+    """Whether a Gym MCP session token's signature verifies and it was signed more than ``max_age_seconds`` ago."""
+    verified = _verified_mcp_session_token(serializer, token)
+    return verified is not None and verified[1] > max_age_seconds
 
 
 def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
@@ -173,6 +203,15 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
         "do. Needs expose_tools_over_mcp. The server then signs its sessions with a secret made for the run, which "
         "every worker shares (SimpleServer.get_session_secret)",
     )
+    mcp_token_max_age_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description="How long an MCP session token is accepted after the /seed_session that minted it, in seconds. "
+        "A request to the MCP endpoint with an older token is answered with HTTP 401 (invalid_token), so set it "
+        "longer than the longest episode. Null (the default) puts no limit on a token's age. Needs "
+        "expose_tools_over_mcp",
+    )
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
@@ -202,7 +241,11 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     @model_validator(mode="after")
     def _mcp_options_need_the_mcp_endpoint(self) -> "BaseResourcesServerConfig":
         """Refuse the MCP endpoint's options on a server that serves no MCP endpoint, where they would do nothing."""
-        options = [name for name in ("mcp_server_name", "mcp_bearer_token") if getattr(self, name)]
+        options = [
+            name
+            for name in ("mcp_server_name", "mcp_bearer_token", "mcp_token_max_age_seconds")
+            if getattr(self, name)
+        ]
         if options and not self.expose_tools_over_mcp:
             raise ValueError(
                 f"{' and '.join(options)} configure this server's MCP endpoint, which it serves only with "
@@ -1069,8 +1112,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     def _mcp_token_claims(self, scope: dict[str, Any]) -> Optional[MCPTokenClaims]:
         """The session and attempt an MCP request's signed token names.
 
-        ``None`` without a token or for one that does not verify; the MCP endpoint rejects a bad token.
-        An attempt claim that does not decode counts as missing.
+        ``None`` without a token, or for one that does not verify or is older than ``mcp_token_max_age_seconds``;
+        the MCP endpoint rejects such a token. An attempt claim that does not decode counts as missing.
         """
         header = "Authorization" if self.config.mcp_bearer_token else NEMO_GYM_MCP_SESSION_TOKEN_HEADER
         text = mcp_session_token(Headers(scope=scope), header)
@@ -1078,7 +1121,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             return None
         if self._mcp_token_serializer is None:
             self._mcp_token_serializer = mcp_session_token_serializer(self.session_secret)
-        payload = mcp_session_token_payload(self._mcp_token_serializer, text)
+        payload = mcp_session_token_payload(
+            self._mcp_token_serializer, text, max_age_seconds=self.config.mcp_token_max_age_seconds
+        )
         if not isinstance(payload, dict) or not isinstance(payload.get("sid"), str):
             return None
         episode_id = None
