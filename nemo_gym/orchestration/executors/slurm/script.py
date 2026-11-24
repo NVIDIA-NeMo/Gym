@@ -1098,7 +1098,7 @@ def _command_env(benchmark: BenchmarkRunConfig, remote_bench_dir: Path, driver_e
     validation time), so they are passed through as-is. The model-call capture
     directory is the one `gym eval run` would get; Gym processes the command
     starts read it as their default. A value in driver.env wins, and an empty
-    one turns capture off.
+    one removes the default.
     """
     env = {"NEMO_GYM_BENCH_DIR": str(remote_bench_dir)}
     if MODEL_CALL_CAPTURE_DIR_ENV not in driver_env:

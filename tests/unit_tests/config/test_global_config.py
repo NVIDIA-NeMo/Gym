@@ -248,6 +248,8 @@ class TestGlobalConfig:
             ),
             ("/run/model-calls", {"observability_enabled": False}, "/run/model-calls", False),  # an opt-out holds
             ("", {}, None, None),  # an empty export turns nothing on
+            # ... and turns nothing off: capture the config enables itself goes on.
+            ("", {"observability_enabled": True, "model_call_capture_dir": "/mine"}, "/mine", True),
         ],
     )
     def test_an_exported_capture_dir_is_the_default(

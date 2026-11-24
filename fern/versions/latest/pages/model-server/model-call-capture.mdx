@@ -11,6 +11,10 @@ or rollout rewards.
 `gym eval submit` enables capture by default under each benchmark's job directory at `model-calls/`.
 Set `driver.benchmarks.<name>.run.observability_enabled: false` to opt out, or set
 `driver.benchmarks.<name>.run.model_call_capture_dir` to an absolute path to customize the directory.
+A benchmark that runs a [`command`](/main/orchestration/how-to/custom-harness) cannot set `run`; on Slurm its Gym
+processes get the directory as `NEMO_GYM_MODEL_CALL_CAPTURE_DIR`. Set that variable in `driver.env` to another
+absolute path (`lit:/path`) or to `lit:` to remove the default, and set `observability_enabled: false` in the
+command's Gym config to opt out.
 Other entry points, including local evaluations and training, remain opt-in.
 
 ## Run an evaluation with capture

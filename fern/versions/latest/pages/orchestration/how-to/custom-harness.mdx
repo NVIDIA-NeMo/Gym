@@ -33,7 +33,9 @@ driver:
 | `NEMO_GYM_POLICY_BASE_URL` | The policy's OpenAI-compatible base URL. Set when `driver.policy_model` is set. |
 | `NEMO_GYM_POLICY_MODEL_NAME` | The served model name. Set when `driver.policy_model` is set. |
 | `NEMO_GYM_POLICY_API_KEY` | The API key to present. Set when `driver.policy_model` is set. |
-| `NEMO_GYM_MODEL_CALL_CAPTURE_DIR` | Slurm only. `$NEMO_GYM_BENCH_DIR/model-calls`, the model-call capture directory `gym eval run` would get. Gym processes your script starts use it when their config leaves `model_call_capture_dir` unset or `null`, and turn on `observability_enabled` unless their config sets it, so their model servers capture calls. Set it to an empty value in `driver.env` to turn capture off, or to another absolute path. |
+| `NEMO_GYM_MODEL_CALL_CAPTURE_DIR` | Slurm only. `$NEMO_GYM_BENCH_DIR/model-calls`, the model-call capture directory `gym eval run` would get. Gym processes your script starts use it when their config leaves `model_call_capture_dir` unset or `null`, and turn on `observability_enabled` unless their config sets it, so their model servers capture calls. Set it in `driver.env` to another absolute path (`lit:/path`), or to `lit:` to remove the default; a Gym config that enables capture itself still captures, so set `observability_enabled: false` there to turn capture off. |
+
+Every Gym process your script starts gets the same capture directory, and capture files are named by task and rollout index, not by run. If the script runs more than one rollout collection, together or one after another, give each its own absolute `++model_call_capture_dir`, on its `gym env start` too when its servers start separately; otherwise one collection can clear or attach another's model calls.
 
 The driver clones Gym into a fresh temporary checkout when `gym_install` is set, so a script that sits next to your submit config is not copied there. Put the harness on a shared cluster path, mount it with `driver.mounts`, and call it by absolute path, as `/harness/run_my_harness.py` above.
 

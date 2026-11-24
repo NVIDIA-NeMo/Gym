@@ -2196,7 +2196,7 @@ def test_a_command_is_told_where_to_write_and_how_to_reach_the_policy(tmp_path):
 @pytest.mark.parametrize(
     ("declared", "exported"),
     [
-        pytest.param("lit:", {"", "''"}, id="empty turns capture off"),
+        pytest.param("lit:", {"", "''"}, id="empty removes the default"),
         pytest.param("lit:/scratch/calls", {"/scratch/calls"}, id="a declared directory wins"),
     ],
 )
