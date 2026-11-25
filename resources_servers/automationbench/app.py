@@ -24,7 +24,7 @@ import logging
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import PlainTextResponse
@@ -167,12 +167,14 @@ class AutomationBenchResourcesServer(ToolSidecarResources, SimpleResourcesServer
     config: AutomationBenchResourcesServerConfig
     seed_request_model = AutomationBenchSeedRequest
     # What the tool host in a tool sidecar imports beyond Gym, as this server's pyproject.toml pins them.
-    tool_sidecar_requirements = (
+    tool_sidecar_requirements: ClassVar[tuple[str, ...]] = (
         "verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@b2e4e8157783b2c0dffc7821044c87f29f1c3ccf",
         "automation-bench @ git+https://github.com/zapier/AutomationBench.git@4a8e1061254004d9dac807054eed33fad7d1ff14",
         "datasets",
     )
-    tool_sidecar_sources = {"benchmarks/automationbench/automationbench_env": "automationbench_env"}
+    tool_sidecar_sources: ClassVar[dict[str, str]] = {
+        "benchmarks/automationbench/automationbench_env": "automationbench_env"
+    }
 
     _episodes: Dict[str, _Episode] = PrivateAttr(default_factory=dict)
 
