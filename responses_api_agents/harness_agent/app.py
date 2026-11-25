@@ -64,6 +64,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
+from responses_api_agents.harness_exa_search.registry import FABRIC_ADAPTERS, resolve_agent
 
 
 LOG = logging.getLogger(__name__)
@@ -74,8 +75,7 @@ DEPRECATION_WARNING = (
     "DEPRECATED: harness_agent runs each episode through its own legacy /run path and will be removed after the "
     "environment-server migration. Use the harness's own agent (claude_code_agent, codex_agent, hermes_agent, "
     "pi_agent, opencode_agent and so on) with sandbox sessions under an environment server instead, as the job_bench "
-    "and workspace_bench configs do. The swe_atlas_qa and rna_design configs still run on this agent and keep "
-    "working until they move. See responses_api_agents/harness_agent/README.md."
+    "and workspace_bench configs do. See responses_api_agents/harness_agent/README.md."
 )
 
 
@@ -85,31 +85,6 @@ def _warn_deprecated_once() -> None:
     if not is_nemo_gym_fastapi_worker():
         LOG.warning(DEPRECATION_WARNING)
 
-
-_AGENTS = {
-    "claude_code": ("responses_api_agents.claude_code_agent.app", "ClaudeCodeAgent", "ClaudeCodeAgentConfig"),
-    "cline": ("responses_api_agents.cline_agent.app", "ClineAgent", "ClineAgentConfig"),
-    "codex": ("responses_api_agents.codex_agent.app", "CodexAgent", "CodexAgentConfig"),
-    "deepagents": ("responses_api_agents.nemo_fabric_agent.app", "NeMoFabricAgent", "NeMoFabricAgentConfig"),
-    "hermes": ("responses_api_agents.hermes_agent.app", "HermesAgent", "HermesAgentConfig"),
-    "kilocode": ("responses_api_agents.kilocode_agent.app", "KiloCodeAgent", "KiloCodeAgentConfig"),
-    "mini_swe": ("responses_api_agents.nemo_fabric_agent.app", "NeMoFabricAgent", "NeMoFabricAgentConfig"),
-    "openclaw": ("responses_api_agents.openclaw_agent.app", "OpenClawAgent", "OpenClawAgentConfig"),
-    "opencode": ("responses_api_agents.opencode_agent.app", "OpenCodeAgent", "OpenCodeAgentConfig"),
-    "pi": ("responses_api_agents.pi_agent.app", "PiAgent", "PiAgentConfig"),
-    "prime": ("responses_api_agents.prime_agent.app", "PrimeAgent", "PrimeAgentConfig"),
-    "simple_strands": (
-        "responses_api_agents.simple_strands_agent.app",
-        "SimpleStrandsAgent",
-        "SimpleStrandsAgentConfig",
-    ),
-    "terminus_2": ("responses_api_agents.terminus_2_agent.app", "Terminus2Agent", "Terminus2AgentConfig"),
-}
-
-_FABRIC_ADAPTERS = {
-    "deepagents": "nvidia.fabric.langchain.deepagents",
-    "mini_swe": "nvidia.fabric.mini-swe-agent",
-}
 
 _WORKDIR_KEYS = {
     "cline": "repo_dir",
@@ -169,13 +144,6 @@ def _masked_result(
             "failure_reason": (reason or "")[:4000],
         }
     )
-
-
-def resolve_agent(name: str) -> tuple[str, str, str]:
-    try:
-        return _AGENTS[name]
-    except KeyError as exc:
-        raise ValueError(f"Unknown agent: {name}") from exc
 
 
 async def stage_and_run_eval(
@@ -567,7 +535,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         if getattr(agent_body, "metadata", None):
             agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
         agent_config = dict(self.config.agent_kwargs)
-        if adapter_id := _FABRIC_ADAPTERS.get(self.config.agent):
+        if adapter_id := FABRIC_ADAPTERS.get(self.config.agent):
             agent_config.setdefault("adapter_id", adapter_id)
         agent_config.setdefault("resources_server", self.config.resources_server.model_dump(mode="json"))
         agent_config.setdefault("model_server", self.config.model_server.model_dump(mode="json"))

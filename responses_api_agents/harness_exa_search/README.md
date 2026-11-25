@@ -33,7 +33,7 @@ responses_api_agents:
 | --- | --- |
 | `model_server` | Gym model server. |
 | `resources_server` | Benchmark-specific verifier that receives the completed response. |
-| `agent` | Agent name from Gym’s shared `harness_agent` registry, such as `claude_code`, `codex`, or `opencode`. |
+| `agent` | Agent name from the search agent’s [adapter registry](registry.py), such as `claude_code`, `codex`, or `opencode`. |
 | `agent_kwargs` | Arguments forwarded to the selected agent’s config class. Supported keys depend on the agent. |
 | `image` | Sandbox base image containing Python and required system dependencies. |
 | `python` | Python executable used to launch `agent_runner.py`. It defaults to `python3`. |

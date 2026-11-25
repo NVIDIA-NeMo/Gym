@@ -310,15 +310,14 @@ dataset list or a dataset's paths, and keep `split` and `config_paths` as this s
 A benchmark graded by a judge model, one that searches the web, and one whose agent runs in a sandbox
 need services and credentials of their own. The benchmark's config chains their configs itself (for
 example `benchmarks/simpleqa/` chains a judge config, `benchmarks/arxivmath_0526/` another,
-`benchmarks/swe_atlas_qa/` a sandbox provider, and `benchmarks/gdpval/` a sandbox provider, judges and a
+and `benchmarks/gdpval/` a sandbox provider, judges and a
 search tool), so naming the benchmark's file is still enough. What the submit config must add is the
 environment and the config values they read:
 
 - Read the benchmark's README, and every `${oc.env:NAME}` and bare `${name}` in its config and the
   files it chains to.
-- A bare `${name}` is a config value the benchmark expects from you, which `driver.env` does not set:
-  `benchmarks/swe_atlas_qa/` needs `judge_base_url`, `judge_model_name` and `harness_bundle`, as its
-  README lists. Set each as a key under both `prepare` and `run`, since both load the config.
+- A bare `${name}` is a config value the benchmark expects from you, which `driver.env` does not set.
+  Set each as a key under both `prepare` and `run`, since both load the config.
 - Give each `${oc.env:NAME}` a value in the job: `driver.env` as `host:NAME` (read from your shell at submit) or
   `runtime:NAME` together with `compute.cluster.forward_env`, as `HF_TOKEN` in section 2. A credential
   never goes in as a literal.

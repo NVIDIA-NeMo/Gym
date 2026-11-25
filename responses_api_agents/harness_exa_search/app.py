@@ -29,7 +29,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
+from responses_api_agents.harness_exa_search.registry import FABRIC_ADAPTERS, resolve_agent
 
 
 LOG = logging.getLogger(__name__)
@@ -225,7 +225,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
             raise ValueError(f"unknown sandbox_spec keys: {sorted(values)}")
         upstream_model_url = self._upstream_model_url(request)
         agent_kwargs = dict(self.config.agent_kwargs)
-        if adapter := _FABRIC_ADAPTERS.get(self.config.agent):
+        if adapter := FABRIC_ADAPTERS.get(self.config.agent):
             agent_kwargs.setdefault("adapter_id", adapter)
         runner_config = {
             "agent": self.config.agent,
