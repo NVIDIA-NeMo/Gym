@@ -216,9 +216,7 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
     - each stop gets a bounded wait (``sandbox_stop_timeout_seconds``) but is never cut short, and each grading
       attempt's verifier sandbox stays with the session until its stop succeeds;
     - shutdown waits a bounded time for a session's request in progress, never raises, and leaves what an agent's
-      ``/run`` still holds to the provider's TTL;
-    - the files a checkout holds untracked before the agent starts are listed as before: a listing that fails gives
-      none.
+      ``/run`` still holds to the provider's TTL.
 
     The cookie path of an agent's ``/run`` keeps its seed; its task sandbox is created on the shared provider
     (``new_task_sandbox``), so a checkpointing server says its episode restarts.
@@ -438,21 +436,6 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
         )
         if result.return_code != 0:
             print(f"Failed to init git repo at {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
-
-    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
-        """List of files ``workdir`` holds untracked before the agent touches it.
-
-        Unlike the repository-task base's listing, one that fails gives none instead of failing the seed.
-        """
-        try:
-            result = await sandbox.exec(f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard")
-            if result.return_code != 0:
-                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
-                return frozenset()
-            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
-        except Exception:
-            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
-            return frozenset()
 
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
         """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""

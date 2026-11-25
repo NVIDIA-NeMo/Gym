@@ -957,6 +957,22 @@ async def test_seed_without_a_base_commit_is_retryable_and_stops_its_sandbox(ser
     assert not server._session_id_to_sandbox and not server._task_sessions
 
 
+async def test_seed_that_cannot_list_the_untracked_files_fails_and_stops_its_sandbox(server):
+    """Without that list, the files the image held untracked would be captured as the agent's patch."""
+    ok = SimpleNamespace(return_code=0, stdout=f"{BASE_COMMIT}\n", stderr="", error_type=None)
+    refused = SimpleNamespace(return_code=128, stdout="", stderr="fatal: not a git repository", error_type=None)
+    sandbox = FakeSandbox(
+        exec=AsyncMock(side_effect=lambda command, **kwargs: refused if "ls-files --others" in command else ok)
+    )
+    starts(server, sandbox)
+
+    with pytest.raises(RuntimeError, match="pristine untracked files"):
+        await server.seed_session(SimpleNamespace(session={}), seed())
+
+    sandbox.stop.assert_awaited_once()
+    assert not server._session_id_to_sandbox and not server._task_sessions
+
+
 async def test_a_session_never_closed_expires_and_its_verify_is_masked(server, grading, sandboxes):
     """A session that outlives its sandbox's lifetime is closed by the server; a later verify grades nothing."""
     request = SimpleNamespace(session={})
