@@ -1,50 +1,49 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Upstream NL2RepoBench (104 tasks) with the OpenHands SDK harness - the OpenHands counterpart of opencode.yaml in this directory
-# (same resources server, task set, grading and agent_network_mode switch; only the agent differs). Uses the same block names as
-# opencode.yaml so the existing launchers and ++...agent_network_mode overrides apply unchanged.
+# NL2RepoBench x the OpenHands SDK on agent sessions, the OpenHands counterpart of opencode.yaml (same resources server,
+# task set, grading and block names, so the same ++nl2repobench_opencode_resources_server...agent_network_mode override
+# applies). single_agent_turn_legacy seeds the resources server, which starts the agent sandbox and lends it
+# (sandbox_access); openhands_agent runs the OpenHands SDK inside it. After the agent session closes, /verify collects
+# /workspace and grades it in a fresh sandbox from the task's pinned image.
 #
-# Network modes (override at the CLI, see opencode.yaml): official | block_target | block_target_v2 | no_internet_preinstalled.
-# OpenHands needs an offline bundle for block_target_v2 and no_internet_preinstalled (their sandboxes cannot run the default pip-venv
-# install): build it with responses_api_agents/openhands_sdk_sandboxed_agent/build_bundle.sh and pass
-#   ++nl2repobench_opencode_sandboxed_agent.responses_api_agents.openhands_sdk_sandboxed_agent.bundle_path=<outdir>/openhands_bundle.tar.gz
-# The task prompt comes from the benchmark row (user_prompt: null below), so OpenHands and OpenCode get the same one.
-#
-# Status: experimental. This config resolves and the OpenHands agent has run on the internal NL2RepoBench-style task sets, but no
-# complete run of the upstream 104 tasks with this harness is recorded yet (see "Combinations and status" in README.md), so
-# treat that pairing as untested end to end until a smoke run is.
+# Status: the config resolves; no run is recorded yet (see "Combinations and status" in README.md), so treat it as untested
+# end to end. It runs the SDK version pinned by openhands_agent, not the SDK 1.50 harness of the internal runs, so its
+# scores are not comparable with those. Like opencode.yaml it supports only agent_network_mode=official.
 config_paths:
-  - responses_api_agents/openhands_sdk_sandboxed_agent/configs/openhands_sdk_sandboxed_agent.yaml
+  - responses_api_agents/openhands_agent/configs/openhands_agent.yaml
   - resources_servers/nl2repobench/configs/nl2repobench.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 nl2repobench_opencode_resources_server:
   _inherit_from: nl2repobench_resources_server
   resources_servers:
     nl2repobench:
+      # official mode: the generic agent image needs open egress to install a task's dependencies, as upstream's agent
+      # has, so treat its score as an upper bound (README "Network modes"). The verifier is unaffected.
       enforce_agent_no_network: false
-      sandbox_model_server:
-        type: responses_api_models
-        name: policy_model
-      # Same grading as opencode.yaml: NL2RepoBench's own protocol. Use grading_protocol=gym_strict to resume older runs.
+      # Grade like NL2RepoBench itself (see _UPSTREAM_PACKAGE_FILES in app.py).
       grading_protocol: upstream
-      # The SDK's own dependency `pyperclip` is also a task in this set. It is installed into the sandbox (pip, or the
-      # offline bundle) after the resources server's target scrubs, so a pyperclip rollout can read the implementation:
-      # no clean score for it. The official `reward` is unchanged. The first four are the server's default exclusions.
+      # `pyperclip`, a task in this set, is also a dependency of the OpenHands runtime that openhands_agent uploads into
+      # the sandbox after the resources server's target scrubs, so a pyperclip rollout can read its implementation: no
+      # clean score for it. The official `reward` is unchanged. The first four are the server's default exclusions.
       clean_exclude_tasks: [six, tenacity, typing_extensions, more-Itertools, pyperclip]
 
-nl2repobench_opencode_sandboxed_agent:
-  _inherit_from: openhands_sdk_sandboxed_agent
+nl2repobench_openhands_agent:
+  _inherit_from: openhands_agent
   responses_api_agents:
-    openhands_sdk_sandboxed_agent:
-      sandbox_timeout: 21600
-      model_call_timeout_s: 14400
-      # The task prompt is the benchmark row's (resources_servers/nl2repobench/prepare.py: NL2RepoBench's own prompt plus a
-      # no-internet line), the same one the OpenCode harness gets; not the agent's built-in default.
-      user_prompt: null
+    openhands_agent:
       resources_server:
         type: resources_servers
         name: nl2repobench_opencode_resources_server
+      # NL2RepoBench's agent budget: 6 hours.
+      timeout: 21600
+      # An admitted episode already holds its sandbox, so the agent server does not queue it again.
+      concurrency: 1024
+      # OpenHands' default max_iterations (500), which NL2RepoBench runs with, and no condenser: an overflow ends the run
+      # instead of being summarised.
+      max_iterations: 500
+      condenser: false
       datasets:
         - name: nl2repobench_v1
           type: benchmark
@@ -53,12 +52,14 @@ nl2repobench_opencode_sandboxed_agent:
           num_repeats: 1
 
 nl2repobench_environment_server:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
-      # The whole /run: the agent's 21600 s budget, then export, workspace collection, grading and cleanup. The server's
-      # 21600 s default equals the agent budget alone, so a full-length run was cut off before it could be graded.
-      default_episode_timeout_seconds: 28800
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: nl2repobench_opencode_resources_server
       agent_server:
         type: responses_api_agents
-        name: nl2repobench_opencode_sandboxed_agent
+        name: nl2repobench_openhands_agent
+      # The agent's 21600 s plus collection and grading, within the agent sandbox's 25200 s ttl_s.
+      default_episode_timeout_seconds: 25200

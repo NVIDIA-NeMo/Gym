@@ -2,10 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """agent_network_mode="block_target_v2": stricter replacement for the "block_target" pip/git guard.
 
-The original guard (still available, unchanged, as mode "block_target"; backup of the whole server file:
-app.py.bak_pre_guard_v2_20261020) only substring-matched the normalised task_id against argv. On the vahid1016
-testset every id looks like `owner_repo_prNN`, which never appears in a real PyPI/GitHub name or URL, so it blocked
-nothing (0 refusals in every run) while agents fetched the real source in many rollouts (see LEAK_AUDIT.md).
+The original guard (still available, unchanged, as mode "block_target") only substring-matched the normalised task_id
+against argv. On task sets whose ids look like `owner_repo_prNN`, which never appears in a real PyPI/GitHub name or
+URL, it blocked nothing while agents fetched the real source in many rollouts.
 
 What v2 adds (all in this file; app.py only dispatches to it):
   1. REAL identifiers. For testset tasks the GitHub owner/repo is parsed from the clone URL in test_commands[0]

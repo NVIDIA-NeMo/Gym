@@ -27,6 +27,9 @@ python responses_api_agents/opencode_sandboxed_agent/client.py \
 ```
 
 ## Prefetch OpenCode binary and upload to S3
+`configs/opencode_sandboxed_agent.yaml` pins OpenCode 1.17.11; a config without `opencode_version` gets
+`opencode_agent`'s default, now 1.19.6. A prefetched binary must be the configured release: setup checks
+`opencode --version`.
 ```bash
 curl -L https://opencode.ai/install -o opencode_install.sh
 
@@ -73,6 +76,52 @@ sandbox_row_option_keys: [volumes]
 ```
 
 `sandbox_uploads` maps a sandbox path to a file on the agent server host, which must resolve under `sandbox_upload_roots` (empty roots refuse all; relative paths resolve from the agent server's directory). On OpenSandbox each upload must finish within `request_timeout_s`, so raise it for large files. Row `sandbox_provider_options` override `sandbox_config.provider_options` at creation only, only for top-level keys the operator lists in `sandbox_row_option_keys` (default empty: any row option is rejected; `network_policy` is also rejected when `network_access` is restricted), and are rejected for a sandbox supplied by the resources server. A listed key gives every row that provider option as is, for example host mounts through Docker `volumes` or `run_args`. A row value replaces the configured value of the same key; lists are not merged. With `network_access: model_only` or `model_and_tools`, a configured deny-default `network_policy` keeps its egress and gets the model/tool hosts appended; with the default `inherit` it is applied as written, so it must allow the model host itself. `opencode_provider_id` and `opencode_model_id` default to `nemo_gym` and `dummy_model`; `opencode_config` overrides must use `provider.<opencode_provider_id>.models.<opencode_model_id>`.
+
+## Run controls
+
+Options for long, unattended runs, used by the relay preset of [NL2RepoBench](../../benchmarks/nl2repobench/README.md)
+(`benchmarks/nl2repobench/opencode_sandboxed_agent.yaml`). All of them are off by default, and with none set the command
+line and behavior are unchanged.
+
+```yaml
+opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_timeout: 21600          # one time budget, seconds, for the first run and every resume
+      idle_nudge:                     # continue a session that stops without a tool call
+        text: "Continue until the task is complete."
+        max_nudges: 3
+        stop_on_text: "TASK_COMPLETE"   # the model's explicit "done"
+        finish_instruction: "When you are finished, reply TASK_COMPLETE."
+      stuck_detector: true            # end a run that loops
+      opencode_data_home_in_tmp: true # images whose user has no writable home
+      opencode_unset_proxy_env: true  # drop HTTP(S)_PROXY / ALL_PROXY before OpenCode starts
+      require_opencode_runtime: true  # offline runs: refuse to start without a configured OpenCode runtime
+      preinstalled_opencode: true     # (or remote_opencode_install_script_path + remote_opencode_binary_path)
+```
+
+- **`idle_nudge`.** After a run exits cleanly with time left and its last assistant turn made no tool call, the same
+  session is continued with `text`, up to `max_nudges` times. `stop_on_text` ends it only when the reply ends with that
+  text (trailing punctuation allowed), so a mention in the middle of a reply is not "done". The step cap
+  (`agent.build.steps`) and `sandbox_timeout` are one budget across the first run and all resumes; a resume needs at least
+  a minute left. Each resume is checked on its own output: it must print the completion marker and, when plugins are
+  enabled, their receipts, or the row fails ungraded. A typed provider failure in the idle check or the resume is
+  reported (ungraded, retried) and is not graded as a short clean run. `finish_instruction` is appended to the first
+  prompt so the model knows how to finish from the first turn.
+- **`stuck_detector`.** An OpenCode plugin adapted from OpenHands 0.56's `StuckDetector`
+  ([source](https://github.com/OpenHands/OpenHands/blob/0.56.0/openhands/controller/stuck.py), commit
+  `81f73ee91d4b4fb645b48ca99f1e559c6e058118`, MIT license). It ends a run whose root session loops; a looping subagent
+  (`task`) session is left alone. The monologue scenario is checked between runs, before a nudge. The row's
+  `opencode_stuck` names the scenario. It differs from OpenHands in one scenario: ten compactions in a row (OpenHands
+  fires when any two of its last ten condensations are back to back), so this port fires less often. A run is refused
+  (ungraded `opencode.plugin`) if the plugin's `[stuck_detector] loaded` line is missing, because OpenCode swallows plugin
+  load failures.
+- **`opencode_data_home_in_tmp`.** For task images whose user has no writable home: OpenCode's data, state, cache and
+  config directories go under `/tmp`, for the run, every resume and every session command.
+- **`opencode_unset_proxy_env`.** Task images can carry a builder's proxy settings that OpenCode would honor; this drops
+  them before OpenCode starts, so enable it only for benchmarks whose agent commands have no internet anyway.
+- **`require_opencode_runtime`.** Refuses to start when no OpenCode runtime is configured, instead of failing at the
+  installer's download after the sandbox is seeded.
 
 ## Offline scientific evaluation with OpenCode or Pi
 

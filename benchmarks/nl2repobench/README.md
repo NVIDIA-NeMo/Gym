@@ -6,7 +6,7 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
 | Dataset | Tasks | Configs | Notes |
 |---|---|---|---|
 | Upstream NL2RepoBench | 104 | `benchmarks/nl2repobench/{opencode,openhands}.yaml` (`opencode_sandboxed_agent.yaml` to reproduce published runs) | pinned per-task grading images (ghcr); tests run in the agent's own workspace |
-| Internal held-out sets (verified-50, legacy 75-task) | 50 / 75 | not in Gym: kept in the internal nl2repo repo (`benchmarks/`), linked into `Gym/benchmarks/` by its launchers | same resources server and configs layout |
+| Internal held-out sets (verified-50, legacy 75-task) | 50 / 75 | not in Gym | same resources server and configs layout |
 
 ## Harnesses (pick one config per dataset)
 - **opencode** (`opencode.yaml`, `responses_api_agents/opencode_agent` on agent sessions): the resources server lends the
@@ -16,14 +16,17 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
   `official` (or another open-egress mode) until it does.
 - **opencode, legacy relay** (`opencode_sandboxed_agent.yaml`, deprecated `responses_api_agents/opencode_sandboxed_agent`
   behind `legacy_agent`): kept to reproduce the runs below. No compaction and no pruning (`compaction.auto: false`, `prune: false` in `opencode_sandboxed_agent.yaml`), so a conversation that outgrows the declared 524288-token window (`opencode_max_context_window`) ends the run with a context error instead of being summarised. It continues an idle session with `idle_nudge` (finish with `TASK_COMPLETE`), ends a looping one with `stuck_detector`, and holds OpenCode's 500-step cap as one budget across resumes.
-- **OpenHands SDK 1.50** (`responses_api_agents/openhands_sdk_sandboxed_agent`): native tool calls, no condenser (no compaction). Needs an offline bundle (`build_bundle.sh`, then
-  `++nl2repobench_opencode_sandboxed_agent.responses_api_agents.openhands_sdk_sandboxed_agent.bundle_path=...`) for `block_target_v2` and `no_internet_preinstalled`.
+- **OpenHands SDK** (`openhands.yaml`, `responses_api_agents/openhands_agent` on agent sessions): the same pairing as
+  `opencode.yaml`, with native tool calls, no condenser and a 500-iteration cap. It runs the SDK version `openhands_agent`
+  pins, not the SDK 1.50 of the internal runs, so compare its scores only with runs of the same version. Like `opencode.yaml`
+  it supports only `agent_network_mode: official`. `pyperclip`, a task in this set, is also a dependency of the uploaded
+  runtime, so it has no clean score (`clean_exclude_tasks`).
 
 ## Network modes (`++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=<mode>`)
 | Mode | Agent sandbox | Egress | Reference-lookup protection |
 |---|---|---|---|
 | `official` (default) | generic image | open | none: treat results as an upper bound |
-| `block_target` | generic image | open | legacy pip/git/curl wrappers matching the task id only (kept unchanged for reproducing old runs; ineffective on vahid_1016 ids) |
+| `block_target` | generic image | open | legacy pip/git/curl wrappers matching the task id only (kept unchanged for reproducing old runs; ineffective on task sets whose ids are not real package names) |
 | `block_target_v2` | generic image | source-hosting domains denied (GitHub etc.), PyPI open | `guard_v2.py`: real package/repo identifiers, subcommand-aware pip/git/curl/uv/apt wrappers, python/node code inspection, no `-m venv` |
 | `no_internet_preinstalled` | per-task image with dependencies preinstalled | deny-all except the model host | reference repo wiped before the first turn; its editable-install metadata and same-named cargo crates scrubbed |
 
@@ -40,7 +43,7 @@ Four targets ship vendored inside pip or setuptools in their images (six, tenaci
 
 **Official vs clean score.** With `grading_protocol: upstream`, every row carries both. `reward` is NL2RepoBench's own scoring: every "N passed" line of the pytest output summed, over the stored test count, capped at 1. Use it to compare with published numbers. `clean_reward` counts only each pytest command's outer summary line, over the larger of the stored count and the outer run's passed+failed+errors. It is `None` for `clean_exclude_tasks`, which defaults to the four vendored targets above, so `mean/clean_reward` in the aggregate metrics is the clean score over the rest. `openhands.yaml` also excludes `pyperclip`: that task's package is a dependency of the OpenHands runtime, installed into the sandbox after the target scrubs, so its implementation is readable and a leak-free score for it would not be sound (its official `reward` is unchanged). The two differ where tests run pytest themselves (pytest-cov: 510 "passed" against 184 tests, 1.00 official, 0.81 clean) or the stored count is stale (parse: 96 stored, 131 run). On a 99-row DeepSeek V4.1 Flash run, 13 rows changed, all downward.
 
-On vahid_1016 tasks the guard identifiers come from the clone URL in `test_commands.json`; upstream tasks have no clone URL, so `block_target_v2` falls back to the task id there (the egress deny rules still apply).
+On tasks whose `test_commands.json` has a clone URL, the guard identifiers come from it; upstream tasks have no clone URL, so `block_target_v2` falls back to the task id there (the egress deny rules still apply).
 
 ## OpenCode runtime in the sandbox (legacy relay preset)
 `opencode_sandboxed_agent.yaml` sets no runtime paths, so the OpenCode agent downloads the installer from `opencode.ai`. That works in the modes with open egress (`official`, `block_target`, `block_target_v2`) and needs no staging.
@@ -59,14 +62,14 @@ Use `preinstalled_opencode=true` instead of the two paths for an image that alre
 - **Verified-50** x {opencode, OpenHands} x {`block_target_v2`, `no_internet_preinstalled`}: full runs (Lightning final, 4 SFT checkpoints, Qwen3.8-27B); `block_target_v2` results were regraded with the final verifier.
 - **75-task legacy** testset: opencode and OpenHands under `block_target` / `block_target_v2` / `no_internet_preinstalled` (graded with the old verifier; superseded).
 - **Upstream** x opencode: `official`, `block_target` and `no_internet_preinstalled` runs predate this change; `block_target_v2` has only a partial Qwen run (5 of 104 tasks, timed out).
-- **Upstream** x OpenHands: the config resolves and the agent has run on the vahid_1016 tasks, but there is **no completed upstream x OpenHands run yet**: treat it as untested end to end until a smoke run is recorded.
-- Parent-repo launchers: `launch_upstream_nl2repo_eval.sh` (opencode), `launch_upstream_nl2repo_eval_openhands.sh`, `launch_v50_{opencode,openhands}.sh`.
+- **Upstream** x OpenHands (`openhands.yaml`): the config resolves; there is **no completed run yet**: treat it as untested end to end until a smoke run is recorded.
 
 ## Grading notes
-verified-50 / vahid_1016 grading: reference clone + install, (optional) test-only dependency step, **purge of the reference implementation**, overlay of the agent's workspace, held-out tests; every mode grades in
+Grading of task sets with a reference clone (the internal sets): reference clone + install, (optional) test-only dependency step, **purge of the reference implementation**, overlay of the agent's workspace, held-out tests; every mode grades in
 the per-task image for verified-50. Upstream 104 grades with `grading_protocol: upstream` (since 2026-10-27), which follows NL2RepoBench's
 own post-processor: the agent's packaging files (setup.py, pyproject.toml, requirements*, ...) and its files at the held-out test paths
 are deleted, the rest is overlaid on the pinned per-task image's /workspace, PYTHONPATH=/workspace, every command runs, and the pytest
 commands' "N passed" lines are summed. Before that, runs used `gym_strict`: the agent's own packaging was installed as-is and the first
 failing command zeroed the row (about half of all rows), and agent-written tests at the held-out paths could inflate a score.
-Background, leak audit, residual risks: `sft_runs/lightning_vahid1016/testset/LEAK_AUDIT.md` in the parent repo.
+Residual risks of every mode other than `official` (open-egress grading, the guards' own limits) are listed under
+"Limits of the scores" in [`resources_servers/nl2repobench/README.md`](../../resources_servers/nl2repobench/README.md).

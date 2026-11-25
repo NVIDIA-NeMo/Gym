@@ -26,14 +26,14 @@ def _write(path: Path, text: str = "x = 1\n") -> Path:
     return path
 
 
-def _dist(site: Path, name: str, files: list[str], url: str | None) -> Path:
+def _dist(site: Path, name: str, files: list[str], url: str | None, kind: str = "dir_info") -> Path:
     di = site / f"{name}.dist-info"
     for rel in files:
         _write(site / rel)
     _write(di / "METADATA", f"Name: {name}\n")
     _write(di / "RECORD", "".join(f"{rel},,\n" for rel in files + [f"{name}.dist-info/METADATA"]))
     if url is not None:
-        _write(di / "direct_url.json", json.dumps({"dir_info": {}, "url": url}))
+        _write(di / "direct_url.json", json.dumps({kind: {}, "url": url}))
     return di
 
 
@@ -47,6 +47,14 @@ def image(tmp_path: Path) -> Path:
     _dist(site, "scikit_learn-0.24.2", ["sklearn/__init__.py"], None)
     # a dependency installed from a URL that is not a local checkout
     _dist(site, "somedep-1.0", ["somedep.py"], "https://example.com/somedep-1.0.tar.gz")
+    # a dependency installed from a local wheel (archive_info, not dir_info) is not the reference checkout
+    _dist(
+        site,
+        "localwheel-1.0",
+        ["localwheel.py"],
+        "file:///wheels/localwheel-1.0-py3-none-any.whl",
+        kind="archive_info",
+    )
     # a broken record pointing at the filesystem root must not delete it
     _dist(site, "weird-0.1", ["weird.py"], "file:///")
     # setup.py-install egg of the target and an unrelated egg, both on easy-install.pth
@@ -98,6 +106,8 @@ def test_removes_reference_project_and_keeps_dependencies(image: Path) -> None:
         "sklearn/__init__.py",
         "scikit_learn-0.24.2.dist-info",
         "somedep.py",
+        "localwheel.py",
+        "localwheel-1.0.dist-info",
         "other-1.0-py3.10.egg",
         "jinja/_speedups.so",
     ):

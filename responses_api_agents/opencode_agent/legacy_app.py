@@ -3,9 +3,16 @@
 
 """Deprecated local episode entry point; new configurations use agent sessions."""
 
+from contextlib import nullcontext
+
 from fastapi import HTTPException, Request
 
-from nemo_gym.agents import AgentSessionConflictError, verification_failure_fields
+from nemo_gym.agents import (
+    AgentSessionConflictError,
+    OutcomeAction,
+    agent_outcome_policy,
+    verification_failure_fields,
+)
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
@@ -28,6 +35,14 @@ class OpenCodeLegacyAgent(OpenCodeAgent):
             raise AgentSessionConflictError("OpenCode sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(422, "Local OpenCode /run requires resources_server")
+        participant = self.checkpoint_participant
+        # Nothing of a local run is in a checkpoint: with checkpointing on it is a restart.
+        async with (
+            participant.restart_call(self.rollout_id_from_run(body)) if participant is not None else nullcontext()
+        ):
+            return await self._run_locally(request, body)
+
+    async def _run_locally(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
 
@@ -63,18 +78,22 @@ class OpenCodeLegacyAgent(OpenCodeAgent):
                 AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
             )
 
+            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
+            if agent_outcome_policy(gym_resp) != OutcomeAction.VERIFY:
+                # A failure the outcome policy does not grade, such as an endpoint outage or an unexplained OpenCode
+                # exit, is not the model's score. The rollout fails without a reward, as it would through an
+                # Environment Server, and collection may run it again.
+                raise HTTPException(502, gym_resp.error.message if gym_resp.error else "OpenCode run failed")
+
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump()
-                | {"response": agent_resp_json}
-                | verification_failure_fields(NeMoGymResponse.model_validate(agent_resp_json)),
+                json=body.model_dump() | {"response": agent_resp_json} | verification_failure_fields(gym_resp),
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
             verify_json = await get_response_json(verify_resp)
 
-            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
             turns = sum(
                 1
                 for item in gym_resp.output

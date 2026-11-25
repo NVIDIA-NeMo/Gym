@@ -38,3 +38,21 @@ def test_the_openhands_preset_gives_no_clean_score_to_the_task_whose_package_its
         "resources_servers"
     ]
     assert "clean_exclude_tasks" not in opencode["nl2repobench"]
+
+
+def test_the_openhands_preset_runs_openhands_agent_and_the_server_allows_it() -> None:
+    config = yaml.safe_load(OPENHANDS_CONFIG.read_text())
+    assert "openhands_agent" in config["nl2repobench_openhands_agent"]["responses_api_agents"]
+    assert (
+        config["nl2repobench_environment_server"]["environment_servers"]["single_agent_turn_legacy"]["agent_server"][
+            "name"
+        ]
+        == "nl2repobench_openhands_agent"
+    )
+    shared = yaml.safe_load(
+        (OPENHANDS_CONFIG.parents[2] / "resources_servers/nl2repobench/configs/nl2repobench.yaml").read_text()
+    )
+    assert (
+        "openhands_agent"
+        in shared["nl2repobench_resources_server"]["resources_servers"]["nl2repobench"]["allowed_agents"]
+    )

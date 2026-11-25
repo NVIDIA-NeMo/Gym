@@ -148,6 +148,15 @@ def deps_recipe_key(*paths: Path, values: tuple[str, ...] = ()) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+def agent_pin_files(key: str) -> tuple[Path, ...]:
+    """The agent's own pins and build scripts that its deps script reads, e.g. Hermes' source pin in pyproject.toml.
+
+    A pin bump must rebuild the prefix: Hermes refuses a prefix built from another source.
+    """
+    agent_dir = Path(__file__).resolve().parents[1] / key
+    return (agent_dir / "pyproject.toml", *sorted((agent_dir / "scripts").glob("*.py")))
+
+
 def deps_build_env(deps_dir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
     """Give dependency installers private state outside the archived runtime."""
     build_dir = deps_dir.parent / f".{deps_dir.name}-build"
@@ -686,7 +695,11 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         recipe = deps_recipe_key(
             script,
             scripts_dir / "_portable_python.sh",
-            values=tuple(f"{name}={value}" for name, value in sorted(arch_env.items())),
+            *agent_pin_files(key),
+            values=(
+                *(f"{name}={value}" for name, value in sorted(arch_env.items())),
+                f"HERMES_SPEC={os.environ.get('HERMES_SPEC', '')}",
+            ),
         )
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             return deps_dir
@@ -735,7 +748,13 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         recipe = deps_recipe_key(
             script,
             scripts_dir / "_portable_python.sh",
-            values=(f"target={target}", f"ARCH={python_arch}", f"NODE_ARCH={node_arch}"),
+            *agent_pin_files(key),
+            values=(
+                f"target={target}",
+                f"ARCH={python_arch}",
+                f"NODE_ARCH={node_arch}",
+                f"HERMES_SPEC={os.environ.get('HERMES_SPEC', '')}",
+            ),
         )
         return script, recipe
 
@@ -770,6 +789,12 @@ class CVDPAgent(SimpleResponsesAPIAgent):
     async def _provision_deps_in_sandbox(self, image: str) -> Path:
         """Build the portable runtime inside OpenSandbox when host and sandbox arch differ."""
         key = agent_key(self.config.agent_server_module)
+        if key == "hermes_agent":
+            # Its deps script builds the Hermes runtime with uv from the Gym checkout, which a task sandbox lacks.
+            raise RuntimeError(
+                "Hermes deps cannot be built inside a sandbox of another architecture; run CVDP on a host of the "
+                f"sandbox's architecture ({self._deps_target_arch()[0]})"
+            )
         script, recipe = self._deps_recipe(key)
         target, _python_arch, _node_arch = self._deps_target_arch()
         DEPS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -891,6 +916,10 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             env={
                 # The harness in the sandbox sends no traceparent: the URL carries the rollout prefix and this run's span.
                 "NV_MODEL_URL": self.base_url_for_run(self._model_url(), body) if self._model_url() else "",
+                # Hermes sends compression calls here, without this run's sampling values.
+                "NV_UNTRAINED_MODEL_URL": (
+                    self.base_url_for_run(self._model_url(), body, trained=False) if self._model_url() else ""
+                ),
                 "NV_MODEL_NAME": body.responses_create_params.model or "model",
                 "NV_AGENT_KWARGS": json.dumps(self.config.agent_kwargs),
                 "NV_AGENT_HOME": f"{wd.rstrip('/')}/.home",
@@ -1044,13 +1073,36 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 ).read_text()
 
             async with AsyncSandbox(self._sandbox_provider, spec) as box:
+                traj = self._traj_dir()
+                agent_deps_dir = self._agent_deps_dir()
+                agent_python = shlex.quote(f"{agent_deps_dir}/bin/python")
+
+                async def setup_runtime(sandbox: AsyncSandbox) -> None:
+                    if self.config.deps_provision == "archive":
+                        deps_archive_path = f"{traj}/agent-deps.tar.gz"
+                        directory = await sandbox.exec(f"mkdir -p {shlex.quote(agent_deps_dir)}", timeout_s=30)
+                        if directory.error_type or directory.return_code != 0:
+                            raise RuntimeError(f"agent runtime directory creation failed: {directory.stderr or ''}")
+                        await sandbox.upload(deps_archive, deps_archive_path)
+                        unpack = await sandbox.exec(
+                            f"tar -xzf {shlex.quote(deps_archive_path)} -C {shlex.quote(agent_deps_dir)}",
+                            timeout_s=600,
+                        )
+                        if unpack.error_type or unpack.return_code != 0:
+                            raise RuntimeError(f"agent runtime extraction failed: {(unpack.stderr or '')[-500:]}")
+                    elif self.config.deps_provision == "baked":
+                        runtime = await sandbox.exec(f"test -x {shlex.quote(agent_deps_dir)}/bin/python", timeout_s=30)
+                        if runtime.error_type or runtime.return_code != 0:
+                            raise RuntimeError(f"sandbox image does not contain {agent_deps_dir}/bin/python")
+
                 if repository_archive:
 
                     async def setup_repository(sandbox: AsyncSandbox) -> None:
-                        traj = self._traj_dir()
+                        # Repository helpers use the same portable runtime as the harness.
+                        await setup_runtime(sandbox)
                         await sandbox.upload(repository_archive, f"{traj}/repository.tar.gz")
                         command = (
-                            f"python {shlex.quote(traj + '/repository_workspace.py')} restore "
+                            f"{agent_python} {shlex.quote(traj + '/repository_workspace.py')} restore "
                             f"{shlex.quote(wd)} {shlex.quote(traj + '/before.json')} "
                             f"--archive {shlex.quote(traj + '/repository.tar.gz')}"
                         )
@@ -1063,22 +1115,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     await box.start_with_setup(None, setup_repository)
                 else:
                     await box.start()
-                traj = self._traj_dir()
-                agent_deps_dir = self._agent_deps_dir()
-                if self.config.deps_provision == "archive":
-                    deps_archive_path = f"{traj}/agent-deps.tar.gz"
-                    await box.exec(f"mkdir -p {shlex.quote(agent_deps_dir)}", timeout_s=30)
-                    await box.upload(deps_archive, deps_archive_path)
-                    unpack = await box.exec(
-                        f"tar -xzf {shlex.quote(deps_archive_path)} -C {shlex.quote(agent_deps_dir)}",
-                        timeout_s=600,
-                    )
-                    if unpack.return_code != 0:
-                        raise RuntimeError(f"agent runtime extraction failed: {(unpack.stderr or '')[-500:]}")
-                elif self.config.deps_provision == "baked":
-                    runtime = await box.exec(f"test -x {shlex.quote(agent_deps_dir)}/bin/python", timeout_s=30)
-                    if runtime.return_code != 0:
-                        raise RuntimeError(f"sandbox image does not contain {agent_deps_dir}/bin/python")
+                    await setup_runtime(box)
                 agent_result = await box.exec(
                     f"{shlex.quote(agent_deps_dir)}/bin/python {traj}/agent_runner.py",
                     cwd=wd,
@@ -1119,7 +1156,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     repository_changes = None
                     if repository_archive:
                         collect = await box.exec(
-                            f"python {shlex.quote(traj + '/repository_workspace.py')} collect "
+                            f"{agent_python} {shlex.quote(traj + '/repository_workspace.py')} collect "
                             f"{shlex.quote(wd)} {shlex.quote(traj + '/before.json')} "
                             f"--archive {shlex.quote(traj + '/changes.tar.gz')}",
                             timeout_s=600,

@@ -30,6 +30,7 @@ from environment_servers.harbor.app import (
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
     HarborEpisodeRequest,
+    _split_request_sampling,
 )
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S, _is_image_pull_failure
 from environment_servers.harbor.tests.conftest import (
@@ -238,6 +239,85 @@ class TestEpisode:
             f"/ng-rollout/r1/ng-sampling/{encode_model_sampling(sampling)}/v1/responses",
             "/v1/agent_sessions/close",
         ]
+
+    @staticmethod
+    def _episode_with_request_sampling(task, **sampling):
+        request = episode(task)
+        params = request.task.task_input.responses_create_params
+        request.task.task_input.responses_create_params = type(params).model_validate(
+            {**params.model_dump(mode="json", exclude_unset=True), **sampling}
+        )
+        return request
+
+    @staticmethod
+    def _turn_bodies(server) -> list[dict]:
+        return [
+            call[2]["json"].model_dump(mode="json", exclude_unset=True)
+            for call in server.server_client.calls
+            if call[1].endswith("/v1/responses")
+        ]
+
+    async def test_request_sampling_moves_to_the_model_calls_when_the_server_is_told_to(self, tmp_path, monkeypatch):
+        """A framework that writes its values into the row: the harness gets a request without them, and its model
+        calls carry them as an episode's own values would. The result keeps the row's request."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch, request_sampling_to_model_calls=True)
+        request = self._episode_with_request_sampling(task, temperature=1, top_p=0.95, max_output_tokens=8192)
+
+        response = await server.run_request(request)
+
+        assert response.failure is None, response.failure
+        sampling = ModelCallSampling(temperature=1.0, top_p=0.95, max_output_tokens=8192)
+        assert server.server_client.paths() == [
+            "/v1/agent_sessions",
+            f"/ng-rollout/r1/ng-sampling/{encode_model_sampling(sampling)}/v1/responses",
+            "/v1/agent_sessions/close",
+        ]
+        assert self._turn_bodies(server) == [{"input": [{"role": "user", "content": "Create hello.txt"}]}]
+        recorded = response.result.responses_create_params
+        assert (recorded.temperature, recorded.top_p, recorded.max_output_tokens) == (1.0, 0.95, 8192)
+
+    async def test_request_sampling_stays_in_the_request_by_default(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+
+        response = await server.run_request(self._episode_with_request_sampling(task, temperature=0.5))
+
+        assert response.failure is None, response.failure
+        assert server.server_client.paths()[1] == "/ng-rollout/r1/v1/responses"
+        assert self._turn_bodies(server)[0]["temperature"] == 0.5
+
+    async def test_an_episodes_own_sampling_values_take_precedence_over_the_requests(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, request_sampling_to_model_calls=True)
+        sampling = ModelCallSampling(temperature=0.6)
+        request = self._episode_with_request_sampling(task, temperature=0.5).model_copy(
+            update={"model_sampling": sampling}
+        )
+
+        response = await server.run_request(request)
+
+        assert response.failure is None, response.failure
+        assert (
+            server.server_client.paths()[1]
+            == f"/ng-rollout/r1/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
+        )
+        # The request is sent as the row wrote it.
+        assert self._turn_bodies(server)[0]["temperature"] == 0.5
+
+    async def test_a_request_without_sampling_is_sent_as_it_is(self, tmp_path, monkeypatch):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, request_sampling_to_model_calls=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert server.server_client.paths()[1] == "/ng-rollout/r1/v1/responses"
+
+    def test_split_request_sampling_handles_a_mapping_and_refuses_values_a_call_cannot_carry(self):
+        row = {"input": "hi", "temperature": 1, "max_output_tokens": 16}
+        stripped, sampling = _split_request_sampling(row)
+        assert stripped == {"input": "hi"} and row["temperature"] == 1
+        assert sampling == ModelCallSampling(temperature=1.0, max_output_tokens=16)
+        assert _split_request_sampling({"input": "hi"}) == ({"input": "hi"}, None)
+        with pytest.raises(ValueError):
+            _split_request_sampling({"input": "hi", "top_p": 0})
 
     async def test_episode_seeds_runs_the_agent_verifies_and_stops_the_sandbox(self, tmp_path, monkeypatch):
         server, task, sandbox, created = make_server(tmp_path, monkeypatch)
@@ -4187,6 +4267,7 @@ def test_server_config_holds_only_deployment_settings():
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
         "turn_sessions",
+        "request_sampling_to_model_calls",
         "compose_variables",
         "compose_overlay",
     }
