@@ -57,7 +57,7 @@ A restore rebuilds a borrowed sandbox under a new ID. When the replacement attem
 
 ## A sandbox for each attempt
 
-This server can own a sandbox for each attempt: it starts it, lends it to the agent and to the verifier, and stops it, so a harness that runs its loop in a sandbox, such as Simple Agent, never runs on a host. The Resources Server and the agent only borrow it. Set `sandbox_provider` to a named sandbox provider block and `sandbox_config` to the sandbox's settings; set both or neither. Unset, this server starts no sandbox, as before.
+This server can own a sandbox group for each attempt: it starts it, lends it to the agent and to the verifier, and stops it, so a harness that runs its loop in a sandbox, such as Simple Agent, never runs on a host. The Resources Server and the agent only borrow it. The lifecycle is the base `BaseEnvironmentServer`'s, configured through `AttemptSandboxEnvironmentServerConfig`. Set `sandbox_provider` to a named sandbox provider block and `sandbox_config` to the group's settings; set both or neither. Unset, this server starts no sandbox, as before, and fails an attempt whose Resources Server declares a group (see below) for good.
 
 ```yaml
 environment_servers:
@@ -88,5 +88,45 @@ Each attempt then runs in one sandbox:
 At startup the server builds the provider and refuses one that cannot apply the rule, such as Docker for `model_only`, or that no other process can connect to, such as the `local` provider, which runs commands on this host. There is no host fallback: if the sandbox cannot start, or cannot be lent to the verifier, the attempt fails as a retryable infrastructure failure and records no reward. The agent must run in the sandbox it is lent: an agent that would run elsewhere refuses the seed. Simple Agent runs its loop in any sandbox it is lent. A checkpoint cannot rebuild a sandbox this server started, so with partial-rollout checkpointing on, such an episode starts over from its input after a crash.
 
 Grading runs with the network rule the sandbox started with, and anything the agent left running keeps running until the sandbox stops: providers cannot change a running sandbox's egress yet.
+
+### What the Resources Server declares
+
+At seed, the Resources Server may declare what the group holds, as `sandbox_group` (`SandboxGroupSpec`) on its seed reply. The group starts from `sandbox_config` (provider, network rule, `ttl_s`, resources) with the declared fields over it. A server that inherits `SimpleResourcesServer.seed_session` declares through class hooks; one that builds its own seed reply sets `sandbox_group=self.declared_sandbox_group(body)` on it.
+
+| Hook on the Resources Server | Declares |
+|------|------|
+| `sandbox_group(body)` | The task's `image`, `workdir`, `env`, text `files` delivered before anyone borrows the group, and `sidecars` that serve its environment tools. `image` and `workdir` fall back to `sandbox_config`. Sidecars need a provider that starts them; on any other, the attempt fails for good. |
+| `grader_runs_code = True` | The grader executes model output or calls tools, so it always gets a sandbox and never opts out. |
+| `prepare_sandbox(body)` | Serves `/prepare_sandbox`: once the group has started, this server sends operate-scope access to it, and the Resources Server prepares the task through `borrow()`, such as starting a sidecar's tool service, before the agent or the grader borrows it. |
+
+A seed reply lends a sandbox (`sandbox_access`) or declares one (`sandbox_group`), never both.
+
+### Opting out
+
+Every task and every grader runs in the group unless `sandbox_opt_out` says otherwise. Only what executes nothing may opt out, to save sandbox capacity on large QA runs:
+
+```yaml
+environment_servers:
+  single_agent_turn:
+    sandbox_provider: attempt_sandboxes
+    sandbox_config: {...}
+    sandbox_opt_out:
+      task: true    # a pure QA task: the agent is lent no sandbox, so its loop runs in the Agent Server process
+      grader: false # the grader still gets a sandbox: one of its own, started after the agent closes
+```
+
+| `task` | `grader` | What starts |
+|------|------|------|
+| `false` | `false` | One group at seed: the agent borrows it, then `/verify`. |
+| `true` | `false` | No sandbox during the agent's turn. A group for the grader alone starts after the agent closes, is lent to `/verify`, and stops with the episode. |
+| `false` | `true` | One group at seed for the agent. It stops once the agent closes, and `/verify` runs in the Resources Server. |
+| `true` | `true` | Nothing. |
+
+The opt-outs are checked at seed, and a refused one fails the attempt for good (a terminal seed failure), since every attempt would fail alike:
+
+- `task` is refused for a task that declares tools (`responses_create_params.tools`), for an episode that grants tools (`resources_tool_transports` or `tool_servers`; also refused at startup), and for a group with sidecars.
+- `grader` is refused when the Resources Server declares `grader_runs_code`.
+
+A group for the grader alone that cannot start fails the attempt as a retryable infrastructure failure, with the agent's response kept as evidence, and records no reward.
 
 The server supports `num_workers > 1`. Episode state and cleanup remain local to the worker handling that request. `max_concurrent_episodes` and queue admission are also enforced independently by each worker, so the deployment-wide concurrency limit is approximately `num_workers * max_concurrent_episodes`.

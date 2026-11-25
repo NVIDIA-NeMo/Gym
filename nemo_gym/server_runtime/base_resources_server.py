@@ -77,6 +77,12 @@ from nemo_gym.server_runtime._checkpoint.resources import (
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
+from nemo_gym.server_runtime.attempt_sandbox import (
+    PREPARE_SANDBOX_PATH,
+    ResourcesPrepareSandboxRequest,
+    ResourcesPrepareSandboxResponse,
+    SandboxGroupSpec,
+)
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.model_sampling import CallerSamplingMiddleware
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
@@ -401,14 +407,25 @@ class ResourcesSeedSessionResponse(BaseModel):
     sandbox_access: SandboxAccess | None = None
     # The single_agent_turn Environment Server appends this to the agent's input as one user message.
     observation: str | None = None
+    # What the attempt's sandbox group holds and whether the grader runs code; the Environment Server starts it.
+    # A seed declares a group or lends a sandbox (sandbox_access), never both.
+    sandbox_group: SandboxGroupSpec | None = None
+
+    @model_validator(mode="after")
+    def _lend_or_declare(self) -> "ResourcesSeedSessionResponse":
+        if self.sandbox_access is not None and self.sandbox_group is not None:
+            raise ValueError("a seed reply lends a sandbox (sandbox_access) or declares one (sandbox_group), not both")
+        return self
 
     # A return annotation would replace the model's serialization schema with that container schema.
     @model_serializer(mode="wrap")
     def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
-        """Preserve the seed wire shape when the server supplies no observation field."""
+        """Preserve the seed wire shape when the server supplies no observation field and declares no group."""
         result = handler(self)
         if "observation" not in self.model_fields_set:
             result.pop("observation", None)
+        if self.sandbox_group is None:
+            result.pop("sandbox_group", None)
         return result
 
 
@@ -688,6 +705,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # as openai or anthropic). Its verifier then saves no grading record of its own, so its trials are observed only
     # through a recorded grading operation or a saved grading artifact.
     grading_may_use_uninstrumented_model: ClassVar[bool] = False
+    # True for a server whose grader executes model output or calls tools, such as a verifier that runs unit tests
+    # or passes the answer to eval. Its seed reply declares it (SandboxGroupSpec.grader_runs_code), so an
+    # Environment Server lends /verify a sandbox and refuses a grader sandbox opt-out (SandboxOptOut.grader).
+    grader_runs_code: ClassVar[bool] = False
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
@@ -974,6 +995,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         else:
             app.post("/seed_session")(self.seed_session)
         app.post("/close_session")(self.close_resources_session)
+        if self._prepares_sandbox():
+            app.post(PREPARE_SANDBOX_PATH)(self._prepare_sandbox_endpoint)
         config = getattr(self.server_client, "global_config_dict", {})
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
@@ -1179,6 +1202,51 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             return body.task_data
         return {**body.task_data, "responses_create_params": body.responses_create_params}
 
+    def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
+        """What this task's attempt sandbox group holds: its image, files, sidecars; ``None`` declares nothing.
+
+        The Environment Server starts the group from its own ``sandbox_config`` with these fields over it, lends it to
+        the agent and to ``/verify``, and stops it. Override it to give the group a task's image or files, or the
+        sidecars that serve its environment tools. ``grader_runs_code`` and ``prepare`` are filled in from the class
+        (see ``declared_sandbox_group``), so an override leaves them unset.
+        """
+        return None
+
+    def declared_sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
+        """The ``sandbox_group`` of this seed's reply: ``sandbox_group``'s declaration, with ``grader_runs_code`` set
+        from the class and ``prepare`` set when the class overrides ``prepare_sandbox``.
+
+        The inherited ``seed_session`` puts it on its reply. A server that overrides ``seed_session`` and builds its
+        own ``ResourcesSeedSessionResponse`` sets ``sandbox_group=self.declared_sandbox_group(body)`` on it.
+        """
+        group = self.sandbox_group(body)
+        updates = {
+            name: True
+            for name, declared in (("grader_runs_code", self.grader_runs_code), ("prepare", self._prepares_sandbox()))
+            if declared
+        }
+        if not updates:
+            return group
+        return (group or SandboxGroupSpec()).model_copy(update=updates)
+
+    async def prepare_sandbox(self, body: ResourcesPrepareSandboxRequest) -> None:
+        """Prepare the task in the attempt's sandbox group, which the Environment Server started from this seed's
+        ``sandbox_group``, before the agent or the grader borrows it.
+
+        Override it to set the task up through ``borrow(body.sandbox_access)``, such as starting a sidecar's tool
+        service; release the borrowed client before returning and never stop the group. Overriding it serves
+        ``/prepare_sandbox`` and declares ``prepare`` on the seed reply. Files go in ``SandboxGroupSpec.files``
+        instead, which the group starts with. Raise ``ResourcesSeedRejectedError`` for a task no retry can prepare.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not prepare sandboxes")
+
+    def _prepares_sandbox(self) -> bool:
+        return type(self).prepare_sandbox is not SimpleResourcesServer.prepare_sandbox
+
+    async def _prepare_sandbox_endpoint(self, body: ResourcesPrepareSandboxRequest) -> ResourcesPrepareSandboxResponse:
+        await self.prepare_sandbox(body)
+        return ResourcesPrepareSandboxResponse(resources_session_id=body.resources_session_id)
+
     async def seed_session(
         self,
         body: ResourcesSeedSessionRequest | BaseSeedSessionRequest,
@@ -1206,7 +1274,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """
         if not self._manages_session_state():
             if isinstance(body, ResourcesSeedSessionRequest):
-                return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
+                return ResourcesSeedSessionResponse(
+                    resources_session_id=body.resources_session_id, sandbox_group=self.declared_sandbox_group(body)
+                )
             return BaseSeedSessionResponse()
         if request is None:
             raise TypeError("Stateful seed_session requires request= to bind the session cookie")
@@ -1271,7 +1341,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 self._initializing_sessions.pop(session_id, None)
                 self._session_episodes[session_id] = identity
             request.session[SESSION_ID_KEY] = session_id
-        return ResourcesSeedSessionResponse(resources_session_id=session_id)
+        return ResourcesSeedSessionResponse(
+            resources_session_id=session_id, sandbox_group=self.declared_sandbox_group(body)
+        )
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Release by ID, then fence the session for the configured close retry window.
