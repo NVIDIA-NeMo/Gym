@@ -8,8 +8,8 @@ derives from :class:`ToolSidecarResourcesConfig`. With ``tool_sidecar`` set:
 - its seed declares the sidecar in ``sandbox_group``, and the Environment Server starts it with the attempt's group;
 - ``/prepare_sandbox`` installs a private Python runtime in the sidecar if the image lacks it, unpacks this server's
   ``nemo_gym`` sources and its own package there, starts the tool host (``tool_sidecar_host.py``), and seeds the
-  episode's session in it with the seed this server got. The tool host signs sessions with this server's key, so the
-  Resources session's cookies name the same session there;
+  episode's session in it with the seed's identity and ``task_data``, which the prepare request carries. The tool host
+  signs sessions with this server's key, so the Resources session's cookies name the same session there;
 - ``/tool_sidecar/collect`` reads the session's tool state from the tool host (:meth:`export_tool_state` there) and
   hands it to :meth:`import_tool_state` here, so ``/verify`` grades the state the agent's tool calls left.
 
@@ -35,7 +35,7 @@ from typing import Any, ClassVar
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, JsonValue, PrivateAttr, model_validator
+from pydantic import JsonValue, model_validator
 
 import nemo_gym
 from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
@@ -191,7 +191,7 @@ def _write_private(content: bytes, suffix: str) -> Path:
     return target
 
 
-class ToolSidecarResources(BaseModel):
+class ToolSidecarResources:
     """Serve this Resources Server's tools from a sidecar of the attempt's group, when its config sets
     ``tool_sidecar``. List it before the Resources Server class among the bases.
 
@@ -204,11 +204,9 @@ class ToolSidecarResources(BaseModel):
 
     tool_sidecar_requirements: ClassVar[tuple[str, ...]] = ()
     tool_sidecar_sources: ClassVar[Mapping[str, str]] = {}
-    # The seed each session's tool host is seeded with at /prepare_sandbox, kept from /seed_session until then.
-    _tool_sidecar_seeds: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
+        super().model_post_init(context)  # type: ignore[misc]
         if self.config.tool_sidecar is not None and self.session_secret != self.get_session_middleware_key():  # type: ignore[attr-defined]
             raise ValueError(
                 f"{type(self).__name__} signs sessions with a secret the tool host does not share, so its tools "
@@ -229,11 +227,10 @@ class ToolSidecarResources(BaseModel):
             app.post(TOOL_SIDECAR_COLLECT_PATH)(self.collect_tool_sidecar)
 
     def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
-        """The attempt's group holds the tool sidecar; the seed is kept for the tool host's own seed."""
+        """The attempt's group holds the tool sidecar, which serves this server's tools."""
         config = self.config.tool_sidecar  # type: ignore[attr-defined]
         if config is None:
             return super().sandbox_group(body)  # type: ignore[misc]
-        self._tool_sidecar_seeds[body.resources_session_id] = body.model_dump(mode="json")
         return SandboxGroupSpec(sidecars=[config.group_sidecar()])
 
     def _prepares_sandbox(self) -> bool:
@@ -246,9 +243,12 @@ class ToolSidecarResources(BaseModel):
         config = self.config.tool_sidecar  # type: ignore[attr-defined]
         if config is None:
             return
-        seed = self._tool_sidecar_seeds.get(body.resources_session_id)
-        if seed is None:
-            raise RuntimeError(f"no seed of {body.resources_session_id!r} to seed its tool host with")
+        seed = ResourcesSeedSessionRequest(
+            resources_session_id=body.resources_session_id,
+            episode_id=body.episode_id,
+            task_id=body.task_id,
+            task_data=body.task_data,
+        ).model_dump(mode="json")
         python = self.tool_host_runtime().python
         sandbox = await borrow(body.sandbox_access)
         try:
@@ -259,7 +259,6 @@ class ToolSidecarResources(BaseModel):
             await sandbox.disconnect()
         if reply["status"] != 200:
             raise RuntimeError(f"The tool host refused the seed with HTTP {reply['status']}: {reply['body'][:2000]}")
-        self._tool_sidecar_seeds.pop(body.resources_session_id, None)
 
     async def collect_tool_sidecar(
         self, request: Request, body: ToolSidecarCollectRequest

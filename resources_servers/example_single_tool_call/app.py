@@ -99,7 +99,7 @@ class SimpleWeatherResourcesServer(ToolSidecarResources, SimpleWeatherVerifier, 
             if identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         return ResourcesSeedSessionResponse(
-            resources_session_id=resources_session_id, sandbox_group=self.declared_sandbox_group(body)
+            resources_session_id=resources_session_id, **self.sandbox_declaration(body)
         )
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:

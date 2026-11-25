@@ -20,7 +20,7 @@ from tests.helpers.single_agent_turn import _request, _Response
 # The Resources seed's reply: it declares the tool sidecar in the attempt's group, and prepares it.
 SEED_REPLY = {
     "resources_session_id": "resources-session",
-    "sandbox_group": {"sidecars": [{"name": "tools", "image": "tools:1"}], "prepare": True},
+    "sandbox_group": {"sidecars": [{"name": "tools", "image": "tools:1", "tools_port": 8000}], "prepare": True},
 }
 
 
@@ -80,12 +80,13 @@ async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads
 
     assert result.failure is None, result.failure
     assert result.result.reward == 1.0
-    # One group: the agent container, model only, and the tool sidecar the seed declared.
+    # One group: the agent container, model only, and the tool sidecar the seed declared, which reaches no host.
     assert list(provider.boxes) == ["sb-1"]
     spec = provider.boxes["sb-1"]["spec"]
     assert spec.provider_options["network_policy"] == {"rule": "model_only", "allow": ["10.0.0.5"]}
     [sidecar] = spec.sidecars
     assert (sidecar.name, sidecar.image) == ("tools", "tools:1")
+    assert sidecar.provider_options == {"network_policy": {"rule": "no_network", "allow": []}}
     assert _paths(client) == [
         "/seed_session",
         "/prepare_sandbox",
@@ -151,16 +152,30 @@ async def test_tool_state_that_cannot_be_collected_is_never_graded() -> None:
     assert provider.running() == []
 
 
-async def test_a_seed_that_does_not_declare_the_tool_sidecar_fails_for_good() -> None:
+@pytest.mark.parametrize(
+    ("sidecars", "refusal"),
+    [
+        ([{"name": "tools", "image": "tools:1"}], "declared no sidecar that serves them"),
+        (
+            [
+                {"name": "tools", "image": "tools:1", "tools_port": 8000},
+                {"name": "more", "image": "t:2", "tools_port": 9},
+            ],
+            "declared 2 tool sidecars",
+        ),
+    ],
+)
+async def test_a_seed_that_does_not_declare_one_tool_sidecar_fails_for_good(
+    sidecars: list[dict[str, Any]], refusal: str
+) -> None:
     provider = _SidecarProvider()
     server, client = _sidecar_server(provider)
-    client.responses[0] = _Response({"resources_session_id": "resources-session"})
-    client.responses.pop(1)
+    client.responses[0] = _Response(SEED_REPLY | {"sandbox_group": {"sidecars": sidecars, "prepare": True}})
 
     result = await server.run_request(_request())
 
     assert (result.failure.stage, result.failure.terminal) == ("seed", True)
-    assert "did not declare" in result.failure.failure_reason
+    assert refusal in result.failure.failure_reason
     assert "/v1/agent_sessions" not in _paths(client)
     assert provider.running() == []
 

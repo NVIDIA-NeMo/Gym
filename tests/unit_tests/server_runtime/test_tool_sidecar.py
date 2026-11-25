@@ -44,11 +44,14 @@ class _OpenEgressOnly(_SidecarProvider):
 def test_the_seed_declares_the_tool_sidecar_and_the_agent_reaches_it_by_its_name() -> None:
     closed = ToolSidecarConfig(image="python:3.13-slim")
     sidecar = closed.group_sidecar()
-    assert (sidecar.name, sidecar.image, sidecar.resources) == (
+    assert (sidecar.name, sidecar.image, sidecar.resources, sidecar.egress_hosts, sidecar.tools_port) == (
         "tools",
         "python:3.13-slim",
         {"cpu": 1, "memory_mib": 2048},
+        [],
+        8000,
     )
+    assert sidecar.network == closed.network_rule == "no_network"
     assert (closed.url, closed.network_rule) == ("http://tools:8000", "no_network")
 
     search = ToolSidecarConfig(image="search:1", name="search", port=9000, egress_hosts=["api.example.com"])
