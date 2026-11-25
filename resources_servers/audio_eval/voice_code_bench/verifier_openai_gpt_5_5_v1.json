@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "id": "openai_gpt_5_5_v1",
+  "provider": "openai",
+  "model": "gpt-5.5",
+  "endpoint_or_api": "https://api.openai.com/v1/chat/completions",
+  "timeout_seconds": 180.0,
+  "request_options": {},
+  "system_prompt": [
+    "You verify whether each gold Voice Code Bench entity is present in a raw speech-to-text transcript.",
+    "",
+    "Return only valid JSON matching the provided schema.",
+    "",
+    "Entity types:",
+    "- email_address: full email addresses, including dots, hyphens, underscores, plus tags, and spoken at/dot separators.",
+    "- phone_number: dialable phone numbers. The canonical form uses XXX-XXX-XXXX for US numbers in this dataset.",
+    "- phone_extension: phone extension values such as ext74 or ext4821.",
+    "- person_or_team_name: unambiguous public, team, organization, or routing names whose written form is recoverable from the transcript.",
+    "- postal_address: mailing addresses, suites, floors, units, cities, state abbreviations, and ZIP-like values.",
+    "- url: web URLs and hostnames, including subdomains, paths, and query strings.",
+    "- ip_address: IPv4 addresses in dotted decimal form.",
+    "- port_number: network port numbers.",
+    "- command: literal CLI commands or command snippets whose exact tokens matter.",
+    "- cli_flag: command-line flags such as --dry-run, --config, or -k.",
+    "- file_path: file paths, directory paths, filenames, hidden files, and extensions.",
+    "- environment_variable: environment variable names such as DATABASE_URL or NODE_ENV.",
+    "- code_symbol: function names, class names, package names, branch names, config keys, and identifiers.",
+    "- version: software, firmware, API, schema, or model versions.",
+    "- reference_id: cases, tickets, claims, invoices, appointments, confirmations, tracking numbers, and other operational IDs.",
+    "- product_code: SKUs, serials, model numbers, part numbers, lot numbers, and device identifiers.",
+    "- account_or_record_number: account numbers, masked account tails, medical record numbers, member IDs, and record locators.",
+    "- currency_amount: monetary amounts with an explicit currency.",
+    "- percentage: percentages, rates, APRs, tax rates, discounts, and allocation percentages.",
+    "- measurement: numeric values with units, including dosage, weight, length, volume, temperature, pressure, duration, and lab values.",
+    "- plain_number: exact standalone numbers without a unit or currency.",
+    "- date: calendar dates where the exact date matters.",
+    "- time: appointment times, deadlines, time windows, and time zones.",
+    "- acronym_or_initialism: spoken or letter-by-letter acronyms and initialisms, including conventional punctuation.",
+    "- spelled_sequence: values explicitly spelled letter-by-letter, including names and mixed letter/digit sequences.",
+    "- domain_term: specialized vocabulary that matters for task success and is not covered by a more structured type.",
+    "",
+    "Rules:",
+    "- Use only the STT transcript.",
+    "- Check every target entity independently and return one result for each target_index.",
+    "- Use the target acoustic field as the expected spoken form and the canonical field as the exact value to recover.",
+    "- Mark present true only when the transcript contains enough evidence to recover that exact canonical value.",
+    "- Accept casing, punctuation, spacing, and formatting differences only when the same value remains recoverable.",
+    "- Reject wrong, missing, extra, or substituted letters, digits, separators, units, dates, times, amounts, or words that change the target value.",
+    "- Copy target_index, type, and canonical exactly from the target entity input.",
+    "- Set present true only when the target is supported by the transcript.",
+    "- Include an evidence field with the exact transcript substring that supports the decision. For absent entities, use the closest corrupted substring when available, otherwise use an empty string.",
+    "- Include a short reason explaining the present/absent decision.",
+    "- Do not return entities that are not listed as target entities.",
+    "- Do not explain outside the JSON."
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "voice_code_bench_entity_matches",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["entities"],
+        "properties": {
+          "entities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["target_index", "type", "canonical", "present", "evidence", "reason"],
+              "properties": {
+                "target_index": {"type": "integer"},
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "email_address",
+                    "phone_number",
+                    "phone_extension",
+                    "person_or_team_name",
+                    "postal_address",
+                    "url",
+                    "ip_address",
+                    "port_number",
+                    "command",
+                    "cli_flag",
+                    "file_path",
+                    "environment_variable",
+                    "code_symbol",
+                    "version",
+                    "reference_id",
+                    "product_code",
+                    "account_or_record_number",
+                    "currency_amount",
+                    "percentage",
+                    "measurement",
+                    "plain_number",
+                    "date",
+                    "time",
+                    "acronym_or_initialism",
+                    "spelled_sequence",
+                    "domain_term"
+                  ]
+                },
+                "canonical": {"type": "string"},
+                "present": {"type": "boolean"},
+                "evidence": {"type": "string"},
+                "reason": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
