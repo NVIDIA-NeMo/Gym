@@ -7,6 +7,7 @@ auto-review:
 
 approval:
   enabled: true
+  reapprove: true
   eligible_teams:
     - automation
     - gym_maintainers
