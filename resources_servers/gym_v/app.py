@@ -25,7 +25,6 @@ from dataclasses import field as dataclass_field
 from functools import partial
 from math import isclose, isfinite
 from pathlib import Path
-from time import monotonic
 from typing import Annotated, Any, ClassVar
 
 import anyio
@@ -131,7 +130,6 @@ class GymVResourcesServer(SimpleResourcesServer):
     env_id_to_task_row: dict[str, dict[str, Any]] = Field(default_factory=dict)
     env_id_to_turn_count: dict[str, int] = Field(default_factory=lambda: defaultdict(int))
     env_id_to_operation: dict[str, _SessionOperation] = Field(default_factory=dict, exclude=True)
-    cleanup_tombstone_expiry: dict[str, float] = Field(default_factory=dict, exclude=True)
     background_close_tasks: set[asyncio.Task[GymVCloseResponse]] = Field(default_factory=set, exclude=True)
 
     def model_post_init(self, _ctx: Any) -> None:
@@ -434,11 +432,6 @@ class GymVResourcesServer(SimpleResourcesServer):
         return await self._close_native_session(request, body)
 
     async def _close_native_session(self, request: Request | None, body: GymVCloseRequest) -> GymVCloseResponse:
-        # The cleanup request can overtake an ambiguously completed seed request
-        # on a different connection. Record the abort intent before consulting
-        # live state so the delayed seed cannot publish an orphan later.
-        if body.discard_reward:
-            self._record_cleanup_tombstone(body.env_id)
         operation = self.env_id_to_operation.get(body.env_id)
         if operation is None:
             return GymVCloseResponse(success=True, message="already closed")
@@ -598,33 +591,11 @@ class GymVResourcesServer(SimpleResourcesServer):
     def _reserve_session(self, env_id: str) -> _SessionOperation:
         # No await in this critical section: one event-loop turn atomically
         # checks and publishes the reservation.
-        if self._has_active_cleanup_tombstone(env_id):
-            raise ResourcesSessionConflictError(f"env_id={env_id} was already closed.")
         if self._session_id_in_use(env_id):
             raise ResourcesSessionConflictError(f"env_id={env_id} is already in use.")
         operation = _SessionOperation()
         self.env_id_to_operation[env_id] = operation
         return operation
-
-    def _record_cleanup_tombstone(self, env_id: str) -> None:
-        now = monotonic()
-        self._prune_cleanup_tombstones(now)
-        self.cleanup_tombstone_expiry[env_id] = now + self.config.cleanup_tombstone_ttl_seconds
-
-    def _has_active_cleanup_tombstone(self, env_id: str) -> bool:
-        now = monotonic()
-        expiry = self.cleanup_tombstone_expiry.get(env_id)
-        if expiry is None:
-            return False
-        if expiry <= now:
-            self.cleanup_tombstone_expiry.pop(env_id, None)
-            return False
-        return True
-
-    def _prune_cleanup_tombstones(self, now: float) -> None:
-        for env_id, expiry in list(self.cleanup_tombstone_expiry.items()):
-            if expiry <= now:
-                self.cleanup_tombstone_expiry.pop(env_id, None)
 
     def _discard_session_state(self, env_id: str) -> None:
         self.env_id_to_env.pop(env_id, None)

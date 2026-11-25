@@ -120,14 +120,6 @@ class GymVResourcesServerConfig(BaseResourcesServerConfig):
         ),
     )
     enforce_horizon_cap: bool = True
-    cleanup_tombstone_ttl_seconds: float = Field(
-        default=600.0,
-        ge=1.0,
-        description=(
-            "How long an aborting /close for a client-generated env_id prevents "
-            "a delayed /seed_session with the same ID from creating an orphan."
-        ),
-    )
     return_transitions: Literal[False] = Field(
         default=False,
         description="Pinned false for the flat trajectory shape consumed by the inspector.",

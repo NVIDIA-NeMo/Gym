@@ -102,7 +102,6 @@ def test_seed_session_request_accepts_client_generated_env_id() -> None:
     [
         ("num_workers", 2),
         ("return_transitions", True),
-        ("cleanup_tombstone_ttl_seconds", 0),
     ],
 )
 def test_stateful_resource_config_rejects_unsafe_process_or_output_modes(field: str, value: object) -> None:

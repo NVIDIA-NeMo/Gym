@@ -111,6 +111,35 @@ def _request() -> Request:
     return MagicMock(spec=Request)
 
 
+def test_failed_typed_construction_can_retry_same_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+
+    env = StubGymVEnv()
+    server = _server(monkeypatch, env)
+    attempts = 0
+
+    def make(*_args: Any, **_kwargs: Any) -> StubGymVEnv:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("transient construction failure")
+        return env
+
+    monkeypatch.setattr(gymv_app.gym_v, "make", make)
+    body = {
+        "resources_session_id": "retry-construction",
+        "episode_id": {"rollout_id": "retry"},
+        "task_id": {"taskset": "smoke", "task_id": "task"},
+        "task_data": GymVSeedSessionRequest(task_row=_row()).model_dump(mode="json"),
+    }
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=body).status_code == 500
+        retry = client.post("/seed_session", json=body)
+        assert retry.status_code == 200, retry.text
+        assert attempts == 2
+        assert client.post("/close", json={"env_id": "retry-construction", "discard_reward": True}).status_code == 200
+
+
 def _assert_no_session_state(server: gymv_app.GymVResourcesServer) -> None:
     assert server.env_id_to_failure == {}
     assert server.env_id_to_env == {}
@@ -141,14 +170,13 @@ def _verify_request(env_id: str) -> GymVAgentVerifyRequest:
 
 
 @pytest.mark.asyncio
-async def test_unknown_abort_close_tombstones_id_against_delayed_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_unknown_abort_close_fences_id_against_delayed_seed(monkeypatch: pytest.MonkeyPatch) -> None:
     from nemo_gym.server_runtime import base_resources_server
 
     now = [100.0]
     monkeypatch.setattr(base_resources_server, "monotonic", lambda: now[0])
-    monkeypatch.setattr(gymv_app, "monotonic", lambda: now[0])
     env = StubGymVEnv()
-    server = _server(monkeypatch, env, cleanup_tombstone_ttl_seconds=10.0, session_close_retry_window_seconds=10.0)
+    server = _server(monkeypatch, env, session_close_retry_window_seconds=10.0)
     env_id = "reordered-cleanup-session"
 
     closed = await server.close(
@@ -157,7 +185,6 @@ async def test_unknown_abort_close_tombstones_id_against_delayed_seed(monkeypatc
     )
 
     assert closed.success is True
-    assert server.cleanup_tombstone_expiry[env_id] == 110.0
     with pytest.raises(HTTPException) as exc_info:
         await server.seed_session(
             _request(),
@@ -175,7 +202,6 @@ async def test_unknown_abort_close_tombstones_id_against_delayed_seed(monkeypatc
         GymVSeedSessionRequest(env_id=env_id, task_row=_row()),
     )
     assert seeded.env_id == env_id
-    assert env_id not in server.cleanup_tombstone_expiry
     await server.close(_request(), GymVCloseRequest(env_id=env_id, discard_reward=True))
     _assert_no_session_state(server)
 
@@ -349,7 +375,6 @@ async def test_abort_close_waits_for_failing_constructor_and_retires_empty_reser
     assert exc_info.value.status_code == 500
     assert closed.success is True
     assert env.closed is False
-    assert env_id in server.cleanup_tombstone_expiry
     _assert_no_session_state(server)
 
 
