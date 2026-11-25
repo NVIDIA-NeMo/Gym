@@ -16,6 +16,8 @@ finance_sec_search_web_search_benchmark_agent:
   responses_api_agents:
     finance_agent:
       continue_if_not_tool_call: true
+      max_output_tokens_behavior: continue_with_content
+      nudge_turns_without_prose: true
       resources_server:
         name: finance_sec_search_web_search_benchmark_resources_server
       datasets:

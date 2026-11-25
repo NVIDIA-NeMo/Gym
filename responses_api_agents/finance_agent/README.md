@@ -58,6 +58,15 @@ final turn cannot reuse earlier analysis as its answer. Context overflow optiona
 (`truncate_on_overflow`), which is for eval only — during training the full trajectory has to be
 preserved for reward assignment.
 
+Two opt-in fields reproduce how the Vals harness treats a turn without a tool call or a turn cut off
+at the output-token limit. The Vals benchmark configs under `benchmarks/` enable both; training
+keeps the defaults.
+
+| Field | Effect | Default |
+|-------|--------|---------|
+| `max_output_tokens_behavior` | `stop`: a turn cut off at `max_output_tokens` ends the run (`stop_reason: max_output_tokens`). `continue_with_content`: the cut-off turn is handled like any other turn if it produced reasoning text, assistant text or a tool call; only an empty cut-off turn ends the run. | `stop` |
+| `nudge_turns_without_prose` | With `continue_if_not_tool_call: true`, also inject `no_tool_call_nudge` after a turn with no tool call and no assistant text, such as a reasoning-only turn. | `false` |
+
 Two opt-in fields cover a resources server that briefly cannot answer `seed_session` or `verify`,
 for example a multi-worker server whose session routing answers 502 when it cannot reach the
 worker that holds the session:

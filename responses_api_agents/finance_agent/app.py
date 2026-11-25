@@ -225,6 +225,18 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
         "(GRPO overlay), that turn ends the episode so a synthetic user message "
         "cannot break NeMo-RL monotonic trajectories.",
     )
+    max_output_tokens_behavior: Literal["stop", "continue_with_content"] = Field(
+        default="stop",
+        description="What to do when a turn is cut off at max_output_tokens. 'stop' ends the run. "
+        "'continue_with_content' handles the cut-off turn like any other turn when it produced "
+        "reasoning text, assistant text or a tool call, and ends the run only when it produced none.",
+    )
+    nudge_turns_without_prose: bool = Field(
+        default=False,
+        description="When True and continue_if_not_tool_call is True, a turn with no tool call and no "
+        "assistant text (for example a reasoning-only turn) also injects no_tool_call_nudge. When False "
+        "such a turn is sent back to the model with no new message.",
+    )
 
 
 class FinanceAgentRunRequest(BaseRunRequest):
@@ -254,6 +266,33 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         if t in _MODEL_OUTPUT_TYPES:
             return True
         return t == "message" and getattr(item, "role", None) == "assistant"
+
+    @staticmethod
+    def _has_model_content(output: List[Any]) -> bool:
+        """True when a turn produced reasoning text, assistant text or a tool call.
+
+        Text is not stripped: a whitespace-only reply counts as content. A refusal does not.
+        """
+        for item in output:
+            item_type = getattr(item, "type", None)
+            if item_type in ("function_call", "custom_tool_call"):
+                return True
+            if item_type == "reasoning":
+                parts = [*(getattr(item, "summary", None) or []), *(getattr(item, "content", None) or [])]
+                if any(getattr(part, "text", None) for part in parts):
+                    return True
+            if item_type == "message" and getattr(item, "role", None) == "assistant":
+                content = getattr(item, "content", None)
+                if isinstance(content, str):
+                    if content:
+                        return True
+                    continue
+                if any(
+                    getattr(part, "type", None) == "output_text" and getattr(part, "text", None)
+                    for part in content or []
+                ):
+                    return True
+        return False
 
     @staticmethod
     def _truncate_oldest_exchange(outputs: List[Any]) -> List[Any]:
@@ -487,8 +526,10 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
-                stop_reason = StopReason.MAX_OUTPUT_TOKENS
-                break
+                if self.config.max_output_tokens_behavior == "stop" or not self._has_model_content(output):
+                    stop_reason = StopReason.MAX_OUTPUT_TOKENS
+                    break
+                logger.info("Step %d hit max_output_tokens with partial output — continuing", step)
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
@@ -506,9 +547,10 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 if self.config.prose_only_behavior == "finish":
                     stop_reason = StopReason.ASSISTANT_MESSAGE
                     break
-            if not all_fn_calls and all_output_messages:
+            nudge_without_prose = self.config.nudge_turns_without_prose and self.config.continue_if_not_tool_call
+            if not all_fn_calls and (all_output_messages or nudge_without_prose):
                 logger.info(
-                    "Text-only turn on step %d — injecting no-tool-call nudge",
+                    "Turn without tool calls on step %d — injecting no-tool-call nudge",
                     step,
                 )
                 new_outputs.append(NeMoGymEasyInputMessage(role="user", content=self.config.no_tool_call_nudge))

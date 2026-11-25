@@ -20,8 +20,10 @@ stops parsing or stops setting a required field fails these tests.
 """
 
 import asyncio
+import functools
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -40,9 +42,12 @@ from nemo_gym.config import (
     ResourcesServerRef,
 )
 from nemo_gym.core import (
+    NeMoGymChatCompletion,
     NeMoGymEasyInputMessage,
+    NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from responses_api_agents.finance_agent import app as finance_agent_app
 from responses_api_agents.finance_agent.app import (
     FinanceAgent,
@@ -63,6 +68,18 @@ _SHIPPED_CONFIGS = {
     "big_finance_benchmark_agent": _REPO_ROOT / "benchmarks/big_finance/config.yaml",
     "finance_agent": _REPO_ROOT / "resources_servers/finance_sec_search/configs/finance_sec_search.yaml",
     "finance_agent_v2": _REPO_ROOT / "resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml",
+}
+_VALS_BENCHMARK_CONFIGS = {
+    "finance_sec_search_benchmark_agent": _REPO_ROOT / "benchmarks/finance_sec_search/config_no_web_search.yaml",
+    "finance_sec_search_web_search_benchmark_agent": _REPO_ROOT
+    / "benchmarks/finance_sec_search/config_web_search.yaml",
+    "finance_agent_v2_benchmark_agent": _REPO_ROOT / "benchmarks/finance_agent_v2/config.yaml",
+}
+_TURN_HANDLING_FIELDS = ("continue_if_not_tool_call", "max_output_tokens_behavior", "nudge_turns_without_prose")
+_VALS_TURN_HANDLING = {
+    "continue_if_not_tool_call": True,
+    "max_output_tokens_behavior": "continue_with_content",
+    "nudge_turns_without_prose": True,
 }
 
 #: Fields with no default, so each profile has to state its own policy.
@@ -89,7 +106,7 @@ def _shipped_block(instance: str) -> dict:
     file, because a profile may pull shared fields in through `config_paths`."""
     initial = OmegaConf.merge(
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        {"config_paths": [str(_SHIPPED_CONFIGS[instance])]},
+        {"config_paths": [str({**_SHIPPED_CONFIGS, **_VALS_BENCHMARK_CONFIGS}[instance])]},
     )
     resolved = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
@@ -282,6 +299,20 @@ class TestFinanceAgentConfig:
         assert agent_config.keep_response_on_verify_failure is True
         assert agent_config.prose_only_behavior == "nudge"
         assert agent_config.tool_call_execution == "sequential"
+
+    @pytest.mark.parametrize("instance", sorted(_SHIPPED_CONFIGS))
+    def test_resources_server_profiles_keep_default_turn_handling(self, instance: str) -> None:
+        block = _shipped_block(instance)
+        config = _make_config(
+            policy=_shipped_policy(instance), **{f: block[f] for f in _TURN_HANDLING_FIELDS if f in block}
+        )
+        assert config.max_output_tokens_behavior == "stop"
+        assert config.nudge_turns_without_prose is False
+
+    @pytest.mark.parametrize("instance", sorted(_VALS_BENCHMARK_CONFIGS))
+    def test_vals_benchmark_profiles_enable_vals_turn_handling(self, instance: str) -> None:
+        config = _make_config(policy={}, **dict(_vals_benchmark_config_fields(instance)))
+        assert {f: getattr(config, f) for f in _TURN_HANDLING_FIELDS} == _VALS_TURN_HANDLING
 
     @pytest.mark.parametrize("instance", sorted(_SHIPPED_CONFIGS))
     def test_shipped_profile_states_every_required_field(self, instance: str) -> None:
@@ -757,6 +788,37 @@ class TestResponses:
         assert res.status_code == 200
         assert agent.server_client.post.call_count == 2
         assert res.json()["metadata"]["stop_reason"] == "max_turns"
+        assert not [item for item in res.json()["output"] if item["type"] == "message"]
+
+    @pytest.mark.parametrize("instance", ["finance_agent", "finance_agent_v2"])
+    @pytest.mark.parametrize("empty_output", [False, True], ids=["reasoning-only", "empty"])
+    def test_nudge_turns_without_prose(self, instance: str, empty_output: bool) -> None:
+        policy = _shipped_policy(instance)
+        agent, client = _make_agent_and_client(
+            _make_config(policy=policy, max_steps=2, nudge_turns_without_prose=True)
+        )
+        model_response = _reasoning_response()
+        if empty_output:
+            model_response["output"] = []
+        agent.server_client.post.return_value = _dotjson_mock(model_response)
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        assert agent.server_client.post.call_count == 2
+        assert res.json()["metadata"]["stop_reason"] == "max_turns"
+        messages = [item for item in res.json()["output"] if item["type"] == "message"]
+        assert [(m["role"], m["content"]) for m in messages] == [("user", policy["no_tool_call_nudge"])] * 2
+
+    def test_nudge_turns_without_prose_needs_continue_if_not_tool_call(self) -> None:
+        agent, client = _make_agent_and_client(
+            _make_config(max_steps=2, continue_if_not_tool_call=False, nudge_turns_without_prose=True)
+        )
+        agent.server_client.post.return_value = _dotjson_mock(_reasoning_response())
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert agent.server_client.post.call_count == 2
         assert not [item for item in res.json()["output"] if item["type"] == "message"]
 
     def test_finish_profile_executes_tools_when_prose_and_calls_share_a_turn(self) -> None:
@@ -1538,16 +1600,246 @@ class TestResponses:
         assert isinstance(body.input[0], NeMoGymEasyInputMessage)
         assert body.input[0].content == "hello"
 
-    def test_incomplete_details_max_tokens_breaks(self) -> None:
-        """incomplete_details with reason=max_output_tokens → loop exits."""
+    def test_empty_turn_cut_off_at_max_output_tokens_ends_the_run(self) -> None:
         agent, client = _make_agent_and_client()
 
-        resp = _text_response("partial") | {"incomplete_details": {"reason": "max_output_tokens"}}
+        resp = _text_response("") | {"incomplete_details": {"reason": "max_output_tokens"}}
         agent.server_client.post.return_value = _dotjson_mock(resp)
 
         res = client.post("/v1/responses", json=_INPUT)
         assert res.status_code == 200
         assert len(res.json()["output"]) == 1
+        assert res.json()["metadata"]["stop_reason"] == "max_output_tokens"
+
+
+# ---------------------------------------------------------------------------
+# Tests: turns cut off at max_output_tokens and turns without tool calls
+#
+# Expected actions follow the Vals harness (model-library Agent with the
+# finance-agent hooks): a reply counts as empty only when it has no output
+# text, no reasoning text and no tool call. An empty reply cut off at the
+# output limit ends the run; any other reply without a tool call gets the
+# nudge, and tool calls run even when the reply was cut off.
+# ---------------------------------------------------------------------------
+
+
+def _reasoning_item(text: str) -> dict:
+    return {
+        "id": "rs_1",
+        "summary": [{"text": text, "type": "summary_text"}],
+        "status": "completed",
+        "type": "reasoning",
+    }
+
+
+def _message_item(text: str) -> dict:
+    return {
+        "id": "msg_1",
+        "content": [{"annotations": [], "text": text, "type": "output_text"}],
+        "role": "assistant",
+        "status": "completed",
+        "type": "message",
+    }
+
+
+def _refusal_item(refusal: str) -> dict:
+    return {
+        "id": "msg_1",
+        "content": [{"refusal": refusal, "type": "refusal"}],
+        "role": "assistant",
+        "status": "completed",
+        "type": "message",
+    }
+
+
+def _function_call_item(name: str, arguments: str, call_id: str = "call_cut") -> dict:
+    return {
+        "id": f"fc_{call_id}",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+        "type": "function_call",
+        "status": "completed",
+    }
+
+
+def _turn(*items: dict, cut_off: bool) -> dict:
+    response = _text_response("") | {"output": list(items)}
+    if cut_off:
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    return response
+
+
+_SEARCH_CALL = _function_call_item("edgar_search", json.dumps({"query": "NVDA 10-Q"}))
+_TRUNCATED_SEARCH_CALL = _function_call_item("edgar_search", '{"query": "NVDA 10')
+
+#: (id, output items, cut off) -> expected action in the Vals harness.
+_TURN_CASES = [
+    ("reasoning-cut", [_reasoning_item("Let me think")], True, "nudge"),
+    ("text-cut", [_message_item("Revenue was")], True, "nudge"),
+    ("whitespace-text-cut", [_message_item("\n")], True, "nudge"),
+    ("reasoning-and-text-cut", [_reasoning_item("Plan"), _message_item("Revenue")], True, "nudge"),
+    ("tool-call-cut", [_reasoning_item("Search"), _SEARCH_CALL], True, "tool"),
+    ("truncated-tool-args-cut", [_TRUNCATED_SEARCH_CALL], True, "tool"),
+    ("no-items-cut", [], True, "stop"),
+    ("empty-text-cut", [_message_item("")], True, "stop"),
+    ("empty-reasoning-cut", [_reasoning_item("")], True, "stop"),
+    ("empty-reasoning-and-text-cut", [_reasoning_item(""), _message_item("")], True, "stop"),
+    ("refusal-only-cut", [_refusal_item("I can't help with that.")], True, "stop"),
+    ("reasoning-only", [_reasoning_item("Let me think")], False, "nudge"),
+    ("text-only", [_message_item("Revenue was $100B.")], False, "nudge"),
+    ("tool-call", [_SEARCH_CALL], False, "tool"),
+]
+
+
+def _run_turn_then_submit(config: FinanceAgentConfig, first_turn: dict) -> tuple[dict, int]:
+    agent, client = _make_agent_and_client(config)
+    submit = _tool_call_response("submit_final_result", json.dumps({"final_result": "42"}), call_id="call_submit")
+    model_mock = _dotjson_mock(first_turn, submit)
+    resource_mock = _dotjson_mock({"results": "ok"})
+    agent.server_client.post = AsyncMock(side_effect=_route(model_mock, resource_mock))
+    res = client.post("/v1/responses", json=_INPUT)
+    assert res.status_code == 200
+    model_calls = [c for c in agent.server_client.post.call_args_list if c.kwargs["server_name"] == _MODEL_SERVER]
+    return res.json(), len(model_calls)
+
+
+def _action_after_first_turn(result: dict, first_turn: dict, model_calls: int) -> str:
+    if model_calls == 1:
+        assert result["metadata"]["stop_reason"] == "max_output_tokens"
+        assert len(result["output"]) == len(first_turn["output"])
+        return "stop"
+    assert model_calls == 2
+    assert result["metadata"]["stop_reason"] == "done_tool"
+    following = result["output"][len(first_turn["output"])]
+    if following["type"] == "function_call_output":
+        assert following["call_id"] == first_turn["output"][-1]["call_id"]
+        return "tool"
+    assert (following["type"], following["role"]) == ("message", "user")
+    return "nudge"
+
+
+@functools.cache
+def _vals_benchmark_config_fields(instance: str) -> tuple[tuple[str, Any], ...]:
+    block = _shipped_block(instance)
+    fields = {f: block[f] for f in (*_POLICY_FIELDS, *_TURN_HANDLING_FIELDS) if f in block}
+    return tuple(fields.items())
+
+
+class TestTurnsMatchValsHarness:
+    @pytest.mark.parametrize("instance", sorted(_VALS_BENCHMARK_CONFIGS))
+    @pytest.mark.parametrize(
+        "items, cut_off, expected",
+        [case[1:] for case in _TURN_CASES],
+        ids=[case[0] for case in _TURN_CASES],
+    )
+    def test_vals_benchmark_profiles(self, instance: str, items: list, cut_off: bool, expected: str) -> None:
+        fields = dict(_vals_benchmark_config_fields(instance))
+        first_turn = _turn(*items, cut_off=cut_off)
+
+        result, model_calls = _run_turn_then_submit(_make_config(policy={}, max_steps=3, **fields), first_turn)
+
+        assert _action_after_first_turn(result, first_turn, model_calls) == expected
+        if expected == "nudge":
+            assert result["output"][len(items)]["content"] == fields["no_tool_call_nudge"]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {},
+            {"continue_if_not_tool_call": False},
+            {"prose_only_behavior": "finish"},
+            {"continue_if_not_tool_call": False, "nudge_turns_without_prose": True},
+        ],
+        ids=["default", "training", "finish", "training-with-prose-nudge"],
+    )
+    @pytest.mark.parametrize(
+        "items",
+        [[_reasoning_item("Let me think")], [_message_item("Revenue was")], [_SEARCH_CALL]],
+        ids=["reasoning", "text", "tool-call"],
+    )
+    def test_stop_behavior_ends_every_cut_off_turn(self, overrides: dict, items: list) -> None:
+        first_turn = _turn(*items, cut_off=True)
+
+        result, model_calls = _run_turn_then_submit(_make_config(max_steps=3, **overrides), first_turn)
+
+        assert _action_after_first_turn(result, first_turn, model_calls) == "stop"
+
+    def test_repeated_cut_off_turns_are_bounded_by_max_steps(self) -> None:
+        agent, client = _make_agent_and_client(_make_config(max_steps=3, **_VALS_TURN_HANDLING))
+        agent.server_client.post.return_value = _dotjson_mock(_turn(_reasoning_item("..."), cut_off=True))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert agent.server_client.post.call_count == 3
+        assert res.json()["metadata"]["stop_reason"] == "max_turns"
+
+
+def _chat_completion(message: dict, finish_reason: str) -> dict:
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "test",
+        "choices": [{"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", **message}}],
+    }
+
+
+def _lift_like_vllm_model(message: dict, finish_reason: str) -> list:
+    """Converts a chat completion the way the vLLM model server does with a reasoning parser."""
+    message = dict(message)
+    reasoning = message.pop("reasoning_content", None)
+    if reasoning:
+        message["content"] = ChatCompletionsConverter._wrap_reasoning_in_think_tags([reasoning]) + (
+            message.get("content") or ""
+        )
+    converter = ChatCompletionsConverter(return_token_id_information=False, uses_reasoning_parser=True)
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], model="test"),
+        chat_completion=NeMoGymChatCompletion.model_validate(_chat_completion(message, finish_reason)),
+    )
+    assert response.incomplete_details is not None and response.incomplete_details.reason == "max_output_tokens"
+    return response.output
+
+
+_TRUNCATED_CHAT_TOOL_CALL = {
+    "id": "call_1",
+    "type": "function",
+    "function": {"name": "edgar_search", "arguments": '{"query": "NVDA'},
+}
+
+
+class TestModelContentOnModelServerOutput:
+    """Chat completions as vLLM returns them, lifted by the model server's converter. Expected
+    values are model-library's emptiness check: no output text, no reasoning and no tool calls."""
+
+    @pytest.mark.parametrize(
+        "message, has_content",
+        [
+            ({"content": None, "reasoning_content": "Let me think"}, True),
+            ({"content": "Revenue was", "reasoning_content": "Plan"}, True),
+            ({"content": "\n"}, True),
+            ({"content": None, "tool_calls": [_TRUNCATED_CHAT_TOOL_CALL]}, True),
+            ({"content": None}, False),
+            ({"content": ""}, False),
+            ({"content": None, "reasoning_content": ""}, False),
+            ({"content": None, "refusal": "I can't help with that."}, False),
+        ],
+        ids=[
+            "reasoning-only",
+            "reasoning-and-text",
+            "whitespace-text",
+            "truncated-tool-call",
+            "null-content",
+            "empty-content",
+            "empty-reasoning",
+            "refusal-only",
+        ],
+    )
+    def test_cut_off_reply(self, message: dict, has_content: bool) -> None:
+        output = _lift_like_vllm_model(message, "length")
+
+        assert FinanceAgent._has_model_content(output) is has_content
 
 
 # ---------------------------------------------------------------------------
