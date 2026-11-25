@@ -24,12 +24,26 @@ import socket
 import sys
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import cached_property, partial
 from ipaddress import ip_network
 from os import environ, getenv
 from traceback import format_exception, print_exception
-from typing import Any, Awaitable, Callable, ClassVar, List, Optional, Protocol, Sequence, TextIO, Tuple, Type
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    ClassVar,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    TextIO,
+    Tuple,
+    Type,
+)
 from urllib.parse import urlsplit, urlunsplit
 
 import uvicorn
@@ -40,7 +54,7 @@ from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
-from pydantic import BaseModel, PositiveInt, ValidationError, model_validator
+from pydantic import BaseModel, PositiveInt, PrivateAttr, ValidationError, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
@@ -112,7 +126,13 @@ from nemo_gym.utils.server_process import (
 )
 
 
+if TYPE_CHECKING:
+    from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
+
 logger = logging.getLogger(__name__)
+
+# The longest a server's shutdown spends stopping the sandboxes it still owns.
+SANDBOX_SHUTDOWN_TIMEOUT_S = 150.0
 
 
 class KeepaliveHttpToolsProtocol(HttpToolsProtocol):
@@ -317,6 +337,90 @@ class SimpleServer(BaseServer):
     # so that with several uvicorn workers a session's requests must reach the worker that created it.
     # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
+    # The sandboxes this server owns, one OwnedSandboxes per provider field, created on first use.
+    _owned_sandboxes: dict[str, "OwnedSandboxes"] = PrivateAttr(default_factory=dict)
+    # Set when the shutdown sweep begins: no instance is built after it, so none is left that nothing closes.
+    _sandboxes_closed: bool = PrivateAttr(default=False)
+
+    @property
+    def sandboxes(self) -> "OwnedSandboxes":
+        """The sandboxes this server owns on its ``sandbox_provider``, created on first use.
+
+        A server tracks, lends, snapshots and stops the sandboxes it starts through it, and the server's shutdown stops
+        what is left in it. (Servers that own sandboxes through ``LentSandboxes`` or ``start_episode_sandbox`` move onto
+        it in later changes.) ``self.sandboxes.on("<field>")`` gives the instance for a second provider field, such as a
+        GPU provider. A server that never uses it creates nothing. Lending needs ``sandbox_provider`` to name a provider
+        block, since a borrower resolves the provider by that name. Use it from the event loop: the instance is built
+        on first use without a lock, so a worker thread could build a second one that the shutdown never stops.
+
+        Raises:
+            ValueError: If the server's config sets no ``sandbox_provider``.
+            RuntimeError: If the server's shutdown has begun.
+        """
+        return self._sandboxes_on("sandbox_provider")
+
+    def _sandboxes_on(self, provider_field: str) -> "OwnedSandboxes":
+        owned = self._owned_sandboxes.get(provider_field)
+        if owned is None:
+            if self._sandboxes_closed:
+                raise RuntimeError(f"{self.config.name} is shutting down: it starts no sandboxes on {provider_field}")
+            from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes
+
+            owned = OwnedSandboxes.for_server(
+                config=self.config,
+                provider_field=provider_field,
+                global_config=self._global_config(),
+                on=self._sandboxes_on,
+            )
+            self._owned_sandboxes[provider_field] = owned
+        return owned
+
+    def _global_config(self) -> Any:
+        # The config the server was started with; a process that set none, such as a test, falls back to the global.
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        return global_config if global_config is not None else get_global_config_dict()
+
+    def setup_owned_sandboxes(self, app: FastAPI) -> None:
+        """Stop every sandbox this server still owns once the app's lifespan has ended.
+
+        Wraps the app's lifespan, including any shutdown a server adds itself, so the server's own cleanup runs first
+        and what it leaves is stopped here. An instance keeps a sandbox whose stop failed and logs it. The whole sweep
+        is bounded by ``SANDBOX_SHUTDOWN_TIMEOUT_S``; under the launcher's default ``server_shutdown_timeout_seconds``
+        the process usually ends before then, and the sandboxes' ``ttl_s`` reclaims what is left.
+        """
+        inner_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(application: FastAPI) -> AsyncIterator[Any]:
+            try:
+                async with inner_lifespan(application) as state:
+                    yield state
+            finally:
+                await self.aclose_sandboxes()
+
+        app.router.lifespan_context = lifespan
+
+    async def aclose_sandboxes(self) -> None:
+        """Stop every sandbox of every ``OwnedSandboxes`` this server created; see ``OwnedSandboxes.aclose``.
+
+        No instance is built from here on. The sweep gives up after ``SANDBOX_SHUTDOWN_TIMEOUT_S`` and logs it.
+        """
+        self._sandboxes_closed = True
+        owned = list(self._owned_sandboxes.values())
+        try:
+            async with asyncio.timeout(SANDBOX_SHUTDOWN_TIMEOUT_S):
+                outcomes = await asyncio.gather(*(instance.aclose() for instance in owned), return_exceptions=True)
+        except TimeoutError:
+            logger.error(
+                "Sandboxes of %s were not all stopped within %s s of shutdown; their ttl_s reclaims them",
+                self.config.name,
+                SANDBOX_SHUTDOWN_TIMEOUT_S,
+            )
+            return
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                logger.error("Sandboxes of %s were not all stopped at shutdown: %r", self.config.name, outcome)
+
     # Sign session cookies and MCP session tokens with a secret made for the run (run_session_secret), not with the
     # public key get_session_middleware_key() derives from the server's class and name: for a server whose routes code
     # it does not trust can call, such as code in a sandbox it lends. mcp_bearer_token turns it on as well.
@@ -580,6 +684,14 @@ repr(e): {repr(e)}"""
         is_main_fastapi_proc = not is_nemo_gym_fastapi_worker()
 
         server_config = cls.load_config_from_global_config()
+        # Standalone recipes can be inspected before a provider block is composed in.
+        # At launch, resolve explicit names. Some execution modes leave a default provider unused.
+        provider_ref = getattr(server_config, "sandbox_provider", None)
+        if isinstance(provider_ref, str) and "sandbox_provider" in server_config.model_fields_set:
+            from nemo_gym.sandbox.config import resolve_provider_config
+
+            resolve_provider_config(provider_ref, global_config_dict)
+
         startup.mark("load_config")
         _connect_server_to_ray(cls, global_config_dict)
         if cls.ray_enabled:
@@ -617,6 +729,7 @@ repr(e): {repr(e)}"""
         startup.mark("setup_webserver")
         observe_app_event_loop(app, "server")
         server.setup_checkpoint_participant(app)
+        server.setup_owned_sandboxes(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         mcp_token_routing = {}
