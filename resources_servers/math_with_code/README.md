@@ -156,9 +156,10 @@ at most 2 GiB: code that asks for more gets a `MemoryError` instead of stopping 
 
 | Agent | Verifier | Why |
 |---|---|---|
-| Borrows the attempt's group, started at seed | `none`: in this Resources Server, lent nothing | The task has the `execute_python` Python tool, which runs in the agent's container; the verifier normalizes the boxed answer and compares strings and floats, so it executes nothing |
+| attempt group | `none` | The task has the `execute_python` Python tool, which runs in the agent's container. The verifier normalizes the boxed answer and compares strings and floats, so it executes nothing. |
 
-See [Where the agent and the verifier run](../../environment_servers/single_agent_turn/README.md#where-the-agent-and-the-verifier-run).
+See [Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs).
+
 This server keeps the session contract for `math_with_code_environment_server` (`single_agent_turn_legacy`): a
 `/verify` for a closed session returns a masked sample instead of a reward of 0.
 
