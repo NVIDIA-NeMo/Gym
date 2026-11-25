@@ -973,6 +973,9 @@ COMMANDS = {
             CONFIG,
             _bool_flag("run", "run_after_build", "Build the image, then submit the YAML's run configuration."),
             _bool_flag("run-only", "run_only", "Submit the YAML's run configuration using the existing image."),
+            _bool_flag(
+                "overwrite-existing", "overwrite_existing", "Allow the build to replace an existing output image."
+            ),
         ),
     ),
     "list benchmarks": Command(

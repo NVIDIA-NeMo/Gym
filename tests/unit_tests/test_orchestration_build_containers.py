@@ -567,7 +567,8 @@ def test_flashinfer_jit_repair_failure_stops_before_import(flashinfer_version_ch
 
 
 @pytest.mark.parametrize("entrypoint", ["gym", "module"])
-def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
+@pytest.mark.parametrize("overwrite_existing", [False, True])
+def test_cli_loads_configs_and_overrides(entrypoint, overwrite_existing, tmp_path, monkeypatch):
     config = tmp_path / "build.yaml"
     config.write_text(
         "input_container_fpath: base.sqsh\n"
@@ -611,6 +612,8 @@ def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
 
     monkeypatch.setattr(build_containers.BuildContainerHelper, "run", capture_run)
     args = ["--config", str(config), "--config", str(override), "++flashinfer.cpus_per_task=64"]
+    if overwrite_existing:
+        args.append("--overwrite-existing")
     if entrypoint == "gym":
         monkeypatch.setattr(sys, "argv", ["gym", "build-containers", *args])
         cli_main()
@@ -621,6 +624,7 @@ def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
     resolved = captured[0]
     assert resolved.input_container_fpath == (tmp_path / "base.sqsh").resolve()
     assert resolved.output_container_fpath == (tmp_path / "output.sqsh").resolve()
+    assert resolved.overwrite_existing is overwrite_existing
     assert resolved.vllm.branch == "vllm-dev"
     assert resolved.vllm.version == "0.32.0"
     assert resolved.vllm.precompiled_wheel_commit == "wheel-ref"
@@ -904,6 +908,73 @@ def test_vllm_installed_rust_launcher_compatibility(vllm_builder, tmp_path, supp
     assert result.returncode == (0 if supports_flag else 1)
     if not supports_flag:
         assert "--input-listener-fd" in result.stderr
+
+
+@pytest.mark.parametrize("mode", [None, "--run", "--run-only"])
+@pytest.mark.parametrize("overwrite_existing", [False, True])
+def test_cli_preserves_existing_output_unless_overwrite_requested(tmp_path, monkeypatch, mode, overwrite_existing):
+    monkeypatch.chdir(tmp_path)
+    config = tmp_path / "build.yaml"
+    config.write_text("input_container_fpath: base.sqsh\noutput_container_fpath: output.sqsh\nrun:\n  env: {}\n")
+    source = tmp_path / "base.sqsh"
+    output = tmp_path / "output.sqsh"
+    log = tmp_path / "output.log"
+    source.write_bytes(b"base image")
+    output.write_bytes(b"existing image")
+    log.write_text("existing build log\n")
+    launcher = tmp_path / BENCHMARK / "sbatch_external_vllm.sh"
+    launcher.parent.mkdir(parents=True)
+    launcher.touch()
+    monkeypatch.setattr(
+        build_containers,
+        "get_global_config_dict",
+        lambda: GlobalConfigDictParser().parse(GlobalConfigDictParserConfig(skip_load_from_dotenv=True)),
+    )
+    run_command = AsyncMock(return_value=CommandOutput(returncode=0, output_lines=[]))
+    monkeypatch.setattr(build_containers, "_run_command", run_command)
+    args = ["gym", "build-containers", "--config", str(config)]
+    if mode:
+        args.append(mode)
+    if overwrite_existing:
+        args.append("--overwrite-existing")
+    monkeypatch.setattr(sys, "argv", args)
+
+    if not overwrite_existing and mode != "--run-only":
+        with pytest.raises(FileExistsError, match="Pass --overwrite-existing"):
+            cli_main()
+        assert output.read_bytes() == b"existing image"
+        assert log.read_text() == "existing build log\n"
+        run_command.assert_not_awaited()
+    else:
+        cli_main()
+        if mode == "--run-only":
+            assert output.read_bytes() == b"existing image"
+            assert log.read_text() == "existing build log\n"
+        else:
+            assert output.read_bytes() == b"base image"
+        assert run_command.await_count == int(mode is not None)
+    assert source.read_bytes() == b"base image"
+
+
+@pytest.mark.parametrize("destination", ["same_path", "hardlink", "directory"])
+async def test_overwrite_rejects_invalid_destination_without_cleanup(container_config, destination):
+    container_config.overwrite_existing = True
+    source = container_config.input_container_fpath
+    source.write_bytes(b"base image")
+    container_config.log_file.write_text("existing log\n")
+    if destination == "same_path":
+        container_config.output_container_fpath = source
+    elif destination == "hardlink":
+        container_config.output_container_fpath.hardlink_to(source)
+    else:
+        container_config.output_container_fpath.mkdir()
+
+    error = IsADirectoryError if destination == "directory" else shutil.SameFileError
+    with pytest.raises(error):
+        await BuildContainerHelper(config=container_config).run()
+    assert source.read_bytes() == b"base image"
+    assert container_config.output_container_fpath.exists()
+    assert container_config.log_file.read_text() == "existing log\n"
 
 
 @pytest.mark.parametrize(

@@ -151,6 +151,7 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
     run: Optional[RunConfig] = None
     run_after_build: bool = False
     run_only: bool = False
+    overwrite_existing: bool = False
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -981,6 +982,25 @@ class BuildContainerHelper(BaseModel):
         stages.update({type(builder).__name__.removesuffix("Builder"): "Not started" for builder in builders})
         if self.config.warmup is not None:
             stages["Warmup"] = "Not started"
+
+        output = self.config.output_container_fpath
+        # Reserve the path before entering failure cleanup. Exclusive creation
+        # also prevents two default builds from claiming the same output image.
+        if not self.config.overwrite_existing:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                output.touch(exist_ok=False)
+            except FileExistsError as exc:
+                raise FileExistsError(
+                    f"Output container already exists: {output}. Pass --overwrite-existing to replace it."
+                ) from exc
+        else:
+            if output.is_dir():
+                raise IsADirectoryError(f"Output container path is a directory: {output}")
+            if output.exists() and output.samefile(self.config.input_container_fpath):
+                raise shutil.SameFileError(
+                    "Input and output containers must be different files, even with --overwrite-existing"
+                )
 
         try:
             await self._run(builders, stages)
