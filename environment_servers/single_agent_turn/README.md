@@ -127,9 +127,17 @@ reason, until the provider limits the agent container to the sidecar's tools por
 agent that runs no model-written code in the agent container, such as Simple Agent without a code-execution tool: such
 code could change the tool state the grader reads.
 
-### Where the agent and the verifier run
+### Where it runs
 
-There is no switch. Where each runs is fixed per task, and each borrows only what this server lends.
+There is no switch. Where the agent and the verifier run is fixed per task, and each borrows only what this server lends. A benchmark's README states its placement in a short table with these columns and words, and links here for the rules:
+
+| Agent | Verifier | Why |
+|------|------|------|
+| Agent Server process | `none` | No tools, and an agent that runs its loop without a sandbox (Simple Agent); the verifier only reads the answer (rules, a judge call). |
+| Agent Server process | `separate` | No tools; the verifier runs model output (unit tests, an evaluating parser such as SymPy's) in a group of its own. |
+| attempt group | `none` | The task has tools or sidecars, or the agent needs a container; the verifier only reads the answer. |
+| attempt group | `shared` | The verifier inspects what the agent left in its group. |
+| attempt group | `separate` | The verifier runs model output but must not see the agent's files. |
 
 The agent's side is derived:
 
