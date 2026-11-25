@@ -120,6 +120,14 @@ _OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete respons
 _STDERR_TAIL_CHARS = 2000
 # Codex 0.144.4 rejects MCP server names with other characters.
 _CODEX_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+# An exact Codex version names one release; a tag or a range such as `latest` does not.
+_EXACT_CODEX_VERSION = re.compile(r"\d+\.\d+\.\d+")
+# Codex 0.144.4 stops on the `enabled` key of the [agents] table with a configuration error
+# ("expected struct AgentRoleToml in `agents`"), and Codex 0.163.0 accepts the key. No version
+# between the two is verified. CodexAgentConfig refuses agents_enabled for 0.144.4 and for every
+# older version, which is assumed not to know a key that a later version rejects.
+_AGENTS_ENABLED_REJECTED_UP_TO = "0.144.4"
+_AGENTS_ENABLED_VERIFIED_WITH = "0.163.0"
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -283,6 +291,11 @@ def _redact(text: str, values: list[str]) -> str:
 def _codex_mcp_server_name(name: str) -> bool:
     """Whether Codex accepts ``name`` as an MCP server name."""
     return _CODEX_MCP_SERVER_NAME.fullmatch(name) is not None
+
+
+def _version_numbers(version: str) -> tuple[int, ...]:
+    """Split an exact Codex version such as 0.144.4 into its numbers, which compare in release order."""
+    return tuple(int(part) for part in version.split("."))
 
 
 def _toml_key(key: str) -> str:
@@ -676,6 +689,17 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # applies its own default; that is how a launch with no Gym config (such as Harbor's) runs. Unlike
     # extra_config, this also applies to sandbox sessions.
     features: dict[str, Optional[bool]] = Field(default_factory=lambda: {"multi_agent": False, "code_mode": False})
+    # The base config's `model_catalog_json`: a model catalog file that replaces Codex's bundled one, so
+    # a `model` the bundled catalog does not list gets that file's metadata. The file must exist where
+    # Codex runs (in a sandbox session, inside the sandbox); the adapter does not write it. Absolute,
+    # because Codex resolves a relative path against the per-run CODEX_HOME. None leaves the key out.
+    # Unlike extra_config, this also applies to sandbox sessions.
+    model_catalog_json: str | None = Field(default=None, pattern=r"^/")
+    # The `enabled` key of the base config's [agents] table; false removes Codex's subagent tools.
+    # None leaves the table out, so the CLI applies its own default. Refused for a codex_version up to
+    # the newest one known to reject the key (see validate_agents_enabled_version). Unlike extra_config,
+    # this also applies to sandbox sessions.
+    agents_enabled: bool | None = None
     # Sandbox sessions, which run without --ephemeral: copy Codex's session rollouts (CODEX_HOME/sessions, with
     # per-call token counts and timestamps) into <sandbox_logs_dir>/sessions after Codex stops, before the session
     # directory is removed. Point it at a directory the resources server collects, such as /logs/agent for
@@ -741,6 +765,22 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
         """A tool call cannot outlast the Codex run that makes it."""
         if self.mcp_tool_timeout_seconds is not None and self.mcp_tool_timeout_seconds > self.timeout:
             raise ValueError("mcp_tool_timeout_seconds must not exceed timeout, which bounds the whole Codex run")
+        return self
+
+    @model_validator(mode="after")
+    def validate_agents_enabled_version(self) -> "CodexAgentConfig":
+        """Refuse agents_enabled for a codex_version up to the newest one known to reject the [agents] `enabled` key.
+
+        An older version is assumed not to know the key. Only an exact codex_version is compared. Any other
+        value, such as `latest`, is accepted here.
+        """
+        if self.agents_enabled is None or not _EXACT_CODEX_VERSION.fullmatch(self.codex_version):
+            return self
+        if _version_numbers(self.codex_version) <= _version_numbers(_AGENTS_ENABLED_REJECTED_UP_TO):
+            raise ValueError(
+                f"Codex {self.codex_version} does not support `agents_enabled`. Use a compatible version "
+                f"(verified with {_AGENTS_ENABLED_VERIFIED_WITH}) or omit the setting."
+            )
         return self
 
 
@@ -875,7 +915,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             )
         if self.config.model_server is None:
             raise HTTPException(422, "Codex in the task sandbox requires a sandbox-reachable Gym model_server")
-        if not self.config.codex_version or not re.fullmatch(r"\d+\.\d+\.\d+", self.config.codex_version):
+        if not self.config.codex_version or not _EXACT_CODEX_VERSION.fullmatch(self.config.codex_version):
             raise HTTPException(422, "Codex in the task sandbox requires an exact codex_version, for example 0.144.4")
         if self.config.codex_version != TESTED_CODEX_VERSION:
             LOG.warning(
@@ -1742,10 +1782,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
         model = self._effective_model()
         if model:
             config["model"] = model
-        for name in ("model_context_window", "model_auto_compact_token_limit"):
+        for name in ("model_context_window", "model_auto_compact_token_limit", "model_catalog_json"):
             value = getattr(self.config, name)
             if value is not None:
                 config[name] = value
+        if self.config.agents_enabled is not None:
+            config["agents"] = {"enabled": self.config.agents_enabled}
         if self.config.reasoning_effort:
             config["model_reasoning_effort"] = self.config.reasoning_effort
         if developer_instructions:

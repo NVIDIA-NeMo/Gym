@@ -440,6 +440,31 @@ def test_codex_cli_default_features_and_session_state_reach_the_sandbox_launch(s
     assert payload["command"][-2:] == ["--", "-"]
 
 
+@pytest.mark.parametrize(
+    "settings, expected",
+    [
+        ({}, {}),
+        (
+            # The fixture's Codex 0.144.4 rejects the [agents] key, so the switch needs another version.
+            {"model_catalog_json": "/opt/models/catalog.json", "agents_enabled": False, "codex_version": "0.163.0"},
+            {"model_catalog_json": "/opt/models/catalog.json", "agents": {"enabled": False}},
+        ),
+    ],
+    ids=["defaults", "set"],
+)
+def test_model_catalog_and_agents_table_reach_sandbox_config_only_when_set(setup, settings, expected) -> None:
+    # extra_config is refused in sandbox sessions, so these keys have fields of their own.
+    agent, sandbox = setup
+    agent.config = CodexAgentConfig(**(agent.config.model_dump() | settings))
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix multiply"})
+        assert result.status_code == 200, result.text
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    assert {key: config[key] for key in ("model_catalog_json", "agents") if key in config} == expected
+
+
 def test_direct_run_without_resources_rejected_before_execution(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
