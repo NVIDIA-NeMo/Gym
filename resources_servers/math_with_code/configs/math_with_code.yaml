@@ -58,3 +58,7 @@ math_with_code_environment_server:
         ttl_s: 25200  # above the agent's sandbox_runner_timeout_seconds plus cleanup
         network: model_only
         model_server: policy_model
+      # The grader compares boxed answers and runs nothing, so it grades in this Resources Server and the sandbox
+      # stops once the agent closes. The task has a tool, so it cannot opt out.
+      sandbox_opt_out:
+        grader: true
