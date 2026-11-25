@@ -142,6 +142,12 @@ python first_sandbox.py
 
 `exec()` returns a `SandboxExecResult`. Nonzero process exits are reported in `return_code`; providers should reserve exceptions for sandbox runtime failures such as allocation, transport, or lifecycle errors.
 
+`exec()` also takes a list of strings instead of shell text, such as `await sandbox.exec(["python", "/sandbox/hello.py"])`. The list runs as the program's argv without a shell, so its arguments need no quoting and no shell program of the sandbox takes part. Docker, Apptainer, Local and OpenSandbox (with `opensandbox>=1.1.0`) run it; other providers, and a `user` a provider can switch to only through `su`, raise `SandboxExecArgvUnsupportedError` before anything runs, and `preserve_background_services=True` takes shell text only.
+
+An argument list is not a trust boundary on its own. No shell runs, but the program, its dynamic loader and libraries, and files such as `/etc/ld.so.preload` still come from the sandbox's file system. To run a program you trust in a sandbox that an agent has modified, upload a statically linked binary or mount the program read-only.
+
+On Docker, Apptainer and Local, a program in an argument list that cannot be started is a command failure, as with shell text: `error_type` is `None` and `return_code` is `127` when the program is not found or `126` when it is not executable.
+
 ## Provider Config Blocks
 
 Agents can refer to a named provider block instead of embedding provider credentials or backend settings in the agent config. The `sandbox_provider` field names a top-level config block, and that block contains exactly one provider key plus optional reserved keys:

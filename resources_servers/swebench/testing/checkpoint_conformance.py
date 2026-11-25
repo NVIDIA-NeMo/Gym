@@ -23,7 +23,7 @@ from nemo_gym.sandbox import (
     SandboxStatus,
 )
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest, SandboxCheckpointError, seed_restarts
-from nemo_gym.server_runtime._checkpoint import sandbox as sandbox_checkpoints
+from nemo_gym.server_runtime import owned_sandboxes as sandbox_checkpoints
 from resources_servers.swebench.sandbox_session_checkpoints import TASK_SANDBOX
 
 

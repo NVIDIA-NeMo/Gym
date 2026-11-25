@@ -28,7 +28,7 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgentConfig,
     _sandbox_prepare_command,
 )
-from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
+from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH, OPENCODE_RELEASE_SHA256, OPENCODE_VERSION
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.tests.test_continuation import activate, close, install_artifact_runner, start
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
@@ -41,7 +41,7 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
 
 
 PIN = "ab" * 32
-RUNTIME = "/tmp/nemo-gym-opencode-runtime-1.17.11"
+RUNTIME = f"/tmp/nemo-gym-opencode-runtime-{OPENCODE_VERSION}"
 EXPORT_DIR = "/owner/exports"
 # Distinctive text of each sandbox step, to find its command.
 PLUGIN_CHECK = 'for path in "$@"'
@@ -168,7 +168,17 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
     response, closed = await episode(agent, sandbox)
     directory = sandbox.directory
     install = events[index(events, "install_opencode_runtime.sh")]
-    assert shlex.split(install) == ["bash", f"{directory}/install_opencode_runtime.sh", RUNTIME, "1.17.11", "", "", ""]
+    digests = " ".join(f"{arch}={digest}" for arch, digest in OPENCODE_RELEASE_SHA256[OPENCODE_VERSION].items())
+    assert shlex.split(install) == [
+        "bash",
+        f"{directory}/install_opencode_runtime.sh",
+        RUNTIME,
+        OPENCODE_VERSION,
+        "",
+        "",
+        "",
+        digests,
+    ]
     assert index(events, "install_opencode_runtime.sh") == 1
     for marker in (PLUGIN_CHECK, EXPORT_SESSION, EVENT_LOG, PINNED_COPY, IMPORT_CHECK, "NG_OPENCODE_SKIP_RIPGREP"):
         assert not any(marker in event for event in events)
@@ -855,7 +865,7 @@ async def test_path_prefix_reaches_the_installer_and_every_opencode_process(setu
     events = record(sandbox)
     response, closed = await episode(agent, sandbox)
     assert response.status == "completed"
-    assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[-1] == prefix
+    assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[-2] == prefix
     assert f"PATH={shlex.quote(prefix)}:$PATH\n" in launch_config(sandbox)[0]["setup"]
     for marker in (IMPORT, EXPORT_SESSION):
         assert f"PATH={shlex.quote(prefix)}:$PATH\n" in events[index(events, marker)], marker

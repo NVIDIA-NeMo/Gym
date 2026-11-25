@@ -473,6 +473,8 @@ model_call_sampling:
 
 A call to one of those model servers that arrives without the rollout's values fails instead of sampling with others, so a harness that ignores its model URL is caught on its first call. Model calls a resources server makes through Gym's server client while handling a request, such as a verifier's LLM judge, carry a marker that tells the model server to keep the caller's own sampling. A vLLM model server forwards that marker on its Chat Completions requests to its generation server as the header `x-ng-sampling: null`, so a server that checks every call against the training values can skip those calls.
 
+A framework that instead writes `temperature`, `top_p` or `max_output_tokens` into each row's `responses_create_params` reaches only agents that accept those request fields. Sandbox harnesses refuse them, because a harness cannot put them on every model call it makes. For task folders, the `harbor` environment server can move them for such a framework: with `request_sampling_to_model_calls: true` it removes the three fields from the request the harness receives and carries them on the turn's model calls, the same way as `_ng_model_sampling`. A row that has `_ng_model_sampling` keeps those values and its request is sent unchanged.
+
 ## Turn capture off for a rollout
 
 A training framework that also runs rollouts it does not train on, such as validation rollouts, can skip capture for each of them. Set `_ng_skip_token_capture: true` on the row, next to `_ng_rollout_id`:
