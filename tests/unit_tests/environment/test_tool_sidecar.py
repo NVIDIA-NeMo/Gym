@@ -77,6 +77,11 @@ def _seed(opening: Any = "hi") -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
+def test_a_tool_sidecar_cannot_also_serve_the_tools_over_mcp() -> None:
+    with pytest.raises(ValidationError, match="expose_tools_over_mcp"):
+        _config(expose_tools_over_mcp=True)
+
+
 class SecretConfig(LedgerConfig):
     judge_api_key: str | None = None
     refresh_token: bool = False
@@ -107,7 +112,8 @@ def test_the_tool_host_serves_the_tools_and_their_state_but_not_grading() -> Non
     # Relative to the directory above the server's own, as resources_servers/<name>/app.py is to the repository.
     assert spec["module"] == "fixtures.tool_server.app"
     assert spec["class"] == "LedgerResourcesServer"
-    assert "tool_sidecar" not in spec["config"]
+    # The tool host serves the tools itself.
+    assert spec["config"]["tool_sidecar"] is None
     # In this process the fixture's module is importable under its test package's name.
     app = build_app(spec | {"module": "tests.unit_tests.environment.fixtures.tool_server.app"})
 
@@ -437,3 +443,22 @@ async def test_a_server_that_prepares_the_group_itself_still_does_so_without_a_t
     await server.prepare_sandbox(_prepare())
 
     assert _ServerThatPrepares.prepared == [SESSION]
+
+
+class _OwnGroupLedger(LedgerResourcesServer):
+    """A server whose own sandbox_group override does not call super()."""
+
+    def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
+        return SandboxGroupSpec(files={"/task/README": "own"})
+
+
+def test_a_servers_own_group_override_keeps_the_tool_sidecar() -> None:
+    server = _OwnGroupLedger(config=_config(), server_client=_server(_config()).server_client)
+
+    group = server.sandbox_declaration(ResourcesSeedSessionRequest.model_validate(_seed()))["sandbox_group"]
+
+    assert (group.files, [sidecar.name for sidecar in group.sidecars], group.prepare) == (
+        {"/task/README": "own"},
+        ["tools"],
+        True,
+    )

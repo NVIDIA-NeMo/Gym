@@ -139,10 +139,11 @@ class ToolSidecarResourcesConfig(BaseResourcesServerConfig):
                     f"tool_sidecar would copy {secrets} into a sidecar that code in the agent container can read; "
                     "keep credentials out of a config whose tools run in a sidecar"
                 )
-            if self.mcp_bearer_token:
+            if self.expose_tools_over_mcp or self.mcp_bearer_token:
                 raise ValueError(
-                    "tool_sidecar needs sessions signed with the server's public key, which the tool host shares; "
-                    "mcp_bearer_token signs them with a secret made for the run"
+                    "tool_sidecar serves this server's tools over direct HTTP from the sidecar; expose_tools_over_mcp "
+                    "would serve them from this process, and mcp_bearer_token signs sessions with a secret the tool "
+                    "host does not share"
                 )
         return self
 
@@ -220,8 +221,8 @@ class ToolSidecarResources:
 
     The tool host gets the Python files of the server's own directory and of ``tool_sidecar_sources``, not their data
     files. Until the provider limits the agent container to the sidecar's tools port, pair a tool sidecar only with an
-    agent that runs no model-written code in the agent container, such as Simple Agent: code there can reach the
-    sidecar's exec daemon on OpenSandbox and change the tool state the grader reads.
+    agent that runs no model-written code in the agent container, such as Simple Agent without a code-execution tool:
+    code there can reach the sidecar's exec daemon on OpenSandbox and change the tool state the grader reads.
 
     Attributes:
         tool_sidecar_requirements: Packages the server's own module needs beyond Gym's, as requirement strings.
@@ -269,14 +270,16 @@ class ToolSidecarResources:
         if self.config.tool_sidecar is not None:  # type: ignore[attr-defined]
             app.post(TOOL_SIDECAR_IMPORT_STATE_PATH)(self.import_tool_sidecar_state)
 
-    def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
-        """The group the server declares, if any, with the tool sidecar that serves this server's tools added."""
-        group = super().sandbox_group(body)  # type: ignore[misc]
+    def sandbox_declaration(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
+        """The seed's declaration, with the tool sidecar that serves this server's tools added to whatever group the
+        server's own ``sandbox_group`` declares."""
+        declaration = super().sandbox_declaration(body)  # type: ignore[misc]
         config = self.config.tool_sidecar  # type: ignore[attr-defined]
         if config is None:
-            return group
-        group = group or SandboxGroupSpec()
-        return group.model_copy(update={"sidecars": [*group.sidecars, config.group_sidecar()]})
+            return declaration
+        group = declaration.get("sandbox_group") or SandboxGroupSpec(prepare=True)
+        declaration["sandbox_group"] = group.model_copy(update={"sidecars": [*group.sidecars, config.group_sidecar()]})
+        return declaration
 
     def _own_prepare_sandbox(self) -> Any:
         """The ``prepare_sandbox`` a class after this mixin among the server's bases defines, which this one runs
@@ -369,7 +372,8 @@ class ToolSidecarResources:
         return {
             "module": ".".join(module),
             "class": type(self).__qualname__,
-            "config": self.config.model_dump(mode="json", exclude={"tool_sidecar"}),  # type: ignore[attr-defined]
+            # The tool host serves the tools itself, whatever this config class's default.
+            "config": self.config.model_dump(mode="json") | {"tool_sidecar": None},  # type: ignore[attr-defined]
             "port": config.port,
         }
 

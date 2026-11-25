@@ -3,9 +3,9 @@
 # http://tools:8000; each session's world lives in the sidecar, and the world the agent's calls left is copied back to
 # the Resources Server before /verify scores it. No tool call reaches the Resources host.
 #
-# Pair it only with an agent that runs no model-written code in the agent container, such as Simple Agent: until the
-# provider limits the agent container to the sidecar's tools port, code there can reach the sidecar's exec daemon and
-# change the world the rubric scores.
+# Pair it only with an agent that runs no model-written code in the agent container, such as Simple Agent without a
+# code-execution tool: until the provider limits the agent container to the sidecar's tools port, code there can reach
+# the sidecar's exec daemon and change the world the rubric scores.
 #
 # Set OPENSANDBOX_DOMAIN and OPENSANDBOX_API_KEY. The deployment must enforce egress policies at the packet level
 # (`enforces_network_policy`), and its sandboxes must reach the model server's host.
