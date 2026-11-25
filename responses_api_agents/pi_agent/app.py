@@ -1500,10 +1500,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="pi", gaps=[ObservationGap(code="observation_parse_failed")]
             )
-        if graded_error is not None or (incomplete and not error):
+        # The invocation record takes the response's status where Pi's last stop reason does not decide it: a graded
+        # agent error, a failed recovery of an overflowed or cut-off reply (Pi's events still end on that reply), and
+        # a limit stop.
+        if graded_error is not None or compaction_failure is not None or (incomplete and not error):
             for record in state.observations.records:
                 if isinstance(record, AgentInvocation):
-                    record.status = status if graded_error is not None else "incomplete"
+                    record.status = status
         if runtime is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup["return_code"] is None:

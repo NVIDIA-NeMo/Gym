@@ -2472,6 +2472,9 @@ async def test_pinned_pi_reports_a_failed_recovery_of_a_cut_off_reply(
         async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
             response = await run.activation
     assert ["tools" in request for request in run.requests] == requests_with_tools
+    # The invocation record agrees with the response, not with the cut-off reply Pi tried to recover.
+    records = run.close.agent_observations.records
+    assert [record.status for record in records if record.kind == "agent_invocation"] == [response.status]
     texts = [item.content[0].text for item in response.output if item.type == "message"]
     if summary_status == 200:
         assert (response.status, response.error) == ("completed", None)
@@ -2589,6 +2592,34 @@ async def test_provider_failure_is_reported_but_context_limit_preserves_patch(
     assert close.agent_observations.records[0].status == ("failed" if error else "incomplete")
     sandbox.launch.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("compaction", "status", "error"),
+    [
+        # Pi stopped at the output limit without trying to recover the reply.
+        ([], "incomplete", None),
+        # Pi compacted to recover the cut-off reply, and its compaction call failed.
+        (
+            [
+                {"type": "compaction_start", "reason": "overflow"},
+                {"type": "compaction_end", "reason": "overflow", "errorMessage": _COMPACTION_CALL_FAILED},
+            ],
+            "failed",
+            _COMPACTION_CALL_FAILED,
+        ),
+    ],
+)
+async def test_failed_recovery_of_a_cut_off_reply_also_fails_the_invocation(setup, compaction, status, error):
+    agent, sandbox = setup
+    recorded = [json.loads(line)[1] for line in events(stop_reason="length").splitlines()]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate([*recorded, *compaction]))
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    assert (response.status, response.error and response.error.message) == (status, error)
+    close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    # Pi's events end on the `length` reply either way; the invocation record follows the response.
+    assert close.agent_observations.records[0].status == status
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
