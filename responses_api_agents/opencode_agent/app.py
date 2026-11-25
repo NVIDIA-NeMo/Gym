@@ -124,6 +124,7 @@ from responses_api_agents.opencode_agent.artifacts import (
     _assistant_part_items,
     _empty_answer_part,
     _parse_opencode_session,
+    last_assistant_message,
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.continuation import (
@@ -150,7 +151,6 @@ from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
     IMAGE_INPUT_MODEL_OPTIONS,
     OPENCODE_RELEASE_SHA256,
-    OPENCODE_V2_VERSION,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
     RUNTIME_INSTALLER_FILE,
@@ -181,9 +181,6 @@ SANDBOX_RUNTIME_PREFIX = "/tmp/nemo-gym-opencode-runtime-"
 REPROMPT_SCRIPT = Path(__file__).with_name("reprompt_opencode.sh")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
-_TESTED_OUTCOME_VERSION = "1.17.11"
-# Error classification of OpenCode 2 (its errors translated by opencode2.store) is validated on this release.
-_TESTED_OPENCODE2_OUTCOME_VERSION = OPENCODE_V2_VERSION
 # Restore outcomes that are expected rather than faults: the checkpoint was taken before the launch's relay started,
 # or the launch or its replacement attempt has MCP tools, which only a relaunch renders for that attempt. They are
 # logged at INFO; every other reason a launch cannot resume in place, a launch without a relay included, at WARNING:
@@ -225,6 +222,32 @@ def _is_model_endpoint_failure(error: object) -> bool:
     ):
         return True
     return bool(_CONNECTION_ERROR.search(str(data.get("message") or "")))
+
+
+def _provider_error_message(error: Mapping[str, Any]) -> str:
+    """The response error for a provider failure OpenCode reported: its message and the upstream HTTP status."""
+    data = error.get("data") or {}
+    message = data.get("message")
+    if not isinstance(message, str) or not message:
+        message = "OpenCode provider request failed"
+    status = data.get("statusCode")
+    if type(status) is int and 400 <= status <= 599:
+        message = f"HTTP {status}: {message}"
+    return format_error_message(message)
+
+
+@dataclass(frozen=True)
+class _LocalRunFailure:
+    """How a local OpenCode run that ended on its own did not complete.
+
+    ``native_result`` is the last assistant message the outcome is classified from; it is empty when OpenCode
+    reported no provider failure.
+    """
+
+    status: Literal["failed", "incomplete"]
+    error_type: str
+    message: Optional[str]
+    native_result: Mapping[str, Any]
 
 
 def _request_digest(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
@@ -400,10 +423,16 @@ case "$workdir/" in "${export_dir%/}"/*) overlap=1 ;; esac
 """
 
 
-# Built-in agents by OpenCode version. Each sets its own sampling (1.17.11's ``title`` fixes temperature 0.5) and none
-# inherits from ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an
-# agent, so other versions refuse request sampling, as the adapter did before it applied any.
-_OPENCODE_AGENTS = {"1.17.11": ("build", "plan", "general", "explore", "compaction", "title", "summary")}
+# OpenCode 1's built-in agents. Each sets its own sampling (``title`` fixes temperature 0.5) and none inherits from
+# ``build``, so request sampling goes to all of them. A name OpenCode does not define would add an agent, so request
+# sampling is applied only on the releases checked to define exactly these (packages/opencode/src/agent/agent.ts).
+_OPENCODE_BUILTIN_AGENTS = ("build", "plan", "general", "explore", "compaction", "title", "summary")
+_SAMPLING_OPENCODE1_VERSIONS = ("1.17.11", "1.19.6")
+# Releases on which the error reports that `classify_outcome` and `_reported_model_error` read (OpenCode 2's after
+# opencode2.store translates them) were checked: their error types and fields are those of 1.17.11 (OpenCode 1,
+# packages/core/src/v1/session.ts) or 2.2.7 (OpenCode 2, packages/core/src/session/to-session-error.ts). Another
+# release logs a warning at seed.
+_CLASSIFIED_OPENCODE_VERSIONS = ("1.17.11", "1.19.6", "2.2.7", "2.3.2")
 # Isolation shared by every OpenCode process of a session: run, export and import.
 _OPENCODE_ISOLATION = {
     "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
@@ -557,7 +586,7 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
 _SUBAGENT_NAME = re.compile(r"[a-z][a-z0-9-]*")
 # OpenCode's own agents: `build` runs the session, `plan` is its other primary agent, and the rest are the roles
 # OpenCode runs itself. A session may limit `build`, hide a built-in subagent, and define its own subagents.
-_OPENCODE_OWN_AGENTS = frozenset(_OPENCODE_AGENTS["1.17.11"])
+_OPENCODE_OWN_AGENTS = frozenset(_OPENCODE_BUILTIN_AGENTS)
 _OPENCODE_BUILTIN_SUBAGENTS = frozenset({"general", "explore"})
 _SUBAGENT_KEYS = frozenset({"mode", "description", "prompt", "steps", "permission", "tools"})
 
@@ -666,7 +695,7 @@ def _compaction_buffer_name_error(opencode_version: Any, opencode_config: Mappin
 
     OpenCode 1 names the buffer ``compaction.reserved`` and OpenCode 2 ``compaction.buffer``. Each version is given only
     its own name: OpenCode 1.17 drops a compaction key it does not know, so a run given ``buffer`` would compact at the
-    default threshold without an error.
+    default threshold without an error (1.19.6 reads ``buffer`` as ``reserved``).
     """
     compaction = opencode_config.get("compaction")
     if not isinstance(compaction, Mapping):
@@ -935,7 +964,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     def _reported_model_error(
         native_result: Mapping[str, Any], cleanup: dict | None, *, reprompted: bool = False
     ) -> bool:
-        """Recognize a completed API error or context limit; tested on OpenCode 1.17.11.
+        """Recognize a completed API error or context limit; checked on ``_CLASSIFIED_OPENCODE_VERSIONS``.
 
         Independent worker failures, cleanup errors and timeouts are not provider reports. ``opencode run`` exits 1
         on a reported error, except that OpenCode 1.15.x exits 0 when compaction itself overflows, so a context limit
@@ -959,7 +988,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read native APIError status or transport retry marker; tested on OpenCode 1.17.11.
+        """Read native APIError status or transport retry marker; checked on ``_CLASSIFIED_OPENCODE_VERSIONS``.
 
         OpenCode marks connection resets, header timeouts, decompression failures and
         interrupted streams retryable without an HTTP status. Preserve that evidence;
@@ -1094,6 +1123,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         calls when capture is on."""
         config = self._build_opencode_config(rollout_id)
         config["permission"] = opencode2_config.code_mode_off(config.get("permission"))
+        opencode2_config.background_compaction_off(config)
         for model in ((config.get("provider") or {}).get("nemo") or {}).get("models", {}).values():
             # OpenCode 2 assumes image input for a model it does not know; OpenCode 1 assumed text only.
             model.setdefault("modalities", {"input": ["text"], "output": ["text"]})
@@ -1134,8 +1164,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
         timeout: float | None = None,
-    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
-        """Run one headless OpenCode session and read its persisted artifact."""
+    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle, Optional[_LocalRunFailure]]:
+        """Run one headless OpenCode session and read its persisted artifact.
+
+        The last element says how a run that ended on its own did not complete, and is None for a completed run
+        or one that reached ``timeout``.
+        """
         try:
             self.config._validate_prompt_agent()
         except ValueError as error:
@@ -1205,6 +1239,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 labels = message_labels(label_file.read_text()) if label_file.is_file() else {}
                 untranslated = await asyncio.to_thread(translate_store, db_path, translated, labels=labels)
                 db_path = translated
+            failure = None if timed_out else self._local_run_failure(db_path, proc.returncode, stderr)
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
                 ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None})
@@ -1238,12 +1273,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             ObservationGap(code="model_call_ownership_unavailable"),
                         ],
                     )
-            run_status = "incomplete" if timed_out else "completed" if proc.returncode == 0 else "failed"
+            run_status = "incomplete" if timed_out else "completed" if failure is None else failure.status
             for invocation in observations.records:
                 if not isinstance(invocation, AgentInvocation):
                     continue
                 if invocation.parent_invocation_id is None:
                     invocation.status = run_status
+                    if failure is not None:
+                        invocation.error_type = failure.error_type
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
             if untranslated:
@@ -1251,9 +1288,34 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 observations.gaps.append(
                     ObservationGap(code="harness_records_untranslated", detail="; ".join(untranslated)[:2500])
                 )
-            return output_items, usage, self.config.model, observations
+            return output_items, usage, self.config.model, observations, failure
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _local_run_failure(
+        self, db_path: Path, return_code: Optional[int], stderr: bytes
+    ) -> Optional[_LocalRunFailure]:
+        """Classify a local run that ended on its own the way a sandbox session classifies its run.
+
+        A provider failure OpenCode reported after its own retries (an endpoint outage, a rejected request) fails
+        the run with that failure's status. Any other nonzero exit fails it without a known cause. A context
+        overflow leaves the response incomplete and gradable. Each failed response then carries its cause, so the
+        caller's outcome policy decides whether it is graded.
+        """
+        native_result = last_assistant_message(db_path)
+        cleanup = {"return_code": return_code, "timed_out": False, "error": None}
+        if self._reported_model_error(native_result, cleanup):
+            if native_result["error"]["name"] == _CONTEXT_OVERFLOW_ERROR:
+                return _LocalRunFailure("incomplete", "context_limit", None, native_result)
+            return _LocalRunFailure(
+                "failed", "provider_error", _provider_error_message(native_result["error"]), native_result
+            )
+        if return_code in (0, None):
+            return None
+        message = format_error_message(
+            f"OpenCode exited with code {return_code}", stderr=stderr.decode(errors="replace")
+        )
+        return _LocalRunFailure("failed", "server_error", message, {})
 
     async def _create_episode(
         self,
@@ -1283,7 +1345,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
-        output_items, usage, model_name, observations = await self._run_opencode(
+        output_items, usage, model_name, observations, failure = await self._run_opencode(
             user_message,
             system_prompt,
             rollout_id=rollout_id,
@@ -1332,6 +1394,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
+        run_outcome: dict[str, Any] = {}
+        if failure is not None:
+            run_outcome["status"] = failure.status
+            if failure.message is not None:
+                run_outcome["error"] = {"code": "server_error", "message": failure.message}
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -1351,7 +1418,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
             metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
+            **run_outcome,
         )
+        if failure is not None and failure.status == "failed":
+            fields = verification_failure_fields()
+            if fields["failure_report"] is not None:
+                response = response.model_copy(update=fields)
+            response = self.report_outcome(response, failure.native_result)
         if trajectory is not None:
             response = response.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
         return AgentEpisode(response=response, observations=observations)
@@ -1847,12 +1920,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
             raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
-        tested = _TESTED_OPENCODE2_OUTCOME_VERSION if self._opencode2 else _TESTED_OUTCOME_VERSION
-        if self.config.opencode_version != tested:
+        tested = [version for version in _CLASSIFIED_OPENCODE_VERSIONS if _is_opencode2(version) == self._opencode2]
+        if self.config.opencode_version not in tested:
             LOG.warning(
                 "OpenCode %s is untested: error classification is validated on %s",
                 self.config.opencode_version,
-                tested,
+                ", ".join(tested),
             )
         if self._opencode2:
             if self.config.sandbox_plugin_dependencies_path or self.config.sandbox_plugin_dependencies_sha256:
@@ -2270,16 +2343,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self.config.sandbox_executable_path or "",
                 self.config.sandbox_executable_sha256 or "",
                 ":".join(self.config.sandbox_path_prefix),
-                # OpenCode 2 downloads are checked against the release's pinned SHA-256 digests.
-                *(
-                    [
-                        " ".join(
-                            f"{arch}={digest}"
-                            for arch, digest in OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {}).items()
-                        )
-                    ]
-                    if self._opencode2
-                    else []
+                " ".join(
+                    f"{arch}={digest}"
+                    for arch, digest in OPENCODE_RELEASE_SHA256.get(self.config.opencode_version, {}).items()
                 ),
             )
         )
@@ -2394,11 +2460,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if not math.isfinite(getattr(body, name)):
                 raise HTTPException(422, f"OpenCode sandbox execution requires a finite {name}")
         # OpenCode 2 sessions apply request sampling to every model call through the Gym plugin.
-        if sampled and not self._opencode2 and self.config.opencode_version not in _OPENCODE_AGENTS:
+        if sampled and not self._opencode2 and self.config.opencode_version not in _SAMPLING_OPENCODE1_VERSIONS:
             raise HTTPException(
                 422,
                 f"OpenCode sandbox execution applies request {' and '.join(sampled)} only with OpenCode "
-                f"{', '.join(_OPENCODE_AGENTS)}, whose built-in agents it knows; configure Gym model sampling",
+                f"{', '.join(_SAMPLING_OPENCODE1_VERSIONS)}, whose built-in agents it knows; configure Gym model "
+                "sampling",
             )
         for key, field in type(body).model_fields.items():
             if key in supported:
@@ -3118,7 +3185,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             # Merged into each agent, the session's own subagents included, so a configured agent.build.steps stays.
             agents = config.setdefault("agent", {})
             for agent in (
-                *_OPENCODE_AGENTS[self.config.opencode_version],
+                *_OPENCODE_BUILTIN_AGENTS,
                 *_configured_subagents(self.config.opencode_config),
             ):
                 agents.setdefault(agent, {}).update(sampling)
@@ -3518,14 +3585,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(502, format_error_message(error, stderr=state.stderr))
         reported_message = None
         if reported_error and not context_limit:
-            error_data = native_result["error"].get("data") or {}
-            reported_message = error_data.get("message")
-            if not isinstance(reported_message, str) or not reported_message:
-                reported_message = "OpenCode provider request failed"
-            upstream_status = error_data.get("statusCode")
-            if type(upstream_status) is int and 400 <= upstream_status <= 599:
-                reported_message = f"HTTP {upstream_status}: {reported_message}"
-            reported_message = format_error_message(reported_message)
+            reported_message = _provider_error_message(native_result["error"])
         response = self._make_session_response(
             state,
             body,

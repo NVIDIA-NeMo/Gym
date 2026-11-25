@@ -30,6 +30,7 @@ mm_coding_opencode_agent:
           build:
             steps: 8
       timeout: 7200
+      opencode_version: 1.17.11
       sandbox_executable_path: ${oc.env:MM_CODING_OPENCODE_PATH}
       sandbox_executable_sha256: ${oc.env:MM_CODING_OPENCODE_SHA256}
       sandbox_ripgrep_path: ${oc.env:MM_CODING_RG_PATH}

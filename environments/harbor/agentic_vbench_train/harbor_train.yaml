@@ -37,6 +37,9 @@ opencode_agent:
       # `agentic_vbench_output_tokens` for another policy.
       context_window: ${oc.select:agentic_vbench_context_tokens,49152}
       max_output_tokens: ${oc.select:agentic_vbench_output_tokens,8192}
+      # The NeMo RL smoke in README.md and the compaction_plugins.yaml overlay were checked on OpenCode 1.17.11; 1.19.6
+      # renames the compaction summary's sections, which `vllm_model.compaction_summary_sections` lists.
+      opencode_version: 1.17.11
       opencode_config:
         compaction:
           auto: true
