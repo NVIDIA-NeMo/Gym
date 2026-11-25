@@ -2,30 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config_paths:
-  - benchmarks/nemotron_3.5_super/build_container_configs/swe_8n-11.yaml
-
-input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_sota.sqsh
-output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___rewardprofiling.sqsh
-
-slurm:
-  qos: normal
-
-mooncake:
-    repo: https://github.com/bxyu-nvidia/Mooncake.git
-    branch: bxyu/v0.3.13.post1-rl
-    cpus_per_task: 96
-    build_parallel_level: 96
-
-vllm:
-  repo: https://github.com/bxyu-nvidia/vllm.git
-  branch: bxyu/v0.32.0-fixunscheduledmooncakeslam
-  version: "0.32.0"
-  precompiled_wheel_commit: v0.32.0
+  - benchmarks/nemotron_3.5_super/build_container_configs/swe_8n-11_reward_profiling.yaml
 
 shared_run_warmup_env_vars:
   NUM_PREFILL_NODES: 6
   NUM_DECODE_NODES: 6
-  MOONCAKE_DEFAULT_KV_LEASE_TTL: 5000  # milliseconds
 
 run:
   env:
@@ -49,4 +30,4 @@ run:
     ++r2e_gym_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.datasets=[] \
     ++input_jsonl_fpath=data/swe_20261118.jsonl \
     ++num_repeats=8 \
-    ++num_samples_in_parallel=6144
+    ++num_samples_in_parallel=5120
