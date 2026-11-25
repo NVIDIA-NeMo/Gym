@@ -5,6 +5,7 @@
 import importlib.util
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -47,10 +48,11 @@ class ReviewPoolDispatchTests(unittest.TestCase):
         self.assertFalse(parent["gym-review-pools-prepare"]["allow_failure"])
         self.assertFalse(parent["gym-review-pools"]["allow_failure"])
         self.assertFalse(child[".gym-review-pools"]["allow_failure"])
-        script = "\n".join(child[".gym-review-pools"]["script"])
-        self.assertIn("--require-codeowners", script)
-        self.assertIn("--codeowners-fallback @nvidia-nemo/gym_maintainers", script)
-        pin = re.search(r"fetch --depth=1 origin ([0-9a-f]{40})", script)
+        script = child[".gym-review-pools"]["script"]
+        adapter = next(shlex.split(line) for line in script if "gitlab_review_pools.py" in line)
+        self.assertIn("--require-codeowners", adapter)
+        self.assertEqual(adapter[adapter.index("--codeowners-fallback") + 1], "@nvidia-nemo/gym_maintainers")
+        pin = re.search(r"fetch --depth=1 origin ([0-9a-f]{40})", "\n".join(script))
         self.assertIsNotNone(pin, "child job must fetch the adapter by full commit SHA")
         readme = (ROOT / ".gitlab/ci/README.md").read_text()
         self.assertIn(
