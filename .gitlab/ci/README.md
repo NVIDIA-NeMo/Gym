@@ -31,3 +31,72 @@ Focused validation runs with:
 ```bash
 uv run pytest tests/unit_tests/tooling/test_collect_downstream_junit.py
 ```
+
+## Advisory review pools
+
+Today MR webhooks run the shared adapter on protected `nv-internal-main` and
+create optional approval rules with zero required approvals. These rules expose
+eligible approvers; they do not assign the MR's Reviewers field.
+
+From deployment of this configuration, a lightweight preparation job will validate
+`TRIGGER_PAYLOAD` and generate a child pipeline. Each child will lock only
+`gym-review-pools-191584-<MR IID>`. Updates to one MR will remain serialized while
+different MRs can run concurrently. Irrelevant events will generate a no-op child
+without credentials or dependency installation.
+
+```mermaid
+flowchart LR
+  Event[MR webhook] --> Prepare[Validate event on protected branch]
+  Prepare --> Child[Generate child for numeric MR IID]
+  Child --> Lock[Per-MR resource group]
+  Lock --> Adapter[Pinned shared adapter]
+  Rules[GitHub suggestion rules and team membership] --> Adapter
+  Adapter --> Pools[Optional GitLab approval pools]
+```
+
+The GitLab adapter pin will move to
+`f6e8ed5837b263566534bf0dff0d83a7c653ca8b`
+([FW-CI-templates PR 631](https://github.com/NVIDIA-NeMo/FW-CI-templates/pull/631)).
+The adapter will skip mapped users without active Developer-or-higher project
+membership and report them in `warnings`. Missing identity mappings, empty pools,
+and attempts to replace required approval rules will still block writes. The MR
+author is excluded. The adapter will always reconcile the optional approval pools.
+When the MR has no reviewers, the adapter will additionally assign eligible pool
+members as reviewers. If reviewers already exist, their list will stay unchanged.
+The adapter rechecks the reviewer list immediately before assignment and checks
+the current MR state and head before writes. GitLab has no atomic assign-if-empty
+operation, so a manual assignment in the remaining read/write window can race.
+
+The dispatcher accepts only open, reopen, or update events for non-draft MRs in
+project `191584` targeting `nv-internal-main`. Only a positive integer MR IID is
+inserted into the child configuration. The child uses a local trusted job template
+from the protected pipeline commit; webhook content cannot supply job code.
+The preparation job checks out the protected branch, never MR source code. The
+credentialed child uses `GIT_STRATEGY: empty` and fetches only the pinned adapter.
+
+Both credentials are protected, masked, hidden, raw CI variables scoped to the
+`review-pools` environment:
+
+| Variable | Purpose |
+| --- | --- |
+| `GH_SSO_MANAGMENT_PAT` | Read audited SSO identities, GitHub rules, and team membership. |
+| `GITLAB_REVIEW_POOLS_TOKEN` | Read project members and manage optional MR approval rules. |
+
+The protected environment permits dedicated project bot `160783`, which owns
+trigger `3236`. Webhook `283184` sends merge request events to that trigger on
+protected `nv-internal-main`. The child inherits the triggering identity and reads
+the project variables in its own `review-pools` environment; the bridge forwards
+neither pipeline nor YAML variables. CPU CI continues to select MR pipelines only.
+
+Failures remain advisory through `allow_failure: true`; inspect the child job
+status and trace rather than relying on the parent pipeline's success status.
+
+GitLab switches to MR-local approval rules when the first optional pool is
+created. Future project-level regular or any-approver rules will not automatically
+apply to those MRs. Before introducing or changing project approval requirements,
+maintainers must migrate rules on existing MRs as part of that policy change.
+
+Validate the dispatcher tests, shared adapter tests, pre-commit hooks, and expanded
+parent/child configurations with GitLab CI lint. After deployment, trigger two
+different MRs and verify different resource-group keys, inspect missing-member
+warnings, and repeat reconciliation to confirm an empty change plan.

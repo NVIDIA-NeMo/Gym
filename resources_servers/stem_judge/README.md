@@ -38,7 +38,8 @@ the reason in `grading_status`.
 | `box_too_long` | The box is longer than `max_box_chars` (off by default). |
 | `answer_too_long` | The judge would see the whole final answer, and it is longer than `max_answer_chars`. |
 
-After the gates, the server makes one judge call:
+After the gates, the base configuration sends the row to the judge. The
+[question-bank preset](#question-bank-grading-options) also supports masked abstentions and JSON reasons.
 
 - **Answer rows:** the stem_v11 prompt. The judge's last `Judgement: 'yes'|'no'`
   gives reward 1 or 0.
@@ -154,6 +155,81 @@ to the shipped config's `policy_model`.
 `data/example_rollouts.jsonl` holds one rollout per example row from these
 commands: the policy `nvidia/nemotron-3.5-lightning-30b-a3b` and the judge
 `nvidia/nemotron-3-ultra-550b-a55b`.
+
+## Question-bank grading options
+
+The question-bank preset uses the same resources server, agent and rubric grader.
+Select it with `gym env start --resources-server stem_judge/question_bank` and the
+usual model arguments. It includes the base config and overrides its answer options.
+
+| Answer option | Base config | Question-bank preset |
+| --- | --- | --- |
+| `guideline_scope` | `stem` | `cross_domain` treats v11 examples as guidance for reference comparisons in any subject. |
+| `extra_answer_rules` | `[]` | A list of additional instructions for model-judged answer rows. |
+| `verdict_mode` | `binary` | `yes_no_unresolved` adds abstention. An explicit no is a measured zero. An abstention or unparseable verdict has unknown correctness and sets `mask_sample=true`. |
+| `verdict_format` | `line` | `json` saves the verdict, reason code and supporting evidence on model-judged answer rows. |
+| `box_parser` | `exact` | `last_command` recognizes whitespace before the opening brace, skips escaped commands, and rejects a malformed final box even when an earlier one is valid. |
+| `boxed_judge_input` | `final_answer` | `box` grades the extracted answer. Free-answer rows use their full final message. |
+
+Set each option independently. The prompt options reuse the sections of the shipped
+`stem_v11.txt` template. Custom templates used with those options must retain its section
+markers. Gym marks the individual sample. On NeMo RL branches that provide SingleController's
+`grpo.exclude_failed_judge_groups`, enable it with NeMo Gym, `grpo.use_dynamic_sampling=true`
+and `env.should_mask_flagged_samples=true` to exclude and refill the entire group.
+On NeMo RL main, `grpo.masked_reward_policy: exclude` excludes masked samples from the group baseline.
+
+If recovery rejudges a saved answer, a parsed `unresolved` verdict completes the
+regrade once. The saved answer stays masked with unknown correctness. A malformed
+judge reply leaves the original answer eligible for another grading attempt.
+
+The question-bank preset requests a structured explanation. For a line verdict, append
+`++stem_judge.resources_servers.stem_judge.verdict_format=line` to the launch command.
+The model returns one JSON object, for example:
+
+```json
+{"verdict":"incorrect","reason_code":"wrong_denominator","evidence":"The submitted 1/3 differs from the reference 1/2."}
+```
+
+The saved rollout keeps that object in `judge_evaluations[0].judgment`, alongside
+the usual `verdict_label`. The optional generation log records it in `judgments`.
+Binary mode accepts `correct` and `incorrect`. Three-way mode also accepts
+`unresolved`. A missing reason, blank evidence, duplicate field, or truncated
+reply produces `judge_unparsed`. Binary mode gives an unparsed reply reward zero.
+Three-way mode masks it as unknown.
+
+The solver instruction is a separate generation option. For a dataset of **boxed**
+questions with a raw `question` field, render it once before generating rollouts:
+
+```bash
+gym dataset render --input boxed_questions.jsonl \
+  --prompt-config resources_servers/stem_judge/prompt_templates/boxed_final_answer.yaml \
+  --output boxed_prompts.jsonl
+```
+
+The template asks the solver to put its final answer, and only its final answer,
+inside `\boxed{}`. Use the original prompts for free-response tasks or historical
+rollouts. Gym's renderer rejects already materialized input.
+
+### Adding rules to the answer judge
+
+Add `--config rules.yaml` to the launch command. Put the rules under the STEM
+instance they apply to. Gym includes this list in the resolved run configuration.
+
+```yaml
+stem_judge:
+  resources_servers:
+    stem_judge:
+      extra_answer_rules:
+        - For archive classes, accept K-17 as an alias for Blue Ledger.
+```
+
+For a working example, pass `--config resources_servers/stem_judge/examples/archive_rules.yaml`.
+Each string becomes a `<rule>` block immediately after the last built-in rule,
+before the verdict instructions. Braces in LaTeX, JSON and examples are literal.
+Custom answer templates using this option need a closing `</rule>` marker.
+Additional rules take precedence over the default exact-match shortcut. A STEM
+instance with extra rules sends answer comparisons to the model, including exact
+math matches. Rubric rows use their own criteria.
 
 ## Test
 

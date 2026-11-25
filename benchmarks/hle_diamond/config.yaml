@@ -12,6 +12,12 @@ hle_diamond_equivalence_llm_judge_resources_server:
   _inherit_from: equivalence_llm_judge
   resources_servers:
     equivalence_llm_judge:
+      # Loopback on every preset: only Gym's own servers call this server, from the same host (the Environment
+      # Server, or the agent server on the *_legacy_agent presets), and its /verify returns the judge model's
+      # whole reply. The sandboxed presets move Resources servers to the
+      # address their sandboxes reach (absolute_ip_server_types, use_absolute_ip or an explicit default_host);
+      # a server's own host wins over all three.
+      host: 127.0.0.1
       judge_model_server:
         type: responses_api_models
         name: policy_model

@@ -46,12 +46,6 @@ if TYPE_CHECKING:
         GenerationCutReceipt,
     )
     from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
-    from nemo_gym.server_runtime._checkpoint.sandbox import (
-        SandboxCheckpointConfig,
-        SandboxCheckpointError,
-        SandboxSessionCheckpointer,
-        checkpoint_state_dir,
-    )
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
@@ -128,6 +122,12 @@ if TYPE_CHECKING:
         install_auto_exposure,
         maybe_auto_expose,
     )
+    from nemo_gym.server_runtime.owned_sandboxes import (
+        OwnedSandboxes,
+        SandboxCheckpointConfig,
+        SandboxCheckpointError,
+        checkpoint_state_dir,
+    )
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
     from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
     from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
+        END_ACTIVATION_HEADER,
         TOOL_CALL_ID_HEADER,
         TOOL_ERROR_HEADER,
         DirectHTTPToolAccess,
@@ -202,6 +203,7 @@ _PUBLIC_API = {
     "MCPTool": "mcp_auto_exposure",
     "LentSandboxes": "sandbox_lending",
     "MCPToolAccess": "tool_access",
+    "OwnedSandboxes": "owned_sandboxes",
     "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
@@ -226,9 +228,8 @@ _PUBLIC_API = {
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
     "SHUTDOWN_STOP_CONCURRENCY": "sandbox_lending",
     "STOP_TIMEOUT_S": "sandbox_lending",
-    "SandboxCheckpointConfig": "_checkpoint.sandbox",
-    "SandboxCheckpointError": "_checkpoint.sandbox",
-    "SandboxSessionCheckpointer": "_checkpoint.sandbox",
+    "SandboxCheckpointConfig": "owned_sandboxes",
+    "SandboxCheckpointError": "owned_sandboxes",
     "ServedTools": "base_environment_server",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
@@ -241,6 +242,7 @@ _PUBLIC_API = {
     "StaleAttemptError": "_checkpoint.errors",
     "StepType": "_checkpoint.steps",
     "TOKEN_HEADER": "mcp_auto_exposure",
+    "END_ACTIVATION_HEADER": "tool_access",
     "TOOL_CALL_ID_HEADER": "tool_access",
     "TOOL_ERROR_HEADER": "tool_access",
     "ToolAccess": "tool_access",
@@ -250,7 +252,7 @@ _PUBLIC_API = {
     "ToolSpec": "episode_tools",
     "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
-    "checkpoint_state_dir": "_checkpoint.sandbox",
+    "checkpoint_state_dir": "owned_sandboxes",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
     "episode_tool": "episode_tools",

@@ -370,6 +370,9 @@ def grade(trajectory: Mapping[str, Any], native: Mapping[str, Any]) -> dict[str,
         expected_version=(trajectory.get("identity_case") or {}).get("expected_version"),
     )
     if answered_empty:
+        # Indirect openings waive identity disclosure, not a visible answer.
+        classified["status_proposal"] = False
+        classified["metrics"]["passed"] = 0.0
         native = {key: value for key, value in native.items() if key != "error"}
     return {
         **native,

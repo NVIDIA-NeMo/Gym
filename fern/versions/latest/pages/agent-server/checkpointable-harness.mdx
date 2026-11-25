@@ -55,6 +55,15 @@ Take the agent's own concurrency slot with `activation.slot(semaphore, deadline=
 activation as parked, and the slot is given back on every path, including a retire or close while the activation is
 parked.
 
+On a provider whose snapshot keeps the sandbox's processes (`capabilities.snapshot_keeps`), create the session with
+`pause_mode="hold"`, and pass the same `pause_mode` to `SandboxSession.rebind` after a restore. The supervisor then
+acknowledges a pause without signalling anything: the harness keeps running, its next model call waits at the
+checkpoint (the model server holds calls while a checkpoint is open), and the time the pause is held does not count
+against the harness timeout. Each acknowledgement names the supervisor (`identity`, `PID.START`), and
+`SandboxSession.checkpoint_state()` records it with the pause it holds. A pause requested after the launch command
+was sent waits for that launch's supervisor to answer; if none has started when the pause's timeout ends, the pause
+is unconfirmed in hold mode, so the launch is stopped instead of being snapshotted with a pause nothing names.
+
 ## Resume after a crash
 
 Per-harness policy stays in the adapter:
@@ -68,6 +77,15 @@ Per-harness policy stays in the adapter:
   forked sandbox. Override `_rebind_restored_agent_session_state` to connect it and call `SandboxSession.rebind`.
   Declare `rebinds_tool_accesses = True` if the re-bound session takes the new seed's tool grants, so episodes with
   resources MCP grants can continue instead of restarting.
+- **Processes kept.** When the provider's snapshot kept the sandbox's processes and the bookmark holds a pause
+  (`pause_seq`, `supervisor_identity`), the launch may still be running in the fork. `check_restored` tells, in one
+  command, whether its supervisor still runs as that identity and holds that pause, with no receipt yet. If so,
+  point the harness at the new model server, then `SandboxSession.adopt(pause_seq=...)` continues the pause and waits
+  for the receipt, as `execute` would have, under `run_with_checkpoint_pauses` like a launch. If not,
+  `abandon_launch` kills the launch without continuing anything, and the next launch relaunches as below. OpenCode
+  reaches the model through `nemo_gym/agents/utils/model_relay.mjs`, which `harness_runner.sh` starts in the sandbox
+  on OpenCode's own binary (`BUN_BE_BUN=1`), so any task image can run it: re-pointing it (a new `gen` in its endpoint
+  file) makes it re-send the call the checkpoint cut to the new model server.
 - **Resume decision.** On the first launch after a stop or a restore, read the saved conversation. Resume it when it is
   the task's own and the model answered at least once; otherwise start afresh from the original prompt. OpenCode
   re-posts the last user message with empty `parts` through `opencode serve` (`reprompt_opencode.sh`), so no turn is added.
@@ -86,4 +104,5 @@ machine (`LocalExecProvider`) and a test harness in place of the CLI. Build a `H
 `nemo_gym.server_runtime`) and call `await check_harness_adapter(fixture, tmp_path / "state")`. It checks pause → park → continue, a re-sent
 activation, the stop fallback and relaunch, the close of a restored session that was never re-bound, re-bind and resume
 after a crash, and a close while the harness runs. `responses_api_agents/opencode_agent/tests/test_checkpoint.py` shows
-a fixture with a fake `opencode` executable.
+a fixture with a fake `opencode` executable; `test_resume_in_place.py` runs it on a provider that keeps processes,
+through a crash of the agent server alone.

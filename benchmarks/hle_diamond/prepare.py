@@ -26,7 +26,8 @@ questions without an image as raw fields to be templated at rollout time via
 ``prompt_config`` (``text.yaml``, the agent-session presets and their ``*_legacy_agent``
 relay presets, through ``prepare_text.py``). ``--prompt opencode``
 materializes every question with ``prompts/opencode.yaml`` instead, the single user
-message the OpenCode sandboxed harness forwards (``opencode_full.yaml``):
+message the OpenCode harnesses forward (``opencode_hle_tools_full.yaml`` on the
+``opencode_agent`` session, and the deprecated ``opencode_full.yaml`` presets on the relay):
 image questions carry the same ``input_image`` block, and there is no system message to drop.
 
 The corpus is validated before anything is written: a wrong row count, partition
@@ -159,8 +160,10 @@ def prepare(text_only: bool = False, limit: Optional[int] = None, prompt: str = 
             mechanism; it bypasses the completeness check.
         prompt: Which ``prompts/`` file the full set is materialized with: ``default``
             (upstream's system message plus the bare question) or ``opencode`` (the
-            instruction folded into the single user message the OpenCode sandboxed
-            harness forwards; written to ``hle_diamond_benchmark_opencode_full.jsonl``).
+            instruction folded into the single user message the OpenCode harnesses
+            forward, for ``opencode_hle_tools_full.yaml`` and the deprecated
+            ``opencode_full.yaml`` presets; written to
+            ``hle_diamond_benchmark_opencode_full.jsonl``).
             Ignored with ``text_only``, whose rows are templated at rollout time.
 
     Returns:
