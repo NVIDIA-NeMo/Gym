@@ -832,7 +832,7 @@ async def test_upload_builds_mkdir_and_cp(fake_binary: str, monkeypatch: pytest.
     cp_calls = [c for c in rec.calls if "cp" in c["argv"]]
     assert exec_calls and "mkdir -p /etc" in exec_calls[0]["argv"][-1]
     assert _contains_seq(exec_calls[0]["argv"], ["--user", "0"])  # mkdir runs as root
-    assert cp_calls[0]["argv"] == [FAKE_BINARY, "cp", "-L", str(src), "nemo-gym-x:/etc/app.conf"]
+    assert cp_calls[0]["argv"] == [FAKE_BINARY, "cp", str(src), "nemo-gym-x:/etc/app.conf"]
 
 
 async def test_upload_no_parent_skips_mkdir(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -843,7 +843,7 @@ async def test_upload_no_parent_skips_mkdir(fake_binary: str, monkeypatch: pytes
     await provider.upload_file(_make_handle(), src, "out.txt")  # relative -> no parent dir
 
     assert not any("exec" in c["argv"] for c in rec.calls)
-    assert rec.calls[0]["argv"] == [FAKE_BINARY, "cp", "-L", str(src), "nemo-gym-x:out.txt"]
+    assert rec.calls[0]["argv"] == [FAKE_BINARY, "cp", str(src), "nemo-gym-x:out.txt"]
 
 
 async def test_upload_mkdir_failure_raises(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

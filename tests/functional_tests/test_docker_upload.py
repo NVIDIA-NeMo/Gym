@@ -38,15 +38,14 @@ def docker_daemon() -> None:
 
 
 @pytest.mark.parametrize("source_kind", ["regular", "absolute_symlink", "relative_symlink"])
-async def test_upload_copies_source_file_contents(docker_daemon: None, tmp_path: Path, source_kind: str) -> None:
+async def test_upload_preserves_files_and_source_links(docker_daemon: None, tmp_path: Path, source_kind: str) -> None:
     original = tmp_path / "original.sh"
     payload = b'#!/bin/sh\nprintf "docker-upload-payload\\n"\n'
     original.write_bytes(payload)
     source = original
     if source_kind != "regular":
-        source = tmp_path / "component" / "runner.sh"
-        source.parent.mkdir()
-        source.symlink_to(original if source_kind == "absolute_symlink" else Path("../original.sh"))
+        source = tmp_path / "runner.sh"
+        source.symlink_to(original if source_kind == "absolute_symlink" else Path("original.sh"))
 
     image = os.environ.get("NEMO_GYM_DOCKER_TEST_IMAGE", "alpine:3.21")
     provider = DockerProvider(
@@ -58,15 +57,25 @@ async def test_upload_copies_source_file_contents(docker_daemon: None, tmp_path:
         await sandbox.start(SandboxSpec(image=image, ttl_s=120))
         await sandbox.upload(source, "/tmp/runner.sh")
 
-        # The host link remains a link; the remote task needs usable contents rather than that host-only target.
         assert source.is_symlink() is (source_kind != "regular")
         assert original.read_bytes() == payload
-        result = await sandbox.exec("test -f /tmp/runner.sh && test ! -L /tmp/runner.sh && sh /tmp/runner.sh")
+        if source_kind == "regular":
+            command = "test -f /tmp/runner.sh && test ! -L /tmp/runner.sh && sh /tmp/runner.sh"
+            expected_output = "docker-upload-payload\n"
+        else:
+            command = "test -L /tmp/runner.sh && readlink /tmp/runner.sh"
+            expected_output = f"{source.readlink()}\n"
+        result = await sandbox.exec(command)
         assert result.error_type is None, result
         assert result.return_code == 0, result
-        assert result.stdout == "docker-upload-payload\n"
+        assert result.stdout == expected_output
         downloaded = tmp_path / "downloaded.sh"
         await sandbox.download("/tmp/runner.sh", downloaded)
-        assert downloaded.read_bytes() == payload
+        if source_kind == "regular":
+            assert not downloaded.is_symlink()
+            assert downloaded.read_bytes() == payload
+        else:
+            assert downloaded.is_symlink()
+            assert downloaded.readlink() == source.readlink()
     finally:
         await sandbox.stop()
