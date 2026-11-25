@@ -48,8 +48,8 @@ aime25_math_with_judge_environment_server:
         model_server: policy_model
       sandbox_opt_out:
         # The task calls no tools, so a large run may set `task: true` to save sandbox capacity: the agent loop then
-        # runs in the Agent Server's process. The server still checks the provider block at startup; to run with no
-        # provider at all, set `sandbox_provider` and `sandbox_config` to null instead.
+        # runs in the Agent Server's process. With the verifier opted out too, the server starts no sandbox and needs
+        # no provider block.
         task: false
         # Math-Verify runs nothing from the answer (see the math_with_judge README), so /verify runs in the
         # Resources Server.
