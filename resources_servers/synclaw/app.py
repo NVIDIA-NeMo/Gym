@@ -23,6 +23,7 @@ from synclaw.tools.synthesis import SynthesisTools
 
 from nemo_gym.core import NeMoGymEasyInputMessage
 from nemo_gym.server_runtime import SimpleResourcesServer
+from nemo_gym.verification import VerifierFixture
 from resources_servers.synclaw.schema import (
     SYNCLAW_SUBMISSION_KEY,
     SynClawResourcesServerConfig,
@@ -73,7 +74,38 @@ def _run_tool_in_worker(
         raise RuntimeError("SynClaw tool worker is not initialized")
 
 
-class SynClawResourcesServer(SimpleResourcesServer):
+class SynClawVerifier:
+    """Scores a submission. It reads only the submission and the target, so it needs no database."""
+
+    config: SynClawResourcesServerConfig
+
+    async def verify(self, body: SynClawVerifyRequest) -> SynClawVerifyResponse:
+        submission = (body.response.model_extra or {}).get(SYNCLAW_SUBMISSION_KEY)
+        submitted = submission is not None
+        accepted = bool((submission or {}).get("accepted"))
+
+        similarity = submission_similarity_to_target(
+            submission=submission,
+            target_smiles=body.target_smiles,
+        )
+        similarity = float(similarity or 0)
+        is_exact = submission_identical_to_target(submission, body.target_smiles) is True
+
+        alpha = self.config.max_similarity_reward
+        reward = 1.0 if is_exact else alpha * similarity * accepted
+
+        return SynClawVerifyResponse(
+            **(body.model_dump() | {"evaluation_completed": True}),
+            reward=reward,
+            submitted=submitted,
+            accepted=accepted,
+            similarity=similarity,
+            exact_reconstruction=is_exact,
+            target_hidden_from_stock=self.config.hide_target_building_block,
+        )
+
+
+class SynClawResourcesServer(SynClawVerifier, SimpleResourcesServer):
     config: SynClawResourcesServerConfig
 
     _db_path: Path = PrivateAttr()
@@ -151,30 +183,19 @@ class SynClawResourcesServer(SimpleResourcesServer):
                     self._pool = self._new_pool()
                 raise
 
-    async def verify(self, body: SynClawVerifyRequest) -> SynClawVerifyResponse:
-        submission = (body.response.model_extra or {}).get(SYNCLAW_SUBMISSION_KEY)
-        submitted = submission is not None
-        accepted = bool((submission or {}).get("accepted"))
 
-        similarity = submission_similarity_to_target(
-            submission=submission,
-            target_smiles=body.target_smiles,
-        )
-        similarity = float(similarity or 0)
-        is_exact = submission_identical_to_target(submission, body.target_smiles) is True
+class _FixtureVerifier(SynClawVerifier):
+    """The verifier alone, with default scoring settings, for `VERIFIER_FIXTURE`."""
 
-        alpha = self.config.max_similarity_reward
-        reward = 1.0 if is_exact else alpha * similarity * accepted
+    def __init__(self) -> None:
+        self.config = SynClawResourcesServerConfig.model_construct()
 
-        return SynClawVerifyResponse(
-            **(body.model_dump() | {"evaluation_completed": True}),
-            reward=reward,
-            submitted=submitted,
-            accepted=accepted,
-            similarity=similarity,
-            exact_reconstruction=is_exact,
-            target_hidden_from_stock=self.config.hide_target_building_block,
-        )
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=_FixtureVerifier,
+    request_model=SynClawVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":

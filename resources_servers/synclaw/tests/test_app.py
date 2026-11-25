@@ -14,7 +14,8 @@ from synclaw.core import db
 from synclaw.rollout.policy import RolloutPolicyConfig
 
 from nemo_gym.client import ServerClient
-from resources_servers.synclaw.app import SynClawResourcesServer
+from nemo_gym.verification import exercise_verifier_fixture
+from resources_servers.synclaw.app import VERIFIER_FIXTURE, SynClawResourcesServer
 from resources_servers.synclaw.schema import (
     SYNCLAW_SUBMISSION_KEY,
     SynClawResourcesServerConfig,
@@ -67,6 +68,10 @@ def _make_request(submission: dict | None = None) -> SynClawVerifyRequest:
     if submission is not None:
         response |= {SYNCLAW_SUBMISSION_KEY: submission}
     return SynClawVerifyRequest.model_validate(_BASE_REQUEST | {"response": response})
+
+
+def test_verifier_fixture():
+    asyncio.run(exercise_verifier_fixture(VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"))
 
 
 class TestVerify:

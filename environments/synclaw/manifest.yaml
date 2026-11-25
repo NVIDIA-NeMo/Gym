@@ -1,0 +1,28 @@
+name: synclaw
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: Retrosynthesis planning. An LLM agent searches purchasable building blocks and reaction templates, tests
+  reaction steps with RDKit, and submits a route that is validated against the target molecule.
+modality: text
+licensing: Apache-2.0 AND LicenseRef-OpenMDW-1.1 AND CC-BY-SA-4.0
+authors:
+- Dane Corneil
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: synclaw
+agent_server: synclaw_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/synclaw/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+prompt_source: agent
+lifecycle: active
