@@ -33,7 +33,12 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NeMoGymResponse
 from nemo_gym.sandbox import SandboxAccess
-from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, verifier_observability
+from nemo_gym.server_runtime import (
+    NG_SANDBOX_ACCESS_KEY,
+    ResourcesSeedSessionRequest,
+    SandboxGroupSpec,
+    verifier_observability,
+)
 from nemo_gym.trajectory import VerifierInvocation
 from nemo_gym.verification import SandboxVerificationError
 
@@ -389,6 +394,11 @@ class TestLentSandboxVerify:
     def _lent_request(self, code: str = "n=int(input())\nprint(n*n)") -> CompCodingVerifyRequest:
         body = _verify_request(code).model_dump(mode="json") | {NG_SANDBOX_ACCESS_KEY: _ACCESS}
         return CompCodingVerifyRequest.model_validate(body)
+
+    def test_the_seed_declares_a_code_running_grader_and_the_verifier_image(self) -> None:
+        # The Environment Server starts the group from this image and never lets the grader opt out of it.
+        group = _make_server().declared_sandbox_group(MagicMock(spec=ResourcesSeedSessionRequest))
+        assert group == SandboxGroupSpec(image="code-gen-verifier:test", grader_runs_code=True)
 
     def test_the_access_is_read_from_the_wire_key_and_never_dumped(self) -> None:
         request = self._lent_request()

@@ -39,7 +39,9 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedSessionRequest,
     ReverifyMode,
+    SandboxGroupSpec,
     SimpleResourcesServer,
     borrow,
     observe_programmatic_grading,
@@ -118,11 +120,18 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
     ray_enabled = False
+    # The grader runs the candidate's code, so it never opts out of a sandbox: an Environment Server lends /verify the
+    # attempt's sandbox group, or one of the grader's own when the task opted out.
+    grader_runs_code = True
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
         self._sandbox_target: Optional[Tuple[Dict[str, Any], Dict[str, str]]] = None
+
+    def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec:
+        """The attempt's sandbox group runs the unit tests, so it starts from code_gen's verifier image."""
+        return SandboxGroupSpec(image=self.config.sandbox_config.image)
 
     def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
         """Provider config and sandbox metadata, resolved once from the global config."""

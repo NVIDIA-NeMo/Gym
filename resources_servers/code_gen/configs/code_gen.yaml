@@ -74,12 +74,13 @@ code_gen_environment_server:
       agent_server:
         type: responses_api_agents
         name: code_gen_simple_agent
-      # Each attempt runs in one sandbox this server owns: Simple Agent's loop runs in it, then code_gen runs the
-      # unit tests in it at /verify, and this server stops it. The agent calls no tools, so the sandbox reaches only
-      # the model server. Providers that cannot apply model_only (Docker, Enroot) refuse to start; see the README.
+      # Each attempt runs in one sandbox group this server owns: Simple Agent's loop runs in it, then code_gen runs
+      # the unit tests in it at /verify, and this server stops it. code_gen declares the group's image (its
+      # sandbox_config.image) at seed. The agent calls no tools, so the group reaches only the model server.
+      # Providers that cannot apply model_only (Docker, Enroot) refuse to start; see the README, which also shows
+      # sandbox_opt_out.task for running the loop in the Agent Server process.
       sandbox_provider: sandbox
       sandbox_config:
-        image: ${oc.env:CODE_GEN_SANDBOX_IMAGE,null}
         workdir: /tmp
         network: model_only
         model_server: policy_model
