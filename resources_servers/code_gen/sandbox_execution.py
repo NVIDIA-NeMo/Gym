@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Grade a candidate in a fresh provider sandbox.
+"""Grade a candidate in a sandbox: the attempt's sandbox lent to ``/verify``, or a fresh one.
 
 This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py``, which
 runs only in the sandbox, and the unchanged grading harness from ``lcb_integration/``, the same
 grading code used for every candidate; nothing else from this server is uploaded. The upload and run go through
-``nemo_gym.verification.sandbox_verification.run_verification_sandbox``, which raises
+``run_verification_in_sandbox`` for a lent sandbox and ``run_verification_sandbox`` for a fresh one; both raise
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 Candidate failures (wrong answer, timeout, crash) come back as normal harness results.
 """
@@ -29,10 +29,11 @@ from typing import Any
 
 from pydantic import BaseModel, StrictBool, StrictInt
 
-from nemo_gym.sandbox import SandboxProvider
+from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, cpu_cap_env
 from nemo_gym.verification import (
     RUNNER_FILE,
     SandboxVerificationConfig,
+    run_verification_in_sandbox,
     run_verification_sandbox,
 )
 
@@ -68,23 +69,46 @@ async def check_correctness_in_sandbox(
     debug: bool,
     *,
     num_tests: int,
-    provider: Mapping[str, Any] | SandboxProvider,
     config: SandboxVerificationConfig,
-    metadata: Mapping[str, str],
+    sandbox: AsyncSandbox | None = None,
+    provider: Mapping[str, Any] | SandboxProvider | None = None,
+    metadata: Mapping[str, str] | None = None,
     work_dir: str = DEFAULT_WORK_DIR,
 ) -> tuple[list[bool | int], dict[str, Any] | None]:
-    """Sandboxed equivalent of ``check_correctness``; raises ``SandboxVerificationError`` on infra failure."""
-    parsed = await run_verification_sandbox(
-        provider=provider,
-        config=config,
-        files={
-            RUNNER_FILE: _RUNNER.read_text(encoding="utf-8"),
-            **{name: (_CODE_GEN_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
-        },
-        request={"sample": sample, "generation": generation, "timeout": timeout, "debug": debug},
-        exec_timeout_s=exec_timeout_s(timeout, num_tests),
-        parse_result=_RunnerResult.model_validate_json,
-        metadata=metadata,
-        work_dir=work_dir,
-    )
+    """Sandboxed equivalent of ``check_correctness``; raises ``SandboxVerificationError`` on infra failure.
+
+    Exactly one of ``sandbox`` and ``provider`` is given. ``sandbox`` is one the caller holds, such as the attempt's
+    sandbox lent to ``/verify``: the tests run in it with ``config.python``, and it is left running for its owner.
+    ``provider`` starts a fresh sandbox from ``config`` for this one grade, with ``metadata``, and stops it after.
+    """
+    if (sandbox is None) == (provider is None):
+        raise ValueError("pass exactly one of sandbox and provider")
+    files = {
+        RUNNER_FILE: _RUNNER.read_text(encoding="utf-8"),
+        **{name: (_CODE_GEN_DIR / name).read_text(encoding="utf-8") for name in _HARNESS_FILES},
+    }
+    request = {"sample": sample, "generation": generation, "timeout": timeout, "debug": debug}
+    if sandbox is not None:
+        parsed = await run_verification_in_sandbox(
+            sandbox,
+            files=files,
+            request=request,
+            exec_timeout_s=exec_timeout_s(timeout, num_tests),
+            parse_result=_RunnerResult.model_validate_json,
+            work_dir=work_dir,
+            python=config.python,
+            # The same thread caps a fresh sandbox of config.resources gets.
+            env=cpu_cap_env(config.resources.cpu) | config.env,
+        )
+    else:
+        parsed = await run_verification_sandbox(
+            provider=provider,
+            config=config,
+            files=files,
+            request=request,
+            exec_timeout_s=exec_timeout_s(timeout, num_tests),
+            parse_result=_RunnerResult.model_validate_json,
+            metadata=metadata or {},
+            work_dir=work_dir,
+        )
     return parsed.result, parsed.metadata

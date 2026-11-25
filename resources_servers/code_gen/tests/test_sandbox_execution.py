@@ -26,7 +26,7 @@ import yaml
 from sandbox_execution import check_correctness_in_sandbox, exec_timeout_s
 
 from nemo_gym.core import VERIFIER_ERROR
-from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.verification import SandboxVerificationConfig, SandboxVerificationError
 
 
@@ -45,6 +45,7 @@ class _FakeProvider:
         self.specs = []
         self.uploads = []
         self.execs = []
+        self.envs = []
         self.closed = 0
 
     async def create(self, spec):
@@ -56,6 +57,7 @@ class _FakeProvider:
 
     async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append((command, timeout_s))
+        self.envs.append(env)
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def download_file(self, handle, source_path, target_path):
@@ -115,6 +117,67 @@ class TestSandboxLifecycle:
             await _grade(provider)
         assert info.value.failure_kind == VERIFIER_ERROR
         assert provider.closed == 1
+
+
+class TestHeldSandbox:
+    """Grading in a sandbox the caller holds, such as the attempt's sandbox lent to /verify."""
+
+    async def _grade_in(self, provider, **kwargs):
+        sandbox = AsyncSandbox(provider)
+        await sandbox.start(SandboxSpec(image="code-gen-verifier:test"))
+        result = await check_correctness_in_sandbox(
+            _SAMPLE,
+            _SQUARE,
+            3,
+            False,
+            num_tests=2,
+            sandbox=sandbox,
+            config=SandboxVerificationConfig(resources={"cpu": 2}),
+            **kwargs,
+        )
+        return sandbox, result
+
+    async def test_runs_in_the_held_sandbox_and_leaves_it_running(self) -> None:
+        provider = _FakeProvider()
+        sandbox, (result, _) = await self._grade_in(provider)
+
+        assert result == [True, True]
+        # Only the sandbox the caller started; the grade starts none and stops none.
+        assert len(provider.specs) == 1 and provider.closed == 0
+        call_dir = provider.uploads[0].removeprefix("/tmp/code_gen_verify/").split("/")[0]
+        assert f"/tmp/code_gen_verify/{call_dir}/request.json" in provider.uploads
+        runner = next(i for i, (command, _) in enumerate(provider.execs) if "sandbox_runner.py" in command)
+        assert provider.execs[runner][1] == exec_timeout_s(3, 2)
+        # The thread caps a fresh sandbox of the same resources would get.
+        assert provider.envs[runner]["OMP_NUM_THREADS"] == "2"
+        await sandbox.stop()
+
+    async def test_exactly_one_of_sandbox_and_provider(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            await check_correctness_in_sandbox(
+                _SAMPLE, _SQUARE, 3, False, num_tests=2, config=SandboxVerificationConfig()
+            )
+
+    async def test_real_runner_in_a_held_local_sandbox(self, tmp_path: Path) -> None:
+        sandbox = AsyncSandbox({"local": {}})
+        await sandbox.start(SandboxSpec())
+        try:
+            result, metadata = await check_correctness_in_sandbox(
+                _SAMPLE,
+                _SQUARE,
+                3,
+                False,
+                num_tests=2,
+                sandbox=sandbox,
+                config=SandboxVerificationConfig(python=sys.executable),
+                work_dir=str(tmp_path / "work"),
+            )
+            assert result == [True, True] and "execution time" in metadata
+            # The sandbox still runs commands after the grade: its owner stops it.
+            still_running = await sandbox.exec("true", timeout_s=30)
+            assert still_running.return_code == 0
+        finally:
+            await sandbox.stop()
 
 
 class TestLocalProvider:

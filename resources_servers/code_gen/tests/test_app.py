@@ -31,8 +31,9 @@ from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
-from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponse
-from nemo_gym.server_runtime import verifier_observability
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR, NeMoGymResponse
+from nemo_gym.sandbox import SandboxAccess
+from nemo_gym.server_runtime import NG_SANDBOX_ACCESS_KEY, verifier_observability
 from nemo_gym.trajectory import VerifierInvocation
 from nemo_gym.verification import SandboxVerificationError
 
@@ -364,6 +365,117 @@ class TestSandboxVerify:
         assert res.failure_reason == "runner failed (exit=137)"
         assert res.reward == 0.0
         assert res.extracted_model_code == "print(9)"
+
+
+_ACCESS = {
+    "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {"sandbox_id": "attempt-1"}},
+    "workdir": "/workspace",
+}
+
+
+class _LentSandbox:
+    """Stands in for the BorrowedSandbox that borrow() returns; records whether its client was released."""
+
+    def __init__(self) -> None:
+        self.disconnected = 0
+
+    async def disconnect(self) -> None:
+        self.disconnected += 1
+
+
+class TestLentSandboxVerify:
+    """The tests run in the sandbox the Environment Server lends /verify, never in one this server starts."""
+
+    def _lent_request(self, code: str = "n=int(input())\nprint(n*n)") -> CompCodingVerifyRequest:
+        body = _verify_request(code).model_dump(mode="json") | {NG_SANDBOX_ACCESS_KEY: _ACCESS}
+        return CompCodingVerifyRequest.model_validate(body)
+
+    def test_the_access_is_read_from_the_wire_key_and_never_dumped(self) -> None:
+        request = self._lent_request()
+        assert request.ng_sandbox_access == SandboxAccess.model_validate(_ACCESS)
+        assert NG_SANDBOX_ACCESS_KEY not in request.model_dump()
+
+    async def test_grades_in_the_borrowed_sandbox_and_releases_it(self, monkeypatch) -> None:
+        lent = _LentSandbox()
+        borrowed, calls = [], []
+
+        async def _borrow(access):
+            borrowed.append(access)
+            return lent
+
+        async def _passing(*args, **kwargs):
+            calls.append(kwargs)
+            return [True, True], {"execution time": 0.01}
+
+        monkeypatch.setattr(code_gen_app, "borrow", _borrow)
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        # No sandbox_provider of its own: a lent sandbox is all this server needs.
+        res = await _make_server(sandbox_provider=None, sandbox_config={}).verify(self._lent_request())
+
+        assert res.reward == 1.0 and not res.mask_sample
+        assert borrowed == [SandboxAccess.model_validate(_ACCESS)]
+        assert calls[0]["sandbox"] is lent and "provider" not in calls[0]
+        assert lent.disconnected == 1
+        assert NG_SANDBOX_ACCESS_KEY not in res.model_dump()
+
+    async def test_a_lent_sandbox_wins_over_this_servers_own_provider(self, monkeypatch) -> None:
+        lent = _LentSandbox()
+        calls = []
+
+        async def _borrow(access):
+            return lent
+
+        async def _passing(*args, **kwargs):
+            calls.append(kwargs)
+            return [True, True], None
+
+        monkeypatch.setattr(code_gen_app, "borrow", _borrow)
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
+        server = _make_server()
+        server._sandbox_target = ({"local": {}}, {"nemo_gym_server": "code_gen"})
+        await server.verify(self._lent_request())
+
+        assert calls[0]["sandbox"] is lent and "provider" not in calls[0]
+
+    async def test_a_runner_failure_still_releases_the_borrowed_client(self, monkeypatch) -> None:
+        lent = _LentSandbox()
+
+        async def _borrow(access):
+            return lent
+
+        async def _failing(*args, **kwargs):
+            raise SandboxVerificationError(VERIFIER_ERROR, "runner failed (exit=137)")
+
+        monkeypatch.setattr(code_gen_app, "borrow", _borrow)
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _failing)
+        res = await _make_server(sandbox_provider=None, sandbox_config={}).verify(self._lent_request())
+
+        assert res.mask_sample is True and res.failure_kind == VERIFIER_ERROR
+        assert lent.disconnected == 1
+
+    async def test_a_failed_borrow_masks_the_sample(self, monkeypatch) -> None:
+        async def _borrow(access):
+            raise RuntimeError("provider 'docker' cannot reconnect")
+
+        async def _never(*args, **kwargs):
+            raise AssertionError("no tests run without a sandbox")
+
+        monkeypatch.setattr(code_gen_app, "borrow", _borrow)
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _never)
+        res = await _make_server(sandbox_provider=None, sandbox_config={}).verify(self._lent_request())
+
+        assert res.mask_sample is True and res.failure_kind == PROVIDER_UNAVAILABLE
+        assert "cannot reconnect" in res.failure_reason
+
+    async def test_no_lent_sandbox_and_no_provider_masks_instead_of_running_on_the_host(self, monkeypatch) -> None:
+        async def _never(*args, **kwargs):
+            raise AssertionError("no tests run without a sandbox")
+
+        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _never)
+        res = await _make_server(sandbox_provider=None, sandbox_config={}).verify(_verify_request("print(9)"))
+
+        assert res.mask_sample is True and res.failure_kind == PROVIDER_UNAVAILABLE
+        assert res.reward == 0.0
 
 
 class TestProgrammaticGrading:

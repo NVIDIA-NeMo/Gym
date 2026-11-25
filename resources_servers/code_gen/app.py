@@ -26,13 +26,14 @@ from pydantic import BaseModel, Field, model_validator
 from sandbox_execution import check_correctness_in_sandbox
 
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import PROVIDER_UNAVAILABLE
 from nemo_gym.metrics import (
     add_avg_sample_std_dev,
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
-from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox import SandboxAccess, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -40,6 +41,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    borrow,
     observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -59,15 +61,17 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     unit_test_timeout_secs: int
     debug: bool
     reasoning_format_penalty: float = 0.0
-    # Run unit tests in a fresh provider sandbox per verification.
-    # Names a top-level sandbox block, such as `sandbox` from
-    # nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or is an inline provider mapping.
-    sandbox_provider: Union[str, Dict[str, Any]]
+    # The unit tests run in the attempt's sandbox when the Environment Server lends one to /verify. For a caller that
+    # lends none, they run in a fresh sandbox per verification from this provider: a top-level sandbox block, such as
+    # `sandbox` from nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or an inline provider mapping.
+    # Unset, a verification that is lent no sandbox is masked as an infrastructure failure: tests never run on this
+    # host.
+    sandbox_provider: str | dict[str, Any] | None = None
     sandbox_config: SandboxVerificationConfig = Field(default_factory=SandboxVerificationConfig)
 
     @model_validator(mode="after")
     def _require_sandbox_image(self) -> "CompCodingResourcesServerConfig":
-        if not self.sandbox_config.image:
+        if self.sandbox_provider is not None and not self.sandbox_config.image:
             raise ValueError("sandbox_config.image is required for code verification")
         return self
 
@@ -90,6 +94,10 @@ class CompCodingRunRequest(BaseRunRequest):
 
 class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
     verifier_metadata: Optional[Dict[str, Any]] = None
+    # The attempt's sandbox (body key NG_SANDBOX_ACCESS_KEY), lent by the Environment Server that owns it once the
+    # agent has closed. The tests run in it instead of in a sandbox of this server's own. Excluded from dumps, so no
+    # response or result carries it.
+    ng_sandbox_access: SandboxAccess | None = Field(default=None, exclude=True)
 
 
 class CompCodingVerifyResponse(BaseVerifyResponse):
@@ -119,6 +127,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
     def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
         """Provider config and sandbox metadata, resolved once from the global config."""
+        assert self.config.sandbox_provider is not None
         if self._sandbox_target is None:
             global_config_dict = get_global_config_dict()
             provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -264,15 +273,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            provider, sandbox_metadata = self._resolve_sandbox_target()
             try:
-                result, metadata = await check_correctness_in_sandbox(
-                    *task_args,
-                    num_tests=len(tests.inputs),
-                    provider=provider,
-                    config=self.config.sandbox_config,
-                    metadata=sandbox_metadata,
-                )
+                result, metadata = await self._run_tests(body.ng_sandbox_access, task_args, num_tests=len(tests.inputs))
             except SandboxVerificationError as e:
                 # The environment failed, not the policy: exclude the sample rather than score it.
                 LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
@@ -308,6 +310,42 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             )
 
         return observe_programmatic_grading(_grade)
+
+    async def _run_tests(
+        self, access: SandboxAccess | None, task_args: tuple[Any, ...], *, num_tests: int
+    ) -> tuple[list[bool | int], dict[str, Any] | None]:
+        """Run the unit tests in the lent sandbox, or else in a fresh sandbox of this server's own.
+
+        Raises:
+            SandboxVerificationError: When no sandbox can run them; the caller masks the sample.
+        """
+        if access is not None:
+            try:
+                sandbox = await borrow(access)
+            except Exception as e:
+                raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {e!r}") from e
+            try:
+                return await check_correctness_in_sandbox(
+                    *task_args,
+                    num_tests=num_tests,
+                    sandbox=sandbox,
+                    config=self.config.sandbox_config,
+                )
+            finally:
+                # Releases this server's client only: the Environment Server that lent the sandbox stops it.
+                await sandbox.disconnect()
+        if self.config.sandbox_provider is None:
+            raise SandboxVerificationError(
+                PROVIDER_UNAVAILABLE, "no sandbox was lent to /verify and code_gen has no sandbox_provider of its own"
+            )
+        provider, sandbox_metadata = self._resolve_sandbox_target()
+        return await check_correctness_in_sandbox(
+            *task_args,
+            num_tests=num_tests,
+            provider=provider,
+            config=self.config.sandbox_config,
+            metadata=sandbox_metadata,
+        )
 
 
 if __name__ == "__main__":

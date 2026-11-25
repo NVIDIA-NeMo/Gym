@@ -13,11 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run a verifier's grading harness in a fresh, single-use provider sandbox.
+"""Run a verifier's grading harness in a sandbox: a fresh, single-use one, or one the caller holds.
 
 A resources server uploads its runner and harness files with a JSON request; inside the
 sandbox ``sandbox_runner.py request.json result.json`` grades the submission and writes a
-result file, which is downloaded and parsed before the sandbox is stopped. Only the
+result file, which is downloaded and parsed. :func:`run_verification_sandbox` starts a sandbox for the one grade and
+stops it after; :func:`run_verification_in_sandbox` grades in a sandbox the caller already holds, such as the
+attempt's sandbox an Environment Server lends ``/verify``, and leaves it running for its owner to stop. Only the
 provider-neutral sandbox API is used, so any provider works.
 
 Submission failures (wrong answer, timeout, crash) are the harness's to report in the
@@ -37,7 +39,7 @@ from pydantic import BaseModel, Field, field_validator
 from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import SandboxProvider, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.utils import cpu_cap_env, read_text
+from nemo_gym.sandbox.utils import cpu_cap_env, read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)
@@ -111,17 +113,13 @@ async def run_verification_sandbox(
     """
     if RUNNER_FILE not in files:
         raise ValueError(f"files must include {RUNNER_FILE}")
-    # One directory per call: providers that share /tmp between sandboxes (local, and Apptainer, which binds the
-    # host /tmp by default) would otherwise let concurrent verifications overwrite each other's files.
-    work_dir = f"{work_dir.rstrip('/')}/{uuid.uuid4().hex}"
-    uploads = {f"{work_dir}/{name}": content for name, content in files.items()}
-    uploads[f"{work_dir}/request.json"] = json.dumps(request)
+    work_dir = _call_dir(work_dir)
     spec = SandboxSpec(
         image=config.image,
         ttl_s=config.ready_timeout_s + exec_timeout_s + _TTL_MARGIN_S,
         ready_timeout_s=config.ready_timeout_s,
         env=cpu_cap_env(config.resources.cpu) | config.env,
-        files=uploads,
+        files=_uploads(work_dir, files, request),
         metadata={**metadata, **config.metadata},
         resources=config.resources,
         provider_options=config.provider_options,
@@ -137,13 +135,105 @@ async def run_verification_sandbox(
             raise
         except Exception as e:
             raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"sandbox start failed: {e!r}") from e
+        return await _grade(
+            sandbox,
+            work_dir=work_dir,
+            python=config.python,
+            env=None,
+            exec_timeout_s=exec_timeout_s,
+            parse_result=parse_result,
+        )
+    finally:
+        try:
+            await sandbox.stop()
+        except Exception:
+            LOG.warning("Failed to stop verification sandbox", exc_info=True)
 
+
+async def run_verification_in_sandbox(
+    sandbox: AsyncSandbox,
+    *,
+    files: Mapping[str, str],
+    request: Mapping[str, Any],
+    exec_timeout_s: float,
+    parse_result: Callable[[str], T],
+    work_dir: str,
+    python: str = "python3",
+    env: Mapping[str, str] | None = None,
+) -> T:
+    """Grade one submission in a sandbox the caller already holds, and return the parsed result.
+
+    The same runner contract as :func:`run_verification_sandbox`, for a sandbox someone else started, such as the
+    attempt's sandbox an Environment Server lends ``/verify``. The files are uploaded into a fresh subdirectory of
+    ``work_dir`` and the runner runs there; the sandbox is left running, since its owner stops it.
+
+    Args:
+        sandbox: A started or borrowed sandbox.
+        files: As for :func:`run_verification_sandbox`.
+        request: As for :func:`run_verification_sandbox`.
+        exec_timeout_s: Deadline for the runner.
+        parse_result: As for :func:`run_verification_sandbox`.
+        work_dir: Absolute directory in the sandbox; each call uses its own subdirectory of it.
+        python: Interpreter inside the sandbox that runs the runner.
+        env: Environment for the runner, on top of the sandbox's own.
+
+    Raises:
+        SandboxVerificationError: ``provider_unavailable`` if the files could not be uploaded, ``verifier_error`` if
+            the runner failed or its result is invalid.
+    """
+    if RUNNER_FILE not in files:
+        raise ValueError(f"files must include {RUNNER_FILE}")
+    work_dir = _call_dir(work_dir)
+    try:
+        prepared = await sandbox.exec(f"mkdir -p {shlex.quote(work_dir)}", cwd="/", timeout_s=60)
+        if prepared.error_type or prepared.return_code != 0:
+            raise RuntimeError(
+                f"mkdir failed (exit={prepared.return_code}, error_type={prepared.error_type}): "
+                f"{(prepared.stderr or '')[-_LOG_TAIL_BYTES:]}"
+            )
+        for path, text in _uploads(work_dir, files, request).items():
+            await upload_text(sandbox, path=path, text=text)
+    except Exception as e:
+        raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"sandbox upload failed: {e!r}") from e
+    return await _grade(
+        sandbox,
+        work_dir=work_dir,
+        python=python,
+        env=dict(env) if env else None,
+        exec_timeout_s=exec_timeout_s,
+        parse_result=parse_result,
+    )
+
+
+def _call_dir(work_dir: str) -> str:
+    # One directory per call: providers that share /tmp between sandboxes (local, and Apptainer, which binds the
+    # host /tmp by default) would otherwise let concurrent verifications overwrite each other's files.
+    return f"{work_dir.rstrip('/')}/{uuid.uuid4().hex}"
+
+
+def _uploads(work_dir: str, files: Mapping[str, str], request: Mapping[str, Any]) -> dict[str, str]:
+    uploads = {f"{work_dir}/{name}": content for name, content in files.items()}
+    uploads[f"{work_dir}/request.json"] = json.dumps(request)
+    return uploads
+
+
+async def _grade(
+    sandbox: AsyncSandbox,
+    *,
+    work_dir: str,
+    python: str,
+    env: dict[str, str] | None,
+    exec_timeout_s: float,
+    parse_result: Callable[[str], T],
+) -> T:
+    """Run the uploaded runner in ``work_dir`` and parse its result; the caller stops the sandbox, if it owns it."""
+    try:
         # A submission may share the runner's stdout, so all output stays in the sandbox.
         command = (
             f"cd {shlex.quote(work_dir)} && "
-            f"{shlex.quote(config.python)} {RUNNER_FILE} request.json result.json > runner.log 2>&1"
+            f"{shlex.quote(python)} {RUNNER_FILE} request.json result.json > runner.log 2>&1"
         )
-        execution = await sandbox.exec(command, timeout_s=exec_timeout_s)
+        execution = await sandbox.exec(command, timeout_s=exec_timeout_s, env=env)
         # Providers report a timeout either as error_type or as exit code 124; both are nonzero here.
         if execution.error_type or execution.return_code != 0:
             raise SandboxVerificationError(
@@ -158,11 +248,6 @@ async def run_verification_sandbox(
     except Exception as e:
         # Request boundary: any other sandbox or result failure invalidates only this sample.
         raise SandboxVerificationError(VERIFIER_ERROR, f"sandbox verification failed: {e!r}") from e
-    finally:
-        try:
-            await sandbox.stop()
-        except Exception:
-            LOG.warning("Failed to stop verification sandbox", exc_info=True)
 
 
 async def _runner_log_tail(sandbox: AsyncSandbox, work_dir: str) -> str:
