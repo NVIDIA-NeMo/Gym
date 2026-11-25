@@ -69,7 +69,8 @@ class SimpleWeatherVerifier:
 class SimpleWeatherResourcesServer(ToolSidecarResources, SimpleWeatherVerifier, SimpleResourcesServer):
     # Tool results depend only on the request, so a continuation needs no session state.
     checkpoint_mode = "stateless"
-    # The verifier only reads the response's tool calls, so /verify runs here and is lent no sandbox.
+    # The verifier only reads the response's tool calls, so it supports only `none`: /verify runs here and is lent no
+    # sandbox.
     verifier_mode: ClassVar[VerifierMode] = "none"
     config: SimpleWeatherResourcesServerConfig
     _episode_by_session: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)

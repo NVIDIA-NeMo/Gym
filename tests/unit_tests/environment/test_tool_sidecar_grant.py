@@ -173,6 +173,7 @@ def _sidecar_server(
             "network": "model_only",
             "model_server": "policy_model",
         },
+        "verifier": {"mode": "none"},
     }
     server_config = SingleAgentTurnEnvironmentServerConfig.model_validate(base.config.model_dump() | settings | config)
     client.global_config_dict = OmegaConf.merge(
@@ -255,8 +256,8 @@ async def test_the_agent_is_granted_the_tool_sidecar_it_was_probed_to_reach_and_
     assert isinstance(grant, DirectHTTPToolAccess)
     assert str(grant.base_url).rstrip("/") == f"http://localhost:{_port(tool_host)}"
     assert dict(grant.cookies) == {"session": "cookie-value"}
-    # The tool state is copied out of the group while it runs. The verifier (verifier_mode "none") grades it in the
-    # Resources Server, lent nothing, after the group has stopped.
+    # The tool state is copied out of the group while it runs. The verifier (mode none) grades it in the Resources
+    # Server, lent nothing, after the group has stopped.
     imported = SandboxAccess.model_validate(calls["/tool_sidecar/import_state"]["json"]["sandbox_access"])
     assert imported.connection.descriptor["sandbox_id"] == "sb-1"
     assert running_at["/tool_sidecar/import_state"] == ["sb-1"]
@@ -265,12 +266,17 @@ async def test_the_agent_is_granted_the_tool_sidecar_it_was_probed_to_reach_and_
     assert provider.running() == []
 
 
+def _supporting(port: int, *modes: str) -> _Response:
+    """The seed's reply from a Resources Server whose ``/verify`` also runs in ``modes``."""
+    return _Response(_seed_body(port) | {"supported_verifier_modes": ["none", *modes]})
+
+
 async def test_a_shared_verifier_reads_the_tool_state_and_borrows_the_same_group(
     tool_host: _ToolHostStandIn,
 ) -> None:
     provider = _SidecarProvider()
-    server, client = _sidecar_server(provider, _port(tool_host))
-    client.responses[0] = _Response(_seed_body(_port(tool_host)) | {"verifier_mode": "shared"})
+    server, client = _sidecar_server(provider, _port(tool_host), verifier={"mode": "shared"})
+    client.responses[0] = _supporting(_port(tool_host), "shared")
     recorded = _recording(client, provider)
 
     result = await server.run_request(_request())
@@ -281,6 +287,34 @@ async def test_a_shared_verifier_reads_the_tool_state_and_borrows_the_same_group
     imported = calls["/tool_sidecar/import_state"]["json"]["sandbox_access"]
     assert imported == calls["/verify"]["json"][NG_SANDBOX_ACCESS_KEY]
     assert running_at["/verify"] == ["sb-1"]
+    assert provider.running() == []
+
+
+async def test_a_separate_verifier_gets_the_tool_state_copied_out_before_the_tool_sidecar_stops(
+    tool_host: _ToolHostStandIn,
+) -> None:
+    provider = _SidecarProvider()
+    server, client = _sidecar_server(provider, _port(tool_host), verifier={"mode": "separate"})
+    client.responses[0] = _supporting(_port(tool_host), "separate")
+    recorded = _recording(client, provider)
+
+    result = await server.run_request(_request())
+
+    assert result.failure is None, result.failure
+    running_at = dict(recorded)
+    calls = {path: kwargs for _, path, kwargs in client.calls}
+    # The state is read from the agent's group while its tool sidecar runs; the verifier then borrows a fresh group
+    # without sidecars or network, started after the agent's group stopped, which no prepare runs in.
+    imported = SandboxAccess.model_validate(calls["/tool_sidecar/import_state"]["json"]["sandbox_access"])
+    assert imported.connection.descriptor["sandbox_id"] == "sb-1"
+    assert running_at["/tool_sidecar/import_state"] == ["sb-1"]
+    verifier = SandboxAccess.model_validate(calls["/verify"]["json"][NG_SANDBOX_ACCESS_KEY])
+    assert verifier.connection.descriptor["sandbox_id"] == "sb-2"
+    assert running_at["/verify"] == ["sb-2"]
+    spec = provider.boxes["sb-2"]["spec"]
+    assert not spec.sidecars
+    assert spec.provider_options["network_policy"]["rule"] == "no_network"
+    assert _paths(client).count("/prepare_sandbox") == 1
     assert provider.running() == []
 
 

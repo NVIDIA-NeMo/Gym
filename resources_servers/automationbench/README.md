@@ -50,7 +50,7 @@ here, would let the pin relax to upstream's range.
 
 ## Where it runs
 
-With the tool sidecar (`configs/automationbench_tool_sidecar.yaml`):
+With the tool sidecar (`configs/automationbench_tool_sidecar.yaml`, which sets `verifier.mode: none`):
 
 | Agent | Verifier | Why |
 |------|------|------|

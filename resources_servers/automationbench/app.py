@@ -167,8 +167,8 @@ class _Episode:
 class AutomationBenchResourcesServer(ToolSidecarResources, SimpleResourcesServer):
     config: AutomationBenchResourcesServerConfig
     seed_request_model = AutomationBenchSeedRequest
-    # The rubric reads the world copied out of the tool sidecar before the group stops, and executes nothing, so
-    # /verify runs here and is lent no sandbox.
+    # The rubric reads the world copied out of the tool sidecar before the group stops, and executes nothing, so it
+    # supports only `none`: /verify runs here and is lent no sandbox.
     verifier_mode: ClassVar[VerifierMode] = "none"
     # What the tool host in a tool sidecar imports beyond Gym, as this server's pyproject.toml pins them.
     tool_sidecar_requirements: ClassVar[tuple[str, ...]] = (

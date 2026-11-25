@@ -10,7 +10,7 @@ This is an example environment with simple tool calls. The example data can be f
 
 ## Where it runs
 
-With the tool sidecar (`configs/example_single_tool_call_tool_sidecar.yaml`):
+With the tool sidecar (`configs/example_single_tool_call_tool_sidecar.yaml`, which sets `verifier.mode: none`):
 
 | Agent | Verifier | Why |
 |------|------|------|

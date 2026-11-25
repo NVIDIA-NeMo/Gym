@@ -46,3 +46,6 @@ automationbench_environment_server:
         # The tools are in the group, so the agent container needs only the model server.
         network: model_only
         model_server: policy_model
+      verifier:
+        # The verifier only reads the world copied out of the sidecar, so /verify runs in the Resources Server.
+        mode: none
