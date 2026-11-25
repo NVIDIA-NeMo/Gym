@@ -170,6 +170,8 @@ partner_if_swe_agent:
       context_window: 262144
       timeout: 10800
       sandbox_install_timeout_seconds: 600
+      # The SWE scores are measured on OpenCode 1.17.11 (README, "Task contract"); opencode_agent's default is newer.
+      opencode_version: 1.17.11
       session_close_timeout_seconds: 60
       session_close_retry_window_seconds: 300
       opencode_config:

@@ -154,7 +154,7 @@ def test_every_split_resolves_and_manifest_matches(tmp_path, splits, model_type)
 @pytest.mark.parametrize("splits", [(split,) for split in SPLITS] + [SPLITS, ("throughput_32k", "throughput_1k")])
 @pytest.mark.parametrize("arguments", [{}, {"dataset_repo": "other/repo", "dataset_revision": "pinned"}])
 def test_selected_wrappers_receive_global_source_arguments(monkeypatch, tmp_path, splits, arguments):
-    monkeypatch.setattr("nemo_gym.environment.benchmark_preparation._install_prepare_dependencies", lambda _: None)
+    monkeypatch.setattr("nemo_gym.environment.benchmark_preparation._install_prepare_dependencies", lambda *_: None)
     downloads = []
 
     def load(repo, name, **kwargs):
