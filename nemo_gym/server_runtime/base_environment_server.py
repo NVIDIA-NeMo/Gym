@@ -963,8 +963,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             )
             spec = dataclasses.replace(spec, env=spec.env | group.env, sidecars=sidecars)
             sandbox = await self.sandboxes.create(attempt.key, spec)
-            # Not every provider creates the working directory it starts a sandbox with (OpenSandbox does not), and
-            # every borrower runs its commands there.
+            # Every borrower runs its commands in the working directory, and a provider need not create the one it
+            # starts a sandbox with; where it does, this is a no-op.
             made = await sandbox.exec(f"mkdir -p {shlex.quote(attempt.workdir)}", cwd="/")
             if made.error_type is not None or made.return_code != 0:
                 output = (made.stderr or made.stdout or "").strip()[:500]
