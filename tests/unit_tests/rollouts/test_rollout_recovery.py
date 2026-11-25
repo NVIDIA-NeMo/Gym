@@ -2528,6 +2528,41 @@ async def test_a_credentials_or_quota_stop_writes_no_aggregate(runner_config, mo
     assert not partial_aggregate.exists()
 
 
+async def test_a_provider_stop_with_nothing_scored_removes_the_partial_score_an_earlier_segment_left(
+    runner_config, monkeypatch
+):
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for, partial_aggregate_metrics_path_for
+
+    runner_config.require_complete = True
+    runner_config.disable_aggregation = False
+    output = Path(runner_config.output_jsonl_fpath)
+    aggregate = aggregate_metrics_path_for(output)
+    partial_aggregate = partial_aggregate_metrics_path_for(output)
+    aggregate.write_text("[]")
+    partial_aggregate.write_text("[]")  # an earlier segment scored failures it counted as zeros
+
+    async def post(**kwargs):
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": "infrastructure_error",
+                "failure_kind": "provider_credentials_rejected",
+                "failure_reason": "provider stop",
+                "mask_sample": True,
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError) as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.failure_kind == "provider_credentials_rejected"
+    assert not aggregate.exists() and not partial_aggregate.exists()
+
+
 async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rollouts(runner_config, monkeypatch):
     from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 

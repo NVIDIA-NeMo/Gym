@@ -3986,6 +3986,46 @@ class TestRolloutCollection:
             )
         assert not (tmp_path / "output_partial_aggregate_metrics.json").exists()
 
+    async def test_a_partial_score_that_never_arrives_does_not_hold_the_rejection(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.PARTIAL_AGGREGATION_TIMEOUT_S", 0.05)
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/aggregate_metrics":
+                await asyncio.Event().wait()  # an aggregator that accepts the request and never replies
+            if json.get("x") == 0:
+                raise http_error(500, "unhandled tool-call json")
+            return FakeResponse(200, {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        output = tmp_path / "output.jsonl"
+
+        with pytest.raises(RuntimeError, match="EVAL FAILED: 1/2 samples completed"):
+            await asyncio.wait_for(
+                RolloutCollectionHelper().run_from_config(
+                    RolloutCollectionConfig(
+                        input_jsonl_fpath=str(input_jsonl_fpath),
+                        output_jsonl_fpath=str(output),
+                        route_failures_to_sidecar=True,
+                        disable_health_check=True,
+                        require_complete=True,
+                    )
+                ),
+                timeout=30,
+            )
+        assert not (tmp_path / "output_partial_aggregate_metrics.json").exists()
+        assert not (tmp_path / "output_aggregate_metrics.json").exists()
+        assert (tmp_path / "output_coverage.json").exists()
+
     async def test_a_complete_strict_run_writes_its_aggregate(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
@@ -5743,9 +5783,13 @@ class TestRolloutCollection:
                 assert examples == []
                 return []
 
-            async def _call_aggregate_metrics(self, results, rows, output_fpath, *, raise_on_error: bool = True):
+            async def _call_aggregate_metrics(
+                self, results, rows, output_fpath, *, raise_on_error: bool = True, partial: bool = False
+            ):
+                aggregate_calls.append((len(results), partial))
                 return None
 
+        aggregate_calls: list[tuple[int, bool]] = []
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(tmp_path / "input.jsonl"),
             output_jsonl_fpath=str(output_jsonl_fpath),
@@ -5757,6 +5801,8 @@ class TestRolloutCollection:
         )
         with pytest.raises(RuntimeError, match="EVAL FAILED: 2/3 samples completed"):
             await Helper().run_from_config(config)
+        # Only the partial score is computed, over the two settled rollouts and any failure counted as zero.
+        assert aggregate_calls == [(3 if count_failures_as_zero else 2, True)]
 
         printed = capsys.readouterr().out
         # The run is rejected and has no aggregate. Its partial score counts what the run was told to count.

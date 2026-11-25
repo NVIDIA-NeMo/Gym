@@ -1930,6 +1930,18 @@ class SharedRolloutCollectionConfig(
         return None
 
 
+async def _remove_stale_scores(output_fpath: Path, *, complete: bool) -> None:
+    """Remove the score files an earlier segment left, which describe rows the run no longer has.
+
+    The partial score always goes. The complete aggregate goes only when ``complete`` is set.
+    """
+    stale = [partial_aggregate_metrics_path_for(output_fpath)]
+    if complete:
+        stale.append(aggregate_metrics_path_for(output_fpath))
+    for path in stale:
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
 def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
     """The end of a run whose provider (sandbox, or the grading API) refused its credentials: no attempt succeeds
     until they are fixed."""
@@ -3354,6 +3366,8 @@ def _iter_jsonl(path: Path) -> Iterator[Dict]:
 AGENT_COMPLETE_SCHEMA_VERSION = "1"
 # An early /aggregate_metrics call past this is recorded as an aggregation error: the run waits for it.
 AGENT_COMPLETE_AGGREGATION_TIMEOUT_S = 1800.0
+# Longest the optional partial score of a rejected run may wait for an environment server: the run's own error must not wait on it.
+PARTIAL_AGGREGATION_TIMEOUT_S = 300.0
 
 
 async def _cancel_and_join(tasks: List[asyncio.Task]) -> None:
@@ -5275,6 +5289,8 @@ executions → not run again (left to recovery)
             stop = await asyncio.to_thread(
                 lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
             )
+            # No rollout is left to score: a partial score an earlier segment left no longer describes this run.
+            await _remove_stale_scores(output_fpath, complete=stop is not None)
             if stop is not None:
                 raise stop
             raise IncompleteEvaluationError(
@@ -5344,8 +5360,7 @@ executions → not run again (left to recovery)
             )
             aggregate_metrics_fpath = None
         elif provider_stop:
-            for stale in (aggregate_metrics_path_for(output_fpath), partial_aggregate_metrics_path_for(output_fpath)):
-                await asyncio.to_thread(stale.unlink, missing_ok=True)
+            await _remove_stale_scores(output_fpath, complete=True)
             print("The run was stopped by its provider and has no score. Resume it once the provider accepts calls.")
             aggregate_metrics_fpath = None
         else:
@@ -5640,7 +5655,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if not results:
             return None
 
-        all_agent_metrics, first_error = await self._aggregate_entries(results, rows)
+        all_agent_metrics, first_error = await self._aggregate_entries(
+            results, rows, timeout_s=PARTIAL_AGGREGATION_TIMEOUT_S if partial else None
+        )
+
+        if partial and first_error is not None:
+            # A partial score that misses a server is not worth keeping: the run's own rejection is what matters.
+            logger.error("Could not compute the partial score of the incomplete run: %r", first_error)
+            return None
 
         if not partial:
             export_metrics(flatten_aggregate_metrics(all_agent_metrics))

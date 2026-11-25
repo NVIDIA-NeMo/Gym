@@ -37,7 +37,11 @@ from nemo_gym.rollouts.rollout_recovery import (
     manifest_path_for,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.utils.path_utils import failures_path_for, rerun_masked_journal_path_for
+from nemo_gym.utils.path_utils import (
+    failures_path_for,
+    partial_aggregate_metrics_path_for,
+    rerun_masked_journal_path_for,
+)
 
 
 @pytest.fixture
@@ -101,6 +105,22 @@ def test_a_fresh_run_does_not_inherit_an_earlier_runs_rerun_approvals(prepared_r
     # The fresh run numbers attempts from 0 again, so the old approval would name its first attempt.
     assert not rerun_masked_journal_path_for(output).exists()
     assert load_rerun_masked_approvals(output) == frozenset()
+
+
+def test_a_fresh_run_does_not_inherit_an_earlier_runs_partial_score(prepared_run):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False):
+        pass
+    partial_aggregate_metrics_path_for(output).write_text("[]")
+
+    with RolloutStore.start_or_resume(output, prepare, resume=True):
+        pass
+    # A resume continues the run, so its partial score stays until the collector replaces it.
+    assert partial_aggregate_metrics_path_for(output).exists()
+
+    with RolloutStore.start_or_resume(output, prepare, resume=False):
+        pass
+    assert not partial_aggregate_metrics_path_for(output).exists()
 
 
 def test_partial_open_failure_closes_files_and_allows_retry(prepared_run, monkeypatch):
