@@ -3,12 +3,18 @@
 """Execution-based evaluation utilities for Spider 2.0-Lite."""
 
 import asyncio
+import datetime
+import logging
 import math
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 ResultRow = tuple[Any, ...]
@@ -31,11 +37,15 @@ def _normalize(v: Any) -> Any:
 
 
 def _coerce(v: Any) -> Any:
-    """Coerce string values to int or float if possible.
-
-    Gold result rows loaded from pre-computed CSVs via JSON are all strings.
-    sqlite3 returns Python native types. Coerce so comparisons work correctly.
-    """
+    """Coerce CSV strings and BigQuery native types to a common comparable form."""
+    if isinstance(v, Decimal):
+        if v == v.to_integral_value():
+            return int(v)
+        return float(v)
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        return v.isoformat()
+    if isinstance(v, bytes):
+        return v.decode("utf-8")
     if not isinstance(v, str):
         return v
     try:
@@ -81,10 +91,10 @@ def execute_sqlite(db_path: Path, sql: str, timeout_s: Optional[float] = None) -
         cur = mem.cursor()
         cur.execute(sql)
         return cur.fetchall()
-    # We try/except only the actual code execution.
-    except Exception:
+    except Exception as exc:
         if timed_out:
             raise TimeoutError(f"SQLite query exceeded {timeout_s}s") from None
+        logger.warning("SQLite query failed on %s: %s", db_path.name, exc)
         return None
     finally:
         mem.close()
@@ -226,3 +236,25 @@ async def execute_and_compare(
         [gold_rows], pred_rows, multi_condition_cols=condition_cols, ignore_order=ignore_order
     )
     return match, gold_rows, pred_rows, None
+
+
+def execute_bigquery(client: Any, sql: str, timeout_s: float = 120.0) -> Optional[ResultSet]:
+    """Execute SQL on BigQuery and return rows as tuples, or None on any error."""
+    try:
+        job = client.query(sql)
+        rows = job.result(timeout=timeout_s)
+        return [tuple(row.values()) for row in rows]
+    except Exception as exc:
+        logger.warning("BigQuery query failed: %s", exc)
+        return None
+
+
+async def execute_bigquery_async(
+    client: Any,
+    sql: str,
+    semaphore: asyncio.Semaphore,
+    timeout_s: float = 120.0,
+) -> Optional[ResultSet]:
+    """Run execute_bigquery in a worker thread, bounded by ``semaphore``."""
+    async with semaphore:
+        return await asyncio.to_thread(execute_bigquery, client, sql, timeout_s)
