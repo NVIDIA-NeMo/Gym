@@ -26,8 +26,8 @@ alarm of `unit_test_timeout_secs`, an overall deadline of
 ### One sandbox per attempt
 The shipped pairing (`code_gen_environment_server`) runs each attempt in one sandbox group that the Environment
 Server owns (see "A sandbox for each attempt" in the `single_agent_turn` README). At seed, code_gen declares that the
-group starts from its `sandbox_config.image`, and it never declares `verifier_executes_nothing`, so its verifier
-always gets a sandbox. The model calls no tools, so the group reaches only the model server (`network: model_only`).
+group starts from its `sandbox_config.image`. The model calls no tools, so the group reaches only the model server
+(`network: model_only`).
 
 | Step | Where it runs |
 |---|---|
@@ -36,9 +36,9 @@ always gets a sandbox. The model calls no tools, so the group reaches only the m
 | Stop | The Environment Server stops the group after the episode. code_gen never stops it. |
 
 code_gen is a pure QA task, so for sandbox capacity on large runs it may run the agent loop in the Agent Server's
-process instead. The verifier cannot opt out: the Environment Server then starts a group for the verifier alone
-after the agent closes, with no egress (`no_network`, whatever `sandbox_config.network` says), and lends it to
-`/verify`.
+process instead. The Environment Server then starts a group for the verifier alone after the agent closes, with no
+egress (`no_network`, whatever `sandbox_config.network` says), and lends it to `/verify`. The provider must apply
+`no_network`, so Docker can take this opt-out and Enroot cannot.
 
 ```yaml
 code_gen_environment_server:
@@ -48,21 +48,32 @@ code_gen_environment_server:
         task: true
 ```
 
-A caller that lends no sandbox to `/verify`, such as a re-verification, gets a fresh sandbox from code_gen's own
-`sandbox_provider` and `sandbox_config`, as before. A sandbox that cannot be borrowed or runs no tests masks the
-sample as below; the tests never run on the server's host.
+The verifier runs the candidate's code, so it should not opt out. A configuration that still sets
+`sandbox_opt_out.verifier: true` lends `/verify` nothing, and so does a caller such as a re-verification: code_gen
+then runs the tests in a fresh sandbox from its own `sandbox_provider` and `sandbox_config`, as before. A sandbox that
+cannot be borrowed or runs no tests masks the sample as below; the tests never run on the server's host.
+
+The LiveCodeBench benchmark configs (`benchmarks/livecodebench*/`) define their own Environment Server blocks with
+`_inherit_from: code_gen_environment_server`, so they run the same way. Overrides are merged before `_inherit_from` is
+resolved, so an override on `code_gen_environment_server`, like the ones below, reaches them too. A
+`single_agent_turn` pairing of code_gen without `sandbox_provider` fails every attempt at seed, because code_gen
+declares a group that nothing starts; nothing falls back to the host.
 
 The pairing needs three things the old one did not:
 
 - a provider that applies `model_only` and lends sandboxes, such as OpenSandbox with
   `networking.enforces_network_policy: true`. Docker and Enroot refuse `model_only` at startup;
-- servers at an address the sandbox reaches (`default_host` or `use_absolute_ip`), not a loopback address;
+- a model server at an address the sandbox reaches, not a loopback address. `code_gen.yaml` sets
+  `use_absolute_ip: true` with `absolute_ip_server_types: [responses_api_models]`, so only model servers advertise
+  this host's address and every other server stays on loopback. These keys apply to every config that composes
+  `code_gen.yaml`, and on a host whose name resolves to a loopback address startup asks for `default_host` instead;
 - an image that also runs Simple Agent's runtime: Linux on x86_64 or aarch64, glibc 2.17 or later or musl, with
   `bash`, `tar` and a writable `/tmp`. The Agent Server uploads a Python build that matches the image, so the image's
   own Python is not used. The `sandbox/Dockerfile` image qualifies.
 
 It also holds one sandbox per running attempt for the whole generation, where code_gen alone held at most
-`num_processes` short-lived ones. For a trusted local setup on Docker or Enroot, override the rule explicitly:
+`num_processes` short-lived ones. For a trusted local setup on Docker or Enroot, override the rule explicitly (Enroot
+applies only `inherit`, so it cannot take `sandbox_opt_out.task` either):
 
 ```yaml
 code_gen_environment_server:
@@ -74,7 +85,7 @@ code_gen_environment_server:
 ```
 
 In the shared group, grading keeps the egress rule the group started with, because providers cannot change a
-running sandbox's egress yet. Candidate code can therefore reach the model server's host while it is graded, where
+running sandbox's egress yet. Candidate code can therefore reach the model server's address while it is graded, where
 code_gen's own verifier sandbox allowed no egress at all. With `sandbox_opt_out.task`, the verifier's group has no
 egress.
 

@@ -122,8 +122,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
     ray_enabled = False
-    # The verifier runs the candidate's code, so it never declares verifier_executes_nothing: an Environment Server
-    # lends /verify the attempt's sandbox group, or a group for the verifier alone when the task opted out.
+    # The verifier runs the candidate's code, so its tests always run in a sandbox: the attempt's group or a group for
+    # the verifier alone that an Environment Server lends /verify, or else a fresh sandbox of this server's own.
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
@@ -275,7 +275,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             ```
             """
 
-            # We can directly measure here since nothing queues past this point.
+            # Measured from here: a fresh sandbox's slot is held, and a lent grade's time includes borrowing the
+            # sandbox and waiting for an earlier grade in it.
             start_time = time()
 
             task_args = (
@@ -357,8 +358,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         try:
             sandbox = await borrow(access)
         except (ImportError, ValueError):
-            # A missing provider SDK or a provider block this server cannot resolve is a deployment error that would
-            # mask every sample, not an outage: fail the request instead.
+            # A missing provider SDK or a provider block this server cannot resolve would mask every sample, and some
+            # providers (Enroot, Apptainer, bwrap) raise ValueError for a sandbox that is gone. Neither is the
+            # policy's failure: fail the request, which the Environment Server retries as an infrastructure failure.
             raise
         except Exception as e:
             raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {e!r}") from e

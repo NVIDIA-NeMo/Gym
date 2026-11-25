@@ -1,3 +1,8 @@
+# The attempt's sandbox (code_gen_environment_server below) calls the model server, so model servers advertise this
+# host's address instead of loopback. The head server and every other server stay on loopback.
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+
 code_gen:
   resources_servers:
     code_gen:
@@ -87,7 +92,8 @@ code_gen_environment_server:
         # Above the default episode timeout plus the cleanup timeout; the provider reclaims a sandbox this server
         # could not stop.
         ttl_s: 25200
-        # The same limits as code_gen's own verification sandbox.
+        # The same limits as code_gen's own verification sandbox; change both together, since the thread caps of a
+        # lent grade come from code_gen's sandbox_config.resources.
         resources:
           cpu: 1
           memory_mib: 6144

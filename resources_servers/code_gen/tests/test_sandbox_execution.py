@@ -122,7 +122,7 @@ class TestSandboxLifecycle:
 class TestHeldSandbox:
     """Grading in a sandbox the caller holds, such as the attempt's sandbox lent to /verify."""
 
-    async def _grade_in(self, provider, **kwargs):
+    async def _grade_in(self, provider, config: SandboxVerificationConfig | None = None, **kwargs):
         sandbox = AsyncSandbox(provider)
         await sandbox.start(SandboxSpec(image="code-gen-verifier:test"))
         result = await check_correctness_in_sandbox(
@@ -132,7 +132,7 @@ class TestHeldSandbox:
             False,
             num_tests=2,
             sandbox=sandbox,
-            config=SandboxVerificationConfig(resources={"cpu": 2}),
+            config=config or SandboxVerificationConfig(resources={"cpu": 2}),
             **kwargs,
         )
         return sandbox, result
@@ -152,10 +152,35 @@ class TestHeldSandbox:
         assert provider.envs[runner]["OMP_NUM_THREADS"] == "2"
         await sandbox.stop()
 
-    async def test_exactly_one_of_sandbox_and_provider(self) -> None:
+    async def test_the_configured_env_and_python_reach_the_runner_in_a_held_sandbox(self) -> None:
+        provider = _FakeProvider()
+        config = SandboxVerificationConfig(
+            resources={"cpu": 2}, env={"CODE_GEN_FLAG": "1", "OMP_NUM_THREADS": "4"}, python="/opt/venv/bin/python"
+        )
+        sandbox, (result, _) = await self._grade_in(provider, config)
+
+        assert result == [True, True]
+        runner = next(i for i, (command, _) in enumerate(provider.execs) if "sandbox_runner.py" in command)
+        assert "/opt/venv/bin/python sandbox_runner.py" in provider.execs[runner][0]
+        # config.env reaches the runner as it would a fresh sandbox's, and wins over the thread caps.
+        assert provider.envs[runner]["CODE_GEN_FLAG"] == "1"
+        assert provider.envs[runner]["OMP_NUM_THREADS"] == "4"
+        assert provider.envs[runner]["OPENBLAS_NUM_THREADS"] == "2"
+        await sandbox.stop()
+
+    @pytest.mark.parametrize("both", [False, True], ids=["neither", "both"])
+    async def test_exactly_one_of_sandbox_and_provider(self, both: bool) -> None:
+        sandbox = AsyncSandbox(_FakeProvider()) if both else None
         with pytest.raises(ValueError, match="exactly one"):
             await check_correctness_in_sandbox(
-                _SAMPLE, _SQUARE, 3, False, num_tests=2, config=SandboxVerificationConfig()
+                _SAMPLE,
+                _SQUARE,
+                3,
+                False,
+                num_tests=2,
+                config=SandboxVerificationConfig(),
+                sandbox=sandbox,
+                provider={"local": {}} if both else None,
             )
 
     async def test_real_runner_in_a_held_local_sandbox(self, tmp_path: Path) -> None:

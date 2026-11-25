@@ -399,9 +399,8 @@ class TestLentSandboxVerify:
         body = _verify_request(code).model_dump(mode="json") | {NG_SANDBOX_ACCESS_KEY: _ACCESS}
         return CompCodingVerifyRequest.model_validate(body)
 
-    def test_the_seed_declares_the_verifier_image_and_never_a_verifier_that_executes_nothing(self) -> None:
-        # The Environment Server starts the group from this image, and without verifier_executes_nothing it refuses a
-        # verifier opt-out, so the unit tests always get a sandbox.
+    def test_the_seed_declares_the_group_from_the_verifier_image(self) -> None:
+        # The Environment Server starts the attempt's group, or a group for the verifier alone, from this image.
         declaration = _make_server().sandbox_declaration(MagicMock(spec=ResourcesSeedSessionRequest))
         assert declaration == {"sandbox_group": SandboxGroupSpec(image="code-gen-verifier:test")}
 
@@ -453,7 +452,7 @@ class TestLentSandboxVerify:
 
     async def test_grades_in_one_lent_sandbox_run_one_at_a_time(self, monkeypatch) -> None:
         # A /verify resent after a dropped connection must not share the sandbox's CPU with the first one.
-        running, peak = {}, {}
+        running, peak, overlap = {}, {}, []
 
         async def _borrow(access):
             sandbox = _LentSandbox()
@@ -463,6 +462,7 @@ class TestLentSandboxVerify:
         async def _grading(*args, sandbox, **kwargs):
             running[sandbox.sandbox_id] = running.get(sandbox.sandbox_id, 0) + 1
             peak[sandbox.sandbox_id] = max(peak.get(sandbox.sandbox_id, 0), running[sandbox.sandbox_id])
+            overlap.append(sum(running.values()))
             await asyncio.sleep(0.05)
             running[sandbox.sandbox_id] -= 1
             return [True, True], None
@@ -479,6 +479,7 @@ class TestLentSandboxVerify:
 
         # The two grades in attempt-1's sandbox ran one after the other; attempt-2's did not wait for them.
         assert peak == {"attempt-1": 1, "attempt-2": 1}
+        assert max(overlap) == 2
         # No lock outlives the grades that held it.
         assert len(server._lent_sandbox_locks) == 0
 
