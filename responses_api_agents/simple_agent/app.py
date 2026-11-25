@@ -134,7 +134,7 @@ from responses_api_agents.simple_agent.python_tool import PythonToolConfig, Pyth
 
 
 if TYPE_CHECKING:
-    from responses_api_agents.simple_agent.python_tool import PythonTools
+    from responses_api_agents.simple_agent.python_tool_client import PythonTools
     from responses_api_agents.simple_agent.sandbox import SandboxLoop
 
 
@@ -541,22 +541,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     def _opted_in_python_tools(self, body: AgentSeedSessionRequest) -> dict[str, PythonToolConfig]:
         """The Python tools the seed's task opts into, by name; refuse one this agent does not define or cannot run."""
-        context = self.parse_agent_context(body)
         # A subclass may declare its own context model, without the key.
-        names = list(getattr(context, "python_tools", None) or [])
+        names = getattr(self.parse_agent_context(body), "python_tools", None)
         if not names:
             return {}
-        if unknown := sorted(set(names) - self.config.python_tools.keys()):
-            raise AgentSeedRejectedError(
-                f"The task opts into Python tools {unknown}, which this agent's python_tools does not define"
-            )
-        if body.sandbox_access is None:
-            # No host fallback: the model's code runs only in the sandbox the environment lends.
-            raise AgentSeedRejectedError(
-                f"The task opts into Python tools {sorted(set(names))}, which run only in a sandbox the environment "
-                "lends; this seed lends none"
-            )
-        return {name: self.config.python_tools[name] for name in names}
+        # Imported here, like the sandbox runtime's other helpers: a task that opts into a tool always lends a sandbox.
+        from responses_api_agents.simple_agent.sandbox import opted_in_python_tools
+
+        return opted_in_python_tools(names, self.config.python_tools, lends_sandbox=body.sandbox_access is not None)
 
     async def export_agent_sessions(
         self, session_keys: list[str], *, checkpoint_id: str
@@ -1079,20 +1071,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         error_type = type(e).__name__
                         tool_status = "failed"
                 else:
-                    if python_tools is not None and output_function_call.name in python_tools:
-                        # A Python tool the task opted into runs beside this loop, in the agent's sandbox. As with a
-                        # Resources tool, errors in the model's code come back to it in the tool's output.
-                        tool_output, python_error = await python_tools.call(
-                            output_function_call.name, parsed_arguments
+                    # A Python tool the task opted into runs beside this loop, in the agent's sandbox. As with a
+                    # Resources tool, errors in the model's code come back to it in the tool's output.
+                    answered = (
+                        await python_tools.answer(
+                            output_function_call.name, parsed_arguments, granted=tool_access is not None
                         )
-                        if collect_trajectory:
-                            tool_status, error_type = "failed" if python_error else "completed", python_error
-                    elif python_tools is not None and tool_access is None:
-                        # Every tool of the task runs here, so another name is the model's mistake. It gets the reply
-                        # a Resources Server gives a call to a tool it does not serve, and the turn goes on.
-                        tool_output = json.dumps({"detail": "Not Found"}, separators=(",", ":"))
-                        if collect_trajectory:
-                            tool_status, error_type = "failed", "unknown_tool"
+                        if python_tools is not None
+                        else None
+                    )
+                    if answered is not None:
+                        tool_output, error_type = answered
+                        tool_status = "failed" if error_type else "completed"
                     else:
                         # Resource-server errors are valid model-visible tool outputs.
                         if tool_access is not None:
@@ -1345,37 +1335,21 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         """Create a session activation's episode. A subclass whose task context lives in its session state, such as
         a document to put in the request, overrides this; the agent loop stays ``_create_episode``'s."""
-        self._check_python_tools_offered(state, body)
+        if state.python_tools or self.config.python_tools:
+            from responses_api_agents.simple_agent.sandbox import check_python_tools_offered
+
+            check_python_tools_offered(
+                body,
+                opted_in=state.python_tools,
+                defined=self.config.python_tools,
+                granted=state.tool_access is not None,
+            )
         if state.sandbox_loop is not None:
             return await self._create_sandboxed_episode(state, body, **kwargs)
         if state.request.sandbox_access is not None:
             # No host fallback: a session lent a sandbox runs its loop only there, even one restored without it.
             raise RuntimeError("Simple Agent runs the loop of a session lent a sandbox only in that sandbox")
         return await self._create_episode(body, **kwargs)
-
-    def _check_python_tools_offered(
-        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
-    ) -> None:
-        """Refuse a request whose function tools disagree with the Python tools its task opted into.
-
-        The request offers a tool to the model and the task's agent_context opts into running it here, so a name in
-        one and not the other is a task that cannot run as written: refused with a terminal 422 before the loop runs,
-        instead of failing when the model calls it.
-        """
-        offered = {_function_tool_name(tool) for tool in body.tools or []} - {None}
-        not_offered = sorted(state.python_tools.keys() - offered)
-        # A tool grant may serve any name, so only a session without one has every offered tool to run itself.
-        not_opted_in = sorted((offered & self.config.python_tools.keys()) - state.python_tools.keys())
-        if not_offered:
-            raise HTTPException(
-                422, f"The task opts into Python tools {not_offered}, but the request does not offer them to the model"
-            )
-        if not_opted_in and state.tool_access is None:
-            raise HTTPException(
-                422,
-                f"The request offers {not_opted_in}, which this agent runs as Python tools, but the task does not "
-                "opt into them; add them to the row's agent_context: {agent: {values: {python_tools: [...]}}}",
-            )
 
     async def _create_sandboxed_episode(
         self,
@@ -1794,13 +1768,6 @@ def _tool_image_message(image: ToolOutputImage) -> NeMoGymEasyInputMessage:
     content = [{"type": "input_text", "text": image.label}] if image.label else []
     content.append({"type": "input_image", "image_url": image.image_url, "detail": "auto"})
     return NeMoGymEasyInputMessage(type="message", role="user", content=content)
-
-
-def _function_tool_name(tool: Any) -> str | None:
-    """The name of a function tool the request offers, or None for any other kind of tool."""
-    if isinstance(tool, Mapping):
-        return tool.get("name") if tool.get("type") == "function" else None
-    return getattr(tool, "name", None) if getattr(tool, "type", None) == "function" else None
 
 
 def _tools_base_url(tool_access: DirectHTTPToolAccess, resources_prefix: str) -> str:

@@ -248,6 +248,7 @@ async def test_the_runner_unpacked_from_the_harness_archive_runs_the_loop(tmp_pa
         "responses_api_agents/simple_agent/app.py",
         "responses_api_agents/simple_agent/sandbox_runner.py",
         "responses_api_agents/simple_agent/python_tool.py",
+        "responses_api_agents/simple_agent/python_tool_client.py",
         "responses_api_agents/simple_agent/python_tool_worker.py",
     } <= names
     # The same sources give the same archive, and a removed or changed file is written again.
@@ -938,18 +939,20 @@ async def test_a_request_whose_tools_disagree_with_the_tasks_python_tools_is_ref
 ) -> None:
     from fastapi import HTTPException
 
-    agent = SimpleAgent(config=_config(python_tools={"execute_python": PYTHON_TOOL}), server_client=_client(1))
+    defined = {"execute_python": PYTHON_TOOL}
+    body = NeMoGymResponseCreateParamsNonStreaming(input="1?", tools=offered)
+    if refusal is None:
+        sandbox_module.check_python_tools_offered(
+            body, opted_in={name: PYTHON_TOOL for name in opted_in}, defined=defined, granted=grant
+        )
+        return
+    agent = SimpleAgent(config=_config(python_tools=defined), server_client=_client(1))
     state = SimpleAgentSessionState(
         request=_seed(),
         tool_access=object() if grant else None,
         resources_cookies=None,
         python_tools={name: PYTHON_TOOL for name in opted_in},
     )
-    body = NeMoGymResponseCreateParamsNonStreaming(input="1?", tools=offered)
-
-    if refusal is None:
-        agent._check_python_tools_offered(state, body)
-        return
     with pytest.raises(HTTPException) as raised:
         await agent._create_session_episode(state, body, **_loop_arguments())
     assert raised.value.status_code == 422 and refusal in raised.value.detail

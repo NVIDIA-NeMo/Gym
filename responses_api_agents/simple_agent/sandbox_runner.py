@@ -33,7 +33,8 @@ async def run_loop(payload: dict[str, Any]) -> dict[str, Any]:
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.server_runtime import DirectHTTPToolAccess
     from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, _cookie_values
-    from responses_api_agents.simple_agent.python_tool import PythonTools, PythonToolSpec
+    from responses_api_agents.simple_agent.python_tool import PythonToolSpec
+    from responses_api_agents.simple_agent.python_tool_client import PythonTools
 
     config = SimpleAgentConfig.model_validate(payload["config"])
     model = payload["model_server"]

@@ -14,11 +14,12 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from responses_api_agents.simple_agent import python_tool
-from responses_api_agents.simple_agent.python_tool import PythonToolConfig, PythonTools, PythonToolSpec
+from responses_api_agents.simple_agent import python_tool_client
+from responses_api_agents.simple_agent.python_tool import PythonToolConfig, PythonToolSpec
+from responses_api_agents.simple_agent.python_tool_client import PythonTools
 
 
-WORKER = str(Path(python_tool.__file__).with_name("python_tool_worker.py"))
+WORKER = str(Path(python_tool_client.__file__).with_name("python_tool_worker.py"))
 # The math_with_code tool's builtins.
 MATH_BUILTINS = [
     "print",
@@ -129,14 +130,14 @@ async def test_a_long_call_into_c_times_out_late_and_keeps_the_names(tmp_path: P
         await _run(tools, "kept = 1")
         started = time.monotonic()
         assert (await _run(tools, "sum(range(4 * 10**8))"))["error_message"] == "code timed-out"
-        assert time.monotonic() - started < 1 + python_tool.KILL_GRACE_SECONDS
+        assert time.monotonic() - started < 1 + python_tool_client.KILL_GRACE_SECONDS
         assert (await _run(tools, "kept"))["result"] == "1"
 
 
 async def test_code_that_blocks_the_alarm_is_killed_and_the_next_call_starts_afresh(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(python_tool, "KILL_GRACE_SECONDS", 0.5)
+    monkeypatch.setattr(python_tool_client, "KILL_GRACE_SECONDS", 0.5)
     async with _tools(tmp_path, timeout_seconds=1) as tools:
         await _run(tools, "kept = 1")
         worker = tools._workers["execute_python"]
@@ -144,7 +145,7 @@ async def test_code_that_blocks_the_alarm_is_killed_and_the_next_call_starts_afr
 
         timed_out = await _run(tools, blocked)
 
-        assert timed_out["error_message"] == f"code timed-out; {python_tool.RESTARTS}"
+        assert timed_out["error_message"] == f"code timed-out; {python_tool_client.RESTARTS}"
         assert worker.returncode is not None
         # The model was told: a new worker answers, without the old names.
         assert (await _run(tools, "kept"))["error_message"] == "name 'kept' is not defined"
@@ -169,7 +170,7 @@ async def test_a_reply_the_code_forges_stops_the_worker_instead_of_answering(tmp
     async with _tools(tmp_path) as tools:
         await _run(tools, "kept = 1")
         forged = await _run(tools, "import os\nos.write(4, b'\\x00\\x00\\x00\\x02{}')")
-        assert forged["error_message"] == f"Python worker stopped; {python_tool.RESTARTS}"
+        assert forged["error_message"] == f"Python worker stopped; {python_tool_client.RESTARTS}"
         assert (await _run(tools, "kept"))["error_message"] == "name 'kept' is not defined"
 
 
@@ -177,7 +178,7 @@ async def test_code_that_ends_the_worker_reports_it_and_the_next_call_starts_afr
     async with _tools(tmp_path) as tools:
         ended = await _run(tools, "import sys\nsys.exit(3)")
         assert ended["success"] is False
-        assert ended["error_message"] == f"Python worker stopped; {python_tool.RESTARTS}"
+        assert ended["error_message"] == f"Python worker stopped; {python_tool_client.RESTARTS}"
         assert (await _run(tools, "1"))["result"] == "1"
 
 
@@ -197,7 +198,7 @@ async def test_close_stops_what_the_code_forked(tmp_path: Path) -> None:
         assert _alive(child)
         started = time.monotonic()
         await tools.close()
-        assert time.monotonic() - started < python_tool.REAP_TIMEOUT_SECONDS + 1
+        assert time.monotonic() - started < python_tool_client.REAP_TIMEOUT_SECONDS + 1
         for _ in range(50):
             if not _alive(child):
                 break
@@ -244,6 +245,19 @@ async def test_a_lone_surrogate_the_code_prints_reaches_the_model_as_utf8(tmp_pa
         output, _ = await tools.call("execute_python", {"code": "print('\\ud800')"})
     output.encode("utf-8")
     assert json.loads(output)["stdout"] == "?\n"
+
+
+async def test_answer_runs_its_own_tools_and_answers_unknown_names_only_without_a_grant(tmp_path: Path) -> None:
+    async with _tools(tmp_path) as tools:
+        output, error_type = await tools.answer("execute_python", {"code": "1 + 1"}, granted=False)
+        assert json.loads(output)["result"] == "2" and error_type is None
+        # Without a grant every tool of the task runs here: another name gets a Resources Server's 404 reply.
+        assert await tools.answer("execute_code", {"code": "1"}, granted=False) == (
+            '{"detail":"Not Found"}',
+            "unknown_tool",
+        )
+        # With a grant the name may be the granted server's tool.
+        assert await tools.answer("get_weather", {"city": "x"}, granted=True) is None
 
 
 @pytest.mark.parametrize(

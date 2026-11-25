@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import ClientResponseError, RequestInfo
+from fastapi import HTTPException
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
@@ -68,6 +69,7 @@ _AGENT_FILES = (
     "__init__.py",
     "app.py",
     "python_tool.py",
+    "python_tool_client.py",
     "python_tool_worker.py",
     "sandbox.py",
     "sandbox_runner.py",
@@ -84,6 +86,53 @@ def harness_dir() -> str:
 
 def runner_path() -> str:
     return f"{harness_dir()}/responses_api_agents/simple_agent/sandbox_runner.py"
+
+
+def opted_in_python_tools(
+    names: list[str], defined: dict[str, PythonToolConfig], *, lends_sandbox: bool
+) -> dict[str, PythonToolConfig]:
+    """The Python tools a seed's task opts into, by name; refuse one the agent does not define or cannot run."""
+    if unknown := sorted(set(names) - defined.keys()):
+        raise AgentSeedRejectedError(
+            f"The task opts into Python tools {unknown}, which this agent's python_tools does not define"
+        )
+    if not lends_sandbox:
+        # No host fallback: the model's code runs only in the sandbox the environment lends.
+        raise AgentSeedRejectedError(
+            f"The task opts into Python tools {sorted(set(names))}, which run only in a sandbox the environment "
+            "lends; this seed lends none"
+        )
+    return {name: defined[name] for name in names}
+
+
+def check_python_tools_offered(
+    body: Any, *, opted_in: dict[str, PythonToolConfig], defined: dict[str, PythonToolConfig], granted: bool
+) -> None:
+    """Refuse a request whose function tools disagree with the Python tools its task opted into.
+
+    The request offers a tool to the model and the task's agent_context opts into running it here, so a name in one
+    and not the other is a task that cannot run as written: refused with a terminal 422 before the loop runs, instead
+    of failing when the model calls it.
+    """
+    offered = {_function_tool_name(tool) for tool in body.tools or []} - {None}
+    if not_offered := sorted(opted_in.keys() - offered):
+        raise HTTPException(
+            422, f"The task opts into Python tools {not_offered}, but the request does not offer them to the model"
+        )
+    # A tool grant may serve any name, so only a session without one has every offered tool to run itself.
+    if (not_opted_in := sorted((offered & defined.keys()) - opted_in.keys())) and not granted:
+        raise HTTPException(
+            422,
+            f"The request offers {not_opted_in}, which this agent runs as Python tools, but the task does not opt "
+            "into them; add them to the row's agent_context: {agent: {values: {python_tools: [...]}}}",
+        )
+
+
+def _function_tool_name(tool: Any) -> str | None:
+    """The name of a function tool the request offers, or None for any other kind of tool."""
+    if isinstance(tool, dict):
+        return tool.get("name") if tool.get("type") == "function" else None
+    return getattr(tool, "name", None) if getattr(tool, "type", None) == "function" else None
 
 
 def python_tool_worker_path() -> str:
