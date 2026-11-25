@@ -23,6 +23,7 @@ constraints = [
 ]
 overrides = [
     { name = "gprof2dot", marker = "sys_platform == 'never'" },
+    { name = "model-library", specifier = "==0.1.25" },
     { name = "opencv-python-headless", marker = "sys_platform == 'never'" },
     { name = "pathspec", marker = "sys_platform == 'never'" },
     { name = "pycountry", marker = "sys_platform == 'never'" },
@@ -950,7 +951,7 @@ wheels = [
 [[package]]
 name = "finance-agent"
 version = "0.1.0"
-source = { git = "https://github.com/vals-ai/finance-agent-v2.git?rev=bb460b524472ae0955abdf243bbbac06958dc8c9#bb460b524472ae0955abdf243bbbac06958dc8c9" }
+source = { git = "https://github.com/vals-ai/finance-agent-v2.git?rev=97b9fdc73161018fbee8098370d0fbccf48f9728#97b9fdc73161018fbee8098370d0fbccf48f9728" }
 dependencies = [
     { name = "aiohttp" },
     { name = "backoff" },
@@ -961,6 +962,7 @@ dependencies = [
     { name = "sec-api" },
     { name = "simpleeval" },
     { name = "tavily-python" },
+    { name = "tqdm" },
 ]
 
 [[package]]
@@ -1305,7 +1307,7 @@ telemetry = [
 
 [package.metadata]
 requires-dist = [
-    { name = "finance-agent", git = "https://github.com/vals-ai/finance-agent-v2.git?rev=bb460b524472ae0955abdf243bbbac06958dc8c9" },
+    { name = "finance-agent", git = "https://github.com/vals-ai/finance-agent-v2.git?rev=97b9fdc73161018fbee8098370d0fbccf48f9728" },
     { name = "frontier-finance", git = "https://github.com/samaya-ai/frontier-finance.git?rev=3c1134e68b69528cf1afa64839493a9ce1b29fe3" },
     { name = "model-library", specifier = "==0.1.25" },
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },

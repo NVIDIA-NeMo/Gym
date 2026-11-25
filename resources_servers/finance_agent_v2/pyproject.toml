@@ -8,7 +8,7 @@ requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
     "model-library==0.1.25",
-    "finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@bb460b524472ae0955abdf243bbbac06958dc8c9",
+    "finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@97b9fdc73161018fbee8098370d0fbccf48f9728",
     "frontier-finance @ git+https://github.com/samaya-ai/frontier-finance.git@3c1134e68b69528cf1afa64839493a9ce1b29fe3",
 ]
 
@@ -22,6 +22,9 @@ constraint-dependencies = [
     "transformers>=5.17.0",
 ]
 override-dependencies = [
+    # finance-agent declares model-library>=0.1.41, which needs openai>=3 and anthropic>=2
+    # and cannot resolve against Gym's pins; the finance_agent.tools surface Gym imports runs on 0.1.25.
+    "model-library==0.1.25",
     "spacy>=3.8.13",
     "wcwidth; sys_platform == 'never'",
     "opencv-python-headless; sys_platform == 'never'",
