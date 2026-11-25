@@ -150,7 +150,7 @@ def resolve_provider_config(
     """
     block, source = _resolve_block(sandbox_provider, named_configs)
     if not isinstance(block, Mapping):
-        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
+        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got {type(block).__name__}")
 
     provider_keys = _provider_keys(block)
     if len(provider_keys) != 1:
