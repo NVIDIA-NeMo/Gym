@@ -221,3 +221,12 @@ async def test_an_agent_image_that_cannot_check_the_tool_sidecar_is_granted_noth
     assert "neither python3 nor bash" in result.failure.failure_reason
     assert "/v1/agent_sessions" not in _paths(client)
     assert provider.running() == []
+
+
+def test_a_config_without_the_resources_servers_block_serves_the_tools_in_process() -> None:
+    server, client = _sidecar_server(_SidecarProvider())
+    client.global_config_dict = OmegaConf.create(
+        {k: v for k, v in client.global_config_dict.items() if k != "resources"}
+    )
+
+    assert server.tool_sidecar is None

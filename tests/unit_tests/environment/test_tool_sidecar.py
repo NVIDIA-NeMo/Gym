@@ -100,7 +100,7 @@ def test_a_config_that_holds_a_credential_cannot_serve_its_tools_from_a_sidecar(
             "passwords": "",
             "aws_secret_access_key": "s",
             "auth": {"user": "u"},
-            "base_url": "https://user:pass@example.com/v1",
+            "base_url": "https://user:pass@example.com/v1",  # pragma: allowlist secret
             "plain_url": "https://example.com/v1",
         }
     ) == ["judge.API_KEY", "judge.private_key", "tokens", "aws_secret_access_key", "auth", "base_url"]

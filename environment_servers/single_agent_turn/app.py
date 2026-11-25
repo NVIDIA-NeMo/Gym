@@ -221,7 +221,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     @functools.cached_property
     def tool_sidecar(self) -> ToolSidecarConfig | None:
-        """The sidecar the Resources Server's tools run in, as its config declares; None when they run in its process."""
+        """The sidecar the Resources Server's tools run in, as its config declares; None when they run in its process,
+        or when this process's config holds no block for that server."""
+        if self.server_client.global_config_dict.get(self.config.resources_server.name) is None:
+            return None
         return tool_sidecar_config_of(
             get_first_server_config_dict(self.server_client.global_config_dict, self.config.resources_server.name)
         )
