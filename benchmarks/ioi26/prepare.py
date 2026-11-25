@@ -315,14 +315,16 @@ def prepare() -> Path:
         if not variants:
             raise SystemExit(f"{problem_id}: no scoring table found in the statement")
         for index, variant in enumerate(variants, start=1):
+            subtask = scored[index - 1][0] if not variant.band else f"band-{variant.label.replace(' ', '')}"
             benchmark_rows.append(
                 {
+                    "task_id": f"{problem_id}-{subtask}",
                     "id": len(benchmark_rows) + 1,
                     "competition_id": COMPETITION_ID,
                     "problem_id": problem_id,
                     "ioi_id": problem_id,
                     "name": problem["name"],
-                    "subtask": scored[index - 1][0] if not variant.band else f"band-{variant.label.replace(' ', '')}",
+                    "subtask": subtask,
                     "subtask_score": variant.score,
                     "problem": variant.statement,
                     "question": variant.statement,

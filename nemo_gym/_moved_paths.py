@@ -825,6 +825,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.token_id_capture.staging": {
         **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
     },
+    # Staging capture imported the extras digest before record builds moved into the staged record.
+    "nemo_gym.token_id_capture.staging.capture": {
+        **_names("nemo_gym.models.token_capture.staging.digest", "0.8.0", "compute_extras_digest"),
+    },
     "nemo_gym.orchestration.executors.kubernetes": {
         # Split into the executors/kubernetes package by part; served by the package's __getattr__ with a warning.
         **_names("nemo_gym.orchestration.api", "0.8.0", "KubernetesComputeConfig SubmitConfig"),

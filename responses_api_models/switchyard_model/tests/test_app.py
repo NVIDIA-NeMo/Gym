@@ -287,6 +287,29 @@ class TestApp:
         server = self._setup_server()
         assert server._client.base_url == "http://127.0.0.1:4000/v1"
 
+    def test_the_proxy_call_is_unbounded_by_default(self) -> None:
+        client = self._setup_server()._client
+
+        assert client.request_timeout_seconds is None
+        assert client.max_connection_retries is None
+        assert client.connection_retry_timeout_s is None
+
+    def test_configured_bounds_reach_the_client(self) -> None:
+        client = self._setup_server(
+            request_timeout_seconds=30.0, max_connection_retries=3, connection_retry_timeout_s=15.0
+        )._client
+
+        assert client.request_timeout_seconds == 30.0
+        assert client.max_connection_retries == 3
+        assert client.connection_retry_timeout_s == 15.0
+
+    @pytest.mark.parametrize(
+        "field", ["request_timeout_seconds", "max_connection_retries", "connection_retry_timeout_s"]
+    )
+    def test_a_bound_of_zero_is_rejected(self, field: str) -> None:
+        with pytest.raises(ValueError):
+            self._setup_server(**{field: 0})
+
     def test_max_concurrent_requests_builds_semaphore(self) -> None:
         server = self._setup_server(max_concurrent_requests=2)
         assert server._semaphore._value == 2

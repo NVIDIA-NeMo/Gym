@@ -42,7 +42,9 @@ Also configure the OpenSandbox provider's connection settings.
 `harness_bundle` is a tarball with `nemo_gym/`, the harness's `responses_api_agents/<agent>/` package, and a Linux
 x86_64 runtime for the harness. Each task sandbox unpacks it to `/work/gym_mount` and starts it with `harness_python`.
 The runtime must also run on the three Alpine images (k6, MinIO, and SFTPGo). A URL must be on the model host, the only
-host task sandboxes can reach.
+host task sandboxes can reach. A `hermes` bundle also needs the Hermes worker under its interpreter's prefix (see
+"Presets that run this agent's host path" in `responses_api_agents/hermes_agent/README.md`); that worker needs glibc
+2.28 or newer, so the three Alpine tasks cannot run Hermes.
 
 ## Harnesses
 

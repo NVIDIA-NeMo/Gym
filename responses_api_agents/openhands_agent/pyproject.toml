@@ -7,8 +7,8 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,sandbox]",
-    "openhands-sdk==1.59.0",
-    "openhands-tools==1.59.0",
+    "openhands-sdk==1.62.0",
+    "openhands-tools==1.62.0",
 ]
 
 [tool.uv]

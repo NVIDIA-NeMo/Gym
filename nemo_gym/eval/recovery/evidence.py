@@ -1615,9 +1615,14 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 )
             )
         selected = {"rollouts.jsonl": set(), "rollouts_failures.jsonl": set()}
+        # Resolve each path once: a realpath per record is slow on shared filesystems.
+        sources = {name: (artifacts / name).resolve() for name in selected}
+        resolved: dict[Path, Path] = {}
         for disposition in ("success", "failure", "omitted"):
             for record in store.selected_records(disposition).values():
-                matches = [name for name in selected if (artifacts / name).resolve() == record.path.resolve()]
+                if record.path not in resolved:
+                    resolved[record.path] = record.path.resolve()
+                matches = [name for name in selected if sources[name] == resolved[record.path]]
                 if len(matches) != 1:
                     raise ValueError("selected outcome is outside the collected source files")
                 selected[matches[0]].add(record.line_number - 1)

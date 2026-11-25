@@ -30,16 +30,15 @@ the dataset-health check: a row whose golden patch does not resolve is a broken 
 """
 
 import shlex
-import sys
 from pathlib import Path
 from time import time
-from traceback import format_exc
-from typing import Annotated, Any
+from typing import Annotated, Any, ClassVar
 from uuid import uuid4
 
 from fastapi import Request
 from pydantic import BaseModel, BeforeValidator, ConfigDict, JsonValue
 
+from nemo_gym.agents import exec_idempotent
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR
@@ -80,7 +79,13 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
-from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.repo_task_sessions import (
+    SETUP_COMMAND_TIMEOUT_S,
+    RepoTaskSessionFields,
+    RepoTaskSessionResourcesServer,
+    loaded_capture,
+    saved_capture,
+)
 
 
 GRADING_ARTIFACTS = (
@@ -96,15 +101,19 @@ GRADING_ARTIFACTS = (
 
 async def hide_grading_artifacts(sandbox: AsyncSandbox, workdir: str) -> None:
     targets = " ".join(shlex.quote(name) for name in GRADING_ARTIFACTS)
-    result = await sandbox.exec(
+    # Among the first commands in a new sandbox, which can refuse them for a few seconds; removing twice is safe.
+    result = await exec_idempotent(
+        sandbox,
         f"cd {shlex.quote(workdir)} && rm -rf {targets} "
-        "&& if grep -qs r2e_tests run_tests.sh; then rm -f run_tests.sh; fi"
+        "&& if grep -qs r2e_tests run_tests.sh; then rm -f run_tests.sh; fi",
+        what="swe_next: hiding grading artifacts",
+        timeout_s=SETUP_COMMAND_TIMEOUT_S,
     )
     if result.error_type is not None or result.return_code != 0:
         raise RuntimeError(f"Failed to hide grading artifacts in {workdir}")
 
 
-class SWENextResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfig):
+class SWENextResourcesServerConfig(RepoTaskSessionFields, BaseResourcesServerConfig, AgentNetworkConfig):
     is_verifying_golden_patch: bool = False
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
@@ -175,8 +184,9 @@ class SWENextVerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
 
 
-class SWENextResourcesServer(SandboxSessionResourcesServer):
+class SWENextResourcesServer(RepoTaskSessionResourcesServer):
     config: SWENextResourcesServerConfig
+    task_model: ClassVar[type[BaseModel]] = SWENextInstanceRequest
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -234,13 +244,21 @@ class SWENextResourcesServer(SandboxSessionResourcesServer):
             resources=sandbox_resources,
             provider_options=self.config.sandbox_provider_options(provider_config, for_agent=for_agent),
         )
-        sandbox = AsyncSandbox(provider_config)
         if session_id is not None:
-            self._session_id_to_sandbox[session_id] = sandbox
+            # On the provider every task sandbox shares, and registered for the session and its checkpoints.
+            sandbox = self.new_task_sandbox(session_id, spec)
+        else:
+            sandbox = AsyncSandbox(provider_config)
         if verifier_session_id is not None:
             self._verifier_sandboxes[verifier_session_id] = sandbox
         await sandbox.start(spec)
-        result = await sandbox.exec(f"ln -sfn /workspace {shlex.quote(body.workdir)}")
+        # The first command in a new sandbox, which can refuse it for a few seconds; the link is safe to make twice.
+        result = await exec_idempotent(
+            sandbox,
+            f"ln -sfn /workspace {shlex.quote(body.workdir)}",
+            what="swe_next: linking the workdir",
+            timeout_s=SETUP_COMMAND_TIMEOUT_S,
+        )
         if result.error_type is not None or result.return_code != 0:
             raise RuntimeError("Failed to create the SWE-Next working-directory link")
         return sandbox
@@ -257,18 +275,6 @@ class SWENextResourcesServer(SandboxSessionResourcesServer):
         )
         if result.error_type is not None or result.return_code != 0:
             raise RuntimeError(f"Failed to initialize SWE-Next git repository at {workdir}")
-
-    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
-        """List of files ``workdir`` holds untracked before the agent touches it."""
-        try:
-            result = await sandbox.exec(f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard")
-            if result.return_code != 0:
-                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
-                return frozenset()
-            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
-        except Exception:
-            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
-            return frozenset()
 
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
         """Capture the patch before the shared lifecycle stops the task sandbox."""
@@ -314,13 +320,20 @@ class SWENextResourcesServer(SandboxSessionResourcesServer):
         await hide_grading_artifacts(sandbox, body.workdir)
         await self._init_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swe_next")
+            required = self.config.anti_cheat_required
+            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swe_next", required=required)
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "swe_next")
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, body.workdir
         )
-        head = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
+        # A new sandbox can refuse its first commands for a few seconds; this read is safe to repeat.
+        head = await exec_idempotent(
+            sandbox,
+            f"git -C {shlex.quote(body.workdir)} rev-parse HEAD",
+            what="swe_next: reading HEAD",
+            timeout_s=SETUP_COMMAND_TIMEOUT_S,
+        )
         if head.error_type is not None or head.return_code != 0 or not (head.stdout or "").strip():
             raise RuntimeError("SWE-Next seed did not produce a base commit")
         self._session_id_to_base_commit[session_id] = head.stdout.strip()
@@ -370,22 +383,25 @@ class SWENextResourcesServer(SandboxSessionResourcesServer):
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
 
-            async def capture_or_fallback() -> tuple[PatchCapture, str | None, bool]:
+            async def capture_or_fallback() -> dict[str, JsonValue]:
                 try:
                     capture = await self._extract_model_patch(
                         session_id, body.workdir, self._session_id_to_base_commit[session_id]
                     )
-                    return capture, None, False
+                    return saved_capture(capture, None, False)
                 except CaptureCommandError as exc:
                     # A real git failure can reflect a repository damaged by the agent. Keep its empty-patch
                     # grading behavior; unavailable execution belongs to the infrastructure denominator.
                     incomplete = exc.error_type is not None or not isinstance(exc.return_code, int)
-                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", incomplete
+                    error = f"Failed to extract model patch: {exc}"
+                    return saved_capture(PatchCapture.static("", mode, "none"), error, incomplete)
                 except Exception as exc:
-                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", True
+                    error = f"Failed to extract model patch: {exc}"
+                    return saved_capture(PatchCapture.static("", mode, "none"), error, True)
 
-            capture, extraction_error, capture_incomplete = await self.capture_task_sandbox_patch(
-                session_id, capture_or_fallback
+            # Saved as a JSON value, so a checkpoint can export it.
+            capture, extraction_error, capture_incomplete = loaded_capture(
+                await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
             )
             await self.stop_task_sandbox_after_capture(session_id)
             if capture_incomplete:
