@@ -953,12 +953,12 @@ _RUN_CONTEXT_KEYS = (
 )
 
 
-def _use_driver_config(monkeypatch, driver_telemetry, extra: dict) -> None:
-    """Merge *extra* into the fake head server's config and serve it to the driver as its global config."""
+def _use_driver_config(monkeypatch, driver_telemetry, *extras: dict) -> None:
+    """Merge *extras* into the fake head server's config and serve it to the driver as its global config."""
     from omegaconf import OmegaConf
 
     client = driver_telemetry.setup_server_client_utils()
-    client.global_config_dict = OmegaConf.merge(client.global_config_dict, extra)
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, *extras)
     monkeypatch.setattr(driver_telemetry, "get_global_config_dict", lambda *a, **k: client.global_config_dict)
 
 
@@ -969,13 +969,20 @@ def _run_context_of(span) -> dict:
 _ALPHA_BENCHMARK = {
     "alpha": {"responses_api_agents": {"impl": {"datasets": [{"name": "bench_a", "type": "benchmark"}]}}}
 }
+_ALPHA_SERVED_MODEL = {
+    "alpha": {
+        "responses_api_agents": {"impl": {"model_server": {"type": "responses_api_models", "name": "policy_model"}}}
+    },
+    "policy_model": {"responses_api_models": {"vllm_model": {"model": "served-model"}}},
+}
 
 
 @pytest.mark.parametrize(
-    ("extra_config", "expected_job", "expected_dispatch"),
+    ("extra_configs", "expected_job", "expected_dispatch"),
     [
         pytest.param(
-            {"policy_model_name": "served-model", "split": "benchmark", **_ALPHA_BENCHMARK},
+            # An env.yaml default `policy_model_name` is not what the agent's model server sends.
+            (_ALPHA_SERVED_MODEL, _ALPHA_BENCHMARK, {"split": "benchmark", "policy_model_name": "env-yaml-default"}),
             {"nemo.gym.model.name": "served-model", "nemo.gym.benchmark.names": ("bench_a",)},
             {
                 "nemo.gym.model.name": "served-model",
@@ -985,21 +992,26 @@ _ALPHA_BENCHMARK = {
             id="benchmark-run-with-served-model",
         ),
         pytest.param(
-            {"policy_model_name": "served-model", "split": "train", **_ALPHA_BENCHMARK},
+            (_ALPHA_SERVED_MODEL, _ALPHA_BENCHMARK, {"split": "train"}),
             {"nemo.gym.model.name": "served-model"},
             {"nemo.gym.model.name": "served-model", "nemo.gym.rollout.attempt.index": 0},
             id="train-run-omits-the-benchmark",
         ),
-        pytest.param({}, {}, {"nemo.gym.rollout.attempt.index": 0}, id="nothing-known-is-omitted"),
+        pytest.param(
+            ({"policy_model_name": "env-yaml-default"},),
+            {},
+            {"nemo.gym.rollout.attempt.index": 0},
+            id="nothing-known-is-omitted",
+        ),
     ],
 )
 async def test_run_context_lands_on_the_job_and_every_dispatch(
-    tmp_path, monkeypatch, recorded_spans, driver_telemetry, extra_config, expected_job, expected_dispatch
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry, extra_configs, expected_job, expected_dispatch
 ):
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     _install_recording_post(monkeypatch)
-    _use_driver_config(monkeypatch, driver_telemetry, extra_config)
+    _use_driver_config(monkeypatch, driver_telemetry, *extra_configs)
     await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
 
     spans = recorded_spans()
@@ -1072,7 +1084,7 @@ async def test_run_context_is_not_read_while_traces_are_off(
 
     monkeypatch.setattr(rollout_collection, "run_context_from_config", boom)
     sent = _install_recording_post(monkeypatch)
-    _use_driver_config(monkeypatch, driver_telemetry, {"policy_model_name": "served-model"})
+    _use_driver_config(monkeypatch, driver_telemetry, _ALPHA_SERVED_MODEL)
     await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
 
     assert len(sent) == 2
@@ -1088,7 +1100,7 @@ async def test_run_context_lands_on_an_embedded_job(tmp_path, monkeypatch, recor
     from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     _install_recording_post(monkeypatch)
-    _use_driver_config(monkeypatch, driver_telemetry, {"policy_model_name": "served-model"})
+    _use_driver_config(monkeypatch, driver_telemetry, _ALPHA_SERVED_MODEL)
     with otel_trace.get_tracer("embedder").start_as_current_span("embedder.step"):
         await RolloutCollectionHelper().run_from_config(
             _collection_config(tmp_path, _write_rollout_input(tmp_path, 1))
@@ -1107,15 +1119,13 @@ async def test_the_job_lists_no_benchmark_whose_rows_all_drained(
     from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
     sent = _install_recording_post(monkeypatch)
-    _use_driver_config(
-        monkeypatch, driver_telemetry, {"policy_model_name": "served-model", "split": "benchmark", **_ALPHA_BENCHMARK}
-    )
+    _use_driver_config(monkeypatch, driver_telemetry, _ALPHA_SERVED_MODEL, _ALPHA_BENCHMARK, {"split": "benchmark"})
     config = _collection_config(tmp_path, _write_rollout_input(tmp_path, 2))
     config.dispatch_budget_s = 0.0
     with pytest.raises(IncompleteEvaluationError):
         await RolloutCollectionHelper().run_from_config(config)
 
     assert sent == []
-    # The run ended in an error and its context still reached the job, without the benchmark.
+    # Nothing was dispatched, so the job names neither a benchmark nor a served model.
     (job,) = [s for s in recorded_spans() if s.name == "gym.job"]
-    assert _run_context_of(job) == {"nemo.gym.model.name": "served-model"}
+    assert _run_context_of(job) == {}

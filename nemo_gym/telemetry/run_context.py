@@ -21,8 +21,10 @@ as span attributes. They are never metric labels.
 Every value comes from the resolved config or the collector row; a value that cannot be read
 from either is omitted rather than guessed:
 
-* The served model name is ``policy_model_name``, the value Gym's model-server configs send as
-  the model.
+* A row's served model name is the ``model`` (or ``openai_model``) field of the model server its
+  agent's ``model_server`` names, the value that server sends upstream. It is known only when
+  the agent the row is dispatched to names one model server and that server sets exactly one
+  model name; ``gym.job`` carries it only when every row the job dispatched has the same one.
 * A row's benchmark is the ``type: benchmark`` dataset it was prepared from. Rows record only
   their declaring instance (``task_source``) and, when materialized, their taskset, so the name
   is known only for a ``split=benchmark`` run and only when that instance or taskset maps to
@@ -40,15 +42,20 @@ from dataclasses import dataclass, field
 from omegaconf.errors import OmegaConfBaseException
 
 from nemo_gym.config.global_config import (
+    AGENT_REF_KEY_NAME,
+    AGENT_SERVER_TYPE_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    POLICY_MODEL_NAME_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SERVER_TYPE_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    environment_server_attributed_agent,
     get_first_server_config_dict,
 )
 from nemo_gym.core.episode_types import is_materialized_task_row
 
 
-#: Served model name of the policy model, on ``gym.job`` and ``gym.rollout.dispatch``.
+#: Served model name of the rollout's agent, on ``gym.rollout.dispatch``, and of the whole job on ``gym.job``.
 MODEL_NAME_ATTRIBUTE = "nemo.gym.model.name"
 #: Benchmark dataset a dispatched row was prepared from, on ``gym.rollout.dispatch``.
 BENCHMARK_NAME_ATTRIBUTE = "nemo.gym.benchmark.name"
@@ -62,6 +69,8 @@ SpanAttributes = dict[str, str | int | list[str]]
 
 _BENCHMARK_SPLIT = "benchmark"
 _SERVER_KINDS = ("responses_api_agents", "resources_servers")
+# The fields Gym's model servers send upstream as the model.
+_MODEL_NAME_FIELDS = ("model", "openai_model")
 
 
 @dataclass(frozen=True)
@@ -71,9 +80,24 @@ class RunContext:
     Build it with :func:`run_context_from_config`, once per run, only when traces are exported.
     """
 
-    model_name: str | None = None
+    model_by_agent: Mapping[str, str] = field(default_factory=dict)
+    agent_by_environment_server: Mapping[str, str] = field(default_factory=dict)
     benchmark_by_taskset: Mapping[str, str] = field(default_factory=dict)
     benchmark_by_task_source: Mapping[str, str] = field(default_factory=dict)
+
+    def model_name(self, row: Mapping[str, object]) -> str | None:
+        """The model the agent *row* is dispatched to is served, or None when it is not known."""
+        agent_ref = row.get(AGENT_REF_KEY_NAME)
+        agent = agent_ref.get("name") if isinstance(agent_ref, Mapping) else None
+        if agent is None:
+            # A materialized row names no agent: it runs on the one its environment server attributes results to.
+            environment_server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+            agent = (
+                self.agent_by_environment_server.get(environment_server)
+                if isinstance(environment_server, str)
+                else None
+            )
+        return self.model_by_agent.get(agent) if isinstance(agent, str) else None
 
     def benchmark_name(self, row: Mapping[str, object]) -> str | None:
         """The benchmark dataset *row* was prepared from, or None when it is not known."""
@@ -86,8 +110,9 @@ class RunContext:
     def dispatch_attributes(self, row: Mapping[str, object]) -> SpanAttributes:
         """Attributes for one ``gym.rollout.dispatch``."""
         attributes: SpanAttributes = {}
-        if self.model_name is not None:
-            attributes[MODEL_NAME_ATTRIBUTE] = self.model_name
+        model = self.model_name(row)
+        if model is not None:
+            attributes[MODEL_NAME_ATTRIBUTE] = model
         benchmark = self.benchmark_name(row)
         if benchmark is not None:
             attributes[BENCHMARK_NAME_ATTRIBUTE] = benchmark
@@ -103,15 +128,20 @@ class JobRunContext:
     dispatches, then set :meth:`attributes` before the span ends. Keeps distinct values, not rows."""
 
     context: RunContext
+    #: Distinct served models of the dispatched rows; None stands for a row whose model is not known.
+    models: set[str | None] = field(default_factory=set)
     benchmarks: set[str] = field(default_factory=set)
 
     def add(self, rows: Iterable[Mapping[str, object]]) -> None:
-        self.benchmarks.update(name for row in rows if (name := self.context.benchmark_name(row)) is not None)
+        for row in rows:
+            self.models.add(self.context.model_name(row))
+            if (name := self.context.benchmark_name(row)) is not None:
+                self.benchmarks.add(name)
 
     def attributes(self) -> SpanAttributes:
         attributes: SpanAttributes = {}
-        if self.context.model_name is not None:
-            attributes[MODEL_NAME_ATTRIBUTE] = self.context.model_name
+        if len(self.models) == 1 and (model := next(iter(self.models))) is not None:
+            attributes[MODEL_NAME_ATTRIBUTE] = model
         if self.benchmarks:
             attributes[BENCHMARK_NAMES_ATTRIBUTE] = sorted(self.benchmarks)
         return attributes
@@ -125,10 +155,11 @@ def run_context_from_config(
     ``collector_config`` is the collector's own config, whose ``split`` is the split the run dispatches: with
     ``--no-serve`` the servers were started with a config of their own. Without it the split is ``global_config``'s.
     """
-    model_name = _config_str(global_config, POLICY_MODEL_NAME_KEY_NAME)
+    model_by_agent = _models_by_agent(global_config)
+    agent_by_environment_server = _agents_by_environment_server(global_config)
     split_config = global_config if collector_config is None else collector_config
     if _config_str(split_config, "split") != _BENCHMARK_SPLIT:
-        return RunContext(model_name=model_name)
+        return RunContext(model_by_agent=model_by_agent, agent_by_environment_server=agent_by_environment_server)
 
     by_taskset: dict[str, set[str]] = {}
     by_task_source: dict[str, set[str]] = {}
@@ -137,7 +168,8 @@ def run_context_from_config(
         # An entry that sets no taskset declares the one of its own name, as a Harbor dataset's generated entry does.
         by_taskset.setdefault(taskset or name, set()).add(name)
     return RunContext(
-        model_name=model_name,
+        model_by_agent=model_by_agent,
+        agent_by_environment_server=agent_by_environment_server,
         benchmark_by_taskset=_unambiguous(by_taskset),
         benchmark_by_task_source=_unambiguous(by_task_source),
     )
@@ -150,6 +182,54 @@ def _config_str(config: Mapping[str, object], key: str) -> str | None:
         # A missing mandatory value or an unresolvable interpolation is an unknown value.
         return None
     return value if isinstance(value, str) and value else None
+
+
+def _server_blocks(global_config: Mapping[str, object], kind: str) -> Iterator[tuple[str, Mapping[str, object]]]:
+    """``(instance name, server config)`` for every instance of *kind* that holds exactly one server."""
+    for instance_name in list(global_config.keys()):
+        try:
+            block = global_config[instance_name]
+            servers = block.get(kind) if isinstance(block, Mapping) else None
+            if not isinstance(instance_name, str) or not isinstance(servers, Mapping) or len(servers) != 1:
+                continue
+            server = next(iter(servers.values()))
+        except (AttributeError, TypeError, OmegaConfBaseException):
+            continue
+        if isinstance(server, Mapping):
+            yield instance_name, server
+
+
+def _models_by_agent(global_config: Mapping[str, object]) -> dict[str, str]:
+    """The served model of every agent whose ``model_server`` sets exactly one model name."""
+    served = {}
+    for name, server in _server_blocks(global_config, MODEL_SERVER_TYPE_KEY_NAME):
+        models = {model for key in _MODEL_NAME_FIELDS if (model := _config_str(server, key)) is not None}
+        if len(models) == 1:
+            served[name] = next(iter(models))
+    models_by_agent = {}
+    for name, agent in _server_blocks(global_config, AGENT_SERVER_TYPE_KEY_NAME):
+        try:
+            reference = agent.get("model_server")
+        except OmegaConfBaseException:
+            continue
+        if not isinstance(reference, Mapping) or _config_str(reference, "type") != MODEL_SERVER_TYPE_KEY_NAME:
+            continue
+        model = served.get(_config_str(reference, "name"))
+        if model is not None:
+            models_by_agent[name] = model
+    return models_by_agent
+
+
+def _agents_by_environment_server(global_config: Mapping[str, object]) -> dict[str, str]:
+    agents = {}
+    for name, server in _server_blocks(global_config, ENVIRONMENT_SERVER_TYPE_KEY_NAME):
+        try:
+            agent = environment_server_attributed_agent(server)
+        except (AttributeError, TypeError, OmegaConfBaseException):
+            continue
+        if isinstance(agent, str) and agent:
+            agents[name] = agent
+    return agents
 
 
 def _benchmark_datasets(global_config: Mapping[str, object]) -> Iterator[tuple[str, str, str | None]]:

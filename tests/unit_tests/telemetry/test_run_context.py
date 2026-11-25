@@ -18,6 +18,8 @@ Pure config and row logic, so no nemo-lens is needed. The spans that carry these
 covered in ``test_call_sites.py``.
 """
 
+from pathlib import Path
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -35,7 +37,7 @@ def _benchmark(name: str, taskset: str | None = None) -> dict:
     return dataset
 
 
-_FLAT_ROW = {"task_source": "aime_agent"}
+_FLAT_ROW = {"agent_ref": {"name": "aime_agent"}, "task_source": "aime_agent"}
 
 
 def _materialized_row(taskset: str) -> dict:
@@ -135,22 +137,94 @@ def test_a_harbor_benchmark_is_named_by_its_generated_dataset_entry(tmp_path):
     assert run_context_from_config(OmegaConf.create(config)).benchmark_name(row) == taskset
 
 
+_REPO = Path(__file__).resolve().parents[3]
+
+
+def _agent_calling(model_server: str = "policy_model", **reference) -> dict:
+    model_ref = {"type": "responses_api_models", "name": model_server} | reference
+    return {"aime_agent": {"responses_api_agents": {"simple_agent": {"model_server": model_ref}}}}
+
+
+def _model_server(**fields) -> dict:
+    return {"policy_model": {"responses_api_models": {"some_model": fields}}}
+
+
 @pytest.mark.parametrize(
     ("config", "expected_model"),
     [
-        pytest.param({"policy_model_name": "gpt-oss-120b"}, "gpt-oss-120b", id="set"),
-        pytest.param({}, None, id="absent"),
-        pytest.param({"policy_model_name": ""}, None, id="empty"),
-        pytest.param({"policy_model_name": "???"}, None, id="missing-mandatory-value"),
-        pytest.param({"policy_model_name": "${nowhere}"}, None, id="unresolvable-interpolation"),
-        pytest.param({"policy_model_name": 7}, None, id="not-a-string"),
+        pytest.param({**_agent_calling(), **_model_server(model="gpt-oss-120b")}, "gpt-oss-120b", id="model"),
+        pytest.param(
+            {**_agent_calling(), **_model_server(openai_model="gpt-4.1")}, "gpt-4.1", id="openai-model-field"
+        ),
+        pytest.param(
+            {**_agent_calling(), **_model_server(model="${policy_model_name}"), "policy_model_name": "qwen3"},
+            "qwen3",
+            id="interpolated-policy-model-name",
+        ),
+        pytest.param({**_agent_calling(), **_model_server(model="m", openai_model="m")}, "m", id="both-fields-agree"),
+        pytest.param({**_agent_calling(), **_model_server(model="a", openai_model="b")}, None, id="two-model-names"),
+        pytest.param({**_agent_calling(), **_model_server()}, None, id="model-server-sets-no-model"),
+        pytest.param({**_agent_calling(), **_model_server(model="")}, None, id="empty"),
+        pytest.param({**_agent_calling(), **_model_server(model="???")}, None, id="missing-mandatory-value"),
+        pytest.param({**_agent_calling(), **_model_server(model="${nowhere}")}, None, id="unresolvable-interpolation"),
+        pytest.param({**_agent_calling(), **_model_server(model=7)}, None, id="not-a-string"),
+        pytest.param({**_agent_calling("elsewhere"), **_model_server(model="m")}, None, id="unknown-model-server"),
+        pytest.param(
+            {**_agent_calling(type="resources_servers"), **_model_server(model="m")}, None, id="not-a-model-server"
+        ),
+        pytest.param(
+            {
+                **_agent_calling(),
+                "policy_model": {"responses_api_models": {"a": {"model": "m"}, "b": {"model": "m"}}},
+            },
+            None,
+            id="two-model-implementations",
+        ),
+        pytest.param(
+            {"aime_agent": _agent(), **_model_server(model="m"), "policy_model_name": "m"},
+            None,
+            id="agent-without-model-server",
+        ),
     ],
 )
-def test_model_name_is_policy_model_name_when_it_resolves(config, expected_model):
-    assert run_context_from_config(OmegaConf.create(config)).model_name == expected_model
+def test_model_name_is_the_one_the_agents_model_server_sends(config, expected_model):
+    row = {"agent_ref": {"name": "aime_agent"}}
+
+    assert run_context_from_config(OmegaConf.create(config)).model_name(row) == expected_model
 
 
-_KNOWN = RunContext(model_name="m", benchmark_by_task_source={"aime_agent": "aime24"})
+def test_a_shipped_policy_config_that_sets_its_model_directly_wins_over_policy_model_name():
+    """HealthBench's Claude Opus 5 policy names its model on the server, so `policy_model_name` is not what it sends."""
+    policy = OmegaConf.load(_REPO / "benchmarks/healthbench/configs/claude-opus-5.yaml")
+    config = OmegaConf.merge(policy, _agent_calling(), {"policy_model_name": "an-env-yaml-default"})
+
+    context = run_context_from_config(config)
+
+    assert context.model_name({"agent_ref": {"name": "aime_agent"}}) == "aws/anthropic/bedrock-claude-opus-5"
+
+
+def test_a_shipped_model_server_config_sends_policy_model_name():
+    model = OmegaConf.load(_REPO / "responses_api_models/vllm_model/configs/vllm_model.yaml")
+    config = OmegaConf.merge(model, _agent_calling(), {"policy_model_name": "nemotron"})
+
+    assert run_context_from_config(config).model_name({"agent_ref": {"name": "aime_agent"}}) == "nemotron"
+
+
+def test_a_row_routed_by_its_environment_server_runs_on_the_agent_that_server_names():
+    config = {
+        **_agent_calling(),
+        **_model_server(model="m"),
+        "harbor_env": {"environment_servers": {"harbor": {"agent_server": {"name": "aime_agent"}}}},
+    }
+    row = {"_ng_environment_server": "harbor", "task_id": {"taskset": "t", "task_id": "0"}, "task_input": {}}
+
+    context = run_context_from_config(OmegaConf.create(config))
+
+    assert context.model_name(row) is None
+    assert context.model_name(row | {"_ng_environment_server": "harbor_env"}) == "m"
+
+
+_KNOWN = RunContext(model_by_agent={"aime_agent": "m"}, benchmark_by_task_source={"aime_agent": "aime24"})
 
 
 @pytest.mark.parametrize(
@@ -178,17 +252,35 @@ def test_dispatch_attributes(context, row, expected):
     assert context.dispatch_attributes(row) == expected
 
 
+def _row_on(agent: str, task_source: str = "a") -> dict:
+    return {"agent_ref": {"name": agent}, "task_source": task_source}
+
+
+_TWO_AGENTS = RunContext(
+    model_by_agent={"x": "m", "y": "m", "z": "other"}, benchmark_by_task_source={"a": "aime24", "b": "aime25"}
+)
+
+
 @pytest.mark.parametrize(
     ("context", "batches", "expected"),
     [
         pytest.param(
-            RunContext(model_name="m", benchmark_by_task_source={"a": "aime24", "b": "aime25"}),
-            [[{"task_source": "b"}, {"task_source": "a"}], [{"task_source": "b"}, {"task_source": "unknown"}]],
+            _TWO_AGENTS,
+            [[_row_on("x", "b"), _row_on("y", "a")], [_row_on("x", "b"), _row_on("y", "unknown")]],
             {"nemo.gym.model.name": "m", "nemo.gym.benchmark.names": ["aime24", "aime25"]},
-            id="sorted-distinct-benchmarks",
+            id="one-model-and-sorted-distinct-benchmarks",
+        ),
+        pytest.param(
+            _TWO_AGENTS, [[_row_on("x")], [_row_on("z")]], {"nemo.gym.benchmark.names": ["aime24"]}, id="two-models"
+        ),
+        pytest.param(
+            _TWO_AGENTS,
+            [[_row_on("x"), _row_on("unknown_agent")]],
+            {"nemo.gym.benchmark.names": ["aime24"]},
+            id="a-row-whose-model-is-unknown",
         ),
         pytest.param(RunContext(), [[{"task_source": "a"}]], {}, id="nothing-known"),
-        pytest.param(_KNOWN, [], {"nemo.gym.model.name": "m"}, id="nothing-dispatched"),
+        pytest.param(_KNOWN, [], {}, id="nothing-dispatched"),
     ],
 )
 def test_job_attributes_name_the_dispatched_rows(context, batches, expected):
