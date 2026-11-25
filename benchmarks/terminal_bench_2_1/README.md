@@ -6,18 +6,21 @@ Terminal-Bench 2.1 evaluates agents on 89 terminal tasks, each in its own contai
 | --- | --- | --- |
 | `terminal_bench_2_1/terminus_2` | Harbor's Terminus 2 (`terminus_2_agent` agent sessions) | Harbor environment server |
 | `terminal_bench_2_1/opencode` | OpenCode (`opencode_agent`) | Harbor environment server |
+| `terminal_bench_2_1/openclaw` | OpenClaw 2026.6.11 (`openclaw_agent`) | Harbor environment server |
 | `terminal_bench_2_1/nooa` | NOOA | `single_agent_turn` on the `terminal_bench_2_1` resources server |
 | `terminal_bench_2_1/inkling_small` | Terminus 2, pinned rows with a terminal-interaction note | the resources server's `legacy_agent` relay |
 | `terminal_bench_2_1/terminus_2_legacy_agent`, `terminal_bench_2_1/opencode_legacy_agent` | the previous `terminus_2` and `opencode` recipes (deprecated) | the resources server's `legacy_agent` relay |
 
 ## Run
 
-`terminal_bench_2_1/terminus_2` and `terminal_bench_2_1/opencode` run the published task folders of
+`terminal_bench_2_1/terminus_2`, `terminal_bench_2_1/opencode` and `terminal_bench_2_1/openclaw` run the published task folders of
 [`environments/harbor/terminal_bench_2_1`](../../environments/harbor/terminal_bench_2_1/README.md), pinned by content
 hash, through the [`harbor` environment server](../../environment_servers/harbor/README.md). The server starts each
 task's prebuilt image as the sandbox, lends it to the harness's agent session, and then grades the episode with the
-task's own `tests/test.sh`; resources and time budgets come from each task's `task.toml`. Both presets take eight
-rollouts per task.
+task's own `tests/test.sh`; resources and time budgets come from each task's `task.toml`. Each preset takes eight
+rollouts per task. `terminal_bench_2_1/openclaw` keeps OpenClaw 2026.6.11: the `exec` tool of the adapter's default
+2026.11.5 needs glibc 2.33, and the `qemu-alpine-ssh` and `qemu-startup` images ship glibc 2.31, so session setup
+would refuse those two tasks.
 
 ```bash
 gym dataset pull terminal_bench_2_1
@@ -28,7 +31,8 @@ gym eval run --benchmark terminal_bench_2_1/terminus_2 --sandbox opensandbox --m
 - `--only-tasks` and `--exclude-tasks` select task folders; drop them, and `--num-repeats`, for the full run.
 - `--agent-type <harness>` runs another session-capable harness (for example `opencode_agent`, `pi_agent`,
   `codex_agent` or `mini_swe_agent/mini_swe_agent_sandboxed`) on the same tasks; it uses that harness's shipped
-  settings.
+  settings. For OpenClaw, use `terminal_bench_2_1/openclaw`: `--agent-type openclaw_agent` runs the shipped 2026.11.5,
+  which refuses the two glibc 2.31 tasks.
 - `gym dataset validate terminal_bench_2_1 --sandbox opensandbox` runs each task's reference solution.
 - These presets need no `gym eval prepare`, and refuse `--no-serve` and `gym eval plan`. Results land where
   `gym eval run` writes them for a Harbor target; the
@@ -210,7 +214,7 @@ the harness for this taskset.
 | [Pi](../../responses_api_agents/pi_agent/README.md) | `responses_api_agents/pi_agent/configs/pi_agent.yaml` | `pi_agent` | `thinking: "off"`, `max_output_tokens: 8192`, `timeout: 600` |
 | [Codex](../../responses_api_agents/codex_agent/README.md) | `responses_api_agents/codex_agent/configs/codex_agent.yaml` | `codex_agent` | `model_context_window: 32768`, `model_auto_compact_token_limit: 28672`, `timeout: 600` |
 | [OpenCode](../../responses_api_agents/opencode_agent/README.md) | `responses_api_agents/opencode_agent/configs/opencode_agent.yaml` | `opencode_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
-| [OpenClaw](../../responses_api_agents/openclaw_agent/README.md) | `responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml` | `openclaw_agent` | `context_window: 32768`, `model_timeout_seconds: 600`, `timeout: 600` |
+| [OpenClaw](../../responses_api_agents/openclaw_agent/README.md) | `responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml` | `openclaw_agent` | `openclaw_version: 2026.6.11` (2026.11.5 refuses the two glibc 2.31 task images), `context_window: 32768`, `model_timeout_seconds: 600`, `timeout: 600` |
 | [Copilot](../../responses_api_agents/copilot_agent/README.md) | `responses_api_agents/copilot_agent/configs/copilot_agent.yaml` | `copilot_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
 | [CrewAI](../../responses_api_agents/crewai_agent/README.md) (development pairing) | `responses_api_agents/crewai_agent/configs/crewai_agent.yaml` | `crewai_agent` | `context_window_size: 131072`, `shell_timeout_seconds: 300`, `timeout: 900` |
 

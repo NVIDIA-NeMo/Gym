@@ -180,6 +180,9 @@ class Sandbox:
             return await self.launch(command=command, **kwargs)
         if "opencode.db-wal" in command:
             return SimpleNamespace(return_code=0, stdout="opencode.db\n", stderr="", error_type=None)
+        if "supervisor.pid" in command and "launch.claim" in command:
+            # The check after a launch command raised: this fake never starts a supervisor of its own.
+            return SimpleNamespace(return_code=1, stdout="", stderr="", error_type=None)
         if "stop.request" in command:
             await self.request_stop()
         if command.startswith("{ [ ! -d /tmp/nemo-gym-media/"):
@@ -260,7 +263,6 @@ def setup():
         entrypoint="app.py",
         num_workers=1,
         model_server={"type": "responses_api_models", "name": "policy"},
-        opencode_version="1.17.11",
         resources_server={"type": "resources_servers", "name": "resources"},
         sandbox_provider="unused",
         sandbox_config={},
@@ -614,7 +616,7 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert body["usage"]["total_tokens"] == 16
         payload = sandbox.params()
         assert payload["prompt"] == "Fix the code"
-        assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
+        assert payload["command"][0].endswith(f"nemo-gym-opencode-runtime-{OPENCODE_VERSION}/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
@@ -2041,7 +2043,7 @@ def test_malformed_later_artifact_keeps_partial_output(setup):
         "/tmp/",
         "/tmp/../tmp/task",
         "/tmp/nemo-gym-opencode-sessions",
-        "/tmp/nemo-gym-opencode-runtime-1.17.11/repo",
+        f"/tmp/nemo-gym-opencode-runtime-{OPENCODE_VERSION}/repo",
     ],
 )
 async def test_adapter_workdir_overlap_is_rejected_before_connection(setup, workdir):

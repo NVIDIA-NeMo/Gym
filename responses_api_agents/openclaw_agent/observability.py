@@ -6,6 +6,7 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 from datetime import datetime, timezone
+from io import StringIO
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -29,9 +30,11 @@ OPENCLAW_OBSERVATION_SOURCE = "openclaw"
 _MILLISECOND_EPOCH_THRESHOLD = 100_000_000_000
 
 
-def _read_events(path: Path) -> list[dict[str, Any]]:
+def parse_openclaw_session_events(session_text: str) -> list[dict[str, Any]]:
+    """Read JSONL records without splitting on Unicode separators inside JSON strings."""
     events = []
-    for line in path.read_text(errors="replace").splitlines():
+    for record in StringIO(session_text):
+        line = record.removesuffix("\n").removesuffix("\r")
         try:
             event = json.loads(line)
         except (json.JSONDecodeError, RecursionError):
@@ -149,7 +152,7 @@ def discover_openclaw_session_tree(
             ),
             None,
         )
-        events = _read_events(path) if path is not None else []
+        events = parse_openclaw_session_events(path.read_text(errors="replace")) if path is not None else []
         if path is None:
             incomplete = True
             gaps.append(

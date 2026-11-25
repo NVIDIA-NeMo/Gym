@@ -89,7 +89,7 @@ docker build --platform linux/amd64 -t deepcad-opencode:1.17.11 \
 | `--harness` | Native runtime setup in the borrowed workspace |
 |---|---|
 | `opencode` | Pinned 1.17.11 binary and plugin archive are preinstalled by the supplied Dockerfile and SHA-256 checked. |
-| `pi` | Pinned 0.80.2 plus private Node 22.19.0; existing installer or a verified `sandbox_runtime_dir` containing both. |
+| `pi` | Pinned 1.5.2 plus private Node 22.19.0; existing installer or a verified `sandbox_runtime_dir` containing both. |
 | `codex` | Pinned 0.144.4 plus private Node 22.19.0; existing installer or verified `sandbox_runtime_dir`. |
 | `claude_code` | Pinned 2.1.108 Linux binary cached on the controller and uploaded; supplied local/sandbox binaries require `sandbox_executable_sha256`. |
 | `openclaw` | Pinned 2026.6.11 plus private Node 22.19.0; existing installer or verified `sandbox_runtime_dir`. |
