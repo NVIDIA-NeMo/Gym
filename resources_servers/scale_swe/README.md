@@ -141,13 +141,7 @@ names the session for `/verify`, and `/close_session` ends it.
   with the same bounded wait per stop. A session with a request still in
   progress gets that long to finish, and then its sandboxes are stopped anyway. A stop that fails is logged,
   and the provider's TTL reclaims the sandbox.
-- **Checkpoints.** Episode sessions take part in partial-rollout checkpoints like the other repository-task
-  servers (`resources_servers/swebench/repo_task_sessions.py`), on a sandbox provider that can snapshot. A commit
-  snapshots the agent's sandbox with the files the checkout held untracked before the agent started and the base
-  commit; once verify captured the patch, it saves the capture alone, failure included. After a crash, the
-  episode continues in a fork of the snapshot, and a verify grades the saved capture without capturing again.
-  Golden-patch mode, and a provider that cannot snapshot, run `restart_only`: those episodes start over.
 
 The cookie path that an Agent's `/run` uses does not replay, and a verify that finds no task sandbox is masked
 with `failure_kind: session_lost`. The stops inside its requests are not bounded, and the sandboxes it still holds
-at shutdown are left to the provider's TTL. Its episodes start over after a crash.
+at shutdown are left to the provider's TTL.
