@@ -11,7 +11,7 @@ the sidecar (``/tool_sidecar/import_state``), then stops the group. No tool call
 """
 
 import shlex
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from omegaconf import OmegaConf
@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, PositiveFloat
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SupportsSandboxSidecars
-from nemo_gym.server_runtime.attempt_sandbox import SandboxGroupSidecar
+from nemo_gym.server_runtime.attempt_sandbox import SandboxGroupSidecar, SandboxGroupSpec
 from nemo_gym.server_runtime.owned_sandboxes import check_network_rule
 
 
@@ -125,6 +125,47 @@ def tool_sidecar_config_of(resources_config: Mapping[str, Any]) -> ToolSidecarCo
     return ToolSidecarConfig.model_validate(
         OmegaConf.to_container(raw, resolve=True) if OmegaConf.is_config(raw) else raw
     )
+
+
+def tool_sidecar_to_grant(
+    group: SandboxGroupSpec | None,
+    *,
+    resources_server: str,
+    configured: bool,
+    lent_to_agent: bool,
+    transports: Sequence[str],
+) -> SandboxGroupSidecar | None:
+    """The sidecar of the seed's group whose tools the Environment Server grants the agent; None when the Resources
+    Server serves its tools in its own process.
+
+    Args:
+        group: The group the Resources Server's seed declared.
+        resources_server: The Resources Server's name, for the refusal.
+        configured: Whether the Resources Server's config sets ``tool_sidecar``.
+        lent_to_agent: Whether the agent borrows the attempt's group.
+        transports: The Environment Server's ``resources_tool_transports``.
+
+    Raises:
+        ValueError: Naming why the tools cannot be granted, which no retry changes: a configured tool sidecar the seed
+            does not declare, more than one, a group the agent does not borrow, or a grant other than direct_http.
+    """
+    serving = [sidecar for sidecar in (group.sidecars if group is not None else []) if sidecar.tools_port]
+    name = repr(resources_server)
+    if not serving:
+        if configured:
+            raise ValueError(
+                f"{name} serves its tools from a sidecar, but its seed declared no sidecar that serves them"
+            )
+        return None
+    if len(serving) > 1:
+        raise ValueError(f"{name} declared {len(serving)} tool sidecars; an agent is granted one direct_http address")
+    if not lent_to_agent:
+        raise ValueError(
+            f"{name} serves its tools from a sidecar of an attempt sandbox group the agent does not borrow"
+        )
+    if "direct_http" not in transports:
+        raise ValueError(f"{name} serves its tools from a sidecar, which this server grants over direct_http only")
+    return serving[0]
 
 
 async def check_tool_sidecar_reachable(sandbox: AsyncSandbox, host: str, port: int) -> bool:

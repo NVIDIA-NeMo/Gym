@@ -786,3 +786,21 @@ def test_a_server_that_keeps_session_state_must_bring_its_tool_state_to_verify()
         _StatefulWithoutStateHooks(config=_config(), server_client=client)
     # With the tools in process, there is no state to bring back.
     _StatefulWithoutStateHooks(config=_config().model_copy(update={"tool_sidecar": None}), server_client=client)
+
+
+class _Lookup(ToolSidecarResources, SimpleResourcesServer):
+    """Tools that keep no state, such as a lookup: the tool host has no state to hand back."""
+
+    config: LedgerConfig
+
+    async def verify(self, body: Any) -> Any:
+        raise AssertionError("not graded here")
+
+
+def test_a_tool_host_whose_tools_keep_no_state_exports_none() -> None:
+    lookup = _Lookup(config=_config(), server_client=_server(_config()).server_client)
+    spec = lookup.tool_host_spec() | {"module": __name__, "class": "_Lookup"}
+
+    with TestClient(build_app(spec), client=("127.0.0.1", 40000)) as local:
+        local.post("/seed_session", json=_seed())
+        assert local.post("/_tool_sidecar/state").json() == {"state": None}

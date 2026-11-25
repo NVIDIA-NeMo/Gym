@@ -4,6 +4,7 @@
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -17,10 +18,12 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.sandbox.providers.base import SandboxCapabilities, SandboxExecResult
+from nemo_gym.server_runtime.attempt_sandbox import SandboxGroupSidecar, SandboxGroupSpec
 from nemo_gym.server_runtime.tool_sidecar import (
     ToolSidecarConfig,
     check_tool_sidecar_reachable,
     tool_sidecar_config_of,
+    tool_sidecar_to_grant,
 )
 
 
@@ -198,3 +201,39 @@ async def test_a_probe_the_provider_could_not_finish_names_why() -> None:
 
     with pytest.raises(RuntimeError, match="cannot reach the tool sidecar at tools:8000: timeout"):
         await check_tool_sidecar_reachable(_TimedOut(), "tools", 8000)  # type: ignore[arg-type]
+
+
+def _group(*sidecars: SandboxGroupSidecar) -> SandboxGroupSpec:
+    return SandboxGroupSpec(sidecars=list(sidecars), prepare=True)
+
+
+_TOOLS = ToolSidecarConfig(image="python:3.13-slim").group_sidecar()
+_GRANT = {"resources_server": "ledger", "configured": True, "lent_to_agent": True, "transports": ["direct_http"]}
+
+
+def test_the_agent_is_granted_the_one_sidecar_that_serves_tools() -> None:
+    other = SandboxGroupSidecar(name="db", image="postgres:17")
+    assert tool_sidecar_to_grant(_group(other, _TOOLS), **_GRANT) == _TOOLS
+    # A Resources Server whose tools run in process declares no tool sidecar, and nothing is granted.
+    assert tool_sidecar_to_grant(_group(other), **_GRANT | {"configured": False}) is None
+    assert tool_sidecar_to_grant(None, **_GRANT | {"configured": False}) is None
+
+
+@pytest.mark.parametrize(
+    ("group", "overrides", "reason"),
+    [
+        (None, {}, "'ledger' serves its tools from a sidecar, but its seed declared no sidecar that serves them"),
+        (
+            _group(_TOOLS, _TOOLS.model_copy(update={"name": "more"})),
+            {},
+            "'ledger' declared 2 tool sidecars; an agent is granted one direct_http address",
+        ),
+        (_group(_TOOLS), {"lent_to_agent": False}, "of an attempt sandbox group the agent does not borrow"),
+        (_group(_TOOLS), {"transports": ["mcp"]}, "which this server grants over direct_http only"),
+    ],
+)
+def test_a_tool_sidecar_that_cannot_be_granted_is_refused_with_why(
+    group: SandboxGroupSpec | None, overrides: dict[str, Any], reason: str
+) -> None:
+    with pytest.raises(ValueError, match=re.escape(reason)):
+        tool_sidecar_to_grant(group, **_GRANT | overrides)

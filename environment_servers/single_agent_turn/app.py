@@ -90,6 +90,7 @@ from nemo_gym.server_runtime import (
     seed_restarts,
     seed_verify_step_type,
     tool_sidecar_config_of,
+    tool_sidecar_to_grant,
 )
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -623,25 +624,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         does not borrow the group of, fails the attempt for good; a tool host the agent container cannot reach fails
         it as an infrastructure failure. No tool call falls back to the Resources host.
         """
-        group = seed.sandbox_group
-        serving = [sidecar for sidecar in (group.sidecars if group is not None else []) if sidecar.tools_port]
-        resources = repr(self.config.resources_server.name)
-        refusal = None
-        if not serving:
-            if self.tool_sidecar is None:
-                return
-            refusal = f"{resources} serves its tools from a sidecar, but its seed declared no sidecar that serves them"
-        elif len(serving) > 1:
-            refusal = f"{resources} declared {len(serving)} tool sidecars; an agent is granted one direct_http address"
-        elif handles.attempt_sandbox is None or not handles.attempt_sandbox.lend_to_agent:
-            refusal = (
-                f"{resources} serves its tools from a sidecar of an attempt sandbox group the agent does not borrow"
+        lent_to_agent = handles.attempt_sandbox is not None and handles.attempt_sandbox.lend_to_agent
+        try:
+            sidecar = tool_sidecar_to_grant(
+                seed.sandbox_group,
+                resources_server=self.config.resources_server.name,
+                configured=self.tool_sidecar is not None,
+                lent_to_agent=lent_to_agent,
+                transports=self.config.resources_tool_transports,
             )
-        elif "direct_http" not in self.config.resources_tool_transports:
-            refusal = f"{resources} serves its tools from a sidecar, which this server grants over direct_http only"
-        if refusal is not None:
-            raise self._failure(stage="seed", failure_reason=refusal, terminal=True)
-        sidecar = serving[0]
+        except ValueError as refusal:
+            raise self._failure(stage="seed", failure_reason=str(refusal), terminal=True) from refusal
+        if sidecar is None:
+            return
         url = f"http://{sidecar.name}:{sidecar.tools_port}"
         try:
             sandbox = self.sandboxes.get(handles.attempt_sandbox.key)
