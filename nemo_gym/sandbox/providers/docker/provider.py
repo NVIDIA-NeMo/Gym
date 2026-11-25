@@ -91,6 +91,79 @@ class DockerCreateVerificationError(SandboxCreateVerificationError):
     """Raised when a new container fails its readiness probe."""
 
 
+class DockerClientEnvError(RuntimeError):
+    """The configured ``client_env_file`` is missing or malformed."""
+
+
+def _prefixed_path(cli_dir: str | None, path: str) -> str:
+    return os.pathsep.join(filter(None, [cli_dir, path]))
+
+
+def client_environment(client_env_file: str | Path | None, cli_dir: str | None) -> dict[str, str] | None:
+    """The docker CLI's environment for a remote daemon: the process environment with ``client_env_file``'s
+    ``KEY=value`` lines over it and ``cli_dir`` first on ``PATH``; ``None`` (inherit) when neither is set.
+
+    Read at each call, so the file may appear after start. Raises :class:`DockerClientEnvError` for a missing or
+    malformed file. The process environment is never modified.
+    """
+    if client_env_file is None and cli_dir is None:
+        return None
+    env = dict(os.environ)
+    if client_env_file is not None:
+        # An inherited DOCKER_CONTEXT takes precedence over DOCKER_HOST, so only the file may set one.
+        env.pop("DOCKER_CONTEXT", None)
+        env.update(_read_client_env(Path(client_env_file).expanduser()))
+    env["PATH"] = _prefixed_path(str(Path(cli_dir).expanduser()) if cli_dir else None, env.get("PATH", ""))
+    # docker finds plugins (compose) under $DOCKER_CONFIG/cli-plugins, never beside its binary.
+    if cli_dir and (Path(cli_dir).expanduser() / "cli-plugins").is_dir():
+        env["DOCKER_CONFIG"] = str(Path(cli_dir).expanduser())
+    return env
+
+
+def _read_client_env(path: Path) -> dict[str, str]:
+    """``[export ]KEY=value`` lines (shell-quoted values, ``#`` comments), as a remote daemon's ``client.env``.
+
+    A ``DOCKER_CERT_PATH`` that does not exist on this host becomes the file's directory when that directory holds
+    the TLS material (``ca.pem``, ``cert.pem``, ``key.pem``): a daemon that writes the file beside it names the
+    directory as its own host mounts it. Every other unreadable or malformed file raises DockerClientEnvError.
+    """
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        raise DockerClientEnvError(
+            f"Docker client environment file {path} does not exist; start the daemon that writes it first"
+        ) from None
+    except (OSError, UnicodeDecodeError) as error:
+        raise DockerClientEnvError(f"Cannot read Docker client environment file {path}: {error}") from error
+    values: dict[str, str] = {}
+    for number, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.removeprefix("export ").strip().partition("=")
+        if not separator or not key.isascii() or not key.isidentifier():
+            raise DockerClientEnvError(f"Malformed environment assignment in {path} at line {number}")
+        try:
+            parts = shlex.split(value, comments=True)
+        except ValueError as error:
+            raise DockerClientEnvError(f"Malformed environment value in {path} at line {number}") from error
+        if len(parts) > 1:
+            raise DockerClientEnvError(f"Quote environment values containing spaces in {path} at line {number}")
+        values[key] = parts[0] if parts else ""
+    cert_path = values.get("DOCKER_CERT_PATH")
+    if cert_path is not None and not Path(cert_path).is_dir():
+        if not all((path.parent / name).is_file() for name in ("ca.pem", "cert.pem", "key.pem")):
+            raise DockerClientEnvError(
+                f"DOCKER_CERT_PATH {cert_path} in {path} does not exist, and {path.parent} holds no ca.pem, "
+                "cert.pem and key.pem"
+            )
+        values["DOCKER_CERT_PATH"] = str(path.parent)
+    if not values.get("DOCKER_HOST"):
+        # Without it the CLI falls back to the local daemon, where a remote container looks missing.
+        raise DockerClientEnvError(f"Docker client environment file {path} sets no DOCKER_HOST")
+    return values
+
+
 def _require_docker() -> str:
     path = shutil.which("docker")
     if path is None:
@@ -299,7 +372,12 @@ def _picks_network(args: Sequence[str]) -> bool:
 
 
 class DockerProvider:
-    """Sandbox provider backed by the local Docker CLI / daemon."""
+    """Sandbox provider driven by the Docker CLI.
+
+    ``client_env_file`` optionally supplies quoted ``KEY=value`` assignments for a remote daemon, reloaded on
+    each command. ``cli_dir`` optionally selects a directory containing Docker and its ``cli-plugins`` directory.
+    Both settings are scoped to this provider; omitted settings inherit the process environment.
+    """
 
     capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(
         network_rules=frozenset({"inherit", "no_network"}), reconnect="same_host"
@@ -350,11 +428,15 @@ class DockerProvider:
         exec: DockerExecConfig | Mapping[str, Any] | None = None,
         create: DockerCreateConfig | Mapping[str, Any] | None = None,
         probe: DockerProbeConfig | Mapping[str, Any] | None = None,
+        client_env_file: str | None = None,
+        cli_dir: str | None = None,
     ) -> None:
         self._exec_config = _coerce_config(exec, DockerExecConfig)
         self._create_config = _coerce_config(create, DockerCreateConfig)
         self._probe = _coerce_config(probe, DockerProbeConfig)
-        self._binary = _require_docker()
+        self._client_env_file = Path(client_env_file).expanduser() if client_env_file else None
+        self._cli_dir = str(Path(cli_dir).expanduser()) if cli_dir else None
+        self._binary = (shutil.which("docker", path=self._cli_dir) if self._cli_dir else None) or _require_docker()
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
         # Live PTY sessions by container name; closed with their container and at provider shutdown.
         self._pty_sessions: dict[str, set[docker_pty.DockerPtySession]] = {}
@@ -390,6 +472,9 @@ class DockerProvider:
             raise ValueError(f"pull policy must be always, missing or never, got {policy!r}")
         return {"run_args": ["--pull", policy]}
 
+    def _client_environment(self) -> dict[str, str] | None:
+        return client_environment(self._client_env_file, self._cli_dir)
+
     async def _run(
         self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
     ) -> tuple[int, str, str]:
@@ -401,6 +486,7 @@ class DockerProvider:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env=self._client_environment(),
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
@@ -876,6 +962,7 @@ class DockerProvider:
             await self._release_pty_session(stale, name, abandon=False)
         session = await self._spawn_pty(
             self._pty_argv(handle, spec, session_id),
+            env=self._client_environment(),
             use_pty=spec.pty,
             rows=spec.rows,
             cols=spec.cols,

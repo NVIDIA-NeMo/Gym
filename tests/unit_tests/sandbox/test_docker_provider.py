@@ -29,6 +29,7 @@ from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -109,6 +110,77 @@ def test_require_docker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(docker_provider.shutil, "which", lambda _name: None)
     with pytest.raises(RuntimeError, match="docker"):
         docker_provider._require_docker()
+
+
+@pytest.mark.parametrize("use_pty", [False, True])
+async def test_remote_client_environment_isolated_per_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_pty: bool
+) -> None:
+    cli_dir = tmp_path / "bin"
+    cli_dir.mkdir()
+    binary = cli_dir / "docker"
+    binary.write_text('#!/bin/sh\nprintf "%s|%s|%s" "$DOCKER_HOST" "$PRESERVED" "${DOCKER_CONTEXT-unset}"\n')
+    binary.chmod(0o755)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///original.sock")
+    monkeypatch.setenv("DOCKER_CONTEXT", "inherited-context")
+    monkeypatch.setenv("PRESERVED", "process-value")
+    providers = []
+    for name in ("first", "second"):
+        env_file = tmp_path / f"{name}.env"
+        env_file.write_text(f"export DOCKER_HOST='tcp://{name}:2376' # remote daemon\n")
+        providers.append(docker_provider.DockerProvider(client_env_file=str(env_file), cli_dir=str(cli_dir)))
+    try:
+        results = await asyncio.gather(*(provider._run([provider._binary], timeout_s=5) for provider in providers))
+        assert results == [(0, f"tcp://{name}:2376|process-value|unset", "") for name in ("first", "second")]
+        for provider, name in zip(providers, ("first", "second"), strict=True):
+
+            async def spawn_local(argv: list[str], **kwargs: Any) -> Any:
+                for key in ("run_in_container", "pid_file", "fallback_pid_file", "runtime_failure"):
+                    kwargs.pop(key)
+                return await docker_provider.docker_pty.spawn([argv[0]], **kwargs)
+
+            monkeypatch.setattr(provider, "_spawn_pty", spawn_local)
+            session = await provider.create_pty(_make_handle(name=name), SandboxPtySpec(command="true", pty=use_pty))
+            try:
+                assert await session.wait_exit(timeout_s=5) == 0
+                output = b""
+                while chunk := await session.read(timeout_s=5):
+                    output += chunk
+                assert output == f"tcp://{name}:2376|process-value|unset".encode()
+            finally:
+                await session.close()
+        assert os.environ["DOCKER_HOST"] == "unix:///original.sock"
+        assert os.environ["DOCKER_CONTEXT"] == "inherited-context"
+    finally:
+        for provider in providers:
+            await provider.aclose()
+
+
+def test_remote_client_environment_reloads_tls_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = tmp_path / "client.env"
+    env_file.write_text("DOCKER_HOST=tcp://first:2376\nDOCKER_CERT_PATH=/daemon-only/certs\n")
+    for name in ("ca.pem", "cert.pem", "key.pem"):
+        (tmp_path / name).touch()
+    plugins = tmp_path / "cli-plugins"
+    plugins.mkdir()
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = docker_provider.client_environment(env_file, str(tmp_path))
+    assert env["DOCKER_CERT_PATH"] == str(tmp_path)
+    assert env["DOCKER_CONFIG"] == str(tmp_path)
+    assert env["PATH"] == f"{tmp_path}:/usr/bin"
+    env_file.write_text("DOCKER_HOST=tcp://second:2376\n")
+    assert docker_provider.client_environment(env_file, None)["DOCKER_HOST"] == "tcp://second:2376"
+
+
+@pytest.mark.parametrize(
+    "contents", [None, "INVALID", "DOCKER_HOST='unterminated", "DOCKER_HOST=two words", "OTHER=x"]
+)
+def test_remote_client_environment_rejects_invalid_file(tmp_path: Path, contents: str | None) -> None:
+    env_file = tmp_path / "client.env"
+    if contents is not None:
+        env_file.write_text(contents)
+    with pytest.raises(docker_provider.DockerClientEnvError):
+        docker_provider.client_environment(env_file, None)
 
 
 def test_coerce_config() -> None:
