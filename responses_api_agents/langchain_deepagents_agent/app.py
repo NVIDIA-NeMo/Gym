@@ -164,8 +164,6 @@ class DeepAgentsAgentConfig(SimpleAgentConfig):
         if self.tool_profile == "tavily_search":
             if not self.tavily_api_key:
                 raise ValueError("tavily_api_key is required for tool_profile=tavily_search")
-            if self.sandboxed:
-                raise ValueError("tool_profile=tavily_search runs in process and cannot use sandboxed=true")
             if self.sandbox_provider is not None:
                 raise ValueError(
                     "tool_profile=tavily_search runs in process; sandbox_provider requires tool_profile=builtin"

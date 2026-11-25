@@ -4,14 +4,16 @@
 """Shared lifecycle for environment servers, and the base for those that serve each episode's tools."""
 
 import asyncio
+import dataclasses
 import json
 import logging
 import re
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from time import perf_counter
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional, TypeVar
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
@@ -40,15 +42,22 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import reply_failure_report, report_for_current_request
 from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, encode_model_sampling
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
+from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxSpec
+from nemo_gym.sandbox.providers.base import SandboxSpec, SupportsSandboxSidecars
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 from nemo_gym.server_runtime._checkpoint.errors import ControlError
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
+from nemo_gym.server_runtime.attempt_sandbox import (
+    AttemptSandbox,
+    AttemptSandboxConfig,
+    SandboxGroupSpec,
+    SandboxOptOut,
+)
 from nemo_gym.server_runtime.base_server import SimpleServer
 from nemo_gym.server_runtime.episode_tokens import (
     EPISODE_TOKEN_HEADER,
@@ -82,6 +91,11 @@ _ENVIRONMENT_CHECKPOINT_MODES = ("restart_only", "exported")
 EpisodeRequestT = TypeVar("EpisodeRequestT", bound=BaseEpisodeRequest[Any])
 EpisodeResponseT = TypeVar("EpisodeResponseT", bound=BaseEpisodeResponse[Any])
 CleanupCallback = Callable[[], Awaitable[None]]
+# Provider label values stay within the common 63-character limit.
+_LABEL_LIMIT = 63
+# The owned sandbox block of a server whose base class starts attempt sandboxes: its sandbox_config, started on its
+# sandbox_provider. Such a server lists it in owned_sandbox_blocks and sets lends_sandboxes.
+ATTEMPT_SANDBOX_BLOCKS: Mapping[str, str] = MappingProxyType({"sandbox_config": "sandbox_provider"})
 
 
 class BaseEnvironmentServerConfig(BaseRunServerInstanceConfig):
@@ -100,6 +114,36 @@ class BaseEnvironmentServerConfig(BaseRunServerInstanceConfig):
     def validate_queue_timeout(self) -> Self:
         if self.max_concurrent_episodes is not None and self.queue_timeout_seconds is None:
             raise ValueError("queue_timeout_seconds is required when max_concurrent_episodes is enabled")
+        return self
+
+
+class AttemptSandboxEnvironmentServerConfig(BaseEnvironmentServerConfig):
+    """Configure an Environment Server whose base class starts, lends and stops each attempt's sandbox group.
+
+    ``sandbox_provider`` names a top-level sandbox provider block and ``sandbox_config`` the group's settings; set both
+    or neither. Set, every attempt runs in a group the server starts at seed from ``sandbox_config``, with what the
+    Resources Server declares at seed (``SandboxGroupSpec``) over it: the agent borrows it for its turn and ``/verify``
+    after the agent closes, unless ``sandbox_opt_out`` says otherwise; the server stops it after the episode. Unset,
+    the server starts no sandbox, as before, and refuses a Resources Server that declares a group it would need.
+    ``ttl_s`` must exceed ``default_episode_timeout_seconds`` plus ``cleanup_timeout_seconds``.
+    """
+
+    sandbox_provider: str | None = None
+    sandbox_config: AttemptSandboxConfig | None = None
+    sandbox_opt_out: SandboxOptOut = Field(default_factory=SandboxOptOut)
+
+    @model_validator(mode="after")
+    def _sandbox_provider_and_config_together(self) -> Self:
+        if (self.sandbox_provider is None) != (self.sandbox_config is None):
+            raise ValueError("set sandbox_provider and sandbox_config together, or neither")
+        if self.sandbox_config is not None and self.default_episode_timeout_seconds is not None:
+            # The provider must not reclaim a sandbox while its episode, or the episode's cleanup, still uses it.
+            lifetime = self.default_episode_timeout_seconds + self.cleanup_timeout_seconds
+            if self.sandbox_config.ttl_s <= lifetime:
+                raise ValueError(
+                    f"sandbox_config.ttl_s ({self.sandbox_config.ttl_s}) must exceed default_episode_timeout_seconds "
+                    f"plus cleanup_timeout_seconds ({lifetime})"
+                )
         return self
 
 
@@ -290,6 +334,14 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     A subclass implements ``run`` and registers the release of each resource it holds, such as a sandbox, in the
     episode's ``CleanupContext``. When the server shuts down, it finishes the cleanups of every episode still
     running (see ``finish_running_cleanups``).
+
+    The server owns each attempt's sandbox group. With an ``AttemptSandboxEnvironmentServerConfig`` that sets
+    ``sandbox_provider``, a subclass's ``run`` uses the attempt sandbox methods: it registers
+    ``stop_attempt_sandbox`` in the episode's cleanup, decides at seed with ``plan_attempt_sandbox`` who borrows the
+    group, starts it with ``start_attempt_sandbox`` and lends the access it returns to the agent, lends it to
+    ``/verify`` with ``attempt_sandbox_access`` (or starts it then, for a grader alone), and stops it after the agent
+    closes when only the agent needed it. Such a subclass sets ``lends_sandboxes`` and lists
+    ``ATTEMPT_SANDBOX_BLOCKS`` in ``owned_sandbox_blocks``. The Resources Server and the agent only borrow the group.
     """
 
     config: BaseEnvironmentServerConfig
@@ -664,6 +716,198 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             raise ValueError("response episode_id does not match request")
         if response.task_id != request.task.task_id:
             raise ValueError("response task_id does not match request")
+
+    def _attempt_sandbox_settings(self) -> AttemptSandboxEnvironmentServerConfig | None:
+        """The config, if it is one whose server starts attempt sandboxes; ``None`` for any other server."""
+        return self.config if isinstance(self.config, AttemptSandboxEnvironmentServerConfig) else None
+
+    @property
+    def starts_attempt_sandboxes(self) -> bool:
+        """Whether this server starts attempt sandbox groups: its config sets ``sandbox_provider``."""
+        settings = self._attempt_sandbox_settings()
+        return settings is not None and settings.sandbox_config is not None
+
+    def check_sandbox_provider(self) -> None:
+        """Refuse at startup what the server's sandbox providers cannot do; see ``SimpleServer.check_sandbox_provider``.
+
+        A server that starts attempt sandboxes must also declare that it owns and lends them, and its provider is
+        built now, so a bad provider block fails startup instead of every attempt.
+
+        Raises:
+            ValueError: Naming the first need the configuration or the provider cannot meet.
+        """
+        starts = self.starts_attempt_sandboxes
+        if starts and (
+            not ATTEMPT_SANDBOX_BLOCKS.items() <= dict(self.owned_sandbox_blocks).items() or not self.lends_sandboxes
+        ):
+            raise ValueError(
+                f"{type(self).__name__} starts attempt sandboxes from sandbox_config, so it sets lends_sandboxes = True "
+                "and lists ATTEMPT_SANDBOX_BLOCKS in owned_sandbox_blocks"
+            )
+        super().check_sandbox_provider()
+        if starts:
+            self.sandboxes  # noqa: B018 - builds the provider, which raises for a bad provider block
+
+    def plan_attempt_sandbox(
+        self,
+        *,
+        key: str,
+        lent: SandboxAccess | None = None,
+        group: SandboxGroupSpec | None = None,
+        task_tools: Sequence[str] = (),
+        resources_server: str = "the Resources Server",
+    ) -> AttemptSandbox | None:
+        """Decide at seed, from the Resources seed reply, who borrows a sandbox group this server starts.
+
+        ``key`` names the group in ``self.sandboxes`` and must be unique to the attempt. ``lent`` is a sandbox the
+        Resources seed lent itself: without ``sandbox_provider`` it is lent on and this server starts none; with it,
+        the attempt fails, since one attempt has one sandbox owner. ``group`` is what the seed declared,
+        and ``task_tools`` names the tools the task declares or the episode grants, for the task opt-out check.
+        Unless ``sandbox_opt_out`` says otherwise, the agent borrows the group for its turn and ``/verify`` borrows
+        it after the agent closes. Returns ``None`` when nothing borrows a group this server starts, which is always
+        the case without ``sandbox_provider``.
+
+        Raises:
+            NgFailureEvent: A terminal seed failure, which no retry changes: a refused opt-out (a task opt-out with
+                tools, a grader opt-out for a grader that runs code), a declared group without a ``sandbox_provider``
+                to start it, or a Resources Server that lends a sandbox although this server owns the attempt's.
+        """
+        settings = self._attempt_sandbox_settings()
+        if settings is None:
+            raise TypeError(f"{type(self).__name__} has no AttemptSandboxEnvironmentServerConfig")
+        opt_out = settings.sandbox_opt_out
+        sidecars = [f"sidecar {sidecar.name}" for sidecar in group.sidecars] if group is not None else []
+        tools = [*task_tools, *sidecars]
+        if opt_out.task and tools:
+            raise self._attempt_sandbox_refusal(
+                "sandbox_opt_out.task is only for a pure QA task, whose model calls no tools, but this task has "
+                f"{tools}; a task with tools always runs in the attempt's sandbox group"
+            )
+        if opt_out.grader and group is not None and group.grader_runs_code:
+            raise self._attempt_sandbox_refusal(
+                f"sandbox_opt_out.grader is only for a grader that executes nothing, but {resources_server} declares "
+                "that its grader runs code; such a grader always gets a sandbox"
+            )
+        if lent is not None:
+            if settings.sandbox_config is not None:
+                # One attempt has one sandbox owner, and with sandbox_provider set it is this server.
+                raise self._attempt_sandbox_refusal(
+                    f"Resources Server {resources_server} lent a sandbox, but Environment Server {self.config.name!r} "
+                    "starts the attempt's sandbox itself (sandbox_provider is set); a Resources Server only borrows "
+                    "the sandbox the Environment Server lends"
+                )
+            return None
+        lend_to_agent, lend_to_grader = not opt_out.task, not opt_out.grader
+        if not (lend_to_agent or lend_to_grader):
+            return None
+        if settings.sandbox_config is None:
+            if group is not None:
+                raise self._attempt_sandbox_refusal(
+                    f"{resources_server} declares a sandbox group at seed, but {self.config.name} sets no "
+                    "sandbox_provider and sandbox_config to start it; nothing falls back to a host"
+                )
+            return None
+        return AttemptSandbox(key=key, lend_to_agent=lend_to_agent, lend_to_grader=lend_to_grader, group=group)
+
+    async def start_attempt_sandbox(
+        self,
+        request: EpisodeRequestT,
+        attempt: AttemptSandbox,
+        *,
+        stage: FailureStage,
+        prepare: Callable[[SandboxAccess], Awaitable[None]] | None = None,
+        **evidence: Any,
+    ) -> SandboxAccess:
+        """Start the attempt's sandbox group, wait until it is ready, let the Resources Server prepare it, and return
+        the operate-scope access a borrower takes it with.
+
+        Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled start still stops what it
+        created. ``prepare`` runs when the seed declared ``prepare``: it asks the Resources Server to prepare the task
+        through the access. A group the agent borrows is held across checkpoint boundaries, and no checkpoint can
+        rebuild it, so its episode becomes a restart first; a group for the grader alone starts and stops inside the
+        verify step. There is no host fallback: a group that cannot start or be described fails the attempt as a
+        retryable infrastructure failure at ``stage``, with ``evidence`` kept, and records no reward; a failed
+        prepare is retried when the Resources Server's error is. A group no attempt can start, one without an image
+        or with sidecars on a provider without them, fails the attempt terminally.
+        """
+        if attempt.lend_to_agent:
+            # Marked before the group and the agent session exist, so no checkpoint exports an episode that holds them.
+            await self.checkpoint_restart(request)
+        settings = self._attempt_sandbox_settings()
+        assert settings is not None and settings.sandbox_config is not None  # plan_attempt_sandbox returned a plan
+        config = settings.sandbox_config
+        group = attempt.group or SandboxGroupSpec()
+        image, workdir = group.image or config.image, group.workdir or config.workdir
+        missing = [name for name, value in (("image", image), ("workdir", workdir)) if value is None]
+        if missing:
+            raise self._attempt_sandbox_refusal(
+                f"the attempt's sandbox group has no {' or '.join(missing)}: set it in sandbox_config or declare it in "
+                "the seed's sandbox_group",
+                stage=stage,
+            )
+        if group.sidecars and not isinstance(self.sandboxes.provider, SupportsSandboxSidecars):
+            raise self._attempt_sandbox_refusal(
+                f"the seed's sandbox_group declares sidecars, which provider {type(self.sandboxes.provider).__name__} "
+                f"of {settings.sandbox_provider!r} cannot start",
+                stage=stage,
+            )
+        attempt.workdir = workdir
+        try:
+            spec = self.sandboxes.spec(
+                config,
+                image=image,
+                workdir=workdir,
+                metadata={
+                    "task_id": request.task.task_id.task_id[:_LABEL_LIMIT],
+                    "rollout_id": request.episode_id.capture_key[:_LABEL_LIMIT],
+                },
+                files=group.files,
+            )
+            spec = dataclasses.replace(
+                spec, env=spec.env | group.env, sidecars=tuple(sidecar.spec() for sidecar in group.sidecars)
+            )
+            await self.sandboxes.create(attempt.key, spec)
+            access = await self.sandboxes.access(attempt.key, workdir=workdir)
+        except Exception as error:
+            raise dependency_failure(error, stage=stage, terminal=False, name_error_type=True, **evidence) from error
+        if prepare is not None and group.prepare:
+            try:
+                await prepare(access)
+            except Exception as error:
+                raise dependency_failure(error, stage=stage, **evidence) from error
+        return access
+
+    async def attempt_sandbox_access(
+        self, attempt: AttemptSandbox, *, stage: FailureStage, **evidence: Any
+    ) -> SandboxAccess:
+        """Operate-scope access to the attempt's started group for another borrower, such as ``/verify``.
+
+        A group that cannot be described any more is an infrastructure failure: the attempt is retried, never graded
+        without it.
+        """
+        try:
+            return await self.sandboxes.access(attempt.key, workdir=attempt.workdir or "")
+        except Exception as error:
+            raise dependency_failure(error, stage=stage, terminal=False, name_error_type=True, **evidence) from error
+
+    async def stop_attempt_sandbox(self, key: str) -> None:
+        """Stop the attempt's group; a no-op when none was started, so cleanup may repeat it.
+
+        It never builds the provider, so an episode whose Resources Server lent the sandbox builds none here.
+        """
+        owned = self._owned_sandboxes.get("sandbox_provider")
+        if owned is not None:
+            await owned.stop(key)
+
+    def _attempt_sandbox_refusal(self, reason: str, *, stage: FailureStage = "seed") -> NgFailureEvent:
+        """A terminal failure for an attempt sandbox the configuration cannot give: every attempt would fail alike."""
+        return handled_episode_failure(
+            boundary=FailureBoundary.ENVIRONMENT,
+            stage=stage,
+            operation="episode",
+            failure_reason=reason[:2000],
+            terminal=True,
+        )
 
     @abstractmethod
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
