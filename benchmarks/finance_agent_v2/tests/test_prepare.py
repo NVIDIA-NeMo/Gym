@@ -174,6 +174,65 @@ class TestConvert:
             assert criterion["criteria"] in rows[0]["expected_answer"]
 
 
+_PINNED_CSV = b"Question,Rubric\npinned?,[]\n"
+_OLD_PIN_CSV = b"Question,Rubric\nold pin?,[]\n"
+
+
+class TestPublicCsvDownload:
+    """data/public.csv is a download keyed by the upstream pin: one fetched at an earlier
+    pin must not survive a pin bump, or the new prompts run against the old rubrics."""
+
+    @pytest.fixture
+    def data_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(prepare_module, "DATA_DIR", tmp_path)
+        monkeypatch.setattr(prepare_module, "_CSV_SHA256", prepare_module.hashlib.sha256(_PINNED_CSV).hexdigest())
+        return tmp_path
+
+    @pytest.fixture
+    def downloads(self, monkeypatch):
+        served = {"body": _PINNED_CSV, "calls": 0}
+
+        def fake_urlretrieve(url, dest):
+            assert url == prepare_module.CSV_URL
+            served["calls"] += 1
+            prepare_module.Path(dest).write_bytes(served["body"])
+
+        monkeypatch.setattr(prepare_module.urllib.request, "urlretrieve", fake_urlretrieve)
+        return served
+
+    def test_missing_csv_is_downloaded(self, data_dir, downloads) -> None:
+        assert prepare_module._default_source() == data_dir / "public.csv"
+        assert (data_dir / "public.csv").read_bytes() == _PINNED_CSV
+        assert downloads["calls"] == 1
+
+    def test_csv_of_the_pinned_commit_is_reused(self, data_dir, downloads) -> None:
+        (data_dir / "public.csv").write_bytes(_PINNED_CSV)
+
+        assert prepare_module._default_source() == data_dir / "public.csv"
+        assert downloads["calls"] == 0
+
+    def test_csv_of_an_earlier_pin_is_downloaded_again(self, data_dir, downloads) -> None:
+        (data_dir / "public.csv").write_bytes(_OLD_PIN_CSV)
+
+        assert prepare_module._default_source() == data_dir / "public.csv"
+        assert (data_dir / "public.csv").read_bytes() == _PINNED_CSV
+        assert downloads["calls"] == 1
+
+    def test_download_with_another_digest_fails_and_keeps_nothing(self, data_dir, downloads) -> None:
+        downloads["body"] = _OLD_PIN_CSV
+
+        with pytest.raises(ValueError, match="Update _CSV_SHA256"):
+            prepare_module._default_source()
+        assert sorted(p.name for p in data_dir.iterdir()) == []
+
+    def test_local_labeled_source_still_wins(self, data_dir, downloads) -> None:
+        (data_dir / "labeled.jsonl").write_text('{"question": "q?"}\n', encoding="utf-8")
+        (data_dir / "public.csv").write_bytes(_OLD_PIN_CSV)
+
+        assert prepare_module._default_source() == data_dir / "labeled.jsonl"
+        assert downloads["calls"] == 0
+
+
 class TestSourceDriftGuard:
     def test_partial_rubric_loss_fails_loudly(self, tmp_path) -> None:
         """A renamed upstream column must not silently yield unscorable rows."""
@@ -258,6 +317,10 @@ class TestSourceDriftGuard:
 
         with pytest.raises(FileNotFoundError, match="export_upstream_spec.py"):
             prepare_module._load_upstream_spec()
+
+    def test_csv_digest_is_a_sha256(self) -> None:
+        assert len(prepare_module._CSV_SHA256) == 64
+        int(prepare_module._CSV_SHA256, 16)
 
     def test_dataset_pin_matches_the_installed_tools(self) -> None:
         # The tool code and the question set come from the same repo; if they came
