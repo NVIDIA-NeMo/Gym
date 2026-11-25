@@ -9,7 +9,7 @@ NVIDIA <br>
 ### License/Terms of Use: <br>
 Apache 2.0 <br>
 ## Use Case: <br>
-Developers and engineers evaluating models with NeMo Gym use this skill to decide whether a score difference between runs, or between a run and a published number, is real and comparable, and to diagnose why tasks fail and what to fix. <br>
+Developers and engineers evaluating models with NeMo Gym use this skill to decide whether a score difference between runs (or against a published number) is real, comparable and larger than noise, and to diagnose which tasks fail and why before reporting findings. <br>
 
 ### Deployment Geography for Use: <br>
 Global <br>
@@ -25,14 +25,15 @@ Risk: Review before execution as proposals could introduce incorrect or misleadi
 Mitigation: Review and scan skill before deployment. <br>
 
 ## Reference(s): <br>
-- [Is the Difference Real? (score comparability)](references/score-comparability.md) <br>
-- [Why Did Tasks Fail? (failure diagnosis)](references/failure-diagnosis.md) <br>
-- [Benchmark Notes](references/benchmark-notes.md) <br>
+- [references/score-comparability.md](references/score-comparability.md) <br>
+- [references/failure-diagnosis.md](references/failure-diagnosis.md) <br>
+- [references/benchmark-notes.md](references/benchmark-notes.md) <br>
+- [NeMo Gym documentation](https://docs.nvidia.com/nemo/gym/main/about/) <br>
 
 
 ## Skill Output: <br>
 **Output Type(s):** [Analysis, Shell commands] <br>
-**Output Format:** [Markdown report with a structured verdict block and inline bash code blocks] <br>
+**Output Format:** [Markdown report with verdict, evidence and inline bash/Python code blocks] <br>
 **Output Parameters:** [1D] <br>
 **Other Properties Related to Output:** [None] <br>
 
@@ -43,7 +44,7 @@ Mitigation: Review and scan skill before deployment. <br>
 
 
 ## Evaluation Tasks: <br>
-22 evaluation tasks (12 positive, 10 negative), 1 attempt per task, each attempt in its own isolated sandbox pod (`k8s-sandbox`); each task was also attempted without the skill as a baseline. Evaluator version `1.6.10`, evaluation date 2026-11-25. <br>
+23 evaluation tasks (13 positive, 10 negative), 1 attempt per task, each run in its own isolated sandbox pod (`k8s-sandbox` environment); evaluator version `1.6.10`, evaluation date 2026-11-25. <br>
 
 ## Evaluation Metrics Used: <br>
 Reported benchmark dimensions: <br>
@@ -75,12 +76,12 @@ Recommended for publication based on the completed evaluation evidence in this r
 
 | Measure | Claude Code (Baseline → Skill Uplift) | Codex (Baseline → Skill Uplift) |
 |---|---:|---:|
-| Overall | 94.7% — baseline ran, but no comparable score was available; uplift unavailable | 90.4% — baseline ran, but no comparable score was available; uplift unavailable |
-| Security | 97.7% → 100.0% (+2.3 points) | 100.0% → 95.5% (-4.5 points) |
-| Correctness | 86.4% → 92.7% (+6.3 points) | 95.5% → 97.3% (+1.8 points) |
-| Discoverability | 95.8% — baseline ran, but no comparable score was available; uplift unavailable | 91.3% — baseline ran, but no comparable score was available; uplift unavailable |
-| Effectiveness | 77.6% → 87.9% (+10.3 points) | 89.0% → 86.4% (-2.6 points) |
-| Efficiency | 96.9% — baseline ran, but no comparable score was available; uplift unavailable | 81.7% — baseline ran, but no comparable score was available; uplift unavailable |
+| Overall | 94.1% — baseline ran, but no comparable score was available; uplift unavailable | 92.5% — baseline ran, but no comparable score was available; uplift unavailable |
+| Security | 100.0% → 100.0% (±0.0 points) | 97.8% → 97.8% (±0.0 points) |
+| Correctness | 83.5% → 95.7% (+12.2 points) | 96.5% → 99.1% (+2.6 points) |
+| Discoverability | 96.2% — baseline ran, but no comparable score was available; uplift unavailable | 89.5% — baseline ran, but no comparable score was available; uplift unavailable |
+| Effectiveness | 79.5% → 85.6% (+6.1 points) | 83.0% → 92.4% (+9.4 points) |
+| Efficiency | 93.1% — baseline ran, but no comparable score was available; uplift unavailable | 83.5% — baseline ran, but no comparable score was available; uplift unavailable |
 
 **How to read this table:** baseline is the same task attempted without the target skill. Scores are rounded to one decimal; threshold-adjacent values use additional precision so their displayed band matches the verdict. Uplift is derived from those displayed scores and shown in percentage points.
 
@@ -95,9 +96,17 @@ Shared-source comparisons use the same signals and weights on both conditions. T
 | Agent | Dimension | Basis | Baseline → With skill (uplift) | Explanation |
 | --- | --- | --- | --- | --- |
 | claude-code | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| claude-code | Efficiency | Token-only comparison | 95.4% → 93.7% (-1.7 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| claude-code | Efficiency | Token-only comparison | 95.5% → 93.0% (-2.5 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
 | codex | Discoverability | Dimension comparison | N/A | Discoverability is not applicable to the no-skill baseline; there is no installed skill to discover. |
-| codex | Efficiency | Token-only comparison | 82.7% → 83.7% (+1.0 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+| codex | Efficiency | Token-only comparison | 83.7% → 83.8% (+0.1 points) | Only Token Efficiency is comparable; the full dimension scores use different evaluator sources. |
+
+### Tier Status
+
+| Tier | Purpose | Status | Evidence |
+|---|---|---|---|
+| Tier 1 | Static validation | **PASSED WITH OBSERVATIONS** | 11 validator(s); 4 finding(s) |
+| Tier 2 | Semantic deduplication | **PASSED** | 2 validator(s); 0 finding(s) |
+| Tier 3 | Live agent evaluation | **PASS** | 2 agent(s); 23 task(s) |
 
 ## Skill Version(s): <br>
 1.0.0 (source: frontmatter) <br>
