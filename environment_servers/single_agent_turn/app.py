@@ -189,10 +189,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         """
         super().check_sandbox_provider()
         config = self.config.sandbox_config
-        if config is None:
-            return
         granted = {*([self.config.resources_server.name] if self.config.resources_tool_transports else [])}
         granted.update(self.tool_server_names)
+        if config is None:
+            if self.starts_attempt_sandboxes and granted:
+                # Granted tools put the agent in the attempt's group, which only sandbox_config starts.
+                raise ValueError(
+                    f"{self.config.name} grants the tools of {sorted(granted)}, which put the agent in the attempt's "
+                    "sandbox group, but sets no sandbox_config to start it; set sandbox_config, or grant no tools"
+                )
+            return
         # inherit leaves egress open, and hosts_only names hosts rather than servers, so neither can be checked here.
         missing = sorted(granted - set(config.tool_servers))
         if missing and config.network in ("no_network", "model_only", "model_and_tools"):
