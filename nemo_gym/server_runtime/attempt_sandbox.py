@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """The attempt sandbox: the sandbox group an Environment Server starts, lends and stops for one episode attempt.
 
-The Environment Server owns it. The Resources Server declares at seed what the group holds (``SandboxGroupSpec``) and
-whether its verifier executes nothing; the agent borrows the group for its turn and the Resources Server borrows it for
-``/verify``. A pure QA task, or a verifier that executes nothing, may opt out (``SandboxOptOut``). These are the types
-both sides share; the lifecycle itself is ``BaseEnvironmentServer``'s.
+The Environment Server owns it. The Resources Server declares at seed what the group holds (``SandboxGroupSpec``); the
+agent borrows the group for its turn and the Resources Server borrows it for ``/verify``. A pure QA task, or a verifier
+that executes nothing, may opt out explicitly (``SandboxOptOut``). These are the types both sides share; the lifecycle
+itself is ``BaseEnvironmentServer``'s.
 """
 
 from collections.abc import Mapping
@@ -52,17 +52,17 @@ class AttemptSandboxConfig(SandboxConfig):
 class SandboxOptOut(BaseModel):
     """What may run outside the attempt's sandbox group, to save sandbox capacity on large runs.
 
-    Everything runs in a sandbox unless it opts out, and only what executes nothing may. The Environment Server
-    checks both at seed and fails the attempt, as a terminal configuration error, when the opt-out is refused.
+    Everything runs in a sandbox unless the configuration opts it out explicitly; neither opt-out is ever the default.
+    The Environment Server checks the task opt-out at seed and fails the attempt, as a terminal configuration error,
+    when it is refused.
 
     Attributes:
         task: A pure QA task, whose model calls no tools: the agent is lent no sandbox, so an agent whose loop runs in
             the Agent Server's process, such as Simple Agent, runs it there. Refused for a task that declares tools,
             for an episode that grants tools, and for a sandbox group with sidecars.
         verifier: A verifier that executes nothing and calls no tools, such as rules, math-verify or a judge call:
-            ``/verify`` runs in the Resources Server and is lent no sandbox. Allowed only when the Resources Server
-            declares it (``SimpleResourcesServer.verifier_executes_nothing``), so an undeclared verifier, or one whose
-            server's seed reply drops the declaration, still gets a sandbox.
+            ``/verify`` runs in the Resources Server and is lent no sandbox. The configuration's explicit choice: it
+            is never the default, and nothing else is checked for it.
     """
 
     model_config = ConfigDict(extra="forbid")

@@ -19,7 +19,7 @@ sandbox, never in this server. This server only grades, comparing answers withou
 """
 
 import json
-from typing import ClassVar, Optional
+from typing import Optional
 
 from fastapi import Request
 
@@ -56,8 +56,6 @@ class PythonMathVerifyResponse(BaseVerifyResponse):
 
 class MathWithCodeResourcesServer(SimpleResourcesServer):
     config: MathWithCodeResourcesServerConfig
-    # verify compares the boxed answer with string rules and float(); it runs nothing, so /verify may run here.
-    verifier_executes_nothing: ClassVar[bool] = True
 
     # The server holds no state for a session, but implements the session hooks, so verify keeps masking a sample
     # whose session already closed instead of scoring it.
