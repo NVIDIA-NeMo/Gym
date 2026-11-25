@@ -38,7 +38,7 @@ simpleqa_sandboxed_environment_server:
       sandbox_provider: sandbox
       sandbox_config:
         image: python:3.13-slim
-        workdir: /tmp
+        workdir: /workspace
         # Above the episode timeout plus the cleanup timeout (21600 + 180 s).
         ttl_s: 25200
         network: model_only
