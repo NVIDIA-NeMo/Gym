@@ -54,6 +54,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    VerifierMode,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge
@@ -168,6 +169,10 @@ class SimpleQAVerifyResponse(BaseVerifyResponse):
 
 class SimpleQAServer(SimpleResourcesServer):
     config: SimpleQAConfig
+
+    # verify() formats the judge prompt, calls the judge model and parses one letter: it executes nothing and calls no
+    # tools, so /verify runs here with no sandbox. "none" is the default; it is stated so the example shows the choice.
+    verifier_mode: ClassVar[VerifierMode] = "none"
 
     def model_post_init(self, context):
         prompt_data = yaml.safe_load(Path(self.config.judge_prompt_path).read_text())

@@ -55,13 +55,14 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
-## Sandboxing
+## Where it runs
 
-SimpleQA is a pure QA task with a judge verifier: the model calls no tools, and the judge call executes nothing.
-`simpleqa_environment_server` therefore opts both out of the attempt's sandbox group
-(`sandbox_opt_out: {task: true, verifier: true}`), which saves sandbox capacity on large runs. The agent loop runs in
-the Agent Server, the judge call in the Resources Server, and no sandbox provider is needed. The pairing grants no
-tools (`resources_tool_transports: []`), because a task opt-out is refused for an episode that grants them.
+| Agent | Verifier | Why |
+|-------|----------|-----|
+| Agent Server process | Resources Server (`verifier_mode: none`) | The model calls no tools, and the verifier only calls a judge model, so nothing needs a sandbox. |
+
+`simpleqa_environment_server` grants no tools (`resources_tool_transports: []`) and sets no sandbox provider. See
+[where the agent and the verifier run](../../environment_servers/single_agent_turn/README.md#where-the-agent-and-the-verifier-run).
 
 ## Data Format
 
