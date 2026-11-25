@@ -2,14 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """The attempt sandbox: the sandbox group an Environment Server starts, lends and stops for one episode attempt.
 
-The Environment Server owns it. The Resources Server declares at seed what the group holds (``SandboxGroupSpec``); the
-agent borrows the group for its turn and the Resources Server borrows it for ``/verify``. A pure QA task, or a verifier
-that executes nothing, may opt out explicitly (``SandboxOptOut``). These are the types both sides share; the lifecycle
-itself is ``BaseEnvironmentServer``'s.
+The Environment Server owns it; the agent and the Resources Server only borrow what it lends. Where the agent runs is
+derived: in the group when the task has tools or sidecars or the agent cannot run its loop without a sandbox. Where
+the verifier runs is declared by the Resources Server at seed (``VerifierMode``). The Resources Server also declares
+what the group holds (``SandboxGroupSpec``). These are the types both sides share; the lifecycle itself is
+``BaseEnvironmentServer``'s.
 """
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -49,26 +50,10 @@ class AttemptSandboxConfig(SandboxConfig):
         return self
 
 
-class SandboxOptOut(BaseModel):
-    """What may run outside the attempt's sandbox group, to save sandbox capacity on large runs.
-
-    Everything runs in a sandbox unless the configuration opts it out explicitly; neither opt-out is ever the default.
-    The Environment Server checks the task opt-out at seed and fails the attempt, as a terminal configuration error,
-    when it is refused.
-
-    Attributes:
-        task: A pure QA task, whose model calls no tools: the agent is lent no sandbox, so an agent whose loop runs in
-            the Agent Server's process, such as Simple Agent, runs it there. Refused for a task that declares tools,
-            for an episode that grants tools, and for a sandbox group with sidecars.
-        verifier: A verifier that executes nothing and calls no tools, such as rules, math-verify or a judge call:
-            ``/verify`` runs in the Resources Server and is lent no sandbox. The configuration's explicit choice: it
-            is never the default, and nothing else is checked for it.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    task: bool = False
-    verifier: bool = False
+# Where /verify runs, as the Resources Server declares it at seed; the words are Harbor's verifier modes.
+# "none": in the Resources Server, lent no sandbox. "shared": in the group the agent borrowed, after the agent closes.
+# "separate": in a fresh group of its own, started right before /verify with no_network, after any agent group stops.
+VerifierMode = Literal["none", "shared", "separate"]
 
 
 class SandboxGroupSidecar(BaseModel):
@@ -127,8 +112,9 @@ class SandboxGroupSpec(BaseModel):
         env: Environment variables of the main container, over ``sandbox_config.env``.
         files: Text files delivered into the main container before anyone borrows it, keyed by path.
         sidecars: Containers that serve the task's environment tools.
-        prepare: The Resources Server prepares the task in the started group through ``/prepare_sandbox`` (see
-            ``SimpleResourcesServer.prepare_sandbox``) before the agent, or the verifier, borrows it.
+        prepare: The Resources Server prepares the task in the first group the attempt starts through
+            ``/prepare_sandbox`` (see ``SimpleResourcesServer.prepare_sandbox``), before the agent, or the verifier,
+            borrows it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -150,16 +136,17 @@ class SandboxGroupSpec(BaseModel):
 
 
 class AttemptSandbox(BaseModel):
-    """One attempt's sandbox group as its Environment Server tracks it.
+    """One attempt's sandbox groups as their Environment Server tracks them.
 
     An episode that holds one is a restart (see ``BaseEnvironmentServer.seed_attempt_sandbox``), so no checkpoint
     exports it, nor the declared files and environment variables in ``group``.
 
     Attributes:
-        key: The group's key in the server's ``OwnedSandboxes``, unique to the attempt.
-        lend_to_agent: The group starts at seed and the agent borrows it for its turn.
-        lend_to_verifier: ``/verify`` borrows the group after the agent closes; when the agent borrowed none, the
-            group starts just before ``/verify``, for the verifier alone.
+        key: The agent's group's key in the server's ``OwnedSandboxes``, unique to the attempt; a separate verifier's
+            group is ``verifier_key``.
+        lend_to_agent: The group starts at seed and the agent borrows it for its turn: the task has tools or sidecars,
+            or the agent cannot run its loop without a sandbox.
+        verifier_mode: Where ``/verify`` runs, as the Resources Server declared it (``VerifierMode``).
         group: What the Resources Server declared at seed, if anything.
         image: The main container's image: the declared one, or else ``sandbox_config.image``.
         workdir: The main container's working directory: the declared one, or else ``sandbox_config.workdir``.
@@ -169,10 +156,20 @@ class AttemptSandbox(BaseModel):
 
     key: str
     lend_to_agent: bool = False
-    lend_to_verifier: bool = False
+    verifier_mode: VerifierMode = "none"
     group: SandboxGroupSpec | None = None
     image: str
     workdir: str
+
+    @property
+    def verifier_key(self) -> str:
+        """The key of the group a separate verifier runs in."""
+        return verifier_group_key(self.key)
+
+
+def verifier_group_key(key: str) -> str:
+    """The key of a separate verifier's group, beside the agent's group under ``key``."""
+    return f"{key}/verifier"
 
 
 class ResourcesPrepareSandboxRequest(BaseModel):
