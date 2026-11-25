@@ -4,13 +4,13 @@
 
 The Environment Server owns it; the agent and the Resources Server only borrow what it lends. Where the agent runs is
 derived: in the group when the task has tools or sidecars or the agent cannot run its loop without a sandbox. Where
-the verifier runs is declared by the Resources Server at seed (``VerifierMode``). The Resources Server also declares
-what the group holds (``SandboxGroupSpec``). These are the types both sides share; the lifecycle itself is
-``BaseEnvironmentServer``'s.
+the verifier runs is its ``VerifierMode``: the Environment Server's ``verifier.mode`` (``AttemptVerifierConfig``), or
+else the mode the Resources Server declares at seed. The Resources Server also declares what the group holds
+(``SandboxGroupSpec``). These are the types both sides share; the lifecycle itself is ``BaseEnvironmentServer``'s.
 """
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -50,10 +50,69 @@ class AttemptSandboxConfig(SandboxConfig):
         return self
 
 
-# Where /verify runs, as the Resources Server declares it at seed; the words are Harbor's verifier modes.
-# "none": in the Resources Server, lent no sandbox. "shared": in the group the agent borrowed, after the agent closes.
-# "separate": in a fresh group of its own, started right before /verify with no_network, after any agent group stops.
+# Where /verify runs; the words are Harbor's verifier modes. "none": in the Resources Server, lent no sandbox.
+# "shared": in the group the agent borrowed, after the agent closes. "separate": in a fresh group of its own, started
+# right before /verify, with no_network unless verifier.sandbox sets a rule, after any agent group stops.
 VerifierMode = Literal["none", "shared", "separate"]
+# The verifier modes in a fixed order, for messages and the seed reply.
+VERIFIER_MODES: tuple[VerifierMode, ...] = get_args(VerifierMode)
+# The fields of a sandbox's network rule. A separate verifier's group takes none of them from sandbox_config: its rule
+# is no_network unless verifier.sandbox sets one.
+_NETWORK_FIELDS = frozenset({"network", "model_server", "tool_servers", "allowed_hosts"})
+
+
+class VerifierSandboxConfig(SandboxConfig):
+    """``verifier.sandbox``: the settings of a separate verifier's group that differ from the task sandbox's.
+
+    Each field it sets replaces ``sandbox_config``'s, and the rest are copied, except the network rule: unset, it is
+    ``no_network``, whatever ``sandbox_config`` allows. Without a ``sandbox_config`` it is the whole group's settings,
+    so it sets ``image`` and ``ttl_s`` at least. The group never has sidecars.
+
+    Attributes:
+        image: The verifier's image, over the one the Resources Server declares at seed and ``sandbox_config.image``.
+        workdir: The verifier's working directory, over the declared one and ``sandbox_config.workdir``.
+    """
+
+    image: str | None = None
+    workdir: str | None = None
+
+
+class AttemptVerifierConfig(BaseModel):
+    """The ``verifier`` block of an Environment Server's config: where each attempt's ``/verify`` runs.
+
+    Attributes:
+        mode: The ``VerifierMode``; unset, the mode the Resources Server declares at seed. Either way, the Resources
+            Server must say its ``/verify`` can run in it (``supported_verifier_modes``).
+        sandbox: For ``mode: separate`` only, the verifier's group settings that differ from ``sandbox_config``'s.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: VerifierMode | None = None
+    sandbox: VerifierSandboxConfig | None = None
+
+    @model_validator(mode="after")
+    def _sandbox_only_when_separate(self) -> "AttemptVerifierConfig":
+        if self.sandbox is not None and self.mode != "separate":
+            raise ValueError("verifier.sandbox configures a separate verifier's group; set verifier.mode: separate")
+        return self
+
+    def separate_sandbox_config(self, task_sandbox: AttemptSandboxConfig | None) -> AttemptSandboxConfig | None:
+        """The settings a separate verifier's group starts with: ``sandbox`` over ``task_sandbox`` without its network
+        rule, and ``no_network`` unless ``sandbox`` sets a rule. ``None`` when neither is set.
+
+        Raises:
+            pydantic.ValidationError: If the merged settings are no complete ``AttemptSandboxConfig``.
+        """
+        if task_sandbox is None and self.sandbox is None:
+            return None
+        settings: dict[str, Any] = {"network": "no_network"}
+        if task_sandbox is not None:
+            settings |= task_sandbox.model_dump(exclude=set(_NETWORK_FIELDS))
+        if self.sandbox is not None:
+            settings |= self.sandbox.model_dump(include=set(self.sandbox.model_fields_set))
+        model = type(task_sandbox) if task_sandbox is not None else AttemptSandboxConfig
+        return model.model_validate(settings)
 
 
 class SandboxGroupSidecar(BaseModel):
@@ -146,10 +205,15 @@ class AttemptSandbox(BaseModel):
             group is ``verifier_key``.
         lend_to_agent: The group starts at seed and the agent borrows it for its turn: the task has tools or sidecars,
             or the agent cannot run its loop without a sandbox.
-        verifier_mode: Where ``/verify`` runs, as the Resources Server declared it (``VerifierMode``).
+        verifier_mode: Where ``/verify`` runs: the configured ``verifier.mode``, or else the declared one.
         group: What the Resources Server declared at seed, if anything.
-        image: The main container's image: the declared one, or else ``sandbox_config.image``.
-        workdir: The main container's working directory: the declared one, or else ``sandbox_config.workdir``.
+        image: The agent's group's image, set when ``lend_to_agent``: the declared one, or else
+            ``sandbox_config.image``.
+        workdir: The agent's group's working directory, set when ``lend_to_agent``: the declared one, or else
+            ``sandbox_config.workdir``.
+        verifier_image: A separate verifier's image: ``verifier.sandbox.image``, the declared one, or else
+            ``sandbox_config.image``.
+        verifier_workdir: A separate verifier's working directory, in the same order.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -158,8 +222,18 @@ class AttemptSandbox(BaseModel):
     lend_to_agent: bool = False
     verifier_mode: VerifierMode = "none"
     group: SandboxGroupSpec | None = None
-    image: str
-    workdir: str
+    image: str | None = None
+    workdir: str | None = None
+    verifier_image: str | None = None
+    verifier_workdir: str | None = None
+
+    @model_validator(mode="after")
+    def _groups_have_image_and_workdir(self) -> "AttemptSandbox":
+        if self.lend_to_agent and (self.image is None or self.workdir is None):
+            raise ValueError("the agent's group needs an image and a working directory")
+        if self.verifier_mode == "separate" and (self.verifier_image is None or self.verifier_workdir is None):
+            raise ValueError("a separate verifier's group needs an image and a working directory")
+        return self
 
     @property
     def verifier_key(self) -> str:

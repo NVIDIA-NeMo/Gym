@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Where the agent and the verifier of an attempt run: the agent's side derived from the task's tools and the agent's
-capabilities, the verifier's side declared by the Resources Server (``verifier_mode``)."""
+capabilities, the verifier's side configured in ``verifier.mode`` or declared by the Resources Server
+(``verifier_mode``)."""
 
 from typing import Any
 
 import pytest
 from aiohttp import ClientResponseError, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
+from omegaconf import OmegaConf
 from yarl import URL
 
 from environment_servers.single_agent_turn.tests.test_attempt_sandbox import MODEL_HOST, _lending_server
@@ -146,7 +148,7 @@ async def test_a_shared_verifier_is_refused_when_the_agent_borrows_no_group_and_
 
     assert result.result is None
     assert (result.failure.stage, result.failure.terminal) == ("seed", True)
-    assert "declares verifier_mode 'shared', but the agent borrows no group to share" in result.failure.failure_reason
+    assert "the verifier mode is 'shared', but the agent borrows no group to share" in result.failure.failure_reason
     assert _paths(client) == ["/seed_session", "/close_session"]
     assert provider.boxes == {}
 
@@ -226,7 +228,7 @@ async def test_a_task_with_tools_never_asks_the_agent() -> None:
 @pytest.mark.parametrize(
     "seed_fields, reason",
     [
-        ({"verifier_mode": "separate"}, "declares verifier_mode 'separate' at seed, but environment sets no"),
+        ({"verifier_mode": "separate"}, "declares verifier mode 'separate' at seed, but environment sets no"),
         ({"sandbox_group": {"image": "verifier:1"}}, "declares a sandbox group at seed, but environment sets no"),
     ],
 )
@@ -349,3 +351,95 @@ async def test_a_group_no_attempt_can_start_is_refused_at_seed_before_the_agents
     assert "has no workdir" in result.failure.failure_reason
     assert _paths(client) == ["/seed_session", "/close_session"]
     assert provider.boxes == {}
+
+
+# --- The verifier block in the Environment Server's config -----------------------------------------------------------
+
+# code_gen's shape: no task sandbox, since its tasks have no tools, and the grader's whole group in verifier.sandbox.
+GRADER_ALONE = {
+    "sandbox_config": None,
+    "verifier": {"mode": "separate", "sandbox": {"image": "grader:1", "workdir": "/grade", "ttl_s": 25200}},
+}
+
+
+async def test_a_configured_verifier_mode_overrides_the_declared_one_among_those_the_resources_server_supports() -> (
+    None
+):
+    provider = _Provider()
+    server, client = _server(provider, agent=IN_PROCESS_AGENT, verifier={"mode": "separate"})
+    # A Resources Server that grades in its own process unless it is lent a sandbox.
+    client.responses[0] = _seed_reply(supported_verifier_modes=["none", "separate"])
+
+    result = await server.run_request(_request())
+
+    assert result.failure is None, result.failure
+    assert NG_SANDBOX_ACCESS_KEY in _verify_body(client)
+    assert provider.rules == [("no_network", [])]
+    assert provider.running() == []
+
+
+async def test_a_configured_verifier_mode_the_resources_server_cannot_verify_in_is_refused_at_seed() -> None:
+    provider = _Provider()
+    server, client = _server(provider, agent=IN_PROCESS_AGENT, verifier={"mode": "none"})
+    # A grader that runs the model's code, so it never grades in its own process.
+    client.responses[0] = _seed_reply(verifier_mode="separate")
+
+    result = await server.run_request(_request())
+
+    assert (result.failure.stage, result.failure.terminal) == ("seed", True)
+    assert "sets verifier.mode 'none', but 'resources' says its /verify runs only in ['separate']" in (
+        result.failure.failure_reason
+    )
+    assert _paths(client) == ["/seed_session", "/close_session"]
+    assert provider.boxes == {}
+
+
+async def test_without_a_task_sandbox_the_grader_gets_its_group_from_verifier_sandbox_alone() -> None:
+    provider = _Provider()
+    server, client = _server(provider, agent=IN_PROCESS_AGENT, **GRADER_ALONE)
+    client.responses[0] = _seed_reply(verifier_mode="separate", sandbox_group={"image": "task:1"})
+    seen = _recording(client, provider)
+
+    result = await server.run_request(_request())
+
+    assert result.failure is None, result.failure
+    assert _agent_seed(client).sandbox_access is None
+    assert dict(seen)["/verify"] == ["sb-1"]
+    # verifier.sandbox.image wins over the declared image.
+    spec = provider.boxes["sb-1"]["spec"]
+    assert (spec.image, spec.workdir, spec.ttl_s) == ("grader:1", "/grade", 25200)
+    assert provider.rules == [("no_network", [])]
+    assert provider.running() == []
+
+
+async def test_without_a_task_sandbox_a_task_whose_agent_needs_a_group_is_refused_before_the_agents_turn() -> None:
+    provider = _Provider()
+    server, client = _server(provider, agent=IN_PROCESS_AGENT, **GRADER_ALONE)
+    client.responses[0] = _seed_reply(verifier_mode="separate")
+
+    result = await server.run_request(_with_tools(_request()))
+
+    assert (result.failure.stage, result.failure.terminal) == ("seed", True)
+    assert "the agent needs a sandbox group (the task has tools ['run_python']), but environment sets no " in (
+        result.failure.failure_reason
+    )
+    assert _paths(client) == ["/seed_session", "/close_session"]
+    assert provider.boxes == {}
+
+
+@pytest.mark.parametrize("provider, refused", [(_ModelOnlyProvider(), True), (_Provider(), False)])
+def test_startup_refuses_a_configured_separate_verifier_on_a_provider_that_cannot_cut_egress(
+    provider: _ModelOnlyProvider, refused: bool
+) -> None:
+    server, client = _server(provider, verifier={"mode": "separate"})
+    # A provider block whose class applies every rule, so only the started provider's own capabilities decide.
+    opensandbox = {"opensandbox": {"networking": {"enforces_network_policy": True}}}
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": opensandbox})
+
+    if refused:
+        with pytest.raises(
+            ValueError, match="sets verifier.mode separate, whose group starts with network 'no_network'"
+        ):
+            server.check_sandbox_provider()
+    else:
+        server.check_sandbox_provider()
