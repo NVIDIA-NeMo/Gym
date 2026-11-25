@@ -38,9 +38,8 @@ aime25_math_with_judge_environment_server:
       sandbox_provider: sandbox
       sandbox_config:
         image: python:3.13-slim
-        # The agent loop keeps its files elsewhere; /tmp exists in every image.
-        workdir: /tmp
-        ttl_s: 25200
+        workdir: /workspace
+        ttl_s: 25200  # above the episode timeout plus the cleanup timeout
         network: model_only
         model_server: policy_model
       sandbox_opt_out:
