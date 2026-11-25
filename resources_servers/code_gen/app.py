@@ -283,7 +283,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             )
 
             try:
-                result, metadata = await self._run_tests(body.ng_sandbox_access, task_args, num_tests=len(tests.inputs))
+                result, metadata = await self._run_tests(
+                    body.ng_sandbox_access, task_args, num_tests=len(tests.inputs)
+                )
             except SandboxVerificationError as e:
                 # The environment failed, not the policy: exclude the sample rather than score it.
                 LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
@@ -335,7 +337,9 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             try:
                 sandbox = await borrow(access)
             except Exception as e:
-                raise SandboxVerificationError(PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {e!r}") from e
+                raise SandboxVerificationError(
+                    PROVIDER_UNAVAILABLE, f"borrowing the lent sandbox failed: {e!r}"
+                ) from e
             try:
                 return await check_correctness_in_sandbox(
                     *task_args,
