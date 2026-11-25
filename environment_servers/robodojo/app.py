@@ -24,7 +24,12 @@ from environment_servers.robodojo.cases import (
     bind_case,
     parse_pool_cases,
 )
-from environment_servers.robodojo.episode import CleanupUnconfirmed, Episode, EpisodeError
+from environment_servers.robodojo.episode import (
+    CleanupUnconfirmed,
+    Episode,
+    EpisodeError,
+    SimulatorBackendMismatch,
+)
 from environment_servers.robodojo.native_pool import NativePool
 from environment_servers.robodojo.opencode_relay import mount_opencode_relay
 from nemo_gym.agents import AgentSeedSessionRequest
@@ -132,7 +137,6 @@ class RoboDojoEnvironmentServer(
     _gpu: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     _pool_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     _pool: NativePool | None = PrivateAttr(default=None)
-    _active_pool_cases: set[str] = PrivateAttr(default_factory=set)
     _cleanup_unconfirmed: bool = PrivateAttr(default=False)
     _relays: dict[str, str] = PrivateAttr(default_factory=dict)
     _relay_mounted: bool = PrivateAttr(default=False)
@@ -201,7 +205,9 @@ class RoboDojoEnvironmentServer(
             agent_context=AgentContext(values=binding.model_dump(mode="json")),
         )
 
-    async def _pool_slot(self, case_id: str, bound: dict, base_binding: dict, runner: Episode) -> dict:
+    async def _pool_slot(
+        self, case_id: str, bound: dict, base_binding: dict, runner: Episode
+    ) -> tuple[NativePool, dict]:
         config = self.config
         cases = parse_pool_cases(config.pool_cases)
         if case_id not in cases:
@@ -212,14 +218,14 @@ class RoboDojoEnvironmentServer(
             if self._pool is not None and self._pool.process is not None and self._pool.process.returncode is not None:
                 crashed_pool = self._pool
                 self._pool = None
-                self._active_pool_cases.clear()
                 try:
                     await crashed_pool.close(config.cleanup_timeout_seconds)
                 except BaseException:
                     self._cleanup_unconfirmed = True
                     raise
             if self._pool is None:
-                cohort = {key: bind_case(case_id=key, **base_binding)[0] for key in cases}
+                cohort_binding = {**base_binding, "model_url": self._resolve_model_base_url(None)}
+                cohort = {key: bind_case(case_id=key, **cohort_binding)[0] for key in cases}
                 pool = NativePool()
                 pool_log = (
                     config.evidence_export_root or config.output_root
@@ -241,14 +247,15 @@ class RoboDojoEnvironmentServer(
                         raise
                     raise
                 self._pool = pool
-            if case_id not in self._pool.seats:
+            pool = self._pool
+            if case_id not in pool.seats:
                 raise ValueError("This case is missing from the started RoboDojo pool")
-            if case_id in self._active_pool_cases:
+            if case_id in pool.active_cases:
                 raise ValueError("This RoboDojo pool case is already running")
-            self._active_pool_cases.add(case_id)
-            seat = self._pool.seats[case_id]
+            pool.active_cases.add(case_id)
+            seat = pool.seats[case_id]
         runner.pool_evidence = Path(seat["native_pool_evidence"]).resolve()
-        return {
+        return pool, {
             **bound,
             "native_pool_socket": seat["native_pool_socket"],
             "native_pool_evidence": seat["native_pool_evidence"],
@@ -317,6 +324,7 @@ class RoboDojoEnvironmentServer(
         failure_reason = None
         relay_id: str | None = None
         relay_url: str | None = None
+        claimed_pool: NativePool | None = None
         claimed_pool_case: str | None = None
         if self._relay_mounted:
             relay_id = secrets.token_urlsafe(18)
@@ -329,7 +337,7 @@ class RoboDojoEnvironmentServer(
                     if self._cleanup_unconfirmed:
                         raise CleanupUnconfirmed("An earlier episode did not release the GPU")
                     if config.pool_cases is not None:
-                        bound = await self._pool_slot(task_input.case_id, bound, binding, runner)
+                        claimed_pool, bound = await self._pool_slot(task_input.case_id, bound, binding, runner)
                         claimed_pool_case = task_input.case_id
                     if relay_url is not None:
                         bound["model"] = {**bound["model"], "base_url": relay_url}
@@ -338,15 +346,18 @@ class RoboDojoEnvironmentServer(
                     self._cleanup_unconfirmed = True
                     failure_kind, failure_reason = HARNESS_TERMINATION_UNCONFIRMED, str(error)
                 except asyncio.CancelledError:
+                    if not runner.cleanup_confirmed:
+                        self._cleanup_unconfirmed = True
                     raise
                 except TimeoutError:
                     failure_kind = ENVIRONMENT_SERVER_FAILED
                     failure_reason = "RoboDojo supervisor exceeded its episode deadline"
+                except SimulatorBackendMismatch as error:
+                    failure_kind = ENVIRONMENT_PROTOCOL_VIOLATION
+                    failure_reason = f"{type(error).__name__}: RoboDojo native measurement failed"
+                    LOGGER.warning("RoboDojo case %s could not be scored", task_input.case_id, exc_info=True)
                 except (EpisodeError, OSError, RuntimeError, ValueError, KeyError) as error:
-                    if isinstance(error, EpisodeError) and "differs from the configured backend" in str(error):
-                        failure_kind = ENVIRONMENT_PROTOCOL_VIOLATION
-                    else:
-                        failure_kind = ENVIRONMENT_SERVER_FAILED
+                    failure_kind = ENVIRONMENT_SERVER_FAILED
                     failure_reason = f"{type(error).__name__}: RoboDojo native measurement failed"
                     LOGGER.warning("RoboDojo case %s could not be scored", task_input.case_id, exc_info=True)
                 else:
@@ -357,8 +368,8 @@ class RoboDojoEnvironmentServer(
                         failure_kind = ENVIRONMENT_PROTOCOL_VIOLATION
                         failure_reason = "Native horizon does not match the frozen case"
         finally:
-            if claimed_pool_case is not None:
-                self._active_pool_cases.discard(claimed_pool_case)
+            if claimed_pool is not None and claimed_pool_case is not None:
+                claimed_pool.active_cases.discard(claimed_pool_case)
             if relay_id is not None:
                 self._relays.pop(relay_id, None)
         if config.evidence_export_root is not None:

@@ -17,6 +17,7 @@ class NativePool:
         self.directory = tempfile.TemporaryDirectory(prefix="rd-pool-")
         self.process: asyncio.subprocess.Process | None = None
         self.seats: dict[str, dict] = {}
+        self.active_cases: set[str] = set()
 
     async def start(
         self,
@@ -98,14 +99,38 @@ class NativePool:
 
     async def close(self, timeout: float) -> None:
         try:
-            if self.process is not None and self.process.returncode is None:
+            if self.process is not None:
+                pgid = self.process.pid
                 with suppress(ProcessLookupError):
-                    os.killpg(self.process.pid, signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(self.process.wait(), timeout)
-                except TimeoutError:
-                    with suppress(ProcessLookupError):
-                        os.killpg(self.process.pid, signal.SIGKILL)
-                    await self.process.wait()
+                    os.killpg(pgid, signal.SIGTERM)
+                deadline = asyncio.get_running_loop().time() + timeout
+                if self.process.returncode is None:
+                    try:
+                        await asyncio.wait_for(
+                            self.process.wait(), max(0.0, deadline - asyncio.get_running_loop().time())
+                        )
+                    except TimeoutError:
+                        pass
+                while True:
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        break
+                    if asyncio.get_running_loop().time() >= deadline:
+                        with suppress(ProcessLookupError):
+                            os.killpg(pgid, signal.SIGKILL)
+                        if self.process.returncode is None:
+                            await self.process.wait()
+                        kill_deadline = asyncio.get_running_loop().time() + min(5.0, max(0.5, timeout))
+                        while True:
+                            try:
+                                os.killpg(pgid, 0)
+                            except ProcessLookupError:
+                                break
+                            if asyncio.get_running_loop().time() >= kill_deadline:
+                                raise RuntimeError("RoboDojo simulator pool process group remained live after cleanup")
+                            await asyncio.sleep(0.05)
+                        break
+                    await asyncio.sleep(0.05)
         finally:
             self.directory.cleanup()

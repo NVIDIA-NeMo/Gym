@@ -6,6 +6,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import sys
 import tarfile
 import threading
@@ -725,11 +726,16 @@ def test_agent_seed_request_and_pool_recovery_and_clean_cancel(runtime, tmp_path
         },
     )
     launcher = tmp_path / "pool.py"
+    child_pid_file = tmp_path / "pool-child.pid"
+    cohort_urls_file = tmp_path / "cohort-urls.json"
     launcher.write_text(
-        "import json, socket, sys, time\n"
+        "import json, socket, subprocess, sys, time\n"
         "from pathlib import Path\n"
         "root = Path(sys.argv[1])\n"
         "cases = json.loads((root / 'cases.json').read_text())\n"
+        f"Path({str(cohort_urls_file)!r}).write_text(json.dumps({{k: v['model']['base_url'] for k, v in cases.items()}}))\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"Path({str(child_pid_file)!r}).write_text(str(child.pid))\n"
         "sockets = []\n"
         "for idx, bound in enumerate(cases.values()):\n"
         "    listener = socket.socket(socket.AF_UNIX)\n"
@@ -778,6 +784,10 @@ def test_agent_seed_request_and_pool_recovery_and_clean_cancel(runtime, tmp_path
     seen_urls: list[str] = []
     seen_limits: list[int] = []
     call_count = 0
+    old_ep_entered = asyncio.Event()
+    release_old_ep = asyncio.Event()
+    new_ep_entered = asyncio.Event()
+    release_new_ep = asyncio.Event()
 
     async def run():
         async def fake_episode(self, bound):
@@ -786,7 +796,15 @@ def test_agent_seed_request_and_pool_recovery_and_clean_cancel(runtime, tmp_path
             seen_urls.append(bound["model"]["base_url"])
             seen_limits.append(bound["step_limit"])
             if call_count == 1:
+                self.cleanup_confirmed = True
                 raise asyncio.CancelledError()
+            if call_count == 2:
+                old_ep_entered.set()
+                await release_old_ep.wait()
+                raise EpisodeError("pool crashed")
+            if call_count == 3:
+                new_ep_entered.set()
+                await release_new_ep.wait()
             return "scored", HorizonScores(
                 within_native=True,
                 within_budget=True,
@@ -803,24 +821,70 @@ def test_agent_seed_request_and_pool_recovery_and_clean_cancel(runtime, tmp_path
         monkeypatch.setattr(Episode, "export_evidence", broken_export)
         app = server.setup_webserver()
         async with app.router.lifespan_context(app):
+            # 1. Clean cancel after cleanup_confirmed=True must NOT poison server.
             req0 = _episode_request(CASE, 0)
             with pytest.raises(asyncio.CancelledError):
                 await server.run(req0, CleanupContext(episode_id=req0.episode_id, cleanup_timeout_seconds=5.0))
-            # Clean cancel must NOT poison the server; crashed pool must restart.
             assert server._cleanup_unconfirmed is False
+            # Cohort model URL must be unprefixed (no rollout-specific prefix).
+            cohort_urls = json.loads(cohort_urls_file.read_text())
+            assert set(cohort_urls.values()) == {"http://127.0.0.1:8011/v1"}
+
+            # 2. Start episode on pool 1, crash pool 1's leader while child process survives.
+            req_old = _episode_request(CASE, 1)
+            old_task = asyncio.create_task(
+                server.run(req_old, CleanupContext(episode_id=req_old.episode_id, cleanup_timeout_seconds=5.0))
+            )
+            await asyncio.wait_for(old_ep_entered.wait(), 5.0)
             first_pid = server._pool.process.pid
+            first_child_pid = int(child_pid_file.read_text())
+            os.kill(first_child_pid, 0)  # child is alive before crash recovery
             server._pool.process.kill()
             await server._pool.process.wait()
 
-            req1 = _episode_request(CASE, 1)
-            res1 = await server.run(req1, CleanupContext(episode_id=req1.episode_id, cleanup_timeout_seconds=5.0))
-            second_pid = server._pool.process.pid
-            assert second_pid != first_pid
-            assert res1.result["reward"] == 1.0
-            assert res1.result["mask_sample"] is False
-            assert len(res1.result["ng_verifier_invocations"]) == 1
-            assert seen_limits == [400, 400]
-            assert len(set(seen_urls)) == 2
+            # 3. New request restarts pool 2, kills old pool 1's orphaned child, and claims CASE on pool 2.
+            req_new = _episode_request(CASE, 2)
+            new_task = asyncio.create_task(
+                server.run(req_new, CleanupContext(episode_id=req_new.episode_id, cleanup_timeout_seconds=5.0))
+            )
+            await asyncio.wait_for(new_ep_entered.wait(), 5.0)
+            assert server._pool.process.pid != first_pid
+            with pytest.raises(ProcessLookupError):
+                os.kill(first_child_pid, 0)
+
+            # 4. Old episode finishing on pool 1 must NOT release pool 2's active claim for CASE.
+            release_old_ep.set()
+            old_res = await old_task
+            assert old_res.result["mask_sample"] is True
+            assert CASE in server._pool.active_cases
+
+            # A concurrent duplicate request for CASE on pool 2 must be rejected as already running.
+            req_dup = _episode_request(CASE, 3)
+            dup_res = await server.run(
+                req_dup, CleanupContext(episode_id=req_dup.episode_id, cleanup_timeout_seconds=5.0)
+            )
+            assert dup_res.result["mask_sample"] is True
+
+            release_new_ep.set()
+            res_new = await new_task
+            assert res_new.result["reward"] == 1.0
+            assert res_new.result["mask_sample"] is False
+            assert len(res_new.result["ng_verifier_invocations"]) == 1
+            assert seen_limits == [400, 400, 400]
+            assert len(set(seen_urls)) == 3
+
+            # 5. Unconfirmed cancel (cleanup_confirmed=False) MUST mark _cleanup_unconfirmed=True.
+            async def unconfirmed_cancel(self, bound):
+                raise asyncio.CancelledError()
+
+            monkeypatch.setattr(Episode, "run", unconfirmed_cancel)
+            req_bad_cancel = _episode_request(CASE, 4)
+            with pytest.raises(asyncio.CancelledError):
+                await server.run(
+                    req_bad_cancel,
+                    CleanupContext(episode_id=req_bad_cancel.episode_id, cleanup_timeout_seconds=5.0),
+                )
+            assert server._cleanup_unconfirmed is True
 
     with rollout_context("robodojo-recovery-test"):
         asyncio.run(run())

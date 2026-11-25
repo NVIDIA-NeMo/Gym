@@ -53,6 +53,10 @@ class CleanupUnconfirmed(EpisodeError):
     """The runtime did not establish that it released the simulator and SDK session."""
 
 
+class SimulatorBackendMismatch(EpisodeError):
+    """The native simulator receipt disagrees with the configured backend."""
+
+
 class HorizonScores(BaseModel):
     within_native: StrictBool
     within_budget: StrictBool
@@ -119,6 +123,7 @@ class Episode:
         self.timeout = timeout
         self.cleanup_timeout = cleanup_timeout
         self.pool_evidence: Path | None = None
+        self.cleanup_confirmed: bool = False
         self.engine = (str(bridge_python), "-m", "ember_bridge.cli")
         self.environment = {
             name: os.environ[name]
@@ -301,6 +306,7 @@ class Episode:
                 )
             except (EpisodeError, OSError, TimeoutError) as error:
                 raise CleanupUnconfirmed("Nanoverse did not confirm process cleanup") from error
+            self.cleanup_confirmed = True
 
         budget_exit = None
         if run_error is not None:
@@ -361,7 +367,7 @@ class Episode:
         else:
             backend = None
         if backend != configuration["simulator_backend"]:
-            raise EpisodeError("Native RoboDojo simulator differs from the configured backend")
+            raise SimulatorBackendMismatch("Native RoboDojo simulator differs from the configured backend")
         horizon = await self.execute(
             str(self.simulation_python),
             "-c",
