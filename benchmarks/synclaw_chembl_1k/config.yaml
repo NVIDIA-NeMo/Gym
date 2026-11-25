@@ -1,0 +1,24 @@
+# SynClaw ChEMBL-1000: retrosynthesis planning for the 1,000 public SynFormer ChEMBL targets, a
+# held-out test set. Needs the SynClaw database:
+#   python resources_servers/synclaw/prepare_db.py
+config_paths:
+  - resources_servers/synclaw/configs/synclaw.yaml
+  - responses_api_agents/synclaw_agent/configs/synclaw_agent.yaml
+
+synclaw_chembl_1k_resources_server:
+  _inherit_from: synclaw_resources_server
+
+synclaw_chembl_1k_agent:
+  _inherit_from: synclaw_agent
+  responses_api_agents:
+    synclaw_agent:
+      resources_server:
+        name: synclaw_chembl_1k_resources_server
+      datasets:
+      - name: synclaw_chembl_1k
+        type: benchmark
+        jsonl_fpath: benchmarks/synclaw_chembl_1k/data/synclaw_chembl_1k_benchmark.jsonl
+        prepare_script: benchmarks/synclaw_chembl_1k/prepare.py
+        # ChEMBL structures, redistributed by SynFormer (Apache-2.0 repository).
+        license: Creative Commons Attribution-ShareAlike 3.0 Unported
+        num_repeats: 1

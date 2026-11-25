@@ -1,0 +1,15 @@
+config_paths:
+  - resources_servers/synclaw/configs/synclaw.yaml
+  - responses_api_agents/synclaw_agent/configs/synclaw_agent.yaml
+
+synclaw_agent:
+  _inherit_from: synclaw_agent
+  responses_api_agents:
+    synclaw_agent:
+      resources_server:
+        type: resources_servers
+        name: synclaw_resources_server
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/synclaw/data/example.jsonl

@@ -1,0 +1,30 @@
+name: synclaw_chembl_1k
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: agent
+description: SynClaw retrosynthesis planning on the 1,000 public SynFormer ChEMBL targets, using an
+  eMolecules plus common-reagent stock
+modality: text
+licensing: CC-BY-SA-3.0
+authors:
+- Dane Corneil
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: synclaw
+agent_server: synclaw_agent
+datasets:
+- name: synclaw_chembl_1k
+  type: benchmark
+  jsonl_fpath: benchmarks/synclaw_chembl_1k/data/synclaw_chembl_1k_benchmark.jsonl
+  prepare_script: benchmarks/synclaw_chembl_1k/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active

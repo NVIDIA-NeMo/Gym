@@ -1,0 +1,8 @@
+synclaw_resources_server:
+  resources_servers:
+    synclaw:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Agentic retrosynthesis planning with SynClaw
+      value: Improve chemical retrosynthetic capabilities

@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - environments/synclaw/config.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+# Bound live trajectories to preserve prefix-cache reuse between model calls.
+num_samples_in_parallel: 64
+
+# One shared router owns replica selection for every model-adapter worker.
+policy_base_url: http://127.0.0.1:8090/v1
+policy_api_key: unused
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      propagate_context_overflow_errors: true

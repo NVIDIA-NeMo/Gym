@@ -1,0 +1,30 @@
+--- a/src/routers/http/router.rs
++++ b/src/routers/http/router.rs
+@@ -428,7 +428,7 @@
+ 
+         match self.select_first_worker() {
+             Ok(worker_url) => {
+-                let url = format!("{}/{}", worker_url, endpoint);
++                let url = format!("{}/{}", self.worker_base_url(&worker_url), endpoint);
+                 let route_name = format!("/{}", endpoint);
+                 let mut request_builder = self.client.get(&url);
+                 for (name, value) in headers {
+--- a/src/protocols/spec.rs
++++ b/src/protocols/spec.rs
+@@ -517,7 +517,7 @@
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub echo: Option<bool>,
+ 
+-    /// Reasoning effort level for reasoning models (low, medium, high)
++    /// Reasoning effort level for reasoning models (low, medium, high, max)
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub reasoning_effort: Option<ReasoningEffort>,
+ 
+@@ -858,6 +858,7 @@
+     Low,
+     Medium,
+     High,
++    Max,
+ }
+ 
+ // ============= Input/Output Items =============
