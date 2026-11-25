@@ -26,10 +26,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from tqdm import tqdm
 
 
 TASK_INDEX = "_ng_task_index"
@@ -71,7 +74,7 @@ def _load_inputs(path: Path) -> tuple[list[tuple[int, str]], dict[int, Task]]:
     rows: list[tuple[int, str]] = []
     tasks: dict[int, Task] = {}
     unstamped: dict[str, int] = {}
-    for line_number, line, row in _read_jsonl(path):
+    for line_number, line, row in tqdm(_read_jsonl(path), desc="Loading inputs", unit="rows"):
         location = f"{path}:{line_number}"
         if ROLLOUT_INDEX in row:
             raise ValueError(f"{location}: use the original input dataset, not repeated materialized inputs")
@@ -107,6 +110,10 @@ def _rollout_task(row: dict[str, object], tasks: dict[int, Task], location: str)
     return task, rollout_index
 
 
+def _mean_reward(task: Task) -> float | None:
+    return math.fsum(reward / len(task.rewards) for reward in task.rewards) if task.rewards else None
+
+
 def filter_inputs(
     input_jsonl: Path,
     rollouts_jsonl: Path,
@@ -133,10 +140,14 @@ def filter_inputs(
     if any(path.resolve() in sources for path in outputs):
         raise ValueError("output files must not overwrite inputs, rollouts, or materialized inputs")
 
+    print(f"[1/5] Loading source inputs from {input_jsonl}", file=sys.stderr, flush=True)
     inputs, tasks = _load_inputs(input_jsonl)
+    print(f"Loaded {len(inputs):,} input rows covering {len(tasks):,} tasks", file=sys.stderr, flush=True)
+    print("[2/5] Determining expected rollouts", file=sys.stderr, flush=True)
     expected_known = materialized.is_file() or num_repeats is not None
     if materialized.is_file():
-        for line_number, _, row in _read_jsonl(materialized):
+        print(f"Using materialized inputs: {materialized}", file=sys.stderr, flush=True)
+        for line_number, _, row in tqdm(_read_jsonl(materialized), desc="Reading expected rollouts", unit="rollouts"):
             location = f"{materialized}:{line_number}"
             task, rollout_index = _rollout_task(row, tasks, location)
             if rollout_index in task.expected:
@@ -145,6 +156,7 @@ def filter_inputs(
         if num_repeats is not None and any(len(task.expected) != num_repeats for task in tasks.values()):
             raise ValueError("--num-repeats disagrees with the materialized inputs")
     elif num_repeats is not None:
+        print(f"Expecting {num_repeats} repeats per task", file=sys.stderr, flush=True)
         for task in tasks.values():
             task.expected = set(range(num_repeats))
     elif not allow_partial_rollouts:
@@ -153,22 +165,45 @@ def filter_inputs(
             "or explicitly use --allow-partial-rollouts"
         )
 
-    for line_number, _, row in _read_jsonl(rollouts_jsonl):
-        location = f"{rollouts_jsonl}:{line_number}"
-        task, rollout_index = _rollout_task(row, tasks, location)
-        if rollout_index in task.seen:
-            raise ValueError(f"{location}: duplicate rollout identity")
-        if expected_known and rollout_index not in task.expected:
-            raise ValueError(f"{location}: rollout identity is absent from the expected collection")
-        task.seen.add(rollout_index)
-        if row.get("mask_sample") or row.get("evaluation_completed") is False:
-            task.excluded += 1
-            continue
-        reward = row.get("reward")
-        if not isinstance(reward, (int, float)) or not math.isfinite(reward):
-            raise ValueError(f"{location}: reward must be a finite number for an unmasked, completed evaluation")
-        task.rewards.append(float(reward))
+    expected_total = sum(len(task.expected) for task in tasks.values()) if expected_known else None
+    print(f"[3/5] Reading rewards from {rollouts_jsonl}", file=sys.stderr, flush=True)
+    print(
+        "kept_tasks_provisional counts tasks within the reward bounds so far; remaining repeats can change it.",
+        file=sys.stderr,
+        flush=True,
+    )
+    provisional_kept: set[int] = set()
+    excluded_rollouts = 0
+    with tqdm(_read_jsonl(rollouts_jsonl), desc="Reading rollouts", total=expected_total, unit="rollouts") as progress:
+        for line_number, _, row in progress:
+            location = f"{rollouts_jsonl}:{line_number}"
+            task, rollout_index = _rollout_task(row, tasks, location)
+            if rollout_index in task.seen:
+                raise ValueError(f"{location}: duplicate rollout identity")
+            if expected_known and rollout_index not in task.expected:
+                raise ValueError(f"{location}: rollout identity is absent from the expected collection")
+            task.seen.add(rollout_index)
+            if row.get("mask_sample") or row.get("evaluation_completed") is False:
+                task.excluded += 1
+                excluded_rollouts += 1
+            else:
+                reward = row.get("reward")
+                if not isinstance(reward, (int, float)) or not math.isfinite(reward):
+                    raise ValueError(
+                        f"{location}: reward must be a finite number for an unmasked, completed evaluation"
+                    )
+                task.rewards.append(float(reward))
+                task_index = _index(row, TASK_INDEX, location)
+                mean = _mean_reward(task)
+                if mean is not None and low_threshold < mean < high_threshold:
+                    provisional_kept.add(task_index)
+                else:
+                    provisional_kept.discard(task_index)
+            progress.set_postfix(
+                kept_tasks_provisional=len(provisional_kept), excluded_rollouts=excluded_rollouts, refresh=False
+            )
 
+    print("[4/5] Validating completeness and filtering tasks", file=sys.stderr, flush=True)
     missing_tasks = [index for index, task in tasks.items() if not task.seen or task.expected - task.seen]
     if missing_tasks and not allow_partial_rollouts:
         raise ValueError(
@@ -179,8 +214,9 @@ def filter_inputs(
     profiles: list[dict[str, object]] = []
     kept: set[int] = set()
     decisions: Counter[str] = Counter()
-    for task_index, task in tasks.items():
-        mean = math.fsum(reward / len(task.rewards) for reward in task.rewards) if task.rewards else None
+    progress = tqdm(tasks.items(), desc="Filtering tasks", unit="tasks")
+    for task_index, task in progress:
+        mean = _mean_reward(task)
         if mean is None:
             decision = "no_measured_rewards"
         elif mean <= low_threshold:
@@ -192,6 +228,13 @@ def filter_inputs(
         decisions[decision] += 1
         if decision == "kept":
             kept.add(task_index)
+        progress.set_postfix(
+            kept_tasks=len(kept),
+            rejected_low=decisions["rejected_low"],
+            rejected_high=decisions["rejected_high"],
+            no_measured_rewards=decisions["no_measured_rewards"],
+            refresh=False,
+        )
         profiles.append(
             {
                 TASK_INDEX: task_index,
@@ -225,15 +268,21 @@ def filter_inputs(
         "excluded_rollouts": sum(task.excluded for task in tasks.values()),
     }
     # Validate everything before creating/truncating any output file.
+    print(f"[5/5] Writing filtered inputs, reward profiles, and summary to {output_dir}", file=sys.stderr, flush=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     with outputs[0].open("w", encoding="utf-8") as handle:
-        for task_index, line in inputs:
+        for task_index, line in tqdm(inputs, desc="Writing filtered inputs", unit="rows"):
             if task_index in kept:
                 handle.write(line if line.endswith("\n") else line + "\n")
     with outputs[1].open("w", encoding="utf-8") as handle:
-        for profile in profiles:
+        for profile in tqdm(profiles, desc="Writing reward profiles", unit="tasks"):
             handle.write(json.dumps(profile, allow_nan=False) + "\n")
     outputs[2].write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    print(
+        f"Done: kept {summary['kept_rows']:,}/{len(inputs):,} input rows ({len(kept):,}/{len(tasks):,} tasks)",
+        file=sys.stderr,
+        flush=True,
+    )
     return summary
 
 

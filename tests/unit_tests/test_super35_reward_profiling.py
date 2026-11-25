@@ -72,6 +72,10 @@ def test_cli_filters_original_inputs_with_exclusive_bounds_and_shuffled_results(
     assert summary["rejected_low_tasks"] == 1
     assert summary["rejected_high_tasks"] == 2
     assert "Filtered dataset:" in process.stdout
+    for stage in range(1, 6):
+        assert f"[{stage}/5]" in process.stderr
+    assert "kept_tasks_provisional=1" in process.stderr
+    assert "Done: kept 1/4 input rows (1/4 tasks)" in process.stderr
 
 
 def test_stable_task_ids_and_nonbinary_rewards(tmp_path):
