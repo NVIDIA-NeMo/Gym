@@ -1,12 +1,28 @@
 config_paths:
   - benchmarks/nemotron_3.5_super/build_container_configs/swe_8n-11.yaml
 
+input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_sota.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___rewardprofilingmooncakefix.sqsh
+
 slurm:
   qos: normal
+
+mooncake:
+    repo: https://github.com/bxyu-nvidia/Mooncake.git
+    branch: bxyu/v0.3.13.post1-rl
+    cpus_per_task: 96
+    build_parallel_level: 96
+
+vllm:
+  repo: https://github.com/bxyu-nvidia/vllm.git
+  branch: bxyu/v0.32.0-fixunscheduledmooncakeslam
+  version: "0.32.0"
+  precompiled_wheel_commit: v0.32.0
 
 shared_run_warmup_env_vars:
   NUM_PREFILL_NODES: 6
   NUM_DECODE_NODES: 6
+  MOONCAKE_DEFAULT_KV_LEASE_TTL: 5000  # milliseconds
 
 run:
   env:
