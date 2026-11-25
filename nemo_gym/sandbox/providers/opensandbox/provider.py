@@ -15,7 +15,9 @@
 """OpenSandbox provider implementation."""
 
 import asyncio
+import functools
 import hashlib
+import importlib.metadata
 import ipaddress
 import logging
 import math
@@ -23,7 +25,7 @@ import random
 import re
 import shlex
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -31,6 +33,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, ClassVar, Literal, NoReturn
 from urllib.parse import quote, urlsplit
 
+from packaging.requirements import Requirement
 from pydantic import Field, model_validator
 
 from nemo_gym.core.failure_kinds import (
@@ -67,8 +70,12 @@ from nemo_gym.sandbox.attribution import (  # noqa: F401
     sanitize_label_value,
 )
 from nemo_gym.sandbox.providers.base import (
+    NETWORK_RULES,
     ORPHAN_REAP_TIMEOUT_S,
+    NetworkRule,
+    SandboxCapabilities,
     SandboxEndpoint,
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxPtySession,
@@ -92,6 +99,7 @@ from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.exception_inspection import error_to_http_status, explicit_causes
+from nemo_gym.utils.network_policy import allowlist_policy
 
 
 LOGGER = logging.getLogger(__name__)
@@ -287,6 +295,31 @@ def _require_opensandbox_sdk() -> tuple[Any, Any, Any, Any, Any]:
         ) from e
 
     return Sandbox, ConnectionConfig, RunCommandOpts, PlatformSpec, Volume
+
+
+# The first SDK whose ``commands.run`` takes an argument list, which it sends as execd's ``argv`` instead of shell text.
+ARGV_SDK_REQUIREMENT = "opensandbox>=1.1.0"
+
+
+@functools.cache
+def _sdk_sends_argv() -> bool:
+    """Whether the installed SDK meets ``ARGV_SDK_REQUIREMENT``; Gym's own lower bound predates it.
+
+    Logs the requirement once when it does not: ``AsyncSandbox.exec`` then refuses an argument list without
+    naming the SDK.
+    """
+    try:
+        installed = importlib.metadata.version("opensandbox")
+    except importlib.metadata.PackageNotFoundError:
+        return False
+    sends_argv = Requirement(ARGV_SDK_REQUIREMENT).specifier.contains(installed, prereleases=True)
+    if not sends_argv:
+        LOGGER.warning(
+            "The installed opensandbox %s cannot send an exec argument list; running one without a shell needs %s",
+            installed,
+            ARGV_SDK_REQUIREMENT,
+        )
+    return sends_argv
 
 
 def _require_opensandbox_lifecycle_sdk() -> tuple[Any, Any]:
@@ -1122,12 +1155,13 @@ class OpenSandboxProviderOptions:
 
 @dataclass
 class OpenSandboxNetworkingConfig:
-    """Operator assertion that direct sandbox IPs are mutually reachable."""
+    """Operator declarations about direct sandbox connectivity and control-plane egress enforcement."""
 
     enabled: bool = False
     loopback_forwarding: bool = False
     python_executable: str = "python3"
     setup_command: str | None = None
+    enforces_network_policy: bool = False
 
 
 @dataclass
@@ -1186,6 +1220,29 @@ class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API."""
 
     name = "opensandbox"
+    # A snapshot is a filesystem image: a sandbox created from it starts its processes anew.
+    capabilities: SandboxCapabilities = SandboxCapabilities(snapshot_keeps=frozenset({"files"}))
+
+    @classmethod
+    def capabilities_for_config(cls, config: Mapping[str, Any]) -> SandboxCapabilities:
+        """Advertise restricted rules only for deployments that enforce their allowlists at the packet level."""
+        networking = _coerce_config(config.get("networking"), OpenSandboxNetworkingConfig)
+        if networking.enforces_network_policy is not True:
+            return cls.capabilities
+        return replace(cls.capabilities, network_rules=NETWORK_RULES)
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with a ``network_policy`` for ``rule``: deny by default and allow only ``hosts``.
+
+        Restricted rules require a deployment with declared packet-level enforcement.
+        """
+        if rule == "inherit":
+            return dict(provider_options)
+        if rule not in self.capabilities.network_rules:
+            raise ValueError(f"OpenSandbox network {rule!r} requires networking.enforces_network_policy: true")
+        return {**provider_options, "network_policy": allowlist_policy(hosts)}
 
     def __init__(
         self,
@@ -1209,6 +1266,7 @@ class OpenSandboxProvider:
         self._diagnostics = _coerce_config(diagnostics, OpenSandboxDiagnosticsConfig)
         self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
         self._networking = _coerce_config(networking, OpenSandboxNetworkingConfig)
+        self.capabilities = self.capabilities_for_config({"networking": self._networking})
         self._shared_storage = _coerce_config(shared_storage, OpenSandboxSharedStorageConfig)
         self._runtime_requirements = _coerce_config(runtime_requirements, OpenSandboxRuntimeRequirementsConfig)
         self._images = _coerce_config(images, OpenSandboxImagesConfig)
@@ -1231,6 +1289,14 @@ class OpenSandboxProvider:
         """A foreground command holds one of the shared HTTP pool's connections for as long as it runs, so
         ``max_connections`` running commands leave an upload none; a background command is polled and holds none."""
         return self._operations.background_exec
+
+    def exec_takes_argv(self) -> bool:
+        """Whether execd gets an argument list as the process's argv (``SupportsSandboxExecArgv``).
+
+        False when the installed SDK predates ``ARGV_SDK_REQUIREMENT``, the first that sends one. ``exec`` refuses
+        a list then, and for a ``user`` name, which only ``su`` and so a shell can switch to.
+        """
+        return _sdk_sends_argv()
 
     def pull_policy_options(self, policy: str) -> dict[str, Any]:
         """Compose's ``pull_policy`` as the per-sandbox image pull policy extension (``_resolve_extensions`` lets a
@@ -3011,7 +3077,7 @@ class OpenSandboxProvider:
     async def _exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -3019,8 +3085,13 @@ class OpenSandboxProvider:
         user: str | int | None = None,
         retries: int | None = None,
     ) -> SandboxExecResult:
-        """Run a command inside an OpenSandbox sandbox."""
+        """Run shell text or an argument list inside an OpenSandbox sandbox."""
         _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
+        if not isinstance(command, str) and not _sdk_sends_argv():
+            raise SandboxExecArgvUnsupportedError(
+                f"OpenSandbox runs an argument list without a shell with {ARGV_SDK_REQUIREMENT}; install it, "
+                "or pass shell text"
+            )
 
         opts_kwargs: dict[str, Any] = {}
         if cwd is not None:
@@ -3030,12 +3101,17 @@ class OpenSandboxProvider:
         if timeout_s is not None:
             opts_kwargs["timeout"] = timedelta(seconds=timeout_s)
 
-        effective_command = command
+        effective_command = command if isinstance(command, str) else list(command)
         if isinstance(user, int):
             opts_kwargs["uid"] = user
         elif user == "root":
             opts_kwargs["uid"] = 0
         elif isinstance(user, str):
+            if not isinstance(command, str):
+                raise SandboxExecArgvUnsupportedError(
+                    "OpenSandbox switches to a user name only through su, which runs a shell; run an argument "
+                    "list with a numeric uid or 'root' as its user"
+                )
             effective_command = f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(user)}"
 
         sdk_timeout_s = (
@@ -3246,7 +3322,7 @@ class OpenSandboxProvider:
     async def _exec_background(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | list[str],
         opts_kwargs: dict[str, Any],
         *,
         sdk_timeout_s: float | None,
@@ -3275,7 +3351,7 @@ class OpenSandboxProvider:
     async def _exec_background_polled(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | list[str],
         opts_kwargs: dict[str, Any],
         *,
         sdk_timeout_s: float | None,
@@ -3602,14 +3678,14 @@ class OpenSandboxProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        """Run a command inside an OpenSandbox sandbox."""
+        """Run shell text, or an argument list without a shell (``exec_takes_argv``), inside an OpenSandbox sandbox."""
         return await self._exec(
             handle,
             command,
