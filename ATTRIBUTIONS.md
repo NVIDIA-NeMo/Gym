@@ -22667,3 +22667,19 @@ and modification record. The scoring behavior is unchanged.
 ## SaaS-Bench
 
 Source: https://github.com/UniPat-AI/SaaS-Bench at `48c22deb18b98c0ed78f81e7f3be82bc162de2c8`. Runtime: Apache-2.0; task data and verifiers: CC-BY-4.0. Original copyright: SaaS-Bench Authors. NVIDIA modifications are identified in each changed file; NVIDIA extensions are Apache-2.0. See [vendoring details](responses_api_agents/saas_bench_agent/benchmark/VENDORING.md).
+
+## APEX-Agents grader (Archipelago)
+
+`resources_servers/apex_agents/` adapts the offline artifact-processing layer and the criterion-grading prompts of
+[Mercor-Intelligence/archipelago](https://github.com/Mercor-Intelligence/archipelago), under Apache-2.0. The upstream
+files carry no per-file copyright notice and the repository has no `NOTICE` file; its `LICENSE` is the Apache License,
+Version 2.0. Model invocation, artifact selection calls, scoring and persistence are NeMo Gym code.
+
+| Adapted source | Exact revision | Affected Gym files | Source license |
+| --- | --- | --- | --- |
+| [`grading/runner/utils/file_extraction/methods/local_extractor.py`](https://github.com/Mercor-Intelligence/archipelago/blob/0cb5c476c219a9df637e0bd37fb86b2361f4ab89/grading/runner/utils/file_extraction/methods/local_extractor.py), [`utils/chart_extraction.py`](https://github.com/Mercor-Intelligence/archipelago/blob/0cb5c476c219a9df637e0bd37fb86b2361f4ab89/grading/runner/utils/file_extraction/utils/chart_extraction.py), [`utils/docx_tracked_changes.py`](https://github.com/Mercor-Intelligence/archipelago/blob/0cb5c476c219a9df637e0bd37fb86b2361f4ab89/grading/runner/utils/file_extraction/utils/docx_tracked_changes.py) | `0cb5c476c219a9df637e0bd37fb86b2361f4ab89` | `resources_servers/apex_agents/file_extraction.py` | Apache-2.0 |
+| [`grading/runner/helpers/snapshot_diff/main.py`](https://github.com/Mercor-Intelligence/archipelago/blob/0cb5c476c219a9df637e0bd37fb86b2361f4ab89/grading/runner/helpers/snapshot_diff/main.py), [`match_utils.py`](https://github.com/Mercor-Intelligence/archipelago/blob/0cb5c476c219a9df637e0bd37fb86b2361f4ab89/grading/runner/helpers/snapshot_diff/match_utils.py) | `0cb5c476c219a9df637e0bd37fb86b2361f4ab89` | `resources_servers/apex_agents/artifacts.py` | Apache-2.0 |
+| [`grading/runner/evals/output_llm/utils/prompts.py`](https://github.com/Mercor-Intelligence/archipelago/blob/b581241ed67deed520f8d7854d20e39569e259f5/grading/runner/evals/output_llm/utils/prompts.py) | `b581241ed67deed520f8d7854d20e39569e259f5` | `resources_servers/apex_agents/prompts.py` | Apache-2.0 |
+
+The sandbox image is built from the Archipelago source at revision `0cb5c476c219a9df637e0bd37fb86b2361f4ab89` at setup
+time; that source is downloaded, not vendored here.

@@ -148,6 +148,24 @@ JUDGE_BASE_URL=http://JUDGE_HOST:8001/v1 JUDGE_MODEL=Qwen/Qwen2.5-72B-Instruct \
 
 The headline metric is `mAM`. Scores are comparable only between runs with the same judge, and not with published V-STaR results, which sample one frame per second. See the benchmark's [README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/vstar_spatiotemporal/README.md) for the task contract, the frame options and the limitations.
 
+## APEX-Agents
+
+[APEX-Agents](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/apex_agents/README.md) (`benchmarks/apex_agents`) runs long professional-services tasks inside a simulated workplace: files, mail, chat, calendar, spreadsheets, documents, presentations and code execution. The agent submits a console answer or an edited or new file, and a judge model grades it against a held-out rubric. It is an experimental integration, and the harness is part of what is measured.
+
+The dataset is gated. Accept the terms of [`mercor/apex-agents`](https://huggingface.co/datasets/mercor/apex-agents) with the account whose Hugging Face token is `hf_token` in the root `env.yaml`, then prepare. Preparation also downloads every world archive, so rollouts run offline:
+
+```bash
+gym eval prepare --benchmark apex_agents
+
+gym eval run --benchmark apex_agents --model-type vllm_model \
+  --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
+  --split benchmark --limit 1 --num-repeats 1 \
+  --output results/apex_agents_smoke.jsonl \
+  ++judge_base_url="$JUDGE_URL" ++judge_api_key="$JUDGE_KEY" ++judge_model_name="$JUDGE_MODEL"
+```
+
+Each task runs in an Apptainer sandbox built from a pinned workplace image, so the host needs Apptainer; the [agent README](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/apex_agent/README.md) covers the image build and the sandbox options. The judge is configuration, and scores from different judges are not comparable. The reward is 1.0 only when every rubric criterion is met; a rollout that ends without submitting scores 0. The agent timeout is wall-clock, so keep concurrency and serving capacity fixed across the models you compare. See the benchmark's [measurement contract](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/apex_agents/README.md#scoring-and-run-conditions) and the [verifier README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/apex_agents/README.md) for the task contract, judge settings and limitations.
+
 ## Interpreting Results
 
 A score is only meaningful relative to a fixed comparison: same dataset split, same model, same harness, same sampling config. It is also only as reliable as the verifier behind it — before trusting a score, confirm the reward function actually measures the behavior you care about.
