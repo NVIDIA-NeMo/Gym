@@ -14,9 +14,8 @@ metric (fold match, or crossing-pair F1 on the pseudoknotted suites) and gate (t
   model-free baselines run on the same budget.
 - **Training environment:** any compatible training dataset, similar to the benchmark sources.
 
-The code is in [`responses_api_agents/rna_design_agent`](../../responses_api_agents/rna_design_agent/README.md) (the
-fixed workflow, agent loop and tools) and [`resources_servers/rna_design`](../../resources_servers/rna_design/README.md) (the same
-tools over MCP).
+The code is in [`responses_api_agents/rna_design_agent`](../../responses_api_agents/rna_design_agent/README.md): the
+fixed workflow, agent loop and tools.
 
 ## Setup
 
