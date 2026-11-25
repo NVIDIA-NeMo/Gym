@@ -241,8 +241,10 @@ image"), and set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`. The config's li
 - A call asks for up to `max_output_tokens` (32,768) new tokens; the trainer's generation limit must allow them.
 - Every call sends the episode's tool images again, up to the video tools' `max_tool_media_images` (8,192): the model
   server's image limit per request.
-- Once admitted, an episode ends within `default_episode_timeout_seconds` (6,600 s), grading included, so the
-  trainer's timeout for one rollout must be longer.
+- Once admitted, `default_episode_timeout_seconds` (6,600 s) is the episode protocol budget (seeding, the agent run and
+  grading). Final cleanup runs outside that deadline (`single_agent_turn_legacy` allows up to `cleanup_timeout_seconds`,
+  180 s, per cleanup callback), so `/run` can return later than 6,600 s; give the trainer's rollout timeout headroom
+  beyond 6,600 s for cleanup (for example, 7,200 s or more).
 
 Compaction is off, so an episode that fills the context ends with a context-limit error and scores 0.
 
