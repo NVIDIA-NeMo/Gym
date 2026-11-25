@@ -303,14 +303,17 @@ def test_close_releases_the_world_and_the_session_follows_the_contract():
 
 
 def test_the_world_a_tool_sidecar_hands_back_is_what_verify_scores():
-    # The tool sidecar runs this same class with the same config; the host never sees the tool calls.
-    sidecar_tool = _server(tool_sidecar={"image": "python:3.13-slim"})
     host_server = _server(tool_sidecar={"image": "python:3.13-slim"})
+    # The tool host runs this same class without tool_sidecar, seeded with the task as the host hands it over.
+    sidecar_tool = _server()
+    sidecar_seed = _seed()
+    sidecar_seed.task_data = host_server.tool_host_task_data(sidecar_seed.task_data)
     with TestClient(sidecar_tool.setup_webserver()) as sidecar, TestClient(host_server.setup_webserver()) as host:
-        _post_seed(sidecar, _seed())
+        _post_seed(sidecar, sidecar_seed)
         seeded = _post_seed(host, _seed()).json()
-        # The seed declares the tool sidecar in the attempt's group.
+        # The seed declares the tool sidecar in the attempt's group, and the host runs no tool itself.
         assert seeded["sandbox_group"]["sidecars"][0]["name"] == "tools"
+        assert host.post("/api_search", json={"query": "salesforce"}).status_code == 409
         # The tool host signs sessions with the host's key, so the agent's calls carry the host's cookie.
         sidecar.cookies.clear()
         sidecar.cookies.update(dict(host.cookies))
@@ -319,11 +322,28 @@ def test_the_world_a_tool_sidecar_hands_back_is_what_verify_scores():
         # The world crosses a process boundary as JSON.
         exported = json.loads(json.dumps(sidecar_tool.export_tool_state("session")))
         asyncio.run(host_server.import_tool_state("session", exported))
-        on_host, in_sidecar = _verify(host), _verify(sidecar)
+        on_host = _verify(host)
 
+    # Graded on the host with the real assertions, the sidecar's world scores as a world built in one process does.
+    with TestClient(_server().setup_webserver()) as in_process:
+        _post_seed(in_process, _seed())
+        _win_the_deal(in_process)
+        expected = _verify(in_process)
     for score in ("reward", "aa_headline", "partial_credit", "objectives_passed", "guardrails_violated"):
-        assert on_host[score] == in_sidecar[score], score
+        assert on_host[score] == expected[score], score
     assert on_host["objectives_passed"] == 1.0
+
+
+def test_the_tool_sidecar_gets_no_answer_key():
+    task_data = _seed().task_data
+    handed = _server(tool_sidecar={"image": "python:3.13-slim"}).tool_host_task_data(task_data)
+
+    assert handed["info"]["assertions"] == [{"type": a["type"]} for a in task_data["info"]["assertions"]]
+    assert handed["answer"] == ""
+    assert handed["info"]["initial_state"] == task_data["info"]["initial_state"]
+    # The services in scope, which the tools enforce, are the same as with the full assertions.
+    full, redacted = app_module.new_world_state(task_data["info"]), app_module.new_world_state(handed["info"])
+    assert full["world"].meta.allowed_services == redacted["world"].meta.allowed_services
 
 
 def test_a_session_the_sidecar_lost_is_never_exported_as_an_empty_world():

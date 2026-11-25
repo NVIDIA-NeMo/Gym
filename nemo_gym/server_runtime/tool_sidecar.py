@@ -7,7 +7,7 @@ Environment Server's base class starts the group, and the Resources Server start
 ``/prepare_sandbox``, through a borrowed handle. The Environment Server grants the agent ``http://<name>:<port>`` with
 the Resources session's cookies, which the tool host reads as its own, and checks that the agent container reaches it.
 After the agent closes and before ``/verify``, it asks the Resources Server to copy the session's tool state out of
-the sidecar (``/tool_sidecar/collect``), then stops the group. No tool call of the agent reaches the Resources host.
+the sidecar (``/tool_sidecar/import_state``), then stops the group. No tool call of the agent reaches the Resources host.
 """
 
 from collections.abc import Mapping
@@ -17,12 +17,12 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PositiveFloat
 
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.sandbox.providers.base import NetworkRule
+from nemo_gym.sandbox.providers.base import SupportsSandboxSidecars
 from nemo_gym.server_runtime.attempt_sandbox import SandboxGroupSidecar
 from nemo_gym.server_runtime.owned_sandboxes import check_network_rule
 
 
-TOOL_SIDECAR_COLLECT_PATH = "/tool_sidecar/collect"
+TOOL_SIDECAR_IMPORT_STATE_PATH = "/tool_sidecar/import_state"
 
 
 class ToolSidecarConfig(BaseModel):
@@ -60,22 +60,19 @@ class ToolSidecarConfig(BaseModel):
         """The tool host's address as the agent container reaches it."""
         return f"http://{self.name}:{self.port}"
 
-    @property
-    def network_rule(self) -> NetworkRule:
-        return "hosts_only" if self.egress_hosts else "no_network"
-
     def check_provider(self, provider: object) -> None:
-        """Refuse a provider that cannot run sidecars or cannot limit this sidecar's egress.
+        """Refuse at startup a provider that cannot run this sidecar or apply its own egress, as the attempt's group
+        would at every seed.
 
         Raises:
             ValueError: Naming what the provider lacks.
         """
-        if not hasattr(provider, "sidecar_exec") or not hasattr(provider, "upload_sidecar_file"):
+        if not isinstance(provider, SupportsSandboxSidecars):
             raise ValueError(
                 f"sandbox provider {getattr(provider, 'name', type(provider).__name__)!r} cannot run the tool sidecar "
                 f"{self.name!r}: it runs no sidecars"
             )
-        check_network_rule(provider, self.network_rule)
+        check_network_rule(provider, self.group_sidecar().network)
 
     def group_sidecar(self) -> SandboxGroupSidecar:
         """The sidecar the Resources Server's seed declares in its ``sandbox_group``, with its own egress and the port
@@ -89,7 +86,7 @@ class ToolSidecarConfig(BaseModel):
         )
 
 
-class ToolSidecarCollectRequest(BaseModel):
+class ToolSidecarImportStateRequest(BaseModel):
     """Copy the episode's tool state out of the sidecar into the Resources Server's session, before ``/verify``.
 
     The request carries the Resources session's cookies, which name the session in both places.
@@ -103,7 +100,7 @@ class ToolSidecarCollectRequest(BaseModel):
     sandbox_access: SandboxAccess
 
 
-class ToolSidecarCollectResponse(BaseModel):
+class ToolSidecarImportStateResponse(BaseModel):
     """Whether the sidecar's session held state the Resources Server imported."""
 
     imported: bool

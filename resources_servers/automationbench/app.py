@@ -175,6 +175,8 @@ class AutomationBenchResourcesServer(ToolSidecarResources, SimpleResourcesServer
     tool_sidecar_sources: ClassVar[dict[str, str]] = {
         "benchmarks/automationbench/automationbench_env": "automationbench_env"
     }
+    # The rubric reads the final world and runs nothing the model wrote.
+    verifier_executes_nothing: ClassVar[bool] = True
 
     _episodes: Dict[str, _Episode] = PrivateAttr(default_factory=dict)
 
@@ -206,6 +208,17 @@ class AutomationBenchResourcesServer(ToolSidecarResources, SimpleResourcesServer
 
     async def release_session_state(self, session_id: str) -> None:
         self._episodes.pop(session_id, None)
+
+    def tool_host_task_data(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+        """The task as the tool sidecar gets it: the world and the services in scope, without the answer key.
+
+        The tools read neither the assertions nor the answer; the services in scope come from each assertion's type
+        alone (``compute_allowed_services``), so only the types go to the sidecar, which code in the agent container
+        can reach.
+        """
+        info = dict(task_data.get("info") or {})
+        info["assertions"] = [{"type": assertion.get("type")} for assertion in info.get("assertions") or []]
+        return {**task_data, "info": info, "answer": ""}
 
     def export_tool_state(self, session_id: str) -> Dict[str, Any]:
         """In the tool sidecar: the session's world, the only state the tools change."""

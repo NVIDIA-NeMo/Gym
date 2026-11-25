@@ -25,6 +25,9 @@ Configuration (`configs/automationbench.yaml`):
   (Gym, verifiers, `automation-bench`, `datasets` at this server's versions) at the first prepare of each group. Before
   `/verify`, the world the agent's calls left is copied back here (`export_tool_state` there, `import_tool_state` here),
   and the rubric scores it as before; a world that cannot be copied fails the attempt as an infrastructure failure.
+  The sidecar is seeded without the answer key: each assertion keeps only its type, which scopes the services the tools
+  allow. The rubric executes nothing (`verifier_executes_nothing`), so the config releases the group once the world is
+  copied back.
 
 A row whose `responses_create_params` carries no tools was prepared before this server existed. `/seed_session` refuses
 it with HTTP 422 before any model call, reading the params the typed seed carries beside `task_data`, and the message

@@ -10,10 +10,11 @@ derives from :class:`ToolSidecarResourcesConfig`. With ``tool_sidecar`` set:
   ``nemo_gym`` sources and its own package there, starts the tool host (``tool_sidecar_host.py``), and seeds the
   episode's session in it with the seed's identity and ``task_data``, which the prepare request carries. The tool host
   signs sessions with this server's key, so the Resources session's cookies name the same session there;
-- ``/tool_sidecar/collect`` reads the session's tool state from the tool host (:meth:`export_tool_state` there) and
+- ``/tool_sidecar/import_state`` reads the session's tool state from the tool host (:meth:`export_tool_state` there) and
   hands it to :meth:`import_tool_state` here, so ``/verify`` grades the state the agent's tool calls left.
 
-A server whose tools keep no state the grader reads, such as a lookup, overrides neither hook.
+A server whose tools keep no state the grader reads, such as a lookup, overrides neither hook. With ``tool_sidecar``
+set, the Resources Server itself refuses every tool call (HTTP 409), so none falls back to its process.
 """
 
 import asyncio
@@ -34,7 +35,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import JsonValue, model_validator
 
 import nemo_gym
@@ -47,10 +48,10 @@ from nemo_gym.server_runtime.attempt_sandbox import ResourcesPrepareSandboxReque
 from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig, ResourcesSeedSessionRequest
 from nemo_gym.server_runtime.sandbox_borrow import borrow
 from nemo_gym.server_runtime.tool_sidecar import (
-    TOOL_SIDECAR_COLLECT_PATH,
-    ToolSidecarCollectRequest,
-    ToolSidecarCollectResponse,
+    TOOL_SIDECAR_IMPORT_STATE_PATH,
     ToolSidecarConfig,
+    ToolSidecarImportStateRequest,
+    ToolSidecarImportStateResponse,
 )
 
 
@@ -80,7 +81,7 @@ TOOL_HOST_REQUIREMENTS = (
 _IMPORT_CHECK = "import aiohttp, fastapi, hydra, omegaconf, pydantic, uvicorn"
 # Where the tool host keeps its sources, spec, log and call files in the sidecar, outside any working directory.
 _ROOT = "/tmp/nemo-gym-tool-sidecar"
-_HOST = f"{_ROOT}/harness/nemo_gym/environment/tool_sidecar_host.py"
+_HOST = f"{_ROOT}/tool_host/nemo_gym/environment/tool_sidecar_host.py"
 # A config key that names a credential. Code in the agent container can read a tool sidecar's files and environment
 # (the provider's exec daemon is reachable from it), so no such value may go there.
 _SECRET_KEY = re.compile(r"(api_?key|token|secret|password|credential)s?$", re.IGNORECASE)
@@ -221,10 +222,25 @@ class ToolSidecarResources:
         """On the Resources host: put ``state``, what :meth:`export_tool_state` returned, into the session."""
         return None
 
+    def tool_host_task_data(self, task_data: dict[str, Any]) -> dict[str, Any]:
+        """The ``task_data`` the tool host is seeded with: by default all of it.
+
+        Code in the agent container can reach the sidecar, so a server whose task data holds what only grading reads,
+        such as the expected answer or the checks on the final state, leaves it out here.
+        """
+        return task_data
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()  # type: ignore[misc]
+        if self.config.tool_sidecar is not None:  # type: ignore[attr-defined]
+            # Every route the server adds from here on is one of its tools, which its tool sidecar serves instead.
+            app.router.dependencies.append(Depends(_tools_run_in_the_sidecar))
+        return app
+
     def register_protocol_routes(self, app: FastAPI) -> None:
         super().register_protocol_routes(app)  # type: ignore[misc]
         if self.config.tool_sidecar is not None:  # type: ignore[attr-defined]
-            app.post(TOOL_SIDECAR_COLLECT_PATH)(self.collect_tool_sidecar)
+            app.post(TOOL_SIDECAR_IMPORT_STATE_PATH)(self.import_tool_sidecar_state)
 
     def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec | None:
         """The attempt's group holds the tool sidecar, which serves this server's tools."""
@@ -247,7 +263,7 @@ class ToolSidecarResources:
             resources_session_id=body.resources_session_id,
             episode_id=body.episode_id,
             task_id=body.task_id,
-            task_data=body.task_data,
+            task_data=self.tool_host_task_data(body.task_data),
         ).model_dump(mode="json")
         python = self.tool_host_runtime().python
         sandbox = await borrow(body.sandbox_access)
@@ -260,9 +276,9 @@ class ToolSidecarResources:
         if reply["status"] != 200:
             raise RuntimeError(f"The tool host refused the seed with HTTP {reply['status']}: {reply['body'][:2000]}")
 
-    async def collect_tool_sidecar(
-        self, request: Request, body: ToolSidecarCollectRequest
-    ) -> ToolSidecarCollectResponse:
+    async def import_tool_sidecar_state(
+        self, request: Request, body: ToolSidecarImportStateRequest
+    ) -> ToolSidecarImportStateResponse:
         """Copy the session's tool state from the sidecar into this server's session of the same episode."""
         config = self._tool_sidecar_config()
         python = self.tool_host_runtime().python
@@ -279,9 +295,9 @@ class ToolSidecarResources:
             )
         state = json.loads(reply["body"])["state"]
         if state is None:
-            return ToolSidecarCollectResponse(imported=False)
+            return ToolSidecarImportStateResponse(imported=False)
         await self.import_tool_state(request.session[SESSION_ID_KEY], state)
-        return ToolSidecarCollectResponse(imported=True)
+        return ToolSidecarImportStateResponse(imported=True)
 
     def _tool_sidecar_config(self) -> ToolSidecarConfig:
         config = self.config.tool_sidecar  # type: ignore[attr-defined]
@@ -311,6 +327,7 @@ class ToolSidecarResources:
         )
 
     def tool_host_runtime(self) -> SandboxPythonRuntime:
+        """The tool host's private Python in the sidecar, pinned to this server's package versions."""
         return SandboxPythonRuntime(
             harness="tool-sidecar",
             requirements=(*TOOL_HOST_REQUIREMENTS, *self.tool_sidecar_requirements),
@@ -332,14 +349,14 @@ class ToolSidecarResources:
             if not await runtime.is_installed(shell):  # type: ignore[arg-type]
                 await runtime.install(shell, timeout_s=config.install_timeout_seconds)  # type: ignore[arg-type]
             _check(
-                await shell.exec(f"mkdir -p {_ROOT}/harness {_ROOT}/calls", timeout_s=30), "prepare its directories"
+                await shell.exec(f"mkdir -p {_ROOT}/tool_host {_ROOT}/calls", timeout_s=30), "prepare its directories"
             )
             archive = await asyncio.to_thread(
                 lambda: _write_private(_sources_bytes(self._tool_host_sources()), ".tar.gz")
             )
             await sidecar.upload(archive, f"{_ROOT}/sources.tar.gz")
             _check(
-                await shell.exec(f"tar -xzf {_ROOT}/sources.tar.gz -C {_ROOT}/harness", timeout_s=120),
+                await shell.exec(f"tar -xzf {_ROOT}/sources.tar.gz -C {_ROOT}/tool_host", timeout_s=120),
                 "unpack the tool host's sources",
             )
             spec = await asyncio.to_thread(lambda: _write_private(json.dumps(self.tool_host_spec()).encode(), ".json"))
@@ -362,6 +379,14 @@ class ToolSidecarResources:
                 )
                 raise RuntimeError(f"The tool host {state}: {(log.stdout or '').strip()}")
             await asyncio.sleep(0.5)
+
+
+async def _tools_run_in_the_sidecar(request: Request) -> None:
+    """Refuse a tool call on the Resources host: its tools run in the tool sidecar. Health checks still answer."""
+    if request.method not in ("GET", "HEAD"):
+        raise HTTPException(
+            status_code=409, detail="this Resources Server's tools run in its tool sidecar, not in this process"
+        )
 
 
 async def _ready(sidecar: AsyncSandboxSidecar, python: str, port: int) -> bool:
@@ -398,7 +423,11 @@ async def _call(
         python, "-E", "-s", _HOST, "--call", str(port), f"{call}.request.json", f"{call}.reply.json", timeout_s=300
     )
     _check(result, f"call {path} on the tool host")
-    with tempfile.TemporaryDirectory(dir=_private_dir()) as scratch:
-        local = Path(scratch) / "reply.json"
-        await sidecar.download(f"{call}.reply.json", local)
-        return json.loads(await asyncio.to_thread(local.read_text))
+    try:
+        with tempfile.TemporaryDirectory(dir=_private_dir()) as scratch:
+            local = Path(scratch) / "reply.json"
+            await sidecar.download(f"{call}.reply.json", local)
+            return json.loads(await asyncio.to_thread(local.read_text))
+    finally:
+        # The seed and the state stay in the sidecar no longer than the call.
+        await sidecar.exec("rm", "-f", f"{call}.request.json", f"{call}.reply.json", timeout_s=30)

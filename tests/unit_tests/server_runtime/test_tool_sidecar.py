@@ -28,6 +28,9 @@ class _SidecarProvider:
     async def upload_sidecar_file(self, *args: Any, **kwargs: Any) -> None:
         raise AssertionError("not called")
 
+    async def download_sidecar_file(self, *args: Any, **kwargs: Any) -> None:
+        raise AssertionError("not called")
+
 
 class _NoSidecars:
     name = "plain"
@@ -51,11 +54,11 @@ def test_the_seed_declares_the_tool_sidecar_and_the_agent_reaches_it_by_its_name
         [],
         8000,
     )
-    assert sidecar.network == closed.network_rule == "no_network"
-    assert (closed.url, closed.network_rule) == ("http://tools:8000", "no_network")
+    assert (closed.url, sidecar.network) == ("http://tools:8000", "no_network")
 
     search = ToolSidecarConfig(image="search:1", name="search", port=9000, egress_hosts=["api.example.com"])
-    assert (search.url, search.network_rule) == ("http://search:9000", "hosts_only")
+    assert (search.url, search.group_sidecar().network) == ("http://search:9000", "hosts_only")
+    assert search.group_sidecar().egress_hosts == ["api.example.com"]
 
 
 def test_a_provider_that_runs_no_sidecar_or_cannot_close_its_egress_is_refused() -> None:

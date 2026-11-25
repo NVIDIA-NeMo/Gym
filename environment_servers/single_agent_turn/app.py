@@ -63,7 +63,7 @@ from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     NG_SANDBOX_ACCESS_KEY,
     PREPARE_SANDBOX_PATH,
-    TOOL_SIDECAR_COLLECT_PATH,
+    TOOL_SIDECAR_IMPORT_STATE_PATH,
     AttemptSandbox,
     AttemptSandboxEnvironmentServerConfig,
     BaseEnvironmentServer,
@@ -81,8 +81,8 @@ from nemo_gym.server_runtime import (
     SingleAgentTurnResult,
     StepType,
     ToolAccess,
-    ToolSidecarCollectRequest,
     ToolSidecarConfig,
+    ToolSidecarImportStateRequest,
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
@@ -636,40 +636,59 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             refusal = f"{resources} serves its tools from a sidecar, which this server grants over direct_http only"
         if refusal is not None:
             raise self._failure(stage="seed", failure_reason=refusal, terminal=True)
-        url = f"http://{serving[0].name}:{serving[0].tools_port}"
+        sidecar = serving[0]
+        url = f"http://{sidecar.name}:{sidecar.tools_port}"
         try:
-            await self._check_tool_sidecar_reachable(handles.attempt_sandbox, url)
+            checked = await self._check_tool_sidecar_reachable(
+                handles.attempt_sandbox, sidecar.name, sidecar.tools_port
+            )
         except Exception as error:
             raise dependency_failure(error, stage="seed", terminal=False, name_error_type=True) from error
+        if not checked:
+            raise self._failure(
+                stage="seed",
+                failure_reason=(
+                    f"the agent container has neither python3 nor bash to check that it reaches the tool sidecar at "
+                    f"{url}; the agent is granted no tools it was not checked to reach"
+                ),
+                terminal=True,
+            )
         handles.tool_sidecar_url = url
 
-    async def _check_tool_sidecar_reachable(self, attempt: AttemptSandbox, url: str) -> None:
-        """Probe the tool host at ``url`` from the agent container, as the agent's tool calls will reach it.
+    async def _check_tool_sidecar_reachable(self, attempt: AttemptSandbox, host: str, port: int) -> bool:
+        """Probe the tool host from the agent container, as the agent's tool calls will reach it.
 
-        An image without ``python3`` cannot run the probe; the check is skipped there with a warning.
+        With ``python3`` the probe asks the tool host whether it is ready; with only ``bash`` it opens a connection to
+        its port. Returns False when the image has neither, so the reach was not checked.
+
+        Raises:
+            RuntimeError: If the agent container cannot reach the tool host.
         """
         sandbox = self.sandboxes.get(attempt.key)
         if sandbox is None:
             raise RuntimeError("the attempt's sandbox group is gone before its tool sidecar was checked")
+        ready = shlex.quote(f"http://{host}:{port}/_tool_sidecar/ready")
         probe = (
-            "command -v python3 >/dev/null || exit 127; "
-            "python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=10)' "
-            f"{shlex.quote(url + '/_tool_sidecar/ready')}"
+            "if command -v python3 >/dev/null; then "
+            f"python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=10)' {ready}; "
+            "elif command -v bash >/dev/null; then "
+            f"bash -c 'exec 3<>\"/dev/tcp/$0/$1\"' {shlex.quote(host)} {int(port)}; "
+            "else exit 127; fi"
         )
         result = await sandbox.exec(probe, cwd="/", timeout_s=60)
         if result.return_code == 127 and result.error_type is None:
-            LOGGER.warning("The agent container has no python3, so its path to the tool sidecar was not checked")
-            return
+            return False
         if result.return_code != 0 or result.error_type is not None:
             detail = result.error_type or (result.stderr or result.stdout or "").strip()[-1000:]
-            raise RuntimeError(f"The agent container cannot reach the tool sidecar at {url}: {detail}")
+            raise RuntimeError(f"The agent container cannot reach the tool sidecar at {host}:{port}: {detail}")
+        return True
 
-    async def _collect_tool_sidecar(self, handles: "SessionHandles", access: SandboxAccess) -> None:
+    async def _import_tool_sidecar_state(self, handles: "SessionHandles", access: SandboxAccess) -> None:
         """Have the Resources Server copy the session's tool state out of the sidecar, before ``/verify`` grades it."""
         collected = await self.server_client.post(
             server_name=self.config.resources_server.name,
-            url_path=TOOL_SIDECAR_COLLECT_PATH,
-            json=ToolSidecarCollectRequest(sandbox_access=access).model_dump(mode="json"),
+            url_path=TOOL_SIDECAR_IMPORT_STATE_PATH,
+            json=ToolSidecarImportStateRequest(sandbox_access=access).model_dump(mode="json"),
             cookies=handles.resources_cookies,
         )
         await raise_boundary_failure(collected)
@@ -1004,7 +1023,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             }
             tools_access = await self.attempt_sandbox_access(attempt, stage="verification", **evidence)
             try:
-                await self._collect_tool_sidecar(handles, tools_access)
+                await self._import_tool_sidecar_state(handles, tools_access)
             except Exception as error:
                 raise dependency_failure(
                     error, stage="verification", terminal=False, name_error_type=True, **evidence

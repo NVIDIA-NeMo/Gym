@@ -62,7 +62,7 @@ def _sidecar_server(
         {"resources": {"resources_servers": {"test": {"tool_sidecar": tool_sidecar or {"image": "tools:1"}}}}},
     )
     client.responses[0] = _Response(SEED_REPLY)
-    # The prepare reply after the group starts, and the collect reply before /verify.
+    # The prepare reply after the group starts, and the state import's reply before /verify.
     client.responses.insert(1, _Response({"resources_session_id": "resources-session"}))
     client.responses.insert(5, _Response({"imported": True}))
     return server, client
@@ -93,7 +93,7 @@ async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads
         "/v1/agent_sessions",
         "/ng-rollout/rollout-a2/v1/responses",
         "/v1/agent_sessions/close",
-        "/tool_sidecar/collect",
+        "/tool_sidecar/import_state",
         "/verify",
         "/close_session",
     ]
@@ -109,8 +109,8 @@ async def test_the_agent_calls_the_tools_in_the_groups_sidecar_and_grading_reads
     assert isinstance(grant, DirectHTTPToolAccess)
     assert (str(grant.base_url).rstrip("/"), dict(grant.cookies)) == ("http://tools:8000", {"session": "cookie-value"})
     # The state the tool calls left is copied out of the same group before /verify grades it.
-    collect = calls["/tool_sidecar/collect"]["json"]
-    assert collect["sandbox_access"] == calls["/verify"]["json"][NG_SANDBOX_ACCESS_KEY]
+    imported = calls["/tool_sidecar/import_state"]["json"]
+    assert imported["sandbox_access"] == calls["/verify"]["json"][NG_SANDBOX_ACCESS_KEY]
     assert provider.running() == []
 
 
@@ -139,7 +139,7 @@ async def test_a_tool_sidecar_that_is_not_ready_fails_the_attempt_for_a_retry_be
     assert provider.running() == []
 
 
-async def test_tool_state_that_cannot_be_collected_is_never_graded() -> None:
+async def test_tool_state_that_cannot_be_imported_is_never_graded() -> None:
     provider = _SidecarProvider()
     server, client = _sidecar_server(provider)
     client.responses[5] = ClientConnectionError("sidecar went away")
@@ -209,3 +209,15 @@ def test_a_model_only_group_may_grant_tools_that_run_in_its_sidecar() -> None:
     client.global_config_dict = OmegaConf.merge(client.global_config_dict, {"attempt_sandboxes": provider})
     with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
         server.check_sandbox_provider()
+
+
+async def test_an_agent_image_that_cannot_check_the_tool_sidecar_is_granted_nothing() -> None:
+    provider = _SidecarProvider(probe_exit=127)
+    server, client = _sidecar_server(provider)
+
+    result = await server.run_request(_request())
+
+    assert (result.failure.stage, result.failure.terminal) == ("seed", True)
+    assert "neither python3 nor bash" in result.failure.failure_reason
+    assert "/v1/agent_sessions" not in _paths(client)
+    assert provider.running() == []

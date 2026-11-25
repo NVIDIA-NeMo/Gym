@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A Resources Server's tools served from its tool sidecar: the tool host, and the prepare and collect routes.
+"""A Resources Server's tools served from its tool sidecar: the tool host, and the prepare and state import routes.
 
 The end-to-end tests stand a local directory in for the sidecar: its commands run as local processes there, so the
 real tool host starts, is seeded, answers tool calls and exports its state, as it does in a sidecar.
@@ -226,7 +226,7 @@ def local_sidecar(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     """
     root = tmp_path / "sidecar"
     monkeypatch.setattr(tool_sidecar, "_ROOT", str(root))
-    monkeypatch.setattr(tool_sidecar, "_HOST", f"{root}/harness/nemo_gym/environment/tool_sidecar_host.py")
+    monkeypatch.setattr(tool_sidecar, "_HOST", f"{root}/tool_host/nemo_gym/environment/tool_sidecar_host.py")
 
     class _InstalledRuntime:
         python = sys.executable
@@ -313,6 +313,8 @@ async def test_the_tool_state_the_agents_calls_leave_in_the_sidecar_is_what_the_
         }
         assert seeded["sandbox_group"]["prepare"] is True
         cookies = dict(host.cookies)
+        # No tool call falls back to the Resources host.
+        assert host.post("/pay", json={"value": 1}).status_code == 409
 
         await server.prepare_sandbox(_prepare())
 
@@ -324,7 +326,7 @@ async def test_the_tool_state_the_agents_calls_leave_in_the_sidecar_is_what_the_
         assert server._ledgers[SESSION] == ["opening:hi"]
         # Before the copy, the Resources host would grade an untouched ledger.
         assert host.post(
-            "/tool_sidecar/collect", json={"sandbox_access": _access().model_dump(mode="json")}
+            "/tool_sidecar/import_state", json={"sandbox_access": _access().model_dump(mode="json")}
         ).json() == {"imported": True}
         assert server._ledgers[SESSION] == ["opening:hi", "pay:5", "pay:7"]
         assert host.post("/verify", json=_verify_body()).json()["reward"] == 1.0
@@ -371,7 +373,7 @@ async def test_a_server_whose_tools_run_in_process_declares_no_group_and_serves_
         assert "sandbox_group" not in host.post("/seed_session", json=_seed()).json()
     assert "/prepare_sandbox" not in paths
 
-    assert "/tool_sidecar/collect" not in paths
-    assert "/tool_sidecar/collect" in {
+    assert "/tool_sidecar/import_state" not in paths
+    assert "/tool_sidecar/import_state" in {
         getattr(route, "path", None) for route in _server(_config()).setup_webserver().router.routes
     }

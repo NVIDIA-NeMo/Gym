@@ -26,14 +26,18 @@ from pathlib import Path
 from typing import Any
 
 
-# Importable as a script: the sources sit two directories above this file, outside any task directory.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 READY_PATH = "/_tool_sidecar/ready"
 STATE_PATH = "/_tool_sidecar/state"
 # Grading and the session's lifecycle stay with the Resources Server.
 _DROPPED_ROUTES = frozenset(
-    {"/verify", "/aggregate_metrics", "/close_session", "/reverify_mode", "/prepare_sandbox", "/tool_sidecar/collect"}
+    {
+        "/verify",
+        "/aggregate_metrics",
+        "/close_session",
+        "/reverify_mode",
+        "/prepare_sandbox",
+        "/tool_sidecar/import_state",
+    }
 )
 # Routes only the Resources Server calls, from inside the sidecar (``--call``).
 _LOCAL_ROUTES = frozenset({"/seed_session", STATE_PATH})
@@ -131,4 +135,6 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    # Run as a script in the sidecar: the sources sit two directories above this file, outside any task directory.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     sys.exit(main(sys.argv))

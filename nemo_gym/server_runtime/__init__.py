@@ -167,10 +167,10 @@ if TYPE_CHECKING:
         ToolAccess,
     )
     from nemo_gym.server_runtime.tool_sidecar import (
-        TOOL_SIDECAR_COLLECT_PATH,
-        ToolSidecarCollectRequest,
-        ToolSidecarCollectResponse,
+        TOOL_SIDECAR_IMPORT_STATE_PATH,
         ToolSidecarConfig,
+        ToolSidecarImportStateRequest,
+        ToolSidecarImportStateResponse,
         tool_sidecar_config_of,
     )
     from nemo_gym.server_runtime.verifier_observability import (
@@ -285,9 +285,9 @@ _PUBLIC_API = {
     "ToolCallRecord": "episode_tools",
     "ToolResult": "episode_tools",
     "ToolSpec": "episode_tools",
-    "TOOL_SIDECAR_COLLECT_PATH": "tool_sidecar",
-    "ToolSidecarCollectRequest": "tool_sidecar",
-    "ToolSidecarCollectResponse": "tool_sidecar",
+    "TOOL_SIDECAR_IMPORT_STATE_PATH": "tool_sidecar",
+    "ToolSidecarImportStateRequest": "tool_sidecar",
+    "ToolSidecarImportStateResponse": "tool_sidecar",
     "ToolSidecarConfig": "tool_sidecar",
     "tool_sidecar_config_of": "tool_sidecar",
     "TypedToolset": "episode_tools",

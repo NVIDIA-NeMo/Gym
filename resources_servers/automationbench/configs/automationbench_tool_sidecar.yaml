@@ -46,3 +46,7 @@ automationbench_environment_server:
         # The tools are in the group, so the agent container needs only the model server.
         network: model_only
         model_server: policy_model
+      # The rubric reads the world copied back from the sidecar and executes nothing, so /verify runs in the Resources
+      # Server and the group stops once the world is copied.
+      sandbox_opt_out:
+        verifier: true
