@@ -195,7 +195,9 @@ does not depend on the collector being enabled.
 - **`nodes`**: each node a declared service runs on, with its Slurm node name.
 - **`gpus`**: one row per GPU that `nvidia-smi` lists in a job step on a declared service's node, with
   the GPU UUID, the NVML index and every GPU-using service on that node. Gym does not assign GPUs to
-  services, so two services sharing a node are both listed on each of its GPUs. A node whose GPUs
+  services, so a row names the services that may use the GPU, not one that does: two services sharing
+  a node are both listed on each of its GPUs, and a service whose launch uses fewer GPUs than the node
+  has (its `gpus_per_node`) is listed on the idle ones too. A node whose GPUs
   cannot be listed (no `nvidia-smi` on the node, a timeout) has `gpus_observed: false`, a
   `gpus_unavailable_reason` and no rows.
 
@@ -210,8 +212,10 @@ every job's declaration is also kept at `<job dir>/logs/service_declaration-<slu
 
 **Joining GPU series to services.** DCGM exporter series carry the GPU's UUID in their `UUID` label
 and the NVML index in `gpu`. Match `UUID` to `gpus[].gpu_uuid` and the series' `slurm_job_id` resource
-attribute to the declaration's `slurm_job_id`; the row's `services` names the service, whose entry in
-`services` gives the layout. Engine series join on `service.name.override` (or `gym_service`) directly.
+attribute to the declaration's `slurm_job_id`; the row's `services` names the services that may use the
+GPU, whose entries in `services` give the layout. A row with one service does not show that the service
+used that GPU: compare its `gpus_per_node` with the GPUs listed for the node, and read the GPU's own
+activity. Engine series join on `service.name.override` (or `gym_service`) directly.
 GPU series are not relabelled with the service: the collector's configuration is written at submit
 time, before the GPU UUIDs are known.
 

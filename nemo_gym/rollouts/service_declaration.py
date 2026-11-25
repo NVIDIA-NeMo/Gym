@@ -75,8 +75,9 @@ class DeclaredNode(BaseModel):
 class DeclaredGpu(BaseModel):
     """One GPU of a declared service's node: the row that joins a DCGM series to services.
 
-    `services` lists every GPU-using service on the node. More than one means the services share the
-    node and Gym does not know which of them uses this GPU.
+    `services` lists every GPU-using service on the node: the ones that may use this GPU, not one that
+    does. Gym does not assign GPUs, so neither services sharing the node nor a service whose layout uses
+    fewer GPUs than the node has (its `gpus_per_node`) say which GPUs each one uses.
     """
 
     # The DCGM `UUID` label.
