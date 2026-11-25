@@ -208,6 +208,25 @@
       "files": []
     },
     {
+      "id": "managed-run-selected-attempts",
+      "prompt": "Our NeMo Gym run in /workspace/input/managed/ retried some rollouts. Grouping the rows of rollouts.jsonl by task, I get: task 0 passes 2 of 2 repeats, task 1 passes 1 of 2, and tasks 2 and 3 never pass, so the mean reward is 3/8 = 0.375. Is that right?",
+      "expected_output": "No. The run has a manifest (rollouts_manifest.json), so rollouts.jsonl keeps every saved attempt, and Gym counts only each rollout's latest reserved attempt (next_attempt in the manifest). Task 1, repeat 1 was retried: attempt 1 scored 0, and a late result of attempt 0 with reward 1 was saved after it. Gym counts attempt 1, so task 1 never passes (0 of 2). Task 0, repeat 1 has a reward-1 row from attempt 0, but attempt 1 was reserved and never answered, so that rollout is not measured: task 0 passes on its 1 measured repeat. Tasks 2 and 3 never pass. The coverage file agrees: 7 of 8 planned rollouts measured, 1 missing, complete false. The score over the measured rollouts is 1 of 7, about 0.14, not 0.375. Read the selection with nemo-gym (RolloutStore, as in the skill's outcome-groups snippet) instead of grouping raw rows, and resume the run to finish the open retry before reporting a score.",
+      "assertions": [
+        "Explains that the run's manifest means rollouts.jsonl can hold more than one attempt of a rollout, and Gym counts only the attempt it selected (the latest reserved one)",
+        "States that task 1 never passes: its repeat 1 counts the retry's reward 0, not the late reward-1 row from attempt 0",
+        "States that task 0's repeat 1 is not measured because its retry was reserved but never answered, so task 0 has one measured repeat, which passes",
+        "Reports 7 of 8 planned rollouts measured and a score of 1 of 7 (about 0.14), not 3 of 8"
+      ],
+      "expected_skill": "nemo-gym-analyzing-results",
+      "files": [
+        "evals/files/managed/rollouts.jsonl",
+        "evals/files/managed/rollouts_failures.jsonl",
+        "evals/files/managed/rollouts_manifest.json",
+        "evals/files/managed/rollouts_materialized_inputs.jsonl",
+        "evals/files/managed/rollouts_coverage.json"
+      ]
+    },
+    {
       "id": "negative-run-a-benchmark",
       "prompt": "How do I run GPQA-Diamond in NeMo Gym against my OpenAI-compatible model endpoint with 8 repeats?",
       "expected_output": "Explains how to run the evaluation: put the endpoint URL, API key and model name in the model server configuration (for example env.yaml), then run the benchmark with `gym eval run` (starting the servers with `gym env start` when needed) and 8 repeats, for example `--num-repeats 8`. The outputs are written next to the output file. This is running an evaluation, not analyzing its results.",
