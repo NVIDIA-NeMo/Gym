@@ -202,9 +202,9 @@ entries:
     data: /path/to/droid_pivot_v1.jsonl
 
   - label: gdpval_pivot_v1
-    agent: single_step_tool_use_with_argument_comparison_agent
+    agent: gdpval_single_step_tool_use_with_argument_comparison_agent
     configs:
-      - resources_servers/single_step_tool_use_with_argument_comparison/configs/single_step_tool_use_with_argument_comparison.yaml
+      - /path/to/gdpval_single_step_tool_use_with_argument_comparison.yaml
     data: /path/to/gdpval_pivot_v1.jsonl
 
   - label: terminal_pivot
