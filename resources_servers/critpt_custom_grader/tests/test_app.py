@@ -391,6 +391,19 @@ async def test_finish_token_limit_preserves_termination_evidence(make_server, co
 
 
 @pytest.mark.asyncio
+async def test_a_stop_that_lost_an_accepted_finish_is_not_scored_as_a_no_answer(make_server):
+    # The agent reports that the finish tool accepted an answer its saved history no longer holds.
+    _, app, fake = make_server(answer_source="finish_tool")
+    row = agentic_payload()
+    row["response"]["status"] = "incomplete"
+    row["response"]["metadata"] = {"stop_reason": "wall_time", "finish_accepted_unreported": "true"}
+    status, result = await post(app, "/verify", row)
+    assert status == 200 and result["scored"] is False and result["mask_sample"] is True
+    assert result["category"] == "response_incomplete" and result["failure_outcome_action"] == "retry"
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_finish_accepted_before_the_wall_clock_stop_is_graded(make_server):
     _, app, fake = make_server(answer_source="finish_tool")
     status, acknowledgement = await post(

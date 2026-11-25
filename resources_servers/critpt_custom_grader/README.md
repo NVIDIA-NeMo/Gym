@@ -247,7 +247,9 @@ agent's wall-clock limit (`sandbox_runner_timeout_seconds`, `metadata.stop_reaso
 answer: the limit is the agent's own, so what it kept is its result. That row keeps `failure_kind: agent_timeout`
 (attributed to the model, with no outcome action), so Gym's recovery still runs again a timeout whose window held a
 model-server, sandbox or tool-server fault and settles a clean one as final. An answer the `finish` tool accepted
-before the limit stopped the episode is graded. AA publishes no wall-clock limit, so when comparing with AA set the limit well above the
+before the limit stopped the episode is graded. When the stop lands while other calls of the finishing response still
+run, Stirrup's saved history can lose that turn; the agent then reports `metadata.finish_accepted_unreported`, and the
+row stays unscored (`response_incomplete`) instead of becoming a no-answer. AA publishes no wall-clock limit, so when comparing with AA set the limit well above the
 episodes' durations at the serving speed and report how many episodes it stopped. So does an episode Stirrup ends
 because every context-compaction summary was unusable (`metadata.stop_reason: compaction_failed`, classified
 `agent_invalid_output`): it is the model's result, scored zero as `candidate_no_answer` and never regenerated.
@@ -559,9 +561,12 @@ responses without a model call, and aggregate the new grades in place of those r
 jq -c 'select(.mask_sample == true and .failure_kind == "provider_unavailable")' <rollouts>.jsonl > <retry>.jsonl
 jq -c 'select(.mask_sample != true or .failure_kind != "provider_unavailable")' <rollouts>.jsonl > <kept>.jsonl
 # Stop the gym env start servers first: reverify launches its own server stack, with a head server on the same port.
+# Grade with the producing run's grading settings. For the agentic recipe, also select its finish-answer source:
+# the default output_text mode refuses saved agentic rows (they carry tools) instead of grading the finish answer.
 gym eval reverify --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml --model-type openai_model \
     '+model_endpoint_readiness_timeout_seconds=0' \
+    '++critpt_custom_grader.resources_servers.critpt_custom_grader.answer_source=finish_tool' \
     --inputs <rollouts>_materialized_inputs.jsonl --rollouts <retry>.jsonl --output <recovered>.jsonl
 # Run gym env start again with the same configs: aggregate reads the config from the head server and posts to each
 # agent server's /aggregate_metrics endpoint.

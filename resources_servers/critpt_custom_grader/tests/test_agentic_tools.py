@@ -49,6 +49,9 @@ class DirectoryProvider:
         self.closed = False
         # Provider records deleted by a successful stop; an ended sandbox's record stays until then.
         self.deleted = []
+        # When set, a stop waits for the gate, so a test can act while a delete is in flight.
+        self.stop_gate = None
+        self.stop_started = asyncio.Event()
 
     async def create(self, spec):
         if self.create_failure:
@@ -87,6 +90,9 @@ class DirectoryProvider:
             self.active_commands -= 1
 
     async def close(self, handle):
+        if self.stop_gate is not None:
+            self.stop_started.set()
+            await self.stop_gate.wait()
         if self.stop_failures:
             self.stop_failures -= 1
             raise RuntimeError("synthetic provider stop failure")
@@ -325,6 +331,35 @@ async def test_a_failed_delete_of_the_ended_sandbox_is_retried_when_the_session_
         await sessions.close(close())
     await sessions.close(close())
     assert sorted(provider.deleted) == ["1", "2"]
+    await sessions.shutdown()
+
+
+async def test_a_request_cancelled_during_the_ended_sandbox_delete_leaves_no_usable_session(api, make_sessions):
+    sessions, provider = make_sessions(max_sessions=1)
+    await sessions.seed(seed())
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    provider.stop_gate = asyncio.Event()
+    command = asyncio.create_task(sessions.execute("s1", "allocate more than the limit"))
+    await asyncio.wait_for(provider.stop_started.wait(), 10)
+    command.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await command
+    # No replacement was started, and a replayed seed does not revive the dead sandbox.
+    assert len(provider.created) == 1
+    with pytest.raises(ResourcesSessionConflictError):
+        await sessions.seed(seed())
+    with pytest.raises(api.AgenticExecutionError, match="capacity"):
+        await sessions.seed(seed("s2", episode="r2"))
+    # Once the delete finishes, its capacity goes to another episode.
+    provider.stop_gate.set()
+    await asyncio.sleep(0)
+    for _ in range(100):
+        if provider.deleted:
+            break
+        await asyncio.sleep(0.01)
+    provider.stop_gate = None
+    await sessions.seed(seed("s2", episode="r2"))
+    assert provider.deleted[0] == "1"
     await sessions.shutdown()
 
 

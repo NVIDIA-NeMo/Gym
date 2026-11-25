@@ -105,7 +105,12 @@ def _termination(response: dict[str, Any]) -> Submission | None:
             return _INVALID
         if outcome.failure_kind not in (AGENT_LIMIT, AGENT_INVALID_OUTPUT):
             return _INCOMPLETE
-    if response.get("error") or metadata.get("stop_reason") == "cancelled":
+    # The agent stopped after the finish tool accepted an answer it could not report: the evidence is lost, not absent.
+    if (
+        response.get("error")
+        or metadata.get("stop_reason") == "cancelled"
+        or metadata.get("finish_accepted_unreported")
+    ):
         return _INCOMPLETE
     status = response.get("status")
     details = response.get("incomplete_details")

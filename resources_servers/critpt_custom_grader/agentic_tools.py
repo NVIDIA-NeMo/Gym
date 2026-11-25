@@ -412,6 +412,13 @@ class AgenticExecutionSessions:
         ended.add_done_callback(self._observe_background_result)
         try:
             await asyncio.wait_for(asyncio.shield(ended), self.config.close_timeout_s)
+        except asyncio.CancelledError:
+            # The request went away mid-delete. The session keeps the delete as its stop and is no longer usable, so
+            # the reaper or a close releases its capacity once the delete finishes; no replacement is started.
+            state.usable = False
+            state.discard_requested = True
+            state.stop_task = ended
+            raise
         except Exception as error:
             # The provider record can outlive its container until deleted: closing the session retries the delete.
             LOGGER.warning("Ended execution sandbox cleanup deferred (%s)", type(error).__name__)
