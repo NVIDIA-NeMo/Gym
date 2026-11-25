@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentContinuationCapabilities,
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
@@ -273,6 +274,31 @@ LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
+def _activation_invocation_id(activation_id: int) -> str:
+    """The root invocation of a continued session's activation: ``root`` for the first, as for one activation."""
+    return "root" if activation_id == 1 else f"activation-{activation_id}"
+
+
+def _resumable_conversation(messages: object) -> list[dict[str, Any]]:
+    """Hermes' conversation as the next activation's history.
+
+    Messages keep Gym's token IDs: Hermes resends them with each assistant message, as it does within one
+    activation, so the Model Server continues the sampled tokens rather than a retokenization.
+    """
+    return [message for message in messages or [] if isinstance(message, dict)]
+
+
+def _merge_observations(
+    previous: AgentObservationBundle | None, current: AgentObservationBundle
+) -> AgentObservationBundle:
+    """Add one activation's observations to those of the session's earlier activations."""
+    if previous is None:
+        return current
+    return AgentObservationBundle(
+        source="hermes", records=[*previous.records, *current.records], gaps=[*previous.gaps, *current.gaps]
+    )
+
+
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
     """Rename Hermes' ``mcp__<server>__<tool>`` to Gym's ``mcp__<granted server>__<tool>``, which Gym strips.
 
@@ -482,20 +508,104 @@ class HermesAgent(SimpleResponsesAPIAgent):
         await state.close(self.config.session_close_timeout_seconds)
         # Errors/cancellation can bypass response parsing. The common session
         # still captures available output before releasing the sandbox.
-        output = state.session.artifacts
-        if state.observations is None and output is not None:
-            result = output.get("result")
-            state.observations = self._sandbox_observations(
-                result if isinstance(result, dict) else {"failed": True},
-                output.get("observations"),
-                runtime_info=state.runtime_info,
-            )
+        self._record_unreported_activation(state)
         observations = state.observations or AgentObservationBundle(
             source="hermes", gaps=[ObservationGap(code="observation_capture_failed")]
         )
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id, agent_observations=observations
         )
+
+    def _record_unreported_activation(self, state: HermesSandboxSession) -> None:
+        """Keep the observations of an activation that ended without a response, from what capture saved."""
+        continuation = state.request.continuation is not None
+        if state.activation_recorded if continuation else state.observations is not None:
+            return
+        output = state.session.artifacts
+        root_invocation_id = _activation_invocation_id(state.activation_id or 1)
+        if output is not None:
+            result = output.get("result")
+            observations = self._sandbox_observations(
+                result if isinstance(result, dict) else {"failed": True},
+                output.get("observations"),
+                runtime_info=state.runtime_info,
+                root_invocation_id=root_invocation_id,
+                activation_id=state.activation_id if continuation else None,
+                # The conversation is updated only with a response, so it is still the one this activation resumed.
+                resumed_messages=len(state.conversation or []) if (state.activation_id or 1) > 1 else 0,
+            )
+        elif continuation and state.activation_id is not None:
+            observations = AgentObservationBundle(
+                source="hermes",
+                gaps=[ObservationGap(code="observation_capture_failed", invocation_id=root_invocation_id)],
+            )
+        else:
+            return
+        state.observations = _merge_observations(state.observations, observations)
+        state.activation_recorded = True
+
+    def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities:
+        return AgentContinuationCapabilities(observations=["trajectory", "timing", "harness_tool_calls", "compaction"])
+
+    def _continuation_close_timeout(self) -> float:
+        return self.config.session_close_timeout_seconds
+
+    def _validate_agent_activation(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> None:
+        """Check a delta as one activation's request, then that it keeps the session's first settings."""
+        if not isinstance(state, HermesSandboxSession):
+            raise TypeError("Expected Hermes agent session state")
+        body = self._validate_request(body)
+        first = state.activation_request
+        if first is None:
+            return
+        # Hermes holds the conversation, so a later activation sends only what the user says next.
+        if any(getattr(item, "role", None) != "user" for item in body.input):
+            raise HTTPException(422, "A Hermes continuation activation accepts only new user messages")
+        if body.instructions is not None and body.instructions != first.instructions:
+            raise HTTPException(422, "Hermes continuation cannot replace session instructions")
+        if body.temperature != first.temperature:
+            raise HTTPException(422, "Hermes continuation cannot change session temperature")
+
+    async def _activate_agent_session_state(
+        self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
+    ) -> NeMoGymResponse:
+        """Run one activation of a continued session: Hermes resumes the conversation the last activation left.
+
+        ``metadata.agent_timeout_sec`` bounds the activation, including its wait for a concurrency slot and the
+        preparation of its directory.
+        """
+        if not isinstance(state, HermesSandboxSession):
+            raise TypeError("Expected Hermes agent session state")
+        body = self._validate_request(body)
+        # An earlier activation that raised before its response kept its evidence in capture; keep it before rearming.
+        self._record_unreported_activation(state)
+        if state.activation_request is None:
+            state.activation_request = body.model_copy(deep=True)
+        timeout = self._agent_timeout_sec(body)
+        deadline = monotonic() + timeout
+        async with asyncio.timeout(timeout):
+            await self.sem.acquire()
+        try:
+            async with asyncio.timeout(max(0.0, deadline - monotonic())):
+                await state.prepare_activation(
+                    activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
+                )
+            episode = await self._run_sandbox_episode(
+                body=body,
+                agent_session_id=state.request.agent_session_id,
+                state=state,
+                activation_id=activation_id,
+                timeout=max(0.0, deadline - monotonic()),
+            )
+        finally:
+            self.sem.release()
+        state.observations = _merge_observations(state.observations, episode.observations)
+        state.activation_recorded = True
+        response = episode.response
+        response.metadata = {**(response.metadata or {}), "activation_id": str(activation_id)}
+        return response
 
     def _ensure_sigterm_handler(self) -> None:
         """Install exactly one SIGTERM handler on the event loop that interrupts *every* in-flight
@@ -671,7 +781,16 @@ class HermesAgent(SimpleResponsesAPIAgent):
         raw_observations: Any,
         *,
         runtime_info: HarnessProcessInfo | None,
+        root_invocation_id: str = "root",
+        activation_id: int | None = None,
+        duration_ms: float | None = None,
+        resumed_messages: int = 0,
     ) -> AgentObservationBundle:
+        """Validate the runner's observations. In a continued session they are one activation's, tagged with it.
+
+        The root invocation's conversation leaves out the ``resumed_messages`` it started from, which earlier
+        activations' invocations already hold, so the session's record holds each turn once.
+        """
         context_limited = self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT
         gaps = [] if runtime_info is not None else [ObservationGap(code="runtime_info_unavailable")]
         if isinstance(raw_observations, dict):
@@ -684,6 +803,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     records.append(
                         AgentInvocation(
                             invocation_id=invocation_id,
+                            activation_id=activation_id,
+                            duration_ms=duration_ms if invocation_id == root_invocation_id else None,
                             parent_invocation_id=raw_invocation.get("parent_invocation_id"),
                             spawned_by_tool_call_id=raw_invocation.get("spawned_by_tool_call_id"),
                             status="incomplete" if root_context_limit else raw_invocation.get("status", "unknown"),
@@ -695,7 +816,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
                                 if isinstance(response_id, str) and response_id
                             ],
                             conversation=normalize_hermes_messages(
-                                raw_invocation.get("messages") or [],
+                                (raw_invocation.get("messages") or [])[
+                                    resumed_messages if invocation_id == root_invocation_id else 0 :
+                                ],
                                 id_prefix=invocation_id,
                             ),
                         )
@@ -733,7 +856,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     ],
                 )
 
-        messages = result.get("messages") or []
+        messages = (result.get("messages") or [])[resumed_messages:]
         invocation_status = (
             "failed"
             if result.get("error") or result.get("failed")
@@ -741,7 +864,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
         )
         records: list[AgentInvocation | ToolCallObservation] = [
             AgentInvocation(
-                invocation_id="root",
+                invocation_id=root_invocation_id,
+                activation_id=activation_id,
+                duration_ms=duration_ms,
                 status="incomplete" if context_limited else invocation_status,
                 stop_reason="context_limit" if context_limited else result.get("stop_reason"),
                 conversation=normalize_hermes_messages(messages),
@@ -756,7 +881,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     continue
                 records.append(
                     ToolCallObservation(
-                        invocation_id="root",
+                        invocation_id=root_invocation_id,
                         tool_call_id=str(tool_call.get("id") or ""),
                         tool_name=str(function.get("name") or ""),
                         timing_source="harness",
@@ -805,7 +930,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         agent_session_id: str,
         state: HermesSandboxSession,
+        activation_id: int | None = None,
+        timeout: float | None = None,
     ) -> AgentEpisode:
+        """Run one Hermes process in the session's sandbox.
+
+        With ``activation_id`` (a continued session) Hermes starts from the conversation the previous activation
+        left, with the first activation's system message, and the response holds only this activation's output.
+        """
         mcp_accesses = [
             access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
         ]
@@ -815,7 +947,22 @@ class HermesAgent(SimpleResponsesAPIAgent):
             rollout_id=state.request.episode_id.capture_key,
             mcp_accesses=mcp_accesses,
         )
-        timeout = self._agent_timeout_sec(body)
+        root_invocation_id = "root"
+        resumed_messages = 0
+        if activation_id is not None:
+            root_invocation_id = _activation_invocation_id(activation_id)
+            payload["invocation_id"] = root_invocation_id
+            if activation_id == 1:
+                state.system_message = payload["system_message"]
+            elif state.conversation is None:
+                # Running without the earlier turns would answer a different conversation than the user's.
+                raise AgentSessionConflictError("The previous Hermes activation left no conversation to continue")
+            else:
+                resumed_messages = len(state.conversation)
+                payload["history"] = [*state.conversation, *payload["history"]]
+                payload["system_message"] = state.system_message
+        if timeout is None:
+            timeout = self._agent_timeout_sec(body)
         timed_out = False
         started = monotonic()
         try:
@@ -855,6 +1002,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             raise RuntimeError("Hermes sandbox runner returned an invalid output")
         if timed_out:
             result = {**result, "completed": False, "interrupted": True, "stop_reason": "wall_time"}
+        if activation_id is not None:
+            # A timed-out runner saved only its exported messages, which hold the same turns uncompacted.
+            state.conversation = _resumable_conversation(output.get("conversation") or result.get("messages"))
         runtime = state.runtime_info
         response = self._response_from_result(
             body=body,
@@ -886,7 +1036,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
             )
         return AgentEpisode(
             response=response,
-            observations=self._sandbox_observations(result, output.get("observations"), runtime_info=runtime),
+            observations=self._sandbox_observations(
+                result,
+                output.get("observations"),
+                runtime_info=runtime,
+                root_invocation_id=root_invocation_id,
+                activation_id=activation_id,
+                duration_ms=(monotonic() - started) * 1000 if activation_id is not None else None,
+                resumed_messages=resumed_messages,
+            ),
         )
 
     def _validate_request(
@@ -1146,8 +1304,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        body = self._validate_request(body)
         agent_session_id = self._agent_session_id_from_request(request)
+        if (
+            isinstance(agent_session_id, str)
+            and self._require_agent_session(agent_session_id).request.continuation is not None
+        ):
+            # The base validates the delta, binds its activation index and replays a retried one.
+            return await self.activate_agent_session(request, body)
+        body = self._validate_request(body)
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         if isinstance(agent_session_id, str):

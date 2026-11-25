@@ -112,7 +112,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             save_trajectories=False,
         )
     configure_model_calls(agent, preserve_reasoning_history=payload["chat_template_kwargs_enabled"])
-    observer = SandboxHermesObserver().instrument(agent, capture_summaries=True)
+    observer = SandboxHermesObserver(payload.get("invocation_id") or "root").instrument(agent, capture_summaries=True)
     result = None
     error = None
     stop_reason = None
@@ -171,6 +171,8 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
         if field not in result and type(count) is int and count >= 0:
             result[field] = count
     return {
+        # Hermes' own conversation, compacted as its model context holds it: a continued session resumes from it.
+        "conversation": result.get("messages") or [],
         "observations": observer.finish(result, error),
         "result": observer.restore_messages(result),
         "runtime": runtime,

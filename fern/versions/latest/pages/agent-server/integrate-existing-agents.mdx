@@ -336,6 +336,14 @@ one gets HTTP 422. `max_steps` bounds each activation. The close returns the tra
 every activation. Under checkpointing, the session restarts. A subclass of `simple_agent` supports continuation only when it sets
 `continuation_supported` itself.
 
+`hermes_agent` also resumes its session, in an owned or borrowed sandbox. Hermes keeps no session
+between processes, so the Agent Server keeps the conversation Hermes left (its model context, with
+tool calls, tool outputs and token IDs) and starts each later activation's Hermes process from it,
+with the first activation's system message. A later activation sends only new user messages; one
+that changes the instructions or temperature gets HTTP 422. Files in the sandbox carry over between
+activations. The shell state of the previous activation's process does not: its working directory,
+environment variables and background processes end with it.
+
 Adapters that support continuation override `_agent_continuation_capabilities()` to return
 the supported mode and observations, implement `_validate_agent_activation()` before
 binding an index, `_activate_agent_session_state()` for execution, and

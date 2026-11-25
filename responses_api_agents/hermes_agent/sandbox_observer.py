@@ -79,7 +79,10 @@ class _ObservedChildren(list):
 class SandboxHermesObserver:
     """Capture raw event dictionaries for host-side validation."""
 
-    def __init__(self) -> None:
+    def __init__(self, root_invocation_id: str = "root") -> None:
+        # A continued session's later activations get their own root ID, so their records and the model calls they
+        # label stay apart from earlier activations'.
+        self._root = root_invocation_id
         self._lock = threading.RLock()
         self._executing_tool: ContextVar[tuple[str, str] | None] = ContextVar("executing_tool", default=None)
         # Hermes runs `delegate_task` on its sequential path, outside `_invoke_tool`, so each parent's running
@@ -89,8 +92,8 @@ class SandboxHermesObserver:
         self._started_ticks: dict[tuple[str, str], float] = {}
         self._tools: dict[tuple[str, str], dict[str, Any]] = {}
         self._invocations: dict[str, dict[str, Any]] = {
-            "root": {
-                "invocation_id": "root",
+            root_invocation_id: {
+                "invocation_id": root_invocation_id,
                 "model_response_ids": [],
                 "messages": [],
                 "status": "unknown",
@@ -109,7 +112,7 @@ class SandboxHermesObserver:
             import agent.context_compressor as compressor
 
             _install_summary_capture(compressor)
-        self._instrument(agent, "root", wrap_conversation=False)
+        self._instrument(agent, self._root, wrap_conversation=False)
         return self
 
     def on_iteration_limit_reached(self, *, invocation_id: str) -> None:
@@ -127,7 +130,7 @@ class SandboxHermesObserver:
         result: dict[str, Any] | None,
         error: BaseException | None,
     ) -> dict[str, Any]:
-        self._record_conversation("root", result, error)
+        self._record_conversation(self._root, result, error)
         with self._lock:
             for tool in self._tools.values():
                 if tool["status"] == "unknown":
@@ -391,8 +394,9 @@ class SandboxHermesObserver:
             tool["status"] = "failed" if failed else "completed"
             tool["error_type"] = "tool_result" if failed else None
 
-    def restore_messages(self, result: dict[str, Any], *, invocation_id: str = "root") -> dict[str, Any]:
+    def restore_messages(self, result: dict[str, Any], *, invocation_id: str | None = None) -> dict[str, Any]:
         """Export the executed conversation, retaining history removed from model context."""
+        invocation_id = invocation_id or self._root
         result = dict(result)
         if self._summary_usage_unknown:
             result.update(dict.fromkeys(_USAGE_TOTAL_FIELDS))

@@ -888,6 +888,50 @@ def test_training_token_bundles_follow_their_exact_turn(tmp_path, max_turns):
     assert [{key: m.get(key) for key in bundles[0]} for m in turns] == bundles
 
 
+def test_a_later_activation_resumes_the_conversation_the_first_left(tmp_path, restore_process_globals) -> None:
+    tool_call = {"id": "t", "type": "function", "function": {"name": "terminal", "arguments": '{"command":"echo ok"}'}}
+    bundle = {"prompt_token_ids": [17], "generation_token_ids": [23], "generation_log_probs": [-0.4]}
+    answers = [
+        _completion({"content": None, "tool_calls": [tool_call], **bundle}),
+        _completion({"content": "created"}),
+        _completion({"content": "appended"}),
+    ]
+    first_session, second_session = tmp_path / "activation-1", tmp_path / "activation-2"
+    first_session.mkdir()
+    second_session.mkdir()
+    with _ModelServer(answers) as model:
+        first = _run(_payload(model.base_url, max_turns=3, user_message="create notes.txt"), first_session)
+        second = _run(
+            _payload(
+                model.base_url,
+                max_turns=3,
+                user_message="append a line",
+                history=first["conversation"],
+                invocation_id="activation-2",
+            ),
+            second_session,
+        )
+
+    # A second Hermes process answers with the first activation's turns in its model context, tool call and its
+    # sampled tokens included, and labels its model calls with its own invocation.
+    resumed = [m for m in model.requests[2]["messages"] if m["role"] != "system"]
+    assert [m["role"] for m in resumed] == ["user", "assistant", "tool", "assistant", "user"]
+    assert resumed[1]["tool_calls"][0]["id"] == "t"
+    assert {key: resumed[1].get(key) for key in bundle} == bundle
+    assert resumed[-1]["content"] == "append a line"
+    assert [headers.get("x-session-id") for headers in model.request_headers] == ["root", "root", "activation-2"]
+    assert [i["invocation_id"] for i in second["observations"]["invocations"]] == ["activation-2"]
+    assert second["result"]["final_response"] == "appended"
+    assert [m["role"] for m in second["conversation"]] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+
+
 def _length_cut(index: int, **message) -> dict:
     """A chat completion cut at the output limit, carrying one distinct sampled token bundle."""
     response = _completion(

@@ -17,17 +17,20 @@ import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
 from fastapi import HTTPException
 
 from nemo_gym.agents import (
+    AGENT_ACTIVATION_HEADER,
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentContinuationRequirements,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     SandboxPythonRuntime,
     SandboxSession,
     check_agent_seed_rejected,
@@ -448,7 +451,7 @@ class TestSanity:
 
     @staticmethod
     def _sandbox_session(
-        monkeypatch, sandbox, *, config=None, tool_accesses=()
+        monkeypatch, sandbox, *, config=None, tool_accesses=(), continuation=None
     ) -> tuple[HermesAgent, SimpleNamespace, AgentSeedSessionRequest]:
         import nemo_gym.agents.base_responses_api_agent as base_agent
 
@@ -462,6 +465,7 @@ class TestSanity:
             episode_id=EpisodeId(rollout_id="rollout"),
             task_id=TaskId(taskset="test", task_id="task"),
             tool_accesses=list(tool_accesses),
+            continuation=continuation,
         )
         hermes._session_records["session"] = _AgentSessionRecord(
             state=HermesSandboxSession(
@@ -473,6 +477,7 @@ class TestSanity:
         request = SimpleNamespace(
             session={"agent_session_id": "session"},
             path_params={"rollout_id": seed.episode_id.capture_key},
+            headers={},
         )
         original_download = sandbox.download
 
@@ -757,6 +762,163 @@ class TestSanity:
         assert hermes._session_records["session"].state is None
         with pytest.raises(asyncio.CancelledError):
             await activation
+
+    class _ContinuedSandbox:
+        """Answers each activation's runner input as Hermes would: the history it got, then this turn's messages."""
+
+        def __init__(self) -> None:
+            self.uploaded: dict[str, str] = {}
+            self.outputs_read = 0
+
+        async def disconnect(self, **_) -> None:
+            pass
+
+        async def upload(self, local_path, remote_path) -> None:
+            self.uploaded[remote_path] = Path(local_path).read_text()
+
+        async def exec(
+            self, command, *, cwd=None, env=None, timeout_s=180, user=None, preserve_background_services=False
+        ) -> SandboxExecResult:
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+        async def download(self, remote_path, local_path) -> None:
+            runner_input = json.loads(self.uploaded[remote_path.removesuffix("output.json") + "input.json"])
+            invocation = runner_input["invocation_id"]
+            user = runner_input["user_message"]
+            call = {
+                "id": f"call-{invocation}",
+                "type": "function",
+                "function": {"name": "terminal", "arguments": "{}"},
+            }
+            messages = [
+                *runner_input["history"],
+                {"role": "user", "content": user},
+                {"role": "assistant", "content": None, "tool_calls": [call], "generation_token_ids": [7]},
+                {"role": "tool", "tool_call_id": call["id"], "content": "ok"},
+                {
+                    "role": "assistant",
+                    "content": f"reply to {user}",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                },
+            ]
+            output = {
+                "result": {"messages": messages, "final_response": f"reply to {user}", "completed": True},
+                "conversation": messages,
+                "observations": {
+                    "invocations": [
+                        {
+                            "invocation_id": invocation,
+                            "model_response_ids": [f"resp-{invocation}"],
+                            "messages": messages,
+                            "status": "completed",
+                        }
+                    ]
+                },
+                "runtime": {"hostname": "sandbox", "pid": 1, "python": "python"},
+            }
+            self.outputs_read += 1
+            Path(local_path).write_text(json.dumps(output))
+
+    @staticmethod
+    def _activation(request: SimpleNamespace, index: int) -> SimpleNamespace:
+        return SimpleNamespace(**{**vars(request), "headers": {AGENT_ACTIVATION_HEADER: str(index)}})
+
+    async def test_continued_session_resumes_the_conversation_in_a_later_activation(self, monkeypatch) -> None:
+        sandbox = self._ContinuedSandbox()
+        hermes, request, seed = self._sandbox_session(
+            monkeypatch, sandbox, continuation=AgentContinuationRequirements()
+        )
+        first = NeMoGymResponseCreateParamsNonStreaming(input="create notes.txt", instructions="Work in /app")
+        second = NeMoGymResponseCreateParamsNonStreaming(input="append a line to it")
+
+        await hermes.responses(self._activation(request, 1), first)
+        response = await hermes.responses(self._activation(request, 2), second)
+
+        first_input = json.loads(sandbox.uploaded["/session/input.json"])
+        second_input = json.loads(sandbox.uploaded["/session/activation-2/input.json"])
+        # Hermes resumes from the first activation's whole conversation, tool calls and Gym's token IDs included.
+        assert second_input["history"] == [
+            {"role": "user", "content": "create notes.txt"},
+            {"role": "assistant", "content": None, "tool_calls": [ANY], "generation_token_ids": [7]},
+            {"role": "tool", "tool_call_id": "call-root", "content": "ok"},
+            {
+                "role": "assistant",
+                "content": "reply to create notes.txt",
+                "prompt_token_ids": [1],
+                "generation_token_ids": [2],
+            },
+        ]
+        assert second_input["user_message"] == "append a line to it"
+        assert second_input["system_message"] == first_input["system_message"] == "Work in /app"
+        assert (first_input["invocation_id"], second_input["invocation_id"]) == ("root", "activation-2")
+        # The response carries this activation's work alone.
+        assert [getattr(item, "call_id", None) for item in response.output if item.type == "function_call"] == [
+            "call-activation-2"
+        ]
+        assert response.output[-1].content[0].text == "reply to append a line to it"
+        assert response.metadata["activation_id"] == "2"
+
+        # A retried activation replays its reply without running Hermes again; a different one at the index conflicts.
+        replay = await hermes.responses(self._activation(request, 2), second)
+        assert replay.output == response.output and sandbox.outputs_read == 2
+        with pytest.raises(AgentSessionConflictError):
+            await hermes.responses(
+                self._activation(request, 2), NeMoGymResponseCreateParamsNonStreaming(input="something else")
+            )
+
+        closed = await hermes.close_agent_session(
+            request, AgentCloseSessionRequest(agent_session_id="session", episode_id=seed.episode_id)
+        )
+        invocations = [record for record in closed.agent_observations.records if record.kind == "agent_invocation"]
+        assert [(i.invocation_id, i.activation_id) for i in invocations] == [("root", 1), ("activation-2", 2)]
+        assert all(i.duration_ms is not None for i in invocations)
+        assert [ref.response_id for i in invocations for ref in i.model_calls] == ["resp-root", "resp-activation-2"]
+        # Each invocation holds its own activation's turns once: the second starts at its own user message.
+        conversations = [
+            [getattr(item, "content", None) for item in i.conversation if getattr(item, "role", None) == "user"]
+            for i in invocations
+        ]
+        assert conversations == [["create notes.txt"], ["append a line to it"]]
+        assert len(invocations[1].conversation) == len(invocations[0].conversation)
+
+    @pytest.mark.parametrize(
+        ("later", "reason"),
+        [
+            (
+                {"input": [{"role": "assistant", "content": "earlier"}, {"role": "user", "content": "next"}]},
+                "accepts only new user messages",
+            ),
+            ({"input": "next", "instructions": "Other rules"}, "cannot replace session instructions"),
+            ({"input": "next", "temperature": 0.5}, "cannot change session temperature"),
+        ],
+    )
+    async def test_later_activation_must_keep_the_session(self, monkeypatch, later: dict, reason: str) -> None:
+        sandbox = self._ContinuedSandbox()
+        hermes, request, _seed = self._sandbox_session(
+            monkeypatch, sandbox, continuation=AgentContinuationRequirements()
+        )
+        await hermes.responses(
+            self._activation(request, 1), NeMoGymResponseCreateParamsNonStreaming(input="start", instructions="Rules")
+        )
+
+        with pytest.raises(HTTPException, match=reason) as error:
+            await hermes.responses(self._activation(request, 2), NeMoGymResponseCreateParamsNonStreaming(**later))
+
+        assert error.value.status_code == 422
+        # A refused delta binds no index and runs nothing, so the session can still continue.
+        assert sandbox.outputs_read == 1
+        response = await hermes.responses(
+            self._activation(request, 2), NeMoGymResponseCreateParamsNonStreaming(input="next")
+        )
+        assert response.metadata["activation_id"] == "2"
+
+    def test_continuation_capability_covers_what_harbor_requires(self) -> None:
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        capabilities = hermes._agent_continuation_capabilities()
+
+        assert capabilities.mode == AgentContinuationRequirements().mode
+        assert set(AgentContinuationRequirements().observations) <= set(capabilities.observations)
 
     async def test_close_before_seed_prevents_late_creation(self) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
