@@ -71,7 +71,7 @@ def _run_tool_in_worker(
             target_smiles=target_smiles,
         )
     else:
-        raise RuntimeError("SynClaw tool worker is not initialized")
+        raise RuntimeError("BioNeMo-SynClaw tool worker is not initialized")
 
 
 class SynClawVerifier:
@@ -117,14 +117,14 @@ class SynClawResourcesServer(SynClawVerifier, SimpleResourcesServer):
             self._db_path = stage_prepared_search_database(
                 self.config.db_path, destination_directory=self.config.db_staging_dir
             )
-            LOG.info("Staged SynClaw database at %s", self._db_path)
+            LOG.info("Staged BioNeMo-SynClaw database at %s", self._db_path)
         # Load the ~1.4 GB building-block fingerprint index once here, so forked tool workers share it.
         # This also fails startup if the catalog's search index is missing or stale.
         with session(self._db_path) as conn:
             preload_building_block_search(conn)
         self._semaphore = asyncio.Semaphore(value=self.config.max_concurrent_tool_calls)
         if threading.active_count() > 1:
-            LOG.warning("Forking SynClaw tool workers while %d threads run", threading.active_count())
+            LOG.warning("Forking BioNeMo-SynClaw tool workers while %d threads run", threading.active_count())
         self._pool = self._new_pool()
         atexit.register(lambda: self._pool.shutdown())
 
@@ -178,7 +178,7 @@ class SynClawResourcesServer(SynClawVerifier, SimpleResourcesServer):
             except BrokenProcessPool:
                 # A dead worker breaks the whole pool. This call still fails, but later ones get a new pool.
                 if self._pool is pool:
-                    LOG.error("SynClaw tool pool broke; starting a new one")
+                    LOG.error("BioNeMo-SynClaw tool pool broke; starting a new one")
                     pool.shutdown(wait=False)
                     self._pool = self._new_pool()
                 raise

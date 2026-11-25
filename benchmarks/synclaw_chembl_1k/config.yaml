@@ -1,5 +1,5 @@
-# SynClaw ChEMBL-1000: retrosynthesis planning for the 1,000 public SynFormer ChEMBL targets, a
-# held-out test set. Needs the SynClaw database:
+# BioNeMo-SynClaw ChEMBL-1000: retrosynthesis planning for the 1,000 public SynFormer ChEMBL targets, a
+# held-out test set. Needs the BioNeMo-SynClaw database:
 #   python resources_servers/synclaw/prepare_db.py
 config_paths:
   - resources_servers/synclaw/configs/synclaw.yaml

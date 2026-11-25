@@ -7,7 +7,7 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    # SynClaw release v0.1.0; uv.lock records the commit it resolved to.
+    # BioNeMo-SynClaw release v0.1.0; uv.lock records the commit it resolved to.
     "synclaw @ git+https://github.com/NVIDIA-BioNeMo/SynClaw.git@v0.1.0",
 ]
 

@@ -1,11 +1,11 @@
 # Description
-Thin wrapper around the SynClaw retrosynthesis planning tools.
+Thin wrapper around the BioNeMo-SynClaw retrosynthesis planning tools.
 
-Build the default SynClaw database (reaction templates, eMolecules plus common reagents, search
+Build the default BioNeMo-SynClaw database (reaction templates, eMolecules plus common reagents, search
 index) with `python resources_servers/synclaw/prepare_db.py`; see
 [`environments/synclaw/README.md`](../../environments/synclaw/README.md#building-the-synclaw-database).
 
-Data links: [SynClaw](https://github.com/NVIDIA-BioNeMo/SynClaw),
+Data links: [BioNeMo-SynClaw](https://github.com/NVIDIA-BioNeMo/SynClaw),
 see the *Task sets* section of `README.md`.
 
 # Licensing information

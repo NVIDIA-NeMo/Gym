@@ -1,8 +1,8 @@
 # Description
-Runs SynClaw's multi-turn retrosynthesis planning loop using a Gym model server and
-the SynClaw resources server.
+Runs BioNeMo-SynClaw's multi-turn retrosynthesis planning loop using a Gym model server and
+the BioNeMo-SynClaw resources server.
 
-Data links: [SynClaw](https://github.com/NVIDIA-BioNeMo/SynClaw),
+Data links: [BioNeMo-SynClaw](https://github.com/NVIDIA-BioNeMo/SynClaw),
 see the *Quick start* and *Task sets* sections of `README.md`.
 
 # Observability

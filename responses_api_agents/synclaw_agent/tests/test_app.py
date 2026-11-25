@@ -513,7 +513,7 @@ class TestGymTransport:
         assert recorded[0]["json"]["temperature"] == 0.25
 
     async def test_request_validates_with_unmodified_synclaw_tool_schemas(self) -> None:
-        """SynClaw's Responses schemas omit `strict`, which FunctionToolParam requires."""
+        """BioNeMo-SynClaw's Responses schemas omit `strict`, which FunctionToolParam requires."""
         recorded: list[dict] = []
         transport = _make_transport(_capturing_post([_responses_payload([_MESSAGE_ITEM])], recorded))
         schemas = filter_responses_tool_schemas(set())
@@ -537,7 +537,7 @@ class TestGymTransport:
         ],
     )
     async def test_flattens_chat_tool_choice(self, given, expected) -> None:
-        # SynClaw's loop builds tool_choice for the chat dialect; Responses rejects the nested form.
+        # BioNeMo-SynClaw's loop builds tool_choice for the chat dialect; Responses rejects the nested form.
         recorded: list[dict] = []
         transport = _make_transport(_capturing_post([_responses_payload([_MESSAGE_ITEM])], recorded))
         await transport.complete(
@@ -592,7 +592,7 @@ class TestGymTransport:
         assert turn.message["tool_calls"][0]["function"]["name"] == "submit_pathway"
         assert turn.message["content"] == "I found it."
         assert turn.message["reasoning_text"] == "plan it"
-        # SynClaw's trace events read usage off the chat message, not the transport.
+        # BioNeMo-SynClaw's trace events read usage off the chat message, not the transport.
         usage = usage_from_payload(turn.message)
         assert usage["input_tokens"] == 100
         assert usage["reasoning_tokens"] == 10
@@ -702,7 +702,7 @@ class TestGymTransport:
         }
 
     def test_append_tool_synthesizes_a_call_for_an_orphan_result(self) -> None:
-        """Harmony-parsed calls and SynClaw's tool-call-{n} fallback have no echoed function_call."""
+        """Harmony-parsed calls and BioNeMo-SynClaw's tool-call-{n} fallback have no echoed function_call."""
         transport = _make_transport(None)
 
         transport.append_tool(_prepared_call("harmony-resp_1"), '{"ok": true}')
@@ -898,7 +898,7 @@ class TestRun:
         assert mock_run_rollout.called
         # Guard against the response going vacuously empty: verification must see the trajectory.
         assert result.response.output
-        # The seed prompt and subsequent budget feedback must use the same SynClaw default or explicit override.
+        # The seed prompt and subsequent budget feedback must use the same BioNeMo-SynClaw default or explicit override.
         assert len(seed_requests) == 1
         assert seed_requests[0].config.max_model_len == expected_context
         rollout = mock_run_rollout.call_args.kwargs
@@ -995,7 +995,7 @@ class TestRun:
 
 
 class TestRolloutIntegration:
-    """Drives the real SynClaw rollout loop against a canned model server.
+    """Drives the real BioNeMo-SynClaw rollout loop against a canned model server.
 
     `run_rollout` is deliberately NOT stubbed here: the transport's history handling, the
     loop's chat/Responses dialect boundary, and the output reconstruction only compose
@@ -1428,7 +1428,7 @@ class TestRolloutIntegration:
         result, model_inputs = await self._run(agent, server_client, [truncated, truncated])
         assert len(model_inputs) == 2
         assert result.status == "incomplete"
-        # The second cap was clipped to remaining context: SynClaw classifies this as context exhaustion.
+        # The second cap was clipped to remaining context: BioNeMo-SynClaw classifies this as context exhaustion.
         assert result.incomplete_details is None
 
     async def test_output_limit_does_not_recover_when_feedback_is_disabled(self) -> None:

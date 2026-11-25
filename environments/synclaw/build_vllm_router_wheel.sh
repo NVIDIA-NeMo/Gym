@@ -16,10 +16,10 @@
 #     bug: https://github.com/vllm-project/router/issues/197
 #     fix: https://github.com/vllm-project/router/pull/216 (unmerged upstream)
 #
-# SynClaw also needs the adjacent compatibility patch: accept reasoning_effort=max
+# BioNeMo-SynClaw also needs the adjacent compatibility patch: accept reasoning_effort=max
 # and strip synthetic DP-rank suffixes when forwarding
 # metadata requests such as /v1/models. Keep this build self-contained so the
-# SynClaw-specific patch does not affect other benchmarks' router builds.
+# BioNeMo-SynClaw-specific patch does not affect other benchmarks' router builds.
 #
 # Submit from the Gym root (or set REPO_ROOT) on a CPU partition:
 #   mkdir -p slurm-logs

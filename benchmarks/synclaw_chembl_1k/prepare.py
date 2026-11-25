@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prepare the SynClaw ChEMBL-1000 test set.
+"""Prepare the BioNeMo-SynClaw ChEMBL-1000 test set.
 
-Clones SynClaw at the revision pinned in resources_servers/synclaw/pyproject.toml, downloads the public
+Clones BioNeMo-SynClaw at the revision pinned in resources_servers/synclaw/pyproject.toml, downloads the public
 SynFormer ChEMBL target set (1,000 molecules), strips isotope labels from the targets and converts
-each target into a SynClaw task row. Requires ``git`` and ``uv``.
+each target into a BioNeMo-SynClaw task row. Requires ``git`` and ``uv``.
 """
 
 import json
@@ -20,7 +20,7 @@ AGENT_NAME = "synclaw_chembl_1k_agent"
 SOURCE_NAME = "chembl_filtered_1k.txt"
 
 # Exact-match scoring keeps isotopes but no stock building block carries them, so a labelled
-# target such as an [18F] radiotracer could never be reconstructed exactly. Runs SynClaw's own
+# target such as an [18F] radiotracer could never be reconstructed exactly. Runs BioNeMo-SynClaw's own
 # strip_isotopes helper; prints {stripped SMILES: source SMILES} for the targets it changed.
 STRIP_ISOTOPES = """
 import json, sys

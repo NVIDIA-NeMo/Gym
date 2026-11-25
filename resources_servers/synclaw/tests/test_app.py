@@ -71,7 +71,11 @@ def _make_request(submission: dict | None = None) -> SynClawVerifyRequest:
 
 
 def test_verifier_fixture():
-    asyncio.run(exercise_verifier_fixture(VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"))
+    asyncio.run(
+        exercise_verifier_fixture(
+            VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+        )
+    )
 
 
 class TestVerify:
@@ -113,7 +117,7 @@ class TestVerify:
 
     async def test_unaccepted_submission_gives_zero_reward(self, server):
         # similarity is present, but the submission was never accepted;
-        # synclaw only reports similarity for accepted submissions
+        # BioNeMo-SynClaw only reports similarity for accepted submissions
         request = _make_request({"similarity_to_target": 0.82})
         result = await server.verify(request)
         assert result.accepted is False

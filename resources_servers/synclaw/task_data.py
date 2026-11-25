@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Task-data schema for the synclaw server.
+"""Task-data schema for the BioNeMo-SynClaw server.
 
 Retrosynthesis rows carry their task fields top-level (there is no verifier_metadata).
 Required-ness mirrors ``SynClawRunRequest`` (schema.py): ``task_id``, ``target_smiles``,
@@ -20,7 +20,7 @@ class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     task_id: str = Field(
-        description="SynClaw task identifier (e.g. 'enamine-0249'); forwarded to the rollout loop for tracing.",
+        description="BioNeMo-SynClaw task identifier (e.g. 'enamine-0249'); forwarded to the rollout loop for tracing.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
     target_smiles: str = Field(
@@ -45,7 +45,10 @@ class TaskData(BaseModel):
     )
     available_tools: list[str] | None = Field(
         default=None,
-        description="Tool names derived from the task's excluded_tools by SynClaw's dataset builder; informational only.",
+        description=(
+            "Tool names derived from the task's excluded_tools by BioNeMo-SynClaw's dataset builder; "
+            "informational only."
+        ),
         json_schema_extra={"consumed_by": ["provenance"]},
     )
     max_turns: TaskBudget | None = Field(

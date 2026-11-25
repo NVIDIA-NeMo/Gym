@@ -4,5 +4,5 @@ synclaw_resources_server:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: Agentic retrosynthesis planning with SynClaw
+      description: Agentic retrosynthesis planning with BioNeMo-SynClaw
       value: Improve chemical retrosynthetic capabilities

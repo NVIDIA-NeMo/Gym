@@ -253,7 +253,7 @@ class SynClawAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         config = self._task_policy(body)
         assert isinstance(body.responses_create_params.input, list)
-        # SynClaw's rollout loop keeps chat-shaped `state.messages` for its policy and trace
+        # BioNeMo-SynClaw's rollout loop keeps chat-shaped `state.messages` for its policy and trace
         # events; the transport keeps the authoritative Responses history separately.
         initial_messages = tuple(
             {"role": message.role, "content": message.content} for message in body.responses_create_params.input
@@ -334,7 +334,7 @@ class SynClawAgent(SimpleResponsesAPIAgent):
             model=transport.model or "",
             tool_choice="auto",
             # Record the per-task tool subset the model actually saw, so the rollout can be
-            # exported for SFT without re-deriving schemas from a possibly newer SynClaw release.
+            # exported for SFT without re-deriving schemas from a possibly newer BioNeMo-SynClaw release.
             tools=[{"strict": None, **tool} for tool in tool_schemas],
             parallel_tool_calls=False,
             # Everything the transport appended after the seeded prompt: the model's output
@@ -448,15 +448,15 @@ class SynClawAgent(SimpleResponsesAPIAgent):
 
 
 class _GymTransport:
-    """Drives a Gym model server's ``/v1/responses`` endpoint for SynClaw's rollout loop.
+    """Drives a Gym model server's ``/v1/responses`` endpoint for BioNeMo-SynClaw's rollout loop.
 
-    SynClaw's loop hardcodes chat-shaped ``state.messages``, which cannot represent reasoning
+    BioNeMo-SynClaw's loop hardcodes chat-shaped ``state.messages``, which cannot represent reasoning
     items. This transport therefore ignores the ``messages`` argument to ``complete()`` and
     owns ``input_history``: the Responses items actually sent upstream. That list grows from
     three sources -- ``append_user``, ``append_tool``, and each response's ``output`` echoed
     back verbatim -- so the model re-reads its own reasoning every turn, matching the
     convention in ``responses_api_agents/simple_agent``. ``state.messages`` is left to serve
-    SynClaw's policy and trace events.
+    BioNeMo-SynClaw's policy and trace events.
     """
 
     # The Responses path reports truncation in-band as status="incomplete", but
@@ -545,7 +545,7 @@ class _GymTransport:
 
         budget_payload = self._budget_payload(tools)
         payload: dict[str, Any] = {
-            # FunctionToolParam requires `strict`, which SynClaw's Responses schemas omit. None
+            # FunctionToolParam requires `strict`, which BioNeMo-SynClaw's Responses schemas omit. None
             # rather than True: several schemas leave optional properties out of `required`,
             # which strict mode rejects upstream.
             **budget_payload,
@@ -634,10 +634,10 @@ class _GymTransport:
 
     def append_tool(self, call: PreparedToolCall, result_json: str) -> None:
         if not self._has_function_call(call.call_id):
-            # No function_call was echoed for this id -- a Harmony-parsed text call, or SynClaw's
+            # No function_call was echoed for this id -- a Harmony-parsed text call, or BioNeMo-SynClaw's
             # "tool-call-{n}" fallback when the provider omits one. An unpaired
             # function_call_output downconverts to a chat `tool` message with no preceding call,
-            # which breaks every later turn, so materialize the call SynClaw actually dispatched.
+            # which breaks every later turn, so materialize the call BioNeMo-SynClaw actually dispatched.
             self.input_history.append(
                 {
                     "type": "function_call",

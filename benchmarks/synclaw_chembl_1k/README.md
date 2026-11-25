@@ -1,13 +1,13 @@
-# SynClaw ChEMBL-1000
+# BioNeMo-SynClaw ChEMBL-1000
 
 Retrosynthesis planning for the 1,000 public ChEMBL target molecules from
 [SynFormer](https://github.com/wenhao-gao/synformer) (`chembl_filtered_1k.txt`), run with the
-[SynClaw environment](../../environments/synclaw/README.md). This is a held-out test set; there is no
+[BioNeMo-SynClaw environment](../../environments/synclaw/README.md). This is a held-out test set; there is no
 training split.
 
 For each target the model searches a purchasable-building-block stock and reaction templates,
 simulates reactions, and submits a pathway. The stock is the eMolecules orderable catalog plus
-SynClaw's 37 common reagents.
+BioNeMo-SynClaw's 37 common reagents.
 
 Three targets are radiotracers (`[11CH3]`, `[18F]`, `[125I]`). Exact-match scoring keeps
 isotopes but no stock building block carries them, so the prepare step strips isotope labels from
@@ -15,7 +15,7 @@ all targets. Changed rows keep the source SMILES in `original_target_smiles`.
 
 ## Run it
 
-1. Build the SynClaw database (reaction templates, building-block stock and search index).
+1. Build the BioNeMo-SynClaw database (reaction templates, building-block stock and search index).
    Build time and resource requirements depend on the catalog release and your hardware:
 
    ```bash
@@ -50,7 +50,7 @@ all targets. Changed rows keep the source SMILES in `original_target_smiles`.
    without it, a context overflow comes back as an empty truncated turn instead of ending the
    rollout cleanly with its best route.
 
-   Serve the model with pinned SynClaw's context limit,
+   Serve the model with pinned BioNeMo-SynClaw's context limit,
    `--max-model-len "$(bash environments/synclaw/max_model_len.sh)"`: the agent warns the model as
    it approaches that limit, and rollouts fail if the endpoint's `/v1/models` reports a
    different one. Endpoints that report none (most hosted APIs) are not checked. For a deployment
@@ -69,7 +69,7 @@ all targets. Changed rows keep the source SMILES in `original_target_smiles`.
 
 A score is comparable only with runs that share:
 
-- the SynClaw revision pinned in `resources_servers/synclaw/pyproject.toml` (reaction templates, prompts,
+- the BioNeMo-SynClaw revision pinned in `resources_servers/synclaw/pyproject.toml` (reaction templates, prompts,
   tools and scoring), with the resources server's and agent's default settings;
 - the eMolecules release in the database (`2026-09-01` by default; see `prepare_db.py --release`);
 - the task file from `gym eval prepare` (isotope labels stripped) and one rollout per task.
@@ -81,7 +81,7 @@ default release changes.
 
 Each rollout's reward is:
 
-- **1.0** if the accepted pathway's final product matches the target under SynClaw's
+- **1.0** if the accepted pathway's final product matches the target under BioNeMo-SynClaw's
   exact-match rules (`exact_reconstruction`), accounting for equivalent tautomers and
   stereochemistry left unspecified by the target while preserving specified stereochemistry.
 - **0.5 × similarity** for any other accepted pathway (an analogue).

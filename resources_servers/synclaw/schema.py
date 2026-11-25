@@ -48,7 +48,7 @@ class SynClawResourcesServerConfig(BaseResourcesServerConfig):
     def require_db(cls, db_path: Path) -> Path:
         if not db_path.is_file():
             raise ValueError(
-                f"SynClaw database not found at {db_path}. Build the default database with "
+                f"BioNeMo-SynClaw database not found at {db_path}. Build the default database with "
                 "`python resources_servers/synclaw/prepare_db.py`, or set db_path to an existing one."
             )
         return db_path
@@ -72,8 +72,8 @@ class SynClawRunRequest(BaseRunRequest):
     def require_current_prompt(cls, fingerprint: str | None) -> str | None:
         if fingerprint is not None and fingerprint != PROMPT_FINGERPRINT:
             raise ValueError(
-                f"Taskset prompt fingerprint {fingerprint!r} does not match installed SynClaw ({PROMPT_FINGERPRINT}). "
-                "Regenerate the taskset with `synclaw make-taskset`."
+                f"Taskset prompt fingerprint {fingerprint!r} does not match installed BioNeMo-SynClaw "
+                f"({PROMPT_FINGERPRINT}). Regenerate the taskset with `synclaw make-taskset`."
             )
         return fingerprint
 
