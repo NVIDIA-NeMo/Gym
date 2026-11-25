@@ -106,6 +106,15 @@ gym dataset download --storage gitlab \
     --output data/open_math_reasoning_problems_tool.jsonl
 ```
 
+Revision 0.0.1 predates the Python tool, so its rows lack the opt-in. Add it before using them:
+```
+python -c "import json, sys
+for line in sys.stdin:
+    row = json.loads(line)
+    row['agent_context'] = {'agent': {'values': {'python_tools': ['execute_python']}}}
+    print(json.dumps(row))" < data/open_math_reasoning_problems_tool.jsonl > data/train.jsonl
+```
+
 
 Start the servers. The Environment Server starts a sandbox for each attempt from the provider block named `sandbox`,
 so define one first (see [Sandboxes](https://docs.nvidia.com/nemo/gym/latest/infrastructure/sandbox)); its network
@@ -113,6 +122,7 @@ rule must let the sandbox reach the model server.
 ```
 gym env start \
     --config resources_servers/math_with_code/configs/math_with_code.yaml \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
     --model-type openai_model
 ```
 
@@ -139,7 +149,8 @@ The agent config `math_with_code_simple_agent` defines `execute_python`: a 10-se
 pandas at the versions this server pinned before, preloaded as `np`, `numpy`, `scipy`, `pd` and `pandas`, and the same
 short list of builtins (with `__import__`, so `import` works). Each attempt gets one worker, which keeps the names a call
 defines for the next call. Errors and timeouts come back to the model as `success: false` with the message, as they did
-when this server ran the code.
+when this server ran the code. The sandbox gets 2 CPUs and 4 GiB on every provider, and the worker may allocate
+at most 2 GiB: code that asks for more gets a `MemoryError` instead of stopping the agent loop.
 
 The verifier only compares answers (string rules and `float()`) and runs nothing, so the environment server's config
 opts it out of the sandbox (`sandbox_opt_out.verifier`): the sandbox stops once the agent closes, and `/verify` runs

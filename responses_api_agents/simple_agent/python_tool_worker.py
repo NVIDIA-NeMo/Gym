@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The interpreter of one Python tool, run inside the agent's sandbox by the sandboxed agent loop.
 
-``python -I python_tool_worker.py``, started by ``python_tool.PythonTools`` with the tool's own Python runtime. It
+``python -I python_tool_worker.py``, started by ``python_tool_client.PythonTools`` with the tool's own Python runtime. It
 uses the standard library only. It reads its settings, then one message per call, and keeps one namespace for the
 life of the process, so names a call defines stay defined for the next one.
 
@@ -44,6 +44,22 @@ def write_message(stream: BinaryIO, message: Any) -> None:
     body = json.dumps(message).encode()
     stream.write(_LENGTH.pack(len(body)) + body)
     stream.flush()
+
+
+def limit_memory(memory_mib: int | None) -> None:
+    """Cap what this process may allocate, so code that asks for more gets a MemoryError.
+
+    The hard limit is set too, so the code cannot raise it again.
+    """
+    if memory_mib is None:
+        return
+    import resource
+
+    limit = memory_mib * 1024 * 1024
+    _, hard = resource.getrlimit(resource.RLIMIT_DATA)
+    if hard != resource.RLIM_INFINITY:
+        limit = min(limit, hard)
+    resource.setrlimit(resource.RLIMIT_DATA, (limit, limit))
 
 
 def namespace(preload: dict[str, str], allowed_builtins: list[str] | None) -> dict[str, Any]:
@@ -108,6 +124,8 @@ def main() -> int:
     if settings is None:
         return 1
     try:
+        # Before the preload, whose modules count toward the limit too.
+        limit_memory(settings.get("memory_mib"))
         globals_d = namespace(settings["preload"], settings["builtins"])
     except Exception as error:
         write_message(replies, {"ready": False, "error": f"{type(error).__name__}: {error}"})

@@ -4,6 +4,8 @@ math_with_code:
       entrypoint: app.py
       domain: math
       verified: false
+      # The rows opt into Simple Agent's execute_python Python tool, which only Simple Agent runs.
+      allowed_agents: [simple_agent]
       description: Model solves competitive math problems using simple calculator tools
       value: Improve math and simple tool use capabilities
 math_with_code_simple_agent:
@@ -38,6 +40,8 @@ math_with_code_simple_agent:
           preload: {np: numpy, numpy: numpy, scipy: scipy, pd: pandas, pandas: pandas}
           builtins: [print, len, str, int, float, list, dict, tuple, set, min, max, sum, abs, range, enumerate, zip,
             __import__]
+          # Code that allocates more gets a MemoryError, below the sandbox's memory, which also holds the loop.
+          memory_mib: 2048
 
 math_with_code_environment_server:
   environment_servers:
@@ -56,6 +60,8 @@ math_with_code_environment_server:
         image: python:3.13-slim
         workdir: /workspace
         ttl_s: 25200  # above the episode timeout plus the cleanup timeout
+        # Set here so the tool gets the same room on every provider; OpenSandbox's default is 1 CPU and 2 GiB.
+        resources: {cpu: 2, memory_mib: 4096}
         network: model_only
         model_server: policy_model
       # The verifier compares boxed answers and runs nothing, so it grades in the Resources Server and the sandbox

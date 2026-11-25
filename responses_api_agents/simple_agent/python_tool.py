@@ -53,6 +53,16 @@ class PythonToolConfig(BaseModel):
         default=None,
         description="The builtins the code may use. Unset, all of them.",
     )
+    memory_mib: int | None = Field(
+        default=None,
+        ge=64,
+        description=(
+            "The most memory, in MiB, the tool's worker may allocate (its RLIMIT_DATA, which the code cannot raise). "
+            "Code that asks for more gets a MemoryError in the tool's output, instead of the sandbox running out of "
+            "memory and stopping the agent loop with it. Keep it below the sandbox's memory, which also holds the "
+            "loop. Unset, only the sandbox's limit applies."
+        ),
+    )
 
 
 class PythonToolSpec(BaseModel):

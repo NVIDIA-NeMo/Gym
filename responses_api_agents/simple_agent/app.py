@@ -1216,6 +1216,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 "Simple Agent execute_tools=false is supported only for agent-session requests; "
                 "seed an agent session before calling /v1/responses"
             )
+        if state is None and self.config.python_tools:
+            from responses_api_agents.simple_agent.sandbox import refuse_python_tools_without_session
+
+            refuse_python_tools_without_session(body, defined=self.config.python_tools)
         participant = self.checkpoint_participant
         target = self._activation_target(state, rollout_id)
         index = None

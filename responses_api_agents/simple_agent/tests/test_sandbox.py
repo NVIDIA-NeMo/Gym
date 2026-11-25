@@ -956,3 +956,25 @@ async def test_a_request_whose_tools_disagree_with_the_tasks_python_tools_is_ref
     with pytest.raises(HTTPException) as raised:
         await agent._create_session_episode(state, body, **_loop_arguments())
     assert raised.value.status_code == 422 and refusal in raised.value.detail
+
+
+def test_a_request_outside_a_session_that_offers_a_python_tool_is_refused() -> None:
+    from fastapi.testclient import TestClient
+
+    agent = SimpleAgent(config=_config(python_tools={"execute_python": PYTHON_TOOL}), server_client=_client(1))
+    body = _offering_python("1?").model_dump(mode="json", exclude_none=True)
+
+    # Without a session the call would go to the Resources Server, which does not serve the tool.
+    response = TestClient(agent.setup_webserver()).post("/v1/responses", json=body)
+
+    assert response.status_code == 422
+    assert (
+        "['execute_python']" in response.json()["detail"] and "only in an agent session" in response.json()["detail"]
+    )
+
+
+def test_a_request_outside_a_session_may_offer_tools_that_are_not_python_tools() -> None:
+    other = {**EXECUTE_PYTHON, "name": "get_weather"}
+    body = NeMoGymResponseCreateParamsNonStreaming(input="1?", tools=[other])
+
+    sandbox_module.refuse_python_tools_without_session(body, defined={"execute_python": PYTHON_TOOL})

@@ -45,6 +45,7 @@ simple_agent:
           requirements: [numpy==2.5.5]  # the tool's own runtime; empty runs on the loop's runtime
           preload: {np: numpy}          # global names bound before the first call
           builtins: null                # unset allows every builtin; a list allows only those
+          memory_mib: 2048              # the worker's RLIMIT_DATA; unset, only the sandbox's limit
 ```
 
 ```json
@@ -55,10 +56,11 @@ simple_agent:
 | Step | What happens |
 |------|--------------|
 | Seed | A task that opts into a tool the config does not define, or whose seed lends no sandbox, is refused (HTTP 422). Otherwise the agent server builds the tool's runtime from `requirements` (each pinned with `==`) on this host, as it builds the loop's, uploads it unless the sandbox has it, and checks that it imports the `preload` modules; a runtime that lacks one refuses the seed for good. |
-| Request | The request must offer each opted-in tool to the model by name, and a request that offers a Python tool of this agent must opt into it unless a tool grant may serve it. Otherwise the activation is refused (HTTP 422) before the model runs. |
+| Request | A request outside an agent session that offers one of the agent's Python tools is refused (HTTP 422): only a session's lent sandbox runs them. In a session, the request must offer each opted-in tool to the model by name, and a request that offers a Python tool of this agent must opt into it unless a tool grant may serve it. Otherwise the activation is refused (HTTP 422) before the model runs. |
 | Call | The model calls the tool with `{"code": "<source>"}`. The loop starts the tool's worker on its first call, in the task's working directory, and runs each call's code in it. Names a call defines stay defined for later calls of the activation. A call to a tool name the task never offered answers `{"detail":"Not Found"}`, as a Resources Server does, when the session has no tool grant. |
 | Reply | `{"success", "stdout", "stderr", "error_message", "result"}` as compact JSON. `result` is the `str` of the code's last line when that line is an expression. An error in the code returns `success: false` with its message and drops what the code printed. |
 | Timeout | Code that runs past `timeout_seconds` fails with `code timed-out`, and the worker keeps its names; a long call into C answers once it returns. Code still running 20 seconds later, such as code that blocks the alarm, is killed with everything it started. That call, and a call whose code ended the worker, say that the next call starts a new worker without the earlier names. |
+| Memory | With `memory_mib` set, the worker may allocate at most that much (its `RLIMIT_DATA`, which the code cannot raise): code that asks for more gets a `MemoryError` in the tool's output, and the worker keeps its names. Keep it below the sandbox's memory, which also holds the loop; without it, code that fills the sandbox's memory can stop the loop, and the attempt fails. |
 | End | The activation stops its workers. Each activation of a continued session starts with fresh workers. |
 
 Top-level names land in a locals mapping shared by every call, and functions look names up in the preloaded globals, so a function cannot call another top-level function. Writes to file descriptors 1 and 2, by the code or its subprocesses, are dropped; only what goes through `sys.stdout` and `sys.stderr` comes back. Code that writes into the worker's reply channel stops the worker rather than answering a call.

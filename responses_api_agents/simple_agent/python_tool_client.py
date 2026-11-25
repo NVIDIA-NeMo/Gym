@@ -163,6 +163,7 @@ class PythonTools:
                 "timeout_seconds": spec.config.timeout_seconds,
                 "preload": spec.config.preload,
                 "builtins": spec.config.builtins,
+                "memory_mib": spec.config.memory_mib,
             }
             await _send(process, settings)
             ready = await asyncio.wait_for(_receive(process), timeout=START_TIMEOUT_SECONDS)

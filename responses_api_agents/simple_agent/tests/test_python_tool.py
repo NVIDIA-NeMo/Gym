@@ -182,6 +182,20 @@ async def test_code_that_ends_the_worker_reports_it_and_the_next_call_starts_afr
         assert (await _run(tools, "1"))["result"] == "1"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="only Linux enforces RLIMIT_DATA")
+async def test_code_past_the_memory_cap_gets_a_memory_error_and_the_worker_keeps_its_names(tmp_path: Path) -> None:
+    async with _tools(tmp_path, memory_mib=512) as tools:
+        await _run(tools, "x = 1")
+        worker = tools._workers["execute_python"].pid
+        failed = await _run(tools, "y = bytearray(1024 * 1024 * 1024)")
+        assert failed["success"] is False
+        # The code cannot lift the cap it runs under.
+        raised = await _run(tools, "import resource\nresource.setrlimit(resource.RLIMIT_DATA, (-1, -1))")
+        assert raised["success"] is False and "not allowed to raise" in raised["error_message"]
+        assert (await _run(tools, "x"))["result"] == "1"
+        assert tools._workers["execute_python"].pid == worker
+
+
 async def test_code_larger_than_a_pipe_buffer_runs(tmp_path: Path) -> None:
     async with _tools(tmp_path) as tools:
         code = f"text = '{'a' * 300_000}'\nlen(text)"

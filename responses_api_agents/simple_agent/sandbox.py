@@ -114,7 +114,7 @@ def check_python_tools_offered(
     and not the other is a task that cannot run as written: refused with a terminal 422 before the loop runs, instead
     of failing when the model calls it.
     """
-    offered = {_function_tool_name(tool) for tool in body.tools or []} - {None}
+    offered = _offered_function_names(body)
     if not_offered := sorted(opted_in.keys() - offered):
         raise HTTPException(
             422, f"The task opts into Python tools {not_offered}, but the request does not offer them to the model"
@@ -126,6 +126,24 @@ def check_python_tools_offered(
             f"The request offers {not_opted_in}, which this agent runs as Python tools, but the task does not opt "
             "into them; add them to the row's agent_context: {agent: {values: {python_tools: [...]}}}",
         )
+
+
+def refuse_python_tools_without_session(body: Any, *, defined: dict[str, PythonToolConfig]) -> None:
+    """Refuse a request outside an agent session that offers one of this agent's Python tools.
+
+    A Python tool runs only in the sandbox an Environment Server lends a session. Without a session the call would go
+    to the configured Resources Server, which does not serve it, so every call would answer Not Found.
+    """
+    if offered := sorted(_offered_function_names(body) & defined.keys()):
+        raise HTTPException(
+            422,
+            f"The request offers {offered}, which this agent runs as Python tools only in an agent session whose "
+            "Environment Server lends a sandbox; run the task through its Environment Server",
+        )
+
+
+def _offered_function_names(body: Any) -> set[str]:
+    return {_function_tool_name(tool) for tool in body.tools or []} - {None}
 
 
 def _function_tool_name(tool: Any) -> str | None:
