@@ -2,7 +2,7 @@ config_paths:
   - benchmarks/nemotron_3.5_super/build_container_configs/swe_8n-11.yaml
 
 input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___current_sota.sqsh
-output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___rewardprofilingmooncakefix.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym___rewardprofiling.sqsh
 
 slurm:
   qos: normal
