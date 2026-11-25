@@ -50,6 +50,7 @@ from anyio import CancelScope
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
+import nemo_gym.cli.eval
 import nemo_gym.client.http_client
 import nemo_gym.models.token_capture.delivery
 import nemo_gym.rollouts.batch_status
@@ -4038,8 +4039,10 @@ class TestRolloutCollection:
         assert ("allow_incomplete_aggregate is set" in capsys.readouterr().out) == allow
         if allow:
             assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == 1.0
-        # No tracker receives the incomplete aggregate as the run's score.
+        # No tracker receives the incomplete aggregate as the run's score, live or from `gym eval export` afterwards.
         assert not any(key.endswith("mean/reward") for key in exported)
+        (tmp_path / "output_resolved_config.yaml").write_text("require_complete: true\n")  # as the CLI saves it
+        assert "2/3 rollouts settled" in nemo_gym.cli.eval._incomplete_run_export_error(output_jsonl_fpath)
         # The coverage file beside the score is what marks the run as incomplete.
         coverage = orjson.loads((tmp_path / "output_coverage.json").read_bytes())
         assert (coverage["complete"], coverage["successful"], coverage["expected"]) == (False, 2, 3)
