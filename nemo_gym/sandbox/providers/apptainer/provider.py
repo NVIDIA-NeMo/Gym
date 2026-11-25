@@ -274,8 +274,13 @@ def _serialize_env_file(env: Mapping[str, str]) -> bytes:
 
 
 @contextlib.contextmanager
-def _private_env_file(staging_dir: Path, content: bytes) -> Iterator[Path | None]:
-    """Yield a unique mode-0600 env file and remove it on every exit path."""
+def _private_env_file(content: bytes) -> Iterator[Path | None]:
+    """Yield a unique mode-0600 env file and remove it on every exit path.
+
+    Apptainer reads the file on the host, so it is made in the host's temporary directory (where staging
+    directories are made), not in a staging directory: the sandbox sees that one as its workspace and can make it
+    read-only, which would fail every later exec.
+    """
     if not content:
         yield None
         return
@@ -283,7 +288,7 @@ def _private_env_file(staging_dir: Path, content: bytes) -> Iterator[Path | None
     fd = -1
     path: Path | None = None
     try:
-        fd, raw_path = tempfile.mkstemp(prefix=".apptainer-env-", dir=staging_dir)
+        fd, raw_path = tempfile.mkstemp(prefix=".apptainer-env-")
         path = Path(raw_path)
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as stream:
@@ -501,7 +506,7 @@ class ApptainerProvider:
 
         # start the instance; clean up the staging dir on any failure.
         try:
-            with _private_env_file(staging_dir, env_file_content) as env_file:
+            with _private_env_file(env_file_content) as env_file:
                 if env_file is not None:
                     argv += ["--no-eval", "--env-file", str(env_file)]
                 argv += [image, name]
@@ -690,7 +695,7 @@ class ApptainerProvider:
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
 
         try:
-            with _private_env_file(inst.staging_dir, env_file_content) as env_file:
+            with _private_env_file(env_file_content) as env_file:
                 if env_file is not None:
                     flags += ["--no-eval", "--env-file", str(env_file)]
                 argv = [self._binary, "exec", *flags, f"instance://{inst.name}", "sh", "-c", effective_command]

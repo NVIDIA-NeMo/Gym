@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import os
 import shlex
 import shutil
 import socket
@@ -251,14 +252,14 @@ def test_serialize_env_file_rejects_invalid_input(env: dict[Any, Any], error: ty
 def test_private_env_file_is_mode_0600_and_always_removed(tmp_path: Path) -> None:
     content = b"TOKEN='not-a-real-secret'\n"  # pragma: allowlist secret
 
-    with apptainer_provider._private_env_file(tmp_path, content) as path:
+    with apptainer_provider._private_env_file(content) as path:
         assert path is not None
         assert path.read_bytes() == content
         assert path.stat().st_mode & 0o777 == 0o600
     assert not path.exists()
 
     with pytest.raises(RuntimeError):
-        with apptainer_provider._private_env_file(tmp_path, content) as failed_path:
+        with apptainer_provider._private_env_file(content) as failed_path:
             assert failed_path is not None
             raise RuntimeError("failure")
     assert not failed_path.exists()
@@ -555,6 +556,33 @@ async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytes
     assert argv[-4:] == ["instance://nemo-gym-x", "sh", "-c", "echo hi"]
     assert rec.calls[0]["timeout_s"] == 180  # default exec timeout
     assert not env_file.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes to a read-only directory anyway")
+async def test_exec_env_file_stays_outside_a_read_only_staging_dir(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The sandbox sees its staging dir as its workspace and can make it read-only; exec must still run.
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    env_files: list[Path] = []
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        env_files.append(_env_file_path(argv))
+        assert env_files[-1].read_bytes() == b"TMPDIR=/tmp\n"
+        return (0, "", "")
+
+    provider, _rec = _make_provider(monkeypatch, responder)
+    handle = _make_handle(staging, env={"TMPDIR": "/tmp"})
+    staging.chmod(0o555)
+    try:
+        result = await provider.exec(handle, "true")
+    finally:
+        staging.chmod(0o755)
+
+    assert (result.return_code, result.error_type) == (0, None)
+    assert len(env_files) == 1 and staging not in env_files[0].parents
+    assert not env_files[0].exists()
 
 
 async def test_exec_reapplies_create_env_and_overrides_call_env(
