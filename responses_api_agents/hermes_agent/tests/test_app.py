@@ -41,10 +41,13 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseFunctionToolCallForTraining,
+    NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseReasoningItem,
     TaskId,
 )
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
@@ -54,7 +57,6 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
-    _gym_mcp_tool_name,
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
 )
@@ -95,18 +97,6 @@ def _mcp_access(name: str, *, required: bool = True) -> MCPToolAccess:
             url="http://resources:8000/mcp", headers={"X-NeMo-Gym-Session-Token": f"token-{name}"}
         ),
     )
-
-
-def test_gym_mcp_tool_name_maps_hermes_names_of_granted_servers() -> None:
-    assert _gym_mcp_tool_name("mcp__weather__get_weather", ["weather"]) == "mcp__weather__get_weather"
-    # Hermes replaced "-" and "." in the server name; the granted name is restored.
-    assert _gym_mcp_tool_name("mcp__my_store_v1__append", ["my-store.v1"]) == "mcp__my-store.v1__append"
-    # A granted name that extends another does not lose its tools to the shorter one.
-    assert _gym_mcp_tool_name("mcp__store_b__append", ["store", "store_b"]) == "mcp__store_b__append"
-    assert _gym_mcp_tool_name("mcp__store__append", ["store", "store_b"]) == "mcp__store__append"
-    # Built-in tools and servers that were not granted are left alone.
-    assert _gym_mcp_tool_name("terminal", ["weather"]) == "terminal"
-    assert _gym_mcp_tool_name("mcp__other__get", ["weather"]) == "mcp__other__get"
 
 
 class TestSanity:
@@ -524,8 +514,21 @@ class TestSanity:
         assert runner_input["model_base_url"] == f"http://model-server:1/ng-rollout/{seed.episode_id.capture_key}/v1"
         assert runner_input["user_message"] == "fix bug"
         assert response.metadata["harness_execution"] == "sandbox"
+        assert response.metadata["executed_harness"] == "hermes"
 
     async def test_activation_configures_granted_mcp_servers(self, monkeypatch) -> None:
+        tool_call = {
+            "id": "call-1",
+            "type": "function",
+            "function": {"name": "mcp__weather_v1_0__get_weather", "arguments": '{"city": "Paris"}'},
+        }
+        messages = [
+            {"role": "user", "content": "what is the weather"},
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "sunny"},
+            {"role": "assistant", "content": "done"},
+        ]
+
         class _Sandbox:
             def __init__(self) -> None:
                 self.uploaded: dict = {}
@@ -539,17 +542,6 @@ class TestSanity:
                 return SandboxExecResult(stdout="", stderr="", return_code=0)
 
             async def download(self, remote_path, local_path) -> None:
-                tool_call = {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "mcp__weather_v1_0__get_weather", "arguments": '{"city": "Paris"}'},
-                }
-                messages = [
-                    {"role": "user", "content": "what is the weather"},
-                    {"role": "assistant", "content": None, "tool_calls": [tool_call]},
-                    {"role": "tool", "tool_call_id": "call-1", "content": "sunny"},
-                    {"role": "assistant", "content": "done"},
-                ]
                 result = {"messages": messages, "final_response": "done"}
                 output = {"result": result, "runtime": {"hostname": "sandbox", "pid": 1, "python": "python"}}
                 Path(local_path).write_text(json.dumps(output))
@@ -576,10 +568,43 @@ class TestSanity:
             "headers": {"X-NeMo-Gym-Session-Token": "token-weather-v1.0"},
             "tools": {"resources": False, "prompts": False},
         }
-        # Verifiers see Gym's MCP naming, not Hermes'.
-        assert [item.name for item in response.output if item.type == "function_call"] == [
-            "mcp__weather-v1.0__get_weather"
+
+        # Training history must retain every model-authored call exactly. Verifiers normalize their own copy.
+        def capture_visible(item):
+            value = item.model_dump(mode="json")
+            if value["type"] != "function_call":
+                value.pop("id", None)
+            return value
+
+        assert [capture_visible(item) for item in response.output] == [
+            capture_visible(item) for item in _trajectory_to_output_items(messages, 1)
         ]
+        (function_call,) = [item for item in response.output if item.type == "function_call"]
+        assert (function_call.id, function_call.call_id, function_call.name, function_call.arguments) == (
+            "call-1",
+            "call-1",
+            "mcp__weather_v1_0__get_weather",
+            '{"city": "Paris"}',
+        )
+        assert response.metadata["hermes_mcp_servers"] == '["weather-v1.0","search"]'
+        assert response.metadata["harness_execution"] == "sandbox"
+
+    @pytest.mark.parametrize("names", [["my-store", "my.store"], ["x" * 512]])
+    async def test_invalid_mcp_grants_fail_before_sandbox_execution(self, monkeypatch, names) -> None:
+        hermes, _request, _seed = self._sandbox_session(
+            monkeypatch, MagicMock(), tool_accesses=[_mcp_access(name) for name in names]
+        )
+        state = hermes._require_agent_session("session")
+        state.execute = AsyncMock()
+
+        with pytest.raises(ValueError):
+            await hermes._run_sandbox_episode(
+                body=NeMoGymResponseCreateParamsNonStreaming(input="what is the weather"),
+                agent_session_id="session",
+                state=state,
+            )
+
+        state.execute.assert_not_awaited()
 
     async def test_provider_timeout_without_output_confirms_cleanup_and_fails(self, monkeypatch) -> None:
         class _Sandbox:
@@ -944,6 +969,45 @@ class TestResultUsage:
 
 
 class TestResultClassification:
+    @pytest.mark.parametrize("reason", ["max_iterations", "wall_time"])
+    def test_tool_only_partial_response_preserves_native_chat_capture(self, reason) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        body = NeMoGymResponseCreateParamsNonStreaming(input="synthetic task")
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "last-tool", "type": "function", "function": {"name": "mcp_claw_ReadMedia", "arguments": "{}"}}
+            ],
+        }
+        result = {
+            "messages": [{"role": "user", "content": "synthetic task"}, message],
+            "completed": False,
+            "partial": True,
+            "interrupted": reason == "wall_time",
+            "stop_reason": reason,
+        }
+        response = agent._response_from_result(body=body, result=result, model_name="model", n_input=1)
+        captured = completion_items({"choices": [{"message": message}]})
+
+        assert response.status == "incomplete" and response.error is None
+        assert response.metadata["partial"] == "true" and response.metadata["stop_reason"] == reason
+        assert [item.type for item in response.output] == ["function_call"]
+        assert [output_item_fingerprint(item.model_dump(mode="json")) for item in response.output] == [
+            output_item_fingerprint(item) for item in captured
+        ]
+
+    def test_no_model_output_retains_empty_response_fallback(self) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        response = agent._response_from_result(
+            body=NeMoGymResponseCreateParamsNonStreaming(input="synthetic task"),
+            result={"messages": [], "completed": False, "partial": True},
+            model_name="model",
+        )
+
+        assert response.status == "incomplete" and len(response.output) == 1
+        assert response.output[0].type == "message" and response.output[0].content[0].text == ""
+
     @pytest.mark.parametrize(
         "error",
         [
@@ -1115,7 +1179,7 @@ class TestTrajectoryToOutputItems:
         ]
         out = _trajectory_to_output_items(msgs, 1)
         assert len(out) == 1
-        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
+        assert isinstance(out[0], NeMoGymResponseOutputMessage)
 
     def test_assistant_with_tokens(self) -> None:
         routed_experts = [
@@ -1141,20 +1205,17 @@ class TestTrajectoryToOutputItems:
         assert out[0].prompt_token_ids == [1, 2]
         assert out[0].routed_experts == routed_experts
 
-    def test_assistant_reasoning_strips_inline_think_from_message(self) -> None:
-        msgs = [
-            {
-                "role": "assistant",
-                "reasoning": "structured thoughts",
-                "content": "<think>structured thoughts</think>final answer",
-            }
+    @pytest.mark.parametrize("content", ["<think>thoughts</think>final answer", "<think>thoughts</think>"])
+    def test_inline_reasoning_preserves_native_chat_capture(self, content) -> None:
+        message = {"role": "assistant", "reasoning": "thoughts", "content": content}
+        captured = completion_items({"choices": [{"message": message}]})
+        returned = [item.model_dump(mode="json") for item in _trajectory_to_output_items([message], 0)]
+
+        assert len(returned) == 1 and returned[0]["type"] == "message"
+        assert returned[0]["content"][0]["text"] == content
+        assert [output_item_fingerprint(item) for item in returned] == [
+            output_item_fingerprint(item) for item in captured
         ]
-        out = _trajectory_to_output_items(msgs, 0)
-        assert len(out) == 2
-        assert isinstance(out[0], NeMoGymResponseReasoningItem)
-        assert out[0].summary[0].text == "structured thoughts"
-        assert isinstance(out[1], NeMoGymResponseOutputMessageForTraining)
-        assert out[1].content[0].text == "final answer"
 
     def test_assistant_with_tool_call_and_tool_result(self) -> None:
         msgs = [
@@ -1166,14 +1227,72 @@ class TestTrajectoryToOutputItems:
             {"role": "tool", "tool_call_id": "c1", "content": "file.txt\n"},
         ]
         out = _trajectory_to_output_items(msgs, 0)
-        assert len(out) == 3
-        assert isinstance(out[0], NeMoGymResponseOutputMessageForTraining)
-        assert isinstance(out[1], NeMoGymResponseFunctionToolCall)
-        assert out[1].name == "terminal"
-        assert out[1].arguments == '{"cmd":"ls"}'
-        assert isinstance(out[2], NeMoGymFunctionCallOutput)
-        assert out[2].call_id == "c1"
-        assert out[2].output == "file.txt\n"
+        assert len(out) == 2
+        assert isinstance(out[0], NeMoGymResponseFunctionToolCall)
+        assert out[0].name == "terminal"
+        assert out[0].arguments == '{"cmd":"ls"}'
+        assert isinstance(out[1], NeMoGymFunctionCallOutput)
+        assert out[1].call_id == "c1"
+        assert out[1].output == "file.txt\n"
+
+    @pytest.mark.parametrize("content", [None, "", "calling the tool"])
+    def test_tool_turn_matches_native_chat_capture(self, content) -> None:
+        message = {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [
+                {
+                    "id": "call-native",
+                    "type": "function",
+                    "function": {"name": "mcp_claw_ReadMedia", "arguments": '{"path":"video.mp4"}'},
+                }
+            ],
+        }
+        captured = completion_items({"choices": [{"message": message}]})
+        returned = [item.model_dump(mode="json") for item in _trajectory_to_output_items([message], 0)]
+
+        assert [item["type"] for item in returned] == [item["type"] for item in captured]
+        assert [output_item_fingerprint(item) for item in returned] == [
+            output_item_fingerprint(item) for item in captured
+        ]
+        assert returned[-1]["name"] == "mcp_claw_ReadMedia"
+        assert returned[-1]["call_id"] == "call-native"
+        assert returned[-1]["arguments"] == '{"path":"video.mp4"}'
+
+    @pytest.mark.parametrize("content", [None, ""])
+    def test_empty_plain_response_matches_native_chat_capture(self, content) -> None:
+        message = {"role": "assistant", "content": content}
+        captured = completion_items({"choices": [{"message": message}]})
+        returned = [item.model_dump(mode="json") for item in _trajectory_to_output_items([message], 0)]
+
+        assert len(returned) == 1 and returned[0]["type"] == "message"
+        assert [output_item_fingerprint(item) for item in returned] == [
+            output_item_fingerprint(item) for item in captured
+        ]
+
+    def test_tool_only_turn_retains_native_token_metadata_on_real_tool(self) -> None:
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "tool-token", "type": "function", "function": {"name": "mcp_claw_ReadMedia", "arguments": "{}"}}
+            ],
+            "prompt_token_ids": [1, 2],
+            "generation_token_ids": [3],
+            "generation_log_probs": [-0.5],
+            "routed_experts": [[[0, 1]], [[2, 3]], [[4, 5]]],
+        }
+        returned = _trajectory_to_output_items([message], 0)
+        converter = ChatCompletionsConverter(return_token_id_information=True, uses_reasoning_parser=False)
+        native = converter.postprocess_assistant_message_dict(message)
+
+        assert len(returned) == 1 and isinstance(returned[0], NeMoGymResponseFunctionToolCallForTraining)
+        for field in ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts"):
+            assert getattr(returned[0], field) == getattr(native[0], field) == message[field]
+        captured = completion_items({"choices": [{"message": message}]})
+        assert [output_item_fingerprint(item.model_dump(mode="json")) for item in returned] == [
+            output_item_fingerprint(item) for item in captured
+        ]
 
     def test_skips_non_dict_items(self) -> None:
         msgs = [None, "string", {"role": "assistant", "content": "ok"}]
@@ -1290,7 +1409,10 @@ class TestObservability:
         monkeypatch.setattr(HermesAgent, "_sandbox_observations", fail_finish)
         episode = asyncio.run(agent._create_episode(body=body, rollout_id="rid"))
 
-        assert episode.response.output == baseline.output
+        # Independent replies receive different generated transport IDs.
+        assert [item.model_dump(mode="json", exclude={"id"}) for item in episode.response.output] == [
+            item.model_dump(mode="json", exclude={"id"}) for item in baseline.output
+        ]
         assert episode.response.usage == baseline.usage
         assert [gap.code for gap in episode.observations.gaps] == [
             "observation_capture_failed",

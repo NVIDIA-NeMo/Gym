@@ -11,9 +11,68 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from nemo_gym.config import ModelServerRef
+from nemo_gym.core import skip_token_capture_context
+from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
+from nemo_gym.trajectory import AgentInvocation
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
 from responses_api_agents.opencode_agent.tests.test_app import _make_agent
 from responses_api_agents.pi_agent.tests.test_sandbox import _finishing_model, _http_server
+
+
+@pytest.mark.parametrize("text", ["<think>literal</think>\n\n  answer \n", "<think>unfinished answer</think>"])
+async def test_pinned_opencode_capture_preserves_served_text(tmp_path, monkeypatch, text):
+    configured_binary = os.environ.get("GYM_TEST_OPENCODE_BINARY")
+    binary = configured_binary or shutil.which("opencode")
+    if binary is None:
+        pytest.skip(f"Set GYM_TEST_OPENCODE_BINARY to the pinned OpenCode {OPENCODE_VERSION} executable")
+    version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=30)
+    if configured_binary is None and version.stdout.strip() != OPENCODE_VERSION:
+        pytest.skip(f"PATH OpenCode is not {OPENCODE_VERSION}")
+    assert version.returncode == 0 and version.stdout.strip() == OPENCODE_VERSION
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        monkeypatch.delenv(key, raising=False)
+    requests = []
+    finishing_model = _finishing_model(requests, [])
+
+    def literal_model(body):
+        status, content_type, payload = finishing_model(body)
+        return status, content_type, payload.replace(b'"Done."', json.dumps(text).encode())
+
+    with _http_server(literal_model) as model_url:
+        agent = _make_agent(
+            command=binary,
+            repo_dir=str(tmp_path / "repo"),
+            workspace_root=str(tmp_path / "work"),
+            model="synthetic",
+            model_server=ModelServerRef(type="responses_api_models", name="policy"),
+            opencode_config={
+                "compaction": {"auto": False},
+                "tools": {"*": False},
+                "small_model": "nemo/synthetic",
+                "enabled_providers": ["nemo"],
+            },
+            env={
+                "HOME": str(tmp_path / "home"),
+                "XDG_CONFIG_HOME": str(tmp_path / "config"),
+                "XDG_CACHE_HOME": str(tmp_path / "cache"),
+                "XDG_STATE_HOME": str(tmp_path / "state"),
+                "OPENCODE_DISABLE_AUTOUPDATE": "true",
+                "OPENCODE_DISABLE_MODELS_FETCH": "true",
+            },
+        )
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True, "all_agents": True}}
+        with (
+            patch.object(agent, "_resolve_model_base_url", return_value=model_url),
+            skip_token_capture_context(False),
+        ):
+            output, _, _, observations, failure = await agent._run_opencode("Literal reply fixture", None, timeout=30)
+            assert failure is None
+    invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
+    assert requests and invocations and all(invocation.status == "completed" for invocation in invocations)
+    assert [item.type for item in output] == ["message"]
+    assert output[0].content[0].text == text
+    served = completion_items({"choices": [{"message": {"role": "assistant", "content": text}}]})
+    assert output_item_fingerprint(output[0].model_dump(mode="json")) == output_item_fingerprint(served[0])
 
 
 async def test_pinned_opencode_merges_replacement_without_persisting_it(tmp_path):

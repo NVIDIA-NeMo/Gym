@@ -29,6 +29,7 @@ from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
 from nemo_gym.server_runtime import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.trajectory import AgentInvocation
 from resources_servers.example_mcp_weather.app import (
@@ -36,7 +37,7 @@ from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServerConfig,
 )
 from responses_api_agents.hermes_agent import sandbox_runner
-from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig
+from responses_api_agents.hermes_agent.app import HermesAgent, HermesAgentConfig, _trajectory_to_output_items
 from responses_api_agents.hermes_agent.runtime import host_python
 from responses_api_agents.hermes_agent.sandbox_runner import _use_model_server
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
@@ -683,7 +684,10 @@ class Agent:
     def run_conversation(self, *args, **kwargs):
         self._session_messages = [
             {'role': 'user', 'content': 'fix bug'},
-            {'role': 'assistant', 'content': 'Partial work', 'prompt_token_ids': [1], 'generation_token_ids': [2]},
+            {
+                'role': 'assistant', 'content': 'Partial work',
+                'prompt_token_ids': [1], 'generation_token_ids': [2], 'generation_log_probs': [-0.5],
+            },
         ]
         pathlib.Path('model.patch').write_bytes(b'partial patch\\n')
         while not self.stopping or sys.argv[4] == 'False':
@@ -764,6 +768,8 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     assert response.metadata["stop_reason"] == reason
     assert response.output[0].content[0].text == "Partial work"
     assert response.output[0].generation_token_ids == [2]
+    assert response.output[0].prompt_token_ids == [1]
+    assert response.output[0].generation_log_probs == [-0.5]
     assert output["observations"]["invocations"][0]["status"] == "incomplete"
     with pytest.raises(ProcessLookupError):
         os.kill(output["runtime"]["pid"], 0)
@@ -992,3 +998,39 @@ def test_delegated_child_records_the_delegate_task_call_that_spawned_it(tmp_path
         if invocation.get("parent_invocation_id") == "root"
     ]
     assert [child["spawned_by_tool_call_id"] for child in children] == ["call-delegate"]
+
+
+@pytest.mark.parametrize("content", [None, "", "calling the tool"])
+def test_worker_tool_turn_preserves_authored_chat_capture(tmp_path, content) -> None:
+    message = {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {
+                "id": "call-native",
+                "type": "function",
+                "function": {"name": "terminal", "arguments": '{"command":"echo ok"}'},
+            }
+        ],
+        "prompt_token_ids": [1, 2],
+        "generation_token_ids": [3],
+        "generation_log_probs": [-0.5],
+    }
+    with _ModelServer([_completion(message), _completion({"content": "done"})]) as model:
+        result = _run(_payload(model.base_url, max_turns=4), tmp_path)["result"]
+
+    authored = [row for row in result["messages"] if row.get("role") == "assistant"][0]
+    # Hermes adds replay aliases; the provider-authored call fields must remain exact.
+    assert [{key: call[key] for key in ("id", "type", "function")} for call in authored["tool_calls"]] == message[
+        "tool_calls"
+    ]
+    for call in authored["tool_calls"]:
+        assert call["call_id"] == call["id"]
+        assert call["response_item_id"] == "fc_" + call["call_id"]
+    for field in ("prompt_token_ids", "generation_token_ids", "generation_log_probs"):
+        assert authored[field] == message[field]
+    captured = completion_items({"choices": [{"message": message}]})
+    returned = _trajectory_to_output_items([authored], 0)
+    assert [output_item_fingerprint(item.model_dump(mode="json")) for item in returned] == [
+        output_item_fingerprint(item) for item in captured
+    ]

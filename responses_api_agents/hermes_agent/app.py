@@ -62,14 +62,11 @@ from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
-    NeMoGymSummary,
     UnsupportedContentError,
 )
 from nemo_gym.models import ChatCompletionsConverter
@@ -90,7 +87,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import hermes_mcp_metadata, is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.hermes_agent.observability import normalize_hermes_messages
 from responses_api_agents.hermes_agent.runtime import builtin_toolsets, host_python
 from responses_api_agents.hermes_agent.sandbox import (
@@ -212,6 +209,7 @@ def _usage_from_result(result: dict[str, Any]) -> Optional[NeMoGymResponseUsage]
 
 def _trajectory_to_output_items(messages, n_input):
     output_items = []
+    converter = ChatCompletionsConverter(return_token_id_information=True, uses_reasoning_parser=False)
     for item in messages[n_input:]:
         if not isinstance(item, dict):
             continue
@@ -220,43 +218,7 @@ def _trajectory_to_output_items(messages, n_input):
         if isinstance(content, list):
             content = "".join(c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "") for c in content)
         if role == "assistant":
-            reasoning_text = item.get("reasoning") or ""
-            if reasoning_text:
-                content = ChatCompletionsConverter._parse_think_tags(content)[1]
-                output_items.append(
-                    NeMoGymResponseReasoningItem(
-                        id=f"rsn-{len(output_items)}",
-                        summary=[NeMoGymSummary(type="summary_text", text=reasoning_text)],
-                        type="reasoning",
-                    )
-                )
-            output_items.append(
-                NeMoGymResponseOutputMessageForTraining(
-                    id=f"msg-{len(output_items)}",
-                    content=[NeMoGymResponseOutputText(type="output_text", text=content, annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                    prompt_token_ids=item.get("prompt_token_ids") or [],
-                    generation_token_ids=item.get("generation_token_ids") or [],
-                    generation_log_probs=item.get("generation_log_probs") or [],
-                    routed_experts=item.get("routed_experts"),
-                )
-            )
-            for tc in item.get("tool_calls") or []:
-                fn = tc.get("function") if isinstance(tc, dict) else None
-                if not fn:
-                    continue
-                output_items.append(
-                    NeMoGymResponseFunctionToolCall(
-                        arguments=fn.get("arguments", ""),
-                        call_id=tc.get("id", ""),
-                        name=fn.get("name", ""),
-                        type="function_call",
-                        id=tc.get("id"),
-                        status="completed",
-                    )
-                )
+            output_items.extend(converter.postprocess_assistant_message_dict({**item, "content": content}))
         elif role == "tool":
             output_items.append(
                 NeMoGymFunctionCallOutput(
@@ -271,21 +233,6 @@ def _trajectory_to_output_items(messages, n_input):
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
-
-
-def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
-    """Rename Hermes' ``mcp__<server>__<tool>`` to Gym's ``mcp__<granted server>__<tool>``, which Gym strips.
-
-    Hermes replaces every character outside ``[A-Za-z0-9_]`` with "_" in both parts. The server part is matched
-    against the granted names, longest first so one name that extends another cannot capture its tools; a tool
-    name keeps Hermes' replacement. Hermes shortens a name longer than 64 characters with a hash suffix, and such a
-    name stays as Hermes wrote it.
-    """
-    for server in sorted(server_names, key=len, reverse=True):
-        prefix = "mcp__" + re.sub(r"[^A-Za-z0-9_]", "_", server) + "__"
-        if name.startswith(prefix):
-            return f"mcp__{server}__{name[len(prefix) :]}"
-    return name
 
 
 # if ray close sys.stderr mid-request, write to the original fd
@@ -809,6 +756,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         mcp_accesses = [
             access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
         ]
+        mcp_metadata = hermes_mcp_metadata([access.name for access in mcp_accesses])
         payload = self._worker_payload(
             body,
             agent_session_id=agent_session_id,
@@ -866,14 +814,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
         response = self.report_outcome(response, result)
         if self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT:
             response = response.model_copy(update={"status": "incomplete", "error": None})
-        # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.
-        server_names = [access.name for access in mcp_accesses]
-        for item in response.output:
-            if getattr(item, "type", None) == "function_call":
-                item.name = _gym_mcp_tool_name(item.name, server_names)
         response.metadata = {
             **(response.metadata or {}),
+            **mcp_metadata,
             "harness_execution": "sandbox",
+            "executed_harness": "hermes",
             AGENT_TIMEOUT_METADATA_KEY: str(timeout),
         }
         if timed_out or response.metadata.get("stop_reason") == "wall_time":
@@ -989,13 +934,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         messages = result.get("messages") or []
         output_items = _trajectory_to_output_items(messages, n_input)
-        has_assistant_message = any(
-            getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
+        has_model_output = any(
+            getattr(item, "type", None) in {"function_call", "reasoning"}
+            or (getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant")
             for item in output_items
         )
-        if not has_assistant_message:
+        if not has_model_output:
             LOG.warning(
-                "Hermes agent ended without an assistant message. Padding empty assistant message: error=%r",
+                "Hermes agent ended without model output. Padding empty assistant message: error=%r",
                 result.get("error"),
             )
             last_valid = next(

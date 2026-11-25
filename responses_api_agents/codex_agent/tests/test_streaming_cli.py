@@ -165,6 +165,7 @@ def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(tmp_path: Path
 def test_pinned_cli_failed_turn_retains_transcript_usage(tmp_path: Path, setup) -> None:
     binary = pinned_cli()
     agent, sandbox = setup
+    agent.server_client.global_config_dict["token_id_capture"] = {"enabled": True, "all_agents": True}
     requests = []
     expected_usage = {"input_tokens": 41, "output_tokens": 8, "total_tokens": 49}
 
@@ -250,11 +251,17 @@ def test_pinned_cli_failed_turn_retains_transcript_usage(tmp_path: Path, setup) 
     sandbox.publish = publish
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
-        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Run the shell check."})
+        response = client.post(
+            "/ng-rollout/codex-smoke-a2/training-token-capture/v1/responses", json={"input": "Run the shell check."}
+        )
         response.raise_for_status()
         body = response.json()
         assert body["status"] == "failed"
         assert {key: body["usage"][key] for key in expected_usage} == expected_usage
+        authored = next(item for item in body["output"] if item["type"] == "function_call")
+        assert authored["call_id"] == "call_tool"
+        assert authored["name"] == "exec_command"
+        assert authored["arguments"] == json.dumps({"cmd": "printf usage_probe"})
         assert any(item["type"] == "function_call_output" for item in body["output"])
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         closed.raise_for_status()
