@@ -1,0 +1,16 @@
+{
+  "notices": [
+    {
+      "properties": [
+        {
+          "type": "domain",
+          "value": "huggingface.co"
+        },
+        {
+          "type": "domain",
+          "value": "hf.co"
+        }
+      ]
+    }
+  ]
+}

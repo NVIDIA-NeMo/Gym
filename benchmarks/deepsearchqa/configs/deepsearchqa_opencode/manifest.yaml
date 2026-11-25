@@ -5,7 +5,7 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
 description: Multi-step web research with answer-set F1 scoring using the opencode
-  harness and Exa search.
+  harness and Exa web search.
 modality: text
 licensing: unknown
 authors:
@@ -18,7 +18,7 @@ reward:
 determinism: unknown
 config_path: ../deepsearchqa_opencode.yaml
 resources_server: deepsearchqa
-agent_server: harness_exa_search
+agent_server: opencode_agent
 datasets:
 - name: deepsearchqa
   type: benchmark
