@@ -39,6 +39,10 @@ class TestSandboxConfigNetwork:
         ("block", "message"),
         [
             ({"network": "model_only"}, "model_server"),
+            ({"network": "model_only", "model_server": ""}, "model_server"),
+            ({"network": "model_only", "model_server": "  "}, "model_server"),
+            ({"network": "model_and_tools", "model_server": "", "tool_servers": ["t"]}, "model_server"),
+            ({"network": "model_and_tools", "model_server": "  ", "tool_servers": ["t"]}, "model_server"),
             ({"network": "no_network", "model_server": "policy_model"}, "model_server"),
             ({"network": "model_only", "model_server": "m", "tool_servers": ["t"]}, "tool_servers"),
             ({"network": "model_and_tools", "model_server": "m"}, "tool_servers"),

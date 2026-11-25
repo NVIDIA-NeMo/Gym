@@ -1,0 +1,32 @@
+# The example rows: five synthetic saved coding trials (three that game the grader, two fair fixes), replayed
+# through the judge with gym eval reverify. Use with configs/reward_hacking_judge.yaml.
+reward_hacking_judge:
+  resources_servers:
+    reward_hacking_judge:
+      domain: safety
+      description: MFN's reward-hacking judge (v2) over saved agent rollouts, for gym eval reverify
+      value: Flag passes won by solution lookup, block evasion or grader tampering, with evidence per trial
+      verified: false
+reward_hacking_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reward_hacking_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/reward_hacking_judge/data/example.jsonl
+        num_repeats: 1
+        license: Apache 2.0
+reward_hacking_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: reward_hacking_judge_simple_agent

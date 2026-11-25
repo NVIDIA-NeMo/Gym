@@ -448,10 +448,11 @@ def _run_webserver(monkeypatch, server_class: type, config: _Config) -> FastAPI:
     from nemo_gym.config.config_types import BaseServerConfig
     from nemo_gym.config.global_config import DRY_RUN_KEY_NAME
 
-    monkeypatch.setattr(base_server_module, "get_global_config_dict", lambda: {DRY_RUN_KEY_NAME: False})
+    global_config = {**SERVER_GLOBAL_CONFIG, DRY_RUN_KEY_NAME: False}
+    monkeypatch.setattr(base_server_module, "get_global_config_dict", lambda: global_config)
     monkeypatch.setattr(ray_support_module, "_get_ray", MagicMock(return_value=MagicMock()))
     server_client = MagicMock(spec=ServerClient)
-    server_client.global_config_dict = SERVER_GLOBAL_CONFIG
+    server_client.global_config_dict = global_config
     server_client_class = MagicMock(return_value=server_client)
     server_client_class.load_head_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
     monkeypatch.setattr(base_server_module, "ServerClient", server_client_class)
@@ -682,28 +683,54 @@ class TestTrackedBeforeStart:
         assert owned.keys == []
         await owned.create("session", _spec())
 
-    async def test_a_start_cancelled_by_its_request_is_stopped(self) -> None:
+    @pytest.mark.parametrize("cancel_during_upload", [False, True])
+    async def test_a_cancelled_start_stops_as_soon_as_it_has_a_handle(
+        self, cancel_during_upload: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(owned_sandboxes_module, "STOP_TIMEOUT_S", 0.2)
         provider = FakeSnapshotProvider()
         owned = _owned(provider)
-        spec = SandboxSpec(image="image", ttl_s=60, files={"/task": "x"})
-        uploading = asyncio.Event()
-        real_close = provider.close
+        spec = SandboxSpec(image="image", ttl_s=60, ready_timeout_s=30, files={"/task": "x"})
+        created, return_handle = asyncio.Event(), asyncio.Event()
+        uploading, finish_upload = asyncio.Event(), asyncio.Event()
+        real_create, real_close = provider.create, provider.close
 
-        async def hanging_upload(*args: Any, **kwargs: Any) -> None:
+        async def held_create(spec: SandboxSpec) -> Any:
+            handle = await real_create(spec)
+            created.set()
+            await return_handle.wait()
+            return handle
+
+        async def held_upload(*args: Any, **kwargs: Any) -> None:
             uploading.set()
-            await asyncio.Event().wait()
+            await finish_upload.wait()
 
-        async def slow_close(handle: Any) -> None:
-            # A stop that has to await, so the cancelled request cuts the start's own stop short.
-            await asyncio.sleep(0.01)
+        async def close(handle: Any) -> None:
+            await anyio.lowlevel.checkpoint()
             await real_close(handle)
 
-        provider.upload_file = hanging_upload  # type: ignore[method-assign]
-        provider.close = slow_close  # type: ignore[method-assign]
-        async with anyio.create_task_group() as request:
-            request.start_soon(owned.create, "session", spec)
-            await asyncio.wait_for(uploading.wait(), timeout=5)
-            request.cancel_scope.cancel()
+        provider.close = close  # type: ignore[method-assign]
+        provider.create = held_create  # type: ignore[method-assign]
+        provider.upload_file = held_upload  # type: ignore[method-assign]
+
+        async def request() -> None:
+            async with anyio.create_task_group() as group:
+                group.start_soon(owned.create, "session", spec)
+                await asyncio.wait_for(created.wait(), timeout=5)
+                if cancel_during_upload:
+                    return_handle.set()
+                    await asyncio.wait_for(uploading.wait(), timeout=5)
+                group.cancel_scope.cancel()
+                return_handle.set()
+
+        task = asyncio.create_task(request())
+        try:
+            # A cancelled caller can stop the sandbox while the upload is still blocked.
+            await asyncio.wait_for(asyncio.shield(task), timeout=3)
+        finally:
+            return_handle.set()
+            finish_upload.set()
+            await task
 
         assert _states(provider) == ["stopped"]
         assert owned.keys == []
