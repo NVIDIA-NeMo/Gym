@@ -9,7 +9,8 @@
 # With partial-rollout checkpointing (a top-level `checkpoint:` block, usually set by the training framework),
 # a checkpoint pauses OpenCode in place, snapshots the task sandbox, and a restore forks the snapshot and resumes
 # OpenCode without adding a turn. That needs:
-#   - a sandbox provider that can snapshot (OpenSandbox); on any other provider episodes restart after a crash;
+#   - a sandbox provider that can snapshot (OpenSandbox, or AgentENV with `opencode_agentenv.yaml`); on any other
+#     provider episodes restart after a crash;
 #   - `checkpoint.state_dir` on a filesystem every restart of the run reads, where the SWE-bench server indexes the
 #     snapshots it takes so a `release` can delete them.
 #

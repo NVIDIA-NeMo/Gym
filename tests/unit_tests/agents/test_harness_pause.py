@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from shlex import quote
 from unittest.mock import AsyncMock
 
 import pytest
@@ -844,16 +845,22 @@ async def test_a_pause_of_a_sent_launch_that_never_claims_is_not_launched_only_a
 
 
 async def test_a_pause_of_a_sent_launch_that_claims_but_never_answers_times_out(tmp_path: Path) -> None:
-    async def claim() -> None:
-        await asyncio.sleep(0.2)
-        (tmp_path / "launch.claim").symlink_to("launch")
+    class ClaimingSandbox(LocalSandbox):
+        async def exec(self, command: str, **kwargs) -> SandboxExecResult:
+            # Claim between polling rounds in the same shell, not on a racing Python timer. The request must
+            # first observe no claim, then a claim without an acknowledgement, regardless of host load.
+            claim = quote(str(tmp_path / "launch.claim"))
+            return await super().exec(
+                f"sleep() {{ ln -s launch {claim} || exit 1; unset -f sleep; }}; {command}",
+                **kwargs,
+            )
 
-    claiming = asyncio.create_task(claim())
     outcome, answer = await request_pause(
-        LocalSandbox(), session_dir=str(tmp_path), workdir=None, seq=1, timeout=0.6, launch_sent=True
+        ClaimingSandbox(), session_dir=str(tmp_path), workdir=None, seq=1, timeout=0.6, launch_sent=True
     )
-    await claiming
     assert (outcome, answer) == ("timeout", None)
+    assert (tmp_path / "launch.claim").readlink() == Path("launch")
+    assert (tmp_path / PAUSE_REQUEST_FILE).read_text() == "1"
 
 
 async def test_a_pause_of_a_sent_launch_that_a_stop_fences_meanwhile_is_finished(tmp_path: Path) -> None:
