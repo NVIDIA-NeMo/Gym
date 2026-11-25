@@ -86,8 +86,9 @@ def _termination(response: dict[str, Any]) -> Submission | None:
     Declared response-budget exhaustion, the agent's own turn or wall-clock limit (``stop_reason`` ``max_turns`` or
     ``wall_time``) or an explicit content-filter outcome establishes a no-answer attempt, and so does a failed
     response the agent classified as unusable model output (``agent_invalid_output``, such as Stirrup's
-    ``compaction_failed``): the default outcome policy grades it as the model's result and never retries it. Gym's
-    recovery treats an agent that ran out of its own deadline the same way: what it kept is its result. Cancellation,
+    ``compaction_failed``): the default outcome policy grades it as the model's result and never retries it. A
+    wall-clock no-answer is scored too, with the ``agent_timeout`` kind (app.py), so recovery can still run again a
+    timeout whose window held an infrastructure fault. Cancellation,
     a provider failure or an undifferentiated limit does not establish a no-answer. HTTP model rejection codes alone
     likewise do not distinguish a model refusal from a request/configuration fault.
     """
@@ -181,7 +182,10 @@ def extract_finish_source(response: dict[str, Any]) -> Submission:
 
     if not accepted:
         return _NO_ANSWER
-    if len(accepted) != 1 or termination is not None:
+    # A wall-clock stop can land after the tool accepted the finish, while sibling calls of that response still run;
+    # the accepted answer stands. A turn limit is reached only by a run that returned without one.
+    wall_time = (response.get("metadata") or {}).get("stop_reason") == "wall_time"
+    if len(accepted) != 1 or (termination is not None and not wall_time):
         return _INVALID
     result_index, body = accepted[0]
     # Stirrup can execute other calls from the same finishing response. Their results may follow the finish

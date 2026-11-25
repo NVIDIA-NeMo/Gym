@@ -376,7 +376,11 @@ async def test_finish_token_limit_preserves_termination_evidence(make_server, co
     assert result["category"] == category
     assert result["response"] == response
     assert not any(key.startswith("_ng_") for key in result)
-    if scored:
+    if condition == "wall_time":
+        # Scored as the model's result, yet recovery can still tell a timeout that held an infrastructure fault.
+        assert result["failure_kind"] == "agent_timeout" and result["failure_outcome_attribution"] == "model"
+        assert "failure_outcome_action" not in result
+    elif scored:
         assert result.get("failure_kind") is None and "failure_outcome_action" not in result
     elif category == "submission_invalid":
         assert result["failure_kind"] == "verifier_error" and result["failure_outcome_action"] == "fail"
@@ -384,6 +388,21 @@ async def test_finish_token_limit_preserves_termination_evidence(make_server, co
         assert result["failure_kind"] == "critpt_custom_grader:response_incomplete"
         assert result["failure_outcome_action"] == "retry"
     fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finish_accepted_before_the_wall_clock_stop_is_graded(make_server):
+    _, app, fake = make_server(answer_source="finish_tool")
+    status, acknowledgement = await post(
+        app, "/finish", {"reason": "done", "derivation": "synthetic identity", "answer": SOURCE}
+    )
+    assert status == 200
+    row = agentic_payload(SOURCE, acknowledgement)
+    row["response"]["status"] = "incomplete"
+    row["response"]["metadata"] = {"stop_reason": "wall_time"}
+    status, result = await post(app, "/verify", row)
+    assert status == 200 and result["scored"] is True and result.get("failure_kind") is None
+    fake.grade.assert_awaited_once()
 
 
 @pytest.mark.asyncio

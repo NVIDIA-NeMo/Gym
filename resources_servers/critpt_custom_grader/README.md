@@ -244,8 +244,10 @@ counted, so an episode can make more model calls than that (see
 [Runtime and model configuration](#runtime-and-model-configuration)). A completed episode that never submits an
 answer, an empty accepted answer, or normal turn-budget exhaustion scores zero. So does an episode stopped at the
 agent's wall-clock limit (`sandbox_runner_timeout_seconds`, `metadata.stop_reason: wall_time`) without an accepted
-answer: the limit is the agent's own, so what it kept is its result, the way Gym's recovery treats an agent that ran
-out of its deadline. AA publishes no wall-clock limit, so when comparing with AA set the limit well above the
+answer: the limit is the agent's own, so what it kept is its result. That row keeps `failure_kind: agent_timeout`
+(attributed to the model, with no outcome action), so Gym's recovery still runs again a timeout whose window held a
+model-server, sandbox or tool-server fault and settles a clean one as final. An answer the `finish` tool accepted
+before the limit stopped the episode is graded. AA publishes no wall-clock limit, so when comparing with AA set the limit well above the
 episodes' durations at the serving speed and report how many episodes it stopped. So does an episode Stirrup ends
 because every context-compaction summary was unusable (`metadata.stop_reason: compaction_failed`, classified
 `agent_invalid_output`): it is the model's result, scored zero as `candidate_no_answer` and never regenerated.
@@ -256,8 +258,9 @@ incomplete coverage; do not silently count infrastructure failures as incorrect 
 no-answer outcomes. An explicit content-filter outcome with no answer also scores zero; ambiguous API rejections
 remain unscorable. A request the model server rejects (HTTP 400, 413 or 422, such as a context overflow that recovery
 could not resolve) is one of those: the status alone does not tell a model outcome from a request or configuration
-fault, so the row is `response_incomplete`. Its verdict asks for another attempt (`failure_outcome_action: retry`);
-resume keeps it, because it holds the agent's response, so run it again through [Recovery](#recovery). A rejection
+fault, so the row is `response_incomplete`. Its verdict asks for another attempt (`failure_outcome_action: retry`).
+In the agentic recipe the row holds the agent's response, so resume keeps it; run it again through
+[Recovery](#recovery). A failed response with no saved output is run again by resume within its attempt cap. A rejection
 that repeats on every attempt stays unscored and must be reported as incomplete coverage.
 
 Five repeats mean the mean of five independently scored attempts per task (mean pass@1), not credit when any one
@@ -476,8 +479,9 @@ once. BLAS and OpenMP are always limited to one thread. `max_concurrent_jobs` bo
 `reward` 0.0 or 1.0; `scored`; `mask_sample` (true on every unscored row); `category`; `cleanup_status`;
 `sandbox_observations` (per-domain provider, sandbox id, outcome, exit code, wall time). An unscored row is a masked
 result that also carries `failure_kind`, `failure_reason` (its category) and `failure_outcome_action`: `fail` for a
-terminal category, which grading the same response again cannot change, and `retry` otherwise. A scored row carries
-none of the three. The server writes no `_ng_*` key: that namespace belongs to rollout collection, which refuses it in
+terminal category, which grading the same response again cannot change, and `retry` otherwise. A scored row has no
+`failure_outcome_action` and null `failure_kind` and `failure_reason`, except a wall-clock no-answer, which carries
+`failure_kind: agent_timeout` and `failure_outcome_attribution: model`. The server writes no `_ng_*` key: that namespace belongs to rollout collection, which refuses it in
 an Environment Server's result, so the same row works behind `single_agent_turn_legacy` and on the `legacy_agent`
 relay.
 
@@ -547,8 +551,8 @@ so an entry persisted under one provider or image is never read under another.
 ## Recovery
 
 Verification is stateless (`/reverify_mode` is `stateless`), also with `agentic_execution`: `/verify` reads only its
-request and never an execution sandbox. An unscored verdict is a masked row in `<rollouts>.jsonl` that keeps the
-agent's response, so resume does not run it again. Re-grade the `provider_unavailable` rows from their saved
+request and never an execution sandbox. An unscored verdict of the agentic recipe is a masked row in
+`<rollouts>.jsonl` that keeps the agent's response, so resume does not run it again. Re-grade the `provider_unavailable` rows from their saved
 responses without a model call, and aggregate the new grades in place of those rows:
 
 ```bash
@@ -564,11 +568,13 @@ gym eval reverify --config resources_servers/critpt_custom_grader/configs/critpt
 gym eval aggregate -i "'<kept>.jsonl,<recovered>.jsonl'" -o <merged>.jsonl
 ```
 
-A `verifier_error` row (`failure_outcome_action: fail`) is final. A `response_incomplete` row has no answer to grade
-again: it needs a new episode. For a run started with `gym eval submit`, `gym eval resubmit --recover
+A `verifier_error` row (`failure_outcome_action: fail`) is final, and while one is in the run, `gym eval resubmit
+--recover` stops without recovering any row: fix or exclude its task first. A `response_incomplete` row has no answer
+to grade again: it needs a new episode. For a run started with `gym eval submit`, `gym eval resubmit --recover
 --rerun-masked-without-artifact --rerun-reason <text>` runs masked rows without a recorded grade again, each within its
-attempt cap. It can also select `provider_unavailable` rows, so re-grade those first and check the selection with
-`--inspect` before dispatching.
+attempt cap. That includes `provider_unavailable` rows, whose valid saved answers it would replace with new episodes,
+and the re-grade above does not settle into the run's store. Use the flag only when no `provider_unavailable` row is
+left, and check the selection with `--inspect` before dispatching.
 
 Sandboxes are single-use and stopped in a `finally`; `sandbox_spec.ttl_s`, where the provider enforces it, and the
 metadata labels (`ng-grader-job`, `ng-grader-domain`) are the provider-side backstop. Daytona does not read `ttl_s`;

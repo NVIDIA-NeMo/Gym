@@ -47,6 +47,8 @@ class DirectoryProvider:
         self.active_commands = 0
         self.peak_commands = 0
         self.closed = False
+        # Provider records deleted by a successful stop; an ended sandbox's record stays until then.
+        self.deleted = []
 
     async def create(self, spec):
         if self.create_failure:
@@ -89,6 +91,7 @@ class DirectoryProvider:
             self.stop_failures -= 1
             raise RuntimeError("synthetic provider stop failure")
         self.live.discard(handle.sandbox_id)
+        self.deleted.append(handle.sandbox_id)
 
     async def aclose(self):
         self.closed = True
@@ -305,6 +308,23 @@ async def test_command_that_exhausts_memory_is_reported_and_the_episode_continue
     assert "<stdout>alive</stdout>" in await sessions.execute("s1", "printf alive")
     await sessions.close(close())
     assert not provider.live
+    await sessions.shutdown()
+
+
+async def test_a_failed_delete_of_the_ended_sandbox_is_retried_when_the_session_closes(api, make_sessions):
+    sessions, provider = make_sessions()
+    await sessions.seed(seed())
+    provider.exec_error = sandbox_ended(PROVIDER_OOM_KILLED)
+    provider.stop_failures = 1
+    assert "out_of_memory" in await sessions.execute("s1", "allocate more than the limit")
+    assert "<stdout>alive</stdout>" in await sessions.execute("s1", "printf alive")
+    assert provider.deleted == []
+    # A stop that fails at close keeps the session; the next close deletes the replacement and the ended record.
+    provider.stop_failures = 1
+    with pytest.raises(api.AgenticExecutionError, match="cleanup"):
+        await sessions.close(close())
+    await sessions.close(close())
+    assert sorted(provider.deleted) == ["1", "2"]
     await sessions.shutdown()
 
 

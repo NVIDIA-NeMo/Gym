@@ -9,7 +9,7 @@ import logging
 import math
 import shlex
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -237,6 +237,8 @@ class _ExecutionSession:
     discard_requested: bool = False
     creation_task: asyncio.Task[None] | None = None
     stop_task: asyncio.Task[None] | None = None
+    # Sandboxes ended by the memory limit whose delete has not succeeded yet; closing the session retries them.
+    ended: list[tuple[AsyncSandbox, asyncio.Task[None]]] = field(default_factory=list)
 
 
 class AgenticExecutionSessions:
@@ -302,6 +304,23 @@ class AgenticExecutionSessions:
                 # A failed create can still leave a facade handle available for cleanup.
                 pass
         await self._stop_started(state)
+        await self._stop_ended(state)
+
+    async def _stop_ended(self, state: _ExecutionSession) -> None:
+        """Delete the sandboxes the memory limit ended; one that still fails keeps the session for a later retry."""
+        remaining = []
+        for sandbox, stop in state.ended:
+            if stop.done() and (stop.cancelled() or stop.exception() is not None):
+                stop = asyncio.create_task(sandbox.stop())
+                stop.add_done_callback(self._observe_background_result)
+            try:
+                await asyncio.wait_for(asyncio.shield(stop), self.config.close_timeout_s)
+            except Exception as error:
+                LOGGER.warning("Ended execution sandbox cleanup failed (%s)", type(error).__name__)
+                remaining.append((sandbox, stop))
+        state.ended = remaining
+        if remaining:
+            raise AgenticExecutionError("execution_cleanup_failed")
 
     async def _abort(self, state: _ExecutionSession) -> None:
         # Keep the unusable record after cleanup until a close or the reaper fences it: a retry must not recreate it.
@@ -394,8 +413,9 @@ class AgenticExecutionSessions:
         try:
             await asyncio.wait_for(asyncio.shield(ended), self.config.close_timeout_s)
         except Exception as error:
-            # The provider already ended this sandbox; its TTL reclaims any record this delete did not remove.
+            # The provider record can outlive its container until deleted: closing the session retries the delete.
             LOGGER.warning("Ended execution sandbox cleanup deferred (%s)", type(error).__name__)
+            state.ended.append((state.sandbox, ended))
         if self._shutting_down:
             await self._abort(state)
             raise AgenticExecutionError("execution_shutdown")

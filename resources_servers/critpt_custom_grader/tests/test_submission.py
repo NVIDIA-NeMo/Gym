@@ -321,10 +321,16 @@ def test_cancellation_evidence_overrides_an_earlier_acknowledged_answer():
     assert extract_finish_source(response) == Submission(None, "response_incomplete", False)
 
 
-@pytest.mark.parametrize("stop_reason", ["max_turns", "wall_time"])
-def test_a_limit_cannot_be_used_to_accept_a_contradictory_acknowledged_finish(stop_reason):
-    response = _response(_finish(), status="incomplete", metadata={"stop_reason": stop_reason})
+def test_a_turn_limit_cannot_be_used_to_accept_a_contradictory_acknowledged_finish():
+    response = _response(_finish(), status="incomplete", metadata={"stop_reason": "max_turns"})
     assert extract_finish_source(response) == Submission(None, "submission_invalid", False)
+
+
+def test_a_finish_accepted_before_the_wall_clock_stop_is_graded():
+    # The stop can land while sibling calls of the finishing response still run; the accepted answer stands.
+    stopped = _response(_finish(), status="incomplete", metadata={"stop_reason": "wall_time"})
+    assert extract_finish_source(stopped) == extract_finish_source(_response(_finish()))
+    assert extract_finish_source(stopped).category == "candidate_ready"
 
 
 def test_a_failed_compaction_cannot_be_used_to_accept_a_contradictory_acknowledged_finish():
