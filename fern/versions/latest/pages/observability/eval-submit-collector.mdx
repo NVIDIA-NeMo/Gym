@@ -157,8 +157,10 @@ feature gate, which recent collector releases add, each batch is compressed on i
 
 GPU and node series say which node and GPU they measure, not which model service used it. To tie them
 to a service, every Slurm job with a model service writes
-`<job dir>/artifacts/rollouts_service_declaration.json` when it starts, before the services do. It
-does not depend on the collector being enabled.
+`<job dir>/artifacts/rollouts_service_declaration.json` when it starts. The GPUs are listed while the
+services start, and the driver starts once the file is written: a listing that hangs is stopped after
+about two minutes, and the file is written without that node's GPUs. It does not depend on the collector
+being enabled.
 
 ```json
 {

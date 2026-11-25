@@ -70,7 +70,11 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
 )
-from nemo_gym.orchestration.executors.service_declaration import declared_service, render_declaration_writer
+from nemo_gym.orchestration.executors.service_declaration import (
+    DECLARATION_WAIT,
+    declared_service,
+    render_declaration_writer,
+)
 from nemo_gym.orchestration.executors.slurm.lustre_md_stats import (
     DRIVER_END,
     END,
@@ -1556,7 +1560,8 @@ def build_sbatch_script(
     )
     md_stats = compute.lustre_md_stats
     driver_command = (
-        marker_definition
+        (f"{DECLARATION_WAIT}\n" if declaration else "")
+        + marker_definition
         + (f"{gym_cmd}\n" if gym_cmd else "")
         + (f"_gym_md_stats {SERVICES_READY}\n" if md_stats else "")
         + _render_watched_driver(driver_srun, watched)

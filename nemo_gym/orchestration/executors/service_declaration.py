@@ -18,8 +18,9 @@
 Everything known at submit time (services, layouts, the allocation nodes each one runs on) is
 rendered into the script. The two facts only the running job knows are filled in there: each node's
 hostname, and the GPUs `nvidia-smi` lists in a job step on that node (index and UUID). The step runs
-before the services start; a node whose GPUs cannot be listed is declared with the reason and no GPU
-rows. The shape is `nemo_gym.rollouts.service_declaration.ServiceDeclaration`.
+in the background while the services start, and the driver starts only once it has written the file; a
+node whose GPUs cannot be listed is declared with the reason and no GPU rows. The shape is
+`nemo_gym.rollouts.service_declaration.ServiceDeclaration`.
 """
 
 import json
@@ -39,8 +40,8 @@ from nemo_gym.rollouts.service_declaration import SERVICE_DECLARATION_SCHEMA_VER
 
 PoolRole = Literal["prefill", "decode", "router"]
 
-# Seconds the GPU listing may take across all nodes before the job goes on without it, and the seconds after that
-# TERM before a listing step that has not stopped is killed.
+# Seconds the GPU listing may take across all nodes before the declaration is written without it, and the seconds
+# after that TERM before a listing step that has not stopped is killed.
 GPU_LISTING_TIMEOUT_SECONDS = 120
 GPU_LISTING_KILL_AFTER_SECONDS = 5
 GPUS_UNLISTED_REASON = "nvidia-smi listed no GPUs in a job step on this node"
@@ -107,7 +108,8 @@ def render_declaration_writer(
     declaration_path: Path,
     account: str | None = None,
 ) -> str:
-    """Batch-script lines that list each node's GPUs and write the declaration to `declaration_path`.
+    """Batch-script lines that list each node's GPUs and write the declaration to `declaration_path`, in the
+    background; `DECLARATION_WAIT` waits for them.
 
     `hosts` maps every node index the services use to the shell expansion of its hostname. One
     `srun` step covers all of them, so the listing costs one step whatever the node count; with
@@ -145,6 +147,7 @@ def render_declaration_writer(
     return "\n".join(
         [
             "# service declaration: which model service runs on which node and GPUs",
+            "{",
             listing,
             "_gym_decl_status=$?",
             _listing_reason(),
@@ -152,9 +155,14 @@ def render_declaration_writer(
             *node_calls,
             f"mkdir -p {shlex.quote(str(declaration_path.parent))}",
             write,
+            "} &",
+            "_gym_decl_pid=$!",
         ]
     )
 
+
+# Before the driver: its fallback writes an unavailable declaration when it finds none of this job's.
+DECLARATION_WAIT = 'wait "$_gym_decl_pid"'
 
 _TIER_ROLES: dict[str, PoolRole] = {"kv_producer": "prefill", "kv_consumer": "decode"}
 

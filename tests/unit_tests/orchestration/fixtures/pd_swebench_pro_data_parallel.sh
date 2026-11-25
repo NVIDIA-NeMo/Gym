@@ -21,6 +21,7 @@ gym_nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 export GYM_POOL_PREFILL_NODES="$(IFS=,; echo "${gym_nodes[*]:0:4}")"
 export GYM_POOL_DECODE_NODES="$(IFS=,; echo "${gym_nodes[*]:4:6}")"
 # service declaration: which model service runs on which node and GPUs
+{
 _gym_decl_gpus=$(timeout -k 5 120 srun --overlap --wait=0 --nodelist="${gym_nodes[0]},${gym_nodes[1]},${gym_nodes[2]},${gym_nodes[3]},${gym_nodes[4]},${gym_nodes[5]},${gym_nodes[6]},${gym_nodes[7]},${gym_nodes[8]},${gym_nodes[9]}" --nodes=10 --ntasks=10 --account=acct bash -c 'out=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader); s=$?; if [ "$s" -ne 0 ]; then echo "$SLURMD_NODENAME, nvidia-smi-exit, $s"; else printf "%s\n" "$out" | sed "s/^/$SLURMD_NODENAME, /"; fi' 2>>logs/service_declaration-$SLURM_JOB_ID.log)
 _gym_decl_status=$?
 case "$_gym_decl_status" in
@@ -61,6 +62,8 @@ _gym_decl_node 8 "${gym_nodes[8]}" '["gym-vllm/policy-decode"]' '["gym-vllm/poli
 _gym_decl_node 9 "${gym_nodes[9]}" '["gym-vllm/policy-decode"]' '["gym-vllm/policy-decode"]'
 mkdir -p /jobs/swebench_pro/artifacts
 printf '{"schema_version":1,"status":"available","run_id":%s,"benchmark":%s,"slurm_job_id":"%s","services":%s,"nodes":[%s],"gpus":[%s]}\n' '"jobs"' '"swebench_pro"' "$SLURM_JOB_ID" '[{"service":"gym-vllm/policy-prefill","gym_service":"policy-prefill","kind":"vllm_pd_tier","pool_role":"prefill","node_pool":"prefill","node_indices":[0,1,2,3],"port":8001,"tensor_parallel_size":4,"pipeline_parallel_size":1,"data_parallel_size":4,"ray_serve":false,"server_per_node":false,"gpus_per_node":4},{"service":"gym-vllm/policy-decode","gym_service":"policy-decode","kind":"vllm_pd_tier","pool_role":"decode","node_pool":"decode","node_indices":[4,5,6,7,8,9],"port":8002,"tensor_parallel_size":4,"pipeline_parallel_size":1,"data_parallel_size":6,"ray_serve":false,"server_per_node":false,"gpus_per_node":4},{"service":"gym-vllm/policy","gym_service":"policy","kind":"vllm_pd_router","pool_role":"router","node_indices":[0],"port":8000,"gpus_per_node":0}]' "$(IFS=,; echo "${_gym_decl_nodes[*]}")" "$(IFS=,; echo "${_gym_decl_rows[*]}")" > /jobs/swebench_pro/artifacts/rollouts_service_declaration.json.tmp && cp /jobs/swebench_pro/artifacts/rollouts_service_declaration.json.tmp logs/service_declaration-$SLURM_JOB_ID.json && mv /jobs/swebench_pro/artifacts/rollouts_service_declaration.json.tmp /jobs/swebench_pro/artifacts/rollouts_service_declaration.json
+} &
+_gym_decl_pid=$!
 
 # service: otel_collector
 env OTEL_TOKEN=${OTEL_TOKEN} SLURM_JOB_ID=${SLURM_JOB_ID} GYM_OTEL_NODE_4_HOST=${gym_nodes[4]} srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --account=acct --output=logs/otel_collector-$SLURM_JOB_ID.log sh -c 'src=$(command -v otelcol-contrib) || { echo "OTel collector binary not found: "otelcol-contrib >&2; exit 127; }; dir=$(mktemp -d "/tmp/gym-otel-$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/otelcol-contrib || exit 1; export GYM_OTEL_LOCAL_DIR="$dir"; trap "kill -TERM \$pid 2>/dev/null" TERM INT; "$dir"/otelcol-contrib --config /jobs/swebench_pro/otel/collector.yaml & pid=$!; wait $pid; rc=$?; while kill -0 $pid 2>/dev/null; do wait $pid; rc=$?; done; trap "" TERM INT; for s in metrics traces logs; do if [ -e "$dir/$s.jsonl" ]; then cat "$dir/$s.jsonl" >> /jobs/swebench_pro/otel/"$s.jsonl" && rm -f "$dir/$s.jsonl"; fi; done; rm -f "$dir"/otelcol-contrib; rmdir "$dir" 2>/dev/null; exit $rc' &
@@ -181,6 +184,7 @@ fi
 
 
 
+wait "$_gym_decl_pid"
 GYM_CMD=(
     gym eval run
     +output_jsonl_fpath=/jobs/swebench_pro/artifacts/rollouts.jsonl

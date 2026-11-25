@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -25,6 +27,7 @@ import pytest
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import service_declaration
 from nemo_gym.orchestration.executors.service_declaration import (
+    DECLARATION_WAIT,
     GPU_LISTING_FAILED_REASON,
     GPU_LISTING_KILLED_REASON,
     GPU_LISTING_TIMED_OUT_REASON,
@@ -257,6 +260,53 @@ def test_a_stalled_listing_step_holds_the_job_no_longer_than_its_deadline(tmp_pa
 
 
 @needs_shell
+def test_the_services_start_while_the_gpus_are_listed_and_the_driver_starts_once_the_declaration_is_written(tmp_path):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"policy": _vllm()},
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": {"gpu": _pool(1)}}},
+            "driver": {"container": "gym:img", "benchmarks": {"bench": {"run": {}}}},
+            "job": {"output_path": str(tmp_path)},
+            "otel": {"enabled": False},
+        }
+    )
+    job_dir = tmp_path / RUN_ID / "bench"
+    (job_dir / "logs").mkdir(parents=True)
+    script = build_sbatch_script(config, "bench", config.driver.benchmarks["bench"], config.compute["hsg"], job_dir)
+    (job_dir / "job.sh").write_text(script)
+    order, seen = tmp_path / "order", tmp_path / "declaration_the_driver_saw.json"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _executable(
+        bin_dir / "srun",
+        'case "$*" in\n'
+        '    *nvidia-smi*) sleep 2; echo listed >> "$ORDER"; echo "$SLURMD_NODENAME, 0, GPU-aaaa-0" ;;\n'
+        f'    *logs/driver-*) echo driver >> "$ORDER"; cp {job_dir}/artifacts/rollouts_service_declaration.json "$SEEN" ;;\n'
+        '    *) echo service >> "$ORDER"; exec sleep 600 ;;\n'
+        "esac\n",
+    )
+    _executable(bin_dir / "curl", "exit 0\n")
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "SLURM_JOB_ID": JOB_ID,
+        "SLURMD_NODENAME": "n0",
+        "ORDER": str(order),
+        "SEEN": str(seen),
+    }
+    process = subprocess.Popen(["bash", "job.sh"], cwd=job_dir, env=env, start_new_session=True)
+    try:
+        assert process.wait(timeout=60) == 0
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    assert order.read_text().split() == ["service", "listed", "driver"]
+    declaration = ServiceDeclaration.model_validate_json(seen.read_bytes())
+    assert declaration.status == "available" and [g.gpu_uuid for g in declaration.gpus] == ["GPU-aaaa-0"]
+
+
+@needs_shell
 @pytest.mark.parametrize("services, pools, listings, expected_gpus, unobserved", GPU_TABLE_CASES)
 def test_a_slurm_job_maps_each_gpu_uuid_to_the_services_on_its_node(
     tmp_path, services, pools, listings, expected_gpus, unobserved
@@ -426,7 +476,7 @@ def _run_job_start(tmp_path, services, pools, listings=None, srun_exit=None, sru
     (tmp_path / "logs").mkdir()
 
     hosts = " ".join(f"n{i}" for i in range(total_nodes))
-    block = f"gym_nodes=({hosts})\n{_declaration_block(_script(tmp_path, services, pools))}"
+    block = f"gym_nodes=({hosts})\n{_declaration_block(_script(tmp_path, services, pools))}\n{DECLARATION_WAIT}"
     env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "SLURM_JOB_ID": JOB_ID}
     subprocess.run(["bash", "-c", block], env={**env, "SLURMD_NODENAME": "n0"}, cwd=tmp_path, check=True, timeout=20)
     path = tmp_path / RUN_ID / "bench" / "artifacts" / "rollouts_service_declaration.json"
