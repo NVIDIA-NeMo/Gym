@@ -126,6 +126,39 @@ class TestSanity:
             _config(model_catalog_json="catalog.json")
 
     @pytest.mark.parametrize(
+        "codex_version, enabled",
+        [("0.144.4", False), ("0.144.4", True), ("0.99.0", False)],
+        ids=["false", "true", "older-version"],
+    )
+    def test_agents_enabled_is_refused_up_to_the_codex_version_that_rejects_the_key(
+        self, codex_version: str, enabled: bool
+    ) -> None:
+        # Codex 0.144.4 stops on the key with a configuration error, which fails the activation with HTTP 502.
+        # 0.99.0 is the older version only when the numbers are compared and not the strings.
+        with pytest.raises(ValidationError) as refusal:
+            _config(codex_version=codex_version, agents_enabled=enabled)
+        assert (
+            f"Codex {codex_version} does not support `agents_enabled`. "
+            "Use a compatible version (verified with 0.163.0) or omit the setting."
+        ) in str(refusal.value)
+
+    @pytest.mark.parametrize(
+        "codex_version, enabled",
+        [
+            ("0.144.4", None),
+            ("0.163.0", False),
+            ("0.163.0", True),
+            ("0.145.0", False),
+            ("0.144.10", False),
+            ("latest", False),
+        ],
+        ids=["unset", "verified-false", "verified-true", "unverified-version", "later-patch", "no-exact-version"],
+    )
+    def test_agents_enabled_is_accepted_otherwise(self, codex_version: str, enabled: bool | None) -> None:
+        # An unset switch writes no key. A version after 0.144.4 or a tag is not known to reject the key.
+        assert _config(codex_version=codex_version, agents_enabled=enabled).agents_enabled is enabled
+
+    @pytest.mark.parametrize(
         "settings",
         [{}, {"model_context_window": 40960}, {"model_auto_compact_token_limit": 32768}],
     )

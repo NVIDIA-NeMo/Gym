@@ -445,7 +445,8 @@ def test_codex_cli_default_features_and_session_state_reach_the_sandbox_launch(s
     [
         ({}, {}),
         (
-            {"model_catalog_json": "/opt/models/catalog.json", "agents_enabled": False},
+            # The fixture's Codex 0.144.4 rejects the [agents] key, so the switch needs another version.
+            {"model_catalog_json": "/opt/models/catalog.json", "agents_enabled": False, "codex_version": "0.163.0"},
             {"model_catalog_json": "/opt/models/catalog.json", "agents": {"enabled": False}},
         ),
     ],
