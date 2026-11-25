@@ -267,7 +267,10 @@ gym eval run --no-serve <the same --config and arguments> --agent officeenv_sand
 mini-SWE, OpenCode, OpenClaw, Stirrup and Terminus 2 run the same way with their configs and
 `--agent officeenv_sandbox_miniswe_agent`, `officeenv_sandbox_opencode_agent`,
 `officeenv_sandbox_openclaw_agent`, `officeenv_sandbox_stirrup_agent` or `officeenv_sandbox_terminus_2_agent`. As for
-Pi, the environment server ends Stirrup's run once the task has ended. Pi runs these rows
+Pi, the environment server stops Stirrup's run once the task has ended (`end_on_task_state`). Stirrup cannot run
+without a finish tool, so with its default finish tool most runs end when the model calls `finish`. The stop ends a
+run that calls `user complete-task`, before its next model call. Pi's config sets `finish_tool_names: []`, so for Pi
+the stop is the normal end. Pi runs these rows
 with `configs/officeenv_sandbox.yaml` and
 `++officeenv_sandbox_pi_environment_server.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
 or as it is (a `cli` episode's seed grants no MCP tools), and `api_search` rows with its MCP transport as
