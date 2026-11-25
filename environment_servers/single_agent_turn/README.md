@@ -57,7 +57,7 @@ A restore rebuilds a borrowed sandbox under a new ID. When the replacement attem
 
 ## A sandbox for each attempt
 
-When the Resources Server lends no sandbox, this server can start one for each attempt and lend it to the agent, so a harness that runs its loop in a sandbox, such as a Simple Agent in sandbox mode, never runs on a host. Set `sandbox_provider` to a named sandbox provider block and `sandbox_config` to the sandbox's settings; set both or neither. Unset, this server starts no sandbox, as before.
+This server can own a sandbox for each attempt: it starts it, lends it to the agent and to the verifier, and stops it, so a harness that runs its loop in a sandbox, such as Simple Agent, never runs on a host. The Resources Server and the agent only borrow it. Set `sandbox_provider` to a named sandbox provider block and `sandbox_config` to the sandbox's settings; set both or neither. Unset, this server starts no sandbox, as before.
 
 ```yaml
 environment_servers:
@@ -78,14 +78,14 @@ Each attempt then runs in one sandbox:
 
 | Step | What happens |
 |------|--------------|
-| Seed | After the Resources and tool server seeds, the server starts the sandbox through its `OwnedSandboxes` with the typed network rule, then seeds the agent with operate-scope `sandbox_access` to it. A sandbox the Resources seed lends wins: then the server starts none. |
+| Seed | After the Resources and tool server seeds, the server starts the sandbox through its `OwnedSandboxes` with the typed network rule, then seeds the agent with operate-scope `sandbox_access` to it. A Resources seed that lends a sandbox of its own fails the attempt (not retried): one attempt has one sandbox owner. |
 | Agent turn | The agent borrows the sandbox and runs its turn in it. `model_only` lets the sandbox reach the model server's host and no other host. |
 | Verify | After the agent closes, `/verify` also receives `ng_sandbox_access` (`NG_SANDBOX_ACCESS_KEY`), operate-scope access to the same sandbox. A verifier that grades in it declares the field on its own verify request model, excluded from dumps, and borrows it with `borrow()`. Every other verifier ignores it, and this server drops it from the verify reply, so it never reaches the stored result, even from a verifier that echoes its request. |
 | Cleanup | The server stops the sandbox on every path, after the agent session closes. `ttl_s` reclaims one it could not stop. |
 
 `sandbox_config` must name a network rule (`network`) and a lifetime (`ttl_s`), so no attempt starts with the provider's default egress or outlives a crashed server; `ttl_s` must exceed `default_episode_timeout_seconds` plus `cleanup_timeout_seconds`. A rule allows each named server's whole host, so `model_only` also reaches other servers on the model server's node. An episode that grants tools (`resources_tool_transports` or `tool_servers`) needs `network: model_and_tools` with those servers in `sandbox_config.tool_servers`, since a harness in the sandbox calls them from there.
 
-At startup the server builds the provider and refuses one that cannot apply the rule, such as Docker for `model_only`, or that no other process can connect to, such as the `local` provider, which runs commands on this host. There is no host fallback: if the sandbox cannot start, or cannot be lent to the verifier, the attempt fails as a retryable infrastructure failure and records no reward. The agent must run in the sandbox it is lent: an agent that would run elsewhere refuses the seed, as Simple Agent does unless it runs in sandbox mode. A checkpoint cannot rebuild a sandbox this server started, so with partial-rollout checkpointing on, such an episode starts over from its input after a crash.
+At startup the server builds the provider and refuses one that cannot apply the rule, such as Docker for `model_only`, or that no other process can connect to, such as the `local` provider, which runs commands on this host. There is no host fallback: if the sandbox cannot start, or cannot be lent to the verifier, the attempt fails as a retryable infrastructure failure and records no reward. The agent must run in the sandbox it is lent: an agent that would run elsewhere refuses the seed. Simple Agent runs its loop in any sandbox it is lent. A checkpoint cannot rebuild a sandbox this server started, so with partial-rollout checkpointing on, such an episode starts over from its input after a crash.
 
 Grading runs with the network rule the sandbox started with, and anything the agent left running keeps running until the sandbox stops: providers cannot change a running sandbox's egress yet.
 

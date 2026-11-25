@@ -760,7 +760,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """Decide at seed, from the Resources seed reply, who borrows a sandbox group this server starts.
 
         ``key`` names the group in ``self.sandboxes`` and must be unique to the attempt. ``lent`` is a sandbox the
-        Resources seed lent itself, which wins: then this server starts none. ``group`` is what the seed declared,
+        Resources seed lent itself: without ``sandbox_provider`` it is lent on and this server starts none; with it,
+        the attempt fails, since one attempt has one sandbox owner. ``group`` is what the seed declared,
         and ``task_tools`` names the tools the task declares or the episode grants, for the task opt-out check.
         Unless ``sandbox_opt_out`` says otherwise, the agent borrows the group for its turn and ``/verify`` borrows
         it after the agent closes. Returns ``None`` when nothing borrows a group this server starts, which is always
@@ -768,8 +769,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
         Raises:
             NgFailureEvent: A terminal seed failure, which no retry changes: a refused opt-out (a task opt-out with
-                tools, a grader opt-out for a grader that runs code) or a declared group without a
-                ``sandbox_provider`` to start it.
+                tools, a grader opt-out for a grader that runs code), a declared group without a ``sandbox_provider``
+                to start it, or a Resources Server that lends a sandbox although this server owns the attempt's.
         """
         settings = self._attempt_sandbox_settings()
         if settings is None:
@@ -788,6 +789,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 "that its grader runs code; such a grader always gets a sandbox"
             )
         if lent is not None:
+            if settings.sandbox_config is not None:
+                # One attempt has one sandbox owner, and with sandbox_provider set it is this server.
+                raise self._attempt_sandbox_refusal(
+                    f"Resources Server {resources_server} lent a sandbox, but Environment Server {self.config.name!r} "
+                    "starts the attempt's sandbox itself (sandbox_provider is set); a Resources Server only borrows "
+                    "the sandbox the Environment Server lends"
+                )
             return None
         lend_to_agent, lend_to_grader = not opt_out.task, not opt_out.grader
         if not (lend_to_agent or lend_to_grader):

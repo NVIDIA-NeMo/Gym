@@ -529,9 +529,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     ) -> CleanupHandle | None:
         """Seed the episode's resources and tool server sessions, then its agent session with what they lent.
 
-        Unless the resources seed lends a sandbox itself, the base class decides who borrows the attempt's sandbox
-        group (``plan_attempt_sandbox``); when the agent does, the group starts here, the Resources Server prepares
-        it if its seed declared so, and the agent is lent it.
+        With ``sandbox_provider`` set, this server owns the attempt's sandbox group: the base class decides who borrows
+        it (``plan_attempt_sandbox``); when the agent does, the group starts here, the Resources Server prepares it if
+        its seed declared so, and the agent is lent it. A resources seed that lends a sandbox of its own then fails
+        the attempt, since a Resources Server only borrows. Without it, a sandbox the resources seed lends is lent on
+        to the agent.
         ``register_agent_cleanup`` runs before the agent seed, so a lost agent seed reply is still closed;
         its result is returned.
         An episode whose agent holds resources MCP grants restarts after a crash
