@@ -220,7 +220,8 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 "fn_name": _raw_tests.get("fn_name"),
             }
         tests = UnitTests.model_validate(_raw_tests)
-        task_limits = ResourceLimits.model_validate(body.verifier_metadata.get("resource_limits") or {})
+        raw_limits = body.verifier_metadata.get("resource_limits")
+        task_limits = ResourceLimits.model_validate({} if raw_limits is None else raw_limits)
         timeout = (
             task_limits.time_limit_s if task_limits.time_limit_s is not None else self.config.unit_test_timeout_secs
         )

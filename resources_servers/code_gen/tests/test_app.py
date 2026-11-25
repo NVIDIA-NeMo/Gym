@@ -28,6 +28,7 @@ from app import (
 from fastapi.testclient import TestClient
 from lcb_integration.testing_util import MockStdinWithBuffer
 from pydantic import ValidationError
+from task_data import TaskData
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
@@ -399,6 +400,10 @@ class TestSandboxVerify:
     @pytest.mark.parametrize(
         "resource_limits",
         [
+            [],
+            "",
+            False,
+            0,
             {"time_limit_secs": 0.5},
             {"time_limit_s": 0},
             {"time_limit_s": -1.0},
@@ -418,6 +423,8 @@ class TestSandboxVerify:
         monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _passing)
         request = _verify_request("n=int(input())\nprint(n*n)")
         request.verifier_metadata["resource_limits"] = resource_limits
+        with pytest.raises(ValidationError):
+            TaskData.model_validate(request.verifier_metadata)
         with pytest.raises(ValidationError):
             await self._sandbox_server().verify(request)
         assert calls == []
