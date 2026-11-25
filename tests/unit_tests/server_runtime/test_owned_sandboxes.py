@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import MagicMock
 
 import anyio
@@ -18,7 +18,9 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
-from nemo_gym.sandbox.providers.base import SandboxSpec
+from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.providers.base import NETWORK_RULES, SandboxCapabilities, SandboxSpec
+from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 from nemo_gym.server_runtime import owned_sandboxes as owned_sandboxes_module
 from nemo_gym.server_runtime.base_server import SimpleServer
 from nemo_gym.server_runtime.owned_sandboxes import OwnedSandboxes, SandboxCheckpointConfig
@@ -88,6 +90,9 @@ def providers(monkeypatch) -> _Built:
         owned_sandboxes_module,
         "resolve_provider_owner_concurrency",
         lambda reference, named: owned_sandboxes_module.OwnerConcurrency(),
+    )
+    monkeypatch.setattr(
+        owned_sandboxes_module, "resolve_provider_metadata", lambda reference, named: {"provider_block": reference}
     )
     monkeypatch.setattr("nemo_gym.server_runtime.base_server.get_global_config_dict", global_config_of_the_process)
     return built
@@ -1309,7 +1314,448 @@ async def test_a_superseded_stop_waiting_for_a_slot_is_bounded(monkeypatch, capl
     owned._stop_limit.release()
 
 
-@pytest.mark.parametrize("resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency"])
+class _RuleProvider(FakeSnapshotProvider):
+    """A provider that applies every network rule, the way OpenSandbox does, and records what it was asked."""
+
+    capabilities = SandboxCapabilities(network_rules=NETWORK_RULES)
+
+    def network_options(self, rule: str, hosts: Any, provider_options: Any) -> dict[str, Any]:
+        return {**provider_options, "network_policy": {"rule": rule, "hosts": list(hosts)}}
+
+
+class _NeverReconnects(FakeSnapshotProvider):
+    capabilities = SandboxCapabilities(reconnect="never")
+
+
+def _servers_at(**hosts: str) -> dict[str, Any]:
+    """A global config that defines each named server, the way a launch config nests it, on the given host."""
+    return {name: {"servers": {name: {"host": host, "port": 8000}}} for name, host in hosts.items()}
+
+
+class TestSpec:
+    def _owned(self, provider: Any, global_config: dict[str, Any] | None = None) -> OwnedSandboxes:
+        return OwnedSandboxes(
+            provider,
+            state_dir=None,
+            server_name="server",
+            default_metadata={"team": "gym", "run": "provider"},
+            global_config=global_config or _servers_at(policy_model="10.0.0.5", search="search.internal"),
+        )
+
+    def test_a_restricted_rule_allows_the_servers_hosts_and_the_listed_hosts(self) -> None:
+        config = SandboxConfig(
+            network="model_and_tools",
+            model_server="policy_model",
+            tool_servers=["search"],
+            allowed_hosts=["proxy.internal"],
+            ttl_s=60,
+            metadata={"run": "config"},
+            provider_options={"volumes": ["v"]},
+        )
+
+        spec = self._owned(_RuleProvider()).spec(config, image="image", workdir="/work", metadata={"task": "t1"})
+
+        assert spec.provider_options == {
+            "volumes": ["v"],
+            "network_policy": {
+                "rule": "model_and_tools",
+                "hosts": ["10.0.0.5", "search.internal", "proxy.internal"],
+            },
+        }
+        assert spec.metadata == {"team": "gym", "run": "config", "task": "t1"}
+        assert (spec.image, spec.workdir, spec.ttl_s) == ("image", "/work", 60)
+
+    def test_inherit_leaves_the_provider_options_as_they_are(self) -> None:
+        config = SandboxConfig(network="inherit", provider_options={"volumes": ["v"]})
+
+        spec = self._owned(_RuleProvider()).spec(config, image="image", workdir=None)
+
+        assert spec.provider_options == {"volumes": ["v"]}
+
+    def test_a_rule_the_provider_cannot_apply_is_refused(self) -> None:
+        config = SandboxConfig(network="no_network")
+
+        with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+            self._owned(FakeSnapshotProvider()).spec(config, image="image", workdir=None)
+
+    def test_a_server_on_a_loopback_address_is_refused(self) -> None:
+        config = SandboxConfig(network="model_only", model_server="policy_model")
+        owned = self._owned(_RuleProvider(), _servers_at(policy_model="127.0.0.1"))
+
+        with pytest.raises(ValueError, match="sandbox-reachable host"):
+            owned.spec(config, image="image", workdir=None)
+
+    def test_a_server_the_config_does_not_define_is_named(self) -> None:
+        config = SandboxConfig(network="model_only", model_server="typo_model")
+
+        with pytest.raises(ValueError, match="names server 'typo_model', for which the config defines no host"):
+            self._owned(_RuleProvider()).spec(config, image="image", workdir=None)
+
+    def test_the_servers_are_read_from_the_config_the_instance_was_built_with(self, monkeypatch) -> None:
+        def process_config() -> Any:
+            raise AssertionError("the config the server was started with, not the process's")
+
+        monkeypatch.setattr(owned_sandboxes_module, "get_global_config_dict", process_config)
+        config = SandboxConfig(network="model_only", model_server="policy_model")
+
+        spec = self._owned(_RuleProvider()).spec(config, image="image", workdir=None)
+
+        assert spec.provider_options["network_policy"]["hosts"] == ["10.0.0.5"]
+
+    def test_a_block_without_a_rule_keeps_its_options_and_warns_once_per_config_class(self, caplog) -> None:
+        owned = self._owned(_RuleProvider())
+        config = SandboxConfig(provider_options={"network_policy": {"defaultAction": "deny"}})
+
+        with caplog.at_level("WARNING", logger=owned_sandboxes_module.LOGGER.name):
+            first = owned.spec(config, image="image", workdir=None)
+            owned.spec(config, image="image", workdir=None)
+
+        assert first.provider_options == {"network_policy": {"defaultAction": "deny"}}
+        assert caplog.text.count("sets no network rule") == 1
+
+
+class TestCheckProvider:
+    def test_each_rule_is_checked_on_its_own(self) -> None:
+        owned = OwnedSandboxes(FakeSnapshotProvider(), state_dir=None, server_name="server")
+
+        owned.check_provider(configs=[SandboxConfig(network="inherit"), SandboxConfig()])
+        with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+            owned.check_provider(configs=[SandboxConfig(network="inherit"), SandboxConfig(network="no_network")])
+
+    def test_lending_is_refused_on_a_provider_that_never_reconnects(self) -> None:
+        owned = OwnedSandboxes(_NeverReconnects(), state_dir=None, server_name="server")
+
+        owned.check_provider()
+        with pytest.raises(ValueError, match="cannot lend a sandbox"):
+            owned.check_provider(lends=True)
+
+    def test_lending_is_refused_on_a_provider_that_declares_nothing_and_cannot_reconnect(self) -> None:
+        # A provider outside Gym that declares no capabilities reads reconnect="always"; only its methods tell.
+        class _NoReconnect:
+            name = "no_reconnect"
+
+        owned = OwnedSandboxes(_NoReconnect(), state_dir=None, server_name="server")  # type: ignore[arg-type]
+
+        with pytest.raises(ValueError, match="cannot lend a sandbox"):
+            owned.check_provider(lends=True)
+
+    async def test_the_first_access_refuses_too(self) -> None:
+        owned = OwnedSandboxes(_NeverReconnects(), state_dir=None, server_name="server", provider_config_ref="p")
+        await owned.create("session", _spec())
+
+        with pytest.raises(ValueError, match="cannot lend a sandbox"):
+            await owned.access("session", workdir="/work")
+        await owned.aclose()
+
+
+class _TypedConfig(_Config):
+    sandbox_config: SandboxConfig = SandboxConfig()
+    grader_sandbox_config: SandboxConfig = SandboxConfig(network="inherit")
+
+
+class _TypedServer(_Server):
+    config: _TypedConfig
+    owned_sandbox_blocks = {"sandbox_config": "sandbox_provider", "grader_sandbox_config": "sandbox_provider"}
+
+
+@pytest.mark.parametrize("enforced", [False, True])
+def test_opensandbox_startup_and_owner_require_the_same_deployment_declaration(enforced: bool) -> None:
+    options = {"networking": {"enforces_network_policy": True}} if enforced else {}
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {"runner": {"opensandbox": options}}
+    block = SandboxConfig(network="no_network")
+    server = _TypedServer(
+        config=_TypedConfig(
+            name="env", host="", port=0, entrypoint="", sandbox_provider="runner", sandbox_config=block
+        ),
+        server_client=server_client,
+    )
+    if enforced:
+        server.check_sandbox_provider()
+        assert server.sandboxes.spec(block, image="image", workdir=None).provider_options == {
+            "network_policy": {"defaultAction": "deny", "egress": []}
+        }
+    else:
+        with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+            server.check_sandbox_provider()
+        with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+            server.sandboxes.spec(block, image="image", workdir=None)
+
+
+class _UndeclaredServer(_Server):
+    """Starts its sandboxes some other way, so nothing applies a rule its blocks set."""
+
+    config: _TypedConfig
+
+
+class _NestedConfig(_Config):
+    tools: _TypedConfig
+
+
+class _NestedServer(_Server):
+    config: _NestedConfig
+
+
+class _GpuTypedServer(_Server):
+    config: _TypedConfig
+    owned_sandbox_blocks = {"sandbox_config": "gpu_sandbox_provider"}
+
+
+class _LendingServer(_Server):
+    lends_sandboxes = True
+
+
+class TestStartupCheck:
+    @pytest.fixture(autouse=True)
+    def provider_classes(self, monkeypatch) -> None:
+        classes = {"rules": _RuleProvider, "plain": FakeSnapshotProvider, "never": _NeverReconnects}
+        monkeypatch.setattr(
+            "nemo_gym.sandbox.config.resolve_provider_config", lambda reference, named: {reference: {}}, raising=True
+        )
+        monkeypatch.setattr("nemo_gym.sandbox.providers.registry.get_provider_class", classes.__getitem__)
+        monkeypatch.setattr("nemo_gym.server_runtime.base_server.get_global_config_dict", lambda: {})
+
+    def _typed(self, provider: str, rule: str) -> _TypedServer:
+        return _TypedServer(
+            config=_TypedConfig(
+                name="my_server",
+                host="",
+                port=0,
+                entrypoint="",
+                sandbox_provider=provider,
+                sandbox_config=SandboxConfig(network=rule),
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+    def test_a_rule_the_provider_cannot_apply_fails_the_startup(self) -> None:
+        with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+            self._typed("plain", "no_network").check_sandbox_provider()
+
+    def test_rules_the_provider_applies_pass(self) -> None:
+        self._typed("rules", "no_network").check_sandbox_provider()
+
+    def test_a_lending_server_on_a_provider_that_never_reconnects_fails_the_startup(self) -> None:
+        server = _LendingServer(
+            config=_Config(name="my_server", host="", port=0, entrypoint="", sandbox_provider="never"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        with pytest.raises(ValueError, match="cannot lend a sandbox"):
+            server.check_sandbox_provider()
+
+    def test_a_server_without_typed_blocks_or_lending_checks_nothing(self, providers) -> None:
+        _server(sandbox_provider="never").check_sandbox_provider()
+
+        assert providers == {}
+
+    def test_a_restricted_rule_in_a_block_the_server_does_not_declare_fails_the_startup(self) -> None:
+        server = _UndeclaredServer(
+            config=_TypedConfig(
+                name="my_server",
+                host="",
+                port=0,
+                entrypoint="",
+                sandbox_provider="rules",
+                sandbox_config=SandboxConfig(network="no_network"),
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        with pytest.raises(ValueError, match=r"no_network' in config.sandbox_config, but _UndeclaredServer does not"):
+            server.check_sandbox_provider()
+
+    def test_a_nested_undeclared_block_is_found(self) -> None:
+        nested = _TypedConfig(
+            name="tools", host="", port=0, entrypoint="", grader_sandbox_config=SandboxConfig(network="no_network")
+        )
+        server = _NestedServer(
+            config=_NestedConfig(name="my_server", host="", port=0, entrypoint="", tools=nested),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        with pytest.raises(ValueError, match=r"config.tools.grader_sandbox_config"):
+            server.check_sandbox_provider()
+
+    def test_an_undeclared_block_that_keeps_the_providers_egress_passes(self) -> None:
+        server = _UndeclaredServer(
+            config=_TypedConfig(name="my_server", host="", port=0, entrypoint="", sandbox_provider="plain"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        server.check_sandbox_provider()
+
+    @pytest.mark.parametrize(
+        ("sandbox_provider", "gpu_sandbox_provider", "refused"),
+        [
+            ("plain", "rules", False),
+            ("rules", "plain", True),
+        ],
+    )
+    def test_a_declared_block_is_checked_against_the_provider_its_field_names(
+        self, sandbox_provider: str, gpu_sandbox_provider: str, refused: bool
+    ) -> None:
+        server = _GpuTypedServer(
+            config=_TypedConfig(
+                name="my_server",
+                host="",
+                port=0,
+                entrypoint="",
+                sandbox_provider=sandbox_provider,
+                gpu_sandbox_provider=gpu_sandbox_provider,
+                sandbox_config=SandboxConfig(network="no_network"),
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        if refused:
+            with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+                server.check_sandbox_provider()
+        else:
+            server.check_sandbox_provider()
+
+    def test_a_declared_block_without_its_provider_field_fails_the_startup(self) -> None:
+        server = _GpuTypedServer(
+            config=_TypedConfig(
+                name="my_server", host="", port=0, entrypoint="", sandbox_config=SandboxConfig(network="no_network")
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+        with pytest.raises(ValueError, match="sets a network rule but no gpu_sandbox_provider"):
+            server.check_sandbox_provider()
+
+
+class _OwnNetworkConfig(SandboxConfig):
+    """A server's block with its own network setting, as partner_if's tool sandbox has until it moves."""
+
+    network: Literal["package_index"] = "package_index"  # type: ignore[assignment]
+
+
+def test_a_blocks_own_network_setting_is_left_to_its_server() -> None:
+    owned = OwnedSandboxes(FakeSnapshotProvider(), state_dir=None, server_name="server")
+
+    owned.check_provider(configs=[_OwnNetworkConfig()])
+
+
+class TestStartupCheckResolvesWhatItCan:
+    @pytest.fixture(autouse=True)
+    def provider_classes(self, monkeypatch) -> None:
+        classes = {"rules": _RuleProvider, "plain": FakeSnapshotProvider}
+        monkeypatch.setattr(
+            "nemo_gym.sandbox.config.resolve_provider_config", lambda reference, named: {reference: {}}
+        )
+        monkeypatch.setattr("nemo_gym.sandbox.providers.registry.get_provider_class", classes.__getitem__)
+        monkeypatch.setattr("nemo_gym.server_runtime.base_server.get_global_config_dict", lambda: {})
+
+    def _typed(self, block: SandboxConfig, **fields: Any) -> _TypedServer:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = _servers_at(policy="127.0.0.1")
+        return _TypedServer(
+            config=_TypedConfig(name="my_server", host="", port=0, entrypoint="", sandbox_config=block, **fields),
+            server_client=server_client,
+        )
+
+    def test_a_model_server_a_sandbox_cannot_reach_fails_the_startup(self) -> None:
+        server = self._typed(SandboxConfig(network="model_only", model_server="policy"), sandbox_provider="rules")
+
+        with pytest.raises(ValueError, match="sandbox-reachable host"):
+            server.check_sandbox_provider()
+
+    def test_a_rule_that_allows_a_host_other_servers_share_is_logged(self, caplog) -> None:
+        server = self._typed(SandboxConfig(network="model_only", model_server="policy"), sandbox_provider="rules")
+        server.server_client.global_config_dict = {
+            "policy": {"responses_api_models": {"vllm_model": {"host": "10.0.0.5", "port": 8000}}},
+            "judge": {"resources_servers": {"judge": {"host": "10.0.0.5", "port": 9000}}},
+            "elsewhere": {"resources_servers": {"other": {"host": "10.0.0.6", "port": 9000}}},
+        }
+
+        with caplog.at_level("WARNING", logger="nemo_gym.server_runtime.base_server"):
+            server.check_sandbox_provider()
+
+        assert "allows host 10.0.0.5, where judge also listen" in caplog.text
+        assert "elsewhere" not in caplog.text
+
+
+class TestSpecLeavesWhatIsNotATypedRule:
+    def test_a_subclass_with_its_own_network_setting_gets_its_options_as_they_are(self) -> None:
+        owned = OwnedSandboxes(_RuleProvider(), state_dir=None, server_name="server")
+        config = _OwnNetworkConfig(provider_options={"volumes": ["v"]})
+
+        spec = owned.spec(config, image="image", workdir=None)
+
+        assert spec.provider_options == {"volumes": ["v"]}
+
+    @pytest.mark.parametrize(
+        ("policy", "suggestion"),
+        [
+            (None, "network: inherit"),
+            ({"defaultAction": "deny", "egress": []}, "network: no_network"),
+            (
+                {"defaultAction": "deny", "egress": [{"action": "allow", "target": "proxy"}]},
+                "network: hosts_only with allowed_hosts ['proxy']",
+            ),
+        ],
+    )
+    def test_the_warning_names_the_rule_that_keeps_todays_behavior(self, caplog, policy, suggestion) -> None:
+        owned = OwnedSandboxes(_RuleProvider(), state_dir=None, server_name="server")
+        options = {"network_policy": policy} if policy is not None else {}
+
+        with caplog.at_level("WARNING", logger=owned_sandboxes_module.LOGGER.name):
+            owned.spec(SandboxConfig(provider_options=options), image="image", workdir=None)
+
+        assert suggestion in caplog.text
+
+    def test_a_mixed_legacy_policy_preserves_order_and_requests_manual_migration(self, caplog) -> None:
+        owned = OwnedSandboxes(OpenSandboxProvider(), state_dir=None, server_name="server")
+        options = {
+            "network_policy": {
+                "defaultAction": "deny",
+                "egress": [
+                    {"action": "deny", "target": "private.example"},
+                    {"action": "allow", "target": "*.example"},
+                ],
+            }
+        }
+        with caplog.at_level("WARNING", logger=owned_sandboxes_module.LOGGER.name):
+            spec = owned.spec(SandboxConfig(provider_options=options), image="image", workdir=None)
+
+        assert spec.provider_options == options
+        assert "review the ordered network_policy manually" in caplog.text
+        assert "allowed_hosts" not in caplog.text
+
+
+class _RulesWithoutOptions(FakeSnapshotProvider):
+    """Declares a rule it has no way to apply."""
+
+    capabilities = SandboxCapabilities(network_rules=NETWORK_RULES)
+
+
+def test_a_provider_that_declares_a_rule_without_applying_it_is_refused() -> None:
+    owned = OwnedSandboxes(_RulesWithoutOptions(), state_dir=None, server_name="server")
+
+    with pytest.raises(ValueError, match="cannot apply network 'no_network'"):
+        owned.spec(SandboxConfig(network="no_network"), image="image", workdir=None)
+
+
+class _LendingLaunchedServer(_LaunchedServer):
+    lends_sandboxes = True
+
+
+def test_a_launch_whose_provider_cannot_lend_fails_at_startup(monkeypatch) -> None:
+    monkeypatch.setattr("nemo_gym.sandbox.config.resolve_provider_config", lambda reference, named: {reference: {}})
+    monkeypatch.setattr(
+        "nemo_gym.sandbox.providers.registry.get_provider_class", {"never": _NeverReconnects}.__getitem__
+    )
+    config = _Config(name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", sandbox_provider="never")
+
+    with pytest.raises(ValueError, match="cannot lend a sandbox"):
+        _run_webserver(monkeypatch, _LendingLaunchedServer, config)
+
+
+@pytest.mark.parametrize(
+    "resolver", ["resolve_provider_config", "resolve_provider_owner_concurrency", "resolve_provider_metadata"]
+)
 def test_a_refused_provider_config_builds_no_provider(providers, monkeypatch, resolver: str) -> None:
     def refuse(*args: Any) -> None:
         raise ValueError("unknown provider block")

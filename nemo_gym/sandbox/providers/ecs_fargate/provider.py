@@ -29,9 +29,10 @@ import string
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxExecResult,
     SandboxHandle,
@@ -111,6 +112,9 @@ def _apply_spec_overrides(cfg: engine.EcsFargateConfig, spec: SandboxSpec) -> en
 
 class EcsFargateProvider:
     """Run sandboxes as AWS ECS Fargate tasks behind an SSH sidecar."""
+
+    # A borrower reconnects through the owner's tunnel, so only on the same host and as the same user.
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="same_host")
 
     name = "ecs_fargate"
 
