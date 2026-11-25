@@ -116,6 +116,7 @@ Other features use some of these words in their own senses and keep them:
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
 | **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
 | **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
+| **Harness tool** / **environment tool** | A harness tool runs in the agent's container with the harness, such as a Simple Agent **Python tool**, which runs the model's code in a Python worker beside the loop and which a task opts into by name in its `agent_context`. An environment tool is reached over HTTP, an API or MCP and served by a Resources Server or a sidecar. Not "code sandbox tool" or "local tool". |
 
 ### Evaluation
 

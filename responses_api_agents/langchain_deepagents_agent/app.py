@@ -291,6 +291,9 @@ class DeepAgentsAgent(SimpleAgent):
     # The builtin profile, this entrypoint's default, calls the Model Server from the task sandbox; Harbor reads this
     # literal from app.py. The tavily_search profile refuses a lent sandbox, so a Harbor run never uses it.
     calls_model_from_sandbox: ClassVar[bool] = True
+    # Its sessions run the DeepAgents graph, not Simple Agent's loop, so it takes none of Simple Agent's
+    # agent_context keys, such as python_tools: a seed that sends one is refused.
+    agent_context_model = None
     config: DeepAgentsAgentConfig
     agent: Any = Field(default=None, exclude=True)
     _sem: asyncio.Semaphore = PrivateAttr()

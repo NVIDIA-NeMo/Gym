@@ -130,9 +130,11 @@ from nemo_gym.trajectory import (
     failure_observations,
 )
 from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint, reachable_host
+from responses_api_agents.simple_agent.python_tool import PythonToolConfig, PythonToolSpec
 
 
 if TYPE_CHECKING:
+    from responses_api_agents.simple_agent.python_tool_client import PythonTools
     from responses_api_agents.simple_agent.sandbox import SandboxLoop
 
 
@@ -193,6 +195,20 @@ def _cookie_values(cookies: Any) -> dict[str, str]:
     return {str(name): str(getattr(value, "value", value)) for name, value in (cookies or {}).items()}
 
 
+class SimpleAgentContext(BaseModel):
+    """The ``agent_context`` keys a task may send Simple Agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    python_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The Python tools, by name in the agent's python_tools, that this task opts into. The model calls each "
+            "by the same name, and it runs in the agent's sandbox, never on a host."
+        ),
+    )
+
+
 @dataclass
 class SimpleAgentSessionState(AgentSessionState):
     tool_access: DirectHTTPToolAccess | None
@@ -221,6 +237,9 @@ class SimpleAgentSessionState(AgentSessionState):
     # host and port as that sandbox reaches them.
     sandbox_loop: "SandboxLoop | None" = None
     model_server_endpoint: tuple[str, int] | None = None
+    # The Python tools the task opted into, by name; the sandbox seed fills in where each one's files are.
+    python_tools: dict[str, PythonToolConfig] = field(default_factory=dict)
+    python_tool_specs: dict[str, PythonToolSpec] = field(default_factory=dict)
 
 
 def _dump_reply(reply: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -285,6 +304,15 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
         gt=0,
         allow_inf_nan=False,
         description="How long one activation of a sandboxed agent loop may run.",
+    )
+    python_tools: dict[str, PythonToolConfig] = Field(
+        default_factory=dict,
+        description=(
+            "Python tools a task can opt into by name in its agent_context. Each runs the model's code in a Python "
+            "worker beside the agent loop, in the sandbox the environment lends, and keeps its names between the "
+            "calls of one activation. A seed whose task opts into one must lend a sandbox, and the request must offer "
+            "the tool to the model under its name here."
+        ),
     )
 
     @model_validator(mode="before")
@@ -419,6 +447,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     # A seed that lends no sandbox runs the loop in this process; one that lends a sandbox runs it there.
     runs_loop_without_sandbox = True
     config: SimpleAgentConfig
+    agent_context_model = SimpleAgentContext
     # Continuation runs this class's turn loop on the session's history. A subclass can replace that loop, as
     # DeepAgentsAgent replaces responses(), so only a class that sets this in its own body supports continuation.
     continuation_supported: ClassVar[bool] = True
@@ -472,6 +501,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         state.model_server_endpoint = (model_host, model_port)
         try:
             await state.sandbox_loop.install(timeout=self.config.sandbox_install_timeout_seconds)
+            if state.python_tools:
+                state.python_tool_specs = await state.sandbox_loop.install_python_tools(
+                    state.python_tools, timeout=self.config.sandbox_install_timeout_seconds
+                )
         except BaseException as error:
             try:
                 await state.sandbox_loop.close(timeout=self.config.session_close_timeout_seconds)
@@ -505,7 +538,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             request=body,
             tool_access=direct_access,
             resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
+            python_tools=self._opted_in_python_tools(body),
         )
+
+    def _opted_in_python_tools(self, body: AgentSeedSessionRequest) -> dict[str, PythonToolConfig]:
+        """The Python tools the seed's task opts into, by name; refuse one this agent does not define or cannot run."""
+        # A subclass may declare its own context model, without the key.
+        names = getattr(self.parse_agent_context(body), "python_tools", None)
+        if not names:
+            return {}
+        # Imported here, like the sandbox runtime's other helpers: a task that opts into a tool always lends a sandbox.
+        from responses_api_agents.simple_agent.sandbox import opted_in_python_tools
+
+        return opted_in_python_tools(names, self.config.python_tools, lends_sandbox=body.sandbox_access is not None)
 
     async def export_agent_sessions(
         self, session_keys: list[str], *, checkpoint_id: str
@@ -765,7 +810,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
         activation: Activation | None = None,
+        python_tools: "PythonTools | None" = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        """Run the turn loop. ``python_tools`` are the task's Python tools, which only the sandboxed runner passes."""
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
         turns: list[TrajectoryTurn] = []
@@ -1026,49 +1073,67 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         error_type = type(e).__name__
                         tool_status = "failed"
                 else:
-                    # Resource-server errors are valid model-visible tool outputs.
-                    if tool_access is not None:
-                        api_response = await http_request(
-                            method="POST",
-                            url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
-                            json=parsed_arguments,
-                            cookies=resources_server_cookies,
-                            # The call's ID lets the server join its record to this trajectory and recognize the
-                            # client's resend of a call whose connection dropped.
-                            headers=dict(tool_access.headers) | {TOOL_CALL_ID_HEADER: output_function_call.call_id},
-                            _internal=True,
+                    # A Python tool the task opted into runs beside this loop, in the agent's sandbox. As with a
+                    # Resources tool, errors in the model's code come back to it in the tool's output.
+                    answered = (
+                        await python_tools.answer(
+                            output_function_call.name, parsed_arguments, granted=tool_access is not None
                         )
+                        if python_tools is not None
+                        else None
+                    )
+                    if answered is not None:
+                        tool_output, error_type = answered
+                        tool_status = "failed" if error_type else "completed"
                     else:
-                        if in_session:
-                            # An Environment Server episode reaches Resources only through its grants; the
-                            # configured resources_server has no session for this episode.
-                            raise RuntimeError(
-                                f"Model called tool {output_function_call.name!r}, but this agent session has no "
-                                "direct HTTP tool access"
+                        # Resource-server errors are valid model-visible tool outputs.
+                        if tool_access is not None:
+                            api_response = await http_request(
+                                method="POST",
+                                url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
+                                json=parsed_arguments,
+                                cookies=resources_server_cookies,
+                                # The call's ID lets the server join its record to this trajectory and recognize the
+                                # client's resend of a call whose connection dropped.
+                                headers=dict(tool_access.headers)
+                                | {TOOL_CALL_ID_HEADER: output_function_call.call_id},
+                                _internal=True,
                             )
-                        if self.config.resources_server is None:
-                            raise RuntimeError(
-                                "Simple Agent received a tool call without direct HTTP tool access "
-                                "or a legacy resources_server configuration"
+                        else:
+                            if in_session:
+                                # An Environment Server episode reaches Resources only through its grants; the
+                                # configured resources_server has no session for this episode.
+                                raise RuntimeError(
+                                    f"Model called tool {output_function_call.name!r}, but this agent session has no "
+                                    "direct HTTP tool access"
+                                )
+                            if self.config.resources_server is None:
+                                raise RuntimeError(
+                                    "Simple Agent received a tool call without direct HTTP tool access "
+                                    "or a legacy resources_server configuration"
+                                )
+                            api_response = await self.server_client.post(
+                                server_name=self.config.resources_server.name,
+                                url_path=f"{resources_prefix}/{output_function_call.name}",
+                                json=parsed_arguments,
+                                cookies=resources_server_cookies,
                             )
-                        api_response = await self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path=f"{resources_prefix}/{output_function_call.name}",
-                            json=parsed_arguments,
-                            cookies=resources_server_cookies,
-                        )
-                    tool_output, images = _split_tool_output_images((await api_response.content.read()).decode())
-                    tool_images.extend(images)
-                    resources_server_cookies = dict(resources_server_cookies or {})
-                    resources_server_cookies.update(_cookies(api_response))
-                    ends_activation |= api_response.headers.get(END_ACTIVATION_HEADER) == "true"
-                    if collect_trajectory:
-                        completed = 200 <= api_response.status < 400
-                        error_result = api_response.headers.get(TOOL_ERROR_HEADER) == "true"
-                        tool_status = "completed" if completed and not error_result else "failed"
-                        error_type = (
-                            f"http_{api_response.status}" if not completed else "tool_error" if error_result else None
-                        )
+                        tool_output, images = _split_tool_output_images((await api_response.content.read()).decode())
+                        tool_images.extend(images)
+                        resources_server_cookies = dict(resources_server_cookies or {})
+                        resources_server_cookies.update(_cookies(api_response))
+                        ends_activation |= api_response.headers.get(END_ACTIVATION_HEADER) == "true"
+                        if collect_trajectory:
+                            completed = 200 <= api_response.status < 400
+                            error_result = api_response.headers.get(TOOL_ERROR_HEADER) == "true"
+                            tool_status = "completed" if completed and not error_result else "failed"
+                            error_type = (
+                                f"http_{api_response.status}"
+                                if not completed
+                                else "tool_error"
+                                if error_result
+                                else None
+                            )
 
                 if collect_trajectory:
                     tool_records.append(
@@ -1153,6 +1218,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 "Simple Agent execute_tools=false is supported only for agent-session requests; "
                 "seed an agent session before calling /v1/responses"
             )
+        if state is None and self.config.python_tools:
+            from responses_api_agents.simple_agent.sandbox import refuse_python_tools_without_session
+
+            refuse_python_tools_without_session(body, defined=self.config.python_tools)
         participant = self.checkpoint_participant
         target = self._activation_target(state, rollout_id)
         index = None
@@ -1272,6 +1341,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         """Create a session activation's episode. A subclass whose task context lives in its session state, such as
         a document to put in the request, overrides this; the agent loop stays ``_create_episode``'s."""
+        if state.python_tools or self.config.python_tools:
+            from responses_api_agents.simple_agent.sandbox import check_python_tools_offered
+
+            check_python_tools_offered(
+                body,
+                opted_in=state.python_tools,
+                defined=self.config.python_tools,
+                granted=state.tool_access is not None,
+            )
         if state.sandbox_loop is not None:
             return await self._create_sandboxed_episode(state, body, **kwargs)
         if state.request.sandbox_access is not None:
@@ -1311,6 +1389,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 "resources_server_cookies": _cookie_values(cookies) if cookies is not None else None,
                 "model_server_cookies": _cookie_values(model_cookies) if model_cookies is not None else None,
             },
+            "python_tools": {name: spec.model_dump(mode="json") for name, spec in state.python_tool_specs.items()},
         }
         output = await state.sandbox_loop.run(
             payload,

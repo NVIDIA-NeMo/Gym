@@ -25,14 +25,16 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import ClientResponseError, RequestInfo
+from fastapi import HTTPException
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
 import nemo_gym
-from nemo_gym.agents import SandboxCommand, SandboxPythonRuntime, SandboxSession
+from nemo_gym.agents import AgentSeedRejectedError, SandboxCommand, SandboxPythonRuntime, SandboxSession
 from nemo_gym.core import FailureHeader, RequestFailureLog, rebuild_failure
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.server_runtime import BorrowedSandbox
+from responses_api_agents.simple_agent.python_tool import PythonToolConfig, PythonToolSpec
 
 
 # The loop's import closure: these distributions and their dependencies, at this server's versions. A unit test
@@ -63,7 +65,15 @@ RUNTIME = SandboxPythonRuntime(
     import_check="import aiohttp, fastapi, hydra, omegaconf, openai, pydantic, uvicorn",
 )
 # The Simple Agent files the runner imports; the rest of nemo_gym comes from this server's own package.
-_AGENT_FILES = ("__init__.py", "app.py", "sandbox.py", "sandbox_runner.py")
+_AGENT_FILES = (
+    "__init__.py",
+    "app.py",
+    "python_tool.py",
+    "python_tool_client.py",
+    "python_tool_worker.py",
+    "sandbox.py",
+    "sandbox_runner.py",
+)
 
 
 def harness_dir() -> str:
@@ -76,6 +86,94 @@ def harness_dir() -> str:
 
 def runner_path() -> str:
     return f"{harness_dir()}/responses_api_agents/simple_agent/sandbox_runner.py"
+
+
+def opted_in_python_tools(
+    names: list[str], defined: dict[str, PythonToolConfig], *, lends_sandbox: bool
+) -> dict[str, PythonToolConfig]:
+    """The Python tools a seed's task opts into, by name; refuse one the agent does not define or cannot run."""
+    if unknown := sorted(set(names) - defined.keys()):
+        raise AgentSeedRejectedError(
+            f"The task opts into Python tools {unknown}, which this agent's python_tools does not define"
+        )
+    if not lends_sandbox:
+        # No host fallback: the model's code runs only in the sandbox the environment lends.
+        raise AgentSeedRejectedError(
+            f"The task opts into Python tools {sorted(set(names))}, which run only in a sandbox the environment "
+            "lends; this seed lends none"
+        )
+    return {name: defined[name] for name in names}
+
+
+def check_python_tools_offered(
+    body: Any, *, opted_in: dict[str, PythonToolConfig], defined: dict[str, PythonToolConfig], granted: bool
+) -> None:
+    """Refuse a request whose function tools disagree with the Python tools its task opted into.
+
+    The request offers a tool to the model and the task's agent_context opts into running it here, so a name in one
+    and not the other is a task that cannot run as written: refused with a terminal 422 before the loop runs, instead
+    of failing when the model calls it.
+    """
+    offered = _offered_function_names(body)
+    if not_offered := sorted(opted_in.keys() - offered):
+        raise HTTPException(
+            422, f"The task opts into Python tools {not_offered}, but the request does not offer them to the model"
+        )
+    # A tool grant may serve any name, so only a session without one has every offered tool to run itself.
+    if (not_opted_in := sorted((offered & defined.keys()) - opted_in.keys())) and not granted:
+        raise HTTPException(
+            422,
+            f"The request offers {not_opted_in}, which this agent runs as Python tools, but the task does not opt "
+            "into them; add them to the row's agent_context: {agent: {values: {python_tools: [...]}}}",
+        )
+
+
+def refuse_python_tools_without_session(body: Any, *, defined: dict[str, PythonToolConfig]) -> None:
+    """Refuse a request outside an agent session that offers one of this agent's Python tools.
+
+    A Python tool runs only in the sandbox an Environment Server lends a session. Without a session the call would go
+    to the configured Resources Server, which does not serve it, so every call would answer Not Found.
+    """
+    if offered := sorted(_offered_function_names(body) & defined.keys()):
+        raise HTTPException(
+            422,
+            f"The request offers {offered}, which this agent runs as Python tools only in an agent session whose "
+            "Environment Server lends a sandbox; run the task through its Environment Server",
+        )
+
+
+def _offered_function_names(body: Any) -> set[str]:
+    return {_function_tool_name(tool) for tool in body.tools or []} - {None}
+
+
+def _function_tool_name(tool: Any) -> str | None:
+    """The name of a function tool the request offers, or None for any other kind of tool."""
+    if isinstance(tool, dict):
+        return tool.get("name") if tool.get("type") == "function" else None
+    return getattr(tool, "name", None) if getattr(tool, "type", None) == "function" else None
+
+
+def python_tool_worker_path() -> str:
+    return f"{harness_dir()}/responses_api_agents/simple_agent/python_tool_worker.py"
+
+
+def python_tool_runtime(config: PythonToolConfig) -> SandboxPythonRuntime | None:
+    """A Python tool's own runtime in the sandbox, or None for a tool without requirements, which runs on the loop's.
+
+    The requirements carry their own pins; the tool does not take this server's versions, which may differ.
+    """
+    if not config.requirements:
+        return None
+    return SandboxPythonRuntime(
+        harness="simple_agent_python_tool",
+        requirements=tuple(config.requirements),
+        import_check=_import_check(config),
+        constraints=(),
+    )
+
+
+def _import_check(config: PythonToolConfig) -> str:
+    return f"import {', '.join(sorted(set(config.preload.values())))}" if config.preload else "import sys"
 
 
 @functools.cache
@@ -198,6 +296,33 @@ class SandboxLoop:
             f"{quote(RUNTIME.python)} -E -s {quote(runner_path())} --check", cwd="/", timeout_s=120
         )
         _check(checked, "import the agent loop")
+
+    async def install_python_tools(
+        self, tools: dict[str, PythonToolConfig], *, timeout: float
+    ) -> dict[str, PythonToolSpec]:
+        """Install each Python tool's runtime unless the sandbox has it, check that it imports the tool's preloaded
+        modules, and return where each tool's files are. Call it after ``install``, which unpacks the worker."""
+        specs: dict[str, PythonToolSpec] = {}
+        sandbox = self.session.sandbox
+        for name, config in tools.items():
+            runtime = python_tool_runtime(config)
+            if runtime is not None and not await runtime.is_installed(sandbox):
+                await runtime.install(sandbox, timeout_s=timeout)
+            python = runtime.python if runtime is not None else RUNTIME.python
+            checked = await sandbox.exec(
+                f"{quote(python)} -I -c {quote(_import_check(config))}", cwd="/", timeout_s=min(timeout, 300)
+            )
+            if checked.error_type is None and checked.return_code != 0:
+                # The runtime runs but lacks a module: the agent's config is wrong, and no retry changes that.
+                detail = (checked.stderr or checked.stdout or "").strip()[-2000:]
+                raise AgentSeedRejectedError(
+                    f"Python tool {name!r} cannot import its preloaded modules in the sandbox: {detail}"
+                )
+            _check(checked, f"import the preloaded modules of Python tool {name!r}")
+            specs[name] = PythonToolSpec(
+                config=config, python=python, worker=python_tool_worker_path(), workdir=self.session.workdir
+            )
+        return specs
 
     async def run(self, payload: dict[str, Any], *, timeout: float, close_timeout: float) -> dict[str, Any]:
         """Run the agent loop once with ``payload`` and return what it wrote; raise what the loop raised."""

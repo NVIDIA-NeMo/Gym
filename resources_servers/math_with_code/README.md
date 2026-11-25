@@ -1,6 +1,8 @@
 ## Details 
 
-**Environment**: Added a stateful async python code executor. The python code executor has access to scipy, numpy & pandas.
+**Environment**: The model solves math problems with an `execute_python` tool that has numpy, scipy and pandas, and
+answers in `\boxed{}`. The tool is a [Simple Agent Python tool](../../responses_api_agents/simple_agent/README.md#python-tools):
+the model's code runs in the attempt's sandbox, beside the agent loop. This server only grades the final answer.
 
 
 **Dataset**: Currently works with open_math_reasoning_problems_tool dataset which is a formatted version of open_math_reasoning_problems
@@ -72,7 +74,9 @@ print(f"5! = {result}")
             "parallel_tool_calls": False
         },
         "expected_result": original_data["expected_answer"],
-        "expected_code_contains": ""
+        "expected_code_contains": "",
+        # The task opts into Simple Agent's execute_python Python tool.
+        "agent_context": {"agent": {"values": {"python_tools": ["execute_python"]}}}
     }
     
     return converted
@@ -102,50 +106,63 @@ gym dataset download --storage gitlab \
     --output data/open_math_reasoning_problems_tool.jsonl
 ```
 
+Revision 0.0.1 predates the Python tool, so its rows lack the opt-in. Add it before using them:
+```
+python -c "import json, sys
+for line in sys.stdin:
+    row = json.loads(line)
+    row['agent_context'] = {'agent': {'values': {'python_tools': ['execute_python']}}}
+    print(json.dumps(row))" < data/open_math_reasoning_problems_tool.jsonl > data/train.jsonl
+```
 
-Start server 
+
+Start the servers. The Environment Server starts a sandbox for each attempt from the provider block named `sandbox`,
+so define one first (see [Sandboxes](https://docs.nvidia.com/nemo/gym/latest/infrastructure/sandbox)); its network
+rule must let the sandbox reach the model server.
 ```
 gym env start \
-    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
-    --model-type openai_model \
-    --resources-server math_with_code \
-    +simple_agent.responses_api_agents.simple_agent.resources_server.name=math_with_code
+    --config resources_servers/math_with_code/configs/math_with_code.yaml \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+    --model-type openai_model
 ```
 
 
 Collect trajectories
 ```
 gym eval run --no-serve \
-    --agent simple_agent \
-    --input data/open_math_reasoning_problems_tool.jsonl \
-    --output results/open_math_reasoning_problems_tool_output_new.jsonl \
+    --agent math_with_code_simple_agent \
+    --input resources_servers/math_with_code/data/example.jsonl \
+    --output results/math_with_code_example.jsonl \
     --limit 1
 ```
 
+Each row opts into the tool with `"agent_context": {"agent": {"values": {"python_tools": ["execute_python"]}}}`, as
+`data/example.jsonl` and the conversion script above do. The agent refuses a row that offers `execute_python` without
+the opt-in, before the model runs, so rows written before the tool moved (such as the `train` artifact's revision
+0.0.1) need the key added.
 
 
-### Sessions
 
-Each rollout gets its own Python worker process, which keeps variables between `execute_python` calls. The rollout's
-session cookie keys it, and the first `execute_python` call starts it. Workers fork from a forkserver, a separate
-Python process that imports the server module once, so they do not inherit the server's open sockets and each starts in
-milliseconds. The server's first worker also waits while the forkserver starts and imports the module and its numerical
-libraries; later calls reuse the same worker and variables.
+### The Python tool
 
-Cancelling the first tool request does not abandon a worker still starting in a thread. The server keeps that
-startup owned; close and checkpoint retirement wait for it, then stop the worker.
+The agent config `math_with_code_simple_agent` defines `execute_python`: a 10-second limit per call, numpy, scipy and
+pandas at the versions this server pinned before, preloaded as `np`, `numpy`, `scipy`, `pd` and `pandas`, and the same
+short list of builtins (with `__import__`, so `import` works). Each attempt gets one worker, which keeps the names a call
+defines for the next call. Errors and timeouts come back to the model as `success: false` with the message, as they did
+when this server ran the code. The sandbox gets 2 CPUs and 4 GiB on every provider, and the worker may allocate
+at most 2 GiB: code that asks for more gets a `MemoryError` instead of stopping the agent loop.
 
-Concurrent Python calls on the same session execute serially, so each receives its own result. Cancelling a request
-does not release the pipe while its execution is still running. Cleanup can stop a busy worker even when Python
-calls occupy every executor thread.
+### Where it runs
 
-Under an Environment Server, such as `math_with_code_environment_server` (`single_agent_turn_legacy`),
-`/seed_session` binds the cookie to the `resources_session_id`. `/close_session` stops the worker, even when
-`/verify` never ran, escalating to SIGTERM and then SIGKILL for a worker still running code. A worker that survives
-SIGKILL makes the close fail, so the caller retries it. Closing an unknown session, or closing again with the same
-`episode_id`, succeeds; a close with another `episode_id` gets 409. A seed that arrives after its session closed is
-refused with 409 for `session_close_retry_window_seconds`. An `execute_python` call for a closed session gets 404
-with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with reward 0.
+| Agent | Verifier | Why |
+|---|---|---|
+| attempt group | `none` | The task has the `execute_python` Python tool, which runs in the agent's container. The verifier normalizes the boxed answer and compares strings and floats, so it executes nothing. |
+
+`math_with_code_environment_server` sets `sandbox_config`, the task sandbox the agent borrows, and
+`verifier: {mode: none}`. See [Where it runs](../../environment_servers/single_agent_turn/README.md#where-it-runs).
+
+This server keeps the session contract for `math_with_code_environment_server` (`single_agent_turn_legacy`): a
+`/verify` for a closed session returns a masked sample instead of a reward of 0.
 
 ### Additional Details
 
