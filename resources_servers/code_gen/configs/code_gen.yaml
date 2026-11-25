@@ -74,18 +74,15 @@ code_gen_environment_server:
       agent_server:
         type: responses_api_agents
         name: code_gen_simple_agent
-      # code_gen is a pure QA task whose verifier runs the candidate's code. Simple Agent's loop runs in the Agent
-      # Server process (task opted out), and right before /verify this server starts a sandbox group for the verifier
-      # alone, from code_gen's verifier image, with no egress. code_gen runs the unit tests in it, and this server
-      # stops it. The verifier runs model code, so it never opts out. The README shows the variant for a harness that
-      # must run in the sandbox: one group from seed, shared by the agent and the verifier.
-      sandbox_opt_out:
-        task: true
-        verifier: false
+      # How this server starts sandbox groups; where each part runs is fixed per task (see the README). The task has no
+      # tools and Simple Agent runs its loop in its own process, so the agent borrows no group. code_gen declares
+      # verifier_mode separate: right before /verify this server starts a group from code_gen's verifier image with
+      # no network, code_gen runs the unit tests in it, and this server stops it.
       sandbox_provider: sandbox
       sandbox_config:
         workdir: /tmp
-        # What a group for the verifier alone gets whatever this says; stated so the config reads as it runs.
+        # The rule of a group an agent borrows; Simple Agent borrows none here, and a separate verifier's group always
+        # starts with no_network. A harness that runs its loop in a sandbox needs model_only with model_server.
         network: no_network
         # Above the default episode timeout plus the cleanup timeout; the provider reclaims a sandbox this server
         # could not stop.

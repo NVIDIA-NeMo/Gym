@@ -120,7 +120,7 @@ class TestSandboxLifecycle:
 
 
 class TestHeldSandbox:
-    """Grading in a sandbox the caller holds, such as the attempt's sandbox lent to /verify."""
+    """Grading in a sandbox the caller holds, such as the one lent to /verify."""
 
     async def _grade_in(self, provider, config: SandboxVerificationConfig | None = None, **kwargs):
         sandbox = AsyncSandbox(provider)

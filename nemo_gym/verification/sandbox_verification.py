@@ -18,8 +18,8 @@
 A resources server uploads its runner and harness files with a JSON request; inside the
 sandbox ``sandbox_runner.py request.json result.json`` grades the submission and writes a
 result file, which is downloaded and parsed. :func:`run_verification_sandbox` starts a sandbox for the one grade and
-stops it after; :func:`run_verification_in_sandbox` grades in a sandbox the caller already holds, such as the
-attempt's sandbox an Environment Server lends ``/verify``, and leaves it running for its owner to stop. Only the
+stops it after; :func:`run_verification_in_sandbox` grades in a sandbox the caller already holds, such as one
+an Environment Server lends ``/verify``, and leaves it running for its owner to stop. Only the
 provider-neutral sandbox API is used, so any provider works.
 
 Submission failures (wrong answer, timeout, crash) are the harness's to report in the
@@ -163,8 +163,8 @@ async def run_verification_in_sandbox(
 ) -> T:
     """Grade one submission in a sandbox the caller already holds, and return the parsed result.
 
-    The same runner contract as :func:`run_verification_sandbox`, for a sandbox someone else started, such as the
-    attempt's sandbox an Environment Server lends ``/verify``. The files are uploaded into a fresh subdirectory of
+    The same runner contract as :func:`run_verification_sandbox`, for a sandbox someone else started, such as one
+    an Environment Server lends ``/verify``. The files are uploaded into a fresh subdirectory of
     ``work_dir`` and the runner runs there; the sandbox is left running, since its owner stops it.
 
     The grade is only as trustworthy as the sandbox: ``python`` resolves there, and the result file is read back after

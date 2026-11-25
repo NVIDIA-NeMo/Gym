@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Grade a candidate in a sandbox: the attempt's sandbox lent to ``/verify``, or a fresh one.
+"""Grade a candidate in a sandbox: the one lent to ``/verify``, or a fresh one.
 
 This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py``, which
 runs only in the sandbox, and the unchanged grading harness from ``lcb_integration/``, the same

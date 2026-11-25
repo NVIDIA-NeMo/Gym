@@ -45,6 +45,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SandboxGroupSpec,
     SimpleResourcesServer,
+    VerifierMode,
     borrow,
     observe_programmatic_grading,
 )
@@ -65,10 +66,10 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     unit_test_timeout_secs: int
     debug: bool
     reasoning_format_penalty: float = 0.0
-    # The unit tests run in the attempt's sandbox when the Environment Server lends one to /verify. For a caller that
-    # lends none, such as a re-verification, they run in a fresh sandbox per verification from this provider: a
-    # top-level sandbox block, such as `sandbox` from nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml,
-    # or an inline provider mapping.
+    # The unit tests run in the sandbox the Environment Server lends /verify. For a caller that lends none, such as a
+    # re-verification, they run in a fresh sandbox per verification from this provider: a top-level sandbox block,
+    # such as `sandbox` from nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or an inline provider
+    # mapping.
     sandbox_provider: Union[str, Dict[str, Any]]
     sandbox_config: SandboxVerificationConfig = Field(default_factory=SandboxVerificationConfig)
 
@@ -97,9 +98,9 @@ class CompCodingRunRequest(BaseRunRequest):
 
 class CompCodingVerifyRequest(CompCodingRunRequest, BaseVerifyRequest):
     verifier_metadata: Optional[Dict[str, Any]] = None
-    # The attempt's sandbox (body key NG_SANDBOX_ACCESS_KEY), lent by the Environment Server that owns it once the
-    # agent has closed. The tests run in it instead of in a sandbox of this server's own. Excluded from dumps, so no
-    # response or result carries it.
+    # The verifier's sandbox (body key NG_SANDBOX_ACCESS_KEY), lent by the Environment Server that owns it and starts
+    # it right before /verify. The tests run in it instead of in a sandbox of this server's own. Excluded from
+    # dumps, so no response or result carries it.
     ng_sandbox_access: SandboxAccess | None = Field(default=None, exclude=True)
 
 
@@ -122,8 +123,10 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
     ray_enabled = False
-    # The verifier runs the candidate's code, so its tests always run in a sandbox: the attempt's group or a group for
-    # the verifier alone that an Environment Server lends /verify, or else a fresh sandbox of this server's own.
+    # The verifier runs the candidate's code, so its tests always run in a sandbox: a fresh group with no network that
+    # the Environment Server starts right before /verify and lends it, or else, for a caller that lends none, a fresh
+    # sandbox of this server's own.
+    verifier_mode: ClassVar[VerifierMode] = "separate"
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
@@ -134,7 +137,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         self._lent_sandbox_locks: WeakValueDictionary[str, Lock] = WeakValueDictionary()
 
     def sandbox_group(self, body: ResourcesSeedSessionRequest) -> SandboxGroupSpec:
-        """The attempt's sandbox group runs the unit tests, so it starts from code_gen's verifier image."""
+        """The verifier's group runs the unit tests, so it starts from code_gen's verifier image."""
         return SandboxGroupSpec(image=self.config.sandbox_config.image)
 
     def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
@@ -250,7 +253,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             )
 
         # 4) run in the sandbox lent to /verify, or else in a fresh provider sandbox. num_processes caps only the
-        # sandboxes this server starts: a lent sandbox is the attempt's own, so its grade does not queue behind them.
+        # sandboxes this server starts: a lent sandbox is its owner's, so its grade does not queue behind them.
         async with nullcontext() if body.ng_sandbox_access is not None else self._semaphore:
             """
             Sample looks like this:

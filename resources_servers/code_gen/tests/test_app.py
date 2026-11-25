@@ -399,10 +399,13 @@ class TestLentSandboxVerify:
         body = _verify_request(code).model_dump(mode="json") | {NG_SANDBOX_ACCESS_KEY: _ACCESS}
         return CompCodingVerifyRequest.model_validate(body)
 
-    def test_the_seed_declares_the_group_from_the_verifier_image(self) -> None:
-        # The Environment Server starts the attempt's group, or a group for the verifier alone, from this image.
+    def test_the_seed_declares_a_separate_verifier_from_the_verifier_image(self) -> None:
+        # The Environment Server starts a fresh group for the verifier alone, from this image, right before /verify.
         declaration = _make_server().sandbox_declaration(MagicMock(spec=ResourcesSeedSessionRequest))
-        assert declaration == {"sandbox_group": SandboxGroupSpec(image="code-gen-verifier:test")}
+        assert declaration == {
+            "sandbox_group": SandboxGroupSpec(image="code-gen-verifier:test"),
+            "verifier_mode": "separate",
+        }
 
     def test_the_access_is_read_from_the_wire_key_and_never_dumped(self) -> None:
         request = self._lent_request()
