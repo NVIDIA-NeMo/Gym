@@ -35,7 +35,12 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.config.secret_utils import mask_credentials
-from nemo_gym.server_runtime.base_server import BaseServer, UvicornBacklogConfig, UvicornProxyHeadersConfig
+from nemo_gym.server_runtime.base_server import (
+    BaseServer,
+    UvicornBacklogConfig,
+    UvicornLoopConfig,
+    UvicornProxyHeadersConfig,
+)
 from nemo_gym.telemetry.observer import observe_app_event_loop
 
 
@@ -90,6 +95,7 @@ class HeadServer(BaseServer):
         server = cls(config=config)
         global_config_dict = get_global_config_dict()
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
+        uvicorn_loop_cfg = UvicornLoopConfig.model_validate(global_config_dict)
 
         app = server.setup_webserver()
         # The head server runs on its own thread and event loop inside the supervisor process.
@@ -102,6 +108,7 @@ class HeadServer(BaseServer):
             proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
             forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
             backlog=UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog,
+            loop=uvicorn_loop_cfg.uvicorn_loop,
         )
         uvicorn_server = uvicorn.Server(config=config)
 

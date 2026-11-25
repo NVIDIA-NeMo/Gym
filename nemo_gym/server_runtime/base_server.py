@@ -37,6 +37,7 @@ from typing import (
     Callable,
     ClassVar,
     List,
+    Literal,
     Optional,
     Protocol,
     Sequence,
@@ -225,6 +226,22 @@ class UvicornReusePortConfig(BaseModel):
     # kernel spreads connections evenly across workers instead of whichever worker accepts first.
     # A server's own `uvicorn_reuse_port` overrides this.
     uvicorn_reuse_port: bool = False
+
+
+class UvicornLoopConfig(BaseModel):
+    """Which asyncio event loop implementation the Gym servers run on.
+
+    ``auto`` is uvicorn's default (uvloop when installed). ``asyncio`` selects the stdlib
+    selector loop. uvloop's ``create_connection(sock=...)`` path closes the descriptor through
+    libuv while the Python socket still holds the number when the connect is cancelled, so a
+    later connection can inherit a poisoned descriptor ("File descriptor N is used by
+    transport ..."). Gym's own aiohttp sessions guard against it, but third-party clients that
+    live in the same server process (a sandbox SDK's httpx clients, for one) connect through
+    their own paths. The stdlib loop closes the same socket object and is unaffected; set
+    ``uvicorn_loop: asyncio`` to take it.
+    """
+
+    uvicorn_loop: Literal["auto", "asyncio", "uvloop"] = "auto"
 
 
 # Every IPv4 address as it appears on a dual-stack socket.
@@ -796,6 +813,7 @@ repr(e): {repr(e)}"""
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
+        uvicorn_loop_cfg = UvicornLoopConfig.model_validate(global_config_dict)
         keepalive_cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
             print(
@@ -828,6 +846,8 @@ repr(e): {repr(e)}"""
             # so forwarded headers are never honored from an arbitrary peer.
             proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
             forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
+            # Event loop implementation (see UvicornLoopConfig).
+            loop=uvicorn_loop_cfg.uvicorn_loop,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:

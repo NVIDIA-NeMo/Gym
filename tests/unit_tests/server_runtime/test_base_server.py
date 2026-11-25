@@ -1699,6 +1699,16 @@ class TestRunWebserverProxyKwargs:
 
         self.ray_loader_mock.assert_called_once()
 
+    def test_event_loop_defaults_to_auto_and_can_select_asyncio(self, monkeypatch: MonkeyPatch) -> None:
+        """uvicorn_loop reaches uvicorn on both launch paths; asyncio is the escape from uvloop's cancelled-connect
+        descriptor poisoning."""
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+        assert kwargs["loop"] == "auto"
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_loop": "asyncio"}, num_workers=4)
+        assert kwargs["loop"] == "asyncio"
+        with raises(ValueError):
+            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_loop": "trio"}, num_workers=1)
+
     def test_unrelated_uvicorn_settings_are_unchanged(self, monkeypatch: MonkeyPatch) -> None:
         """The issue calls out parser, keepalive, access-log, and graceful-shutdown as must-not-change."""
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)

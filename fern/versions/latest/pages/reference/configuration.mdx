@@ -287,6 +287,21 @@ connections a server receives, which can approach the callers' `global_aiohttp_c
 
 The kernel caps the backlog at `net.core.somaxconn`, so raise that setting on hosts with a lower value.
 
+### Event Loop
+
+Gym servers run on Uvicorn's default event loop, which is uvloop when it is installed. Top-level `uvicorn_loop` selects
+the implementation for the head server and every agent, model, environment, and resources server:
+
+```yaml
+uvicorn_loop: asyncio
+```
+
+`auto` (the default) keeps Uvicorn's choice, `uvloop` requires uvloop, and `asyncio` runs the standard library's
+selector loop. Choose `asyncio` when a server process hosts third-party HTTP clients that connect through their own
+sockets (a sandbox SDK's httpx clients, for example): when such a connect is cancelled, uvloop closes the descriptor
+through libuv while the Python socket still holds its number, and a later connection can inherit it ("File descriptor
+N is used by transport"). The standard library loop closes the same socket object and is unaffected.
+
 ### Reverse Proxy Headers
 
 Gym disables Uvicorn proxy-header processing by default. Direct Gym traffic does not pass through a reverse proxy, so
