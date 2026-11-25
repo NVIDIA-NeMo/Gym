@@ -19,6 +19,7 @@ import functools
 import gc
 import importlib.metadata
 import logging
+import shlex
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -5338,6 +5339,106 @@ async def test_a_setup_command_that_fails_as_the_images_user_still_fails_the_cre
     assert failure_info.value.failure_kind == "provider_setup_failed"
     assert failure_info.value.details.exit_code == 4
     assert cleaned == ["sandbox-1"]
+
+
+class _ImageWithoutWorkdir(FakeSandbox):
+    """A sandbox whose image has no directory but ``/``, behind an execd that refuses a command whose working
+    directory does not exist (the service answers 400) and runs ``mkdir -p`` for real."""
+
+    last: "_ImageWithoutWorkdir | None" = None
+
+    def __init__(self, sandbox_id: str = "sandbox-1") -> None:
+        super().__init__(sandbox_id)
+        self.dirs = {"/"}
+        self.runs: list[tuple[Any, dict[str, Any]]] = []
+        self.commands = SimpleNamespace(run=self._run)
+        type(self).last = self
+
+    async def _run(self, command: Any, *, opts: Any, handlers: Any = None) -> Any:
+        self.runs.append((command, opts.kwargs))
+        cwd = opts.kwargs.get("working_directory") or "/"
+        if cwd not in self.dirs:
+            raise RuntimeError(f"HTTP 400: working directory {cwd} does not exist")
+        words = shlex.split(command) if isinstance(command, str) else list(command)
+        if words[:2] == ["mkdir", "-p"]:
+            self.dirs.update(words[2:])
+        stdout = [SimpleNamespace(text=cwd)] if words == ["pwd"] else []
+        return SimpleNamespace(logs=SimpleNamespace(stdout=stdout, stderr=[]), error=None, exit_code=0)
+
+
+async def test_a_working_directory_the_image_lacks_is_created_before_the_sandbox_is_handed_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nemo_gym.sandbox.api import AsyncSandbox
+
+    class RunCommandOpts:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (_ImageWithoutWorkdir, FakeConnectionConfig, RunCommandOpts, FakePlatformSpec, object),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    sandbox = await AsyncSandbox(provider, SandboxSpec(image="python:3.13-slim", workdir="/my work")).start()
+    result = await sandbox.exec("pwd")
+
+    # A command that names no cwd runs in the spec's working directory, which now exists.
+    assert (result.return_code, result.stdout) == (0, "/my work")
+    raw = _ImageWithoutWorkdir.last
+    assert raw is not None and "/my work" in raw.dirs
+    # Created first, as root from `/`, with the path quoted.
+    command, opts = raw.runs[0]
+    assert command == "mkdir -p '/my work'"
+    assert (opts["working_directory"], opts["uid"]) == ("/", 0)
+
+
+@pytest.mark.parametrize("workdir", [None, "/"])
+async def test_no_working_directory_to_create_runs_nothing(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, workdir: str | None
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    exec_ = AsyncMock()
+    monkeypatch.setattr(provider, "exec", exec_)
+
+    await provider.create(SandboxSpec(image="python:3.11", workdir=workdir))
+
+    exec_.assert_not_called()
+
+
+@pytest.mark.parametrize("return_code,error_type,exit_code", [(1, None, 1), (-1, "timeout", None)])
+async def test_a_working_directory_that_cannot_be_created_fails_the_create_and_deletes_the_sandbox(
+    fake_opensandbox_sdk: None,
+    monkeypatch: pytest.MonkeyPatch,
+    return_code: int,
+    error_type: str | None,
+    exit_code: int | None,
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        probe={"command": None}, create={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0}
+    )
+    calls: list[str] = []
+    cleaned: list[str] = []
+
+    async def exec_(handle, command, **kwargs):
+        calls.append(command)
+        return opensandbox_provider.SandboxExecResult(
+            stdout="", stderr="mkdir: Read-only file system", return_code=return_code, error_type=error_type
+        )
+
+    async def cleanup(handle):
+        cleaned.append(handle.sandbox_id)
+
+    monkeypatch.setattr(provider, "exec", exec_)
+    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
+    with pytest.raises(NgFailureEvent, match="cannot create its working directory '/srv/app'") as failure_info:
+        await provider.create(SandboxSpec(image="python:3.11", workdir="/srv/app"))
+    assert failure_info.value.failure_kind == "provider_setup_failed"
+    assert failure_info.value.details.exit_code is exit_code
+    # Not retried, like a failed setup command: the same image fails the same way.
+    assert calls == ["mkdir -p /srv/app"] and cleaned == ["sandbox-1"]
 
 
 async def test_a_cancelled_create_still_cleans_up_the_new_sandbox(
