@@ -140,7 +140,7 @@ python benchmarks/terminal_bench_2_1/prepare.py \
   --task-revision 7131e4375048a0e408a8fb404b5f499d726b695b
 ```
 
-`--task-revision` accepts a full 40-character commit SHA. Preparation checks out that
+`--task-revision` accepts a full 40-character lowercase commit hash. Preparation checks out that
 commit in detached HEAD mode and refuses modified task checkouts, including untracked
 files and ignored verifier files. Use `--task-repository URL` to select a fork; an
 existing checkout must have that origin when pinning a revision. Without

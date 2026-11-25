@@ -79,7 +79,7 @@ def test_modified_task_checkout_is_preserved(task_source: tuple[Path, str, str],
     checkout = preparation.BENCHMARK_DIR / "terminal-bench-2-1"
     changed = checkout / "tasks/example" / relative
     changed.write_text("Local change")
-    with pytest.raises(ValueError, match="local changes"):
+    with pytest.raises(ValueError, match="is modified"):
         preparation.prepare(task_revision=second, task_repository=str(source))
     assert changed.read_text() == "Local change"
     assert git(checkout, "rev-parse", "HEAD") == first

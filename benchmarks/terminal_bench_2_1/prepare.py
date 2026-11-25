@@ -28,16 +28,15 @@ def _git(repository: Path, *arguments: str) -> str:
     ).stdout.strip()
 
 
-def prepare(*, task_revision: str | None = None, task_repository: str = TASK_REPOSITORY) -> Path:
+def prepare(*, task_revision: str | None = None, task_repository: str | None = None) -> Path:
     """Prepare task rows, optionally checking out a full task commit before reading them.
 
     Without a revision, preserve the existing checkout or clone the repository's default branch.
     Pinned preparation refuses local changes, including ignored files that could alter verifier assets.
     """
-    if task_revision is not None:
-        if not re.fullmatch(r"[0-9a-fA-F]{40}", task_revision):
-            raise ValueError("task_revision must be a full 40-character commit SHA")
-        task_revision = task_revision.lower()
+    task_repository = task_repository or TASK_REPOSITORY  # read at call time, so a caller or test can replace it
+    if task_revision is not None and not re.fullmatch(r"[0-9a-f]{40}", task_revision):
+        raise ValueError(f"task_revision must be a full 40-character commit hash, got {task_revision!r}")
 
     repo_path = BENCHMARK_DIR / "terminal-bench-2-1"
     if not repo_path.exists():
@@ -54,7 +53,7 @@ def prepare(*, task_revision: str | None = None, task_repository: str = TASK_REP
         if _git(repo_path, "status", "--porcelain", "--untracked-files=all") or _git(
             repo_path, "status", "--porcelain", "--ignored", "--untracked-files=all", "--", ":(glob)tasks/*/tests/**"
         ):
-            raise ValueError(f"Task checkout {repo_path} has local changes; move them aside before pinning a revision")
+            raise ValueError(f"Task checkout {repo_path} is modified. Move it aside and retry; it will not be reset.")
         available = run(["git", "-C", str(repo_path), "cat-file", "-e", task_revision], capture_output=True)
         if available.returncode:
             _git(repo_path, "fetch", "origin", task_revision)
@@ -98,7 +97,7 @@ def prepare(*, task_revision: str | None = None, task_repository: str = TASK_REP
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--task-revision", help="Full task commit SHA; defaults to the existing checkout or repository HEAD"
+        "--task-revision", help="Full lowercase task commit hash; defaults to the existing checkout or repository HEAD"
     )
     parser.add_argument("--task-repository", default=TASK_REPOSITORY, help="Task repository URL to clone")
     args = parser.parse_args()
