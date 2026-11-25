@@ -540,6 +540,8 @@ class Domain(str, Enum):
     - `translation`           — machine translation quality (e.g. WMT).
     - `asr`                   — speech recognition and speech transcription (e.g. LibriSpeech, the Open ASR leaderboard,
       meeting transcription).
+    - `audio_understanding`   — audio question answering and reasoning over speech, sound and music (e.g. MMAU-Pro,
+      AIR-Bench, VoiceBench).
     - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
     - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
     - `other`                 — catch-all when no specific domain above applies.
@@ -555,6 +557,7 @@ class Domain(str, Enum):
     GAMES = "games"
     TRANSLATION = "translation"
     ASR = "asr"
+    AUDIO_UNDERSTANDING = "audio_understanding"
     E2E = "e2e"
     RLHF = "rlhf"
     OTHER = "other"
