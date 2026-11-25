@@ -66,6 +66,7 @@ from nemo_gym.server_runtime.episode_tokens import (
     episode_token_secret,
 )
 from nemo_gym.server_runtime.episode_tools import EpisodeToolset, ToolArgumentsError, ToolCallRecord, ToolSpec
+from nemo_gym.server_runtime.owned_sandboxes import check_network_rule
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import (
@@ -722,19 +723,28 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
     @property
     def starts_attempt_sandboxes(self) -> bool:
-        """Whether this server starts attempt sandbox groups: its config sets ``sandbox_provider``."""
+        """Whether this server starts attempt sandbox groups: its config sets ``sandbox_provider``, and not both the
+        task and the verifier opt out."""
         settings = self._attempt_sandbox_settings()
-        return settings is not None and settings.sandbox_config is not None
+        if settings is None or settings.sandbox_config is None:
+            return False
+        opt_out = settings.sandbox_opt_out
+        return not (opt_out.task and opt_out.verifier)
 
     def check_sandbox_provider(self) -> None:
         """Refuse at startup what the server's sandbox providers cannot do; see ``SimpleServer.check_sandbox_provider``.
 
         A server that starts attempt sandboxes must also declare that it owns and lends them, and its provider is
-        built now, so a bad provider block fails startup instead of every attempt.
+        built now, so a bad provider block fails startup instead of every attempt. With the task opted out, it starts
+        groups for the verifier alone, which cut all egress, so the provider must apply ``no_network``. A server whose
+        task and verifier both opt out starts no sandbox, so its provider is neither checked nor built.
 
         Raises:
             ValueError: Naming the first need the configuration or the provider cannot meet.
         """
+        settings = self._attempt_sandbox_settings()
+        if settings is not None and settings.sandbox_config is not None and not self.starts_attempt_sandboxes:
+            return
         starts = self.starts_attempt_sandboxes
         if starts and (
             not ATTEMPT_SANDBOX_BLOCKS.items() <= dict(self.owned_sandbox_blocks).items() or not self.lends_sandboxes
@@ -745,7 +755,11 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             )
         super().check_sandbox_provider()
         if starts:
-            self.sandboxes  # noqa: B018 - builds the provider, which raises for a bad provider block
+            # Building the provider raises for a bad provider block.
+            if settings.sandbox_opt_out.task:
+                check_network_rule(self.sandboxes.provider, "no_network")
+            else:
+                self.sandboxes  # noqa: B018
 
     def plan_attempt_sandbox(
         self,
@@ -824,6 +838,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 f"the seed's sandbox_group declares sidecars, which provider {type(self.sandboxes.provider).__name__} "
                 f"of {settings.sandbox_provider!r} cannot start"
             )
+        for sidecar in declared.sidecars:
+            try:
+                check_network_rule(self.sandboxes.provider, sidecar.network)
+            except ValueError as error:
+                raise self._attempt_sandbox_refusal(
+                    f"sidecar {sidecar.name!r} reaches only its own hosts, but {error}"
+                ) from error
         return AttemptSandbox(
             key=key,
             lend_to_agent=lend_to_agent,
@@ -905,7 +926,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         the operate-scope access a borrower takes it with.
 
         The group starts from ``sandbox_config`` with the declared image, working directory, environment variables,
-        files and sidecars over it. Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled
+        files and sidecars over it. A group for the verifier alone starts with ``no_network``, and each sidecar with
+        its own rule (``SandboxGroupSidecar.network``), never the main container's. Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled
         start still stops what it created. ``prepare`` runs when the seed declared ``prepare``: it asks the Resources
         Server to prepare the task through the access. There is no host fallback: a group that cannot start or be
         described fails the attempt as a retryable infrastructure failure at ``stage``, with ``evidence`` kept, and
@@ -914,9 +936,21 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         settings = self._attempt_sandbox_settings()
         assert settings is not None and settings.sandbox_config is not None  # plan_attempt_sandbox returned a plan
         group = attempt.group or SandboxGroupSpec()
+        config = settings.sandbox_config
+        if not attempt.lend_to_agent:
+            # A group for the verifier alone runs only the verifier, which needs no egress.
+            config = type(config).model_validate(
+                config.model_dump()
+                | {"network": "no_network", "model_server": None, "tool_servers": [], "allowed_hosts": []}
+            )
+        provider = self.sandboxes.provider
         try:
+            sidecars = tuple(
+                sidecar.spec(provider_options=provider.network_options(sidecar.network, sidecar.egress_hosts, {}))
+                for sidecar in group.sidecars
+            )
             spec = self.sandboxes.spec(
-                settings.sandbox_config,
+                config,
                 image=attempt.image,
                 workdir=attempt.workdir,
                 metadata={
@@ -925,9 +959,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 },
                 files=group.files,
             )
-            spec = dataclasses.replace(
-                spec, env=spec.env | group.env, sidecars=tuple(sidecar.spec() for sidecar in group.sidecars)
-            )
+            spec = dataclasses.replace(spec, env=spec.env | group.env, sidecars=sidecars)
             await self.sandboxes.create(attempt.key, spec)
             access = await self.sandboxes.access(attempt.key, workdir=attempt.workdir)
         except Exception as error:
