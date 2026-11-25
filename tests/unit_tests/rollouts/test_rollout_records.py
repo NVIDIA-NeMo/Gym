@@ -801,7 +801,10 @@ async def test_aggregation_keeps_the_transport_resends_of_runs_with_the_same_ind
     if layout == "one merged file":
         inputs = tmp_path / "merged-earlier.jsonl"
         inputs.write_bytes(
-            orjson.dumps(first | {"_ng_run_id": "run-a"}) + b"\n" + orjson.dumps(second | {"_ng_run_id": "run-b"}) + b"\n"
+            orjson.dumps(first | {"_ng_run_id": "run-a"})
+            + b"\n"
+            + orjson.dumps(second | {"_ng_run_id": "run-b"})
+            + b"\n"
         )
         input_glob = str(inputs)
     else:
