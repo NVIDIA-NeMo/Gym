@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SWE-bench Multimodal with Hermes agent sessions under single_agent_turn, the same Resources Server pairing as
+# opencode.yaml with another harness. The issue's images reach Hermes in the user message.
+
+config_paths:
+  - resources_servers/swebench/configs/swebench.yaml
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_routing_mode: taskset
+environment_server_routes:
+  "swebench:multimodal": swebench_multimodal_hermes
+
+swebench_multimodal_hermes_resources_server:
+  _inherit_from: swebench_resources_server
+  resources_servers:
+    swebench:
+      allowed_agents: [hermes_agent]
+      num_workers: 1
+      sandbox_config:
+        # Outlive the episode (default_episode_timeout_seconds, 21600), patch extraction, and final cleanup. The
+        # resources session expires with the sandbox, and a verify after that is masked as SESSION_EXPIRED.
+        ttl_s: 25200
+      datasets:
+        - name: swebench_multimodal
+          type: benchmark
+          taskset: "swebench:multimodal"
+          jsonl_fpath: benchmarks/swebench/data/swebench_multimodal_benchmark.jsonl
+          prepare_script: benchmarks/swebench/multimodal/prepare.py
+          num_repeats: 3
+
+swebench_multimodal_hermes_agent:
+  _inherit_from: hermes_agent
+  responses_api_agents:
+    hermes_agent:
+      resources_server: null
+      model: ${policy_model_name}
+      enabled_toolsets: [terminal]
+
+swebench_multimodal_hermes:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: swebench_multimodal_hermes_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: swebench_multimodal_hermes_agent
+      resources_tool_transports: []

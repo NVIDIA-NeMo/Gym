@@ -123,6 +123,56 @@ def _session_db(tmp_path, messages, sessions=None) -> Path:
     return db
 
 
+def _local_recipe_agent(recipe: str, server_client: ServerClient) -> OpenCodeAgent:
+    """The agent a shipped local recipe runs, from the entry point its config selects, not the compatibility class.
+
+    Call it from the repository root: the recipe's config names its paths relative to it.
+    """
+    _, configs = GlobalConfigDictParser().load_extra_config_paths([f"environments/{recipe}/config.yaml"])
+    config = OmegaConf.merge(
+        *configs,
+        {"policy_base_url": "http://unused.invalid/v1", "policy_api_key": "unused", "policy_model_name": "test"},
+    )
+    name = config[f"{recipe}_environment_server"].environment_servers.legacy_agent.agent_server.name
+    settings = config[name].responses_api_agents.opencode_agent
+    agent_config = OpenCodeAgentConfig.model_validate(
+        OmegaConf.to_container(settings, resolve=True) | {"host": "localhost", "port": 8001, "name": name}
+    )
+    module = importlib.import_module(f"responses_api_agents.opencode_agent.{Path(agent_config.entrypoint).stem}")
+    agent_class = getattr(module, "OpenCodeLegacyAgent", module.OpenCodeAgent)
+    return agent_class(config=agent_config, server_client=server_client)
+
+
+_LEGACY_RUN_BODY = OpenCodeAgentRunRequest.model_validate(
+    {"responses_create_params": {"input": "solve"}, "_ng_task_index": 1, "_ng_rollout_index": 2}
+)
+
+
+class _RelayedReply:
+    """The parts of a ServerClient reply the legacy relay reads."""
+
+    ok = True
+    cookies = {}
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def read(self):
+        return json.dumps(self.payload).encode()
+
+
+def _relayed_posts(agent: OpenCodeAgent) -> AsyncMock:
+    """The legacy relay's ServerClient calls: the agent's own /v1/responses runs in process, /verify scores 1."""
+
+    async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+        if url_path.endswith("/v1/responses"):
+            response = await agent.responses(MagicMock(path_params={"rollout_id": "1-2"}), json)
+            return _RelayedReply(response.model_dump(mode="json"))
+        return _RelayedReply(json | {"reward": 1.0}) if url_path == "/verify" else _RelayedReply({})
+
+    return AsyncMock(side_effect=post)
+
+
 class TestSanity:
     def test_config_defaults(self) -> None:
         cfg = _config()
@@ -317,7 +367,7 @@ class TestParseOpencodeSession:
     def test_missing_db(self, tmp_path) -> None:
         items, usage = parse_opencode_session(tmp_path / "nope.db")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_assistant_text(self, tmp_path) -> None:
         db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "the answer is 4"}])])
@@ -444,7 +494,7 @@ class TestParseOpencodeSession:
         )
         items, usage = parse_opencode_session(db)
         agent = _make_agent()
-        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", None))
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", None, None))
         episode = asyncio.run(
             agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), collect_observations=False)
         )
@@ -452,7 +502,34 @@ class TestParseOpencodeSession:
         assert actual.input_tokens == 150
         assert actual.output_tokens == 7915
         assert actual.output_tokens_details.reasoning_tokens == 4406
+        # No step reported a cache read, so the response does not claim zero.
+        assert actual.input_tokens_details.cached_tokens is None
         assert actual.total_tokens == 8065
+
+    @pytest.mark.parametrize(
+        ("cache_reads", "expected"),
+        [([5760, 40], 5800), ([5760, 0], None), ([5760, None], None), ([0], None)],
+    )
+    def test_step_finish_cached_tokens_sum_only_measured_cache_reads(
+        self, tmp_path: Path, cache_reads: list[int | None], expected: int | None
+    ) -> None:
+        steps = [
+            {
+                "type": "step-finish",
+                "tokens": {"input": 122, "output": 22, "cache": {} if read is None else {"read": read}},
+            }
+            for read in cache_reads
+        ]
+        db = _session_db(tmp_path, [("assistant", steps)])
+        items, usage = parse_opencode_session(db)
+        # OpenCode stores zero for a cache counter the backend did not report, so zero is not a measurement.
+        assert usage["cached_tokens"] == expected
+        agent = _make_agent()
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", None, None))
+        episode = asyncio.run(
+            agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), collect_observations=False)
+        )
+        assert episode.response.usage.input_tokens_details.cached_tokens == expected
 
     def test_preserves_tree_parallel_tools_compaction_and_reasoning(self, tmp_path) -> None:
         db = _session_db(
@@ -825,7 +902,7 @@ class TestRolloutObservability:
         _, usage = parse_opencode_session(tmp_path / "missing.db")
         observations = _parse_opencode_session(tmp_path / "missing.db", "1-2", observation_schema_version="2.0")
         agent = _make_agent(system_prompt="configured system", system_prompt_mode=mode)
-        agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
+        agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations, None))
         body = NeMoGymResponseCreateParamsNonStreaming(
             instructions="request instructions",
             input=[
@@ -866,64 +943,20 @@ class TestRolloutObservability:
         items, usage = parse_opencode_session(db)
         agent = OpenCodeLegacyAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         if recipe is not None:
-            # Exercise the entry point selected by each shipped local recipe, not just the compatibility class.
             monkeypatch.chdir(Path(__file__).resolve().parents[3])
-            _, configs = GlobalConfigDictParser().load_extra_config_paths([f"environments/{recipe}/config.yaml"])
-            config = OmegaConf.merge(
-                *configs,
-                {
-                    "policy_base_url": "http://unused.invalid/v1",
-                    "policy_api_key": "unused",
-                    "policy_model_name": "test",
-                },
-            )
-            relay = config[f"{recipe}_environment_server"].environment_servers.legacy_agent
-            name = relay.agent_server.name
-            settings = config[name].responses_api_agents.opencode_agent
-            agent_config = OpenCodeAgentConfig.model_validate(
-                OmegaConf.to_container(settings, resolve=True) | {"host": "localhost", "port": 8001, "name": name}
-            )
-            module = importlib.import_module(
-                f"responses_api_agents.opencode_agent.{Path(agent_config.entrypoint).stem}"
-            )
-            agent_class = getattr(module, "OpenCodeLegacyAgent", module.OpenCodeAgent)
-            agent = agent_class(config=agent_config, server_client=agent.server_client)
+            agent = _local_recipe_agent(recipe, agent.server_client)
         agent._ensure_local_runtime = AsyncMock()
         agent.server_client.global_config_dict = {"observability_enabled": True}
 
         async def run_opencode(*args, trajectory, **kwargs):
             observations = _parse_opencode_session(db, "1-2", trajectory, observation_schema_version="2.0")
-            return items, usage, "model", observations
+            return items, usage, "model", observations, None
 
         agent._run_opencode = AsyncMock(side_effect=run_opencode)
-
-        class Response:
-            ok = True
-            cookies = {}
-
-            def __init__(self, payload):
-                self.payload = payload
-
-            async def read(self):
-                return json.dumps(self.payload).encode()
-
-        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
-            if url_path.endswith("/v1/responses"):
-                response = await agent.responses(MagicMock(path_params={"rollout_id": "1-2"}), json)
-                return Response(response.model_dump(mode="json"))
-            return Response(json | {"reward": 1.0}) if url_path == "/verify" else Response({})
-
-        agent.server_client.post = AsyncMock(side_effect=post)
-        body = OpenCodeAgentRunRequest.model_validate(
-            {
-                "responses_create_params": {"input": "solve"},
-                "_ng_task_index": 1,
-                "_ng_rollout_index": 2,
-            }
-        )
+        agent.server_client.post = _relayed_posts(agent)
 
         with TestClient(agent.setup_webserver()) as client:
-            response = client.post("/run", json=body.model_dump(mode="json"))
+            response = client.post("/run", json=_LEGACY_RUN_BODY.model_dump(mode="json"))
         assert response.status_code == 200, response.text
         result = OpenCodeAgentVerifyResponse.model_validate(response.json())
 
@@ -943,6 +976,130 @@ class TestRolloutObservability:
         [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
         assert (turn.task_id, turn.rollout_id, turn.answer[0]["content"][0]["text"]) == ("1", "1-2", "done")
         assert not turn.model_calls
+
+
+# Last assistant messages OpenCode saves when a run ends on a provider failure after its own retries, or on a
+# context overflow; a run that exits for another reason leaves an ordinary one.
+_ENDPOINT_OUTAGE = {
+    "role": "assistant",
+    "time": {"created": 1, "completed": 2},
+    "error": {"name": "APIError", "data": {"message": "Service Unavailable", "statusCode": 503, "isRetryable": True}},
+}
+_REJECTED_REQUEST = {
+    "role": "assistant",
+    "time": {"created": 1, "completed": 2},
+    "error": {"name": "APIError", "data": {"message": "prompt is too long", "statusCode": 400, "isRetryable": False}},
+}
+_CONTEXT_OVERFLOW = {
+    "role": "assistant",
+    "finish": "error",
+    "time": {"created": 1, "completed": 2},
+    "error": {"name": "ContextOverflowError", "data": {"message": "context window exceeded"}},
+}
+
+
+def _opencode_exiting(tmp_path: Path, last_assistant: dict | str, return_code: int):
+    """Stand in for the OpenCode CLI: save a session that ends in ``last_assistant``, then exit with ``return_code``."""
+    prepared = _session_db(tmp_path, [("user", [{"type": "text", "text": "solve"}]), (last_assistant, [])])
+
+    async def create_process(*args, env, **kwargs):
+        database = Path(env["XDG_DATA_HOME"]) / "opencode" / "opencode.db"
+        database.parent.mkdir(parents=True)
+        database.write_bytes(prepared.read_bytes())
+        return MagicMock(returncode=return_code, communicate=AsyncMock(return_value=(b"", b"TypeError: boom")))
+
+    return patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=create_process)
+
+
+@pytest.mark.parametrize(
+    ("last_assistant", "return_code", "status", "error", "outcome", "error_type"),
+    [
+        (
+            _ENDPOINT_OUTAGE,
+            1,
+            "failed",
+            "HTTP 503: Service Unavailable",
+            {"failure_kind": "model_request_error", "status_code": 503},
+            "provider_error",
+        ),
+        (
+            _REJECTED_REQUEST,
+            1,
+            "failed",
+            "HTTP 400: prompt is too long",
+            {"failure_kind": "model_request_error", "status_code": 400},
+            "provider_error",
+        ),
+        (
+            "assistant",
+            1,
+            "failed",
+            "OpenCode exited with code 1\nstderr: TypeError: boom",
+            {"failure_kind": "unknown"},
+            "server_error",
+        ),
+        (_CONTEXT_OVERFLOW, 1, "incomplete", None, None, "context_limit"),
+        (_CONTEXT_OVERFLOW, 0, "incomplete", None, None, "context_limit"),
+        ("assistant", 0, None, None, None, None),
+    ],
+    ids=[
+        "endpoint_outage",
+        "rejected_request",
+        "unexplained_exit",
+        "context_overflow",
+        "context_overflow_exit_0",
+        "completed",
+    ],
+)
+async def test_local_run_reports_how_opencode_ended(
+    tmp_path, last_assistant, return_code, status, error, outcome, error_type
+) -> None:
+    agent = _make_agent(workspace_root=str(tmp_path / "work"))
+    with _opencode_exiting(tmp_path, last_assistant, return_code):
+        episode = await agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve"), rollout_id="1-2")
+
+    response = episode.response
+    assert response.status == status
+    assert (response.error.message if response.error else None) == error
+    reported = response.metadata.get("ng_agent_outcome")
+    assert (json.loads(reported) if reported else None) == outcome
+    [root] = [record for record in _invocations(episode.observations) if record.parent_invocation_id is None]
+    assert (root.status, root.error_type) == (status or "completed", error_type)
+
+
+@pytest.mark.parametrize("recipe", ["opencode_math", "opencode_reasoning_gym"])
+@pytest.mark.parametrize(
+    ("last_assistant", "graded"),
+    [(_ENDPOINT_OUTAGE, False), ("assistant", False), (_REJECTED_REQUEST, True), (_CONTEXT_OVERFLOW, True)],
+    ids=["endpoint_outage", "unexplained_exit", "rejected_request", "context_overflow"],
+)
+def test_legacy_recipe_scores_only_runs_the_outcome_policy_grades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recipe: str, last_assistant: dict | str, graded: bool
+) -> None:
+    """A run that ends on an endpoint outage or an unexplained exit is not the model's 0: it is never verified."""
+    monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    agent = _local_recipe_agent(recipe, MagicMock(spec=ServerClient))
+    agent.config.workspace_root = str(tmp_path / "work")
+    agent._ensure_local_runtime = AsyncMock()
+    agent.server_client.global_config_dict = {"observability_enabled": True}
+    agent.server_client.post = _relayed_posts(agent)
+
+    with _opencode_exiting(tmp_path, last_assistant, 1), TestClient(agent.setup_webserver()) as client:
+        response = client.post("/run", json=_LEGACY_RUN_BODY.model_dump(mode="json"))
+
+    calls = agent.server_client.post.await_args_list
+    verified = [call.kwargs["json"]["response"] for call in calls if call.kwargs["url_path"] == "/verify"]
+    if graded:
+        assert response.status_code == 200, response.text
+        assert [item["status"] for item in verified] == [
+            "failed" if last_assistant is _REJECTED_REQUEST else "incomplete"
+        ]
+    else:
+        assert response.status_code == 502, response.text
+        assert not verified
+        assert response.json()["detail"].startswith(
+            "HTTP 503: Service Unavailable" if last_assistant is _ENDPOINT_OUTAGE else "OpenCode exited with code 1"
+        )
 
 
 class TestRepoDir:
@@ -977,7 +1134,7 @@ class TestRepoDir:
                 side_effect=ValueError("invalid observation artifact"),
             ),
         ):
-            output, usage, _, observations = await agent._run_opencode(
+            output, usage, _, observations, _ = await agent._run_opencode(
                 "fix the issue",
                 None,
                 collect_observations=True,
@@ -1086,7 +1243,7 @@ async def test_local_run_splits_a_reply_only_when_opencode_calls_a_gym_model_ser
         patch.object(agent, "_resolve_model_base_url", return_value="http://policy/v1"),
         patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", side_effect=run_opencode),
     ):
-        output, _, _, observations = await agent._run_opencode(
+        output, _, _, observations, _ = await agent._run_opencode(
             "task", None, rollout_id="rollout", collect_observations=True, trajectory=trajectory
         )
 

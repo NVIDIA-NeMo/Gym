@@ -9,8 +9,11 @@ and agent settings are independent; the run configuration connects them through 
 Environment Server.
 
 Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
-the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
-`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
+the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the agent's `token_id_capture: true`
+or run-level `token_id_capture.all_agents: true` route those calls through capture. Capture also needs a capture
+store and a model backend that returns token IDs (see
+[Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
+No training capture run has validated this agent.
 
 ## Configure and run
 
@@ -280,6 +283,41 @@ detail, not a separate endpoint or a setup step users must run.
 - `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run; only one required
   grant may offer each (default none; uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
+- `thinking_level_map`: the generated model's Pi `thinkingLevelMap`, e.g. `{max: max}` so that
+  `thinking: max` sends `reasoning_effort: "max"` (with `provider_compat.supportsReasoningEffort: true`).
+  `thinking: max` needs `pi_version` 0.80.6 or later (the default pin is 0.80.2)
+- `provider_compat`: Pi compat flags merged over the generated provider's
+  (`supportsDeveloperRole` and `supportsReasoningEffort` off)
+- `settings`: extra `settings.json` entries merged over Gym's, e.g. `{retry: {maxRetries: 10}}`
+
+Sandbox-session settings for running Pi the way a harness started in the task container runs, for
+benchmarks that grade such a harness:
+
+- `sandbox_env`: further environment for Pi and its tools, e.g. `{PI_OFFLINE: "1"}`
+- `sandbox_runtime_guards`: Gym's bash cap and system-prompt note (default true); false runs Pi's own tools
+  and system prompt unchanged
+- `session_prompt_cache_key`: send one `prompt_cache_key` per session with every model call, so a gateway
+  that routes on it keeps the session on one replica
+- `sandbox_logs_dir`, `log_requests`: a sandbox log directory (e.g. Harbor's `/logs/agent`) for Pi's JSON
+  events without the streaming deltas (`pi.txt`, written when the run is collected), its stderr
+  (`pi_stderr.txt`) and, with `log_requests`,
+  every model request without its conversation (`pi-requests.jsonl`; the first in full in
+  `pi-requests.first.json`)
+- `raise_oom_score_adj`: make Pi and its tools the memory-cgroup OOM killer's preferred victims
+  (`oom_score_adj` 1000, or 0 when the sandbox starts below zero)
+- `verify_after_agent_error`: return a failed run (nonzero or signalled exit, a terminal error, no terminal
+  assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is in
+  `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
+  harness runner started Pi (not its own exit 125, 126 or 127), any granted Gym MCP tools loaded (not exit
+  78), Pi ended at least one assistant turn or ran until its time limit, Pi's error for its last model call
+  (if any, even when Pi then exited nonzero) is not a transient model-endpoint failure (connection, timeout,
+  429 or 5xx, as Pi's retry classifier names them) and the sandbox still runs and answers a command. A model error Pi
+  reported itself is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment
+  Server's outcome policy. Anything else stays an execution error and the episode is retried.
+
+Sandbox sessions drop Pi's streaming events (`message_update`, `tool_execution_update`), which repeat the
+whole partial message or tool output on every delta: the harness runner leaves them out of the event log that
+the adapter copies back (`events_exclude`). Pi's raw stdout in the session directory keeps every line.
 
 ## Results and limits
 

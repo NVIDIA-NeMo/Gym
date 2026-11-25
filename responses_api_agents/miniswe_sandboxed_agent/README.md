@@ -9,7 +9,8 @@
 >
 > Legacy `/run` benchmark presets (for example [`benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml`](../../benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml))
 > must stay on this adapter until their environment-server migration; changing only the agent name is insufficient.
-> Terminal-Bench-Science also stays on `/run` until it has a session path. Tasks with `[agent].user` must keep this
+> Terminal-Bench-Science's default `miniswe` preset has migrated to Harbor with `mini_swe_agent`; its
+> `miniswe_legacy_agent` preset retains this `/run` adapter. Tasks with `[agent].user` must keep this
 > adapter because the replacement refuses a task user. Other Harbor task folders can migrate now;
 > the replacement does not establish new benchmark qualification or guarantee identical scores.
 
@@ -41,7 +42,9 @@ run's model and sandbox provider, and the Harbor environment server drives the s
 
 1. `/v1/agent_sessions` seeds the session with `sandbox_access` (the sandbox the
    environment server provisioned and its working directory). The agent connects to it
-   and provisions nothing itself.
+   and provisions nothing itself. A required tool grant is accepted only for an MCP server
+   that `task.json` lists, which mini-SWE starts itself (Harbor's `task_mcp_grants: required`);
+   any other required grant, such as a Resources Server's own tool, is refused with HTTP 422.
 2. `/v1/responses` receives the task instruction as the input. The in-sandbox tool
    grants (`mcp_servers`, `skills_dir`) come from the `task.json` the environment server
    left in the sandbox, and are read before the turn is bound, so an overlapping retry

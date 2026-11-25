@@ -15,6 +15,7 @@
 import importlib
 import importlib.metadata
 import sys
+from argparse import ArgumentParser
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
 from typing import Optional
@@ -37,6 +38,7 @@ from nemo_gym.config.config_types import (
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
+    InheritCycleError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
@@ -1239,6 +1241,43 @@ contested: second_inner
         parser._recursively_swap_keys(config)
         with raises(ConfigMissingValuesError):
             parser.raise_on_missing_values(config)
+
+    @mark.parametrize("target_first", [False, True])
+    def test_inherit_chain_resolves_every_link(self, target_first: bool) -> None:
+        # target -> profile -> base: the target gets the base's fields, then the profile's overrides,
+        # then its own. Both moved sources are gone, whichever order the entries are listed in.
+        entries = {
+            "base": {"server": {"entrypoint": "app.py", "mode": "embedded"}, "extra": 1},
+            "profile": {"_inherit_from": "base", "_delete_key": "extra", "server": {"mode": "sandboxed"}},
+            "target": {"_inherit_from": "profile", "server": {"datasets": ["rows.jsonl"]}},
+        }
+        order = ["target", "profile", "base"] if target_first else ["base", "profile", "target"]
+        config = DictConfig({name: entries[name] for name in order})
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {
+            "target": {"server": {"entrypoint": "app.py", "mode": "sandboxed", "datasets": ["rows.jsonl"]}}
+        }
+
+    def test_copy_of_an_inheriting_source_keeps_the_source(self) -> None:
+        config = DictConfig(
+            {
+                "base": {"a": 1},
+                "profile": {"_inherit_from": "base", "b": 2},
+                "clone": {"_copy": "profile", "c": 3},
+            }
+        )
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {"profile": {"a": 1, "b": 2}, "clone": {"a": 1, "b": 2, "c": 3}}
+
+    def test_inherit_cycle_is_reported(self) -> None:
+        config = DictConfig({"first": {"_inherit_from": "second"}, "second": {"_inherit_from": "first"}})
+
+        with raises(InheritCycleError, match="second -> first -> second"):
+            GlobalConfigDictParser()._recursively_swap_keys(config)
 
     def test_missing_value_in_list_is_reported_not_crash(self) -> None:
         # A '???' as a list element (or inside a dict nested in a list) must not crash the swap; it is
@@ -2936,6 +2975,101 @@ class TestModelServerPairing:
         assert "vllm_model" in resolved["policy_model"]["responses_api_models"]
 
 
+class TestIgnoredAgentTypeSelection:
+    """`--agent-type` must select an agent the composed config runs the run's tasks on."""
+
+    CODEX = DictConfig({"codex_agent": {"responses_api_agents": {"codex_agent": {"resources_server": None}}}})
+
+    @staticmethod
+    def _bound_agent(agent_type: str, resources_server: str) -> dict:
+        return {
+            "responses_api_agents": {
+                agent_type: {"resources_server": {"type": "resources_servers", "name": resources_server}}
+            }
+        }
+
+    def _flat_config(self, **extra) -> DictConfig:
+        """A benchmark split that runs on Codex, composed with a train split that runs on simple_agent."""
+        return DictConfig(
+            {
+                "bench_resources_server": {
+                    "resources_servers": {"bench": {"datasets": [{"name": "bench", "type": "benchmark"}]}}
+                },
+                "train_resources_server": {
+                    "resources_servers": {"train": {"datasets": [{"name": "train", "type": "train"}]}}
+                },
+                "bench_agent": self._bound_agent("codex_agent", "bench_resources_server"),
+                "train_agent": self._bound_agent("simple_agent", "train_resources_server"),
+                **extra,
+            }
+        )
+
+    def _taskset_config(self) -> DictConfig:
+        """A taskset routed to a single_agent_turn server that binds OpenCode, plus a loaded Codex instance."""
+        return DictConfig(
+            {
+                "environment_server_routes": {"pro:benchmark": "pro_episode"},
+                "pro_resources_server": {
+                    "resources_servers": {
+                        "pro": {
+                            "datasets": [
+                                {"name": "pro", "type": "benchmark", "taskset": "pro:benchmark"},
+                                # No route: data preparation reports it, not this check.
+                                {"name": "unrouted", "type": "benchmark", "taskset": "pro:unrouted"},
+                            ]
+                        }
+                    }
+                },
+                "pro_episode": {
+                    "environment_servers": {
+                        "single_agent_turn": {
+                            "resources_server": {"type": "resources_servers", "name": "pro_resources_server"},
+                            "agent_server": {"type": "responses_api_agents", "name": "pro_agent"},
+                        }
+                    }
+                },
+                "pro_agent": {"responses_api_agents": {"opencode_agent": {"resources_server": None}}},
+                **self.CODEX,
+            }
+        )
+
+    def _check(self, config: DictConfig, selected: DictConfig = CODEX) -> None:
+        parser = GlobalConfigDictParser()
+        parser._raise_on_ignored_agent_type(config, parser._agent_instances(selected))
+
+    def test_only_the_split_the_run_collects_is_checked(self) -> None:
+        self._check(self._flat_config(split="benchmark"))
+        with raises(AgentCompositionError) as error:
+            self._check(self._flat_config(split="train"))
+        assert "  - dataset 'train' of train_resources_server runs on train_agent (simple_agent)" in str(error.value)
+
+    def test_without_a_split_every_mismatched_dataset_is_listed(self) -> None:
+        with raises(AgentCompositionError) as error:
+            self._check(self._flat_config())
+        listing = [line for line in str(error.value).splitlines() if line.startswith("  - ")]
+        assert listing == ["  - dataset 'train' of train_resources_server runs on train_agent (simple_agent)"]
+
+    def test_taskset_mismatch_names_the_route_and_its_rebinding(self) -> None:
+        with raises(AgentCompositionError) as error:
+            self._check(self._taskset_config())
+        message = str(error.value)
+        assert message.startswith("--agent-type loaded codex_agent (codex_agent), but these tasks")
+        listing = [line for line in message.splitlines() if line.startswith("  - ")]
+        assert listing == [
+            "  - taskset 'pro:benchmark' of pro_resources_server routes to pro_episode, which runs pro_agent "
+            "(opencode_agent)"
+        ]
+        assert "  ++pro_episode.environment_servers.single_agent_turn.agent_server.name=codex_agent" in message
+
+    def test_rebinding_the_route_satisfies_the_selection(self) -> None:
+        config = self._taskset_config()
+        config.pro_episode.environment_servers.single_agent_turn.agent_server.name = "codex_agent"
+        self._check(config)
+
+    def test_a_config_that_declares_no_agent_selects_nothing_to_check(self) -> None:
+        self._check(self._taskset_config(), DictConfig({"overlay": {"timeout": 60}}))
+
+
 class TestComposeUnboundAgent:
     """Composition of a standalone agent config onto the environment's agent instances."""
 
@@ -3027,9 +3161,9 @@ class TestComposeUnboundAgent:
         return self._parse(DictConfig({"config_paths": list(paths)}))
 
     def test_shipped_terminus_template_replaces_a_benchmarks_agent(self) -> None:
-        """`--benchmark terminal_bench_2_1/opencode --agent-type terminus_2_sandboxed_agent` swaps the harness."""
+        """`--benchmark terminal_bench_2_1/opencode_legacy_agent --agent-type terminus_2_sandboxed_agent` swaps the harness."""
         config = self._parse_config_paths(
-            "benchmarks/terminal_bench_2_1/opencode.yaml",
+            "benchmarks/terminal_bench_2_1/opencode_legacy_agent.yaml",
             "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
         )
         agents = {
@@ -3512,7 +3646,30 @@ class TestComposeUnboundAgent:
         assert OmegaConf.to_container(servers["legacy_agent"]) == {
             "entrypoint": "app.py",
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
+            "default_episode_timeout_seconds": 600,
         }
+
+    @mark.parametrize("configured", [None, 600, 43200])
+    def test_legacy_relay_keeps_an_explicit_episode_deadline(self, configured: object) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        server["default_episode_timeout_seconds"] = configured
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert "default_episode_timeout_seconds" in relay
+        assert relay["default_episode_timeout_seconds"] == configured
+
+    def test_legacy_relay_leaves_an_omitted_episode_deadline_to_the_relays_default(self) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        del server["default_episode_timeout_seconds"]
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert "default_episode_timeout_seconds" not in relay
 
     @mark.parametrize("harness_type", sorted(nemo_gym.config.global_config.HOST_RUN_SWAP_AGENT_TYPES))
     def test_swap_to_host_run_template_keeps_legacy_relay(self, harness_type: str) -> None:
@@ -3544,6 +3701,7 @@ class TestComposeUnboundAgent:
             ("hermes_agent", ["mcp"]),
             ("opencode_agent", ["mcp"]),
             ("pool_agent", ["mcp"]),
+            ("legal_agent_bench_native", ["mcp"]),
             ("langchain_deepagents_agent", ["direct_http"]),
         ],
     )
@@ -3927,3 +4085,28 @@ def test_the_cli_parse_leaves_hydras_argument_parser_as_it_found_it(monkeypatch:
         GlobalConfigDictParser().parse_global_config_dict_from_cli()
 
     assert hydra_main_module.get_args_parser is original
+
+
+def test_the_cli_parse_survives_argparses_strict_help_check(monkeypatch: MonkeyPatch) -> None:
+    """Python 3.14 argparse rejects a help value that is not a str when the argument is added; hydra-core 1.3.x passes
+    one for `--shell-completion`. The check is installed here as 3.14 does, so the test runs on any Python."""
+
+    def strict_check_help(self, action) -> None:
+        if action.help is not None and not isinstance(action.help, str):
+            raise ValueError("badly formed help string")
+
+    original_add_argument = ArgumentParser.add_argument
+
+    def add_argument_with_help_check(self, *args, **kwargs):
+        action = original_add_argument(self, *args, **kwargs)
+        self._check_help(action)
+        return action
+
+    monkeypatch.setattr(ArgumentParser, "_check_help", strict_check_help, raising=False)
+    monkeypatch.setattr(ArgumentParser, "add_argument", add_argument_with_help_check)
+    monkeypatch.setattr(sys, "argv", ["gym", "+probe=1"])
+
+    config = GlobalConfigDictParser().parse_global_config_dict_from_cli()
+
+    assert config.probe == 1
+    assert ArgumentParser._check_help is strict_check_help

@@ -13,15 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import pickle
+import secrets
 import signal
 import socket
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import itsdangerous
 import uvicorn
 from aiohttp import ClientResponseError, RequestInfo
 from fastapi import Request
@@ -48,11 +53,14 @@ from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.server_runtime.base_server import (
+    RUN_SESSION_SECRET_ENV_PREFIX,
     BaseServer,
     KeepaliveHttpToolsProtocol,
     SimpleServer,
     UvicornProxyHeadersConfig,
+    run_session_secret,
 )
 from nemo_gym.server_runtime.ray_support import DictConfig, initialize_ray
 from nemo_gym.server_runtime.registry_server import HeadServer
@@ -90,6 +98,48 @@ class TestServerUtils:
         assert "" == actual_config.host
         assert 0 == actual_config.port
         assert "my entrypoint" == actual_config.entrypoint
+
+    @mark.parametrize("missing", ["base_url", "api_key", "model", "all", None])
+    def test_unset_model_settings_name_the_source_config(self, monkeypatch: MonkeyPatch, missing) -> None:
+        class EndpointConfig(BaseRunServerInstanceConfig):
+            base_url: str | list[str]
+            api_key: str
+            model: str
+
+        class EndpointServer(BaseServer):
+            config: EndpointConfig
+
+        aliases = {
+            "base_url": "support_model_base_url",
+            "api_key": "support_model_api_key",
+            "model": "support_model_name",
+        }
+        values = {"base_url": "https://extractor.example.invalid/v1", "api_key": "secret", "model": "extractor"}
+        config = OmegaConf.create(
+            {
+                **{alias: None if missing in (field, "all") else values[field] for field, alias in aliases.items()},
+                "support_model": {
+                    "responses_api_models": {
+                        "vllm_model": {
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                            "entrypoint": "app.py",
+                            **{field: "${" + alias + "}" for field, alias in aliases.items()},
+                        }
+                    }
+                },
+            }
+        )
+        monkeypatch.setenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, "support_model")
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "get_global_config_dict", lambda: config)
+        if missing is None:
+            assert EndpointServer.load_config_from_global_config().model == "extractor"
+        else:
+            with raises(ValueError, match="Required settings for support_model are unset") as error:
+                EndpointServer.load_config_from_global_config()
+            for field, alias in aliases.items():
+                assert (f"++{alias}=<value>" in str(error.value)) == (missing in (field, "all"))
+            assert "secret" not in str(error.value)
 
     def test_HeadServer_setup_webserver_sanity(self) -> None:
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
@@ -153,6 +203,157 @@ class TestServerUtils:
         third = await head_server.global_config_dict_yaml()
         assert third == first
         assert to_yaml_mock.call_count == 2
+
+    def test_HeadServer_global_config_dict_yaml_masks_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        """Agent sandboxes that share the head server's loopback read this route: no credential in it, routing
+        intact, and a client that resolves the served config gets the mask, not the key."""
+        from fastapi.testclient import TestClient
+
+        global_config_dict = DictConfig(
+            {
+                "head_server": {"host": "127.0.0.1", "port": 11000},
+                "policy_api_key": "sk-live-sentinel",
+                "hf_token": "hf-live-sentinel",
+                "policy_model": {
+                    "responses_api_models": {
+                        "vllm_model": {"host": "127.0.0.1", "port": 1234, "api_key": "${policy_api_key}"}
+                    }
+                },
+                "max_tokens": 4096,
+                "openai_default_headers": {"x-litellm-key": "sk-litellm-sentinel"},
+                "mlflow_tracking_uri": "https://user:pw-sentinel@mlflow.example/api",  # pragma: allowlist secret
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200
+        assert "sentinel" not in response.text
+
+        served = OmegaConf.create(response.json())
+        assert served.policy_api_key == "****"
+        assert served.hf_token == "****"
+        assert served.policy_model.responses_api_models.vllm_model.api_key == "****"
+        assert served.policy_model.responses_api_models.vllm_model.port == 1234
+        assert served.max_tokens == 4096
+        assert served.openai_default_headers["x-litellm-key"] == "****"
+        assert served.mlflow_tracking_uri == "https://user:****@mlflow.example/api"
+        # The supervisor's own config (and so NEMO_GYM_CONFIG_DICT for the servers it launches) is untouched.
+        assert global_config_dict.policy_api_key == "sk-live-sentinel"
+
+    @mark.parametrize("opt_out", [None, False, "false", "true", 0, 1, "${oc.env:TEST_SERVE_CREDENTIALS}", True])
+    def test_HeadServer_serves_credentials_only_for_boolean_true(self, monkeypatch: MonkeyPatch, opt_out) -> None:
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("TEST_SERVE_CREDENTIALS", "false")
+        global_config_dict = DictConfig({"policy_api_key": "sk-live-sentinel"})
+        if opt_out is not None:
+            global_config_dict.head_server_serve_credentials = opt_out
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200
+        served = OmegaConf.create(response.json())
+        assert served.policy_api_key == ("sk-live-sentinel" if opt_out is True else "****")
+        assert global_config_dict.policy_api_key == "sk-live-sentinel"
+
+    def test_HeadServer_masks_referenced_header_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        from fastapi.testclient import TestClient
+
+        global_config_dict = DictConfig(
+            {
+                "shared": {"x-litellm-key": "sk-shared-sentinel", "x-trace-id": "trace-id"},
+                "header_alias": "${shared}",
+                "policy_model": {
+                    "openai_default_headers": "${header_alias}",
+                    "port": 1234,
+                },
+                "opaque_value": "sk-scalar-sentinel",
+                "api_key": "${opaque_value}",
+                "cache_key": "cache-id",
+                "max_tokens": 4096,
+                "unrelated": "${oc.env:UNSET_UNRELATED_VARIABLE}",
+            }
+        )
+        monkeypatch.delenv("UNSET_UNRELATED_VARIABLE", raising=False)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200 and "sentinel" not in response.text
+        served = OmegaConf.create(response.json())
+        assert served.policy_model.openai_default_headers["x-litellm-key"] == "****"
+        assert served.policy_model.openai_default_headers["x-trace-id"] == "trace-id"
+        assert served.shared["x-litellm-key"] == "****"
+        assert served.opaque_value == served.api_key == "****"
+        assert served.cache_key == "cache-id" and served.max_tokens == 4096
+        assert served.policy_model.port == 1234
+        assert OmegaConf.to_container(served, resolve=False)["unrelated"] == "${oc.env:UNSET_UNRELATED_VARIABLE}"
+        assert global_config_dict.shared["x-litellm-key"] == "sk-shared-sentinel"
+        assert global_config_dict.opaque_value == "sk-scalar-sentinel"
+
+    async def test_HeadServer_global_config_dict_yaml_serves_credentials_when_asked(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        global_config_dict = DictConfig({"policy_api_key": "sk-live", "head_server_serve_credentials": True})
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        served = OmegaConf.create(await head_server.global_config_dict_yaml())
+
+        assert served.policy_api_key == "sk-live"
+
+    @mark.parametrize("model_api_key", ["sk-literal-sentinel", "${oc.env:TEST_MODEL_API_KEY_SENTINEL}"])
+    async def test_HeadServer_never_serves_the_model_api_key(
+        self, monkeypatch: MonkeyPatch, model_api_key: str
+    ) -> None:
+        """`--model-api-key` as a literal or as an env interpolation (an external-endpoint run), through the real parser
+        and a model server config: the served YAML holds neither the key nor anything resolving to it."""
+        from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+
+        monkeypatch.setenv("TEST_MODEL_API_KEY_SENTINEL", "env-sentinel")
+        initial = OmegaConf.load(nemo_gym.PARENT_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml")
+        initial.policy_api_key = model_api_key
+        initial.policy_base_url = "https://example.invalid/v1"
+        initial.policy_model_name = "test-model"
+        global_config_dict = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+            )
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+
+        served_yaml = await HeadServer(config=BaseServerConfig(host="", port=0)).global_config_dict_yaml()
+
+        assert "sentinel" not in served_yaml
+        assert "TEST_MODEL_API_KEY_SENTINEL" not in served_yaml
+        served = OmegaConf.to_container(OmegaConf.create(served_yaml), resolve=True)
+        assert served["policy_api_key"] == "****"
+        assert served["policy_model"]["responses_api_models"]["vllm_model"]["api_key"] == "****"
+        assert served["policy_model"]["responses_api_models"]["vllm_model"]["base_url"] == "https://example.invalid/v1"
 
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
         ray_mock = MagicMock()
@@ -1208,6 +1409,7 @@ class TestRunWebserverProxyKwargs:
         routes_sessions: bool = False,
         server_reuse_port: bool | None = None,
         unsupported_reason: str | None = None,
+        mcp: dict | None = None,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -1240,13 +1442,15 @@ class TestRunWebserverProxyKwargs:
 
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.uvicorn, "run", run)
 
-        server_config = BaseRunServerInstanceConfig(
+        # With ``mcp``, a resources server's config that serves the MCP endpoint with those options.
+        server_config = (BaseRunServerInstanceConfig if mcp is None else BaseResourcesServerConfig)(
             name="my_server",
             host="127.0.0.1",
             port=8000,
             entrypoint="app.py",
             num_workers=num_workers,
             uvicorn_reuse_port=server_reuse_port,
+            **({} if mcp is None else {"expose_tools_over_mcp": True, **mcp}),
         )
         ray_setting = ray_enabled
 
@@ -1419,7 +1623,7 @@ class TestRunWebserverProxyKwargs:
 
     def test_uvicorn_starts_with_the_shutdown_signals_unblocked(self, monkeypatch: MonkeyPatch) -> None:
         # A process starts with the signal mask of the thread that launched it, and Ray blocks SIGINT in every thread
-        # of its workers: a server that a Ray worker launched never got RunHelper's interrupt.
+        # of its workers: a server that a Ray worker launched never got ServerSupervisor's interrupt.
         # SIGTERM is blocked too, so the test fails if the helper unblocks only SIGINT.
         def launch_from_a_ray_worker_thread() -> None:
             signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM))
@@ -1581,11 +1785,134 @@ class TestRunWebserverProxyKwargs:
 
         assert 4096 == install.call_args.kwargs["backlog"]
 
+    def test_the_session_router_reads_the_cookie_as_the_session_middleware_does(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "install_session_routing", install)
+        monkeypatch.setattr(SimpleServer, "get_session_cookie_name", lambda self: "sid_named")
+        monkeypatch.setattr(SimpleServer, "get_session_secret", lambda self: "a secret")
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4, is_worker=True, routes_sessions=True)
+
+        assert install.call_args.kwargs["session_cookie"] == "sid_named"
+        assert install.call_args.kwargs["secret_key"] == "a secret"
+
+    @mark.parametrize(
+        ("mcp", "header", "credentials"),
+        [
+            ({"mcp_bearer_token": True}, "Authorization", "Bearer {token}"),
+            ({}, "X-NeMo-Gym-Session-Token", "{token}"),
+        ],
+    )
+    def test_the_session_router_reads_mcp_tokens_where_and_as_the_server_signs_them(
+        self, monkeypatch: MonkeyPatch, mcp: dict, header: str, credentials: str
+    ) -> None:
+        import nemo_gym.server_runtime.mcp_auto_exposure
+        from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
+        from nemo_gym.server_runtime.request_handling.session_routing import mcp_session_token
+
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server, "install_session_routing", install)
+        # The endpoint itself is not under test: only what run_webserver hands the session router.
+        monkeypatch.setattr(nemo_gym.server_runtime.mcp_auto_exposure, "maybe_auto_expose", MagicMock())
+        monkeypatch.setattr(SimpleServer, "get_session_secret", lambda self: "a secret")
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4, is_worker=True, routes_sessions=True, mcp=mcp)
+
+        routing = install.call_args.kwargs
+        assert routing["mcp_token_header"] == header
+        token = mcp_session_token_serializer("a secret").dumps({"sid": "s"})
+        assert mcp_session_token({header: credentials.format(token=token)}, routing["mcp_token_header"]) == token
+        assert routing["mcp_token_serializer"].loads(token) == {"sid": "s"}
+        # A token signed with the server's public name is refused.
+        with raises(itsdangerous.BadSignature):
+            routing["mcp_token_serializer"].loads(
+                mcp_session_token_serializer("TestSimpleServer___my_server").dumps({"sid": "s"})
+            )
+
     def test_a_listen_backlog_below_one_fails_before_uvicorn_starts(self, monkeypatch: MonkeyPatch) -> None:
         with raises(ValidationError, match="uvicorn_backlog"):
             self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 0}, num_workers=1)
 
         assert self.uvicorn_kwargs == {}
+
+
+def _run_secret_variable(server_name: str) -> str:
+    return RUN_SESSION_SECRET_ENV_PREFIX + hashlib.sha256(server_name.encode()).hexdigest()[:16].upper()
+
+
+class _Plain(SimpleServer):
+    def setup_webserver(self):
+        raise AssertionError("not served")
+
+
+class TestRunSessionSecret:
+    @staticmethod
+    def _server(server_class: type[SimpleServer], **resources_config: object) -> SimpleServer:
+        config_class = BaseResourcesServerConfig if resources_config else BaseRunServerInstanceConfig
+        return server_class(
+            config=config_class(name="my_server", host="", port=0, entrypoint="", **resources_config),
+            server_client=ServerClient(
+                head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
+            ),
+        )
+
+    @staticmethod
+    def _fresh(monkeypatch: MonkeyPatch, *server_names: str) -> None:
+        # An empty variable reads as unset, and monkeypatch restores each one when the test ends.
+        for name in server_names:
+            monkeypatch.setenv(_run_secret_variable(name), "")
+
+    def test_each_server_gets_one_secret_for_the_run_which_its_workers_inherit(self, monkeypatch: MonkeyPatch) -> None:
+        self._fresh(monkeypatch, "store", "other")
+        secret = run_session_secret("store")
+        assert secret and run_session_secret("store") == secret
+        assert run_session_secret("other") not in {"", secret}
+        # uvicorn starts a server's workers after its main process made the secret: a process started with that
+        # environment reads the same one.
+        worker = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from nemo_gym.server_runtime.base_server import run_session_secret; "
+                "print(run_session_secret('store'))",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=dict(os.environ),
+        )
+        assert worker.stdout.strip() == secret
+
+    def test_the_public_key_signs_sessions_unless_the_server_or_its_bearer_tokens_take_a_run_secret(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        self._fresh(monkeypatch, "my_server")
+
+        class Lending(_Plain):
+            signs_sessions_with_run_secret = True
+
+        plain = self._server(_Plain)
+        assert plain.session_secret == plain.get_session_middleware_key() == "_Plain___my_server"
+        assert self._server(Lending).session_secret == run_session_secret("my_server")
+        bearer = self._server(_Plain, expose_tools_over_mcp=True, mcp_bearer_token=True)
+        assert bearer.session_secret == run_session_secret("my_server") != bearer.get_session_middleware_key()
+
+    def test_the_secret_is_resolved_once_per_server_however_it_was_built(self) -> None:
+        asked: list[str] = []
+
+        class Fickle(_Plain):
+            def get_session_secret(self) -> str:
+                asked.append(secrets.token_urlsafe(8))
+                return asked[-1]
+
+        server = self._server(Fickle)
+        assert server.session_secret == server.session_secret == asked[0] and len(asked) == 1
+        # As tests that build a server without its model_post_init do: no private attribute holds the secret.
+        with patch.object(_Plain, "model_post_init"):
+            unprepared = self._server(_Plain)
+        assert unprepared.session_secret == unprepared.get_session_middleware_key()
 
 
 class TestHeadServerProxyKwargs:

@@ -46,6 +46,10 @@ class GymDatasetDefaults(BaseModel):
     # Scales [agent].timeout_sec and [verifier].timeout_sec. Task timeouts are authored against Harbor's
     # own runtime; a slower deployment raises this instead of editing tasks.
     timeout_multiplier: float = Field(default=1.0, gt=0)
+    # Scales the verifier budgets alone ([verifier].timeout_sec, a step's [steps.verifier].timeout_sec and the step
+    # default a step inherits), on top of `timeout_multiplier`: a verifier that needs longer than the task gave it,
+    # such as a judge that transcribes the agent's output, gets it without widening the agent's budget.
+    verifier_timeout_multiplier: float = Field(default=1.0, gt=0)
     # Scales cpus, memory_mb and storage_mb of the agent's and the verifier's environments.
     resource_multiplier: float = Field(default=1.0, gt=0)
     # Rollouts per task for an evaluation of the dataset. The generated run config starts from it and a
@@ -301,24 +305,31 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
     environment = _scale_environment(environment, defaults.resource_multiplier)
     verifier = _override_verifier(config.verifier, override.verifier if override else {}, task_id=task_id)
     artifacts = config.artifacts + (_added_artifacts(override.artifacts, task_id=task_id) if override else [])
+    # The verifier budgets scale by both multipliers, the agent's by `timeout_multiplier` alone.
+    agent_multiplier = defaults.timeout_multiplier
+    verifier_multiplier = defaults.timeout_multiplier * defaults.verifier_timeout_multiplier
     verifier_update: dict[str, Any] = {}
-    if defaults.timeout_multiplier != 1:
-        verifier_update["timeout_sec"] = verifier.timeout_sec * defaults.timeout_multiplier
+    if verifier_multiplier != 1:
+        verifier_update["timeout_sec"] = verifier.timeout_sec * verifier_multiplier
     if verifier.environment is not None and defaults.resource_multiplier != 1:
         verifier_update["environment"] = _scale_environment(verifier.environment, defaults.resource_multiplier)
     if verifier_update:
         verifier = verifier.model_copy(update=verifier_update)
     agent = config.agent
     steps = config.steps
-    if defaults.timeout_multiplier != 1:
-        agent = agent.model_copy(update={"timeout_sec": agent.timeout_sec * defaults.timeout_multiplier})
+    if agent_multiplier != 1:
+        agent = agent.model_copy(update={"timeout_sec": agent.timeout_sec * agent_multiplier})
+    if agent_multiplier != 1 or verifier_multiplier != 1:
         # A step's own `[steps.agent]` and `[steps.verifier]` budgets are authored against Harbor's runtime like
         # the task's, so they scale once here. A budget a step does not name stays unnamed, so the step keeps
         # inheriting it through the config's step accessors: the task's scaled agent budget, and for the verifier
         # the default `step_verifier_timeout_sec` reads, scaled by the multiplier the effective config carries, as
         # Harbor grades such a step within its step default times the multiplier (multi_step.py's
         # `_step_verifier_timeout_sec` through `_resolve_timeout_sec`).
-        steps = [_scale_step_timeouts(step, defaults.timeout_multiplier) for step in config.steps]
+        steps = [
+            _scale_step_timeouts(step, agent_multiplier=agent_multiplier, verifier_multiplier=verifier_multiplier)
+            for step in config.steps
+        ]
     effective = config.model_copy(
         update={
             "environment": environment,
@@ -328,17 +339,19 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
             "steps": steps,
         }
     )
-    effective._timeout_multiplier = defaults.timeout_multiplier
+    effective._verifier_timeout_multiplier = verifier_multiplier
     return effective
 
 
-def _scale_step_timeouts(step: Any, multiplier: float) -> Any:
+def _scale_step_timeouts(step: Any, *, agent_multiplier: float, verifier_multiplier: float) -> Any:
     """One ``[[steps]]`` entry with its own ``[steps.agent].timeout_sec`` and ``[steps.verifier].timeout_sec`` scaled
     once; a budget the step does not name stays ``None``, inherited through :class:`HarborTaskConfig`'s step accessors
     (the loader's hint about steps graded within the step default keys on that)."""
     update: dict[str, Any] = {}
-    if step.agent.timeout_sec is not None:
-        update["agent"] = step.agent.model_copy(update={"timeout_sec": step.agent.timeout_sec * multiplier})
-    if step.verifier.timeout_sec is not None:
-        update["verifier"] = step.verifier.model_copy(update={"timeout_sec": step.verifier.timeout_sec * multiplier})
+    if step.agent.timeout_sec is not None and agent_multiplier != 1:
+        update["agent"] = step.agent.model_copy(update={"timeout_sec": step.agent.timeout_sec * agent_multiplier})
+    if step.verifier.timeout_sec is not None and verifier_multiplier != 1:
+        update["verifier"] = step.verifier.model_copy(
+            update={"timeout_sec": step.verifier.timeout_sec * verifier_multiplier}
+        )
     return step.model_copy(update=update) if update else step

@@ -17,7 +17,21 @@ stop.request          Stop shell           Polled by the supervisor to stop the 
 expire.request        Session              Polled by the supervisor to time out the harness
 cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
 output.log            Launch shell         Captures supervisor and harness diagnostics
+pause.request         Pause shell          Holds sequence number N to pause the harness
+paused.json           Supervisor           Acknowledges pause N once every reached process stopped
+continue.request      Continue shell       Holds sequence number N to continue after pause N
+continued.json        Supervisor           Acknowledges continue N once the processes run again
 ===================== ==================== ===========================================
+
+A supervisor launched with ``pause_mode="hold"``, for a sandbox whose snapshot keeps its processes,
+acknowledges a pause without stopping anything; the harness keeps running and its model calls are held
+instead. After a restore of such a snapshot, ``check_restored`` tells whether the launch can be taken over
+where it was, and ``abandon_launch`` ends it for good when it cannot.
+
+Pause and continue are re-armable: each checkpoint writes a sequence number greater than the last,
+and an acknowledgement names the number it answers, so a request is never mistaken for an earlier
+one and no file has to be removed. A pause written before the launch holds the launch until its
+continue; a pause the supervisor never acknowledges is answered by ``cleanup.json``.
 
 Agents in the task sandbox often clean up with ``pkill -f python3``, ``pkill python3`` or
 ``killall python3``. These must not stop the supervisor or a runner, which would end the
@@ -31,15 +45,19 @@ make the launch shell a process group leader, that process starts the supervisor
 group, passes TERM on to it and exits with its status.
 """
 
+import asyncio
 import json
 import logging
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from shlex import join, quote
-from typing import TypedDict
+from typing import Literal, NotRequired, TypedDict, cast
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
+from nemo_gym.agents.utils.setup_retry import exec_idempotent
 from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.typed_exceptions import NgFailureEvent
@@ -55,6 +73,14 @@ STOP_REQUEST_FILE = "stop.request"
 EXPIRE_REQUEST_FILE = "expire.request"
 CLEANUP_RECEIPT_FILE = "cleanup.json"
 OUTPUT_LOG_FILE = "output.log"
+PAUSE_REQUEST_FILE = "pause.request"
+PAUSED_FILE = "paused.json"
+CONTINUE_REQUEST_FILE = "continue.request"
+CONTINUED_FILE = "continued.json"
+# How long a pause or continue waits for the supervisor's acknowledgement by default. The supervisor
+# waits up to 5 seconds for reached processes to stop, and 25 more while some are in uninterruptible
+# sleep.
+DEFAULT_PAUSE_TIMEOUT = 45.0
 
 DEFAULT_CLEANUP_TIMEOUT = 10.0
 CLEANUP_PHASE_COUNT = 3
@@ -71,22 +97,67 @@ class CleanupReceipt(TypedDict):
     that left between two scans without the marker, remain until the owner closes the
     sandbox; this is not a sandbox-empty check. ``return_code`` is the shell status:
     128+N for a harness killed by signal N, and 126 or 127 when the command could not
-    be run.
+    be run. ``stopped``, absent from receipts written before pausing existed, says the
+    stop request, not the harness's own exit or the deadline, ended the harness or
+    fenced its launch.
     """
 
     cleanup_confirmed: bool
     return_code: int | None
     error: str | None
     timed_out: bool
+    # Stop signals the supervisor ignored because no stop file existed; present only when nonzero.
+    foreign_signals: NotRequired[int]
+    # The supervisor ran but died without writing its receipt, and the sandbox provider proved that no sandboxed
+    # process remains (see stop_and_confirm_cleanup); present only when true. Not a clean stop: a harness ran and
+    # its outcome is lost, so ``return_code`` is None.
+    receipt_missing: NotRequired[bool]
+    stopped: NotRequired[bool]
+    # A checkpoint pause lasted longer than the supervisor's ``--max-pause`` and the supervisor ended the harness
+    # as at its time limit (``timed_out`` is true too); present only when true.
+    pause_expired: NotRequired[bool]
+    abandoned: NotRequired[bool]
 
 
-def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
+class PauseAcknowledgement(TypedDict):
+    """A supervisor's answer to pause or continue request ``seq``, from ``paused.json`` or ``continued.json``.
+
+    ``mode`` is the supervisor's pause mode and ``identity`` its ``PID.START``, ``None`` before it launched;
+    acknowledgements written before either existed have neither.
+    """
+
+    seq: int
+    confirmed: bool
+    pids: list[int]
+    error: str | None
+    mode: NotRequired[Literal["stop", "hold"]]
+    identity: NotRequired[str | None]
+
+
+# How a supervisor pauses: ``stop`` sends SIGSTOP and SIGCONT to every process it reaches; ``hold`` sends nothing,
+# for a sandbox whose snapshot keeps its processes running.
+PauseMode = Literal["stop", "hold"]
+
+
+# What a pause or continue request found:
+# ``acknowledged`` - the supervisor answered (see the acknowledgement's ``confirmed``);
+# ``not_launched`` - no supervisor runs yet, and the launch will honour the request when it starts;
+# ``finished`` - the cleanup receipt exists, so the harness has ended;
+# ``timeout`` - nothing answered in time.
+SupervisorRequestOutcome = Literal["acknowledged", "not_launched", "finished", "timeout"]
+
+
+def exec_timeout(
+    *, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT, pause_allowance: float = 0.0
+) -> float:
     """Reserve TERM grace, direct-process reaping, and process-group reaping.
 
     The extra 30 seconds cover startup, polling, and receipt I/O beyond those
     bounded cleanup phases. Keep their count shared with the controller budget.
+    ``pause_allowance`` covers time the harness may spend paused for checkpoints,
+    which the supervisor does not count against ``timeout``.
     """
-    return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30
+    return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30 + pause_allowance
 
 
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
@@ -137,23 +208,38 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
         return _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
     except ValidationError:
         LOG.warning("Harness termination was confirmed, but its diagnostic fields did not match the receipt schema")
-    return {
+    receipt: CleanupReceipt = {
         "cleanup_confirmed": True,
         "return_code": payload.get("return_code") if type(payload.get("return_code")) is int else None,
         "timed_out": payload.get("timed_out") is True,
         "error": payload.get("error") if isinstance(payload.get("error"), str) else None,
     }
+    foreign_signals = payload.get("foreign_signals")
+    if type(foreign_signals) is int and foreign_signals > 0:
+        receipt["foreign_signals"] = foreign_signals
+    if payload.get("receipt_missing") is True:
+        receipt["receipt_missing"] = True
+    if isinstance(payload.get("stopped"), bool):
+        receipt["stopped"] = payload["stopped"]
+    if payload.get("pause_expired") is True:
+        receipt["pause_expired"] = True
+    if isinstance(payload.get("abandoned"), bool):
+        receipt["abandoned"] = payload["abandoned"]
+    return receipt
 
 
-def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float, float]:
+def supervision_timeouts(*, timeout: float, close_timeout: float, pause_allowance: float = 0.0) -> tuple[float, float]:
     """Return the per-cleanup-phase and provider execution deadlines.
 
     Divide the close budget across TERM grace, direct-process and group reaping.
     The provider deadline reserves all phases after
-    the harness timeout, plus 30 seconds for startup, polling, and receipt I/O.
+    the harness timeout, plus 30 seconds for startup, polling, and receipt I/O,
+    plus ``pause_allowance`` for time paused at checkpoints.
     """
     cleanup_timeout = close_timeout / CLEANUP_PHASE_COUNT
-    return cleanup_timeout, exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout)
+    return cleanup_timeout, exec_timeout(
+        timeout=timeout, cleanup_timeout=cleanup_timeout, pause_allowance=pause_allowance
+    )
 
 
 def _seconds(value: float) -> str:
@@ -167,6 +253,9 @@ def supervised_launch_command(
     command: list[str],
     timeout: float,
     cleanup_timeout: float,
+    pausable: bool = False,
+    max_pause: float | None = None,
+    pause_mode: PauseMode = "stop",
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -177,8 +266,24 @@ def supervised_launch_command(
     sandbox owner stops services that left the harness earlier. Stops reach the
     supervisor through the stop file, not a signal, so the harness keeps the default
     TERM disposition.
+
+    With ``pausable``, the supervisor also serves pause and continue requests in
+    ``session_dir`` (see ``request_pause`` and ``request_continue``), in ``pause_mode``.
+    ``max_pause`` bounds one pause: past it the supervisor ends the harness as at its time
+    limit, so a harness whose agent server died during a checkpoint does not stay paused
+    for good.
     """
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
+    pause_options = (
+        f"--pause-file {quote(f'{session_dir}/{PAUSE_REQUEST_FILE}')} "
+        f"--paused {quote(f'{session_dir}/{PAUSED_FILE}')} "
+        f"--continue-file {quote(f'{session_dir}/{CONTINUE_REQUEST_FILE}')} "
+        f"--continued {quote(f'{session_dir}/{CONTINUED_FILE}')} "
+        + (f"--max-pause {_seconds(max_pause)} " if max_pause else "")
+        + (f"--pause-mode {pause_mode} " if pause_mode != "stop" else "")
+        if pausable
+        else ""
+    )
     claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
     return (
         f"[ -d {quote(session_dir)} ] && [ ! -L {claim_path} ] || exit 0; "
@@ -189,31 +294,83 @@ def supervised_launch_command(
         f"--timeout {_seconds(timeout)} --cleanup-timeout {_seconds(cleanup_timeout)} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
         f"--expire-file {quote(f'{session_dir}/{EXPIRE_REQUEST_FILE}')} "
-        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {join(command)} "
+        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} {pause_options}-- {join(command)} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )
 
 
+def control_cwd(*, session_dir: str, workdir: str | None) -> str | None:
+    """Working directory for a lifecycle command that addresses only ``session_dir`` files.
+
+    A task can move or delete its workdir, and providers such as Docker refuse to exec in a missing directory.
+    An absolute session directory needs no workdir, so its stop, probe and removal commands run from ``/``.
+    """
+    return "/" if Path(session_dir).is_absolute() else workdir
+
+
 async def stop_and_confirm_cleanup(
-    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, timeout: float, harness: str
+    sandbox: AsyncSandbox,
+    *,
+    session_dir: str,
+    workdir: str | None,
+    timeout: float,
+    harness: str,
+    launch_finished: bool = False,
 ) -> CleanupReceipt:
     """Fence a pending launch or require explicit supervisor acknowledgement before teardown.
 
     A stop that wins the launch claim writes the same receipt shape as the
     supervisor, with no return code because no harness process ran.
+
+    ``launch_finished`` means the provider exec of the launch command returned
+    normally: no launch is pending and the launch shell has exited. If its
+    supervisor claimed the launch and then exited without a receipt (killed, e.g.
+    by a harness tool or the OOM killer), nothing can write one any more, and
+    cleanup is confirmed when the provider proves that no sandboxed process can
+    still run (``AsyncSandbox.exec_processes_terminated``). The receipt then
+    carries ``receipt_missing: True``, so no consumer mistakes it for a clean stop.
+    A launch shell that returned before claiming (no supervisor ran) goes through
+    the stop below, which fences it. A failed or unprovable check leaves the
+    outcome unknown.
     """
     receipt_path = f"{session_dir}/{CLEANUP_RECEIPT_FILE}"
     try:
         receipt = json.loads(await read_text(sandbox, path=receipt_path))
+        read_failed = False
     except Exception:
-        receipt = {}
+        receipt, read_failed = {}, True
+    if read_failed and launch_finished and await _supervisor_claimed_launch(sandbox, session_dir, workdir):
+        try:
+            proved = (await sandbox.exec_processes_terminated()) is True
+        except Exception:  # noqa: BLE001 - an unprovable sandbox leaves the outcome unknown below
+            LOG.warning("%s: the sandbox provider could not prove the sandbox empty", harness, exc_info=True)
+            proved = False
+        if proved:
+            # Nothing can write the receipt any more: a read that failed for another reason now finds it.
+            try:
+                receipt, read_failed = json.loads(await read_text(sandbox, path=receipt_path)), False
+            except Exception:
+                LOG.warning(
+                    "%s supervisor exited without a cleanup receipt; the sandbox provider confirms "
+                    "that no sandboxed process remains",
+                    harness,
+                )
+                return {
+                    "cleanup_confirmed": True,
+                    "return_code": None,
+                    "error": None,
+                    "timed_out": False,
+                    "receipt_missing": True,
+                }
     _raise_terminal_failure(receipt, harness=harness)
     if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
         stop_path = quote(f"{session_dir}/{STOP_REQUEST_FILE}")
         claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
         temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")
         stopped = quote(
-            json.dumps({"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False})
+            json.dumps(
+                {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False, "stopped": True}
+            )
         )
         script = (
             f"[ -f {quote(receipt_path)} ] && exit 0; "
@@ -224,7 +381,7 @@ async def stop_and_confirm_cleanup(
             f"for _ in $(seq 1 {max(1, int(timeout))}); do "
             f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
         )
-        await sandbox.exec(script, cwd=workdir, timeout_s=timeout + 5)
+        await sandbox.exec(script, cwd=control_cwd(session_dir=session_dir, workdir=workdir), timeout_s=timeout + 5)
         try:
             receipt = json.loads(await read_text(sandbox, path=receipt_path))
         except Exception as error:
@@ -234,6 +391,18 @@ async def stop_and_confirm_cleanup(
             _raise_terminal_failure(receipt, harness=harness)
             raise RuntimeError(f"{harness} harness termination was not confirmed: {detail}")
     return parse_cleanup_receipt(receipt)
+
+
+async def _supervisor_claimed_launch(sandbox: AsyncSandbox, session_dir: str, workdir: str | None) -> bool:
+    """Whether the launch claim names the launch (the supervisor started), not a stop or nothing."""
+    claim = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
+    try:
+        result = await sandbox.exec(
+            f"readlink {claim}", cwd=control_cwd(session_dir=session_dir, workdir=workdir), timeout_s=30
+        )
+    except Exception:  # noqa: BLE001 - unknown: the stop below decides
+        return False
+    return result.return_code == 0 and not result.error_type and (result.stdout or "").strip() == "launch"
 
 
 async def remove_session_directory(
@@ -249,8 +418,253 @@ async def remove_session_directory(
     result = await sandbox.exec(
         f"if [ -d {quote(session_dir)} ]; then "
         f"mv {quote(session_dir)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
-        cwd=workdir,
+        cwd=control_cwd(session_dir=session_dir, workdir=workdir),
         timeout_s=timeout,
     )
     if result.return_code != 0 or result.error_type:
         raise RuntimeError(f"Could not remove {harness} session files")
+
+
+async def request_pause(
+    sandbox: AsyncSandbox,
+    *,
+    session_dir: str,
+    workdir: str | None,
+    seq: int,
+    timeout: float = DEFAULT_PAUSE_TIMEOUT,
+    launch_sent: bool = False,
+) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
+    """Ask the supervisor in ``session_dir`` to pause the harness, as request ``seq``, and wait for its answer.
+
+    With ``launch_sent``, the launch command is already on its way: a launch that has not claimed yet is waited
+    for, within ``timeout``, so its supervisor's acknowledgement is returned. ``not_launched`` then means that no
+    supervisor started in that time.
+    """
+    return await _request(
+        sandbox,
+        session_dir=session_dir,
+        workdir=workdir,
+        request_file=PAUSE_REQUEST_FILE,
+        acknowledgement_file=PAUSED_FILE,
+        seq=seq,
+        timeout=timeout,
+        wait_for_launch=launch_sent,
+    )
+
+
+async def request_continue(
+    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, seq: int, timeout: float = DEFAULT_PAUSE_TIMEOUT
+) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
+    """Ask the supervisor in ``session_dir`` to continue after pause ``seq`` and wait for its answer."""
+    return await _request(
+        sandbox,
+        session_dir=session_dir,
+        workdir=workdir,
+        request_file=CONTINUE_REQUEST_FILE,
+        acknowledgement_file=CONTINUED_FILE,
+        seq=seq,
+        timeout=timeout,
+    )
+
+
+_PAUSE_ACKNOWLEDGEMENT = TypeAdapter(PauseAcknowledgement)
+
+
+async def _request(
+    sandbox: AsyncSandbox,
+    *,
+    session_dir: str,
+    workdir: str | None,
+    request_file: str,
+    acknowledgement_file: str,
+    seq: int,
+    timeout: float,
+    wait_for_launch: bool = False,
+) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
+    """Write request ``seq`` and wait for the supervisor's acknowledgement or the cleanup receipt, in one exec.
+
+    A session directory without a launch claim has no supervisor yet: the request stays for the launch to read,
+    and the answer is ``not_launched`` at once. With ``wait_for_launch`` the claim is waited for as well, and
+    ``not_launched`` is the answer only when none appeared within ``timeout``. A launch the stop fenced counts as
+    finished.
+    """
+    receipt = quote(f"{session_dir}/{CLEANUP_RECEIPT_FILE}")
+    request = quote(f"{session_dir}/{request_file}")
+    temporary = quote(f"{session_dir}/{request_file}.{uuid4().hex}.tmp")
+    acknowledgement = quote(f"{session_dir}/{acknowledgement_file}")
+    claim = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
+    # The receipt is read first: a finished harness is never paused. The request is written before the claim is
+    # read, so a supervisor that claims the launch afterwards reads the request when it starts.
+    read_claim = f"claim=$(readlink {claim} 2>/dev/null); "
+    fenced = '[ "$claim" = stop ] && { echo finished; exit 0; }; '
+    unclaimed = '[ -n "$claim" ] || { echo not_launched; exit 0; }; '
+    script = (
+        f"[ -f {receipt} ] && {{ echo finished; exit 0; }}; "
+        f"[ -d {quote(session_dir)} ] || {{ echo not_launched; exit 0; }}; "
+        f"printf '%s' {seq} > {temporary} && mv -f {temporary} {request} || exit 1; "
+        # A launch that was not sent is not waited for; one that was is read again every round.
+        f"{read_claim}{'' if wait_for_launch else unclaimed}{fenced}"
+        f"for _ in $(seq 1 {max(1, int(timeout * 20))}); do "
+        f"[ -f {receipt} ] && {{ echo finished; exit 0; }}; "
+        f"{read_claim + fenced if wait_for_launch else ''}"
+        f"if [ -f {acknowledgement} ]; then ack=$(cat {acknowledgement}); "
+        f'case "$ack" in *{quote(f'"seq": {seq},')}*) echo acknowledged; printf "%s\\n" "$ack"; exit 0;; esac; fi; '
+        f"sleep 0.05; done; {unclaimed}echo timeout"
+    )
+    # The provider may queue the command behind others, and its own timeout starts only once the command runs:
+    # with every slot taken, by this harness among others, the request would wait for a harness to end.
+    async with asyncio.timeout(timeout + 10):
+        result = await sandbox.exec(
+            script, cwd=control_cwd(session_dir=session_dir, workdir=workdir), timeout_s=timeout + 10
+        )
+    if result.return_code != 0 or result.error_type:
+        raise RuntimeError(f"supervisor request {request_file} failed: {result.error_type or result.stderr}")
+    lines = (result.stdout or "").splitlines()
+    outcome = lines[0].strip() if lines else ""
+    if outcome == "acknowledged":
+        try:
+            return "acknowledged", _PAUSE_ACKNOWLEDGEMENT.validate_python(json.loads(lines[1]), strict=True)
+        except (IndexError, ValueError, ValidationError) as error:
+            raise RuntimeError(f"malformed supervisor acknowledgement in {acknowledgement_file}") from error
+    if outcome not in ("not_launched", "finished", "timeout"):
+        raise RuntimeError(f"unexpected supervisor request outcome {outcome!r}")
+    return outcome, None  # type: ignore[return-value]
+
+
+# Why a launch that a restore of a process-keeping snapshot brought back cannot be taken over:
+# ``supervisor_gone`` - no process with the supervisor's PID runs; ``identity_mismatch`` - a different process
+# holds that PID; ``pause_mismatch`` - the supervisor does not hold the recorded pause in hold mode;
+# ``launch_finished`` - the cleanup receipt exists; ``relay_gone`` - the model relay's process is gone;
+# ``relay_unavailable`` - the launch ran without a relay; ``check_failed`` - the check itself could not run.
+NotResumableReason = Literal[
+    "supervisor_gone",
+    "identity_mismatch",
+    "pause_mismatch",
+    "launch_finished",
+    "relay_gone",
+    "relay_unavailable",
+    "check_failed",
+]
+_NOT_RESUMABLE_REASONS = frozenset(NotResumableReason.__args__)  # type: ignore[attr-defined]
+_IDENTITY = re.compile(r"[0-9]+\.[0-9]+")
+
+
+@dataclass(frozen=True)
+class RestoredLaunch:
+    """A launch that a restore brought back with its supervisor holding pause ``pause_seq``; ``adopt`` takes it."""
+
+    pause_seq: int
+    identity: str
+
+
+@dataclass(frozen=True)
+class NotResumable:
+    """A restored launch that cannot be taken over, and why; ``detail`` adds what the check saw."""
+
+    reason: NotResumableReason
+    detail: str | None = None
+
+
+# The check, as one bash script: prints the first reason that applies, or "ok". Needs only bash and /proc, as the
+# supervisor does. $1 session dir, $2 identity, $3 pause sequence, $4 relay status file or "".
+_CHECK_RESTORED = r"""
+d=$1 id=$2 seq=$3 relay=$4
+start_of() {
+    local stat=
+    IFS= read -r -d '' stat 2>/dev/null <"/proc/$1/stat" || [[ -n $stat ]] || return 1
+    [[ $stat == *') '* ]] || return 1
+    while [[ $stat == *') '* ]]; do stat=${stat#*) }; done
+    set -- $stat
+    [[ $1 != [ZX] ]] || return 1
+    echo "${20}"
+}
+[[ -e $d/cleanup.json ]] && { echo launch_finished; exit 0; }
+pid=${id%%.*}
+started=$(start_of "$pid") || { echo supervisor_gone; exit 0; }
+[[ $started == "${id#*.}" ]] || { echo identity_mismatch; exit 0; }
+ack=
+IFS= read -r -d '' ack 2>/dev/null <"$d/paused.json"
+[[ $ack == *"\"seq\": $seq,"* && $ack == *'"confirmed": true'* && $ack == *'"mode": "hold"'* && $ack == *"\"identity\": \"$id\""* ]] ||
+    { echo pause_mismatch; exit 0; }
+continued=
+IFS= read -r continued 2>/dev/null <"$d/continue.request"
+[[ $continued =~ ^[0-9]+$ ]] && ((10#$continued >= seq)) && { echo pause_mismatch; exit 0; }
+if [[ -n $relay ]]; then
+    [[ -e ${relay%/*}/unavailable ]] && { echo relay_unavailable; exit 0; }
+    status=
+    IFS= read -r -d '' status 2>/dev/null <"$relay"
+    [[ $status =~ \"pid\":\ *([0-9]+) ]] && relay_pid=${BASH_REMATCH[1]} || { echo relay_gone; exit 0; }
+    [[ $status =~ \"start\":\ *([0-9]+) ]] && relay_start=${BASH_REMATCH[1]} || { echo relay_gone; exit 0; }
+    [[ $(start_of "$relay_pid") == "$relay_start" ]] || { echo relay_gone; exit 0; }
+fi
+echo ok
+"""
+
+
+async def check_restored(
+    sandbox: AsyncSandbox,
+    session_dir: str,
+    *,
+    pause_seq: int,
+    identity: str,
+    relay_status_path: str | None,
+    timeout: float,
+) -> RestoredLaunch | NotResumable:
+    """Whether a restore brought back the launch in ``session_dir`` so that ``SandboxSession.adopt`` can take it over.
+
+    The launch qualifies when its supervisor still runs as ``identity`` (``PID.START``), holds pause ``pause_seq`` in
+    hold mode with no continue for it yet, and has written no cleanup receipt; and, with ``relay_status_path``, when
+    the model relay whose status file that is still runs (its ``pid`` and ``start``). One command in the sandbox,
+    repeated when the sandbox refuses it; a check that still cannot run is ``check_failed``, which says nothing
+    about the launch.
+    """
+    if not _IDENTITY.fullmatch(identity):
+        return NotResumable("identity_mismatch", f"malformed supervisor identity {identity!r}")
+    command = (
+        f"bash -c {quote(_CHECK_RESTORED)} check {quote(session_dir)} {quote(identity)} {int(pause_seq)} "
+        f"{quote(relay_status_path or '')}"
+    )
+    try:
+        # The check only reads, so it is safe to repeat: a sandbox a restore just forked can refuse a command.
+        result = await exec_idempotent(sandbox, command, what="restored launch check", timeout_s=timeout)
+    except Exception as error:
+        return NotResumable("check_failed", repr(error)[:500])
+    verdict = (result.stdout or "").strip()
+    if result.return_code != 0 or result.error_type or (verdict != "ok" and verdict not in _NOT_RESUMABLE_REASONS):
+        detail = result.error_type or (result.stderr or verdict or f"exit {result.return_code}").strip()
+        return NotResumable("check_failed", detail[:500])
+    if verdict == "ok":
+        return RestoredLaunch(pause_seq=pause_seq, identity=identity)
+    return NotResumable(cast(NotResumableReason, verdict))
+
+
+async def abandon_launch(
+    sandbox: AsyncSandbox, session_dir: str, *, identity: str, timeout: float, harness: str
+) -> CleanupReceipt:
+    """End a restored launch for good: KILL, never CONT, its supervisor and every process it marked.
+
+    For a launch a restore brought back that will not be taken over, so that nothing of it (a harness still
+    pointed at a dead model server, say) runs again before a relaunch. Uses the supervisor script the launch
+    uploaded to ``session_dir``. Returns the receipt: the supervisor's own if it had finished, else a stopped,
+    ``abandoned`` one. Raises the harness termination failure if a process it killed did not exit, and
+    ``RuntimeError`` if the abandonment failed beside the receipt of a launch that had finished.
+    """
+    if not _IDENTITY.fullmatch(identity):
+        raise ValueError(f"malformed supervisor identity {identity!r}")
+    receipt_path = f"{session_dir}/{CLEANUP_RECEIPT_FILE}"
+    result = await sandbox.exec(
+        f"bash {quote(f'{session_dir}/{SUPERVISOR_FILE}')} --abandon {quote(identity)} "
+        f"--receipt {quote(receipt_path)} --cleanup-timeout {_seconds(timeout)}",
+        timeout_s=timeout + 10,
+    )
+    if result.error_type:
+        raise RuntimeError(f"{harness} launch could not be abandoned: {result.error_type}: {result.stderr}")
+    try:
+        receipt = json.loads(await read_text(sandbox, path=receipt_path))
+    except Exception as error:
+        raise RuntimeError(f"{harness} abandoned launch left no receipt") from error
+    _raise_terminal_failure(receipt, harness=harness)
+    if result.return_code != 0:
+        # The receipt is an earlier one, of a launch that had finished: it does not answer for this abandonment.
+        raise RuntimeError(f"{harness} launch could not be abandoned: exit {result.return_code}: {result.stderr}")
+    return parse_cleanup_receipt(receipt)

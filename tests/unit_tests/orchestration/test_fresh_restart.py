@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
-from nemo_gym.orchestration.executors.slurm import WALLTIME_JOURNAL_NAME
+from nemo_gym.orchestration.executors.slurm.chain import WALLTIME_JOURNAL_NAME
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _sbatch_env, _start_queued_job
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
@@ -186,10 +186,15 @@ def test_a_fresh_restart_is_refused_before_anything_changes(tmp_path, slurm_bin,
 
 def test_a_fresh_restart_from_a_launcher_of_another_revision_is_refused(tmp_path, slurm_bin, monkeypatch):
     import nemo_gym.orchestration.executors.slurm as slurm_executor
-    from nemo_gym.orchestration.executors.slurm import IncompatibleRerenderError
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+    from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+    from nemo_gym.orchestration.executors.slurm.chain import IncompatibleRerenderError
     from nemo_gym.orchestration.submit import recover
     from tests.unit_tests.orchestration.test_resubmit_repin import NEW, OLD
 
+    monkeypatch.setattr(slurm_chain, "installed_gym_commit", lambda: NEW)
+    monkeypatch.setattr(slurm_judge_job, "installed_gym_commit", lambda: NEW)
     monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: NEW)
     job_dir = _cut_before_inventory(tmp_path, slurm_bin)
     files = {path: path.read_bytes() for path in (job_dir / "job.sh", job_dir.parent / "resolved-config.yaml")}

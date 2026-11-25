@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,11 +34,37 @@ TEST_TEMPLATE_ACTION = REPO_ROOT / ".github" / "actions" / "test-template" / "ac
 UNIT_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "unit-tests.yml"
 QWEN_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
+# docker/Dockerfile is the source of truth for the uv pin; every other site must agree with it.
+_V = r"(\d+\.\d+\.\d+)"
+UV_PIN_SOURCES = {
+    "docker/Dockerfile": rf"^ARG UV_VERSION={_V}$",
+    "resources_servers/visual_browser/docker/visual-browser-runtime.Dockerfile": rf"ghcr\.io/astral-sh/uv:{_V}",
+    "scripts/ci/setup_dev.sh": rf"astral\.sh/uv/{_V}/install\.sh|uv-{_V}\"|== \"{_V}\"|= \"{_V}\"",
+    ".github/workflows/component-locks.yml": rf"astral\.sh/uv/{_V}/install\.sh",
+    ".github/workflows/unit-tests.yml": rf"astral\.sh/uv/{_V}/install\.sh",
+    ".github/workflows/full-test-suite.yml": rf"astral\.sh/uv/{_V}/install\.sh",
+}
+[UV_PIN] = set(
+    re.findall(UV_PIN_SOURCES["docker/Dockerfile"], (REPO_ROOT / "docker" / "Dockerfile").read_text(), re.M)
+)
+
+
+def test_uv_pin_is_identical_everywhere() -> None:
+    found: dict[str, set[str]] = {}
+    for rel, pattern in UV_PIN_SOURCES.items():
+        text = (REPO_ROOT / rel).read_text()
+        versions = {v for m in re.finditer(pattern, text, re.M) for v in m.groups() if v}
+        assert versions, f"{rel}: no uv pin matched {pattern!r}"
+        found[rel] = versions
+    assert set().union(*found.values()) == {UV_PIN}, f"uv pin drift: {found}"
+
+
 BEHAVIOR_CHANGING_ENV = {
     "GYM_CI_DEV_VENV_DIR": "/tmp/injected-driver-venv",
     "SKIP": "ruff",
     "NEMO_GYM_EXTRA_ROOTS": "/tmp/external-gym",
     "NEMO_GYM_CONFIG_DICT": '{"search_dir": "/tmp/external-gym"}',
+    "NEMO_GYM_CONFIG_DICT_FILE": "/tmp/external-gym/config.yaml",
     "NEMO_GYM_ALLOW_PRERELEASE": "true",
     "PYTHONPATH": "/tmp/python",
     "PYTHONSAFEPATH": "1",
@@ -70,7 +97,13 @@ def _environment_after_sanitizing(stage: str) -> dict[str, str]:
         ("lint", {"SKIP"}),
         (
             "core",
-            {"GYM_CI_DEV_VENV_DIR", "NEMO_GYM_EXTRA_ROOTS", "NEMO_GYM_CONFIG_DICT", "PYTHONPATH"},
+            {
+                "GYM_CI_DEV_VENV_DIR",
+                "NEMO_GYM_EXTRA_ROOTS",
+                "NEMO_GYM_CONFIG_DICT",
+                "NEMO_GYM_CONFIG_DICT_FILE",
+                "PYTHONPATH",
+            },
         ),
         (
             "server",
@@ -78,6 +111,7 @@ def _environment_after_sanitizing(stage: str) -> dict[str, str]:
                 "GYM_CI_DEV_VENV_DIR",
                 "NEMO_GYM_EXTRA_ROOTS",
                 "NEMO_GYM_CONFIG_DICT",
+                "NEMO_GYM_CONFIG_DICT_FILE",
                 "NEMO_GYM_ALLOW_PRERELEASE",
                 "PYTHONPATH",
                 "PYTHONSAFEPATH",
@@ -94,6 +128,21 @@ def test_ci_stage_removes_only_its_behavior_changing_environment(stage: str, rem
     for name, value in BEHAVIOR_CHANGING_ENV.items():
         if name not in removed:
             assert sanitized[name] == value
+
+
+@pytest.mark.parametrize("stage", ["core", "server"])
+def test_ci_stage_leaves_no_inherited_config(stage: str, tmp_path: Path) -> None:
+    env = os.environ | {
+        "NEMO_GYM_CONFIG_DICT": "sentinel: inherited",
+        # A file that does not exist: reading it would raise.
+        "NEMO_GYM_CONFIG_DICT_FILE": str(tmp_path / "inherited.yaml"),
+    }
+    read_config = "from nemo_gym.config.global_config import maybe_get_global_config_dict as read; print(read())"
+    command = f'source "{SANITIZER}"; gym_ci_sanitize_environment "{stage}"; "{sys.executable}" -c "{read_config}"'
+
+    result = subprocess.run(["bash", "-c", command], check=True, capture_output=True, text=True, env=env)
+
+    assert result.stdout.strip() == "None"
 
 
 def test_ci_environment_sanitizer_rejects_unknown_stage() -> None:
@@ -180,13 +229,24 @@ def test_full_suite_retry_is_bounded_and_reruns_only_failed_jobs() -> None:
 
 
 def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
-    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 4)]:
-        workflow = workflow_path.read_text()
-        assert workflow.count("run: ./scripts/ci/reclaim_runner_disk.sh") == expected_jobs
-        assert workflow.count("Reclaim runner disk") == expected_jobs
-        sections = workflow.split("- name: Reclaim runner disk")
-        for section in sections[1:]:
-            assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
+    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 5)]:
+        jobs = yaml.safe_load(workflow_path.read_text())["jobs"]
+        checked_jobs = 0
+        for job in jobs.values():
+            steps = job.get("steps", [])
+            cleanup = [i for i, step in enumerate(steps) if step.get("run") == "./scripts/ci/reclaim_runner_disk.sh"]
+            if not cleanup:
+                continue
+            assert len(cleanup) == 1
+            checked_jobs += 1
+            dependencies = [
+                i
+                for i, step in enumerate(steps)
+                if step.get("uses", "").startswith("actions/cache@") or step.get("name", "").startswith("Install ")
+            ]
+            assert dependencies
+            assert all(cleanup[0] < i for i in dependencies)
+        assert checked_jobs == expected_jobs
 
 
 def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
@@ -226,7 +286,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         "#!/bin/sh\n"
         'echo "$*" >> "$UV_TEST_CALLS"\n'
         'case "$1" in\n'
-        "  --version) echo 'uv 0.13.4' ;;\n"
+        f"  --version) echo 'uv {UV_PIN}' ;;\n"
         "  venv) mkdir -p .venv/bin; : > .venv/bin/activate ;;\n"
         "  sync) ;;\n"
         "  *) exit 2 ;;\n"
@@ -272,7 +332,7 @@ def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: 
         text=True,
     )
     assert later_step.returncode == 0, later_step.stderr
-    assert later_step.stdout.strip() == "uv 0.13.4"
+    assert later_step.stdout.strip() == f"uv {UV_PIN}"
 
 
 def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
@@ -792,7 +852,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "runs-on: ubuntu-latest" in workflow
     assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
     assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
-    assert "https://astral.sh/uv/0.13.4/install.sh" not in workflow
+    assert not re.search(r"astral\.sh/uv/\d", workflow)  # no hard-coded uv version; read from docker/Dockerfile
     assert "E2E_MODEL: ${{ matrix.model }}" in workflow
     assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
     assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow
@@ -1016,6 +1076,7 @@ printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
         GITHUB_ENV=str(tmp_path / "github-env"),
         INSTALL_TEST_STATE=str(tmp_path),
         INSTALL_TEST_FAILURE=failure,
+        GYM_CI_APT_ETC=str(tmp_path / "no-apt-etc"),
     )
 
     result = subprocess.run(
@@ -1044,6 +1105,65 @@ printf '%s\\n' "$@" > "$INSTALL_TEST_STATE/installed"
     assert (tmp_path / "github-env").read_text() == f"UV_PYTHON_INSTALL_DIR={tmp_path}/runner/uv-python\n"
 
 
+@pytest.mark.parametrize("mirror_works", [True, False])
+def test_system_dependency_install_tries_the_aws_mirror_before_the_runner_sources(
+    tmp_path: Path, mirror_works: bool
+) -> None:
+    apt_etc = tmp_path / "apt-etc"
+    (apt_etc / "sources.list.d").mkdir(parents=True)
+    runner_sources = "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates\n"
+    (apt_etc / "sources.list.d" / "ubuntu.sources").write_text(runner_sources)
+    ppa = "deb https://ppa.launchpadcontent.net/git-core/ppa/ubuntu noble main\n"
+    (apt_etc / "sources.list.d" / "git-core.list").write_text(ppa)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_executable(bin_dir / "sudo", '#!/bin/sh\nexec "$@"\n')
+    _write_executable(bin_dir / "timeout", '#!/bin/sh\nshift\nexec "$@"\n')
+    _write_executable(bin_dir / "dpkg", "#!/bin/sh\nexit 0\n")
+    _write_executable(
+        bin_dir / "apt-get",
+        """#!/bin/sh
+set -eu
+sources=runner
+if test -n "${APT_CONFIG:-}"; then
+    parts=$(sed -n 's/^Dir::Etc::SourceParts "\\(.*\\)";$/\\1/p' "$APT_CONFIG")
+    grep -q 'URIs: http://mirror.test/ubuntu/' "$parts/ubuntu.sources"
+    grep -q 'ppa.launchpadcontent.net' "$parts/git-core.list"
+    sources=mirror
+fi
+echo "$1 $sources" >> "$INSTALL_TEST_STATE/calls"
+if test "$sources" = mirror && test "$INSTALL_TEST_MIRROR_WORKS" = 0; then exit 100; fi
+""",
+    )
+    env = os.environ.copy()
+    env.update(
+        PATH=f"{bin_dir}:{env['PATH']}",
+        RUNNER_TEMP=str(tmp_path / "runner"),
+        GITHUB_ENV=str(tmp_path / "github-env"),
+        INSTALL_TEST_STATE=str(tmp_path),
+        INSTALL_TEST_MIRROR_WORKS="1" if mirror_works else "0",
+        GYM_CI_APT_ETC=str(apt_etc),
+        GYM_CI_APT_MIRROR="http://mirror.test/ubuntu",
+    )
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "ci" / "install_test_dependencies.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = (tmp_path / "calls").read_text().splitlines()
+    if mirror_works:
+        assert calls == ["update mirror", "install mirror", "install mirror"]
+    else:
+        assert calls == ["update mirror", "update runner", "install runner", "install runner"]
+        assert "Falling back to the runner's APT sources" in result.stdout
+    assert (apt_etc / "sources.list.d" / "ubuntu.sources").read_text() == runner_sources
+
+
 def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     ci_dir = repo_root / "scripts" / "ci"
@@ -1061,7 +1181,7 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
         """#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
-    --version) printf '%s\\n' 'uv 0.13.4' ;;
+    --version) printf '%s\\n' 'uv __UV_PIN__' ;;
     cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
     venv)
         venv_dir="${@: -1}"
@@ -1073,7 +1193,7 @@ case "${1:-}" in
     lock|sync) ;;
     *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
 esac
-""",
+""".replace("__UV_PIN__", UV_PIN),
     )
     _write_executable(
         bin_dir / "ng_test_all",
@@ -1198,13 +1318,13 @@ def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock
         """#!/usr/bin/env bash
 set -eu
 case "$1" in
-    --version) echo 'uv 0.13.4' ;;
+    --version) echo 'uv __UV_PIN__' ;;
     cache) echo "${UV_CACHE_DIR}" ;;
     lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
     sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;
     *) echo "unexpected uv command: $*" >&2; exit 2 ;;
 esac
-""",
+""".replace("__UV_PIN__", UV_PIN),
     )
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
@@ -1230,3 +1350,48 @@ esac
     if lock_status == 0:
         expected.append(f"sync --extra dev{offline}")
     assert capture.read_text().splitlines() == expected
+
+
+@pytest.mark.parametrize(
+    ("required", "result", "success"),
+    [
+        ("true", "success", True),
+        ("true", "failure", False),
+        ("true", "cancelled", False),
+        ("true", "skipped", False),
+        ("false", "skipped", True),
+        ("false", "failure", False),
+    ],
+)
+def test_longmt_scoring_is_in_ci_aggregate(required: str, result: str, success: bool) -> None:
+    jobs = yaml.safe_load(UNIT_TEST_WORKFLOW.read_text())["jobs"]
+    aggregate = jobs["test-result"]
+    assert "longmt-scoring" in aggregate["needs"]
+    step = aggregate["steps"][0]
+    assert step["env"]["RUN_LONGMT"] == "${{ " + jobs["longmt-scoring"]["if"] + " }}"
+    assert step["env"]["LONGMT_RESULT"] == "${{ needs.longmt-scoring.result }}"
+    env = dict(
+        os.environ,
+        DETECT_RESULT="success",
+        RUN_FULL="false",
+        RUN_SERVERS="false",
+        RUN_LONGMT=required,
+        LONGMT_RESULT=result,
+    )
+    completed = subprocess.run(["bash", "-c", step["run"]], env=env, timeout=10)
+    assert (completed.returncode == 0) is success
+
+
+def test_longmt_scoring_installs_native_build_tools_before_uv_run() -> None:
+    steps = yaml.safe_load(UNIT_TEST_WORKFLOW.read_text())["jobs"]["longmt-scoring"]["steps"]
+    install_index = next(
+        i for i, step in enumerate(steps) if step.get("run") == "bash scripts/ci/install_test_dependencies.sh"
+    )
+    scoring_index = next(
+        i
+        for i, step in enumerate(steps)
+        if "uv run --locked --project resources_servers/longmt_eval/scoring" in step.get("run", "")
+    )
+    assert install_index < scoring_index
+    command = steps[scoring_index]["run"]
+    assert "--managed-python --python 3.12" in command

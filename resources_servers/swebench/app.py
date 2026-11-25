@@ -23,10 +23,11 @@ from shutil import rmtree
 from tempfile import TemporaryDirectory
 from time import monotonic, time
 from traceback import format_exc
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, Optional, Sequence, Tuple
+from uuid import uuid4
 
 from fastapi import Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, JsonValue, field_validator
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
@@ -55,18 +56,25 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    CheckpointMode,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
+    StepType,
     lost_session_verification,
 )
 from nemo_gym.trajectory import SandboxObservation
 from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
-from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.sandbox_session_checkpoints import (
+    CheckpointedSandboxSessionResourcesServer,
+    SandboxCheckpointFields,
+)
 from resources_servers.swebench.swebench_patches import (
+    patch_swebench_chartjs_chrome_flag,
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_sandbox,
+    patch_swebench_pytest_result_summary,
     patch_swebench_verified_env_vars,
     run_instance,
 )
@@ -97,7 +105,7 @@ def restore_test_assets_from_staging(test_spec: TestSpec, assets: Sequence[SWEBe
         test_spec.eval_script_list[position] = f"cp {quote(staged_test_asset_path(index))} {quote(asset.path)}"
 
 
-class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
+class SwebenchResourcesServerConfig(SandboxCheckpointFields, BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
     # Write the Maven Central mirror to ~/.m2/settings.xml in the eval sandbox. Turn off for providers
@@ -328,8 +336,17 @@ def strip_binary_diffs(patch: str) -> str:
     return "".join(sec for sec in sections if not re.search(r"(?m)^Binary files .* differ$", sec))
 
 
-class SwebenchResourcesServer(SandboxSessionResourcesServer):
+class SwebenchResourcesServer(CheckpointedSandboxSessionResourcesServer):
     config: SwebenchResourcesServerConfig
+    task_model: ClassVar[type[BaseModel]] = SWEBenchInstanceRequest
+    # The patch is captured once per session, so a verify repeated after a restore grades the same patch.
+    checkpoint_verify: ClassVar[StepType] = "replay"
+
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        # Golden-patch grading seeds no episode sessions, so it has nothing to checkpoint.
+        if self.config.is_verifying_golden_patch:
+            return "restart_only"
+        return super().checkpoint_mode_in_effect()
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -378,9 +395,11 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         if task_session_id is not None:
-            self._session_id_to_sandbox[task_session_id] = eval_sandbox
+            # On the provider every task sandbox shares, and registered for the session and its checkpoints.
+            eval_sandbox = self.new_task_sandbox(task_session_id, eval_sandbox_spec)
+        else:
+            eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         if verifier_session_id is not None:
             self._verifier_sandboxes[verifier_session_id] = eval_sandbox
 
@@ -413,6 +432,8 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
             env_image_tag=LATEST,
         )
         restore_test_assets_from_staging(test_spec, body.test_assets())
+        patch_swebench_pytest_result_summary(test_spec)
+        patch_swebench_chartjs_chrome_flag(test_spec)
         return test_spec
 
     async def seed_session(
@@ -479,6 +500,15 @@ Stderr:
     def _forget_task_sandbox_state(self, session_id: str) -> None:
         self._session_id_to_seed_head.pop(session_id, None)
 
+    def _export_task_sandbox_state(self, session_id: str) -> dict[str, JsonValue]:
+        # The commit a restored session's patch is captured against.
+        seed_head = self._session_id_to_seed_head.get(session_id)
+        return {"seed_head": seed_head} if seed_head else {}
+
+    def _restore_task_sandbox_state(self, session_id: str, state: dict[str, JsonValue]) -> None:
+        if state.get("seed_head"):
+            self._session_id_to_seed_head[session_id] = str(state["seed_head"])
+
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """Grade the resources-owned sandbox, reusing the patch and verdict on an episode session's retries."""
         return await self.verify_task_sandbox_session(
@@ -533,7 +563,9 @@ Stderr:
         self._verifier_sandboxes[session_id] = eval_sandbox
         eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
 
-        run_id = session_id
+        # One run id per grading: run_instance returns a report.json it finds in the run's log directory, so a verify
+        # repeated after a restore must not find what an earlier grading of the session left there.
+        run_id = f"{session_id}-{uuid4().hex[:8]}"
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
         mock_container._inner_container = eval_sandbox
 
@@ -599,7 +631,7 @@ Stderr:
         test_output = ""
         if test_output_fpaths:
             test_output_fpath = Path(test_output_fpaths[0])
-            test_output = test_output_fpath.read_text()
+            test_output = test_output_fpath.read_text(errors="replace")
 
         if self.config.clear_swebench_debug_logs:
             rmtree(str(log_dir), ignore_errors=True)

@@ -125,6 +125,9 @@ def raw_outcomes_are_selected(path: Path, *, artifacts: tuple[Path, ...] | None 
 _REJUDGE_GRADING_KEYS = frozenset(
     {
         "reward",
+        "correctness",
+        "verdict",
+        "library_reward",
         "mask_sample",
         "evaluation_completed",
         "failure_kind",
@@ -448,6 +451,11 @@ class RolloutStore:
             for k, v in failure.items()
             if k not in result and k not in _REJUDGE_GRADING_KEYS and not k.startswith(_REJUDGE_DROPPED_PREFIXES)
         }
+        # A judge outage writes a training mask into instance_config. The fresh verifier
+        # receives the original task config and owns that mask on the selected result.
+        instance = carried.get("instance_config")
+        if failure.get("mask_sample") is True and isinstance(instance, dict) and instance.get("mask_sample") is True:
+            carried["instance_config"] = {k: v for k, v in instance.items() if k != "mask_sample"}
         settled = carried | result | {REJUDGED_OBSERVATIONS_KEY: {k: v for k, v in failure.items() if k != "response"}}
         if "ng_trajectory" in failure:
             from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, VerifierInvocation
@@ -578,7 +586,8 @@ class RolloutStore:
             reservations.append((row, identity, attempt))
             next_attempt[identity] = attempt + 1
         manifest = self.manifest.model_copy(update={"next_attempt": next_attempt})
-        manifest.write(manifest_path_for(self.output))
+        # A reservation leaves the configuration identity as opening the store saved it.
+        manifest.write(manifest_path_for(self.output), write_config_identity=False)
         # Publish in memory only after all reservations are durable.
         self.manifest = self._state.manifest = manifest
         for row, identity, attempt in reservations:
@@ -699,6 +708,14 @@ class RolloutStore:
     def disposition(self, row: dict) -> str:
         """Return the newest allocated attempt's disposition for this rollout."""
         return self._state.disposition(logical_rollout_id(row))
+
+    def masked_retryable(self, row: dict) -> bool:
+        """Whether this rollout's selected success is masked by infrastructure and a resume will run it again."""
+        return self._state.masked_retryable(logical_rollout_id(row))
+
+    def settled(self, row: dict) -> bool:
+        """Whether this rollout's outcome is final and measured where it succeeded (``RolloutRecords.settled``)."""
+        return self._state.settled(logical_rollout_id(row))
 
     def selected(self, disposition: str) -> list[dict]:
         """Load selected payloads; use selected_records for metadata-only access."""

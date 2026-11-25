@@ -25,16 +25,25 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientResponseError
+from aiohttp import ClientPayloadError, ClientResponseError
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import (
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
 )
+from nemo_gym.metrics import compute_aggregate_metrics
+from responses_api_agents.finance_agent import app as finance_agent_app
 from responses_api_agents.finance_agent.app import (
     FinanceAgent,
     FinanceAgentConfig,
@@ -251,12 +260,26 @@ class TestFinanceAgentConfig:
     def test_shared_config_accepts_training_overlay_in_struct_mode(self) -> None:
         config = OmegaConf.load(_REPO_ROOT / "responses_api_agents/finance_agent/configs/finance_agent.yaml")
         OmegaConf.set_struct(config, True)
+        assert config.finance_agent.responses_api_agents.finance_agent.resources_server_retries == 0
+        assert config.finance_agent.responses_api_agents.finance_agent.keep_response_on_verify_failure is False
         merged = OmegaConf.merge(
             config,
-            {"finance_agent": {"responses_api_agents": {"finance_agent": {"continue_if_not_tool_call": False}}}},
+            {
+                "finance_agent": {
+                    "responses_api_agents": {
+                        "finance_agent": {
+                            "continue_if_not_tool_call": False,
+                            "resources_server_retries": 2,
+                            "keep_response_on_verify_failure": True,
+                        }
+                    }
+                }
+            },
         )
         agent_config = merged.finance_agent.responses_api_agents.finance_agent
         assert agent_config.continue_if_not_tool_call is False
+        assert agent_config.resources_server_retries == 2
+        assert agent_config.keep_response_on_verify_failure is True
         assert agent_config.prose_only_behavior == "nudge"
         assert agent_config.tool_call_execution == "sequential"
 
@@ -1227,6 +1250,8 @@ class TestResponses:
         assert res.status_code == 200
         model_calls = [c for c in agent.server_client.post.call_args_list if c.kwargs["server_name"] == _MODEL_SERVER]
         assert len(model_calls) == 1, "rollout should abort instead of starting a second turn"
+        metadata = res.json()["metadata"]
+        assert (metadata["stop_reason"], metadata["error_cause"]) == ("error", "tool_aborted")
 
     def test_ordinary_tool_error_does_not_abort(self) -> None:
         agent, client = _make_agent_and_client(_v2_config(max_steps=2))
@@ -1268,6 +1293,7 @@ class TestResponses:
         res = client.post("/v1/responses", json=_INPUT)
         assert res.status_code == 200
         assert res.json()["id"] == "error"
+        assert res.json()["metadata"]["error_cause"] == "model_call_failed"
 
     def test_tool_call_timeout_returns_error(self) -> None:
         """Tool call timeout → error JSON fed back to model, loop continues."""
@@ -1448,6 +1474,19 @@ class TestResponses:
         res = client.post("/v1/responses", json=_INPUT)
         assert res.status_code == 200
         assert res.json()["id"] == "error"
+        assert res.json()["metadata"]["error_cause"] == "context_overflow"
+
+    def test_failed_model_call_records_its_cause(self) -> None:
+        agent, client = _make_agent_and_client(_make_config())
+
+        def fail_post(**kwargs):
+            raise Exception("503 Service Unavailable")
+
+        agent.server_client.post = AsyncMock(side_effect=fail_post)
+
+        res = client.post("/v1/responses", json=_INPUT)
+        metadata = res.json()["metadata"]
+        assert (metadata["stop_reason"], metadata["error_cause"]) == ("error", "model_call_failed")
 
     def test_usage_accumulation(self) -> None:
         """Usage tokens accumulate across multiple model calls."""
@@ -1534,3 +1573,174 @@ class TestRun:
         result = await agent.run(req, body)
         assert result.reward == 0.0
         assert result.response.id == "error"
+
+
+def _status_mock(status: int) -> MagicMock:
+    response = MagicMock()
+    response.ok = status < 400
+    response.status = status
+    response.content.read = AsyncMock(return_value=b'{"detail": "Could not reach the server worker"}')
+    return response
+
+
+class TestResourcesServerRetries:
+    @pytest.fixture(autouse=True)
+    def _no_waits(self, monkeypatch) -> list:
+        self.raised = []
+
+        async def fake_raise_for_status(response) -> None:
+            if not response.ok:
+                self.raised.append(response.status)
+                raise ClientResponseError(request_info=MagicMock(), history=(), status=response.status)
+
+        self.sleeps = []
+
+        async def fake_sleep(delay: float) -> None:
+            self.sleeps.append(delay)
+
+        monkeypatch.setattr(finance_agent_app, "raise_for_status", fake_raise_for_status)
+        monkeypatch.setattr(finance_agent_app.asyncio, "sleep", fake_sleep)
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_status_is_retried_until_it_succeeds(self) -> None:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=3))
+        ok = _status_mock(200)
+        agent.server_client.post = AsyncMock(side_effect=[_status_mock(502), _status_mock(504), ok])
+
+        assert await agent._post_resources_server("/verify", {"a": 1}, {}) is ok
+        assert agent.server_client.post.await_count == 3
+        assert all(call.kwargs["url_path"] == "/verify" for call in agent.server_client.post.await_args_list)
+        assert self.sleeps == [1.0, 2.0]
+        assert self.raised == []
+
+    @pytest.mark.asyncio
+    async def test_the_last_gateway_status_fails_the_call(self) -> None:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1))
+        agent.server_client.post = AsyncMock(side_effect=[_status_mock(502), _status_mock(502)])
+
+        with pytest.raises(ClientResponseError, match="^502"):
+            await agent._post_resources_server("/verify", {}, {})
+        assert agent.server_client.post.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_other_statuses_are_not_retried(self) -> None:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=3))
+        agent.server_client.post = AsyncMock(side_effect=[_status_mock(500)])
+
+        with pytest.raises(ClientResponseError, match="^500"):
+            await agent._post_resources_server("/seed_session", {}, {})
+        assert agent.server_client.post.await_count == 1
+        assert self.sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_status_whose_body_cannot_be_read_is_still_retried(self) -> None:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1))
+        cut = _status_mock(502)
+        cut.content.read = AsyncMock(side_effect=ClientPayloadError("cut"))
+        ok = _status_mock(200)
+        agent.server_client.post = AsyncMock(side_effect=[cut, ok])
+
+        assert await agent._post_resources_server("/seed_session", {"a": 1}, {"c": "1"}) is ok
+        first, second = agent.server_client.post.await_args_list
+        assert first.kwargs == second.kwargs
+        assert self.sleeps == [1.0]
+
+    _GENERATED = _text_response("Revenue was $5B.")
+    _GRADED = {"responses_create_params": _INPUT, "response": _GENERATED, "reward": 1.0, "final_answer": "$5B"}
+
+    async def _run(self, *verify_replies, seed_replies=(), **overrides):
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1, **overrides))
+        agent.server_client.post = AsyncMock(
+            side_effect=[*seed_replies, _status_mock(200), _dotjson_mock(self._GENERATED), *verify_replies]
+        )
+        body = FinanceAgentRunRequest.model_validate(
+            {"responses_create_params": _INPUT, "instance_config": {"task": "t1"}}
+        )
+        request = MagicMock()
+        request.cookies = {}
+        return await agent.run(request, body)
+
+    def _assert_masked_rollout(self, result, failure_kind: str) -> None:
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == failure_kind
+        assert result.instance_config == {"task": "t1", "mask_sample": True}
+        assert result.response.id == self._GENERATED["id"]
+        assert result.response.output[0].content[0].text == "Revenue was $5B."
+
+    @pytest.mark.asyncio
+    async def test_exhausted_gateway_retries_keep_the_rollout_masked_when_enabled(self) -> None:
+        result = await self._run(_status_mock(502), _status_mock(502), keep_response_on_verify_failure=True)
+
+        self._assert_masked_rollout(result, "judge_failed")
+
+    @pytest.mark.asyncio
+    async def test_a_verify_reply_cut_off_mid_read_keeps_the_rollout_masked_when_enabled(self) -> None:
+        cut = _status_mock(200)
+        cut.read = AsyncMock(side_effect=ClientPayloadError("cut"))
+
+        result = await self._run(cut, keep_response_on_verify_failure=True)
+
+        self._assert_masked_rollout(result, "agent_route_failed")
+
+    @pytest.mark.asyncio
+    async def test_a_seed_gateway_status_with_an_unreadable_body_is_retried_through_run(self) -> None:
+        cut = _status_mock(502)
+        cut.content.read = AsyncMock(side_effect=ClientPayloadError("cut"))
+
+        result = await self._run(_dotjson_mock(self._GRADED), seed_replies=[cut])
+
+        assert result.reward == 1.0
+        assert result.response.id == self._GENERATED["id"]
+        assert self.sleeps == [1.0]
+
+    @pytest.mark.asyncio
+    async def test_a_successful_verify_passes_through_unchanged_when_enabled(self) -> None:
+        result = await self._run(_dotjson_mock(self._GRADED), keep_response_on_verify_failure=True)
+
+        assert result.reward == 1.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.final_answer == "$5B"
+
+    @pytest.mark.asyncio
+    async def test_a_failed_verify_returns_the_empty_error_response_by_default(self) -> None:
+        result = await self._run(_status_mock(502), _status_mock(502))
+
+        assert result.reward == 0.0
+        assert result.response.id == "error"
+        assert result.response.output == []
+
+    @pytest.mark.asyncio
+    async def test_a_verify_reply_cut_off_mid_read_returns_the_empty_error_response_by_default(self) -> None:
+        cut = _status_mock(200)
+        cut.read = AsyncMock(side_effect=ClientPayloadError("cut"))
+
+        result = await self._run(cut)
+
+        assert result.reward == 0.0
+        assert result.mask_sample is False
+        assert result.response.id == "error"
+        assert result.response.output == []
+
+    @pytest.mark.asyncio
+    async def test_a_masked_rollout_is_left_out_of_the_mean_reward(self) -> None:
+        masked = await self._run(_status_mock(502), _status_mock(502), keep_response_on_verify_failure=True)
+        rows = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, **masked.model_dump()},
+        ]
+
+        metrics = compute_aggregate_metrics(rows).agent_metrics
+
+        assert metrics["mean/reward"] == 1.0
+        assert metrics["coverage/masked_rollouts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_no_retries_by_default(self) -> None:
+        agent, _ = _make_agent_and_client()
+        agent.server_client.post = AsyncMock(side_effect=[_status_mock(502)])
+
+        with pytest.raises(ClientResponseError, match="^502"):
+            await agent._post_resources_server("/verify", {}, {})
+        assert agent.server_client.post.await_count == 1

@@ -19,6 +19,7 @@ and the Chat Completions API format. It is used by model servers that need to
 convert between the two formats (e.g. vllm_model, inference_provider).
 """
 
+import base64
 import json
 import logging
 import re
@@ -169,6 +170,8 @@ class ChatCompletionsConverterState:
     content_buffer: str = ""
     refusal_buffer: str = ""
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = field(default_factory=list)
+    # Provider-signed thinking blocks replayed onto the next assistant message (preserve_thinking_blocks).
+    thinking_blocks_buffer: List[Dict[str, Any]] = field(default_factory=list)
     assistant_item_buffered: bool = False
 
     token_information: Optional[TokenIDLogProbMixin] = None
@@ -187,6 +190,8 @@ class ChatCompletionsConverterState:
             shared_params["tool_calls"] = self.tool_calls_buffer
         if self.refusal_buffer:
             shared_params["refusal"] = self.refusal_buffer
+        if self.thinking_blocks_buffer:
+            shared_params["thinking_blocks"] = self.thinking_blocks_buffer
 
         if self.return_token_id_information and self.token_information is not None:
             message = NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -201,6 +206,7 @@ class ChatCompletionsConverterState:
         self.content_buffer = ""
         self.refusal_buffer = ""
         self.tool_calls_buffer = []
+        self.thinking_blocks_buffer = []
         self.assistant_item_buffered = False
         self.token_information = None
 
@@ -363,6 +369,10 @@ class ChatCompletionsConverter(BaseModel):
 
     return_token_id_information: bool
     uses_reasoning_parser: bool = True
+    # Carry a Chat Completions provider's signed thinking blocks (LiteLLM's `thinking_blocks` for Anthropic models)
+    # through the Responses side: they ride in the reasoning item's encrypted_content, which a Responses client
+    # (Codex) returns verbatim, and go back on the next assistant message, so the model sees its own earlier thinking.
+    preserve_thinking_blocks: bool = False
     # How a Responses `custom` (free-form) tool crosses a Chat Completions
     # backend that admits function tools only (vLLM's chat schema).
     # "passthrough" keeps the historical behavior: the definition converts to a
@@ -389,6 +399,17 @@ class ChatCompletionsConverter(BaseModel):
     tool_parameter_types: Dict[str, Dict[str, ToolParameterType]] = Field(default_factory=dict)
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+    THINKING_BLOCKS_PREFIX: ClassVar[str] = "gym.thinking_blocks.v1:"
+
+    @classmethod
+    def encode_thinking_blocks(cls, blocks: List[Dict[str, Any]]) -> str:
+        return cls.THINKING_BLOCKS_PREFIX + base64.urlsafe_b64encode(json.dumps(blocks).encode()).decode()
+
+    @classmethod
+    def decode_thinking_blocks(cls, encrypted_content: Any) -> Optional[List[Dict[str, Any]]]:
+        if not isinstance(encrypted_content, str) or not encrypted_content.startswith(cls.THINKING_BLOCKS_PREFIX):
+            return None
+        return json.loads(base64.urlsafe_b64decode(encrypted_content[len(cls.THINKING_BLOCKS_PREFIX) :]))
 
     @staticmethod
     def _wrap_reasoning_in_think_tags(texts: List[str]) -> str:
@@ -928,6 +949,12 @@ class ChatCompletionsConverter(BaseModel):
         See: https://docs.nvidia.com/nemo/gym/main/infrastructure/engineering-notes/responses-api-evolution
         for background on reasoning in the Responses API.
         """
+        blocks = self.decode_thinking_blocks(m.get("encrypted_content")) if self.preserve_thinking_blocks else None
+        if blocks is not None and not m.get("content"):
+            # The signed blocks carry the thinking; the summary is their readable copy and is not replayed.
+            state.assistant_item_buffered = True
+            state.thinking_blocks_buffer.extend(blocks)
+            return
         if m.get("encrypted_content") or m.get("content"):
             raise NotImplementedError(
                 "Responses reasoning content/encrypted_content cannot be preserved by this Chat Completions "
@@ -1300,13 +1327,19 @@ class ChatCompletionsConverter(BaseModel):
                 logprobs = _align_logprobs_to_text(logprobs, original, removed)
         else:
             reasoning_matches = []
-        if reasoning_matches:
+        thinking_blocks = None
+        if self.preserve_thinking_blocks:
+            thinking_blocks = message_dict.get("thinking_blocks") or (
+                message_dict.get("provider_specific_fields") or {}
+            ).get("thinking_blocks")
+        if reasoning_matches or thinking_blocks:
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",
                 type="reasoning",
                 summary=[
                     NeMoGymSummary(text=reasoning_text, type="summary_text") for reasoning_text in reasoning_matches
                 ],
+                encrypted_content=self.encode_thinking_blocks(thinking_blocks) if thinking_blocks else None,
                 status="completed",
             )
             response_output.append(reasoning_item)
@@ -1591,9 +1624,5 @@ def split_responses_input_output_items(
     return items[:split_at], items[split_at:]
 
 
-# Backward-compatible aliases
-VLLMConverter = ChatCompletionsConverter
-VLLMConverterResponsesToChatCompletionsState = ChatCompletionsConverterState
-
-# Names this module had before ResponsesConverter was renamed ChatCompletionsConverter, with a warning.
+# Names this module had before the converter was renamed ChatCompletionsConverter, with a warning.
 __getattr__ = moved_names_getattr(__name__)

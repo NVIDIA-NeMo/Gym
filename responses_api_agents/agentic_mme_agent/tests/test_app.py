@@ -2,24 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientConnectionError, ClientPayloadError
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import Request, Response
 from PIL import Image
 
+from nemo_gym.core import FailureHeader, FailureReport
 from nemo_gym.server_runtime.base_server import ServerClient
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
-from resources_servers.agentic_mme.tests.test_app import response
+from resources_servers.agentic_mme.image_tools import image_data_url
+from resources_servers.agentic_mme.tests.test_app import no_session, response
 from responses_api_agents.agentic_mme_agent.app import (
     AgenticMMEAgent,
     AgenticMMEAgentConfig,
     AgenticMMERunRequest,
     PolicyRequestError,
+    TaskInputRejectedError,
 )
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval
-from responses_api_agents.agentic_mme_agent.tools import image_data_url
 
 
 class FakeResponse:
@@ -30,6 +33,20 @@ class FakeResponse:
 
     async def read(self) -> bytes:
         return json.dumps(self.payload).encode()
+
+
+def refused_reply(status: int, body: bytes, report: FailureReport | None = None) -> MagicMock:
+    """A model reply with an error status, as aiohttp gives it: ``raise_for_status`` reads its body and raises.
+
+    ``report`` is the model server's failure report, which travels in the reply's header.
+    """
+    request_info = SimpleNamespace(url="http://model", method="POST", headers={}, real_url="http://model")
+    headers = FailureHeader.encode(report) if report is not None else {}
+    error = ClientResponseError(request_info, (), status=status, message="refused", headers=headers)
+    reply = MagicMock(status=status, ok=False, cookies={})
+    reply.content.read = AsyncMock(return_value=body)
+    reply.raise_for_status = MagicMock(side_effect=error)
+    return reply
 
 
 def call(name="crop", args=None, call_id="c"):
@@ -54,7 +71,7 @@ def make_agent(outputs, **config):
 
     async def post(**kwargs):
         if kwargs["url_path"] == "/verify":
-            result = await grader.verify(AgenticMMEVerifyRequest.model_validate(kwargs["json"]))
+            result = await grader.verify(no_session(), AgenticMMEVerifyRequest.model_validate(kwargs["json"]))
             return FakeResponse(result.model_dump())
         seen.append(kwargs["json"].model_dump())
         return FakeResponse(pending.pop(0).model_dump(), {"model-session": "test"})
@@ -227,8 +244,30 @@ async def test_no_tool_budget_and_missing_images() -> None:
     assert len(seen[0]["tools"]) == 14  # tools stay visible; any call would end the episode
     task = body()
     task.responses_create_params.input = "no image"
-    with pytest.raises(ValueError, match="at least one"):
+    with pytest.raises(TaskInputRejectedError, match="at least one") as refused:
         await agent.run(request(), task)
+    assert refused.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_oversized_input_image_is_a_422_task_error() -> None:
+    # body()'s input image is 8x4 = 32 pixels.
+    agent, seen = make_agent([response("red")], max_image_pixels=16)
+    with pytest.raises(TaskInputRejectedError, match="input image 8x4: image dimensions exceed") as refused:
+        await agent.run(request(), body())
+    assert refused.value.status_code == 422 and isinstance(refused.value, ValueError)
+    assert seen == []  # refused before any model call
+
+
+@pytest.mark.asyncio
+async def test_oversized_input_image_is_downscaled_when_enabled(caplog) -> None:
+    agent, seen = make_agent([response("red")], max_image_pixels=16, downscale_oversized_input_images=True)
+    original = image_data_url(Image.new("RGB", (8, 4), "red"))  # body()'s input image
+    assert (await agent.run(request(), body())).reward == 1
+    assert "input image 8x4 is over max_image_pixels=16; the tools use it at 5x2" in caplog.text
+    # The model still receives the task's original image; only the tools' copy is scaled.
+    sent = [part for part in seen[0]["input"][0]["content"] if part["type"] == "input_image"]
+    assert [part["image_url"] for part in sent] == [original]
 
 
 @pytest.mark.asyncio
@@ -376,9 +415,7 @@ async def test_wire_input_items_keep_their_type() -> None:
 async def test_refused_model_call_ends_episode_unanswered() -> None:
     # e.g. an endpoint's request-size limit after several tool images: the rollout is scored 0
     # with the error recorded, instead of a 500 that aborts the whole collection.
-    refused = FakeResponse(b"", {})
-    refused.ok, refused.status = False, 400
-    refused.read = AsyncMock(return_value=b'{"error": {"code": "request_too_large"}}')
+    refused = refused_reply(400, b'{"error": {"code": "request_too_large"}}')
     agent, seen = make_agent([response(output=[call()])])
     post = agent.server_client.post.side_effect
 
@@ -456,9 +493,7 @@ async def test_failed_model_call_without_status_goes_to_failures_sidecar(failing
     ids=["auth", "rate_limit", "server_error", "unavailable", "other_400", "serving_image_limit"],
 )
 async def test_refused_model_call_outside_the_model_goes_to_failures_sidecar(status, error_body) -> None:
-    refused = FakeResponse(b"", {})
-    refused.ok, refused.status = False, status
-    refused.read = AsyncMock(return_value=error_body)
+    refused = refused_reply(status, error_body)
     agent, seen = make_agent([response(output=[call()])])
     post = agent.server_client.post.side_effect
 
