@@ -179,8 +179,9 @@ class SandboxCheckpointState(BaseModel):
     a restore can stop it; it is never restored in place. ``snapshot_ready_ts`` is the Unix time the snapshot became
     ready. ``version`` is the version of this record's format; a restore refuses one it does not know.
 
-    ``spec`` is written as the fork needs it, which includes the sandbox environment (``env``) in plain text: a
-    checkpoint directory holds whatever the sandboxes were started with.
+    ``spec`` is written as the fork needs it, which includes the sandbox environment (``env``) and each sidecar's
+    ``env`` and ``provider_options`` (registry credentials too) in plain text: a checkpoint directory holds whatever
+    the sandboxes were started with.
 
     ``keeps_processes`` says the provider's snapshot kept the sandbox's running processes as well as its files, so
     the fork starts with them running (``"processes"`` in the provider's ``capabilities.snapshot_keeps``). States
@@ -257,7 +258,8 @@ def spec_to_json(spec: SandboxSpec) -> dict[str, JsonValue]:
     """Serialize a spec for a checkpoint record, leaving out what a fork never reads.
 
     Files were uploaded at creation and the snapshot has them; the snapshot also replaces the image, so the image and
-    its registry credentials (``provider_options["image_auth"]``) are dropped too.
+    its registry credentials (``provider_options["image_auth"]``) are dropped too. Sidecars are kept whole, their
+    ``image_auth`` included: the snapshot is of the sandbox alone, and a fork starts each sidecar from its image again.
     """
     data = dataclasses.asdict(spec)
     data["image"] = None

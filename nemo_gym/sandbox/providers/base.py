@@ -144,18 +144,26 @@ def clamp_resource_requests(
     return clamped, changed
 
 
+# Sandboxes that must run together carry this label with a shared placement group: the services of one Compose
+# project, or a sandbox and its sidecars. Members reach each other by pod IP and may share storage, so a multi-cell
+# front end (cell-router) routes every create with the same value to one cell.
+PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
+
+
 @dataclass(frozen=True)
 class SandboxSidecarSpec:
     """An extra container started with the sandbox from its own image.
 
-    The sidecar has its own filesystem. Start services in it with ``AsyncSandbox.sidecar(name).exec``.
-    How the sandbox reaches a sidecar over the network is provider-specific.
+    The image is used as a root filesystem; start services in it with ``AsyncSandbox.sidecar(name).exec``.
+    The sidecar has its own filesystem; how the sandbox reaches it over the network is provider-specific.
     """
 
     name: str
     image: str
     env: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+    # Provider-specific options for this sidecar alone; a provider refuses an option it cannot apply.
+    provider_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.name or not self.image:

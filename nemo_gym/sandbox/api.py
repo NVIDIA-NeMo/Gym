@@ -1143,6 +1143,7 @@ class AsyncSandbox:
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
         ports = descriptor.get("ports", ()) if isinstance(descriptor, Mapping) else ()
+        # Sidecars the sandbox was created with, so `sidecar(name)` works on the reconnected sandbox.
         sidecars = descriptor.get("sidecars", ()) if isinstance(descriptor, Mapping) else ()
         user = descriptor.get("user") if isinstance(descriptor, Mapping) else None
         sandbox = cls(

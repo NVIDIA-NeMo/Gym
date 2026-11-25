@@ -26,7 +26,7 @@ import re
 import shlex
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
@@ -48,6 +48,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_PROTOCOL_ERROR,
     PROVIDER_PTY_BUSY,
     PROVIDER_PTY_UNAVAILABLE,
+    PROVIDER_REQUEST_FAILED,
     PROVIDER_SETUP_FAILED,
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
@@ -72,6 +73,7 @@ from nemo_gym.sandbox.attribution import (  # noqa: F401
 from nemo_gym.sandbox.providers.base import (
     NETWORK_RULES,
     ORPHAN_REAP_TIMEOUT_S,
+    PLACEMENT_GROUP_KEY,
     NetworkRule,
     SandboxCapabilities,
     SandboxEndpoint,
@@ -730,6 +732,14 @@ def _to_network_policy(network_policy: Mapping[str, Any]) -> Any:
     return NetworkPolicy.model_validate(network_policy)
 
 
+def _check_hostname(name: str) -> None:
+    """Refuse a name that cannot go into a hosts file as a peer alias."""
+    if len(name) > 253 or not all(
+        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?", label) for label in name.split(".")
+    ):
+        raise ValueError(f"Invalid sandbox hostname: {name!r}")
+
+
 def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     _, _, _, _, Volume = _require_opensandbox_sdk()
     return [Volume(**dict(volume)) for volume in volumes]
@@ -1284,6 +1294,15 @@ class OpenSandboxProvider:
         self._command_polls: dict[str, set[_BackgroundCommandPoll]] = {}
         self._checkpoint_poll_scopes: dict[str, int] = {}
         self._parked_poll_scopes: dict[str, int] = {}
+        # Each sidecar is a sandbox of its own; their handles by the main sandbox's id, then by sidecar name.
+        self._sidecars: dict[str, dict[str, SandboxHandle]] = {}
+        # Main sandboxes whose sidecar handles `connect` made, with how many connects share them; the last
+        # `disconnect_handle` releases them. Handles of a sandbox this provider created are never counted here.
+        self._connected_sidecars: dict[str, int] = {}
+        # Main sandboxes already deleted by a close that left a sidecar behind; a repeated close skips them.
+        self._deleted_with_sidecars_left: set[str] = set()
+        # Sidecars that no longer existed when `connect` reattached their main sandbox, by its id.
+        self._gone_sidecars: dict[str, set[str]] = {}
 
     def uploads_independent_of_execs(self) -> bool:
         """A foreground command holds one of the shared HTTP pool's connections for as long as it runs, so
@@ -1441,10 +1460,7 @@ class OpenSandboxProvider:
         self.validate_networking()
         entries = []
         for name, address in hosts.items():
-            if len(name) > 253 or not all(
-                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?", label) for label in name.split(".")
-            ):
-                raise ValueError(f"Invalid sandbox hostname: {name!r}")
+            _check_hostname(name)
             entries.append(shlex.quote(f"{ipaddress.ip_address(address)} {name}\n"))
         if entries:
             result = await self.exec(handle, "printf '%s' " + " ".join(entries) + " >> /etc/hosts", user="root")
@@ -2031,7 +2047,10 @@ class OpenSandboxProvider:
         server is needed to share one. ``scope`` is ignored: OpenSandbox has no
         lease concept of its own.
         """
-        return {"sandbox_id": handle.sandbox_id}
+        descriptor: dict[str, Any] = {"sandbox_id": handle.sandbox_id}
+        if sidecars := self._sidecars.get(handle.sandbox_id):
+            descriptor["sidecar_ids"] = {name: sidecar.sandbox_id for name, sidecar in sidecars.items()}
+        return descriptor
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
         """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
@@ -2060,7 +2079,6 @@ class OpenSandboxProvider:
                         timedelta(seconds=timeout_s),
                         timedelta(seconds=self._create.connect_poll_s),
                     )
-                return handle
         except BaseException as error:
             if sandbox is None:
                 await config.close_transport_if_owned()
@@ -2077,6 +2095,61 @@ class OpenSandboxProvider:
             if isinstance(error, Exception) and not isinstance(error, NgFailureEvent):
                 raise opensandbox_failure(operation="connect", sandbox_id=sandbox_id, cause=error) from error
             raise
+        sidecars: dict[str, SandboxHandle] = {}
+        gone: set[str] = set()
+        if sandbox_id not in self._sidecars:
+            try:
+                for name, sidecar_id in (descriptor.get("sidecar_ids") or {}).items():
+                    try:
+                        sidecars[name] = await self.connect({"sandbox_id": sidecar_id})
+                    except NgFailureEvent as error:
+                        if error.__cause__ is None or not _is_missing_sandbox_delete_error(error.__cause__):
+                            raise
+                        # A sidecar that no longer exists does not stop the connect, so a caller that reattaches
+                        # only to stop the sandbox still can. Using that sidecar fails; see `_sidecar_handle`.
+                        gone.add(name)
+            except BaseException:
+                # A sidecar that cannot be reached fails the connect. Release the local handles connected so far.
+                await self._close_local_handles([handle, *sidecars.values()], operation="close_after_connect_failure")
+                raise
+        if gone:
+            self._gone_sidecars[sandbox_id] = gone
+        if sandbox_id in self._sidecars:
+            # This provider created the sandbox, or another connect holds its sidecars (also one that finished while
+            # this one connected its own): the connects share those handles.
+            await self._close_local_handles(list(sidecars.values()), operation="close")
+            if sandbox_id in self._connected_sidecars:
+                self._connected_sidecars[sandbox_id] += 1
+        elif sidecars:
+            self._sidecars[sandbox_id] = sidecars
+            self._connected_sidecars[sandbox_id] = 1
+        return handle
+
+    async def _close_local_handles(self, handles: list[SandboxHandle], *, operation: str) -> None:
+        """Close the local SDK resources of these handles; the sandboxes keep running."""
+        for handle in handles:
+            with suppress(Exception):
+                await self._await_sdk_call(
+                    handle.raw.close(),
+                    operation=operation,
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=self._operations.close_timeout_s,
+                )
+
+    async def disconnect_handle(self, handle: SandboxHandle) -> None:
+        """Release the sidecar handles ``connect`` made for a borrowed sandbox once no other connect shares them.
+
+        The sandboxes keep running.
+        """
+        shared_by = self._connected_sidecars.get(handle.sandbox_id)
+        if shared_by is not None and shared_by > 1:
+            self._connected_sidecars[handle.sandbox_id] = shared_by - 1
+            return
+        self._gone_sidecars.pop(handle.sandbox_id, None)
+        if shared_by is None:
+            return
+        del self._connected_sidecars[handle.sandbox_id]
+        await self._close_local_handles(list(self._sidecars.pop(handle.sandbox_id, {}).values()), operation="close")
 
     async def pause(self, handle: SandboxHandle) -> None:
         """Pause a sandbox and wait until it reports paused.
@@ -2192,6 +2265,11 @@ class OpenSandboxProvider:
             )
         except Exception as e:
             LOGGER.warning("Failed to close pre-resume OpenSandbox handle %r: %r", handle.sandbox_id, e)
+        # A resume can give the sandbox a fresh runtime, without the hosts entries written at create.
+        if self._networking.enabled and (sidecars := self._sidecars.get(handle.sandbox_id)):
+            await self.set_hosts(
+                handle, {name: await self.network_address(sidecar) for name, sidecar in sidecars.items()}
+            )
 
     async def _await_sdk_call(
         self,
@@ -3001,7 +3079,70 @@ class OpenSandboxProvider:
         spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
         """
         spec = replace(spec, metadata={**self._attribution.metadata(), **spec.metadata})
-        return await self._create_with_retries(_normalize_spec(spec))
+        if not spec.sidecars:
+            return await self._create_with_retries(_normalize_spec(spec))
+        # A sidecar is a sandbox of its own, from its own image. One placement group keeps it on the main sandbox's
+        # cell, where the two reach each other by IP. It gets its own provider options, none of the main sandbox's
+        # (mounts, a snapshot), and the main sandbox's egress policy unless it names its own.
+        group = spec.metadata.get(PLACEMENT_GROUP_KEY) or f"sidecars-{uuid.uuid4().hex}"
+        spec = replace(spec, metadata={**spec.metadata, PLACEMENT_GROUP_KEY: group})
+        policy = spec.provider_options.get("network_policy")
+        # A sidecar's misspelled option or name stops the create before any sandbox starts.
+        for sidecar in spec.sidecars:
+            OpenSandboxProviderOptions.from_mapping(sidecar.provider_options)
+            if self._networking.enabled:
+                _check_hostname(sidecar.name)
+        sidecars: dict[str, SandboxHandle] = {}
+        handle: SandboxHandle | None = None
+        try:
+            for sidecar in spec.sidecars:
+                options = dict(sidecar.provider_options)
+                if options.get("network_policy") is None:
+                    # An empty policy still denies by default, so it is passed on like any other; a sidecar never
+                    # gets less restricted egress than the main sandbox unless it names its own policy.
+                    options["network_policy"] = policy
+                sidecar_spec = SandboxSpec(
+                    image=sidecar.image,
+                    env=sidecar.env,
+                    resources=sidecar.resources,
+                    ttl_s=spec.ttl_s,
+                    ready_timeout_s=spec.ready_timeout_s,
+                    metadata=spec.metadata,
+                    provider_options=options,
+                )
+                sidecars[sidecar.name] = await self._create_with_retries(_normalize_spec(sidecar_spec))
+            addresses: dict[str, str] = {}
+            if self._networking.enabled:
+                for name, sidecar_handle in sidecars.items():
+                    try:
+                        addresses[name] = await self.network_address(sidecar_handle)
+                    except ValueError as error:
+                        # A sidecar the main sandbox cannot reach is not ready: the attempt fails on the
+                        # infrastructure, like a sidecar that does not start.
+                        raise opensandbox_failure(
+                            operation="sidecar network address",
+                            failure_kind=PROVIDER_SETUP_FAILED,
+                            sandbox_id=sidecar_handle.sandbox_id,
+                            cause=error,
+                            reason=f"Sidecar {name!r} has no address its sandbox can reach: {error}",
+                        ) from error
+            if policy is not None and addresses:
+                # The sidecars start first, so the main sandbox is created with their addresses in its policy.
+                # These rules lead, so no rule of the task's own denies a sidecar.
+                allowed = [{"action": "allow", "target": address} for address in addresses.values()]
+                policy = {**policy, "egress": [*allowed, *(policy.get("egress") or ())]}
+                spec = replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
+            handle = await self._create_with_retries(_normalize_spec(spec))
+            if addresses:
+                # The main sandbox resolves each sidecar by its name.
+                await self.set_hosts(handle, addresses)
+        except BaseException:
+            # Also on cancellation; the shield lets the cleanup finish, as for a failed create.
+            started = [*sidecars.values(), *([handle] if handle else [])]
+            await asyncio.shield(asyncio.gather(*map(self._cleanup_failed_create_handle, started)))
+            raise
+        self._sidecars[handle.sandbox_id] = sidecars
+        return handle
 
     async def resource_sample(self, handle: SandboxHandle) -> dict[str, str | int | float | bool]:
         """Read execd's existing snapshot; preserve its timestamp and measurement names."""
@@ -3084,8 +3225,9 @@ class OpenSandboxProvider:
         timeout_s: int | float | None = None,
         user: str | int | None = None,
         retries: int | None = None,
+        on_stdout: Callable[[str], None] | None = None,
     ) -> SandboxExecResult:
-        """Run shell text or an argument list inside an OpenSandbox sandbox."""
+        """Run shell text or an argument list in an OpenSandbox sandbox; ``on_stdout`` receives stdout lines live."""
         _, _, RunCommandOpts, _, _ = _require_opensandbox_sdk()
         if not isinstance(command, str) and not _sdk_sends_argv():
             raise SandboxExecArgvUnsupportedError(
@@ -3132,10 +3274,21 @@ class OpenSandboxProvider:
                     sdk_timeout_s=sdk_timeout_s,
                     total_timeout_s=timeout_s,
                     retries=effective_retries,
+                    on_stdout=on_stdout,
                 )
 
+            run_kwargs: dict[str, Any] = {"opts": RunCommandOpts(**opts_kwargs)}
+            if on_stdout is not None:
+                from opensandbox.models.execd import ExecutionHandlers
+
+                async def forward_stdout(message: Any) -> None:
+                    # Newer execd keeps each line's ending in the event; older execd strips it.
+                    text = message.text
+                    on_stdout(text if text.endswith(("\n", "\r")) else text + "\n")
+
+                run_kwargs["handlers"] = ExecutionHandlers(on_stdout=forward_stdout)
             execution = await self._submit_command(
-                lambda: handle.raw.commands.run(effective_command, opts=RunCommandOpts(**opts_kwargs)),
+                lambda: handle.raw.commands.run(effective_command, **run_kwargs),
                 operation="command run",
                 sandbox_id=handle.sandbox_id,
                 timeout_s=sdk_timeout_s,
@@ -3328,6 +3481,7 @@ class OpenSandboxProvider:
         sdk_timeout_s: float | None,
         total_timeout_s: int | float | None,
         retries: int,
+        on_stdout: Callable[[str], None] | None = None,
     ) -> SandboxExecResult:
         """Register this command's poll for checkpoint polling scopes, and release it on every exit."""
         poll = _BackgroundCommandPoll(parked=handle.sandbox_id in self._parked_poll_scopes)
@@ -3341,6 +3495,7 @@ class OpenSandboxProvider:
                 total_timeout_s=total_timeout_s,
                 retries=retries,
                 poll=poll,
+                on_stdout=on_stdout,
             )
         finally:
             polls = self._command_polls[handle.sandbox_id]
@@ -3358,12 +3513,14 @@ class OpenSandboxProvider:
         total_timeout_s: int | float | None,
         retries: int,
         poll: _BackgroundCommandPoll,
+        on_stdout: Callable[[str], None] | None = None,
     ) -> SandboxExecResult:
         """Run a command as a background execution polled via short requests.
 
         The logs endpoint returns one combined stream, so unlike the foreground
         path ``stdout`` carries both streams and ``stderr`` is set only when the
-        sandbox itself reports an error.
+        sandbox itself reports an error. ``on_stdout`` receives that combined
+        output as each poll finds more of it.
 
         Gym enforces ``total_timeout_s`` itself: once its own deadline passes
         while the command is still running, it interrupts the command and
@@ -3425,6 +3582,10 @@ class OpenSandboxProvider:
         diagnostic_remaining_s = 0.0
         status_failure_error: NgFailureEvent | None = None
         seen_running = False
+        # Where the next read of the command's output starts (execd's byte cursor), and how many characters of
+        # that output `on_stdout` has received.
+        log_cursor = 0
+        forwarded = 0
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
             # A parked sandbox is being snapshotted and may not answer: ask once the park ends,
@@ -3540,6 +3701,25 @@ class OpenSandboxProvider:
                 if status.running is False:
                     break
                 seen_running = True
+                if on_stdout is not None:
+                    try:
+                        new = await self._await_sdk_call(
+                            handle.raw.commands.get_background_command_logs(execution_id, log_cursor),
+                            operation="command logs",
+                            sandbox_id=handle.sandbox_id,
+                            timeout_s=status_timeout_s,
+                        )
+                    except Exception as error:
+                        # Not the command's failure: a later poll, or the read at its end, forwards what this missed.
+                        LOGGER.debug("OpenSandbox command output not read while it runs: %r", error)
+                    else:
+                        if new.content:
+                            on_stdout(new.content)
+                            forwarded += len(new.content)
+                        # execd's cursor is the byte offset after what it returned; text decoded from output that
+                        # is not UTF-8 has a different length, so the bytes are counted only when it sends none.
+                        cursor = getattr(new, "cursor", None)
+                        log_cursor = cursor if cursor is not None else log_cursor + len(new.content.encode())
                 if command_deadline is not None and not timed_out and loop.time() >= command_deadline:
                     timed_out = await self._interrupt_at_deadline(
                         handle, execution_id, timeout_s=command_timeout_s, request_timeout_s=status_timeout_s
@@ -3614,6 +3794,11 @@ class OpenSandboxProvider:
             logs = None
             output_deleted = True
         stdout = getattr(logs, "content", None) or None
+        # The rest is sliced from the full read by the characters forwarded so far. Where a poll ended inside a
+        # multi-byte character, the streamed text shows two replacement characters for it and this slice is one
+        # character short; `result.stdout` is exact.
+        if on_stdout is not None and stdout and (rest := stdout[forwarded:]):
+            on_stdout(rest)
         status_error = getattr(status, "error", None)
         stderr = status_error or None
         if output_deleted:
@@ -4032,6 +4217,47 @@ class OpenSandboxProvider:
         except TimeoutError as error:
             raise opensandbox_failure(operation="provider I/O", sandbox_id=handle.sandbox_id, cause=error) from error
 
+    async def sidecar_exec(
+        self,
+        handle: SandboxHandle,
+        sidecar: str,
+        argv: list[str],
+        *,
+        timeout_s: int | float,
+        on_stdout: Callable[[str], None] | None = None,
+    ) -> SandboxExecResult:
+        """Run ``argv`` in the sidecar's sandbox as execd's argv, without a shell, so the image can be distroless.
+
+        Needs ``ARGV_SDK_REQUIREMENT``; with an older SDK it raises ``SandboxExecArgvUnsupportedError`` before
+        anything runs.
+        """
+        return await self._exec(
+            self._sidecar_handle(handle, sidecar), list(argv), timeout_s=timeout_s, on_stdout=on_stdout
+        )
+
+    async def download_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: str, target_path: Path
+    ) -> None:
+        """Download one file from the sidecar's sandbox."""
+        await self.download_file(self._sidecar_handle(handle, sidecar), source_path, target_path)
+
+    def _sidecar_handle(self, handle: SandboxHandle, sidecar: str) -> SandboxHandle:
+        """The handle of a sidecar this provider created, or connected from a descriptor with its id."""
+        try:
+            return self._sidecars[handle.sandbox_id][sidecar]
+        except KeyError:
+            if sidecar in self._gone_sidecars.get(handle.sandbox_id, ()):
+                raise opensandbox_failure(
+                    operation="sidecar",
+                    sandbox_id=handle.sandbox_id,
+                    failure_kind=PROVIDER_REQUEST_FAILED,
+                    reason=f"Sidecar {sidecar!r} of sandbox {handle.sandbox_id!r} no longer exists",
+                ) from None
+            raise RuntimeError(
+                f"OpenSandbox holds no sidecar {sidecar!r} of sandbox {handle.sandbox_id!r}: it was stopped, or the "
+                "sandbox was connected from a descriptor without its sidecar_ids"
+            ) from None
+
     async def _kill_with_retry(self, kill: Callable[[], Awaitable[None]], *, sandbox_id: str) -> None:
         """Apply the same idempotent deletion and permission guards to handles and orphan cleanup."""
 
@@ -4061,7 +4287,36 @@ class OpenSandboxProvider:
         )
 
     async def close(self, handle: SandboxHandle) -> None:
-        """Terminate the sandbox and close local SDK resources."""
+        """Terminate the sandbox and its sidecars, and close local SDK resources."""
+        sandbox_id = handle.sandbox_id
+        sidecars = self._sidecars.get(sandbox_id)
+        if not sidecars:
+            self._sidecars.pop(sandbox_id, None)
+            self._connected_sidecars.pop(sandbox_id, None)
+            self._gone_sidecars.pop(sandbox_id, None)
+            return await self._close_one(handle)
+        # Each is deleted whatever happens to the others. One that cannot be deleted is retried by a repeated close,
+        # which leaves alone a main sandbox it has deleted: that one's SDK handle is closed.
+        members = [*sidecars.items(), *([] if sandbox_id in self._deleted_with_sidecars_left else [(None, handle)])]
+        results = await asyncio.gather(*(self._close_one(member) for _, member in members), return_exceptions=True)
+        for (name, _), result in zip(members, results):
+            if isinstance(result, BaseException):
+                continue
+            if name is None:
+                self._deleted_with_sidecars_left.add(sandbox_id)
+            else:
+                del sidecars[name]
+        if not sidecars:
+            del self._sidecars[sandbox_id]
+            self._connected_sidecars.pop(sandbox_id, None)
+            self._gone_sidecars.pop(sandbox_id, None)
+            self._deleted_with_sidecars_left.discard(sandbox_id)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    async def _close_one(self, handle: SandboxHandle) -> None:
+        """Terminate one sandbox and close its local SDK resources."""
         renewal_error = await self._stop_renewal(handle.sandbox_id)
 
         # DELETE is idempotent, so a lost reply can be reconciled. Attempts and

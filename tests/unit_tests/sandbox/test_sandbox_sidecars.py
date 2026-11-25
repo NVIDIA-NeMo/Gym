@@ -106,7 +106,13 @@ class SidecarProvider(PlainProvider):
         target_path.write_text(f"{sidecar}:{source_path}", encoding="utf-8")
 
 
-_RECORDER = {"name": "recorder", "image": "recorder:1", "env": {"MODE": "capture"}, "resources": {"cpu": 0.5}}
+_RECORDER = {
+    "name": "recorder",
+    "image": "recorder:1",
+    "env": {"MODE": "capture"},
+    "resources": {"cpu": 0.5},
+    "provider_options": {"image_auth": {"username": "robot", "password": "secret"}},
+}
 
 
 def test_spec_coerces_sidecar_mappings_and_keeps_specs() -> None:
@@ -115,8 +121,13 @@ def test_spec_coerces_sidecar_mappings_and_keeps_specs() -> None:
 
     assert isinstance(spec.sidecars, tuple)
     assert spec.sidecars[0] == SandboxSidecarSpec(
-        name="recorder", image="recorder:1", env={"MODE": "capture"}, resources=SandboxResources(cpu=0.5)
+        name="recorder",
+        image="recorder:1",
+        env={"MODE": "capture"},
+        resources=SandboxResources(cpu=0.5),
+        provider_options={"image_auth": {"username": "robot", "password": "secret"}},
     )
+    assert explicit.provider_options == {}
     assert spec.sidecars[1] is explicit
 
 
@@ -205,7 +216,8 @@ async def test_serialize_and_connect_carry_declared_sidecars(tmp_path: Path) -> 
 
     # The descriptor crosses a process boundary as JSON.
     descriptor = json.loads(json.dumps(await owner.serialize()))
-    # Only name and image travel; the sidecar's environment and resources stay with the owner.
+    # Only name and image travel; the sidecar's environment, resources and provider options (which may hold
+    # registry credentials) stay with the owner.
     assert descriptor["sidecars"] == [{"name": "recorder", "image": _RECORDER["image"]}]
 
     borrower_provider = SidecarProvider()
