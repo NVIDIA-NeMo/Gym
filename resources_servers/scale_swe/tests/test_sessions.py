@@ -232,7 +232,9 @@ def test_http_lifecycle_replays_the_first_verdict_until_close(server, grading, s
         assert closed.status_code == 200
         assert client.post("/close_session", json=close().model_dump(mode="json")).json() == closed.json()
         assert client.post("/seed_session", json=seed().model_dump(mode="json")).status_code == 409
-        assert client.post("/verify", json=verify_body().model_dump(mode="json")).status_code == 409
+        after_close = client.post("/verify", json=verify_body().model_dump(mode="json"))
+        assert after_close.status_code == 200
+        assert after_close.json()["mask_sample"] is True and after_close.json()["failure_kind"] == "session_lost"
     # One capture and one grading: the replay never graded the stopped task sandbox's empty patch.
     grading.capture.assert_awaited_once()
     grading.run.assert_awaited_once()
@@ -286,12 +288,7 @@ async def test_verify_refuses_a_changed_request_and_keeps_the_first_verdict(serv
     with pytest.raises(HTTPException, match="first request") as error:
         await server.verify(request, changed)
     assert error.value.status_code == 409
-    # A caller that mutates what it got back does not change what is replayed.
-    result.reward = 0.0
-    result.response.id = "mutated"
-    replay = await server.verify(request, verify_body())
-    assert replay.reward == 1.0
-    assert replay.response.id == "response"
+    assert await server.verify(request, verify_body()) == result
     grading.run.assert_awaited_once()
 
 
@@ -328,21 +325,20 @@ async def test_concurrent_verification_replays_after_the_first_finishes(server, 
 
 
 @pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
-async def test_interrupted_verification_requires_retrying_the_episode(server, monkeypatch, failure):
+async def test_interrupted_verification_runs_again_on_retry(server, monkeypatch, failure):
     request = SimpleNamespace(session={})
     await server.seed_session(request, seed())
-    monkeypatch.setattr(server, "_verify", AsyncMock(side_effect=failure("verification interrupted")))
+    verdict = SimpleNamespace(reward=1.0)
+    monkeypatch.setattr(server, "_verify", AsyncMock(side_effect=[failure("verification interrupted"), verdict]))
     with pytest.raises(failure):
         await server.verify(request, verify_body())
-    with pytest.raises(HTTPException, match="retry the episode") as error:
-        await server.verify(request, verify_body())
-    assert error.value.status_code == 503
-    server._verify.assert_awaited_once()
-    await server.close_resources_session(close())
+    assert await server.verify(request, verify_body()) is verdict
+    assert server._verify.await_count == 2
+    await server.close_resources_session(SimpleNamespace(session={}), close())
     assert "attempt" in server._task_session_fences
 
 
-async def test_cancelled_verification_stops_the_task_sandbox_and_requires_retrying_the_episode(
+async def test_cancelled_verification_stops_the_task_sandbox_and_a_retry_grades_the_saved_patch(
     server, grading, sandboxes
 ):
     request = SimpleNamespace(session={})
@@ -350,8 +346,10 @@ async def test_cancelled_verification_stops_the_task_sandbox_and_requires_retryi
     entered = asyncio.Event()
 
     async def run(**kwargs):
-        entered.set()
-        await asyncio.Event().wait()
+        if not entered.is_set():
+            entered.set()
+            await asyncio.Event().wait()
+        return RESOLVED
 
     grading.run.side_effect = run
     verifying = asyncio.create_task(server.verify(request, verify_body()))
@@ -359,12 +357,14 @@ async def test_cancelled_verification_stops_the_task_sandbox_and_requires_retryi
     verifying.cancel()
     with pytest.raises(asyncio.CancelledError):
         await verifying
-    task_sandbox, verifier_sandbox = sandboxes
+    task_sandbox, verifier_sandbox = sandboxes[:2]
     task_sandbox.stop.assert_awaited_once()
     verifier_sandbox.stop.assert_awaited_once()
-    with pytest.raises(HTTPException, match="retry the episode"):
-        await asyncio.wait_for(server.verify(request, verify_body()), timeout=5)
-    grading.run.assert_awaited_once()
+    # The retry grades the patch the first attempt captured; the stopped task sandbox is not read again.
+    result = await asyncio.wait_for(server.verify(request, verify_body()), timeout=5)
+    assert result.reward == 1.0 and result.evaluation_completed is True
+    grading.capture.assert_awaited_once()
+    assert grading.run.await_count == 2
 
 
 @pytest.mark.parametrize(
@@ -380,7 +380,7 @@ async def test_cancelled_verification_stops_the_task_sandbox_and_requires_retryi
         ("test_patch", "verifier_error"),
     ],
 )
-async def test_verification_without_a_verdict_is_masked_and_not_kept(
+async def test_verification_without_a_verdict_is_masked_and_replayed(
     server, grading, sandboxes, failure, failure_kind
 ):
     request = SimpleNamespace(session={})
@@ -422,16 +422,15 @@ async def test_verification_without_a_verdict_is_masked_and_not_kept(
     assert result.failure_reason and result.failure_reason == result.error
     if failure.startswith(("capture", "no_")):
         # Nothing was captured, so nothing was graded: no empty patch scored as a completed 0.
-        assert result.failure_reason.startswith("Failed to extract model patch")
+        lost = "The task sandbox is missing" if failure == "no_task_sandbox" else "Failed to extract model patch"
+        assert result.failure_reason.startswith(lost)
         grading.run.assert_not_awaited()
         assert len(sandboxes) == 1
     if failure != "no_task_sandbox":
         sandboxes[0].stop.assert_awaited_once()
-    # Not kept as the session's result: a retry cannot grade the stopped sandbox, so it asks for another episode.
-    with pytest.raises(HTTPException, match="retry the episode") as error:
-        await server.verify(request, verify_body())
-    assert error.value.status_code == 503
-    await server.close_resources_session(close())
+    # A retry gets the same masked result back.
+    assert await server.verify(request, verify_body()) == result
+    await server.close_resources_session(SimpleNamespace(session={}), close())
 
 
 async def test_a_completed_zero_is_a_kept_measurement(server, grading):
@@ -488,6 +487,20 @@ async def test_cookie_path_verification_neither_masks_nor_replays(server, gradin
         assert grading.run.await_args.kwargs["inputs"].patch == ""
 
 
+async def test_cookie_path_verify_without_a_task_sandbox_is_masked(server, grading):
+    """A /run verify that finds no task sandbox, such as a retry after the first verify used it, grades nothing."""
+    request = SimpleNamespace(session={SESSION_ID_KEY: "cookie"})
+    await server.seed_session(request, ScaleSWESeedSessionRequest.model_validate(ROW))
+    assert (await server.verify(request, verify_body())).reward == 1.0
+
+    retry = await server.verify(request, verify_body())
+
+    assert retry.reward == 0.0 and retry.evaluation_completed is False
+    assert retry.mask_sample is True and retry.failure_kind == "session_lost"
+    grading.capture.assert_awaited_once()
+    grading.run.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_close_stops_the_sandbox_and_a_failed_stop_stays_retryable(server, grading):
     request = SimpleNamespace(session={})
@@ -496,21 +509,21 @@ async def test_close_stops_the_sandbox_and_a_failed_stop_stays_retryable(server,
     sandbox.stop.side_effect = [OSError("temporary"), None]
 
     with pytest.raises(OSError):
-        await server.close_resources_session(close())
+        await server.close_resources_session(SimpleNamespace(session={}), close())
     assert server._session_id_to_sandbox["attempt"] is sandbox
-    # The failed close is not recorded, but it still fences the session against a seed.
+    # The failed close is not recorded, so the session is still open.
     assert "attempt" not in server._task_session_fences
-    with pytest.raises(HTTPException, match="already closed"):
-        await server.seed_session(request, seed())
-    await server.close_resources_session(close())
-    await server.close_resources_session(close())
+    await server.seed_session(request, seed())
+    server._create_sandbox.assert_awaited_once()
+    await server.close_resources_session(SimpleNamespace(session={}), close())
+    await server.close_resources_session(SimpleNamespace(session={}), close())
     assert sandbox.stop.await_count == 2
     assert "attempt" not in server._session_id_to_sandbox
     assert "attempt" in server._task_session_fences
     with pytest.raises(HTTPException, match="already closed"):
         await server.seed_session(request, seed())
-    with pytest.raises(HTTPException, match="closed"):
-        await server.verify(request, verify_body())
+    after_close = await server.verify(request, verify_body())
+    assert after_close.mask_sample is True and after_close.failure_kind == "session_lost"
     grading.capture.assert_not_awaited()
 
 
@@ -519,11 +532,11 @@ async def test_close_for_another_episode_is_refused(server):
     await server.seed_session(SimpleNamespace(session={}), seed())
 
     with pytest.raises(HTTPException, match="episode_id"):
-        await server.close_resources_session(close(EpisodeId(rollout_id="other")))
+        await server.close_resources_session(SimpleNamespace(session={}), close(EpisodeId(rollout_id="other")))
     server._session_id_to_sandbox["attempt"].stop.assert_not_awaited()
-    await server.close_resources_session(close())
+    await server.close_resources_session(SimpleNamespace(session={}), close())
     with pytest.raises(HTTPException, match="episode_id"):
-        await server.close_resources_session(close(EpisodeId(rollout_id="other")))
+        await server.close_resources_session(SimpleNamespace(session={}), close(EpisodeId(rollout_id="other")))
 
 
 async def test_close_records_are_kept_for_the_retry_window_only(server, monkeypatch):
@@ -531,11 +544,11 @@ async def test_close_records_are_kept_for_the_retry_window_only(server, monkeypa
     monkeypatch.setattr(base_resources_server, "monotonic", lambda: now)
     request = SimpleNamespace(session={})
     await server.seed_session(request, seed())
-    await server.close_resources_session(close())
-    await server.close_resources_session(close(session_id="never-seeded"))
+    await server.close_resources_session(SimpleNamespace(session={}), close())
+    await server.close_resources_session(SimpleNamespace(session={}), close(session_id="never-seeded"))
     assert not server._task_sessions
     now = 399.0  # A retried close inside the window does not extend it.
-    await server.close_resources_session(close())
+    await server.close_resources_session(SimpleNamespace(session={}), close())
     for session_id in ("attempt", "never-seeded"):
         with pytest.raises(HTTPException, match="already closed"):
             await server.seed_session(request, seed(session_id))
@@ -546,8 +559,7 @@ async def test_close_records_are_kept_for_the_retry_window_only(server, monkeypa
     assert "never-seeded" in server._session_id_to_sandbox
 
 
-@pytest.mark.parametrize("close_waits", [True, False])
-async def test_close_fences_a_seed_in_progress(server, sandboxes, close_waits):
+async def test_close_waits_for_a_seed_in_progress(server, sandboxes):
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def slow_create(body, files=None, *, for_agent=False, session_id=None):
@@ -560,18 +572,12 @@ async def test_close_fences_a_seed_in_progress(server, sandboxes, close_waits):
     request = SimpleNamespace(session={})
     seeding = asyncio.create_task(server.seed_session(request, seed()))
     await asyncio.wait_for(entered.wait(), timeout=5)
-    closing = asyncio.create_task(server.close_resources_session(close()))
+    closing = asyncio.create_task(server.close_resources_session(SimpleNamespace(session={}), close()))
     await asyncio.sleep(0)
-    if not close_waits:
-        # The caller gave up on the close; the fence it set still takes effect.
-        closing.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await closing
+    assert not closing.done()
     release.set()
-    with pytest.raises(HTTPException, match="closed during setup"):
-        await seeding
-    if close_waits:
-        assert (await closing).resources_session_id == "attempt"
+    await asyncio.wait_for(seeding, timeout=5)
+    assert (await asyncio.wait_for(closing, timeout=5)).resources_session_id == "attempt"
     (sandbox,) = sandboxes
     sandbox.stop.assert_awaited_once()
     assert "attempt" in server._task_session_fences
@@ -580,7 +586,7 @@ async def test_close_fences_a_seed_in_progress(server, sandboxes, close_waits):
         await server.seed_session(request, seed())
 
 
-async def test_close_that_arrives_during_verification_takes_effect_after_it(server, grading):
+async def test_close_waits_for_a_verification_in_progress(server, grading):
     request = SimpleNamespace(session={})
     await server.seed_session(request, seed())
     entered, release = asyncio.Event(), asyncio.Event()
@@ -593,17 +599,16 @@ async def test_close_that_arrives_during_verification_takes_effect_after_it(serv
     grading.run.side_effect = run
     verifying = asyncio.create_task(server.verify(request, verify_body()))
     await asyncio.wait_for(entered.wait(), timeout=5)
-    closing = asyncio.create_task(server.close_resources_session(close()))
+    closing = asyncio.create_task(server.close_resources_session(SimpleNamespace(session={}), close()))
     await asyncio.sleep(0)
-    closing.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await closing
+    assert not closing.done()
     release.set()
     assert (await verifying).reward == 1.0
+    await asyncio.wait_for(closing, timeout=5)
     assert "attempt" in server._task_session_fences
     assert not server._task_sessions
-    with pytest.raises(HTTPException, match="closed"):
-        await server.verify(request, verify_body())
+    after_close = await server.verify(request, verify_body())
+    assert after_close.mask_sample is True and after_close.failure_kind == "session_lost"
 
 
 async def test_slow_stop_at_close_is_waited_for_again_never_cut_short(server):
@@ -623,12 +628,12 @@ async def test_slow_stop_at_close_is_waited_for_again_never_cut_short(server):
     sandbox.stop.side_effect = slow_stop
     started = monotonic()
     with pytest.raises(TimeoutError):
-        await asyncio.wait_for(server.close_resources_session(close()), timeout=5)
+        await asyncio.wait_for(server.close_resources_session(SimpleNamespace(session={}), close()), timeout=5)
     assert monotonic() - started < 2
     assert server._session_id_to_sandbox["attempt"] is sandbox
     assert "attempt" not in server._task_session_fences
     release.set()
-    await server.close_resources_session(close())
+    await server.close_resources_session(SimpleNamespace(session={}), close())
     # The retried close joined the stop that was still running instead of starting another.
     sandbox.stop.assert_awaited_once_with(timeout_s=None)  # the wait bounds the caller, never the stop
     assert not cut_short
@@ -657,23 +662,27 @@ async def test_failed_seed_cleanup_is_bounded_and_keeps_the_sandbox_for_close(se
     assert monotonic() - started < 2
     assert server._session_id_to_sandbox["attempt"] is sandbox
     release.set()
-    await server.close_resources_session(close())
+    await server.close_resources_session(SimpleNamespace(session={}), close())
     # A stop that failed is started again; a slow one is waited for again, not started twice.
     assert sandbox.stop.await_count == (2 if stop_failure == "error" else 1)
     assert "attempt" in server._task_session_fences and not server._session_id_to_sandbox
 
 
-async def test_failed_stop_after_capture_leaves_the_sandbox_to_close(server, grading):
+async def test_failed_stop_after_capture_fails_the_verify_and_a_retry_grades_the_saved_patch(server, grading):
     request = SimpleNamespace(session={})
     await server.seed_session(request, seed())
     sandbox = server._session_id_to_sandbox["attempt"]
     sandbox.stop.side_effect = [OSError("provider unavailable"), None]
 
+    with pytest.raises(OSError, match="provider unavailable"):
+        await server.verify(request, verify_body())
+    assert server._session_id_to_sandbox["attempt"] is sandbox
+    grading.run.assert_not_awaited()
+
     result = await server.verify(request, verify_body())
 
     assert result.reward == 1.0 and result.evaluation_completed is True
-    assert server._session_id_to_sandbox["attempt"] is sandbox
-    await server.close_resources_session(close())
+    grading.capture.assert_awaited_once()
     assert sandbox.stop.await_count == 2
     assert not server._session_id_to_sandbox
 
@@ -783,10 +792,8 @@ async def test_verifier_run_that_never_tested_the_patch_has_no_verdict(
     assert result.mask_sample is True and result.failure_kind == "verifier_error"
     assert result.failure_reason == reason
     assert len(sandboxes) == 3  # The task sandbox, then one retry on a fresh verifier sandbox.
-    # Not kept: a retry asks for another episode instead of replaying a completed 0.
-    with pytest.raises(HTTPException, match="retry the episode") as error:
-        await server.verify(request, verify_body())
-    assert error.value.status_code == 503
+    # A retry gets the same masked result back, not a completed 0.
+    assert await server.verify(request, verify_body()) == result
 
 
 async def test_verifier_timeout_is_still_a_measured_zero(server, grading, sandboxes, monkeypatch):
@@ -875,27 +882,26 @@ async def test_slow_verifier_stop_is_left_to_close_never_cut_short(server, gradi
     task_sandbox, verifier = sandboxes
     assert server._session_id_to_verifier_sandboxes == {"attempt": [verifier]}
     with pytest.raises(TimeoutError):
-        await server.close_resources_session(close())
+        await server.close_resources_session(SimpleNamespace(session={}), close())
     assert "attempt" not in server._task_session_fences
     release.set()
-    await server.close_resources_session(close())
+    await server.close_resources_session(SimpleNamespace(session={}), close())
     verifier.stop.assert_awaited_once()
     assert not cut_short
     assert not server._session_id_to_verifier_sandboxes and "attempt" in server._task_session_fences
 
 
-async def test_failed_verifier_stop_is_retried_at_close(server, grading, sandboxes):
+async def test_failed_verifier_stop_is_retried_before_verify_returns(server, grading, sandboxes):
     request = SimpleNamespace(session={})
     await server.seed_session(request, seed())
     slow_verifier_stops(server, [OSError("provider unavailable"), None])
 
     assert (await server.verify(request, verify_body())).reward == 1.0
     task_sandbox, verifier = sandboxes
-    assert server._session_id_to_verifier_sandboxes == {"attempt": [verifier]}
-    await server.close_resources_session(close())
-
     assert verifier.stop.await_count == 2
-    assert not server._session_id_to_verifier_sandboxes and "attempt" in server._task_session_fences
+    assert not server._session_id_to_verifier_sandboxes
+    await server.close_resources_session(SimpleNamespace(session={}), close())
+    assert "attempt" in server._task_session_fences
 
 
 async def test_shutdown_retries_a_verifier_stop_that_failed(server, grading, sandboxes):
@@ -967,7 +973,7 @@ async def test_a_session_never_closed_expires_and_its_verify_is_masked(server, g
     with pytest.raises(HTTPException, match="already closed"):
         await server.seed_session(request, seed())
     # The Environment Server's own close still succeeds.
-    await server.close_resources_session(close())
+    await server.close_resources_session(SimpleNamespace(session={}), close())
 
 
 async def test_golden_patch_mode_refuses_episode_seeds(server):

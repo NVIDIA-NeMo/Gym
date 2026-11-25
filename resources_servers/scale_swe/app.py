@@ -27,15 +27,14 @@ files, grade FAIL_TO_PASS/PASS_TO_PASS from the output.
 Set ``is_verifying_golden_patch: true`` to grade the dataset's own patch instead of an agent's,
 the dataset-health check: a row whose golden patch does not resolve is a broken row.
 
-An episode session keeps its first completed verification and replays it to an identical
-retry. A verification that produced no verdict is masked with a ``failure_kind`` and not kept: an identical retry
-gets a 503 that asks the caller to retry the episode.
+An episode session keeps its first verification and replays it to an identical retry. A verification that
+produced no verdict is masked with a ``failure_kind``.
 
 Episode sessions run on the shared session base (``resources_servers/swebench/sandbox_sessions.py``) and take part in
 partial-rollout checkpoints like the other repository-task servers
 (``resources_servers/swebench/repo_task_sessions.py``): a commit snapshots the agent's sandbox, or after verify
-captured the patch, saves the capture alone. Where the base differs, this server keeps the session behaviour it had;
-``ScaleSWEResourcesServer`` lists what it keeps.
+captured the patch, saves the capture alone. Seed, verify and close follow the base; ``ScaleSWEResourcesServer``
+lists what this server adds.
 """
 
 import asyncio
@@ -55,7 +54,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import PROVIDER_UNAVAILABLE, SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId
+from nemo_gym.core import PROVIDER_UNAVAILABLE, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -70,8 +69,6 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
@@ -211,18 +208,11 @@ class _UnreadablePatchError(Exception):
 class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
     """Scale-SWE episode sessions on the shared session base, with checkpoints; see the module docstring.
 
-    The base supplies the session record, its lock, the close fences, the expiry of a session that is never closed,
-    and the checkpoint export and restore. Where the base differs, this server keeps the behaviour it had:
+    The base supplies the session record, its lock, seed, verify and close, the close fences, the expiry of a session
+    that is never closed, and the checkpoint export and restore. This server adds:
 
     - an episode seed is refused in golden-patch mode (422), for task data that is not a row (422, without the
-      values), for a session a close has claimed (409, also after that close failed), during shutdown (503), and
-      when the prepared checkout has no base commit (503);
-    - a close claims the session before it waits for the session's lock, so a seed still running stops its own
-      sandbox and a verification in progress completes the close when it ends, even if the close's caller gave up;
-      a close leaves the session cookie bound, so a later ``/verify`` with it is refused (409);
-    - verify keeps only a completed verdict, replays it to an identical retry, and answers a retry after an attempt
-      without a verdict with a 503 that asks for another episode; a stop that fails after the capture is logged and
-      leaves the sandbox to close instead of failing the verdict;
+      values), during shutdown (503), and when the prepared checkout has no base commit (503);
     - each stop gets a bounded wait (``sandbox_stop_timeout_seconds``) but is never cut short, and each grading
       attempt's verifier sandbox stays with the session until its stop succeeds;
     - shutdown waits a bounded time for a session's request in progress, never raises, and leaves what an agent's
@@ -230,8 +220,8 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
     - the files a checkout holds untracked before the agent starts are listed as before: a listing that fails gives
       none.
 
-    The cookie path of an agent's ``/run`` keeps its seed and verify; only its task sandbox is created on the
-    shared provider (``new_task_sandbox``), so a checkpointing server says its episode restarts.
+    The cookie path of an agent's ``/run`` keeps its seed; its task sandbox is created on the shared provider
+    (``new_task_sandbox``), so a checkpointing server says its episode restarts.
     """
 
     config: ScaleSWEResourcesServerConfig
@@ -240,9 +230,6 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self.config.check_agent_network_provider(get_global_config_dict())
-        # Episode sessions a close has claimed, by resources_session_id, with the closing episode. The claim stays
-        # until the session's sandboxes stopped, so a seed is refused even after a close that failed or was given up.
-        self._closing_sessions: dict[str, EpisodeId] = {}
         # Verifier sandboxes of episode sessions whose stop has not succeeded yet.
         self._session_id_to_verifier_sandboxes: dict[str, list[AsyncSandbox]] = {}
         # Stops that a bounded wait gave up on, still running, so a later wait joins them instead of starting another.
@@ -432,17 +419,6 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
         else:
             self._forget_verifier_sandbox(session_id, sandbox)
 
-    async def _stop_failed_seed_sandbox(self, session_id: str) -> bool:
-        """Stop the sandbox of an episode seed that failed, as the base does; then complete a close that claimed it.
-
-        Its caller never got the sandbox, so nobody else can stop it. A failed stop is logged, so the seed's own error
-        propagates, and the sandbox stays with the session for close.
-        """
-        stopped = await super()._stop_failed_seed_sandbox(session_id)
-        if stopped and session_id in self._closing_sessions:
-            self._finish_close(session_id)
-        return stopped
-
     def _forget_task_sandbox_state(self, session_id: str) -> None:
         self._session_id_to_pristine_untracked.pop(session_id, None)
         self._session_id_to_base_commit.pop(session_id, None)
@@ -499,7 +475,8 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
 
         Raises ``_UnreadablePatchError`` when git fails on the repository the agent left, and ``_PatchCaptureError``
         when the capture failed for any other reason. The patch is graded in a fresh sandbox, so the agent's sandbox
-        is stopped either way; a stop that fails or runs long leaves it with the session for close.
+        is stopped either way (``stop_task_sandbox_after_capture``); a stop that fails or runs long fails the verify and
+        leaves the sandbox with the session, and a retry grades the saved capture.
 
         The outcome, failure included, is saved with the session as a JSON value (``capture_task_sandbox_patch``), so
         a checkpoint can store it and a verify after a restore grades the same patch without capturing it again.
@@ -518,15 +495,8 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
             # With the failure kind, so a verify after a restore masks a lost capture as the first verify did.
             return saved_capture(patch, error, incomplete) | {"failure_kind": failure_kind}
 
-        try:
-            saved = await self.capture_task_sandbox_patch(session_id, capture)
-        finally:
-            try:
-                await self._stop_task_sandbox(session_id)
-            except Exception:
-                LOG.exception(
-                    "Failed to stop Scale-SWE task sandbox %s after patch capture; close can retry", session_id
-                )
+        saved = await self.capture_task_sandbox_patch(session_id, capture)
+        await self.stop_task_sandbox_after_capture(session_id)
         patch, error, incomplete = loaded_capture(saved)
         if error is None:
             return patch
@@ -604,9 +574,6 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
             ScaleSWESeedSessionRequest.model_validate(body.task_data)
         except ValidationError as error:
             raise HTTPException(422, detail=error.errors(include_input=False)) from error
-        session_id = body.resources_session_id
-        if session_id in self._closing_sessions or session_id in self._task_session_fences:
-            raise ResourcesSessionConflictError("Resources session is already closed")
         if self._shutting_down:
             raise HTTPException(503, "Scale-SWE server is shutting down")
         return await self.seed_task_sandbox_session(request, body, ScaleSWEInstanceRequest)
@@ -614,27 +581,25 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
     async def _start_task_sandbox(self, session_id: str, task: ScaleSWEInstanceRequest) -> str:
         """Start and prepare an episode session's task sandbox, under the session's lock; see ``_seed_session``.
 
-        A close or shutdown that claimed the session meanwhile fails the seed, which then stops the sandbox.
+        A shutdown that began meanwhile fails the seed, which then stops the sandbox.
         """
-        self._raise_if_closing(session_id)
+        self._raise_if_shutting_down()
         await self._seed_session(session_id, task)
         if not _COMMIT_ID.fullmatch(self._session_id_to_base_commit.get(session_id, "")):
             # Without a base commit the agent's patch could never be captured: fail the seed instead, so the episode
             # is retried.
             raise HTTPException(503, "git rev-parse HEAD did not name a commit in the task sandbox; retry the episode")
-        self._raise_if_closing(session_id)
+        self._raise_if_shutting_down()
         return task.workdir
 
     async def _task_sandbox_response(self, session_id: str, record: _TaskSession) -> ResourcesSeedSessionResponse:
         response = await super()._task_sandbox_response(session_id, record)
-        # Serializing the sandbox awaits the provider, and a close or shutdown may have claimed the session meanwhile.
-        self._raise_if_closing(session_id)
+        # Serializing the sandbox awaits the provider, and the server may have begun shutting down meanwhile.
+        self._raise_if_shutting_down()
         return response
 
-    def _raise_if_closing(self, session_id: str) -> None:
-        """Refuse to lend a sandbox that a close, or the server's shutdown, has claimed during setup."""
-        if session_id in self._closing_sessions:
-            raise ResourcesSessionConflictError("Resources session closed during setup")
+    def _raise_if_shutting_down(self) -> None:
+        """Refuse to lend a sandbox once the server's shutdown began during setup."""
         if self._shutting_down:
             raise HTTPException(503, "Scale-SWE server is shutting down")
 
@@ -670,95 +635,25 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
         )
         return ScaleSWESeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
-    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Stop an episode session's sandboxes and fence the session for the close retry window.
-
-        A repeated close, or one for a session that was never seeded, succeeds; a later seed is refused. The close
-        claims the session before it waits for the session's lock (see ``ScaleSWEResourcesServer``). A stop that fails
-        or times out raises and keeps the sandbox and the claim, so the caller can retry the close.
-        """
-        session_id = body.resources_session_id
-        fenced_episode = self._task_session_fences.get(session_id)
-        if fenced_episode is not None:
-            if fenced_episode != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
-            return ResourcesCloseSessionResponse(resources_session_id=session_id)
-        record = self._task_sessions.get(session_id)
-        for known in (
-            record.seed.episode_id if record and record.seed else None,
-            self._closing_sessions.get(session_id),
-        ):
-            if known is not None and known != body.episode_id:
-                raise ResourcesSessionConflictError("episode_id does not match the resources session")
-        # Before the wait for the lock, so the claim takes effect even if this close's caller gives up.
-        self._closing_sessions[session_id] = body.episode_id
-        async with self._locked_task_session(session_id):
-            await self._stop_session_sandboxes(session_id)
-            if session_id in self._closing_sessions:
-                self._finish_close(session_id)
-        return ResourcesCloseSessionResponse(resources_session_id=session_id)
-
-    def _finish_close(self, session_id: str) -> None:
-        """Complete the close that claimed a session whose sandboxes stopped: drop the session and fence it."""
-        self._task_session_fences.fence(session_id, self._closing_sessions.pop(session_id))
-        self._task_sessions.pop(session_id, None)
-        self._open_task_sessions.pop(session_id, None)
-
-    async def retire_session_state(self, session_id: str) -> None:
-        await super().retire_session_state(session_id)
-        # A restore may install the session again: a close that never completed must not refuse its seed.
-        self._closing_sessions.pop(session_id, None)
-
     async def verify(self, request: Request, body: ScaleSWEVerifyRequest) -> ScaleSWEVerifyResponse:
-        """Grade the agent's patch in a fresh sandbox.
-
-        An episode session keeps its first completed verification and replays it to an identical retry:
-        the first verification stopped the agent's sandbox, so grading again would score an empty patch.
-        """
+        """Grade the agent's patch in a fresh sandbox; an episode session's retry gets its saved verdict back."""
         session_id = request.session[SESSION_ID_KEY]
-        record = self._task_sessions.get(session_id)
-        if record is not None and record.seed is not None:
-            return await self._verify_resources_session(session_id, body)
-        if session_id in self._task_session_fences or session_id in self._closing_sessions:
-            raise ResourcesSessionConflictError("Resources session is closed")
-        return await self._verify(session_id, body, resources_session=False)
 
-    async def _verify_resources_session(self, session_id: str, body: ScaleSWEVerifyRequest) -> ScaleSWEVerifyResponse:
-        async with self._locked_task_session(session_id) as record:
-            try:
-                if record.expired:
-                    return self._expired_response(body)
-                if session_id in self._closing_sessions or record.seed is None or record.response is None:
-                    raise ResourcesSessionConflictError("Resources session is not available for verification")
-                instance_fields = set(ScaleSWEInstanceRequest.model_fields)
-                if body.model_dump(include=instance_fields) != record.task.model_dump(include=instance_fields):
-                    raise ResourcesSessionConflictError("Verification task does not match the seeded task")
-                if record.verify_request is None:
-                    # Recorded first: an attempt that ends without a verdict has already used the agent's sandbox.
-                    record.verify_request = body.model_copy(deep=True)
-                    response = await self._verify(session_id, body, resources_session=True)
-                    if not response.evaluation_completed:
-                        # A missing measurement is not the session's result; a retry gets 503 below.
-                        return response
-                    record.verification = response
-                elif record.verify_request != body:
-                    raise ResourcesSessionConflictError("Verification request does not match the first request")
-                elif record.verification is None:
-                    raise HTTPException(503, "Previous verification did not complete; retry the episode")
-                return record.verification.model_copy(deep=True)
-            finally:
-                if session_id in self._closing_sessions:
-                    # A close arrived while this verification ran, and may have given up waiting; complete it.
-                    try:
-                        await self._stop_session_sandboxes(session_id)
-                    except Exception:
-                        LOG.exception("Failed to stop closing Scale-SWE session %s; close can retry", session_id)
-                    else:
-                        self._finish_close(session_id)
+        async def grade() -> ScaleSWEVerifyResponse:
+            record = self._task_sessions.get(session_id)
+            episode = record is not None and record.seed is not None
+            return await self._verify(session_id, body, resources_session=episode)
 
-    def _expired_response(self, body: ScaleSWEVerifyRequest) -> ScaleSWEVerifyResponse:
-        """The masked reply for a session the base closed because it was never closed within its lifetime."""
-        reason = "The task session has expired"
+        return await self.verify_task_sandbox_session(
+            request,
+            body,
+            verify=grade,
+            lost_response=lambda reason, kind: self._lost_response(body, reason, kind),
+            allow_seedless=self.config.is_verifying_golden_patch,
+        )
+
+    def _lost_response(self, body: ScaleSWEVerifyRequest, reason: str, failure_kind: str) -> ScaleSWEVerifyResponse:
+        """The masked reply for a session this server no longer holds, such as one it closed when it expired."""
         return ScaleSWEVerifyResponse.model_validate(
             body.model_dump()
             | {
@@ -773,7 +668,7 @@ class ScaleSWEResourcesServer(RepoTaskSessionResourcesServer):
                 "eval_sandbox_start_time_taken": 0.0,
                 "patch_verification_time_taken": 0.0,
             }
-            | lost_session_verification(reason, failure_kind=SESSION_EXPIRED)
+            | lost_session_verification(reason, failure_kind=failure_kind)
         )
 
     async def _verify(

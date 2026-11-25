@@ -110,12 +110,12 @@ names the session for `/verify`, and `/close_session` ends it.
   in the prepared sandbox, the seed fails with a retryable 503 and stops the sandbox: without a base commit,
   the agent's patch could never be captured.
 - **Verify once, replay after.** Verification captures the agent's patch, stops the task sandbox and grades
-  the patch in a fresh sandbox. The session keeps its first completed verdict. An identical retry gets that
-  verdict back, and a different request gets a 409.
+  the patch in a fresh sandbox. The session keeps its first verification. An identical retry gets it back,
+  and a different request gets a 409. A verification that ended before it replied, such as one its caller
+  cancelled, runs again on the patch it captured.
 - **No verdict is masked, not scored.** A verification without a verdict returns `mask_sample: true`, a
-  `failure_kind` (`verifier_error`, `provider_unavailable` or `session_lost`) and a `failure_reason`. Masked
-  results are not kept, so a retry gets a 503 that asks the caller to retry the episode. These count as no
-  verdict:
+  `failure_kind` (`verifier_error`, `provider_unavailable` or `session_lost`) and a `failure_reason`, and is
+  replayed like any other result. These count as no verdict:
   - the capture could not reach the sandbox, or a capture command timed out or ended without an exit status
     (nothing is graded, because an empty patch would read as a completed 0);
   - the verifier exec ended without an exit status for a reason other than a timeout;
@@ -126,12 +126,14 @@ names the session for `/verify`, and `/close_session` ends it.
   the result is a completed 0 with `mask_sample: false`, and `failure_reason` names the git error. Examples
   are a stale `.git/index.lock` from an interrupted git command, a deleted `.git`, or a pruned base commit.
 - **Close.** A repeated close, or a close for a session that was never seeded, succeeds. A seed after a close
-  is refused for `session_close_retry_window_seconds`. A close that arrives during setup fences the seed, which
-  then stops its own sandbox. Close stops the task sandbox and any verifier sandbox whose stop has not
-  succeeded yet.
+  is refused for `session_close_retry_window_seconds`, and a verify after a close is masked with
+  `failure_kind: session_lost`. A close waits for a seed or verify in progress on the session. Close stops the
+  task sandbox and any verifier sandbox whose stop has not succeeded yet.
 - **Stops.** The server waits up to `sandbox_stop_timeout_seconds` (default 120) for each stop, but never cuts
   a stop short. A stop that is still running, or that failed, leaves the sandbox with the session. Close then
   raises so the caller can retry, and a retried close or shutdown waits for that stop again or starts it again.
+  A task sandbox that does not stop after verify captured its patch fails that verify, and a retry grades the
+  captured patch.
 - **Expiry.** A session that is never closed is closed by the server once its sandbox's `ttl_s` has passed
   (24 hours without one). A verify after that is masked with `failure_kind: session_expired`.
 - **Shutdown.** When the server shuts down, it stops every sandbox its episode sessions still hold,
@@ -145,6 +147,6 @@ names the session for `/verify`, and `/close_session` ends it.
   episode continues in a fork of the snapshot, and a verify grades the saved capture without capturing again.
   Golden-patch mode, and a provider that cannot snapshot, run `restart_only`: those episodes start over.
 
-The cookie path that an Agent's `/run` uses is unchanged: it does not replay or mask, the stops inside its
-requests are not bounded, and the sandboxes it still holds at shutdown are left to the provider's TTL. Its
-episodes start over after a crash.
+The cookie path that an Agent's `/run` uses does not replay, and a verify that finds no task sandbox is masked
+with `failure_kind: session_lost`. The stops inside its requests are not bounded, and the sandboxes it still holds
+at shutdown are left to the provider's TTL. Its episodes start over after a crash.
