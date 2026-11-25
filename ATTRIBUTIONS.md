@@ -45,6 +45,17 @@ external executable (GPL-2.0-or-later). Its source and binaries are **not**
 included in this repository. The optional Linux startup installer downloads
 revision `6441b478418350b338589cbfb1b4397fed4a490e` (abc2midi 4.88) into an ignored local directory.
 
+## Preference-ASR normalizer
+
+`resources_servers/audio_eval/_scoring/dataset/preference-asr-public/normalizer.py` adapts the preference-aware
+normalizer of [nithinraok/preference-asr-bench](https://github.com/nithinraok/preference-asr-bench/tree/efa5cae9aecb56ce28aeea6105425ded654acbdd/normalizer),
+directory `normalizer/`, revision `efa5cae9aecb56ce28aeea6105425ded654acbdd`, under Apache-2.0 (the repository `LICENSE`
+states it for that directory; the package is itself vendored there from the Open ASR Leaderboard, Copyright 2022 The
+OpenAI team and The HuggingFace Team, Apache-2.0, which copied it from OpenAI Whisper, MIT). Local changes: the English
+normalizer is rebuilt from the `whisper-normalizer` package (0.1.12) plus the release's replacer and spelling
+changes instead of being copied, the skip logic is reimplemented, `target_case` is recovered from `sub_category`, and
+unsupported values raise.
+
 ## SWE-bench Pro v2 example inputs
 
 `resources_servers/swebench_pro_v2/data/example.jsonl` packages five genuine inputs from

@@ -1,0 +1,33 @@
+config_paths:
+- resources_servers/audio_eval/configs/audio_eval.yaml
+
+preference_asr_resources_server:
+  _inherit_from: audio_eval
+  resources_servers:
+    audio_eval:
+      profile_contracts: benchmarks/preference_asr/profiles.json
+
+preference_asr_simple_agent:
+  _inherit_from: audio_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: preference_asr_resources_server
+      datasets:
+      - name: preference_asr
+        type: benchmark
+        jsonl_fpath: benchmarks/preference_asr/data/preference_asr_benchmark.jsonl
+        prepare_script: benchmarks/preference_asr/prepare.py
+        prepare_dependencies:
+        - soundfile
+        license: Creative Commons Attribution-NonCommercial 4.0 International
+
+preference_asr_environment_server:
+  _inherit_from: audio_eval_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: preference_asr_simple_agent
+      resources_server:
+        type: resources_servers
+        name: preference_asr_resources_server
