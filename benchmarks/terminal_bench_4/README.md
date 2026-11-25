@@ -19,8 +19,9 @@ verifiers use harbor-rewardkit criteria, which changes the meaning of test count
 - `terminal_bench_4/opencode`: OpenCode in
   [`opencode_agent`](../../responses_api_agents/opencode_agent/README.md) agent sessions, on the same task
   folders and Harbor environment server, with the episode bound and setup allowance of `terminal_bench_4/miniswe`
-  and OpenCode's run limit raised to the tasks' 8-hour agent budget. OpenCode installs itself in the task sandbox
-  with the image's package manager, which it cannot do in the three tasks whose image runs as a non-root user
+  and OpenCode's run limit raised to the tasks' 8-hour agent budget. A run that died while its sandbox still
+  runs is graded as it stands (`verify_after_agent_error`), as a killed mini-SWE run is. OpenCode installs itself
+  in the task sandbox with the image's package manager, which it cannot do in the three tasks whose image runs as a non-root user
   (`fp8-rmsnorm-gemm`, `risk-scorer-replay`, `rs-archive-clone`): leave them out with `--exclude-tasks`, or
   compare harnesses on the 63 other tasks with `++task_ids_fpath=benchmarks/terminal_bench_4/root_image_tasks.txt`.
   It has no step limit, so its scores are not comparable with the Artificial Analysis settings of
