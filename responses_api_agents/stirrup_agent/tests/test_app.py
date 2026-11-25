@@ -103,7 +103,7 @@ def test_run_provenance_records_the_aa_briefcase_lite_temperature_the_agent_samp
     configured, tmp_path, monkeypatch
 ):
     from nemo_gym.rollouts import provenance
-    from nemo_gym.utils.path_utils import materialized_path_for
+    from nemo_gym.utils import materialized_path_for
 
     if configured is None:
         monkeypatch.delenv("AA_BRIEFCASE_TEMPERATURE", raising=False)
