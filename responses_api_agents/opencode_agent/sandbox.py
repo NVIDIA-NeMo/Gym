@@ -562,6 +562,47 @@ class OpenCodeSandboxSession(AgentSessionState):
             "stderr": f"{directory}/stderr.log",
             "setup": runner_setup(directory, [env[key] for key in _TASK_DIRECTORY_KEYS]),
         }
+        access = self.request.sandbox_access
+        # SandboxAccess.env, except OPENCODE_* and OPENAI_* variables, which could redirect OpenCode's configuration
+        # or model calls, and NEMO_GYM_* variables, which Gym sets for the harness itself.
+        access_env = {
+            key: value
+            for key, value in (access.env if access else {}).items()
+            if not key.startswith(("OPENCODE_", "OPENAI_", "NEMO_GYM_"))
+        }
+        if access_env:
+            # shell_assignments rejects an entry whose name is not a shell variable name. env(1), which sets the
+            # entries below, could take such a name for an option or for an assignment to another variable.
+            shell_assignments({"access_env": access_env})
+            if payload.get("path_prefix") and "PATH" in access_env:
+                # As below: preinstalled runtime tools come first.
+                access_env["PATH"] = ":".join([*payload["path_prefix"], access_env["PATH"]])
+            # No entry becomes a variable of the runner's shell, where one named like a runner parameter, such as
+            # ``command``, would replace it. A HOME or XDG directory among the entries is exported in a subshell around
+            # the setup, which records it as the task's. No other entry reaches the setup, so its ``rm`` and ``mkdir``
+            # run with the sandbox's own variables, such as PATH.
+            task_directories = {key: access_env[key] for key in _TASK_DIRECTORY_KEYS if key in access_env}
+            if task_directories:
+                params["setup"] = (
+                    "(\n"
+                    + shell_assignments({"task_directories": task_directories})
+                    + 'export "${task_directories[@]}"\n'
+                    + params["setup"]
+                    + ") || exit 1\n"
+                )
+            # env(1) then sets the entries for the CLI alone, over the sandbox's values. The names in ``env`` are left
+            # out, so the adapter's own variables keep their values, and so is PWD, which the runner's ``cd`` sets.
+            assignments = [f"{key}={value}" for key, value in access_env.items() if key not in env and key != "PWD"]
+            if payload.get("reprompt") is not None:
+                # reprompt_opencode.sh starts the OpenCode server with the env(1) words in this file, so its own
+                # commands, such as ``seq`` and ``curl``, keep the sandbox's variables. The words are in a file
+                # because the script's command line stays readable in the sandbox for the whole turn.
+                server_env = f"{directory}/reprompt-env.sh"
+                text = shell_assignments({"server_env": ["env", *assignments]})
+                await upload_text(self.session.sandbox, path=server_env, text=text)
+                params["command"] = [*command, server_env]
+            else:
+                params["command"] = ["env", *assignments, *command]
         if payload.get("path_prefix"):
             # Preinstalled runtime tools come first; the task's own PATH still follows.
             params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"

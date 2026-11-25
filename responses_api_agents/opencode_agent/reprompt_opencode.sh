@@ -15,7 +15,11 @@
 # prompt request would wait for it until the harness deadline, so this script rejects them the same way
 # (tested against the API of OpenCode 1.17.11: GET /permission, POST /permission/ID/reply).
 #
-# usage: reprompt_opencode.sh OPENCODE SESSION_ID PAYLOAD
+# usage: reprompt_opencode.sh OPENCODE SESSION_ID PAYLOAD [SERVER_ENV]
+#
+# SERVER_ENV is bash source that sets the array server_env to an env(1) command. That command sets variables
+# for the OpenCode server alone: the commands of this script keep the sandbox's variables, such as PATH. The
+# variables come in a file because this script's command line is readable in the sandbox for the whole turn.
 #
 # Exits 0 once the turn finished, 3 when the server never became ready, 4 when the prompt request failed.
 # OpenCode writes the conversation to its database as the CLI would. The server's log and the request's
@@ -23,7 +27,7 @@
 
 set +o errexit +o nounset +o pipefail
 opencode=$1 session=$2 payload=$3
-[[ -x $opencode && -n $session && -f $payload ]] || { echo "usage: reprompt_opencode.sh OPENCODE SESSION_ID PAYLOAD" >&2; exit 2; }
+[[ -x $opencode && -n $session && -f $payload ]] || { echo "usage: reprompt_opencode.sh OPENCODE SESSION_ID PAYLOAD [SERVER_ENV]" >&2; exit 2; }
 
 password=
 for _ in 1 2 3 4; do password+=$(printf '%08x' "$((RANDOM * 32768 + RANDOM))"); done
@@ -33,7 +37,10 @@ case $payload in */*) files=${payload%/*} ;; *) files=. ;; esac
 log=$files/reprompt-server.log response=$files/reprompt-status
 : >"$log" || exit 3
 
-"$opencode" serve --hostname 127.0.0.1 --port 0 >"$log" 2>&1 &
+# Without SERVER_ENV the server starts directly: the image may have no env.
+server_env=()
+[[ -n ${4-} ]] && { source "$4" || exit 3; }
+"${server_env[@]}" "$opencode" serve --hostname 127.0.0.1 --port 0 >"$log" 2>&1 &
 server=$!
 request= rejecter=
 stop_server() {
