@@ -36,7 +36,7 @@ Known differences between Gym benchmarks and the published methods they follow, 
 
 - 2,158 text-only questions, 1 repeat. The dataset revision is not pinned.
 - The judge is the policy model unless the config overrides it, and no judge temperature is set. Ask which judge produced each number before comparing.
-- The server emits `mean/reward` and a judge parsing-issue rate. An unparseable verdict counts as wrong; a failed judge call becomes `judge_failed`. Runs from before NVIDIA-NeMo/Gym#5865, 0.7.0 among them, matched the verdict label exactly, so a verdict in other capitalisation or in bold, italic or code markup counted as wrong; they are not comparable with later runs.
+- The server emits `mean/reward` and a judge parsing-issue rate. An unparseable verdict counts as wrong; a failed judge call becomes `judge_failed`. Runs from before NVIDIA-NeMo/Gym#5865, 0.7.0 among them, searched for the exact label `Judgement: yes` or `Judgement: no`, so a verdict in other capitalisation or with markup inside the label (`Judgement: **yes**`) counted as wrong, while markup around the whole label was read; they are not comparable with later runs.
 - HLE-Diamond (benchmark `hle_diamond`, after 0.7.0) is a 1,000-question subset of HLE, 272 of them with images; its text presets run 728. Compare it only with HLE-Diamond numbers over the same rows.
 
 ## LiveCodeBench (benchmark `livecodebench`)
