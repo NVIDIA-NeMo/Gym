@@ -117,6 +117,7 @@ Other features use some of these words in their own senses and keep them:
 | **Evaluation** | Run an agent on tasks, score results, and measure performance. See [Evaluation](/about/concepts/evaluation) and the [Evaluate](/evaluation) workflow. |
 | **Benchmark** | Repeatable, versioned evaluation built on an environment: canonical dataset split, prompt configuration, metrics, and comparison protocol. Not every environment is used as a benchmark. See [Benchmarks](/evaluation/benchmarks). |
 | **pass@k** | Fraction of tasks with at least one success among *k* rollouts. See [Aggregate Metrics](/evaluation/aggregate-metrics). |
+| **Service declaration** | The record of which model service ran on which nodes and GPUs during a run, kept next to its rollouts as `<output stem>_service_declaration.json`: available when a `gym eval submit` job on Slurm placed the services, unavailable with the reason otherwise. See [Service declaration](/main/observability/eval-submit-collector#service-declaration). |
 
 ### Training
 
