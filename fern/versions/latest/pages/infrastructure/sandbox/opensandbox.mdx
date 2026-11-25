@@ -471,6 +471,10 @@ SandboxSpec(
 - `ports` needs `networking.enabled: true`; without it the create is refused before anything starts, because nothing
   in the main sandbox could reach the service. The main sandbox resolves each sidecar by its name through
   `/etc/hosts`, which needs root in the main sandbox. The two do not share a loopback interface.
+- `sandbox.sidecar("tools").url()` is the URL at which the main sandbox reaches the service, here
+  `http://tools:8080`. Pass the port when the sidecar declares several. Take the URL from this call instead of
+  writing a host name into a task: a provider whose sidecars share the sandbox's loopback answers with a loopback
+  address. The URL is for code inside the main sandbox and does not resolve on the Gym host.
 - Each sandbox reaches only what it was granted. When the main sandbox has an [egress policy](#network-policy):
   - A sidecar whose `provider_options` name no `network_policy` gets a deny-by-default policy with no rules. It does
     not inherit the main sandbox's grants, so a tool sidecar does not reach the Model Server. Give a sidecar its own

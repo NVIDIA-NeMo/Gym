@@ -702,6 +702,10 @@ class SupportsSandboxSidecars(Protocol):
         """Download one file from ``sidecar`` to the local filesystem."""
         ...
 
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        """The host name or address at which the sandbox reaches ``sidecar``'s ports; it need not resolve elsewhere."""
+        ...
+
 
 @runtime_checkable
 class SupportsSandboxPauseResume(Protocol):

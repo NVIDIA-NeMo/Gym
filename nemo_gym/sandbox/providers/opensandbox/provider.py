@@ -4436,6 +4436,11 @@ class OpenSandboxProvider:
         """Download one file from the sidecar's sandbox."""
         await self.download_file(self._sidecar_handle(handle, sidecar), source_path, target_path)
 
+    def sidecar_host(self, handle: SandboxHandle, sidecar: str) -> str:
+        """The sidecar's name, which the sandbox resolves through the hosts entry its create wrote."""
+        self._sidecar_handle(handle, sidecar)  # Raises for a sidecar that is gone.
+        return sidecar
+
     def _sidecar_handle(self, handle: SandboxHandle, sidecar: str) -> SandboxHandle:
         """The handle of a sidecar this provider created, or connected from a descriptor with its id."""
         try:

@@ -505,6 +505,15 @@ async def test_a_create_waits_for_a_sidecars_service_to_answer_on_its_ports(prov
     assert [created["image"] for created in FakeSandbox.created] == ["tools:2", "task:1"]
 
 
+async def test_a_sidecars_url_names_the_hosts_entry_the_main_sandbox_resolves(provider, monkeypatch) -> None:
+    hosts = _peers(provider, monkeypatch)
+    sandbox = await AsyncSandbox(provider, SandboxSpec(image="task:1", sidecars=[_SERVICE])).start()
+
+    assert sandbox.sidecar("tools").url() == "http://tools:8080"
+    assert hosts == {"sandbox-2": {"tools": "10.0.0.1"}}
+    await sandbox.stop()
+
+
 async def test_a_sidecar_whose_service_never_answers_fails_the_create_as_a_setup_failure(
     provider, monkeypatch
 ) -> None:
