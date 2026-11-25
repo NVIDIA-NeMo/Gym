@@ -52,6 +52,7 @@ from nemo_gym.agents.agent_activation_types import (
 from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, policy_timeout_failure
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
+from nemo_gym.client.sandbox_routes import sandbox_service_url
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.config_types import (
     ROLLOUT_PATH_PREFIX,
@@ -1556,8 +1557,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Pass ``trace_context=False`` for a URL that a client cached across rollouts will keep using, and
         ``trained=False`` for a role the training framework does not train, which keeps its own sampling.
         """
-        server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
-        base_url = self.server_client._build_server_base_url(server_config)
+        global_config = self.server_client.global_config_dict
+        server_config = get_first_server_config_dict(global_config, model_server_name)
+        sandbox_url = (
+            sandbox_service_url(model_server_name, global_config=global_config)
+            if self.calls_model_from_sandbox
+            else None
+        )
+        base_url = sandbox_url or self.server_client._build_server_base_url(server_config)
         untrained = not trained and trace_context and current_model_sampling_segment() is not None
         prefixed = apply_rollout_prefix(
             base_url,

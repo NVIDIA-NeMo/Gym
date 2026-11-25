@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Literal
 
+from nemo_gym.client.sandbox_routes import sandbox_service_url
 from nemo_gym.client.server_client import get_server_url
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.episode_types import TaskId
@@ -186,7 +187,9 @@ class LentSandboxes:
         (provider_name,) = provider_config
         servers = [self._model_server, *self._tool_servers]
         try:
-            return restricted_network_policy(provider_name, [get_server_url(server) for server in servers])
+            config = get_global_config_dict()
+            urls = [sandbox_service_url(server, global_config=config) or get_server_url(server) for server in servers]
+            return restricted_network_policy(provider_name, urls)
         except ValueError as error:
             # A provider without network policies or a server on a loopback address: no retry can fix it.
             raise ResourcesSeedRejectedError(f"Cannot lend a {self._network_access} sandbox: {error}") from error
