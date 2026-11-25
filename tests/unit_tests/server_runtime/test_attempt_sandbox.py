@@ -192,6 +192,8 @@ class _Provider:
     def __init__(self) -> None:
         self.boxes: dict[str, dict[str, Any]] = {}
         self.fail_create: Exception | None = None
+        self.commands: list[tuple[str, str | None]] = []
+        self.exec_result = SandboxExecResult(stdout="", stderr=None, return_code=0)
 
     def network_options(self, rule: str, hosts: Sequence[str], provider_options: Mapping[str, Any]) -> dict[str, Any]:
         return {**provider_options, "network_policy": {"rule": rule, "allow": list(hosts)}}
@@ -204,7 +206,8 @@ class _Provider:
         return SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw=None)
 
     async def exec(self, handle: SandboxHandle, command: str, **kwargs: Any) -> SandboxExecResult:
-        return SandboxExecResult(stdout="", stderr=None, return_code=0)
+        self.commands.append((command, kwargs.get("cwd")))
+        return self.exec_result
 
     async def upload_file(self, handle: SandboxHandle, source_path: Any, target_path: str) -> None:
         pass
@@ -500,6 +503,33 @@ async def test_a_group_for_the_verifier_alone_starts_with_no_egress() -> None:
         "allow": ["10.0.0.5"],
     }
     assert provider.boxes["sb-2"]["spec"].provider_options["network_policy"] == {"rule": "no_network", "allow": []}
+
+
+async def test_the_working_directory_is_created_before_anyone_borrows_the_group() -> None:
+    provider = _Provider()
+    server = _server(provider)
+
+    await server.seed_attempt_sandbox(_request(), key="a", group=SandboxGroupSpec(workdir="/task dir"))
+
+    # From the root, since a provider that does not create it cannot run a command in it either.
+    assert provider.commands == [("mkdir -p '/task dir'", "/")]
+
+
+async def test_a_working_directory_that_cannot_be_created_fails_the_attempt_for_a_retry() -> None:
+    provider = _Provider()
+    provider.exec_result = SandboxExecResult(stdout="", stderr="read-only file system", return_code=1)
+    server = _server(provider)
+
+    with pytest.raises(NgFailureEvent) as error:
+        await server.seed_attempt_sandbox(_request(), key="a")
+
+    assert _refusal(error) == ("seed", False)
+    assert "'/workspace' could not be created (return code 1, no error type): read-only file system" in (
+        error.value.failure_reason
+    )
+    # The started group is the episode's cleanup's to stop.
+    await server.stop_attempt_sandbox("a")
+    assert provider.running() == []
 
 
 async def test_a_declared_prepare_runs_once_the_group_has_started() -> None:

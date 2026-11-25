@@ -711,8 +711,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     grading_may_use_uninstrumented_model: ClassVar[bool] = False
     # True for a server whose verifier executes nothing and calls no tools: it only reads the answer, with rules,
     # math-verify or a judge call. Its seed reply declares it, and only then may an Environment Server run /verify
-    # without a sandbox (SandboxOptOut.verifier). A verifier that runs model output, passes it to eval or to sympy's
-    # parse_expr, or reads state from the sandbox, leaves it False.
+    # without a sandbox (SandboxOptOut.verifier). A verifier that runs model output, passes model-chosen text to eval
+    # or to sympy's parse_expr, or reads state from the sandbox, leaves it False; math-verify qualifies because it
+    # parses only text its patterns limit to numbers and arithmetic operators.
     verifier_executes_nothing: ClassVar[bool] = False
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)

@@ -8,6 +8,7 @@ import dataclasses
 import json
 import logging
 import re
+import shlex
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
@@ -927,7 +928,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
         The group starts from ``sandbox_config`` with the declared image, working directory, environment variables,
         files and sidecars over it. A group for the verifier alone starts with ``no_network``, and each sidecar with
-        its own rule (``SandboxGroupSidecar.network``), never the main container's. Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled
+        its own rule (``SandboxGroupSidecar.network``), never the main container's. Its working directory is
+        created before anyone borrows it, since not every provider creates it. Register ``stop_attempt_sandbox`` in the episode's cleanup first, so a cancelled
         start still stops what it created. ``prepare`` runs when the seed declared ``prepare``: it asks the Resources
         Server to prepare the task through the access. There is no host fallback: a group that cannot start or be
         described fails the attempt as a retryable infrastructure failure at ``stage``, with ``evidence`` kept, and
@@ -960,7 +962,16 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 files=group.files,
             )
             spec = dataclasses.replace(spec, env=spec.env | group.env, sidecars=sidecars)
-            await self.sandboxes.create(attempt.key, spec)
+            sandbox = await self.sandboxes.create(attempt.key, spec)
+            # Not every provider creates the working directory it starts a sandbox with (OpenSandbox does not), and
+            # every borrower runs its commands there.
+            made = await sandbox.exec(f"mkdir -p {shlex.quote(attempt.workdir)}", cwd="/")
+            if made.error_type is not None or made.return_code != 0:
+                output = (made.stderr or made.stdout or "").strip()[:500]
+                raise RuntimeError(
+                    f"the working directory {attempt.workdir!r} could not be created "
+                    f"(return code {made.return_code}, {made.error_type or 'no error type'}): {output}"
+                )
             access = await self.sandboxes.access(attempt.key, workdir=attempt.workdir)
         except Exception as error:
             raise dependency_failure(error, stage=stage, terminal=False, name_error_type=True, **evidence) from error
