@@ -14,7 +14,7 @@ from pathlib import Path
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core import JUDGE_FAILED, PROVIDER_CREDENTIALS_REJECTED
+from nemo_gym.core import JUDGE_FAILED, PROVIDER_CREDENTIALS_REJECTED, FailureReportRow
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
 from nemo_gym.verification import judge_provider_stopped
 from resources_servers.agentic_if_realworld.benchmark.core import (
@@ -46,6 +46,10 @@ class DeferredJudgeError(RetryableTransportError):
 
     failure_kind = JUDGE_FAILED
     resumable_journal: bool = True
+
+    def __init__(self, message: str, *, row: dict | None = None) -> None:
+        super().__init__(message)
+        self.row = row
 
 
 async def run_rollout_collection(rollout_collection_config, global_config_dict) -> None:
@@ -156,6 +160,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
     by_id = {r["task_id"]: r for r in rows}
     output = private_path(Path(config.output_jsonl_fpath))
     published_before = output.exists()
+    failure_output = output.with_name(output.stem + "_failures.jsonl")
     if published_before and not config.resume_from_cache:
         raise ValueError("Existing rollout output requires explicit resume or a new run directory")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -195,6 +200,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
             write(snapshot_path, OmegaConf.to_container(snapshot, resolve=True))
         # failures halt admission; deferred (receipted transport) failures wait for a resume while other tasks run.
         results, failures, deferred, validated_results = [], [], [], {}
+        deferred_rows = []
+        previous_failures = indexed(failure_output, "task_id") if failure_output.exists() else {}
         writing_failed = False
         # Each task keeps its own journal and receipts, so tasks run concurrently (sequential by default).
         slots = asyncio.Semaphore(config.num_samples_in_parallel or 1)
@@ -320,7 +327,18 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                             operation="/verify",
                         )
                     if kind == JUDGE_FAILED and not (cached_only or validate_only):
-                        raise DeferredJudgeError(result.get("failure_reason", "Judge request failed"))
+                        raise DeferredJudgeError(
+                            result.get("failure_reason", "Judge request failed"),
+                            row={
+                                **body,
+                                "failure_kind": JUDGE_FAILED,
+                                "failure_reason": result.get("failure_reason", "Judge request failed"),
+                                "_ng_failure_class": JUDGE_FAILED,
+                                "_ng_failure_stage": "verification",
+                                **{key: result[key] for key in ("_ng_failure_http_status",) if key in result},
+                                **FailureReportRow.fields(FailureReportRow.report(result)),
+                            },
+                        )
                     result.pop("cached_judge_only", None)
                     result.pop("validate_judge_cache", None)
                     return result
@@ -378,6 +396,11 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                 except DeferredJudgeError as error:
                     LOGGER.error("Task %s deferred to a resume: %r", identifier, error)
                     deferred.append(error)
+                    # Recovery must see this as a saved judge failure, never as an unattempted input.
+                    async with writing:
+                        deferred_rows.append(
+                            error.row or {**row, "_ng_failure_class": JUDGE_FAILED, "failure_kind": JUDGE_FAILED}
+                        )
                 except (Exception, asyncio.CancelledError) as error:
                     LOGGER.error("Task %s failed: %r", identifier, error)
                     failures.append(error)
@@ -421,6 +444,21 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         os.fsync(stream.fileno())
                     finally:
                         stream.close()
+                    # Even a halted resume must retain a newly deferred identity, not turn it into missing work.
+                    saved_failures = dict(previous_failures)
+                    if publish:
+                        for record in results:
+                            saved_failures.pop(record["task_id"], None)
+                    saved_failures.update({record["task_id"]: record for record in deferred_rows})
+                    staged_failures = Path(pending) / failure_output.name
+                    with os.fdopen(
+                        os.open(staged_failures, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
+                    ) as stream:
+                        for record in saved_failures.values():
+                            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    staged_failures.replace(failure_output)
                 if publish:
                     staged_output.replace(output)
                     for report in Path(pending).glob("*.json"):

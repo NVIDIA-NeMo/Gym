@@ -114,15 +114,23 @@ def continuation_admission(
                 print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime reached its cap")
                 return "stop"
             policy, _ = effective_outcome_policy(None, json.loads(outcome_policy) if outcome_policy else None)
+            if collected.failures:
+                from nemo_gym.eval.recovery.policy import _judge_state
+
+                deferred = [row for row in collected.failures if row.get("_ng_failure_class") == kind]
+                if not deferred or any(
+                    _judge_state(row, policy) != IdentityState.JUDGE_RECOVERABLE for row in deferred
+                ):
+                    print(f"{CONTINUATION_REASON_PREFIX}the recovery outcome policy stops a deferred judge failure")
+                    return "stop"
+                print(f"{CONTINUATION_REASON_PREFIX}rollout_collection_driver {driver} resumes from its own journal")
+                return "retry"
             if policy.by_status_code:
                 print(
                     f"{CONTINUATION_REASON_PREFIX}journal failure has no HTTP status for status-specific recovery policy"
                 )
                 return "stop"
-            if choose_action(failure_kind=kind, http_status=None, config=policy) not in (
-                OutcomeAction.VERIFY,
-                OutcomeAction.RETRY,
-            ):
+            if choose_action(failure_kind=kind, http_status=None, config=policy) != OutcomeAction.VERIFY:
                 print(f"{CONTINUATION_REASON_PREFIX}the recovery outcome policy stops {kind}")
                 return "stop"
             # This allocation deferred a journaled answer and the driver revalidates it on resume.

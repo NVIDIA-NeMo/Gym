@@ -255,7 +255,7 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
             try:
                 record["http_status"] = response.status
                 # Status settles deterministic rejection even if reading its error body fails.
-                if not (200 <= response.status < 300 or response.status == 429 or response.status >= 500):
+                if not (200 <= response.status < 300 or response.status in (408, 429) or response.status >= 500):
                     record["terminal"] = True
                 record["content_type"] = response.headers.get("content-type", "")
                 with raw_path.open("wb") as stream:
@@ -266,7 +266,7 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
                 record["raw_attempts"].append(
                     {"path": str(raw_path), "sha256": digest(raw_path), "http_status": response.status}
                 )
-                if response.status == 429 or response.status >= 500:
+                if response.status in (408, 429) or response.status >= 500:
                     record.update(status="delivery_error", reason=f"HTTP_{response.status}")
                     write(path, record)
                     if attempt < 3:

@@ -151,6 +151,9 @@ def test_deferred_transport_failure_lets_every_other_task_run_and_publish(tmp_pa
         json.loads(line)["task_id"] for line in (tmp_path / "out" / "rollouts.jsonl").read_text().splitlines()
     ]
     assert sorted(published) == sorted(seen["aggregated"]) == TASKS[1:]
+    failures = [json.loads(line) for line in (tmp_path / "out" / "rollouts_failures.jsonl").read_text().splitlines()]
+    assert [row["task_id"] for row in failures] == ["task-0"]
+    assert failures[0]["_ng_failure_class"] == failures[0]["failure_kind"] == "judge_failed"
 
 
 @pytest.mark.parametrize("status", [401, 403, 503])
@@ -164,6 +167,7 @@ def test_verify_failure_admission(tmp_path, monkeypatch, status):
     response = _mock_response(
         {
             "failure_kind": kind,
+            "_ng_failure_http_status": status,
             "failure_reason": "Judge credentials rejected"
             if status in (401, 403)
             else "Judge transport failed http_status=500",
@@ -190,6 +194,11 @@ def test_verify_failure_admission(tmp_path, monkeypatch, status):
     assert marker.read_text().strip() == caught.value.failure_kind == "judge_failed"
     assert marker.with_name(marker.name + ".journal").read_text().strip() == "judge_failed"
     assert post.await_count == len(TASKS)
+    rows = [json.loads(line) for line in (tmp_path / "out" / "rollouts_failures.jsonl").read_text().splitlines()]
+    assert [row["task_id"] for row in rows] == TASKS
+    assert all(row["_ng_failure_class"] == "judge_failed" for row in rows)
+    assert all(row["_ng_failure_http_status"] == status for row in rows)
+    assert all(row["response"] == {} and row[ATTEMPT_INDEX_KEY_NAME] == 0 for row in rows)
 
 
 def test_resume_judges_the_deferred_task_again_and_completes(tmp_path, monkeypatch):

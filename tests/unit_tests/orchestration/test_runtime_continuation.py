@@ -437,6 +437,14 @@ def test_custom_driver_run_stops_when_its_driver_found_nothing_eligible(tmp_path
             "other.custom_driver:run",
             10,
             "ok",
+            '{"by_failure_kind": {"judge_failed": "retry"}}',
+            "stop",
+            "policy stops judge_failed",
+        ),
+        (
+            "other.custom_driver:run",
+            10,
+            "ok",
             '{"by_failure_kind": {"judge_failed": "fail"}}',
             "stop",
             "policy stops judge_failed",
@@ -501,3 +509,58 @@ def test_only_an_explicit_journal_error_records_resumption_opt_in(tmp_path, monk
     record_failure_kind(JudgeError())
     assert marker.read_text().strip() == "judge_failed"
     assert not journal.exists()
+
+
+@pytest.mark.parametrize(
+    "policy,expected",
+    [
+        ({"by_failure_kind": {"judge_failed": "fail"}}, "stop"),
+        ({"by_failure_kind": {"judge_failed": "retry"}}, "stop"),
+        ({"by_status_code": {"503": "fail"}}, "stop"),
+        ({"by_status_code": {"503": "verify"}}, "retry"),
+        ({}, "retry"),
+    ],
+)
+def test_persisted_deferred_judge_has_same_policy_on_both_recovery_paths(tmp_path, monkeypatch, policy, expected):
+    from types import SimpleNamespace
+
+    from nemo_gym.eval.recovery.continuation import continuation_admission
+    from nemo_gym.eval.recovery.decision import IdentityState
+    from nemo_gym.eval.recovery.evidence import CollectedEvidence
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_resolved_config.yaml").write_text("rollout_collection_driver: other.custom_driver:run\n")
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("{}\n")
+    (tmp_path / ".gym_driver_failure.100").write_text("judge_failed\n")
+    (tmp_path / ".gym_driver_failure.100.journal").write_text("judge_failed\n")
+    identity = {"_ng_task_index": 0, "_ng_rollout_index": 0, "_ng_attempt_index": 0}
+    row = {
+        **identity,
+        "_ng_failure_class": "judge_failed",
+        "failure_kind": "judge_failed",
+        "_ng_failure_http_status": 503,
+        "response": {"id": "saved", "object": "response", "status": "completed", "output": []},
+    }
+    collected = CollectedEvidence(
+        materialized=[identity],
+        results=[],
+        failures=[row],
+        managed_store=False,
+        walltime_used_s=10,
+        walltime_state="ok",
+    )
+    monkeypatch.setattr("subprocess.run", lambda *a, **kw: SimpleNamespace(stdout=collected.model_dump_json()))
+    assert continuation_admission(str(tmp_path), 3, 60, "1:0", "100", outcome_policy=json.dumps(policy)) == expected
+    decision = decide_from_collected(
+        collected,
+        live_job=False,
+        max_infra_retries=3,
+        max_walltime_s=60,
+        outcome_policy=RecoveryOutcomePolicyConfig(**policy),
+    )
+    assert decision.expected == 1
+    assert not decision.counts.get(IdentityState.MISSING)
+    assert bool(decision.counts.get(IdentityState.JUDGE_RECOVERABLE)) == (expected == "retry")

@@ -82,7 +82,7 @@ def test_judge_startup_requires_key_only_when_serving(monkeypatch):
 
 @pytest.mark.parametrize(
     ("status", "body_complete"),
-    [(status, complete) for status in (401, 403, 429, 500, 503, 400, 404, 413, 422) for complete in (False, True)]
+    [(status, complete) for status in (401, 403, 408, 429, 500, 503, 400, 404, 413, 422) for complete in (False, True)]
     + [(None, True)],
 )
 def test_http_verify_judge_failure_preserves_saved_answer(verifier, monkeypatch, status, body_complete):
@@ -92,7 +92,7 @@ def test_http_verify_judge_failure_preserves_saved_answer(verifier, monkeypatch,
     from resources_servers.agentic_if_realworld.tests.test_transport import Response
 
     calls = []
-    failed_calls = 3 if body_complete and status in (429, 500, 503) else 1
+    failed_calls = 3 if body_complete and status in (408, 429, 500, 503) else 1
     monkeypatch.setattr(transport.asyncio, "sleep", AsyncMock())
 
     class ErrorResponse(Response):
@@ -137,6 +137,12 @@ def test_http_verify_judge_failure_preserves_saved_answer(verifier, monkeypatch,
             assert response.json()["failure_kind"] == expected_kind
             assert f"http_status={status}" in response.json()["failure_reason"]
             assert "attempt0.json" in response.json()["failure_reason"]
+            if expected_kind == "judge_failed":
+                event = response.json()["_ng_failure_events"][response.json()["_ng_failure_id"]]
+                if status is None:
+                    assert event.get("http_status") is None
+                else:
+                    assert type(event["http_status"]) is int and event["http_status"] == status
         assert not list(verifier.receipt_dir.glob("judges/*/result.json"))
         [attempt] = verifier.receipt_dir.glob("judges/*/attempt0.json")
         saved_failure = attempt.read_bytes()
