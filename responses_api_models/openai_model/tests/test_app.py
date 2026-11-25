@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 import socket
 from contextlib import nullcontext
 from copy import deepcopy
@@ -714,6 +715,52 @@ class TestApp:
             "model": "dummy_model",
         }
         assert server.config.extra_body == extra_body
+
+    @pytest.mark.parametrize("field", ["model", "input", "messages"])
+    def test_drop_request_fields_refuses_the_model_and_payload(self, field: str) -> None:
+        with pytest.raises(ValueError, match=f"drop_request_fields cannot drop \\['{field}'\\]"):
+            self._setup_server(drop_request_fields=[field])
+
+    def test_a_field_cannot_be_both_overridden_and_dropped(self) -> None:
+        with pytest.raises(ValueError, match="drop_request_fields drops: \\['top_k'\\]"):
+            self._setup_server(request_overrides={"top_k": 20}, drop_request_fields=["top_k"])
+
+    async def test_drop_request_fields_removes_fields_from_both_routes(self, caplog) -> None:
+        server = self._setup_server(
+            extra_body={"chat_template_kwargs": {"enable_thinking": True}, "top_k": 20, "temperature": 0.5},
+            drop_request_fields=["chat_template_kwargs", "top_k", "absent_field"],
+        )
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-drop",
+                "choices": [{"finish_reason": "stop", "index": 0, "message": {"content": "ok", "role": "assistant"}}],
+                "created": 1753983922,
+                "model": "dummy_model",
+                "object": "chat.completion",
+            }
+        )
+        server._client.create_response = AsyncMock(return_value=_response_data())
+        with caplog.at_level(logging.WARNING), TestClient(server.setup_webserver()) as client:
+            client.post(
+                "/v1/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            )
+            client.post("/v1/responses", json={"input": "hi"})
+
+        for sent in (
+            server._client.create_chat_completion.await_args.kwargs,
+            server._client.create_response.await_args.kwargs,
+        ):
+            assert "chat_template_kwargs" not in sent and "top_k" not in sent
+            assert sent["temperature"] == 0.5 and sent["model"] == "dummy_model"
+        assert server.config.extra_body["chat_template_kwargs"] == {"enable_thinking": True}
+        # Each dropped field is logged once, however many requests carry it; an absent one is not.
+        assert caplog.text.count("dropping the request field 'chat_template_kwargs'") == 1
+        assert "absent_field" not in caplog.text
 
     def test_semaphore_disabled_by_default(self) -> None:
         server = self._setup_server()

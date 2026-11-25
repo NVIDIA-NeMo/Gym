@@ -281,12 +281,29 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    drop_request_fields: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Top-level fields removed from every upstream /v1/responses and /v1/chat/completions request after "
+            "extra_body, the caller's fields and request_overrides are merged. For providers that reject a field a "
+            "harness always sends, e.g. a Claude endpoint refusing the vLLM-only `chat_template_kwargs` that the "
+            "Stirrup agent sets. Not applied to /v1/embeddings. `model`, `input` and `messages` are refused, as is a field "
+            "request_overrides also sets."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_request_overrides(self) -> "SimpleModelServerConfig":
         # The model is always the configured one, and the payload and streaming mode are the caller's.
         refused = sorted({"model", "input", "messages", "stream"} & set(self.request_overrides))
         if refused:
             raise ValueError(f"request_overrides cannot set {refused}")
+        refused = sorted({"model", "input", "messages"} & set(self.drop_request_fields))
+        if refused:
+            raise ValueError(f"drop_request_fields cannot drop {refused}")
+        both = sorted(set(self.request_overrides) & set(self.drop_request_fields))
+        if both:
+            raise ValueError(f"request_overrides sets fields that drop_request_fields drops: {both}")
         return self
 
 
@@ -294,11 +311,22 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
 
     def _upstream_body(self, body: BaseModel) -> Dict[str, Any]:
-        """extra_body, then the caller's fields, then request_overrides; the model is always the configured one."""
+        """extra_body, then the caller's fields, then request_overrides, less drop_request_fields.
+
+        The model is always the configured one.
+        """
         body_dict = (
             self.config.extra_body | body.model_dump(exclude_unset=True) | deepcopy(self.config.request_overrides)
         )
         body_dict["model"] = self.config.openai_model
+        for field in self.config.drop_request_fields:
+            if body_dict.pop(field, None) is not None and field not in self._logged_dropped_fields:
+                self._logged_dropped_fields.add(field)
+                LOG.warning(
+                    "NeMo Gym server `%s`: dropping the request field %r (drop_request_fields). Logged once per field.",
+                    self.config.name,
+                    field,
+                )
         return body_dict
 
     def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
@@ -306,6 +334,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         return error.status in self.config.propagate_upstream_http_status_codes
 
     def model_post_init(self, context):
+        self._logged_dropped_fields: set[str] = set()
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
