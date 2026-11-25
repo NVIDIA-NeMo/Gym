@@ -114,7 +114,8 @@ An attribute whose value is unknown is omitted, never filled in. The benchmark i
 `split=benchmark` run, and only when the server instance that declares the row's dataset (or, for a
 materialized row, its taskset) maps to exactly one `type: benchmark` dataset. A dataset entry that sets no
 `taskset`, such as the one `gym eval run` generates for a Harbor dataset, declares the taskset of its own name.
-The run ID is not repeated:
+The datasets are read from the running servers' config and the split from the collector's, so a `--no-serve`
+run reads them as one with servers started separately. The run ID is not repeated:
 it is the `nemo.run.id` resource attribute of every span. These are span attributes only; none of them
 becomes a metric label.
 

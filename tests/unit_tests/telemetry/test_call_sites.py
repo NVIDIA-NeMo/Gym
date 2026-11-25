@@ -1010,6 +1010,29 @@ async def test_run_context_lands_on_the_job_and_every_dispatch(
     assert [_run_context_of(d) for d in dispatches] == [expected_dispatch] * 2
 
 
+async def test_a_no_serve_run_gives_the_job_and_its_dispatches_one_run_context(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry
+):
+    """With --no-serve the servers run their own config; the collector's own carries only its options, the split."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+
+    _install_recording_post(monkeypatch)
+    client = driver_telemetry.setup_server_client_utils()
+    client.global_config_dict = OmegaConf.merge(client.global_config_dict, _ALPHA_BENCHMARK)
+    monkeypatch.setattr(driver_telemetry, "get_global_config_dict", lambda *a, **k: OmegaConf.create({"split": "benchmark"}))
+    await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
+
+    spans = recorded_spans()
+    (job,) = [s for s in spans if s.name == "gym.job"]
+    dispatches = [s for s in spans if s.name == "gym.rollout.dispatch"]
+    assert _run_context_of(job) == {"nemo.gym.benchmark.names": ("bench_a",)}
+    assert [_run_context_of(d) for d in dispatches] == [
+        {"nemo.gym.benchmark.name": "bench_a", "nemo.gym.rollout.attempt.index": 0}
+    ] * 2
+
+
 @pytest.mark.parametrize(
     ("row", "expected_attempt"),
     [

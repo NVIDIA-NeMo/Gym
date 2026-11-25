@@ -4346,8 +4346,17 @@ executions → not run again (left to recovery)
         )
         results = store.selected("success") if config.retain_results_in_memory else []
         rows = store.inputs_for(results)
-        if (job_span := _EXPORTED_JOB_SPAN.get()) is not None:
-            safe_set_span_attributes(job_span, run_context_from_config(global_config).job_attributes(input_rows))
+        job_span = _EXPORTED_JOB_SPAN.get()
+        # One run context for `gym.job` and every dispatch. The running servers' config names the datasets, as it
+        # resolves the rows' task sources; the collector's own names the split, since with --no-serve the servers
+        # were started with a config of their own.
+        run_context = (
+            run_context_from_config(identity_client.global_config_dict, collector_config=get_global_config_dict())
+            if job_span is not None or (is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active())
+            else None
+        )
+        if job_span is not None:
+            safe_set_span_attributes(job_span, run_context.job_attributes(input_rows))
 
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
@@ -4599,6 +4608,7 @@ executions → not run again (left to recovery)
                 drain_margin_s=config.drain_margin_s,
                 dispatch_reservation_interval_s=config.dispatch_reservation_interval_s,
                 latency_tracker=latency_tracker,
+                run_context=run_context,
                 **({"run_timing": run_timing} if run_timing is not None else {}),
             )
             if hasattr(dispatches, "aclose"):
@@ -5568,9 +5578,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         run_timing: Optional[RunTimingReport] = None,
         record_unrouted_failures: bool = False,
         _connect_grace_s: Optional[float] = None,
+        run_context: Optional[RunContext] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
+
+        ``run_context`` is the run context collection already read for ``gym.job``; without it, the dispatch spans
+        read it from the head server's config.
 
         ``record_unrouted_failures`` returns a failed `/run` that ``route_failures_to_sidecar`` would route as a
         failure row whose ``run_error`` holds the error, so the collection writer can keep evidence of it before it
@@ -5628,11 +5642,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # spent, and must drain rather than disable the check.
         deadline = (time.monotonic() + dispatch_budget_s) if dispatch_budget_s is not None else None
         # Read once per call, and only when dispatch spans are exported.
-        run_context = (
-            run_context_from_config(server_client.global_config_dict)
-            if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
-            else None
-        )
+        if run_context is None and is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active():
+            run_context = run_context_from_config(server_client.global_config_dict)
 
         def drained_result() -> Optional[Dict[str, Any]]:
             # Checked after a row acquires its slot, and again when its delayed reservation is due.

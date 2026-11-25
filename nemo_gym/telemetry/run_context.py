@@ -107,10 +107,17 @@ class RunContext:
         return attributes
 
 
-def run_context_from_config(global_config: Mapping[str, object]) -> RunContext:
-    """Read the run context out of a resolved global config. Never raises on a malformed config."""
+def run_context_from_config(
+    global_config: Mapping[str, object], *, collector_config: Mapping[str, object] | None = None
+) -> RunContext:
+    """Read the run context out of the running servers' resolved config. Never raises on a malformed config.
+
+    ``collector_config`` is the collector's own config, whose ``split`` is the split the run dispatches: with
+    ``--no-serve`` the servers were started with a config of their own. Without it the split is ``global_config``'s.
+    """
     model_name = _config_str(global_config, POLICY_MODEL_NAME_KEY_NAME)
-    if _config_str(global_config, "split") != _BENCHMARK_SPLIT:
+    split_config = global_config if collector_config is None else collector_config
+    if _config_str(split_config, "split") != _BENCHMARK_SPLIT:
         return RunContext(model_name=model_name)
 
     by_taskset: dict[str, set[str]] = {}
