@@ -33,8 +33,8 @@ and attached 1, and no sandbox was left running.
 agent-session mode behind a `single_agent_turn_legacy` environment server, all under names of
 its own (see Instance names): `configs/officeenv_sandbox.yaml` runs Pi, with the
 tools over MCP as on the OfficeEnv server; `configs/officeenv_sandbox_codex.yaml` (Codex CLI),
-`configs/officeenv_sandbox_miniswe.yaml` (mini-SWE), `configs/officeenv_sandbox_opencode.yaml`
-(OpenCode), `configs/officeenv_sandbox_openclaw.yaml` (OpenClaw) and
+`configs/officeenv_sandbox_opencode.yaml` (OpenCode), `configs/officeenv_sandbox_openclaw.yaml`
+(OpenClaw) and
 `configs/officeenv_sandbox_terminus_2.yaml` (Terminus 2) run rows whose apps are commands (below),
 with no MCP tools. Each episode also:
 
@@ -47,8 +47,8 @@ with no MCP tools. Each episode also:
    the server down. The sandbox's TTL runs from the seed, so where the harness caps the episodes
    it runs at once (`concurrency`: Pi, Codex, OpenCode, OpenClaw), its config has the Environment
    Server admit no more (`max_concurrent_episodes` follows it), and the rest wait there, before
-   their seed, for up to a day (`queue_timeout_seconds`). mini-SWE and Terminus 2 run every
-   episode they are given;
+   their seed, for up to a day (`queue_timeout_seconds`). Terminus 2 runs every episode it is
+   given;
 2. moves file content between the workspace and the file apps (those of the episode's apps that
    OfficeEnv gives a file API: Google Drive, Box, SharePoint, OneDrive) without passing it through
    the model: the sandbox gets `COMPANY_API_URL` and `COMPANY_API_TOKEN`, in its environment and in
@@ -98,7 +98,7 @@ with no MCP tools. Each episode also:
    completed), and this server answers that call only after the run has stopped, so no model call
    follows it, on every exposure. Otherwise the run ends at Pi's timeout or when the model stops.
    A harness whose type cannot stop a run in flight (not in `ROLLOUT_STOP_AGENT_TYPES`: today
-   mini-SWE, OpenCode, OpenClaw and Terminus 2) runs until it stops by itself
+   OpenCode, OpenClaw and Terminus 2) runs until it stops by itself
    (`close_tools_on_task_end`, which `configs/officeenv_sandbox_episodes.yaml` sets for every
    harness, refuses its later tool and file API calls, so they cannot change the grade). `/verify` first closes the episode's tools and file API and stops its sandbox, then
    grades the world as for any row: a process the harness left running in the background can act
@@ -143,7 +143,6 @@ Pi, Codex and OpenCode set their own `sandbox_config.mcp_tool_prefix` there):
 | Codex CLI | `officeenv_sandbox_codex_agent` | `officeenv_sandbox_codex_environment_server` | `officeenv_sandbox_codex_resources_server` |
 | OpenCode | `officeenv_sandbox_opencode_agent` | `officeenv_sandbox_opencode_environment_server` | `officeenv_sandbox_opencode_resources_server` |
 | OpenClaw | `officeenv_sandbox_openclaw_agent` | `officeenv_sandbox_openclaw_environment_server` | `officeenv_sandbox_openclaw_resources_server` |
-| mini-SWE | `officeenv_sandbox_miniswe_agent` | `officeenv_sandbox_miniswe_environment_server` | `officeenv_sandbox_miniswe_resources_server` |
 | Terminus 2 | `officeenv_sandbox_terminus_2_agent` | `officeenv_sandbox_terminus_2_environment_server` | `officeenv_sandbox_terminus_2_resources_server` |
 
 Each harness's server takes the settings the episodes' server has in the merged config, a later
@@ -211,8 +210,8 @@ sandbox_config:
 A cell whose sandboxes have no internet pulls the image from a registry, pinned by digest: its
 tools cannot be installed at sandbox start, as the OpenSandbox config installs pandas and openpyxl.
 The harnesses that run in the sandbox install their runtime there at session start too (Pi,
-Codex, OpenClaw and OpenCode from nodejs.org, npm or GitHub, mini-SWE from PyPI, and Terminus 2
-installs tmux where it is missing), so their sandboxes need the internet.
+Codex, OpenClaw and OpenCode from nodejs.org, npm or GitHub, and Terminus 2 installs tmux where
+it is missing), so their sandboxes need the internet.
 
 ### Tools, commands or endpoints
 
@@ -264,9 +263,9 @@ gym eval run --no-serve <the same --config and arguments> --agent officeenv_sand
   --input resources_servers/officeenv_sandbox/data/sandbox_pilot_cli_prepare.jsonl --output results/codex_cli.jsonl
 ```
 
-mini-SWE, OpenCode, OpenClaw and Terminus 2 run the same way with their configs and
-`--agent officeenv_sandbox_miniswe_agent`, `officeenv_sandbox_opencode_agent`,
-`officeenv_sandbox_openclaw_agent` or `officeenv_sandbox_terminus_2_agent`. Pi runs these rows
+OpenCode, OpenClaw and Terminus 2 run the same way with their configs and
+`--agent officeenv_sandbox_opencode_agent`, `officeenv_sandbox_openclaw_agent` or
+`officeenv_sandbox_terminus_2_agent`. Pi runs these rows
 with `configs/officeenv_sandbox.yaml` and
 `++officeenv_sandbox_pi_environment_server.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
 or as it is (a `cli` episode's seed grants no MCP tools), and `api_search` rows with its MCP transport as
@@ -362,8 +361,8 @@ command.
 Known limits: Pi installs Node and its own package in every sandbox at session start (network
 access to nodejs.org and npm); token-ID capture through Pi needs a vLLM model server and is not
 validated here. Pi, Codex, OpenCode, OpenClaw and Hermes take MCP tool grants in sandbox sessions;
-Claude Code refuses them, so it runs only the commands' rows. Codex installs Node and its package,
-and mini-SWE its Python packages, in each sandbox at session start. What a sandbox still reads of
+Claude Code refuses them, so it runs only the commands' rows. Codex installs Node and its package
+in each sandbox at session start. What a sandbox still reads of
 Gym:
 
 - the policy's URL, which Gym's agents hand the harness with Gym's own path names:
@@ -379,8 +378,7 @@ Gym:
   `/tmp/nemo-gym-codex-node-22.19.0-<version>`), OpenClaw (`/tmp/nemo-gym-openclaw-sessions/<id>`,
   `/tmp/nemo-gym-openclaw-node-22.19.0-<version>`) and OpenCode
   (`/tmp/nemo-gym-opencode-sessions/<id>`, `/tmp/nemo-gym-opencode-runtime-<version>` and its
-  `.lock`), and mini-SWE's task file and working folder (`/tmp/.nemo-gym/task.json`,
-  `/tmp/nemo-gym-miniswe-<id>`). The adapters take no other folder, so changing those is adapter
+  `.lock`). The adapters take no other folder, so changing those is adapter
   work;
 - the system prompts the harnesses send with every model call, which name those folders: Pi's
   points to its documentation (three paths in its runtime folder), Codex's to its skills (five

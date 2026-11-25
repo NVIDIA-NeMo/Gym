@@ -24,7 +24,7 @@ CONFIGS = "resources_servers/officeenv_sandbox/configs"
 DOCKER = "nemo_gym/sandbox/providers/docker/configs/docker.yaml"
 # The configs of the harnesses that run at most `concurrency` episodes at once, with the provider each runs on
 # (officeenv_opensandbox.yaml is Pi's on OpenSandbox), the harness their instances are named after and its agent type.
-# mini-SWE and Terminus 2 run every episode they are given.
+# Terminus 2 runs every episode it is given.
 CAPPED = {
     "pi": ([f"{CONFIGS}/officeenv_sandbox.yaml", DOCKER], "pi", "pi_agent"),
     "pi-opensandbox": ([f"{CONFIGS}/officeenv_opensandbox.yaml"], "pi", "pi_agent"),
@@ -34,7 +34,6 @@ CAPPED = {
 }
 # Every sandboxed harness config, by the harness it runs
 SANDBOXED = {name: paths for name, (paths, _, _) in CAPPED.items()} | {
-    "miniswe": [f"{CONFIGS}/officeenv_sandbox_miniswe.yaml", DOCKER],
     "terminus-2": [f"{CONFIGS}/officeenv_sandbox_terminus_2.yaml", DOCKER],
 }
 
