@@ -5,7 +5,7 @@
 #SBATCH --output=slurm-logs/%j-%x.log
 #SBATCH --job-name=synclaw-build_vllm_router_wheel
 
-# Build a patched vllm-router wheel inside the eval base container.
+# Build a patched vllm-router wheel inside the vLLM container.
 #
 # Why we do not just `uv pip install vllm-router`:
 #   The released router resets every worker's in-flight load counter from the
@@ -58,7 +58,7 @@ uname -m
 python3 -VV
 (uv pip show --system vllm-router 2>/dev/null || pip3 show vllm-router 2>/dev/null || echo "vllm-router not installed in base image")
 
-# ldconfig segfaults in this image on the cluster's 64K-page aarch64 kernels, so
+# ldconfig segfaults in this image on 64K-page aarch64 kernels, so
 # the libc-bin dpkg trigger fails and apt returns non-zero even though every
 # package unpacked and configured fine. Ubuntu's glibc searches the multiarch
 # dirs without ld.so.cache, so a stale cache is harmless here; check that the
@@ -134,8 +134,7 @@ fi
 
 # Build in a throwaway venv seeded from the container's own interpreter, so the
 # extension module matches the Python that will run vllm-router at eval time
-# without mutating the image's system site-packages. Mirrors the equivalent
-# section of build_eval_container.sh.
+# without mutating the image's system site-packages.
 buildenv="\$build_root/buildenv"
 rm -rf "\$buildenv"
 uv venv --python "\$(command -v python3)" "\$buildenv"
