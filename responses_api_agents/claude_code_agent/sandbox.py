@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 import tarfile
 import tempfile
 from dataclasses import dataclass, field
@@ -42,6 +43,8 @@ from responses_api_agents.claude_code_agent.observability import (
 
 
 LOG = logging.getLogger(__name__)
+# The ``uuid`` key of a saved Claude Code transcript record, as ``grep -o`` prints it.
+_SAVED_UUID = re.compile(r'"uuid": ?"([^"]+)"')
 
 
 class HarnessProcessInfo(BaseModel):
@@ -127,12 +130,16 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     stderr: str = ""
-    # Multi-turn continuation: the activation running now, the Claude Code session the next one resumes, the input
-    # system prompt every activation passes again, and the session's cumulative trajectory.
+    # Multi-turn continuation: the activation running now, the Claude Code session the next one resumes, the system
+    # prompt every activation passes again, and the session's cumulative evidence.
     activation_id: int | None = None
     harness_session_id: str | None = None
-    input_system: str | None = None
+    system_prompt: str | None = None
     instructions_set: bool = False
+    # Whether any activation launched Claude Code, so a saved conversation may exist.
+    conversation_started: bool = False
+    # The last activation whose evidence was recorded.
+    recorded_activation: int | None = None
     trajectory: TrajectoryRecord | None = None
     observations_so_far: AgentObservationBundle | None = None
     # Transcript records that earlier activations already reported.
@@ -167,6 +174,24 @@ class ClaudeCodeSandboxSession(AgentSessionState):
             raise TimeoutError("Claude activation directory preparation timed out")
         if result.return_code != 0 or result.error_type:
             raise RuntimeError(f"Cannot prepare Claude activation directory: {result.stderr}")
+        await self._mark_saved_transcript_records(timeout=timeout)
+
+    async def _mark_saved_transcript_records(self, *, timeout: float) -> None:
+        """Mark every transcript record saved before this launch as seen: the high-water mark of earlier activations.
+
+        Records of an earlier activation whose transcripts could not be collected are then not reported as this one's.
+        """
+        projects = quote(f"{self.config_dir}/projects")
+        result = await self.session.sandbox.exec(
+            f'if [ -d {projects} ]; then grep -rhoE \'"uuid": ?"[^"]+"\' {projects} || [ "$?" = 1 ]; fi',
+            cwd="/",
+            timeout_s=timeout,
+        )
+        if result.error_type == "timeout":
+            raise TimeoutError("Reading the saved Claude transcript timed out")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot read the saved Claude transcript: {result.stderr}")
+        self._seen_transcript_records.update(_SAVED_UUID.findall(result.stdout or ""))
 
     def new_transcript_records(self, transcripts: ClaudeCodeTranscripts) -> ClaudeCodeTranscripts:
         """Keep the records that no earlier activation reported, and remember them.
@@ -200,6 +225,7 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         that left no transcript gets a root invocation with its outcome alone.
         """
         assert self.activation_id is not None
+        self.recorded_activation = self.activation_id
         renamed = {root: f"{self.invocation_prefix}:{root}" for root in root_sessions}
 
         def rename(value: object) -> object:

@@ -228,6 +228,15 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
         return value
 
 
+class _ActivationDeadlineExpired(Exception):
+    """An activation's budget ran out before Claude Code launched."""
+
+
+def _has_system_message(body: NeMoGymResponseCreateParamsNonStreaming) -> bool:
+    """Whether the request leads with its own system message."""
+    return not isinstance(body.input, str) and bool(body.input) and getattr(body.input[0], "role", None) == "system"
+
+
 def _final_text(response: NeMoGymResponse) -> str | None:
     """The text of the response's last assistant message, or None."""
     for item in reversed(response.output):
@@ -853,7 +862,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             cleanup_confirmed=state.session.cleanup_confirmed,
-            agent_observations=state.observations
+            # A continuation session reports every activation's evidence, whatever became of the last one.
+            agent_observations=(state.observations_so_far if state.is_continuation else state.observations)
             or AgentObservationBundle(
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_activation_interrupted")],
@@ -875,57 +885,96 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     ) -> None:
         assert isinstance(state, ClaudeCodeSandboxSession)
         self._validate_sandbox_request(body)
-        _, input_system = self._activation_input(body)
+        _, system = self._conversation_input(body)
         # Claude Code takes the system prompt on each invocation, so every activation passes the first one's.
-        if state.instructions_set and input_system is not None and input_system != state.input_system:
+        if state.instructions_set and _has_system_message(body) and system != state.system_prompt:
             raise HTTPException(422, "Claude Code continuation cannot replace the session's system prompt")
-
-    @staticmethod
-    def _activation_input(body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str | None]:
-        """The activation's user prompt and its own leading system message, if it has one."""
-        items = (
-            [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
-        )
-        return _extract_instruction(items)
 
     async def _activate_agent_session_state(
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, *, activation_id: int
     ) -> NeMoGymResponse:
-        """Resume the saved Claude Code session with the activation's input, under one time budget."""
+        """Resume the saved Claude Code session with the activation's input, under one time budget.
+
+        The budget covers preparation and the wait for a concurrency slot. An activation whose budget runs out before
+        Claude Code launches returns an incomplete reply and leaves the session usable, as nothing ran.
+        """
         assert isinstance(state, ClaudeCodeSandboxSession)
-        prompt, input_system = self._activation_input(body)
+        prompt, system = self._conversation_input(body)
         if not state.instructions_set:
-            state.input_system, state.instructions_set = input_system, True
-        system = "\n\n".join(part for part in (self.config.system_prompt, state.input_system) if part) or None
+            state.system_prompt, state.instructions_set = system, True
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         # asyncio.timeout_at reads the event loop's clock, whose origin can differ from time.monotonic (uvloop).
-        clock = asyncio.get_running_loop().time
-        deadline = clock() + timeout
+        deadline = asyncio.get_running_loop().time() + timeout
+        state.activation_id = activation_id
+        try:
+            if state.conversation_started and state.harness_session_id is None:
+                # Starting afresh would silently drop the conversation the earlier activations had.
+                raise RuntimeError("Claude Code reported no session id to resume; the conversation cannot continue")
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await state.prepare_activation(
+                        activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
+                    )
+                return await self._sandbox_response(
+                    state, body, prompt=prompt, system=state.system_prompt, deadline=deadline
+                )
+            except (TimeoutError, _ActivationDeadlineExpired):
+                if state.recorded_activation == activation_id:
+                    raise
+                self._record_unlaunched(state, prompt, status="incomplete", error_type="timeout")
+                return self._activation_reply(
+                    state, self._response_from_output(body, [], self._model_name(), {}, status="incomplete")
+                )
+        except BaseException as error:
+            if state.recorded_activation != activation_id:
+                # Nothing launched: record the outcome, so close still reports one invocation for this activation.
+                cancelled = isinstance(error, asyncio.CancelledError)
+                self._record_unlaunched(
+                    state,
+                    prompt,
+                    status="incomplete" if cancelled else "failed",
+                    error_type="cancelled" if cancelled else "sandbox_error",
+                )
+            raise
+
+    @staticmethod
+    def _record_unlaunched(state: ClaudeCodeSandboxSession, prompt: str, *, status: str, error_type: str) -> None:
+        state.observations = state.record_activation(
+            AgentObservationBundle(source="claude_code", gaps=[ObservationGap(code="agent_activation_interrupted")]),
+            root_sessions=set(),
+            status=status,
+            error_type=error_type,
+            question=prompt,
+            answer=None,
+        )
+
+    @staticmethod
+    def _activation_reply(state: ClaudeCodeSandboxSession, response: NeMoGymResponse) -> NeMoGymResponse:
+        """Name the activation, and the Claude Code session it continues, in the reply's metadata."""
+        response.metadata = {
+            **(response.metadata or {}),
+            "activation_id": str(state.activation_id),
+            **({"harness_session_id": state.harness_session_id} if state.harness_session_id else {}),
+        }
+        return response
+
+    def _model_name(self) -> str:
+        """The model name the CLI is given: the full name for a configured endpoint, else without its provider."""
+        return self.config.model if self._resolve_base_url() else self.config.model.split("/")[-1]
+
+    async def _acquire_slot(self, deadline: float | None) -> None:
+        """Take a concurrency slot, waiting no later than ``deadline`` (event-loop time) when one is given."""
+        if deadline is None:
+            await self.sem.acquire()
+            return
         try:
             async with asyncio.timeout_at(deadline):
-                await state.prepare_activation(
-                    activation_id, timeout=min(timeout, self.config.session_close_timeout_seconds)
-                )
-            remaining = deadline - clock()
-            if remaining <= 0:
-                raise TimeoutError("Claude activation deadline expired before launch")
-        except BaseException as error:
-            # Nothing launched: record the activation's outcome, so close still reports one invocation for it.
-            timed_out = isinstance(error, TimeoutError)
-            cancelled = isinstance(error, asyncio.CancelledError)
-            state.activation_id = activation_id
-            state.observations = state.record_activation(
-                AgentObservationBundle(
-                    source="claude_code", gaps=[ObservationGap(code="agent_activation_interrupted")]
-                ),
-                root_sessions=set(),
-                status="incomplete" if timed_out or cancelled else "failed",
-                error_type="timeout" if timed_out else "cancelled" if cancelled else "sandbox_error",
-                question=prompt,
-                answer=None,
-            )
-            raise
-        return await self._sandbox_response(state, body, prompt=prompt, system=system, timeout=remaining)
+                await self.sem.acquire()
+        except TimeoutError:
+            raise _ActivationDeadlineExpired("Claude activation deadline expired waiting for a slot") from None
+        if asyncio.get_running_loop().time() >= deadline:
+            self.sem.release()
+            raise _ActivationDeadlineExpired("Claude activation deadline expired before launch")
 
     def _validate_sandbox_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
         supported = {"input", "model"}
@@ -962,8 +1011,13 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str | None,
-        timeout: float | None = None,
+        deadline: float | None = None,
     ) -> NeMoGymResponse:
+        """Run Claude Code once in the session's sandbox and build the reply.
+
+        With ``deadline`` (event-loop time) the wait for a concurrency slot counts against the activation's budget,
+        and Claude Code gets what is left; past it, ``_ActivationDeadlineExpired`` is raised before anything launches.
+        """
         directory = state.session.session_dir
         base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
         model = self.config.model if base_url else self.config.model.split("/")[-1]
@@ -990,9 +1044,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         env.update(self._client_env())
         artifacts = None
         failure = None
+        await self._acquire_slot(deadline)
         try:
             # Close can fence the staging phase just as it fences the execution phase.
-            async with self.sem:
+            try:
+                if deadline is None:
+                    timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+                else:
+                    timeout = deadline - asyncio.get_running_loop().time()
                 mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
                 skills_path = self._configured_skills_path()
                 stdin = self.config.instruction_on_stdin
@@ -1015,38 +1074,21 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "skills_path": skills_path,
                         **({"prompt": prompt} if stdin else {}),
                     },
-                    timeout=timeout
-                    if timeout is not None
-                    else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+                    timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
+            finally:
+                self.sem.release()
         except BaseException as error:
             failure = error
             artifacts = state.session.artifacts
-        items, run_metadata = ([], {})
-        transcripts = None
+        if state.is_continuation and (state.session.launch_started or artifacts is not None):
+            # Claude Code ran, so it may have saved a conversation the next activation must resume.
+            state.conversation_started = True
+        # Built in locals and stored once complete: a cancellation part way must not replace the session's evidence.
+        observations: AgentObservationBundle | None = None
+        response: NeMoGymResponse | None = None
         root_sessions: set[str] = set()
-        if artifacts is not None:
-            # Read once, for the token usage and the observations.
-            transcripts = await asyncio.to_thread(read_artifact_transcripts, artifacts)
-            if state.is_continuation:
-                state.harness_session_id = stream_session_id(artifacts.events) or state.harness_session_id
-                if transcripts is not None:
-                    # The saved transcript holds every activation's records; this one reports only its own.
-                    transcripts = state.new_transcript_records(transcripts)
-                    root_sessions = {
-                        record["sessionId"]
-                        for record in transcripts.records
-                        if isinstance(record.get("sessionId"), str) and not record.get("agentId")
-                    }
-                if state.harness_session_id is not None:
-                    root_sessions.add(state.harness_session_id)
-            items, run_metadata = await asyncio.to_thread(
-                parse_stream_json,
-                artifacts.events,
-                fold_thinking=self._fold_thinking(),
-                transcript_records=transcripts.usage_records if transcripts is not None else None,
-            )
         cleanup = state.session.cleanup
         if cleanup and cleanup["timed_out"]:
             status, reason = "incomplete", "timeout"
@@ -1055,64 +1097,93 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         elif failure is not None:
             status, reason = "failed", "sandbox_error"
         else:
-            status, reason = _invocation_outcome(run_metadata, cleanup["return_code"] if cleanup else None)
-        if artifacts is not None:
-            state.observations = await asyncio.to_thread(
-                parse_artifact_observations,
-                transcripts,
-                model_ref=self.config.model_server,
-                status=status,
-                error_type=reason,
-                run_metadata=run_metadata,
-            )
-        else:
-            state.observations = AgentObservationBundle(
-                source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
-            )
-        response = self._response_from_output(body, items, model, run_metadata, status=status)
-        state.observations = await self._reconcile_captured_calls(
-            state.observations, rollout_id=state.request.episode_id.capture_key, response=response
-        )
-        if state.runtime_info is None:
-            state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
-        if cleanup:
-            access = state.request.sandbox_access
-            state.observations.records.append(
-                SandboxObservation(
-                    role="agent",
-                    sandbox_id=state.sandbox_id,
-                    provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
-                    outcome=(
-                        "timeout"
-                        if cleanup["timed_out"]
-                        else "cancelled"
-                        if reason == "cancelled"
-                        else "failed"
-                        if status == "failed"
-                        else "completed"
-                    ),
-                    exit_code=cleanup["return_code"],
-                    error_type=reason,
+            status, reason = "failed", "agent_error"  # Until the run's own outcome is read.
+        try:
+            items, run_metadata = ([], {})
+            transcripts = None
+            if artifacts is not None:
+                # Read once, for the token usage and the observations.
+                transcripts = await asyncio.to_thread(read_artifact_transcripts, artifacts)
+                if state.is_continuation:
+                    state.harness_session_id = stream_session_id(artifacts.events) or state.harness_session_id
+                    if transcripts is not None:
+                        # The saved transcript holds every activation's records; this one reports only its own.
+                        transcripts = state.new_transcript_records(transcripts)
+                        root_sessions = {
+                            record["sessionId"]
+                            for record in transcripts.records
+                            if isinstance(record.get("sessionId"), str) and not record.get("agentId")
+                        }
+                    if state.harness_session_id is not None:
+                        root_sessions.add(state.harness_session_id)
+                items, run_metadata = await asyncio.to_thread(
+                    parse_stream_json,
+                    artifacts.events,
+                    fold_thinking=self._fold_thinking(),
+                    transcript_records=transcripts.usage_records if transcripts is not None else None,
                 )
+            if failure is None and not (cleanup and cleanup["timed_out"]):
+                status, reason = _invocation_outcome(run_metadata, cleanup["return_code"] if cleanup else None)
+            if artifacts is not None:
+                observations = await asyncio.to_thread(
+                    parse_artifact_observations,
+                    transcripts,
+                    model_ref=self.config.model_server,
+                    status=status,
+                    error_type=reason,
+                    run_metadata=run_metadata,
+                )
+            else:
+                observations = AgentObservationBundle(
+                    source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
+                )
+            if not state.is_continuation:
+                state.observations = observations
+            response = self._response_from_output(body, items, model, run_metadata, status=status)
+            observations = await self._reconcile_captured_calls(
+                observations, rollout_id=state.request.episode_id.capture_key, response=response
             )
-        if state.is_continuation:
-            # Close returns the session's evidence; the reply carries this activation's output alone.
-            state.observations = state.record_activation(
-                state.observations,
-                root_sessions=root_sessions,
-                status=status,
-                error_type=reason,
-                question=prompt,
-                answer=_final_text(response),
-            )
-            response.metadata = {
-                **(response.metadata or {}),
-                "activation_id": str(state.activation_id),
-                **({"harness_session_id": state.harness_session_id} if state.harness_session_id else {}),
-            }
+            if state.runtime_info is None:
+                observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+            if cleanup:
+                access = state.request.sandbox_access
+                observations.records.append(
+                    SandboxObservation(
+                        role="agent",
+                        sandbox_id=state.sandbox_id,
+                        provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
+                        outcome=(
+                            "timeout"
+                            if cleanup["timed_out"]
+                            else "cancelled"
+                            if reason == "cancelled"
+                            else "failed"
+                            if status == "failed"
+                            else "completed"
+                        ),
+                        exit_code=cleanup["return_code"],
+                        error_type=reason,
+                    )
+                )
+            if not state.is_continuation:
+                state.observations = observations
+        finally:
+            if state.is_continuation:
+                # Close returns the session's evidence; the reply carries this activation's output alone.
+                state.observations = state.record_activation(
+                    observations
+                    or AgentObservationBundle(
+                        source="claude_code", gaps=[ObservationGap(code="observation_capture_failed")]
+                    ),
+                    root_sessions=root_sessions,
+                    status=status,
+                    error_type=reason,
+                    question=prompt,
+                    answer=_final_text(response) if response is not None else None,
+                )
         if failure is not None:
             raise failure
-        return response
+        return self._activation_reply(state, response) if state.is_continuation else response
 
     async def responses(
         self,

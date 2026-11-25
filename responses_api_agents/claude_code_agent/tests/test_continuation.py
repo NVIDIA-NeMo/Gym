@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Multi-turn continuation: later activations resume the Claude Code session the first one saved."""
 
+import asyncio
 import io
 import json
 import tarfile
@@ -92,6 +93,8 @@ class FakeClaude:
     def __init__(self) -> None:
         self.launches: list[dict] = []
         self.transcript: list[dict] = []
+        # False: the run dies before Claude Code reports its session id.
+        self.reports_session = True
 
     async def execute(self, state: adapter.ClaudeCodeSandboxSession, payload: dict, **_: object):
         command = payload["command"]
@@ -103,7 +106,8 @@ class FakeClaude:
             _transcript_record(f"user-{turn}", "user", prompt, f"2026-01-01T00:00:0{turn}Z"),
             _transcript_record(f"assistant-{turn}", "assistant", answer, f"2026-01-01T00:00:0{turn}Z"),
         ]
-        return adapter.ClaudeCodeArtifacts(events=_events(answer), transcripts=_archive(self.transcript))
+        events = _events(answer) if self.reports_session else ""
+        return adapter.ClaudeCodeArtifacts(events=events, transcripts=_archive(self.transcript))
 
 
 @pytest.fixture
@@ -119,18 +123,25 @@ def harness(monkeypatch):
         disconnect=AsyncMock(),
     )
     instance = _agent()
+    states = []
 
     async def seed_state(body):
-        return adapter.ClaudeCodeSandboxSession(
-            request=body,
-            runtime="/runtime",
-            session=SandboxSession(
-                sandbox=remote, session_dir="/tmp/nemo-gym-claude-sessions/s", workdir="/app", harness="Claude Code"
-            ),
+        states.append(
+            state := adapter.ClaudeCodeSandboxSession(
+                request=body,
+                runtime="/runtime",
+                session=SandboxSession(
+                    sandbox=remote,
+                    session_dir="/tmp/nemo-gym-claude-sessions/s",
+                    workdir="/app",
+                    harness="Claude Code",
+                ),
+            )
         )
+        return state
 
     monkeypatch.setattr(instance, "_seed_agent_session_state", seed_state)
-    return SimpleNamespace(fake=fake, agent=instance)
+    return SimpleNamespace(fake=fake, agent=instance, remote=remote, states=states)
 
 
 def _activate(client: TestClient, index: int, text: str, **body: object):
@@ -240,3 +251,102 @@ def test_a_session_without_continuation_still_allows_one_activation(harness):
         client.post("/v1/agent_sessions", json=_seed(continuation=False).model_dump(mode="json"))
         assert client.post(RESPONSES, json={"input": "one"}).status_code == 200
         assert client.post(RESPONSES, json={"input": "two"}).status_code == 409
+
+
+def _roots(closed: dict) -> list[tuple]:
+    return [
+        (record["activation_id"], record["status"], record.get("error_type"))
+        for record in closed["agent_observations"]["records"]
+        if record["kind"] == "agent_invocation"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_staging_keeps_the_saved_session_at_the_root_and_marks_saved_records():
+    uploads = {}
+
+    async def upload(source, target):
+        uploads[target] = source.read_bytes()
+
+    saved = '{"uuid":"from-activation-1"}\n{"uuid": "from-activation-1-subagent"}\n'
+    remote = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(stdout=saved, stderr="", return_code=0, error_type=None)),
+        upload=upload,
+    )
+    root = "/tmp/nemo-gym-claude-sessions/s"
+    state = adapter.ClaudeCodeSandboxSession(
+        request=_seed(),
+        runtime="/runtime",
+        session=SandboxSession(sandbox=remote, session_dir=root, workdir="/app", harness="Claude Code"),
+    )
+    await state.prepare_activation(2, timeout=5)
+    command = await state.stage_activation(
+        {
+            "command": ["/runtime/claude", "--resume", CLAUDE_SESSION, "--", "next"],
+            "cwd": "/app",
+            "env": {"CLAUDE_CONFIG_DIR": state.config_dir},
+            "settings": {"env": {}},
+            "mcp_config": None,
+            "skills_path": None,
+        }
+    )
+    # The saved session and settings stay at the root; the launch's own files go in the activation's directory.
+    assert state.config_dir == f"{root}/config"
+    assert f"{root}/config/settings.json" in uploads
+    assert command.argv == ["bash", f"{root}/harness_runner.sh", f"{root}/activation-2/params.sh"]
+    assert f"--resume {CLAUDE_SESSION}" in uploads[f"{root}/activation-2/params.sh"].decode()
+    # Records saved before this launch belong to earlier activations, even if their collection failed.
+    earlier = adapter.ClaudeCodeTranscripts(
+        records=[{"uuid": "from-activation-1"}, {"uuid": "from-activation-1-subagent"}, {"uuid": "new"}],
+        files_read=1,
+    )
+    assert [record["uuid"] for record in state.new_transcript_records(earlier).records] == ["new"]
+
+
+def test_a_budget_spent_before_launch_returns_incomplete_and_the_session_continues(harness):
+    harness.agent.sem = asyncio.Semaphore(0)  # Every slot is taken: the activation cannot launch in time.
+    with TestClient(harness.agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
+        starved = _activate(client, 1, "one", metadata={"agent_timeout_sec": "0.2"})
+        assert starved.status_code == 200, starved.text
+        assert starved.json()["status"] == "incomplete"
+        assert starved.json()["metadata"]["activation_id"] == "1"
+        harness.agent.sem = asyncio.Semaphore(1)
+        resumed = _activate(client, 2, "two")
+        assert resumed.status_code == 200, resumed.text
+        closed = _close(client)
+    assert len(harness.fake.launches) == 1
+    # Nothing ran in activation 1, so activation 2 starts the conversation.
+    assert "--resume" not in harness.fake.launches[0]["command"]
+    assert _roots(closed) == [(1, "incomplete", "timeout"), (2, "completed", None)]
+
+
+def test_a_launched_run_without_a_session_id_fails_the_next_activation(harness):
+    harness.fake.reports_session = False
+    with TestClient(harness.agent.setup_webserver(), raise_server_exceptions=False) as client:
+        client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
+        assert _activate(client, 1, "one").status_code == 200
+        assert _activate(client, 2, "two").status_code == 500
+        closed = _close(client)
+    # Activation 2 never started a new conversation in place of the lost one.
+    assert len(harness.fake.launches) == 1
+    assert _roots(closed)[-1] == (2, "failed", "sandbox_error")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_activation_keeps_the_earlier_activations_evidence(harness, monkeypatch):
+    agent = harness.agent
+    state = await agent._seed_agent_session_state(_seed())
+    body = app.NeMoGymResponseCreateParamsNonStreaming
+    await agent._activate_agent_session_state(state, body(input="one"), activation_id=1)
+
+    async def cancelled(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(agent, "_reconcile_captured_calls", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await agent._activate_agent_session_state(state, body(input="two"), activation_id=2)
+    closed = (await agent._close_agent_session_state(state)).model_dump(mode="json")
+    # Activation 2 ran to completion; only its usage reconciliation was cut short.
+    assert _roots(closed) == [(1, "completed", None), (2, "completed", None)]
+    assert [turn["activation_id"] for turn in closed["trajectory"]["turns"]] == [1, 2]
