@@ -12,6 +12,13 @@ The dataset is in preparation and the example data can be found in `data/example
   - `unit_tests` (required): dict with `inputs` and `outputs` arrays containing test cases.
     - `inputs`: list of strings representing stdin input for each test case
     - `outputs`: list of strings representing expected stdout output for each test case
+    - `type` (optional): `unit-tests` (the default) or `assertions`.
+    - With `type: assertions`, `tests` replaces `inputs` and `outputs`: a list of Python statements, usually
+      asserts, run in order after the candidate's code.
+  - `resource_limits` (optional): the task's own limits. Each applies on its own; one left out keeps the server's.
+    - `time_limit_s`: seconds per test case, or for all assertions together; fractions allowed.
+    - `memory_limit_mb`: memory for the candidate above the grading process's baseline. See
+      `resources_servers/code_gen/README.md` for how it is enforced.
 
 **Notes**
 - All test cases must pass for a solution to receive a reward of 1.0
