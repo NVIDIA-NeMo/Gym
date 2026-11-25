@@ -166,7 +166,11 @@ and response payloads are not serialized. A long message keeps a visible
 
 aiohttp rejects a reply header line over 8190 bytes. A report over 4096 bytes is
 therefore not sent: the header carries `{"omitted": true}`, every hop above keeps the
-flag, and Collection saves `_ng_failure_events_omitted`. The real status and body
+flag, and Collection saves `_ng_failure_events_omitted`. The report's
+scored-despite-failure events are the exception: they still travel beside the flag,
+with their reasons cut to 200 characters and their details and causes dropped, so
+the `rollout_scored_despite_failure` health check still sees a degraded rollout. If
+even these do not fit, only the flag is sent. The real status and body
 still arrive. This diagnostic loss does not change the task outcome. Old records with
 no failure report keep their meaning. The final saved-record migration remains a
 separate change.

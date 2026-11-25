@@ -38,11 +38,13 @@ class FailureHeader:
 
     aiohttp's client rejects a reply whose header line (name and value) is over 8190 bytes, and the caller then
     sees an unreadable error instead of the real status and body. A report whose JSON is over ``MAX_BYTES`` is
-    therefore not sent: the header says ``{"omitted": true}``, and every hop above keeps that flag.
+    therefore not sent: the header says ``{"omitted": true}``, and every hop above keeps that flag. The
+    scored-despite-failure events of that report still travel, trimmed, beside the flag when they fit.
     """
 
     NAME: ClassVar[str] = "X-NG-Failure-Report"
     MAX_BYTES: ClassVar[int] = 4096
+    _COMPACT_REASON_CHARS: ClassVar[int] = 200
     # A stream's headers are sent before its backend finishes, so a streamed reply carries its report as this field of
     # its terminal event instead, with the same bound and the same omitted flag.
     STREAM_FIELD: ClassVar[str] = "nemo_gym_failure_report"
@@ -55,8 +57,36 @@ class FailureHeader:
         value = json.dumps(report.model_dump(mode="json"), ensure_ascii=True, separators=(",", ":"))
         if len(value) > cls.MAX_BYTES:
             LOGGER.warning("Failure report of %d bytes not sent; %d events omitted", len(value), len(report.events))
-            value = json.dumps({"omitted": True})
+            value = cls._compact_value(report) or json.dumps({"omitted": True})
         return {cls.NAME: value}
+
+    @classmethod
+    def _compact_value(cls, report: FailureReport) -> str | None:
+        """What an oversized report keeps: its scored-despite-failure events, trimmed, beside ``omitted``.
+
+        Those events say the rollout was scored from a degraded path, so losing them with the rest would hide it from
+        the health check. Their reasons are cut and their details and causes dropped; ``None`` when there are none or
+        even these do not fit, and the report is then sent as ``{"omitted": true}`` alone.
+        """
+        kept = {
+            event_id: event.model_copy(
+                update={
+                    "failure_reason": event.failure_reason[: cls._COMPACT_REASON_CHARS],
+                    "exception_type": None,
+                    "details": None,
+                    "foreign_error": None,
+                    "cause_id": None,
+                }
+            )
+            for event_id, event in report.events.items()
+            if event.operation == SCORED_DESPITE_FAILURE_OPERATION
+        }
+        if not kept:
+            return None
+        value = json.dumps(
+            FailureReport(events=kept, omitted=True).model_dump(mode="json"), ensure_ascii=True, separators=(",", ":")
+        )
+        return value if len(value) <= cls.MAX_BYTES else None
 
     @classmethod
     def stream_value(cls, report: FailureReport) -> dict[str, Any] | None:

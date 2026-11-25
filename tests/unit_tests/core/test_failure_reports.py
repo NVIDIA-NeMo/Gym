@@ -135,6 +135,60 @@ def test_the_header_codec_omits_an_oversized_report_and_keeps_the_flag_upward() 
     assert FailureHeader.decode({FailureHeader.NAME: "not json"}) == FailureReport(omitted=True)
 
 
+def _oversized_events(count: int = 4) -> dict[str, FailureEvent]:
+    events: dict[str, FailureEvent] = {}
+    for _ in range(count):
+        event = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="x" * 2000)
+        events[event.event_id] = event
+    return events
+
+
+def _scored_despite_failure(reason: str = "the judge fell back to a default reward") -> FailureEvent:
+    return FailureEvent(
+        failure_kind="verifier_error",
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        operation="scored_despite_failure",
+        failure_reason=reason,
+        exception_type="RuntimeError",
+        cause_id=None,
+    )
+
+
+def test_an_oversized_report_keeps_its_scored_despite_failure_event_beside_the_omitted_flag() -> None:
+    marker = _scored_despite_failure("y" * 1500)
+    events = _oversized_events() | {marker.event_id: marker}
+
+    sent = FailureHeader.encode(FailureReport(events=events))
+
+    assert len(sent[FailureHeader.NAME]) <= FailureHeader.MAX_BYTES
+    decoded = FailureHeader.decode(sent)
+    # The other events are omitted, as before; the marker travels, trimmed, so the health check still sees it.
+    assert decoded.omitted and list(decoded.events) == [marker.event_id]
+    kept = decoded.events[marker.event_id]
+    assert (kept.operation, kept.failure_kind) == ("scored_despite_failure", "verifier_error")
+    assert 0 < len(kept.failure_reason) <= 200
+    # It keeps going upward with the flag, and the same stream encoding carries it.
+    assert FailureReport().merged(decoded).omitted and marker.event_id in FailureReport().merged(decoded).events
+    assert FailureHeader.decode_stream_event(
+        {FailureHeader.STREAM_FIELD: FailureHeader.stream_value(FailureReport(events=events))}
+    ).events.keys() == {marker.event_id}
+
+
+def test_an_oversized_report_without_a_marker_is_still_omitted_alone() -> None:
+    sent = FailureHeader.encode(FailureReport(events=_oversized_events()))
+    assert FailureHeader.decode(sent) == FailureReport(omitted=True)
+
+
+def test_markers_that_do_not_fit_even_trimmed_fall_back_to_the_omitted_flag() -> None:
+    markers = [_scored_despite_failure(f"{i}" * 200) for i in range(40)]
+    events = _oversized_events() | {marker.event_id: marker for marker in markers}
+
+    sent = FailureHeader.encode(FailureReport(events=events))
+
+    assert len(sent[FailureHeader.NAME]) <= FailureHeader.MAX_BYTES
+    assert FailureHeader.decode(sent) == FailureReport(omitted=True)
+
+
 def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
