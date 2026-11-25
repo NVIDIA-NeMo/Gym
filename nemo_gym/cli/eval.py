@@ -128,6 +128,7 @@ from nemo_gym.eval.eval_plan import (
     write_eval_plan,
 )
 from nemo_gym.rollouts.health.types import RunHealthConfig
+from nemo_gym.rollouts.service_declaration import record_service_declaration
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
 from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
@@ -448,6 +449,8 @@ def e2e_rollout_collection():  # pragma: no cover
     )
     if driver_path:
         _remove_health_reports(output_fpath)
+        # The built-in helper records it under its run lock; a custom driver may never call the helper.
+        record_service_declaration(output_fpath)
     _interrupt_on_sigterm()
     collection_completed = False
     interrupted = False

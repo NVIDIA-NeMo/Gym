@@ -351,6 +351,20 @@ def test_a_run_records_its_service_declaration(tmp_path, monkeypatch, existing, 
         assert on_disk.services == [] and on_disk.gpus == []
 
 
+def test_a_run_with_a_custom_collection_driver_records_its_service_declaration_before_the_driver_runs():
+    import inspect
+
+    from nemo_gym.cli import eval as eval_cli
+
+    # The e2e entry point starts the run's servers, so it cannot run here. A custom driver, such as GDPVal's
+    # multistage orchestrator, may never call the helper that records the declaration for the built-in path.
+    e2e = inspect.getsource(eval_cli.e2e_rollout_collection)
+    driver_branch = e2e[
+        e2e.index("if driver_path:\n        _remove_health_reports") : e2e.index("asyncio.run(driver_fn(")
+    ]
+    assert "record_service_declaration(output_fpath)" in driver_branch
+
+
 def test_an_unwritable_run_folder_does_not_fail_the_run(tmp_path, monkeypatch, caplog):
     monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     declaration = record_service_declaration(tmp_path / "missing-dir" / "rollouts.jsonl")
