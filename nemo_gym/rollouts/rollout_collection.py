@@ -194,7 +194,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_run_summary,
 )
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
-from nemo_gym.telemetry.run_context import RunContext, run_context_from_config
+from nemo_gym.telemetry.run_context import JobRunContext, RunContext, run_context_from_config
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.trajectory.trajectory_format import project_result_v1
@@ -2503,9 +2503,19 @@ _MAX_FAILURE_BODY_CHARS = 2000
 _OWNED_JOB_SPAN_CONTEXT: ContextVar[Optional["SpanContext"]] = ContextVar(
     "nemo_gym_owned_job_span_context", default=None
 )
-#: The ``gym.job`` span of the current run while traces are exported, owned or embedded, so the run
-#: can put its context on it once the rows it dispatches are known. None otherwise.
-_EXPORTED_JOB_SPAN: ContextVar[Optional["Span"]] = ContextVar("nemo_gym_exported_job_span", default=None)
+
+
+@dataclass
+class _ExportedJob:
+    """The ``gym.job`` span of a run whose traces are exported, owned or embedded, and the run context of the rows
+    it dispatches, which collection sets once it reads the config and the span gets when it closes."""
+
+    span: "Span"
+    run_context: Optional[JobRunContext] = None
+
+
+#: The current run's exported ``gym.job``. None while traces are not exported.
+_EXPORTED_JOB: ContextVar[Optional[_ExportedJob]] = ContextVar("nemo_gym_exported_job", default=None)
 
 
 def _current_span_is_valid() -> bool:
@@ -4197,12 +4207,15 @@ executions → not run again (left to recovery)
             with managed_span(GymSpanGroup.JOB, "gym.job") as job:
                 owned = job.get_span_context() if job is not None and not embedded else None
                 token = _OWNED_JOB_SPAN_CONTEXT.set(owned)
-                job_token = _EXPORTED_JOB_SPAN.set(job if is_trace_exporter_active() else None)
+                exported = _ExportedJob(job) if job is not None and is_trace_exporter_active() else None
+                job_token = _EXPORTED_JOB.set(exported)
                 try:
                     return await self._run_from_config(config)
                 finally:
-                    _EXPORTED_JOB_SPAN.reset(job_token)
+                    _EXPORTED_JOB.reset(job_token)
                     _OWNED_JOB_SPAN_CONTEXT.reset(token)
+                    if exported is not None and exported.run_context is not None:
+                        safe_set_span_attributes(job, exported.run_context.attributes())
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         # Choose the target before locking, including fresh runs. Replacing an
@@ -4346,17 +4359,23 @@ executions → not run again (left to recovery)
         )
         results = store.selected("success") if config.retain_results_in_memory else []
         rows = store.inputs_for(results)
-        job_span = _EXPORTED_JOB_SPAN.get()
+        exported_job = _EXPORTED_JOB.get()
         # One run context for `gym.job` and every dispatch. The running servers' config names the datasets, as it
         # resolves the rows' task sources; the collector's own names the split, since with --no-serve the servers
         # were started with a config of their own.
         run_context = (
             run_context_from_config(identity_client.global_config_dict, collector_config=get_global_config_dict())
-            if job_span is not None or (is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active())
+            if exported_job is not None or (is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active())
             else None
         )
-        if job_span is not None:
-            safe_set_span_attributes(job_span, run_context.job_attributes(input_rows))
+        record_dispatches = store.record_dispatches
+        if exported_job is not None:
+            # `gym.job` names what the job dispatched: a row the dispatch budget drained is never reserved.
+            job_run_context = exported_job.run_context = JobRunContext(run_context)
+
+            def record_dispatches(batch: List[Dict]) -> None:
+                store.record_dispatches(batch)
+                job_run_context.add(batch)
 
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
@@ -4601,7 +4620,7 @@ executions → not run again (left to recovery)
                 _connect_grace_s=config.dispatch_connect_grace_s,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,
-                on_dispatch_batch=store.record_dispatches,
+                on_dispatch_batch=record_dispatches,
                 max_resident_tasks=config.max_resident_rollout_tasks,
                 interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,

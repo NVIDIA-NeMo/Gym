@@ -1021,7 +1021,9 @@ async def test_a_no_serve_run_gives_the_job_and_its_dispatches_one_run_context(
     _install_recording_post(monkeypatch)
     client = driver_telemetry.setup_server_client_utils()
     client.global_config_dict = OmegaConf.merge(client.global_config_dict, _ALPHA_BENCHMARK)
-    monkeypatch.setattr(driver_telemetry, "get_global_config_dict", lambda *a, **k: OmegaConf.create({"split": "benchmark"}))
+    monkeypatch.setattr(
+        driver_telemetry, "get_global_config_dict", lambda *a, **k: OmegaConf.create({"split": "benchmark"})
+    )
     await RolloutCollectionHelper().run_from_config(_collection_config(tmp_path, _write_rollout_input(tmp_path, 2)))
 
     spans = recorded_spans()
@@ -1094,4 +1096,26 @@ async def test_run_context_lands_on_an_embedded_job(tmp_path, monkeypatch, recor
 
     (job,) = [s for s in recorded_spans() if s.name == "gym.job"]
     assert _run_context_of(job) == {"nemo.gym.model.name": "served-model"}
-    assert driver_telemetry._EXPORTED_JOB_SPAN.get() is None
+    assert driver_telemetry._EXPORTED_JOB.get() is None
+
+
+async def test_the_job_lists_no_benchmark_whose_rows_all_drained(
+    tmp_path, monkeypatch, recorded_spans, driver_telemetry
+):
+    """A spent dispatch budget drains every row before it is reserved, so the job dispatched from no benchmark."""
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+    sent = _install_recording_post(monkeypatch)
+    _use_driver_config(
+        monkeypatch, driver_telemetry, {"policy_model_name": "served-model", "split": "benchmark", **_ALPHA_BENCHMARK}
+    )
+    config = _collection_config(tmp_path, _write_rollout_input(tmp_path, 2))
+    config.dispatch_budget_s = 0.0
+    with pytest.raises(IncompleteEvaluationError):
+        await RolloutCollectionHelper().run_from_config(config)
+
+    assert sent == []
+    # The run ended in an error and its context still reached the job, without the benchmark.
+    (job,) = [s for s in recorded_spans() if s.name == "gym.job"]
+    assert _run_context_of(job) == {"nemo.gym.model.name": "served-model"}

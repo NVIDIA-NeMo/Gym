@@ -106,7 +106,7 @@ from it. The eval driver puts that context on `gym.job` and on every `gym.rollou
 | Span | Attribute | Value |
 | --- | --- | --- |
 | `gym.job`, `gym.rollout.dispatch` | `nemo.gym.model.name` | The served model name, from `policy_model_name`. |
-| `gym.job` | `nemo.gym.benchmark.names` | The distinct benchmark datasets the job dispatches rows from, sorted. |
+| `gym.job` | `nemo.gym.benchmark.names` | The distinct benchmark datasets the job dispatched rows from, sorted. A row the dispatch budget drained before it started does not count. |
 | `gym.rollout.dispatch` | `nemo.gym.benchmark.name` | The benchmark dataset the row was prepared from. |
 | `gym.rollout.dispatch` | `nemo.gym.rollout.attempt.index` | The row's resume attempt, `0` on its first attempt. |
 

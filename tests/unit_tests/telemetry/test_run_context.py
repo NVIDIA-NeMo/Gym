@@ -21,7 +21,7 @@ covered in ``test_call_sites.py``.
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.telemetry.run_context import RunContext, run_context_from_config
+from nemo_gym.telemetry.run_context import JobRunContext, RunContext, run_context_from_config
 
 
 def _agent(*datasets: dict) -> dict:
@@ -179,17 +179,21 @@ def test_dispatch_attributes(context, row, expected):
 
 
 @pytest.mark.parametrize(
-    ("context", "rows", "expected"),
+    ("context", "batches", "expected"),
     [
         pytest.param(
             RunContext(model_name="m", benchmark_by_task_source={"a": "aime24", "b": "aime25"}),
-            [{"task_source": "b"}, {"task_source": "a"}, {"task_source": "b"}, {"task_source": "unknown"}],
+            [[{"task_source": "b"}, {"task_source": "a"}], [{"task_source": "b"}, {"task_source": "unknown"}]],
             {"nemo.gym.model.name": "m", "nemo.gym.benchmark.names": ["aime24", "aime25"]},
             id="sorted-distinct-benchmarks",
         ),
-        pytest.param(RunContext(), [{"task_source": "a"}], {}, id="nothing-known"),
-        pytest.param(_KNOWN, [], {"nemo.gym.model.name": "m"}, id="no-rows"),
+        pytest.param(RunContext(), [[{"task_source": "a"}]], {}, id="nothing-known"),
+        pytest.param(_KNOWN, [], {"nemo.gym.model.name": "m"}, id="nothing-dispatched"),
     ],
 )
-def test_job_attributes(context, rows, expected):
-    assert context.job_attributes(rows) == expected
+def test_job_attributes_name_the_dispatched_rows(context, batches, expected):
+    job = JobRunContext(context)
+    for batch in batches:
+        job.add(batch)
+
+    assert job.attributes() == expected

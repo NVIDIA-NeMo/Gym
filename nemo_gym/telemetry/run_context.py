@@ -52,7 +52,7 @@ from nemo_gym.core.episode_types import is_materialized_task_row
 MODEL_NAME_ATTRIBUTE = "nemo.gym.model.name"
 #: Benchmark dataset a dispatched row was prepared from, on ``gym.rollout.dispatch``.
 BENCHMARK_NAME_ATTRIBUTE = "nemo.gym.benchmark.name"
-#: Sorted, distinct benchmark datasets the job dispatches rows from, on ``gym.job``.
+#: Sorted, distinct benchmark datasets the job dispatched rows from, on ``gym.job``.
 BENCHMARK_NAMES_ATTRIBUTE = "nemo.gym.benchmark.names"
 #: Resume attempt of a dispatched row, 0 on its first attempt, on ``gym.rollout.dispatch``.
 ATTEMPT_INDEX_ATTRIBUTE = "nemo.gym.rollout.attempt.index"
@@ -83,16 +83,6 @@ class RunContext:
         task_source = row.get(TASK_SOURCE_KEY_NAME)
         return self.benchmark_by_task_source.get(task_source) if isinstance(task_source, str) else None
 
-    def job_attributes(self, rows: Iterable[Mapping[str, object]]) -> SpanAttributes:
-        """Attributes for ``gym.job``, given the rows the job dispatches."""
-        attributes: SpanAttributes = {}
-        if self.model_name is not None:
-            attributes[MODEL_NAME_ATTRIBUTE] = self.model_name
-        benchmarks = sorted({name for row in rows if (name := self.benchmark_name(row)) is not None})
-        if benchmarks:
-            attributes[BENCHMARK_NAMES_ATTRIBUTE] = benchmarks
-        return attributes
-
     def dispatch_attributes(self, row: Mapping[str, object]) -> SpanAttributes:
         """Attributes for one ``gym.rollout.dispatch``."""
         attributes: SpanAttributes = {}
@@ -104,6 +94,26 @@ class RunContext:
         attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
         if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 0:
             attributes[ATTEMPT_INDEX_ATTRIBUTE] = attempt
+        return attributes
+
+
+@dataclass
+class JobRunContext:
+    """The run context of the rows a job has dispatched, for ``gym.job``: :meth:`add` every batch the job
+    dispatches, then set :meth:`attributes` before the span ends. Keeps distinct values, not rows."""
+
+    context: RunContext
+    benchmarks: set[str] = field(default_factory=set)
+
+    def add(self, rows: Iterable[Mapping[str, object]]) -> None:
+        self.benchmarks.update(name for row in rows if (name := self.context.benchmark_name(row)) is not None)
+
+    def attributes(self) -> SpanAttributes:
+        attributes: SpanAttributes = {}
+        if self.context.model_name is not None:
+            attributes[MODEL_NAME_ATTRIBUTE] = self.context.model_name
+        if self.benchmarks:
+            attributes[BENCHMARK_NAMES_ATTRIBUTE] = sorted(self.benchmarks)
         return attributes
 
 
