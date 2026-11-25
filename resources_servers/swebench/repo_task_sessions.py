@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checkpoints for the servers whose task is a repository and whose verdict grades the agent's patch.
 
-swe_rebench, swemer_v1, swemer_v2 and swe_next share one session shape: the row names an image, the seed starts it
-and prepares the repository, the agent edits the checkout, and ``/verify`` captures the agent's patch once and grades
+The repository-task servers share one session shape: the row names an image, the seed starts it and prepares the
+repository, the agent edits the checkout, and ``/verify`` captures the agent's patch once and grades
 it in a fresh sandbox. Each server keeps its own seed and verify; ``RepoTaskSessionResourcesServer`` holds what they
 would otherwise repeat to take part in partial-rollout checkpoints, on ``CheckpointedSandboxSessionResourcesServer``:
 
@@ -18,9 +18,10 @@ The seed's reads of a new sandbox are retried: ``_pristine_untracked_files`` her
 A server starts its agent's sandbox with ``new_task_sandbox`` and sets ``task_model``; its config adds
 ``RepoTaskSessionFields``. Grading sandboxes are not session state: each grading run starts its own.
 
-The agent sandbox's egress block is ``AgentNetworkConfig`` (``agent_network.py``). Its rule allows one host, the
-model server of the job that created the sandbox, and a checkpoint saves it with the sandbox. A restore therefore
-forks each sandbox with the rule of the job that restores it, whose model server may run on another host.
+When the server's config has ``AgentNetworkConfig`` (``agent_network.py``), the agent sandbox has an egress block.
+Its rule allows one host, the model server of the job that created the sandbox, and a checkpoint saves it with the
+sandbox. A restore therefore forks each sandbox with the rule of the job that restores it, whose model server may run
+on another host.
 """
 
 import dataclasses
