@@ -34,6 +34,7 @@ from nemo_gym.core import (
     failure_report_for,
 )
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult
+from nemo_gym.server_runtime import AgentContext
 from responses_api_agents.simple_agent import sandbox as sandbox_module
 from responses_api_agents.simple_agent import sandbox_runner
 from responses_api_agents.simple_agent.app import (
@@ -42,6 +43,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentConfig,
     SimpleAgentSessionState,
 )
+from responses_api_agents.simple_agent.python_tool import PythonToolConfig, PythonToolSpec
 
 
 ROLLOUT = "rollout-a1"
@@ -245,6 +247,8 @@ async def test_the_runner_unpacked_from_the_harness_archive_runs_the_loop(tmp_pa
         "nemo_gym/server_runtime/sandbox_borrow.py",
         "responses_api_agents/simple_agent/app.py",
         "responses_api_agents/simple_agent/sandbox_runner.py",
+        "responses_api_agents/simple_agent/python_tool.py",
+        "responses_api_agents/simple_agent/python_tool_worker.py",
     } <= names
     # The same sources give the same archive, and a removed or changed file is written again.
     content = archive.read_bytes()
@@ -666,3 +670,194 @@ def test_the_model_servers_address_must_name_a_host_and_a_port() -> None:
     assert sandbox_module.model_server_endpoint("http://10.0.0.5:8000") == ("10.0.0.5", 8000)
     with pytest.raises(ValueError, match="names no host and port"):
         sandbox_module.model_server_endpoint("http://10.0.0.5")
+
+
+# Python tools: a task opts into them by name, and only the sandboxed loop runs them.
+
+PYTHON_TOOL = PythonToolConfig(
+    timeout_seconds=5,
+    requirements=["numpy==2.5.5"],
+    preload={"np": "numpy"},
+    builtins=["print", "__import__"],
+)
+OPTS_INTO_PYTHON = AgentContext(values={"python_tools": ["execute_python"]})
+
+
+def _function_call(code: str) -> dict[str, Any]:
+    reply = _reply("")
+    reply["output"] = [
+        {
+            "type": "function_call",
+            "id": "fc-1",
+            "call_id": "call-1",
+            "name": "execute_python",
+            "arguments": json.dumps({"code": code}),
+            "status": "completed",
+        }
+    ]
+    return reply
+
+
+def test_a_task_that_opts_into_a_python_tool_needs_a_lent_sandbox() -> None:
+    agent = SimpleAgent(config=_config(python_tools={"execute_python": PYTHON_TOOL}), server_client=_client(1))
+
+    detail = check_agent_seed_rejected(agent.setup_webserver(), _seed(agent_context=OPTS_INTO_PYTHON))
+
+    assert "run only in a sandbox the environment lends" in detail and "lends none" in detail
+
+
+def test_a_task_that_opts_into_an_undefined_python_tool_is_refused() -> None:
+    agent = SimpleAgent(config=_config(), server_client=_client(1))
+
+    detail = check_agent_seed_rejected(
+        agent.setup_webserver(), _seed(sandbox_access=ACCESS, agent_context=OPTS_INTO_PYTHON)
+    )
+
+    assert "['execute_python']" in detail and "does not define" in detail
+
+
+def test_a_task_that_opts_into_no_python_tool_gets_none() -> None:
+    agent = SimpleAgent(config=_config(python_tools={"execute_python": PYTHON_TOOL}), server_client=_client(1))
+
+    assert agent._new_session_state(_seed()).python_tools == {}
+    assert agent._new_session_state(_seed(agent_context=AgentContext(values={"python_tools": []}))).python_tools == {}
+
+
+async def test_a_sandboxed_seed_installs_the_tools_the_task_opted_into_and_stages_them_for_the_loop(
+    installed_runtime, monkeypatch
+) -> None:
+    sandbox = _FakeSandbox()
+    installs: list[str] = []
+
+    async def is_installed(runtime: Any, sandbox: Any) -> bool:
+        # The loop's runtime is there; the tool's own runtime is not, so the seed installs it.
+        return runtime.harness == "simple_agent"
+
+    async def install(runtime: Any, sandbox: Any, *, timeout_s: float) -> None:
+        installs.append(runtime.harness)
+
+    monkeypatch.setattr(type(sandbox_module.RUNTIME), "is_installed", is_installed)
+    monkeypatch.setattr(type(sandbox_module.RUNTIME), "install", install)
+    monkeypatch.setattr(
+        "responses_api_agents.simple_agent.app.sandbox_server_url",
+        lambda name, require_reachable: "http://10.0.0.5:8000",
+    )
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.borrow", lambda access: _resolved(sandbox))
+    agent = SimpleAgent(
+        config=_config(python_tools={"execute_python": PYTHON_TOOL, "unused": PythonToolConfig()}),
+        server_client=_client(1),
+    )
+
+    state = await agent._seed_agent_session_state(_seed(sandbox_access=ACCESS, agent_context=OPTS_INTO_PYTHON))
+
+    assert installs == ["simple_agent_python_tool"]
+    runtime = sandbox_module.python_tool_runtime(PYTHON_TOOL)
+    assert runtime.requirements == ("numpy==2.5.5",) and runtime.pins == ()
+    (spec,) = state.python_tool_specs.values()
+    assert spec == PythonToolSpec(
+        config=PYTHON_TOOL,
+        python=runtime.python,
+        worker=sandbox_module.python_tool_worker_path(),
+        workdir="/workspace",
+    )
+    # The seed fails, not the first call, when the runtime cannot import the preloaded modules.
+    assert sandbox.commands[-1] == f"{runtime.python} -I -c 'import numpy'"
+
+    loop = _LoopInProcess()
+    state.sandbox_loop = loop
+
+    async def record(payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        loop.payloads.append(payload)
+        return {
+            "response": NeMoGymResponse.model_validate(_reply("done")).model_dump(mode="json"),
+            "trajectory": None,
+            "model_server_cookies": {},
+            "resources_server_cookies": None,
+        }
+
+    loop.run = record
+    await agent._create_session_episode(
+        state, NeMoGymResponseCreateParamsNonStreaming(input="hi"), **_loop_arguments()
+    )
+    (payload,) = loop.payloads
+    assert payload["python_tools"] == {"execute_python": spec.model_dump(mode="json")}
+
+
+async def test_a_sandboxed_seed_fails_when_the_tool_cannot_import_its_modules(installed_runtime) -> None:
+    sandbox = _FakeSandbox(fail="import numpy")
+    loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
+
+    with pytest.raises(RuntimeError, match="could not import the preloaded modules of Python tool 'execute_python'"):
+        await loop.install_python_tools({"execute_python": PYTHON_TOOL}, timeout=60)
+
+
+async def test_a_tool_without_requirements_runs_on_the_loops_runtime(installed_runtime) -> None:
+    sandbox = _FakeSandbox()
+    loop = sandbox_module.SandboxLoop.borrowed(sandbox, workdir="/workspace")
+
+    specs = await loop.install_python_tools({"calc": PythonToolConfig(preload={"m": "math"})}, timeout=60)
+
+    assert specs["calc"].python == sandbox_module.RUNTIME.python
+    assert sandbox.commands == [f"{sandbox_module.RUNTIME.python} -I -c 'import math'"]
+
+
+async def test_the_sandboxed_loop_runs_the_python_tool_beside_itself(tmp_path: Path) -> None:
+    """The model calls execute_python; the runner answers from a real worker, never from a Resources Server."""
+    worker = Path(sandbox_module.__file__).with_name("python_tool_worker.py")
+    spec = PythonToolSpec(
+        config=PythonToolConfig(preload={"m": "math"}),
+        python=sys.executable,
+        worker=str(worker),
+        workdir=str(tmp_path),
+    )
+    replies = [
+        (200, _function_call("x = m.factorial(5)\nprint(x)")),
+        (200, _function_call("x + 1")),
+        (200, _reply("\\boxed{121}")),
+    ]
+    async with _model_server(replies) as (port, seen):
+        agent = SimpleAgent(config=_config(), server_client=_client(port))
+        loop = _LoopInProcess()
+        state = SimpleAgentSessionState(
+            request=_seed(sandbox_access=ACCESS, agent_context=OPTS_INTO_PYTHON),
+            tool_access=None,
+            resources_cookies=None,
+            sandbox_loop=loop,
+            model_server_endpoint=("127.0.0.1", port),
+            python_tool_specs={"execute_python": spec},
+        )
+        response, trajectory, _, _ = await agent._create_session_episode(
+            state, NeMoGymResponseCreateParamsNonStreaming(input="What is 5! + 1?"), **_loop_arguments()
+        )
+
+    outputs = [json.loads(item.output) for item in response.output if item.type == "function_call_output"]
+    assert outputs == [
+        {"success": True, "stdout": "120\n", "stderr": "", "error_message": None, "result": None},
+        # The worker kept x between the two calls.
+        {"success": True, "stdout": "", "stderr": "", "error_message": None, "result": "121"},
+    ]
+    # Only the model server was called, and it saw each tool output before its next reply.
+    assert [path for path, _, _ in seen] == [MODEL_PATH] * 3
+    assert seen[1][1]["input"][-1]["output"] == response.output[1].output
+    assert [call.status for call in trajectory.tool_calls] == ["completed", "completed"]
+
+
+async def test_a_sandboxed_loop_with_python_tools_still_refuses_other_tools_without_a_grant(tmp_path: Path) -> None:
+    worker = Path(sandbox_module.__file__).with_name("python_tool_worker.py")
+    spec = PythonToolSpec(config=PythonToolConfig(), python=sys.executable, worker=str(worker), workdir=str(tmp_path))
+    other = _function_call("1")
+    other["output"][0]["name"] = "get_weather"
+    async with _model_server([(200, other)]) as (port, _):
+        agent = SimpleAgent(config=_config(), server_client=_client(port))
+        state = SimpleAgentSessionState(
+            request=_seed(sandbox_access=ACCESS),
+            tool_access=None,
+            resources_cookies=None,
+            sandbox_loop=_LoopInProcess(),
+            model_server_endpoint=("127.0.0.1", port),
+            python_tool_specs={"execute_python": spec},
+        )
+        with pytest.raises(RuntimeError, match="'get_weather'.*no direct HTTP tool access"):
+            await agent._create_session_episode(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="Weather?"), **_loop_arguments()
+            )

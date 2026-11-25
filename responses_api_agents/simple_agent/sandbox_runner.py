@@ -33,6 +33,7 @@ async def run_loop(payload: dict[str, Any]) -> dict[str, Any]:
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.server_runtime import DirectHTTPToolAccess
     from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, _cookie_values
+    from responses_api_agents.simple_agent.python_tool import PythonTools, PythonToolSpec
 
     config = SimpleAgentConfig.model_validate(payload["config"])
     model = payload["model_server"]
@@ -48,9 +49,15 @@ async def run_loop(payload: dict[str, Any]) -> dict[str, Any]:
     if arguments.get("tool_access") is not None:
         arguments["tool_access"] = DirectHTTPToolAccess.model_validate(arguments["tool_access"])
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload["body"])
-    response, trajectory, model_server_cookies, resources_server_cookies = await agent._create_episode(
-        body, **arguments
-    )
+    specs = payload.get("python_tools") or {}
+    # The task's Python tools run here, beside the loop: their workers are this process's children in the sandbox.
+    python_tools = PythonTools({name: PythonToolSpec.model_validate(spec) for name, spec in specs.items()})
+    try:
+        response, trajectory, model_server_cookies, resources_server_cookies = await agent._create_episode(
+            body, **arguments, python_tools=python_tools if specs else None
+        )
+    finally:
+        await python_tools.close()
     return {
         "response": response.model_dump(mode="json"),
         "trajectory": trajectory.model_dump(mode="json") if trajectory is not None else None,

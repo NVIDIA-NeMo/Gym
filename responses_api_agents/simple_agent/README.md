@@ -31,6 +31,39 @@ A session lent a sandbox is not checkpointed: after a crash its episode starts o
 
 The runtime's packages are pinned to this server's versions and installed as wheels, except OmegaConf's `antlr4-python3-runtime`, which PyPI ships only as source and the host builds from its PyPI URL.
 
+## Python tools
+
+A Python tool runs the model's code in a Python interpreter beside the agent loop, inside the sandbox the environment lends, never on a host. The agent's config defines each tool by the name the model calls it, and a task opts into it by that name in its row's `agent_context`, as a Harbor task names the tools it needs. Tools reached over HTTP, an API or MCP stay with their servers.
+
+```yaml
+simple_agent:
+  responses_api_agents:
+    simple_agent:
+      python_tools:
+        execute_python:
+          timeout_seconds: 10
+          requirements: [numpy==2.5.5]  # the tool's own runtime; empty runs on the loop's runtime
+          preload: {np: numpy}          # global names bound before the first call
+          builtins: null                # unset allows every builtin; a list allows only those
+```
+
+```json
+{"responses_create_params": {"tools": [{"type": "function", "name": "execute_python", "parameters": {"...": "..."}}]},
+ "agent_context": {"agent": {"values": {"python_tools": ["execute_python"]}}}}
+```
+
+| Step | What happens |
+|------|--------------|
+| Seed | A task that opts into a tool the config does not define, or whose seed lends no sandbox, is refused (HTTP 422). Otherwise the agent server builds the tool's runtime from `requirements` on this host, as it builds the loop's, uploads it unless the sandbox has it, and checks that it imports the `preload` modules. |
+| Call | The model calls the tool with `{"code": "<source>"}`. The loop starts the tool's worker on its first call, in the task's working directory, and runs each call's code in it. Names a call defines stay defined for later calls of the activation. |
+| Reply | `{"success", "stdout", "stderr", "error_message", "result"}` as compact JSON. `result` is the `str` of the code's last line when that line is an expression. An error in the code returns `success: false` with its message and drops what the code printed. |
+| Timeout | Code that runs past `timeout_seconds` fails with `code timed-out`, and the worker keeps its names. Code that blocks the alarm is killed 5 seconds later; the tool then answers `Python worker has already stopped`, as does a worker the code ended. |
+| End | The activation stops its workers. Each activation of a continued session starts with fresh workers. |
+
+Top-level names land in a locals mapping shared by every call, and functions look names up in the preloaded globals, so a function cannot call another top-level function. Writes to file descriptors 1 and 2, by the code or its subprocesses, are dropped; only what goes through `sys.stdout` and `sys.stderr` comes back.
+
+The worker shares the sandbox, and its egress, with the loop. The code can read the activation's staged input, which holds the task's input and any tool grant's headers, but never any secret the agent server holds.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A
