@@ -21,9 +21,10 @@ control-plane cache, and writes one Gym JSONL row per task. The row's prompt is 
 `FIXED_INSTRUCTION` in `prepare.py` (NL2RepoBench's own task prompt, the same in every network mode), and
 it does **not** inline the spec: `start.md` is uploaded into the agent sandbox's `/workspace` at `seed_session`, and
 the agent reads it there. The row also carries `verifier_metadata` with the task's test commands and expected
-test-case count. The task's immutable per-task base image
+test-case count. The task's per-task base image
 (`ghcr.io/multimodal-art-projection/nl2repobench/<proName>:1.0`) is recorded alongside the row, and the resources
-server rejects a row whose image differs from the pinned image for its task ID.
+server rejects a row whose image differs from the image pinned for its task ID. The pin is by tag, not by digest, so it
+does not protect against a retagged image.
 
 ## Run OpenCode rollouts
 
@@ -50,8 +51,9 @@ snapshot instead of `git diff`:
    mode. The sandbox's `ttl_s` must outlive the agent's whole budget plus export and grading (25200 s for the 21600 s
    agent budget in the shipped config).
 2. At `verify` time, the resources server runs
-   `tar czf /tmp/workspace.tar.gz -C /workspace . --exclude=.git --exclude=__pycache__ --exclude=.venv
-   --exclude=node_modules` in the agent sandbox, downloads the resulting tarball, hashes it (SHA-256), and enforces
+   `tar czf /tmp/workspace.tar.gz --exclude=.git --exclude=__pycache__ --exclude=.venv
+   --exclude=node_modules -C /workspace .` in the agent sandbox (the excludes come before `-C`: GNU tar applies an
+   `--exclude` placed after other operands to nothing), downloads the resulting tarball, hashes it (SHA-256), and enforces
    `workspace_tar_max_bytes` as a hard cap before proceeding.
 3. The agent sandbox is stopped, and a **fresh** verifier sandbox is created, from the task's pinned per-task image
    unless `verify_image_override` or `verify_image_registry_template` says otherwise (trusted network, no egress
@@ -60,7 +62,9 @@ snapshot instead of `git diff`:
    before the row is masked.
 4. The tarball is uploaded and restored into `/workspace`. With `grading_protocol: gym_strict` (the server's default; the shipped benchmark configs set `upstream`) it is
    extracted as is; with `upstream` the agent's packaging files and its files at the held-out test paths are deleted
-   first, as NL2RepoBench's own post-processor does.
+   first, as NL2RepoBench's own post-processor does. Unlike upstream, a `pytest.py`, `sitecustomize.py`,
+   `usercustomize.py`, `*.pth` or `conftest.py` at the workspace root is deleted too: with `PYTHONPATH=/workspace` they
+   would run inside the grading session and could rewrite outcomes.
 5. The task's `test_commands.json` commands (e.g. `pip install -e .` followed by a `pytest` invocation) are run in
    `/workspace`. Under `gym_strict`, if a non-final command (typically an install step) fails, the remaining commands
    are skipped, `verifier_error` records which one failed, and the row is `evaluation_completed=True` with
@@ -71,6 +75,20 @@ snapshot instead of `git diff`:
    `test_case_count.txt` value for the task. With `grading_protocol: upstream` every row also carries `clean_reward`,
    computed from each pytest command's outer summary line only, so tests that run pytest themselves do not inflate
    it; `reward` stays the official, leaderboard-comparable score.
+
+### Limits of the scores
+- Grading runs the agent's code in a fresh sandbox **with open egress in every mode**: a package whose import downloads
+  the reference project can pass the held-out tests, including under `no_internet_preinstalled` and `block_target_v2`.
+  Treat every mode other than `official` as an upper bound that narrows the leak, not as leak-proof. Denying egress in
+  the verifier needs a check that each task's install commands work offline; that has not been done.
+- `reward` follows upstream's parser, which sums every "N passed" line, so tests that print pytest summaries inflate it.
+  It is not safe as a training reward; use `clean_reward` for that, and note it is `None` for tasks whose implementation
+  ships inside the task image's pip or setuptools.
+- `clean_reward` reads each pytest command's outer summary line, which pytest 5.1 and newer print with a duration
+  ("in 0.12s"); older pytest formats are not matched.
+- The guard wrappers (`block_target`, `block_target_v2`) keep the real binaries at `<tool>.nl2repobench-real` on the
+  sandbox, so an agent that looks for them can run them. The refusal message does not name them.
+- On agent sessions (`opencode.yaml`) only `agent_network_mode: official` is supported; the seed refuses other modes.
 
 ### Inconclusive verification is masked, not scored
 

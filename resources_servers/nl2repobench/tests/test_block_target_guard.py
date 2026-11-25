@@ -95,6 +95,20 @@ def test_blanket_template_blocks_target_substring(tmp_path: Path) -> None:
     assert "REAL_CALLED" not in result.stdout
 
 
+def test_the_refusal_does_not_name_the_real_binary_kept_beside_the_wrapper(tmp_path: Path) -> None:
+    """The real binary stays at <tool>.nl2repobench-real; a refused agent must not be told that name."""
+    kept = tmp_path / "pip.nl2repobench-real"
+    kept.write_text("#!/usr/bin/env bash\necho REAL_CALLED\n")
+    kept.chmod(kept.stat().st_mode | stat.S_IEXEC)
+    wrapper = _render(_GUARD_SCRIPT_TEMPLATE, target="six", real_path=kept, tool_name="pip")
+
+    result = _run(wrapper, "install", "six")
+
+    assert result.returncode == 1
+    assert "blocked 'pip install six'" in result.stderr
+    assert "nl2repobench-real" not in result.stderr
+
+
 def test_blanket_template_passes_through_unrelated_calls(tmp_path: Path) -> None:
     real = _fake_real_binary(tmp_path, name="pip")
     wrapper = _render(_GUARD_SCRIPT_TEMPLATE, target="six", real_path=real)

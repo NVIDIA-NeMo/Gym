@@ -490,6 +490,65 @@ def test_upstream_restore_command_deletes_agent_packaging_and_tests_but_keeps_im
     assert not (image_ws / "pkg" / "setup.cfg").exists()
 
 
+def test_upstream_restore_command_deletes_agent_hooks_that_would_run_inside_grading(tmp_path: Path) -> None:
+    """With PYTHONPATH=/workspace, a root pytest.py, sitecustomize.py, usercustomize.py, *.pth or conftest.py of the
+    agent would run inside the grading session. They are dropped; nested files and the image's own are untouched."""
+    image_ws = tmp_path / "workspace"
+    image_ws.mkdir()
+    (image_ws / "conftest.py").write_text("real conftest", encoding="utf-8")
+    agent = tmp_path / "agent"
+    (agent / "pkg").mkdir(parents=True)
+    for name in ("pytest.py", "sitecustomize.py", "usercustomize.py", "evil.pth", "conftest.py"):
+        (agent / name).write_text("agent hook", encoding="utf-8")
+    (agent / "pkg" / "conftest.py").write_text("nested", encoding="utf-8")
+    (agent / "pkg" / "__init__.py").write_text("code", encoding="utf-8")
+    tar_path = tmp_path / "workspace.tar.gz"
+    subprocess.run(["tar", "czf", str(tar_path), "-C", str(agent), "."], check=True)
+
+    command = app_module._upstream_restore_command(
+        [], tar_path=str(tar_path), workspace=str(image_ws), stage=str(tmp_path / "stage")
+    )
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    for name in ("pytest.py", "sitecustomize.py", "usercustomize.py", "evil.pth"):
+        assert not (image_ws / name).exists(), name
+    assert (image_ws / "conftest.py").read_text(encoding="utf-8") == "real conftest"  # the image's, not the agent's
+    assert (image_ws / "pkg" / "conftest.py").read_text(encoding="utf-8") == "nested"
+    assert (image_ws / "pkg" / "__init__.py").read_text(encoding="utf-8") == "code"
+
+
+async def test_a_typed_seed_is_refused_outside_the_official_mode_before_any_sandbox(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    config = _config(task_assets).model_copy(update={"agent_network_mode": "no_internet_preinstalled"})
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    create_sandbox = AsyncMock()
+    monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
+    request = MagicMock()
+    request.session = {}
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="episode-session",
+        episode_id=EpisodeId(rollout_id="0-0"),
+        task_id=TaskId(taskset="nl2repobench:benchmark", task_id="example-task"),
+        task_data={key: value for key, value in _request().items() if key != "response"},
+    )
+
+    with pytest.raises(ResourcesSeedRejectedError, match="not supported on agent sessions"):
+        await server.seed_session(request, seed)
+
+    create_sandbox.assert_not_awaited()
+
+
+def test_trace_only_needs_a_place_to_save_the_workspace(task_assets: Path) -> None:
+    fields = _config(task_assets).model_dump()
+    with pytest.raises(ValueError, match="save_workspace_dir"):
+        NL2RepoBenchResourcesServerConfig.model_validate({**fields, "trace_only": True})
+    NL2RepoBenchResourcesServerConfig.model_validate(
+        {**fields, "trace_only": True, "save_workspace_dir": str(task_assets / "ws")}
+    )
+
+
 async def test_upstream_protocol_runs_every_command_and_scores_pytest(task_assets: Path) -> None:
     config = _config(task_assets).model_copy(update={"grading_protocol": "upstream"})
     server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -1167,9 +1226,11 @@ def test_the_collect_command_refuses_a_planted_archive_and_reports_the_size(tmp_
 
 
 async def test_trace_only_rows_are_masked_so_they_only_count_toward_coverage(
-    task_assets: Path, monkeypatch: MonkeyPatch
+    task_assets: Path, monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:
-    server, request, create_sandbox = await _seeded_server(task_assets, monkeypatch, trace_only=True)
+    server, request, create_sandbox = await _seeded_server(
+        task_assets, monkeypatch, trace_only=True, save_workspace_dir=tmp_path / "ws"
+    )
 
     response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
 

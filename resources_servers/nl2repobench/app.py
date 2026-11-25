@@ -21,7 +21,7 @@ from traceback import format_exc
 from typing import Annotated, Any, ClassVar, Literal
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.core import SESSION_LOST, VERIFIER_ERROR, NgFailureEvent
@@ -69,8 +69,7 @@ NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 #   losing general internet access.
 # "block_target_v2": added 2026-10-20 (guard_v2.py). Same open-egress idea but with real package/GitHub identifiers,
 #   subcommand-aware pip/git/curl/uv/... wrappers, interpreter (python/node) code inspection, and default-allow egress
-#   with deny rules for source-hosting domains. "block_target" above is unchanged (backup of this file before the
-#   change: app.py.bak_pre_guard_v2_20261020). See guard_v2.py and sft_runs/lightning_vahid1016/testset/LEAK_AUDIT.md.
+#   with deny rules for source-hosting domains. "block_target" above is unchanged. See guard_v2.py.
 AgentNetworkMode = Literal["official", "no_internet_preinstalled", "block_target", "block_target_v2"]
 
 # "block_target" wrapper: installed in place of the real binaries (the real binary is moved
@@ -79,7 +78,7 @@ AgentNetworkMode = Literal["official", "no_internet_preinstalled", "block_target
 # shell resolves PATH, instead of depending on shell-specific PATH precedence/expansion rules.
 # Substring-matches a normalized (lowercase, "_"->"-") task_id against every argv token, so it
 # only catches tasks whose real PyPI/GitHub name is the task_id itself - a known, accepted gap
-# (see docs/PIPELINE.md).
+# (the README lists the modes as upper bounds, not leak-proof).
 #
 # Two templates:
 # - _GUARD_SCRIPT_TEMPLATE: blanket argv substring match, used for pip/pip3/git/curl/wget. Safe
@@ -101,7 +100,7 @@ norm() {{ echo "$1" | tr 'A-Z_' 'a-z-'; }}
 for arg in "$@"; do
   a=$(norm "$arg")
   if [[ "$a" == *"$TARGET"* ]]; then
-    echo "nl2repobench guard: blocked '$(basename "$REAL") $*' - matches guarded task target '$TARGET'" >&2
+    echo "nl2repobench guard: blocked '$(basename "$REAL" .nl2repobench-real) $*' - matches guarded task target '$TARGET'" >&2
     exit 1
   fi
 done
@@ -276,10 +275,12 @@ checkouts = {"/project"}
 for root in roots:
     for di in glob.glob(root + "/*.dist-info"):
         try:
-            url = json.load(open(di + "/direct_url.json")).get("url", "")
-        except (OSError, ValueError):
+            direct_url = json.load(open(di + "/direct_url.json"))
+            url = direct_url.get("url", "")
+        except (OSError, ValueError, AttributeError):
             continue
-        if not url.startswith("file://"):
+        # dir_info: installed from a directory (the reference checkout); a local wheel (archive_info) is a dependency
+        if not url.startswith("file://") or "dir_info" not in direct_url:
             continue
         checkouts.add(os.path.normpath(url[len("file://"):] or "/"))
         tops = set()
@@ -422,6 +423,11 @@ _UPSTREAM_PACKAGE_FILES = (
     "manifest.in",
     "MANIFEST.in",
 )
+# Files at the workspace root that would run inside the grading session (PYTHONPATH=/workspace puts the root first on
+# sys.path, and pytest loads a root conftest.py): an agent-written pytest.py, sitecustomize.py, usercustomize.py,
+# *.pth or conftest.py could rewrite outcomes or print a summary line both parsers trust. Upstream's grader does not
+# delete them; this one does, so `reward` can differ from upstream's only for a run that wrote one.
+_AGENT_HOOK_FILES = ("pytest.py", "sitecustomize.py", "usercustomize.py", "*.pth", "conftest.py")
 _UPSTREAM_STAGE_DIR = "/tmp/nl2repobench_agent_workspace"
 _UPSTREAM_PASSED_RE = re.compile(r"(\d+) passed")
 _UPSTREAM_FAILED_RE = re.compile(r"(\d+) failed")
@@ -442,6 +448,7 @@ def _upstream_restore_command(
     survive wherever the agent's copies were deleted.
     """
     names = " -o ".join(f"-name {shlex.quote(name)}" for name in _UPSTREAM_PACKAGE_FILES)
+    hooks = " -o ".join(f"-name {shlex.quote(name)}" for name in _AGENT_HOOK_FILES)
     test_paths = [
         f"{stage}/{path.strip('/')}"
         for path in test_files
@@ -452,7 +459,8 @@ def _upstream_restore_command(
         f"set -e; rm -rf {stage}; mkdir -p {stage}; tar xzf {shlex.quote(tar_path)} -C {stage}; "
         # `-type l` too: find does not follow links, so -delete removes the link itself. Left in, an agent's setup.py
         # symlink would replace the image's real packaging file in the overlay below.
-        f"find {stage} \\( -type f -o -type l \\) \\( {names} \\) -delete; {remove_tests}"
+        f"find {stage} \\( -type f -o -type l \\) \\( {names} \\) -delete; "
+        f"find {stage} -maxdepth 1 \\( -type f -o -type l \\) \\( {hooks} \\) -delete; {remove_tests}"
         f"tar -C {stage} -cf - . | tar -C {shlex.quote(workspace)} -xf -"
     )
 
@@ -524,7 +532,7 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     verify_image_override: str | None = None
     # None (default): task_image(task) resolves against upstream's own
     # ghcr.io/multimodal-art-projection/nl2repobench/<task>:1.0 registry. Set to a format string
-    # with a {name} placeholder (e.g. "ghcr.io/<org>/nl2repobench-vahid1016/{name}:1.0") for a
+    # with a {name} placeholder (e.g. "ghcr.io/<org>/<repo>/{name}:1.0") for a
     # task set with its OWN pre-built, deps-preinstalled per-task images under a different
     # registry namespace - required to use agent_network_mode="no_internet_preinstalled" with
     # any task set other than upstream's 104 pinned tasks.
@@ -574,6 +582,13 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # reward 0, graded=false, evaluation_completed=false; grade later from the saved workspace (for nl2repo-tasks: its
     # own grade.py). Mirrors the ProgramBench resources server's trace-only mode. Added 2026-11-03.
     trace_only: bool = False
+
+    @model_validator(mode="after")
+    def _trace_only_needs_a_save_target(self) -> "NL2RepoBenchResourcesServerConfig":
+        if self.trace_only and self.save_workspace_dir is None:
+            raise ValueError("trace_only grades nothing and needs save_workspace_dir, or the whole run's code is lost")
+        return self
+
     # Grading is retried this many times, each on a fresh verifier sandbox, when the infrastructure fails (the sandbox
     # cannot start, or the provider reports an error rather than a test result) before the row is masked as
     # inconclusive: that says nothing about the agent's code, so it must not score as a 0.
@@ -856,8 +871,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # mode == "no_internet_preinstalled" always uses the real preinstalled per-task image for
         # verification too, IGNORING verify_image_override - mirrors agent_image's own mode
         # branch above exactly, and is safe to do unconditionally in that branch since
-        # test_commands.json's clone+install step (see
-        # sft_runs/lightning_vahid1016/testset/make_test_commands_preinstall_aware.py) is
+        # test_commands.json's clone+install step is
         # idempotent: it detects /tmp/_reference_repo/.git already existing and skips straight to
         # the copy+pytest steps, rather than re-cloning into (and failing against) an
         # already-populated directory. For every OTHER mode, verify_image_override is left as the
@@ -944,8 +958,8 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                     # can't return until this function returns, so there's no window where the agent
                     # could read any of it first).
                     #
-                    # /tmp/_reference_repo ALSO wiped, not just /workspace: our own per-task images
-                    # (sft_runs/lightning_vahid1016/testset/task_images/) install the reference repo
+                    # /tmp/_reference_repo ALSO wiped, not just /workspace: per-task images built for
+                    # task sets with a clone URL install the reference repo
                     # with `pip install -e .` (an EDITABLE install - deliberately matching what
                     # test_commands.json itself does at verify time), which leaves the real
                     # implementation AND the real held-out tests/ sitting in /tmp/_reference_repo,
@@ -969,8 +983,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                             f"Failed to wipe pre-existing /workspace/_reference_repo contents in agent sandbox for "
                             f"{task_id(task)!r}: {wipe_result.stderr or wipe_result.stdout or '(no output)'}"
                         )
-                    # Metadata scrub (added 2026-10-21 after a leak scan of the real per-task images, see
-                    # sft_runs/lightning_vahid1016/testset/LEAK_AUDIT.md): the editable install of the reference repo
+                    # Metadata scrub (added after a leak scan of the per-task images): the editable install of the reference repo
                     # leaves, outside /tmp/_reference_repo, the package's dist-info (METADATA embeds the README with code
                     # examples + version + Home-page URL + dependency list; `pip show` prints them), its console-script
                     # stubs in bin/ (reveal the module layout) and the .pth/__editable__ pointer. Remove every dist-info
@@ -1201,6 +1214,13 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest
         | Annotated[NL2RepoBenchSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | NL2RepoBenchSeedSessionResponse:
+        if isinstance(body, ResourcesSeedSessionRequest) and self.config.agent_network_mode != "official":
+            # A session harness installs its own OpenCode release at seed, which a restricted sandbox cannot reach, and
+            # the other modes' guards are not validated against it: refuse before any sandbox is created.
+            raise ResourcesSeedRejectedError(
+                f"agent_network_mode={self.config.agent_network_mode!r} is not supported on agent sessions yet: use "
+                "agent_network_mode=official, or the relay preset (opencode_sandboxed_agent.yaml)"
+            )
         # The base binds the session, releases a previous run and calls initialize_session_state.
         response = await super().seed_session(body, request=request)
         session = self._agent_sessions.get(str(request.session[SESSION_ID_KEY]))

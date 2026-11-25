@@ -31,7 +31,7 @@ nl2repobench_opencode_resources_server:
       # run a different network posture, override at the CLI instead of editing this file, e.g.:
       #   ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=no_internet_preinstalled
       #   ++nl2repobench_opencode_resources_server.resources_servers.nl2repobench.agent_network_mode=block_target
-      # See docs/PIPELINE.md "Network access and reference-lookup risk" for what each mode does.
+      # See benchmarks/nl2repobench/README.md for what each mode does.
 
 nl2repobench_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
@@ -45,8 +45,7 @@ nl2repobench_opencode_sandboxed_agent:
       # policy_model, not the whole session) - if vLLM ever hangs/stalls generating a
       # single response past that point, OpenCode hard-aborts the call and the run
       # errors out. Empirically this produced a tight cluster of official/block_target
-      # rollouts landing at exactly ~60.0-60.4 minutes total duration with reward=0 (see
-      # docs/PIPELINE.md's duration-vs-reward analysis) - consistent with a single early
+      # rollouts landing at exactly ~60.0-60.4 minutes total duration with reward=0 - consistent with a single early
       # call getting stuck and timing out rather than the agent genuinely giving up.
       # Raised to 4hr here, scoped to nl2repobench only (not the shared default, so
       # other opencode_sandboxed_agent benchmarks are unaffected). sandbox_timeout above
@@ -58,10 +57,9 @@ nl2repobench_opencode_sandboxed_agent:
       # (_create_opencode_config in app.py) - OpenCode computes its auto-compaction trigger as a
       # fraction of that declared limit, not of the real served context window. Empirically,
       # compaction was firing around ~240-246K single-turn input tokens, i.e. ~92-94% of 262144 -
-      # right where you'd expect a percentage-of-declared-limit trigger to land. Neither
-      # Lightning's nor dima's vLLM config sets --max-model-len, so the real served window is the
-      # checkpoint's native max_position_embeddings (1,048,576 for both - confirmed via
-      # config.json, same architecture/dims), far above either value below. Raised here to push
+      # right where you'd expect a percentage-of-declared-limit trigger to land. The vLLM config of
+      # the served checkpoints sets no --max-model-len, so the real served window is the
+      # checkpoint's native max_position_embeddings (1,048,576), far above either value below. Raised here to push
       # the compaction trigger point out to ~500K and give the model roughly 2x more headroom
       # before OpenCode starts summarizing/pruning older turns - scoped to nl2repobench only so
       # other opencode_sandboxed_agent benchmarks keep today's 262144 behavior.
@@ -92,6 +90,11 @@ nl2repobench_opencode_sandboxed_agent:
       # OpenHands' StuckDetector (it ends a run whose agent repeats itself: same action and result 4 times, same
       # failing action 3 times, an A-B-A-B-A-B alternation, 3 identical replies, 10 compactions in a row).
       stuck_detector: true
+      # These two options exist for the published runs' task images: some carry a builder's proxy settings that OpenCode
+      # would honor (a dead proxy fails every model call), and some run as a user without a writable home. Both are off by
+      # default in the agent, so they are set here for this preset only.
+      opencode_unset_proxy_env: true
+      opencode_data_home_in_tmp: true
       # The prompt goes to `opencode run` on stdin: as an argument OpenCode wraps any text containing a space in
       # literal double quotes, so the model saw the task prompt quoted. Every nudge resume pipes its text the same way.
       opencode_query_via_stdin: true
