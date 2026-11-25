@@ -64,7 +64,7 @@ def visible_events(output: list[dict[str, JsonValue]]) -> list[VisibleEvent]:
             if isinstance(arguments, str):
                 try:
                     arguments = json.loads(arguments)
-                except ValueError:
+                except (ValueError, RecursionError):
                     pass  # Malformed agent arguments are still evidence.
             events.append(
                 VisibleEvent(

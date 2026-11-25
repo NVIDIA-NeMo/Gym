@@ -1326,6 +1326,15 @@ class _RunRecordWriter:
     earlier run wrote under the same label, so a replayed step does not duplicate rows. ``sink``, when given, receives
     each record after it is appended, as ``(kind, record)``: ``kind`` is ``"rollout"``, ``"failure"`` or ``"omitted"``,
     and ``record`` is the line just written, read back.
+
+    With ``staging_dir`` (a node-local folder), the shard's files are written to a private folder under it instead
+    and published into the run folder once, by :meth:`publish`: from :meth:`row_settled` once every expected row has
+    settled, or from :meth:`close` when the caller stops early. Until then the run folder holds the label's earlier
+    files, if any, ``gym eval status`` on the run folder does not see this shard's progress, and the sink receives
+    nothing: it gets the shard's records when they are published, so a writer another writer replaced delivers none.
+    A record that arrives after publishing (a row the caller awaits after an early close) is written in place, as
+    without staging. Until publishing, each record costs no operation on the run folder's file system, which matters
+    on a shared one (Lustre) with many writers.
     """
 
     def __init__(
@@ -1339,6 +1348,7 @@ class _RunRecordWriter:
         status_rows: Optional[List[Dict[str, Any]]] = None,
         global_config: Any = None,
         sink: Optional[RecordSink] = None,
+        staging_dir: Optional[Path | str] = None,
     ) -> None:
         if not _SHARD_LABEL.fullmatch(shard):
             raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
@@ -1357,20 +1367,31 @@ class _RunRecordWriter:
         self.run_id = run_id or uuid4().hex
         self.rollouts_fpath.parent.mkdir(parents=True, exist_ok=True)
         self._lock_fpath = self.rollouts_fpath.with_name(f".{self.rollouts_fpath.name}.lock")
+        # The *_fpath attributes name the shard's files in the run folder, which its manifest records; _at() names
+        # where this writer writes each of them, its own staging folder when it has one.
+        self._staging: Optional[Path] = None
+        if staging_dir is not None:
+            Path(staging_dir).mkdir(parents=True, exist_ok=True)
+            self._staging = Path(tempfile.mkdtemp(dir=staging_dir, prefix=f"rollouts-{shard}."))
+        # The kinds of the staged records not yet handed to the sink, in write order, and the rows settled so far.
+        self._undelivered: List[str] = []
+        self._settled = 0
         with self._locked() as lock:
-            self.failures_fpath.unlink(missing_ok=True)
-            self.materialized_fpath.unlink(missing_ok=True)
-            self.manifest_fpath.unlink(missing_ok=True)
-            config_identity_path_for(self.manifest_fpath).unlink(missing_ok=True)
-            resume_drift_path_for(self.manifest_fpath).unlink(missing_ok=True)
-            self.status_fpath.unlink(missing_ok=True)
+            if self._staging is None:
+                self.failures_fpath.unlink(missing_ok=True)
+                self.materialized_fpath.unlink(missing_ok=True)
+                self.manifest_fpath.unlink(missing_ok=True)
+                config_identity_path_for(self.manifest_fpath).unlink(missing_ok=True)
+                resume_drift_path_for(self.manifest_fpath).unlink(missing_ok=True)
+                self.status_fpath.unlink(missing_ok=True)
             # The rollouts file exists from the start, even empty, so a shard whose every rollout failed is still
             # found by readers that discover shards by it. A new file (not a truncation) gives this writer its own
             # inode, which write() checks to notice a later writer of the same shard.
-            fd, partial = tempfile.mkstemp(dir=self.rollouts_fpath.parent, prefix=f".{self.rollouts_fpath.name}.")
+            rollouts = self._at(self.rollouts_fpath)
+            fd, partial = tempfile.mkstemp(dir=rollouts.parent, prefix=f".{rollouts.name}.")
             os.close(fd)
-            Path(partial).replace(self.rollouts_fpath)
-            self._generation = self.rollouts_fpath.stat().st_ino
+            Path(partial).replace(rollouts)
+            self._generation = rollouts.stat().st_ino
             # The lock file names the writer that opened the shard last. An inode number can come back to a later
             # reopening of the same label, so every append checks this token under the lock, not the inode alone.
             self._writer_token = secrets.token_hex(16)
@@ -1381,16 +1402,16 @@ class _RunRecordWriter:
             # As in a collection run, the failures sidecar exists from the start, the rows this call dispatches are
             # the shard's materialized inputs, and the run manifest names the run the typed failure records belong
             # to: what the Store and the health check expect to find.
-            self.failures_fpath.touch()
+            self._at(self.failures_fpath).touch()
             if rows is not None:
-                with self.materialized_fpath.open("wb") as file:
+                with self._at(self.materialized_fpath).open("wb") as file:
                     for row in rows:
                         file.write(orjson.dumps(row) + b"\n")
                 # A verified run manifest with every row's attempt reserved before the first request, as collection
                 # writes its own: resume and recovery accept the shard, and the Store checks each record's identity
                 # against it. ``rows`` are the copies as dispatched (run id, rollout id and attempt index stamped).
                 self.manifest = self._resumable_manifest(rows, global_config)
-                self.manifest.write(self.manifest_fpath)
+                self.manifest.write(self._at(self.manifest_fpath))
             # The shard's own saved progress, `rollouts-<shard>_batch_status.json`, read by `gym eval status` and
             # marked by aggregation like any run's. It counts the records this writer writes, which are what the
             # Store reads back, and is best-effort: an error disables it with its reason.
@@ -1408,11 +1429,17 @@ class _RunRecordWriter:
                         (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME]
                         for row in status_rows
                     }
-                    self._status = RunStatusTracker(self.status_fpath, status_rows)
+                    self._status = RunStatusTracker(self._at(self.status_fpath), status_rows)
                     self._status.write_status([], [], force=True)
                 except Exception as error:
-                    disable_run_status(self.status_fpath, error)
+                    disable_run_status(self._at(self.status_fpath), error)
                     self._status = None
+        if self._status_expected == 0:
+            self.publish()
+
+    def _at(self, fpath: Path) -> Path:
+        """Where this writer writes the shard file ``fpath`` names in the run folder."""
+        return fpath if self._staging is None else self._staging / fpath.name
 
     def _resumable_manifest(self, rows: List[Dict[str, Any]], global_config: Any) -> RunManifest:
         """The manifest ``gym eval run`` computes when it resumes this shard, with every row's attempt reserved.
@@ -1432,7 +1459,7 @@ class _RunRecordWriter:
             input_jsonl_fpath=str(self.materialized_fpath), output_jsonl_fpath=str(self.rollouts_fpath)
         ).model_dump()
         try:
-            manifest = RunManifest.create(self.materialized_fpath, rows, config, global_config or {})
+            manifest = RunManifest.create(self._at(self.materialized_fpath), rows, config, global_config or {})
         except (ConfigError, OmegaConfBaseException) as error:
             warnings.warn(
                 f"Shard {self.rollouts_fpath.name} is recorded, but gym eval run will not resume it: its configuration "
@@ -1486,17 +1513,20 @@ class _RunRecordWriter:
             )
         else:
             kind, fpath, line = "rollout", self.rollouts_fpath, orjson.dumps(result)
-        with self._locked() as lock:
-            lock.seek(0)
-            if lock.read() != self._writer_token:
-                raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
-            try:
-                current = self.rollouts_fpath.stat().st_ino
-            except FileNotFoundError:
-                current = None
-            if current != self._generation:
-                raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
-            with fpath.open("ab") as f:
+        staged = self._staging is not None
+        # A staging folder is this writer's alone; a later writer of the same shard is noticed when it publishes.
+        with nullcontext() if staged else self._locked() as lock:
+            if lock is not None:
+                lock.seek(0)
+                if lock.read() != self._writer_token:
+                    raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
+                try:
+                    current = self.rollouts_fpath.stat().st_ino
+                except FileNotFoundError:
+                    current = None
+                if current != self._generation:
+                    raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
+            with self._at(fpath).open("ab") as f:
                 f.write(line + b"\n")
             # The status follows under the same lock, so a writer superseded meanwhile cannot overwrite the newer
             # writer's counts. It reads the line back, as the sink does, so both see exactly what the shard holds.
@@ -1505,15 +1535,133 @@ class _RunRecordWriter:
                 (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
                 last = self._status_expected is not None and self._status_written >= self._status_expected
                 self._status.write_status(self._status_completed, self._status_failures, force=last)
-        if self.sink is not None:
+        if staged:
+            # A staged record reaches the sink when the shard is published, so a superseded writer delivers none.
+            self._undelivered.append(kind)
+        elif self.sink is not None:
             # A copy of its own: the status keeps its rows until a throttled write, and a sink that edits its record
             # (renaming a field for its table) must not change them.
             self.sink(kind, orjson.loads(line))
         return fpath
 
+    def row_settled(self) -> None:
+        """Count one of the shard's rows as settled, whether it wrote a record or raised; end the shard after the last.
+
+        A row whose `/run` raised writes nothing, so the shard ends on settled rows, not on written ones.
+
+        Raises:
+            What :meth:`close` raises, once, from the last expected row.
+        """
+        self._settled += 1
+        if self._status_expected is not None and self._settled == self._status_expected:
+            self.close()
+
+    def close(self) -> None:
+        """End the shard: write its status as it stands, then publish a staged shard.
+
+        Raises what :meth:`publish` raises.
+        """
+        self.flush_status()
+        self.publish()
+
+    def publish(self) -> None:
+        """Copy a staged shard into the run folder in place of what an earlier writer of the label left there.
+
+        The label's earlier rollouts and status files go first. Each file is copied under a temporary name and renamed
+        into place, the rollouts file and then the status file last, since readers find a shard by one or the other: a
+        reader finds this shard whole or not at all. Then the sink receives the shard's records, in the order they
+        were written, and the writer writes any later record in place. Without a staging folder, or once published,
+        there is nothing to do.
+
+        Raises:
+            RuntimeError: Another writer opened the same shard since this one did. The run folder is left to it, and
+                the sink receives nothing.
+            OSError: A copy failed. What this call copied is removed again, so the label has no shard, and the sink
+                receives nothing.
+            Exception: The first error the sink raised, after every record was delivered.
+
+        A copy error or a superseded writer keeps the staged files where they are, named in the error.
+        """
+        if self._staging is None:
+            return
+        staging = self._staging
+        if self._status is not None and self._status.enabled:
+            self._status.write_status(self._status_completed, self._status_failures, force=True)
+        targets = [
+            self.failures_fpath,
+            self.materialized_fpath,
+            self.manifest_fpath,
+            config_identity_path_for(self.manifest_fpath),
+            self.rollouts_fpath,
+            self.status_fpath,
+        ]
+        with self._locked() as lock:
+            lock.seek(0)
+            if lock.read() != self._writer_token:
+                raise RuntimeError(
+                    f"{self.rollouts_fpath} was replaced by another writer for the same shard; this writer's files "
+                    f"stay in {staging}"
+                )
+            placed: List[Path] = []
+            try:
+                self.status_fpath.unlink(missing_ok=True)
+                self.rollouts_fpath.unlink(missing_ok=True)
+                resume_drift_path_for(self.manifest_fpath).unlink(missing_ok=True)
+                for target in targets:
+                    source = staging / target.name
+                    if not source.exists():
+                        target.unlink(missing_ok=True)
+                        continue
+                    fd, partial = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+                    os.close(fd)
+                    try:
+                        shutil.copyfile(source, partial)
+                        shutil.copymode(source, partial)
+                        Path(partial).replace(target)
+                    except BaseException:
+                        Path(partial).unlink(missing_ok=True)
+                        raise
+                    placed.append(target)
+            except OSError as error:
+                for target in placed:
+                    target.unlink(missing_ok=True)
+                raise OSError(
+                    f"publishing {self.rollouts_fpath.name} failed ({error}); its files stay in {staging}"
+                ) from error
+            self._generation = self.rollouts_fpath.stat().st_ino
+        self._staging = None
+        if self._status is not None:
+            self._status.status_fpath = self.status_fpath
+        try:
+            self._deliver(staging)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def _deliver(self, staging: Path) -> None:
+        """Hand the sink every staged record in write order; raise its first error once all are delivered."""
+        undelivered, self._undelivered = self._undelivered, []
+        if self.sink is None:
+            return
+        first_error: Optional[Exception] = None
+        with (
+            (staging / self.rollouts_fpath.name).open("rb") as rollouts,
+            (staging / self.failures_fpath.name).open("rb") as failures,
+        ):
+            for kind in undelivered:
+                line = (rollouts if kind == "rollout" else failures).readline()
+                try:
+                    self.sink(kind, orjson.loads(line))
+                except Exception as error:
+                    first_error = first_error or error
+        if first_error is not None:
+            raise first_error
+
     def flush_status(self) -> None:
         """Write the shard's status as it stands, for a caller that stops consuming before every row is in."""
         if self._status is None or not self._status.enabled:
+            return
+        if self._staging is not None:
+            self._status.write_status(self._status_completed, self._status_failures, force=True)
             return
         with self._locked() as lock:
             lock.seek(0)
@@ -3473,17 +3621,22 @@ class _RowResultIterator:
         completions: Iterator[Future],
         enrich: Optional[Callable[["_CompletedRollout"], Awaitable[Any]]] = None,
         on_close: Optional[Callable[[], None]] = None,
+        on_settled: Optional[Callable[[], None]] = None,
     ):
         self._completions = completions
         self._enrich = enrich
         self._on_close = on_close
+        self._on_settled = on_settled
         self._closed = False
 
     def _finish(self) -> None:
-        """Run the close hook once, after the outcomes a close still delivers have been enriched."""
-        on_close, self._on_close = self._on_close, None
-        if on_close is not None:
-            on_close()
+        """Run the close hook after the outcomes a close still delivers have been enriched, until it succeeds.
+
+        A hook that raises stays, so the next close runs it again: publishing a staged shard can fail and be retried.
+        """
+        if self._on_close is not None:
+            self._on_close()
+            self._on_close = None
 
     def __iter__(self):
         return self
@@ -3494,9 +3647,14 @@ class _RowResultIterator:
         return self._without_metadata(next(self._completions))
 
     async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
-        completed = await future
-        if self._enrich is not None:
-            await self._enrich(completed)
+        try:
+            completed = await future
+            if self._enrich is not None:
+                await self._enrich(completed)
+        finally:
+            # Whether the row was enriched or raised; an error the hook raises carries the row's own as its context.
+            if self._on_settled is not None:
+                self._on_settled()
         return completed.row, completed.result
 
     async def aclose(self) -> None:
@@ -4458,8 +4616,18 @@ executions → not run again (left to recovery)
                 config.num_samples_in_parallel, component="rollout_driver", limit_name="rollouts"
             )
 
-        # Resolve capture dirs once so each rollout's captured model calls can be folded
-        # into its record below (uniform across agents; no-op when capture is off / dirs absent).
+        from nemo_gym.rollouts.provenance import write_run_provenance
+
+        # Recorded before dispatch from the config resolved above.
+
+        await asyncio.to_thread(
+            write_run_provenance,
+            output_fpath,
+            global_config,
+            prompt_config=config.prompt_config,
+            input_jsonl_fpath=config.input_jsonl_fpath,
+            model_server_config=lambda: identity_client.global_config_dict,
+        )
         capture_dirs = model_call_capture_dirs_from_config(global_config)
         # The post-run health check times failed rollouts from the same captures.
         self._health_capture_dirs = capture_dirs
@@ -6276,6 +6444,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         record_omitted_rollouts: bool = False,
         scope_rollout_ids: bool = True,
         record_sink: Optional[RecordSink] = None,
+        record_staging_dir: Optional[Path | str] = None,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -6372,6 +6541,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         call's capture file, and the later shard's records silently carry the earlier shard's model calls. It only
         applies with ``record_output_dir``: a call that records no shard already dispatches each row under its own id.
 
+        ``record_staging_dir`` (a node-local folder, with ``record_output_dir``) writes the shard there and copies it
+        into ``record_output_dir`` once: when every row has settled (written or raised), or from ``aclose()`` or
+        ``aclose_and_drain()`` when the caller stops early. A row awaited after an early close is then written into the
+        published shard, as without staging. Until publishing, ``record_output_dir`` keeps whatever an earlier call
+        left under the same label, ``gym eval status`` there shows no progress for this shard, and ``record_sink``
+        receives nothing: it gets the shard's records, in write order, once they are published, so a call another call
+        of the same label replaced delivers none. A failed copy, or a sink error at publishing, raises from the
+        awaitable of the last row to settle, or from ``aclose()``/``aclose_and_drain()`` (whose drained outcomes are
+        then not returned); a failed copy leaves the label without a shard and names the staging folder that still
+        holds it. A caller that neither awaits every row nor closes the iterator leaves the shard in staging.
+
         ``gym eval run`` with
         ``+input_jsonl_fpath=<dir>/rollouts-<shard>_materialized_inputs.jsonl +output_jsonl_fpath=<dir>/rollouts-<shard>.jsonl
         +resume_from_cache=true`` resumes a shard and runs only what it still lacks.
@@ -6397,6 +6577,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             getattr(record_sink, "__call__", None)
         ):
             raise TypeError("record_sink is called, not awaited: pass a plain function that hands slow work off")
+        if record_staging_dir is not None and record_output_dir is None:
+            raise ValueError("record_staging_dir stages a recorded shard and needs record_output_dir")
         enrich_results = enrich_results or record_output_dir is not None
         if delete_model_call_capture and not include_model_call_payloads:
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
@@ -6543,8 +6725,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 status_rows=status_rows,
                 global_config=global_config,
                 sink=record_sink,
+                staging_dir=record_staging_dir,
             )
-        return _RowResultIterator(completions, enrich=enrich, on_close=writer.flush_status if writer else None)
+        return _RowResultIterator(
+            completions,
+            enrich=enrich,
+            on_close=writer.close if writer else None,
+            on_settled=writer.row_settled if writer else None,
+        )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         """Return a client for the head server, reusing the cached one when the helper opted in.

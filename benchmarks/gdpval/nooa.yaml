@@ -16,7 +16,9 @@ gdpval_resources_server:
         - name: gdpval
           type: benchmark
           jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark.jsonl
-          prompt_config: benchmarks/gdpval/prompts/harness-neutral.yaml
+          # harness-neutral.yaml plus one sentence: NOOA's own task instruction ends with return_result, which
+          # submits no files, so the prompt says to call self.finish first.
+          prompt_config: benchmarks/gdpval/prompts/nooa.yaml
           prepare_script: benchmarks/gdpval/prepare.py
           num_repeats: 1
 

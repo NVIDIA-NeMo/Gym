@@ -136,6 +136,10 @@ class CheckpointableLedger(Protocol):
 
     async def delete_unstarted(self, capture_keys: Sequence[str]) -> dict: ...
 
+    def delete_calls(self, rollout_id: str, model_call_ids: Sequence[str]) -> int:
+        """Delete every row of these calls from a live ledger; return how many rows were deleted."""
+        ...
+
 
 class EpisodeCut(BaseModel):
     """A durable cut of one undelivered call, keyed by the episode that will continue it."""
@@ -176,6 +180,10 @@ class GateSnapshot(BaseModel):
     # Undelivered model calls (model_call_id -> capture key): the commit leaves their ledger rows out.
     undelivered: dict[str, str]
     cuts: list[EpisodeCut]
+    # Calls that ended while admission was closed, before their response started (model_call_id -> capture key):
+    # the client left, or the handler raised. No client received an answer for them.
+    # The commit leaves their rows out like an undelivered call's, and the resume deletes them from the live ledger.
+    disconnected: dict[str, str] = {}
 
 
 class RestoredCuts(Protocol):
@@ -357,6 +365,8 @@ class PolicyGate:
         self.served = False
         # Restored attempts no call has reached here yet, by capture key.
         self.restored_targets: set[str] = set()
+        # Calls that ended while admission was closed, before their response started; see GateSnapshot.disconnected.
+        self.disconnected: dict[str, str] = {}
 
     async def admit(self, capture_key: Optional[str]) -> None:
         """Wait while a checkpoint is open, then admit the call unless its attempt was retired.
@@ -421,6 +431,12 @@ class PolicyGate:
         return ticket
 
     async def exit(self, ticket: _Ticket) -> None:
+        if not self.accepting and not ticket.response_started and ticket.capture is not None:
+            # The call ended while admission was closed, before its response started: its client left,
+            # or its handler raised. Its committed row is published only when a response starts, so the live ledger
+            # holds its intent row, which keeps the call pending, and, if it ended without commit coordinates,
+            # a failure row (``UNCOMMITTED_CALL_REASON``). No client received an answer, so the resume deletes them.
+            self.disconnected[ticket.capture.model_call_id] = ticket.capture_key
         self.tickets.discard(ticket)
         try:
             await self.restored_cuts.settle(ticket)
@@ -527,7 +543,13 @@ class PolicyGate:
                 for ticket in undelivered
                 if ticket.cut_record is not None
             ],
+            disconnected=dict(self.disconnected),
         )
+
+    def take_disconnected(self) -> dict[str, str]:
+        """The calls recorded in ``disconnected`` during the checkpoint that is ending, cleared for the next one."""
+        disconnected, self.disconnected = self.disconnected, {}
+        return disconnected
 
     async def _cut_all(self, request: CheckpointRequest) -> None:
         by_backend: dict[str, list[_Ticket]] = {}
@@ -621,13 +643,15 @@ def export_model_records(
 ) -> list[ModelRecord]:
     """The rows and cuts of each continued episode, leaving out every undelivered call of every process.
 
-    An undelivered call has no row, since rows are published when a response starts;
-    leaving out the rows of undelivered calls only guards against a writer that publishes earlier.
+    Intent rows are never exported, and a call's committed row is published only when its response starts,
+    so a call still held has nothing to export unless a writer published its row earlier.
+    A call that ended while admission was closed, before its response started (``GateSnapshot.disconnected``),
+    can have a failure row (``UNCOMMITTED_CALL_REASON``) in the live ledger; that row is left out too.
     """
     if episode_ids is None:
         raise ControlError("model commit needs the episode_ids the controller continues from this checkpoint")
     snapshots = list(snapshots)
-    undelivered = {call_id for snapshot in snapshots for call_id in snapshot.undelivered}
+    undelivered = {call_id for snapshot in snapshots for call_id in (*snapshot.undelivered, *snapshot.disconnected)}
     # One cut per episode: when a client retried a call the server was still running,
     # both calls are undelivered and cut, but only the latest is still awaited and will be re-issued after a restore.
     latest: dict[str, EpisodeCut] = {}
@@ -690,6 +714,27 @@ def staging_keys_by_episode(records: Iterable[CheckpointRecord]) -> dict[str, li
     since a restored attempt's record carries the rows of the attempt it continues.
     """
     return {record.episode_id.capture_key: retained_staging_keys([record]) for record in records}
+
+
+def delete_disconnected_calls(ledger: CheckpointableLedger, disconnected: Mapping[str, str]) -> None:
+    """Delete from the live ledger every row of the calls in ``GateSnapshot.disconnected``.
+
+    Those calls ended while admission was closed, before their response started, so no client received an answer.
+    What such a call leaves is its intent row, which keeps it pending, and, if it ended without commit coordinates,
+    a failure row (``UNCOMMITTED_CALL_REASON``). The commit already left them out; this removes them from the ledger
+    of an episode that continues without a restore. A rollout whose delete fails is logged and the others still run.
+    """
+    by_key: dict[str, list[str]] = {}
+    for model_call_id, capture_key in disconnected.items():
+        by_key.setdefault(capture_key, []).append(model_call_id)
+    for capture_key, model_call_ids in by_key.items():
+        try:
+            deleted = ledger.delete_calls(capture_key, model_call_ids)
+        except Exception:
+            LOGGER.warning("could not delete disconnected calls %s of %s", model_call_ids, capture_key, exc_info=True)
+            continue
+        if deleted:
+            LOGGER.info("deleted %d row(s) of disconnected calls of %s after the checkpoint", deleted, capture_key)
 
 
 async def retire_ledgers(ledger: Optional[CheckpointableLedger], episode_ids: Iterable[EpisodeId]) -> None:
@@ -812,7 +857,10 @@ class PolicyModelParticipant(CheckpointParticipant):
         await self.gate.close(request)
 
     async def open_admission(self) -> None:
+        disconnected = self.gate.take_disconnected()
         self.gate.open()
+        if disconnected and self.ledger is not None:
+            await asyncio.to_thread(delete_disconnected_calls, self.ledger, disconnected)
 
     async def mark_retired(self, episode_ids: list[EpisodeId]) -> None:
         await super().mark_retired(episode_ids)
