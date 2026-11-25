@@ -19,6 +19,14 @@ revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
 The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
 Native task execution is an external dependency, not vendored here.
 
+## PerceptionBench judge prompt
+
+`resources_servers/perceptionbench/prompt_templates/judge_prompt.txt` copies `eval/judge_prompt.txt`
+unchanged from [MoonshotAI/PerceptionBench](https://github.com/MoonshotAI/PerceptionBench),
+revision `ba032c06e9b6ee3679171ff6ba643b7a0cfebe2e`, under Apache-2.0.
+`resources_servers/perceptionbench/app.py` and `benchmarks/perceptionbench/prepare.py`
+adapt the prompt construction and answer-judging protocol from `eval/eval.py` at the same revision.
+
 ## MM-Lifelong grader prompt and agentic runner note
 
 `benchmarks/mm_lifelong_v1_1/grading.yaml` retains the grader's system prompt and user template from
