@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import shlex
 import signal
@@ -415,9 +416,16 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             tool_response_as_user=True,
             skip_input_file_listing=True,
             min_compaction_summary_words=payload["min_compaction_summary_words"],
+            # None never summarizes (JSON carries no infinity); a payload without the key keeps Stirrup's default.
+            **(
+                {"context_summarization_cutoff": payload["context_summarization_cutoff"] or math.inf}
+                if "context_summarization_cutoff" in payload
+                else {}
+            ),
             **({"system_prompt": system_prompt} if system_prompt else {}),
         )
         observer.watch_compaction(agent)
+        turn = _RunningTurn.watch(agent)
         started = time.time()
         stop_reason = None
         model_error = None
@@ -427,9 +435,13 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             try:
                 finish_params, history, _ = await session.run(messages)
             except asyncio.CancelledError:
-                # SIGTERM from the supervisor, at the deadline or on a close: report the turns completed so far.
+                # SIGTERM from the supervisor, at the deadline, on a rollout stop or on a close: report the live
+                # conversation, which holds the turns that answered and, while a turn's tool calls run, that turn's
+                # reply, whose calls have no answers. A stop once the task has ended lands so: the call that ended the
+                # task waits for its answer until the run is over, and that call is the run's last.
                 asyncio.current_task().uncancel()
-                finish_params, history = None, _completed_turns(session, messages)
+                finish_params = None
+                history = turn.history(_completed_turns(session, messages))
                 stop_reason = _stop_reason(payload)
             except APIStatusError as error:
                 if not _rejected_by_model(error):
@@ -477,6 +489,47 @@ def _completed_turns(session: Any, messages: list[Any]) -> list[list[Any]]:
     """The message history as of the start of the turn that was running, from Stirrup's per-turn snapshot."""
     state = session._current_run_state
     return [list(messages)] if state is None else [*state.full_msg_history, state.msgs]
+
+
+class _RunningTurn:
+    """Stirrup's live conversation (``step``): the messages its last policy call was sent, which Stirrup extends with
+    the turn once its tool calls have answered, and the turn's reply while those calls run.
+
+    A compaction summary is not a turn: its request is a new message list, so its reply is never kept, although it can
+    call tools, since its first attempts offer them.
+    """
+
+    def __init__(self) -> None:
+        self.messages: list[Any] | None = None
+        self.reply: Any = None
+
+    @classmethod
+    def watch(cls, agent: Any) -> _RunningTurn:
+        turn = cls()
+        step, generate = agent.step, agent._client.generate
+
+        async def recorded_step(messages: list[Any], *args: Any, **kwargs: Any) -> Any:
+            turn.messages, turn.reply = messages, None
+            result = await step(messages, *args, **kwargs)
+            turn.reply = None
+            return result
+
+        async def recorded_generate(messages: list[Any], *args: Any, **kwargs: Any) -> Any:
+            reply = await generate(messages, *args, **kwargs)
+            if messages is turn.messages:
+                turn.reply = reply
+            return reply
+
+        # On the instance, which Stirrup's session agent shares (SessionAgent.from_agent), as watch_compaction does.
+        agent.step = recorded_step
+        agent._client.generate = recorded_generate
+        return turn
+
+    def history(self, completed: list[list[Any]]) -> list[list[Any]]:
+        """``completed`` ending with the live conversation and, while its tool calls run, the running turn's reply."""
+        if self.messages is None:
+            return completed
+        return [*completed[:-1], [*self.messages, *([self.reply] if self.reply is not None else [])]]
 
 
 def _rejected_by_model(error: APIStatusError) -> bool:

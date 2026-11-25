@@ -34,7 +34,7 @@ agent-session mode behind a `single_agent_turn_legacy` environment server, all u
 its own (see Instance names): `configs/officeenv_sandbox.yaml` runs Pi, with the
 tools over MCP as on the OfficeEnv server; `configs/officeenv_sandbox_codex.yaml` (Codex CLI),
 `configs/officeenv_sandbox_opencode.yaml` (OpenCode), `configs/officeenv_sandbox_openclaw.yaml`
-(OpenClaw) and
+(OpenClaw), `configs/officeenv_sandbox_stirrup.yaml` (Stirrup) and
 `configs/officeenv_sandbox_terminus_2.yaml` (Terminus 2) run rows whose apps are commands (below),
 with no MCP tools. Each episode also:
 
@@ -45,7 +45,7 @@ with no MCP tools. Each episode also:
    lends the same sandbox;
    verification stops it (or `/close_session`, when verification did not), and so does shutting
    the server down. The sandbox's TTL runs from the seed, so where the harness caps the episodes
-   it runs at once (`concurrency`: Pi, Codex, OpenCode, OpenClaw), its config has the Environment
+   it runs at once (`concurrency`: Pi, Codex, OpenCode, OpenClaw, Stirrup), its config has the Environment
    Server admit no more (`max_concurrent_episodes` follows it), and the rest wait there, before
    their seed, for up to a day (`queue_timeout_seconds`). Terminus 2 runs every episode it is
    given;
@@ -143,6 +143,7 @@ Pi, Codex and OpenCode set their own `sandbox_config.mcp_tool_prefix` there):
 | Codex CLI | `officeenv_sandbox_codex_agent` | `officeenv_sandbox_codex_environment_server` | `officeenv_sandbox_codex_resources_server` |
 | OpenCode | `officeenv_sandbox_opencode_agent` | `officeenv_sandbox_opencode_environment_server` | `officeenv_sandbox_opencode_resources_server` |
 | OpenClaw | `officeenv_sandbox_openclaw_agent` | `officeenv_sandbox_openclaw_environment_server` | `officeenv_sandbox_openclaw_resources_server` |
+| Stirrup | `officeenv_sandbox_stirrup_agent` | `officeenv_sandbox_stirrup_environment_server` | `officeenv_sandbox_stirrup_resources_server` |
 | Terminus 2 | `officeenv_sandbox_terminus_2_agent` | `officeenv_sandbox_terminus_2_environment_server` | `officeenv_sandbox_terminus_2_resources_server` |
 
 Each harness's server takes the settings the episodes' server has in the merged config, a later
@@ -263,9 +264,12 @@ gym eval run --no-serve <the same --config and arguments> --agent officeenv_sand
   --input resources_servers/officeenv_sandbox/data/sandbox_pilot_cli_prepare.jsonl --output results/codex_cli.jsonl
 ```
 
-OpenCode, OpenClaw and Terminus 2 run the same way with their configs and
-`--agent officeenv_sandbox_opencode_agent`, `officeenv_sandbox_openclaw_agent` or
-`officeenv_sandbox_terminus_2_agent`. Pi runs these rows
+OpenCode, OpenClaw, Stirrup and Terminus 2 run the same way with their configs and
+`--agent officeenv_sandbox_opencode_agent`, `officeenv_sandbox_openclaw_agent`, `officeenv_sandbox_stirrup_agent` or
+`officeenv_sandbox_terminus_2_agent`. As for Pi, the environment server stops Stirrup's run once the task has ended
+(`end_on_task_state`). Stirrup cannot run without a finish tool, so with its default finish tool most runs end when
+the model calls `finish`. The stop ends a run that calls `user complete-task`, before its next model call. Pi's
+config sets `finish_tool_names: []`, so for Pi the stop is the normal end. Pi runs these rows
 with `configs/officeenv_sandbox.yaml` and
 `++officeenv_sandbox_pi_environment_server.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
 or as it is (a `cli` episode's seed grants no MCP tools), and `api_search` rows with its MCP transport as

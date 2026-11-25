@@ -33,6 +33,7 @@ HARNESSES = {
     "codex": ("officeenv_sandbox_codex.yaml", "codex_agent", "mcp__company__", []),
     "opencode": ("officeenv_sandbox_opencode.yaml", "opencode_agent", "company_", []),
     "openclaw": ("officeenv_sandbox_openclaw.yaml", "openclaw_agent", None, []),
+    "stirrup": ("officeenv_sandbox_stirrup.yaml", "stirrup_agent", None, []),
     "terminus_2": ("officeenv_sandbox_terminus_2.yaml", "terminus_2_sandboxed_agent", None, []),
 }
 # The generic instances the harness configs inherit from, which no resolved config keeps under their own names
@@ -135,24 +136,35 @@ def test_pis_run_ends_once_its_task_has_ended_on_every_exposure() -> None:
     assert resolved["officeenv_sandbox_pi_agent"]["responses_api_agents"]["pi_agent"]["finish_tool_names"] == []
 
 
+def test_stirrups_run_ends_once_its_task_has_ended() -> None:
+    """Stirrup's environment server stops the run at the task's end (end_on_task_state, no step loop), which it can do
+    only for an agent type whose run a rollout stop ends."""
+    _, _, resolved = resolve(harness_config("stirrup"), DOCKER)
+
+    environment = resolved["officeenv_sandbox_stirrup_environment_server"]["environment_servers"]
+    binding = environment["single_agent_turn_legacy"]
+    assert binding["end_on_task_state"] is True and binding.get("max_episode_steps") is None
+    assert "stirrup_agent" in ROLLOUT_STOP_AGENT_TYPES
+
+
 def test_the_harness_configs_compose_in_one_run_without_overriding_each_other() -> None:
     started, config, resolved = resolve(*(harness_config(harness) for harness in HARNESSES), DOCKER)
 
     for harness in HARNESSES:
         check_harness(resolved, harness)
-    # Each harness keeps its own cap: Pi's and OpenCode's 8 beside Codex's and OpenClaw's 32
+    # Each harness keeps its own cap: Pi's and OpenCode's 8 beside Codex's, OpenClaw's and Stirrup's 32
     caps = {
         harness: resolved[f"officeenv_sandbox_{harness}_environment_server"]["environment_servers"][
             "single_agent_turn_legacy"
         ]["max_concurrent_episodes"]
         for harness in HARNESSES
     }
-    assert caps == {"pi": 8, "codex": 32, "opencode": 8, "openclaw": 32, "terminus_2": None}
+    assert caps == {"pi": 8, "codex": 32, "opencode": 8, "openclaw": 32, "stirrup": 32, "terminus_2": None}
     servers = [resources_server_of(harness) for harness in HARNESSES]
     agents = [f"officeenv_sandbox_{harness}_agent" for harness in HARNESSES]
     environments = [f"officeenv_sandbox_{harness}_environment_server" for harness in HARNESSES]
     assert sorted(started) == sorted(["policy_model", *servers, *agents, *environments])
-    check_no_shared_server(started, resolved)  # no idle episodes' server beside the five harnesses'
+    check_no_shared_server(started, resolved)  # no idle episodes' server beside the six harnesses'
     assert not GENERIC & set(resolved)
     # A row that names a harness's agent reaches that harness's environment server, the one that fronts it
     servers_by_agent = _environment_servers_by_agent(config)

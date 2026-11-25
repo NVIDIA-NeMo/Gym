@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,7 +20,13 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 from stirrup.core.models import AssistantMessage, Reasoning, TokenUsage, ToolCall, ToolMessage, UserMessage
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAction, agent_outcome_policy
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    ROLLOUT_STOP_METADATA_KEY,
+    AgentOutcome,
+    OutcomeAction,
+    agent_outcome_policy,
+)
 from nemo_gym.cli.env import validate_server_configs
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
@@ -123,7 +130,9 @@ async def _run_episode(config, body, report=None, *, execute_error=None, artifac
     wrapper = StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
     state = SimpleNamespace(
         request=SimpleNamespace(episode_id=EpisodeId(rollout_id="rollout", attempt=0)),
-        session=SimpleNamespace(workdir="/root", stop_request_path="/tmp/stop-requested", artifacts=artifacts),
+        session=SimpleNamespace(
+            workdir="/root", stop_request_path="/tmp/stop-requested", artifacts=artifacts, expired=False
+        ),
         tool_access=DirectHTTPToolAccess(name="tools", required=True, base_url="http://resources:8000"),
         resources_cookies={},
         execute=execute,
@@ -195,6 +204,26 @@ class TestApp:
 
         # Unset keeps the shell, as before the option existed.
         assert payload["code_exec"] is (code_exec is not False)
+
+    @pytest.mark.parametrize("training", [False, True])
+    @pytest.mark.asyncio
+    async def test_the_summarization_cutoff_is_forwarded_to_the_rollout(self, training) -> None:
+        # Stirrup's default summarizes at 0.7 of the window; training keeps the history and never summarizes.
+        body = NeMoGymResponseCreateParamsNonStreaming(input="ignored", model="policy")
+        fields = {"context_summarization_cutoff": None} if training else {}
+
+        payload = await _runner_payload(_make_config(**fields), body)
+
+        assert payload["context_summarization_cutoff"] == (None if training else 0.7)
+
+    @pytest.mark.parametrize(("value", "valid"), [(1, True), (0.7, True), (70, False), (0, False)])
+    def test_the_summarization_cutoff_is_a_fraction_of_the_context_window(self, value, valid) -> None:
+        # Stirrup compares it with a fraction of the window: above 1 (a percent such as 70) it would never summarize.
+        if valid:
+            assert _make_config(context_summarization_cutoff=value).context_summarization_cutoff == value
+        else:
+            with pytest.raises(ValidationError, match="context_summarization_cutoff"):
+                _make_config(context_summarization_cutoff=value)
 
     @pytest.mark.asyncio
     async def test_runtime_knobs_shape_the_model_requests_the_runner_makes(self) -> None:
@@ -414,6 +443,47 @@ class TestApp:
         assert (response.status, response.metadata["stop_reason"]) == ("incomplete", "wall_time")
         assert [item.type for item in response.output] == ["function_call"]
         assert state.resources_cookies == {"session": "late"}
+
+    @pytest.mark.parametrize("completed", [True, False])
+    @pytest.mark.asyncio
+    async def test_a_run_a_rollout_stop_ended_is_marked_and_one_whose_task_ended_answers_as_completed(
+        self, completed
+    ) -> None:
+        # POST /rollouts/{rollout_id}/stop ends the runner as at its deadline, so its report says wall_time; the
+        # response says the stop instead (ng_rollout_stop), and a stop once the task has ended answers as completed.
+        wrapper = StirrupAgentWrapper(config=_make_config(), server_client=MagicMock(spec=ServerClient))
+        stopped = _report(
+            output_items=[{"type": "function_call", "call_id": "c1", "name": "code_exec", "arguments": "{}"}],
+            stop_reason="wall_time",
+            observations={"status": "incomplete", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        async def execute(payload, **_):
+            return stopped
+
+        state = SimpleNamespace(
+            request=SimpleNamespace(episode_id=EpisodeId(rollout_id="rollout", attempt=0)),
+            session=SimpleNamespace(
+                workdir="/root",
+                stop_request_path="/tmp/stop-requested",
+                artifacts=None,
+                expired=True,
+                expire_reason="task_ended",
+                expire_completed=completed,
+            ),
+            tool_access=None,
+            resources_cookies={},
+            execute=execute,
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy")
+        with patch.object(StirrupAgentWrapper, "resolve_model_base_url", return_value="http://policy.invalid/v1"):
+            response = await wrapper._run_sandbox_episode(body, state)
+
+        assert response.status == ("completed" if completed else "incomplete")
+        marker = {"reason": "task_ended", **({"completed": True} if completed else {})}
+        assert json.loads(response.metadata[ROLLOUT_STOP_METADATA_KEY]) == marker
+        assert "stop_reason" not in response.metadata
+        assert [item.type for item in response.output] == ["function_call"]
 
     @pytest.mark.parametrize(
         "artifacts", [None, _report(stop_reason="cancelled"), _report(stop_reason=None), "not a report"]

@@ -42,6 +42,13 @@ The one exception is opt-in: with `context_overflow_recovery` on, an HTTP 400 or
 code `context_length_exceeded` does not end the episode while Stirrup can still drop a completed turn. See
 [Context overflow recovery](#context-overflow-recovery).
 
+An environment server can end a run early with `POST /rollouts/{rollout_id}/stop`, for example once the task has
+ended (`end_on_task_state`). The run then ends as it does at its time limit, but the response metadata carries
+`ng_rollout_stop` in place of `stop_reason: wall_time`. A stop with `completed: true` answers `status: completed`, and
+any other stop keeps `status: incomplete`. When a run ends while a turn's tool calls run, at the time limit or on a
+stop, the response ends with that turn's reply, and those calls have no answers. A stop that ends the runner before
+it writes anything (during the seed, before the activation or while the runner starts) answers with no output items.
+
 ## Configuration
 
 `configs/stirrup_agent.yaml` is the stand-alone config. Keys:
@@ -104,6 +111,7 @@ These are constructor arguments of `DynamicMaxTokensChatCompletionsClient`
 | `truncation_recovery` (client) | `False` | When `True`, a turn that uses its whole completion budget without a schema-valid tool call is followed by one turn that requests thinking off and appends a one-time instruction to act now. The instruction is sent to the model but not recorded in the trajectory. |
 | `context_overflow_recovery` (client) | `False` | When `True`, a request the model server rejects with HTTP 400 or 413 and the error code `context_length_exceeded` does not end the episode while a completed turn can still be dropped: Stirrup drops the latest one and sends the request again. See [Context overflow recovery](#context-overflow-recovery) for the model server settings it needs and what bounds repeated recovery. |
 | `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and never replaces the history with an unusable summary: when every attempt is unusable, the episode ends as a failed response on the turns so far, classified `agent_invalid_output`, so it is graded as the model's result and not retried. |
+| `context_summarization_cutoff` (agent) | `0.7` | Fraction of the context window, above 0 and at most 1, at which Stirrup replaces the history with a summary. `None` never summarizes, so an episode that reaches the context limit ends there. See [Keeping the recorded history](#keeping-the-recorded-history). |
 
 Thinking control (`enable_thinking`, and the thinking-off turn of
 `truncation_recovery`) is sent as `extra_body.chat_template_kwargs`. It only
@@ -139,6 +147,18 @@ commands changed in the sandbox stays changed. Stirrup counts turns by the assis
 so a dropped turn is refunded against `agent_max_turns` and an episode can make more model calls than that limit. A
 turn that is redone can overflow again, so recovery can repeat without progress. Only the wall-clock limit
 `sandbox_runner_timeout_seconds` bounds that, and an episode stopped there answers `metadata.stop_reason: wall_time`.
+
+### Keeping the recorded history
+
+Training on recorded tokens (token capture) needs each model call of an episode to continue the previous call as the
+model wrote it. A context summary, a dropped turn and the one-time instruction of a truncation recovery turn each
+change that history, so the next call matches no recorded call. To keep the history, a training config sets
+`context_summarization_cutoff: null` and keeps `context_overflow_recovery` and `truncation_recovery` off, their
+defaults. Long episodes then end at the context limit.
+
+Two rewrites stay. An assistant turn with no parsed tool call goes back to the model without its `<tool_call>` and
+`<function=` text. Reasoning that the model server returns in its own field, not inline as `<think>`, is not sent
+back. The call after such a turn does not continue it.
 
 ## Licensing
 

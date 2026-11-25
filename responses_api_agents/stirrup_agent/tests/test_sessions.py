@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +17,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.agents import (
+    ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     SandboxPlatform,
@@ -232,6 +235,225 @@ def test_an_agent_that_runs_out_of_wall_time_answers_with_its_partial_run_as_inc
     assert (root / "report.txt").read_text() == "draft\n"
     invocation = next(r for r in closed.json()["agent_observations"]["records"] if "model_calls" in r)
     assert invocation["status"] == "incomplete"
+
+
+def test_a_run_stopped_once_its_task_has_ended_answers_as_completed_and_ends_with_its_last_call(
+    agent, root, monkeypatch
+):
+    """POST /rollouts/{rollout_id}/stop with completed (the environment server's stop once the task has ended) ends
+    the runner while its last call waits for an answer, as the call that ended the task waits until the run is over.
+    The run answers as completed, marked as stopped and not as a timeout, and ends with that call."""
+    resources = _Resources(_resources_app([]))
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})),
+            _call("code_exec", json.dumps({"cmd": "touch started && sleep 30"})),
+            None,
+        ]
+    )
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    responses = []
+    try:
+        # One event loop for the activation and the stop, as in a server.
+        with TestClient(agent.setup_webserver()) as client:
+            _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
+            activation = threading.Thread(
+                target=lambda: responses.append(
+                    client.post(
+                        f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+                        json={
+                            "input": [{"role": "user", "content": "Write the report."}],
+                            "model": "policy",
+                            "tools": _TOOLS,
+                        },
+                    )
+                )
+            )
+            activation.start()
+            deadline = time.monotonic() + 60
+            while not (root / "started").exists():
+                assert time.monotonic() < deadline, "the second tool call never started"
+                time.sleep(0.05)
+            stop = client.post(
+                f"/rollouts/{_EPISODE.capture_key}/stop", json={"reason": "task_ended", "completed": True}
+            )
+            activation.join(120)
+            closed = _close(client)
+    finally:
+        model.close()
+        resources.close()
+
+    assert stop.status_code == 200, stop.text
+    assert stop.json()["stopped"]
+    (response,) = responses
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["incomplete_details"]) == ("completed", None)
+    assert json.loads(body["metadata"][ROLLOUT_STOP_METADATA_KEY]) == {"reason": "task_ended", "completed": True}
+    assert "stop_reason" not in body["metadata"]
+    calls = [item for item in body["output"] if item["type"] == "function_call"]
+    assert len(calls) == 2
+    assert "sleep 30" in calls[-1]["arguments"]
+    assert body["output"][-1]["type"] == "function_call"
+    assert (root / "report.txt").read_text() == "draft\n"
+    assert closed.status_code == 200, closed.text
+    # The close says the run completed, as its response does (report_completed_rollout_stop).
+    (invocation,) = [r for r in closed.json()["agent_observations"]["records"] if r["kind"] == "agent_invocation"]
+    assert invocation["status"] == "completed"
+
+
+@pytest.mark.parametrize("completed", [True, False])
+@pytest.mark.parametrize("stopped_while", ["seeding", "seeded"])
+def test_a_stop_before_the_runner_starts_answers_without_a_model_call(
+    agent, root, monkeypatch, stopped_while, completed
+):
+    """A rollout stop accepted while the session seeds, or after the seed and before the activation, keeps the runner
+    from starting: the supervisor launches nothing. The activation answers with no turns, the stop's marker and the
+    status the stop asked for, and the session closes with the seed's cookies."""
+    resources = _Resources(_resources_app([]))
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "touch ran"}))])
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    stops = []
+    try:
+        # One event loop for the seed, the activation and the stop, as in a server.
+        with TestClient(agent.setup_webserver()) as client:
+
+            def stop() -> None:
+                stops.append(
+                    client.post(
+                        f"/rollouts/{_EPISODE.capture_key}/stop", json={"reason": "task_ended", "completed": completed}
+                    )
+                )
+
+            if stopped_while == "seeding":
+                install = sandbox.StirrupSessionState.install_runtime
+
+                async def install_after_a_stop(self, *, timeout):
+                    await asyncio.to_thread(stop)
+                    await install(self, timeout=timeout)
+
+                monkeypatch.setattr(sandbox.StirrupSessionState, "install_runtime", install_after_a_stop)
+            seeded = _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
+            if stopped_while == "seeded":
+                stop()
+            response = client.post(
+                f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+                json={"input": [{"role": "user", "content": "Write the report."}], "model": "policy", "tools": _TOOLS},
+            )
+            closed = _close(client)
+    finally:
+        model.close()
+        resources.close()
+
+    assert seeded.status_code == 200, seeded.text
+    (stopped,) = stops
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json()["stopped"]
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == ("completed" if completed else "incomplete")
+    marker = {"reason": "task_ended", **({"completed": True} if completed else {})}
+    assert json.loads(body["metadata"][ROLLOUT_STOP_METADATA_KEY]) == marker
+    assert "stop_reason" not in body["metadata"]
+    assert body["output"] == []
+    assert model.requests == []
+    assert not (root / "ran").exists()
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["resources_cookies"] == {"session": "seeded"}
+    (invocation,) = [r for r in closed.json()["agent_observations"]["records"] if r["kind"] == "agent_invocation"]
+    assert invocation["status"] == ("completed" if completed else "incomplete")
+
+
+def test_a_run_stopped_before_it_starts_answers_as_an_empty_stopped_run(agent, root, monkeypatch):
+    """A rollout stop that arrives after the seed and before the run ends the runner before launch."""
+    resources = _Resources(_resources_app([]))
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft"}))])
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    try:
+        with TestClient(agent.setup_webserver()) as client:
+            _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
+            stop = client.post(
+                f"/rollouts/{_EPISODE.capture_key}/stop", json={"reason": "task_ended", "completed": True}
+            )
+            response = client.post(
+                f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+                json={"input": [{"role": "user", "content": "Write the report."}], "model": "policy", "tools": _TOOLS},
+            )
+            closed = _close(client)
+    finally:
+        model.close()
+        resources.close()
+
+    assert stop.json()["stopped"]
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["output"]) == ("completed", [])
+    assert json.loads(body["metadata"][ROLLOUT_STOP_METADATA_KEY]) == {"reason": "task_ended", "completed": True}
+    assert model.requests == []
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["agent_observations"]["gaps"] == []
+
+
+@pytest.mark.parametrize("ended_by", ["stop", "deadline"])
+def test_a_runner_ended_during_its_start_is_a_stopped_run_only_when_a_stop_ended_it(
+    agent, root, tmp_path, monkeypatch, ended_by
+):
+    """The supervisor can end the runner during its start, before the runner handles SIGTERM, so it writes no report.
+    A rollout stop that ended it answers as an empty stopped run. A deadline with no stop stays a failure."""
+    # The request names no tools, so no finish tool either.
+    agent.config.finish_tool_names = None
+    started = tmp_path / "runner-started"
+    fake_python = tmp_path / "python"
+    # Only the runner is replaced, by a start that never ends; the supervisor runs on the real interpreter.
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = -c ] && exit 0\n'
+        f"case \"$1 $2 $3\" in '-E -s '*sandbox_runner.py) touch {started}; exec sleep 60;; esac\n"
+        f'exec {sys.executable} "$@"\n'
+    )
+    fake_python.chmod(0o755)
+    monkeypatch.setattr(sandbox, "SANDBOX_PYTHON", str(fake_python))
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: "http://policy.invalid/v1")
+    if ended_by == "deadline":
+        agent.config.sandbox_runner_timeout_seconds = 2
+    responses, errors = [], []
+
+    def activate(client: TestClient) -> None:
+        try:
+            responses.append(_respond(client))
+        except Exception as error:
+            errors.append(error)
+
+    with TestClient(agent.setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(str(root)))
+        activation = threading.Thread(target=activate, args=(client,))
+        activation.start()
+        deadline = time.monotonic() + 60
+        while not started.exists():
+            assert time.monotonic() < deadline and not errors and not responses, f"the runner never started: {errors}"
+            time.sleep(0.05)
+        if ended_by == "stop":
+            stop = client.post(f"/rollouts/{_EPISODE.capture_key}/stop", json={"reason": "budget"})
+            assert stop.json()["stopped"], stop.text
+        activation.join(120)
+        closed = _close(client)
+
+    assert closed.status_code == 200, closed.text
+    if ended_by == "deadline":
+        # The agent route failure, raised from the runner's missing report
+        (error,) = errors
+        assert "Stirrup sandbox runner exited without output" in str(error.__cause__)
+        return
+    assert errors == []
+    (response,) = responses
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["output"]) == ("incomplete", [])
+    assert json.loads(body["metadata"][ROLLOUT_STOP_METADATA_KEY]) == {"reason": "budget"}
+    assert "stop_reason" not in body["metadata"]
 
 
 def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, monkeypatch):

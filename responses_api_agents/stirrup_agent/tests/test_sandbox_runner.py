@@ -5,6 +5,7 @@
 import ast
 import asyncio
 import json
+import math
 import os
 import signal
 import subprocess
@@ -20,8 +21,15 @@ from stirrup.clients.utils import to_openai_tools
 from responses_api_agents.stirrup_agent import nemo_agent as runner_agent
 from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
-from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES
-from responses_api_agents.stirrup_agent.sandbox_runner import LocalShell, Observer, main, remote_tool, run
+from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES, _stopped_without_output
+from responses_api_agents.stirrup_agent.sandbox_runner import (
+    InvocationStatus,
+    LocalShell,
+    Observer,
+    main,
+    remote_tool,
+    run,
+)
 from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app
 
 
@@ -126,6 +134,30 @@ def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources
     assert counts == [(10, 5, 15)] * 4
 
 
+@pytest.mark.parametrize("cutoff", [0.7, None])
+def test_the_summarization_cutoff_reaches_stirrup(tmp_path, resources, monkeypatch, cutoff):
+    """Training keeps one unbroken history: a cutoff of None never summarizes."""
+    seen = {}
+    init = NeMoAgent.__init__
+
+    def record(self, **kwargs):
+        seen.update(kwargs)
+        init(self, **kwargs)
+
+    monkeypatch.setattr(NeMoAgent, "__init__", record)
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
+    payload = _payload(model.base_url, resources.base_url, workdir)
+    payload["context_summarization_cutoff"] = cutoff
+    try:
+        asyncio.run(run(payload, tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert seen["context_summarization_cutoff"] == (math.inf if cutoff is None else cutoff)
+
+
 async def _cancelled_after_the_model_hangs(payload: dict, tmp_path: Path, model: _ModelServer) -> dict:
     task = asyncio.ensure_future(run(payload, tmp_path, Observer()))
     assert await asyncio.to_thread(model.blocked.wait, 30), "the model was never called"
@@ -152,6 +184,90 @@ def test_a_cancelled_run_reports_the_turns_it_completed(tmp_path, resources, mar
     assert [item["type"] for item in output["output_items"]].count("function_call") == 1
     assert [t["tool_name"] for t in output["observations"]["tool_calls"]] == ["code_exec"]
     assert (workdir / "report.txt").read_text() == "draft\n"
+
+
+async def _cancelled_while_a_tool_call_runs(payload: dict, tmp_path: Path, started: Path) -> dict:
+    task = asyncio.ensure_future(run(payload, tmp_path, Observer()))
+    deadline = time.monotonic() + 30
+    while not started.exists():
+        assert time.monotonic() < deadline, "the second tool call never started"
+        await asyncio.sleep(0.05)
+    task.cancel()
+    return await task
+
+
+@pytest.mark.parametrize(("marker_exists", "stop_reason"), [(False, "wall_time"), (True, "cancelled")])
+def test_a_stopped_run_ends_with_the_turn_whose_tool_call_was_running(tmp_path, resources, marker_exists, stop_reason):
+    """The supervisor ends the run while a turn's tool call waits for its answer, as the call that ended the task
+    waits until the run is over: the run ends with that turn's reply, whose call has no answer."""
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    marker = tmp_path / "stop-requested"
+    if marker_exists:
+        marker.touch()
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})),
+            _call("code_exec", json.dumps({"cmd": "touch started && sleep 10"})),
+            None,
+        ]
+    )
+    payload = {**_payload(model.base_url, resources.base_url, workdir), "stop_request_path": str(marker)}
+    try:
+        output = asyncio.run(_cancelled_while_a_tool_call_runs(payload, tmp_path, workdir / "started"))
+    finally:
+        model.close()
+
+    calls = [item for item in output["output_items"] if item["type"] == "function_call"]
+    answers = [item for item in output["output_items"] if item["type"] == "function_call_output"]
+    assert output["stop_reason"] == stop_reason
+    assert output["observations"]["status"] == "incomplete"
+    assert output["observations"]["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2"]
+    assert len(answers) == 1
+    assert len(calls) == 2
+    assert "sleep 10" in calls[-1]["arguments"]
+    assert output["output_items"][-1]["type"] == "function_call"
+    assert [t["tool_name"] for t in output["observations"]["tool_calls"]] == ["code_exec"]
+
+
+@pytest.mark.parametrize(
+    "after_turn",
+    [
+        [{**_call("code_exec", json.dumps({"cmd": "echo from-the-summary"})), "content": "Wrote report.txt."}, None],
+        [_call("code_exec", json.dumps({"cmd": "echo from-the-summary"})), None],
+        [None],
+    ],
+    ids=["after-the-summary", "second-summary-attempt", "first-summary-attempt"],
+)
+def test_a_run_stopped_around_a_compaction_ends_with_its_completed_turn(tmp_path, resources, after_turn):
+    """A summary is not a turn: a run stopped during or after a compaction ends with the turn that ran, answered."""
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})), *after_turn])
+    payload = {**_payload(model.base_url, resources.base_url, workdir), "context_summarization_cutoff": 1e-6}
+    try:
+        output = asyncio.run(_cancelled_after_the_model_hangs(payload, tmp_path, model))
+    finally:
+        model.close()
+
+    assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
+
+
+def test_the_report_of_a_run_stopped_without_output_has_the_runners_shape(tmp_path, resources):
+    """The agent server reads the report it makes for a run that a stop ended before any output as it reads the
+    runner's."""
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
+    try:
+        output = asyncio.run(run(_payload(model.base_url, resources.base_url, workdir), tmp_path, Observer()))
+    finally:
+        model.close()
+
+    report = _stopped_without_output({"session": "seeded"})
+    assert set(report) == set(output)
+    assert {key: report[key] for key in ("observations", "usages")} == Observer().report(InvocationStatus.INCOMPLETE)
+    assert (report["stop_reason"], report["resources_cookies"]) == ("wall_time", {"session": "seeded"})
 
 
 def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):
