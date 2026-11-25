@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -434,17 +434,31 @@ async def test_unparseable_judge_can_be_masked_without_changing_legacy_default()
 @pytest.mark.asyncio
 async def test_judge_parse_retries_share_one_overall_deadline():
     server = _server()
-    server.config.judge_parse_max_retries = 1
+    server.config.judge_parse_max_retries = 2
     server.config.judge_call_timeout_secs = 0.05
+    deadline = asyncio.timeout(None)
+    cancelled = asyncio.Event()
 
     async def slow_judge(*_args, **_kwargs):
-        await asyncio.sleep(0.03)
-        return _FakeHttpResponse(_model_response("unclear"))
+        if server.server_client.post.await_count == 1:
+            return _FakeHttpResponse(_model_response("unclear"))
+        # Expire the shared deadline only after the retry starts, independent
+        # of how quickly a busy runner schedules either judge call.
+        deadline.reschedule(asyncio.get_running_loop().time())
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
 
     server.server_client.post = AsyncMock(side_effect=slow_judge)
-    with pytest.raises(Exception) as caught:
-        await server._judge_evidence(_request())
+    with patch("resources_servers.webvoyager_judge.app.asyncio.timeout", return_value=deadline) as timeout:
+        with pytest.raises(Exception) as caught:
+            await server._judge_evidence(_request())
+    timeout.assert_called_once_with(server.config.judge_call_timeout_secs)
     assert is_judge_failure(caught.value)
+    assert isinstance(caught.value.__cause__, TimeoutError)
+    assert deadline.expired()
+    assert cancelled.is_set()
     assert server.server_client.post.await_count == 2
 
 

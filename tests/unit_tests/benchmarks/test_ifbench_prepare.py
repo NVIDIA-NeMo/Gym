@@ -4,6 +4,7 @@
 import json
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 from benchmarks.ifbench import prepare
 
@@ -21,3 +22,23 @@ def test_the_committed_metrics_describe_the_pinned_prompts() -> None:
     assert metrics["Number of examples"] == PROMPTS * metrics["num_repeats"]
     assert metrics["prompt"]["unique_count"] == PROMPTS
     assert metrics["id"]["Max"] == PROMPTS - 1
+
+
+def test_prepared_rows_carry_the_source_key_as_task_id(tmp_path: Path) -> None:
+    source = [
+        {"key": "7", "prompt": "a", "instruction_id_list": ["count:keywords_multiple"], "kwargs": [{}]},
+        {"key": "3", "prompt": "b", "instruction_id_list": ["count:word_count_range"], "kwargs": [{}]},
+    ]
+
+    def download(url: str, fpath: Path) -> None:
+        Path(fpath).write_text("".join(json.dumps(row) + "\n" for row in source))
+
+    with (
+        patch.object(prepare, "DATA_DIR", tmp_path),
+        patch.object(prepare, "RAW_FPATH", tmp_path / "IFBench_test.jsonl"),
+        patch.object(prepare, "OUTPUT_FPATH", tmp_path / "ifbench_benchmark.jsonl"),
+        patch.object(prepare.urllib.request, "urlretrieve", download),
+    ):
+        rows = [json.loads(line) for line in prepare.prepare().read_text().splitlines()]
+
+    assert [(row["task_id"], row["id"]) for row in rows] == [("7", 0), ("3", 1)]

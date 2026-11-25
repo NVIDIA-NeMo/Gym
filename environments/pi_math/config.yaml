@@ -22,7 +22,7 @@ pi_math_agent:
       concurrency: 8
       command: pi
       model: nvinf/nvidia/qwen/qwen3-5-397b-a17b
-      pi_version: 0.80.2
+      pi_version: 1.5.2
       timeout: 900
       system_prompt: |
         You are a precise math assistant with a bash tool. Run Python to calculate or verify numeric results when helpful.
@@ -37,8 +37,12 @@ pi_math_agent:
               supportsDeveloperRole: false
               supportsReasoningEffort: false
             models:
+            # Pi caps each call at the model's maxTokens (16384 when unset), fitted to contextWindow (128000 when
+            # unset). These are the model card's native context and its output length for competition math.
             - id: nvidia/qwen/qwen3-5-397b-a17b
               reasoning: false
+              contextWindow: 262144
+              maxTokens: 81920
       datasets:
       - name: example
         type: example

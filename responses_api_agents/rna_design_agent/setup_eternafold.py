@@ -54,6 +54,9 @@ def ensure_eternafold(base_dir: Path | str | None = None) -> Path:
                 logger.info("Cloning EternaFold into %s", base_dir)
                 subprocess.run(["git", "clone", "--depth=1", _REPO, str(base_dir / "EternaFold")], check=True)
             logger.info("Building EternaFold")
+            # contrafold_api.cpp includes Defaults.ipp, which upstream's Makefile regenerates without making
+            # contrafold_api.o wait for it. Generate it first so a parallel build never reads a half-written file.
+            subprocess.run(["make", "-C", str(src), "Defaults.ipp"], check=True)
             subprocess.run(["make", "-C", str(src), f"-j{os.cpu_count() or 2}", f"CXXFLAGS={_CXXFLAGS}"], check=True)
             if not binary.is_file():
                 raise RuntimeError(f"EternaFold build finished but {binary} is missing")

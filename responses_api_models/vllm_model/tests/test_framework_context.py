@@ -96,6 +96,7 @@ def make_capture_harness(
     checkpoint=False,
     stream_keepalive_s=None,
     dynamo=False,
+    custom_tool_strategy="passthrough",
 ):
     """Allow paired RL tests to inject their staging transport and prefix reader.
 
@@ -137,6 +138,7 @@ def make_capture_harness(
             checkpoint={"policy": checkpoint},
             stream_keepalive_s=stream_keepalive_s,
             dynamo_frontend=dynamo,
+            custom_tool_strategy=custom_tool_strategy,
         ),
         server_client=MagicMock(spec=ServerClient, global_config_dict=config),
     )
@@ -693,14 +695,14 @@ def test_conversion_error_is_rejected_before_intent(monkeypatch, tmp_path, route
     ],
     ids=lambda item: item["type"],
 )
-def test_unsupported_replay_item_is_rejected_before_intent(monkeypatch, tmp_path, route, prior_call, item):
+def test_unsupported_history_item_is_rejected_before_intent(monkeypatch, tmp_path, route, prior_call, item):
     harness = make_capture_harness(monkeypatch, tmp_path)
     history = list(HISTORY)
     if prior_call:
         first = assert_clean(harness.post("attempt", history))
         history += first["output"]
     history += [item, {"role": "user", "content": "next"}]
-    # This is valid Responses input; the rejection must come from replay support.
+    # The default chat converter or source-history replay rejects these valid Responses input items.
     NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": history})
     before = harness.manifest("attempt")
     root = tmp_path / "lineage"
@@ -958,6 +960,47 @@ def test_framework_checkpoint_restores_a_closed_attempt_and_accepts_its_next_cal
     assert candidate.parent_call_id == first_record.model_call_id
     assert candidate.staging_chain == [first_record.staging_key]
     assert harness.post("episode", HISTORY).status_code == 409
+
+
+def test_custom_tool_result_continues_the_served_call(monkeypatch, tmp_path):
+    harness = make_capture_harness(monkeypatch, tmp_path, custom_tool_strategy="function_bridge")
+    original_worker = NeMoGymAsyncOpenAI.create_chat_completion
+    tool_input = '{"x": 1}'
+
+    async def worker(client, **body):
+        response = await original_worker(client, **body)
+        if len(harness.worker_calls) == 1:
+            choice = response["choices"][0]
+            choice["finish_reason"] = "tool_calls"
+            choice["message"].update(
+                content=None,
+                tool_calls=[
+                    {
+                        "type": "function",
+                        "id": "call-1",
+                        "function": {"name": "exec", "arguments": json.dumps({"input": tool_input})},
+                    }
+                ],
+            )
+        return response
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", worker)
+    path = "/ng-rollout/attempt/training-token-capture/v1/responses"
+    tools = [{"type": "custom", "name": "exec"}]
+    history = [{"role": "user", "content": "run the tool"}]
+    first = assert_clean(harness.client.post(path, json={"input": history, "tools": tools}))
+    (call,) = first["output"]
+    assert (call["type"], call["input"]) == ("custom_tool_call", tool_input)
+    result = {"type": "custom_tool_call_output", "call_id": call["call_id"], "output": "ok"}
+    assert_clean(harness.client.post(path, json={"input": [*history, call, result], "tools": tools}))
+    admission = harness.worker_calls[-1][0]
+    assert admission.parent_call_id == harness.manifest("attempt").records[0].model_call_id
+    assert [item.role for item in admission.request_replay.items[-2:]] == ["assistant", "tool"]
+
+    # Free-form input is exact text, even when it happens to parse as JSON.
+    edited = {**call, "input": '{"x":1}'}
+    assert_clean(harness.client.post(path, json={"input": [*history, edited, result], "tools": tools}))
+    assert harness.worker_calls[-1][0].root_reason == "no_prefix_match"
 
 
 def test_tool_arguments_beyond_the_64_bit_range_still_admit(monkeypatch, tmp_path):
