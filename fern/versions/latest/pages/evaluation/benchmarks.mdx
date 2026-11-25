@@ -137,7 +137,8 @@ python -m benchmarks.nl2repobench.prepare
 python -m resources_servers.nl2repobench.prepare --source-dir /path/to/NL2RepoBench --no-download
 ```
 
-**Run it.** The OpenCode harness (`benchmarks/nl2repobench/opencode.yaml`) drives the resources server. A sandbox
+**Run it.** Two agent harnesses are wired to the same resources server: OpenCode
+(`benchmarks/nl2repobench/opencode.yaml`) and the OpenHands SDK (`benchmarks/nl2repobench/openhands.yaml`). A sandbox
 provider config is required (the sandbox provider must reach the per-task images on `ghcr.io`):
 
 ```bash
@@ -146,6 +147,9 @@ gym env start \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
   --config responses_api_models/<model>/configs/<model>.yaml
 ```
+
+Both harnesses run on agent sessions in the sandbox the resources server lends (`opencode_agent` and `openhands_agent`),
+and both presets support only `agent_network_mode: official` for now; the seed refuses the other modes.
 
 Three settings change what a score means; report them with the result. The shipped configs use
 `grading_protocol: upstream` and `agent_network_mode: official`:
@@ -162,7 +166,9 @@ Three settings change what a score means; report them with the result. The shipp
   image in `no_internet_preinstalled`; the verifier uses the pinned per-task image unless overridden.
 
 A verdict that is not about the agent (a lost session, a verifier sandbox that never started, a sandbox-provider
-error) is retried on a fresh verifier sandbox and then returned as a masked sample rather than a score of 0. The [benchmark README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/nl2repobench/README.md) lists every
+error) is retried on a fresh verifier sandbox and then returned as a masked sample rather than a score of 0. Upstream
+NL2RepoBench with the OpenHands harness has no completed end-to-end run yet, so treat that combination as untested.
+The [benchmark README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/nl2repobench/README.md) lists every
 dataset, harness and mode combination that has been run, and the
 [resources server README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/nl2repobench/README.md)
 describes the verification flow.
