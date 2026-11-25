@@ -57,6 +57,36 @@ _MODEL_KEYS = frozenset(
         "judge_model_name",
     }
 )
+# Agent server settings that name the agent harness or pin its version, read from the agent server's own settings and
+# from `agent_kwargs`, the settings a wrapper agent passes to the harness it runs. A wrapper's agent type does not say
+# which harness ran: configs of one benchmark that differ only in harness can share it and differ only in these.
+_HARNESS_KEYS = frozenset(
+    {
+        # The harness a wrapper agent runs.
+        "agent",  # harness_agent, harness_exa_search
+        "agent_framework",  # swe_agents
+        "agent_server_module",  # anyswe_agent, anyterminal_agent, cvdp_agent
+        "harbor_agent_name",
+        "harbor_agent_import_path",
+        # Its version; for swe_agents, the repository and commit it is built from.
+        "agent_framework_repo",
+        "agent_framework_commit",
+        "claude_code_version",
+        "cline_version",
+        "codex_version",
+        "copilot_version",
+        "droid_version",
+        "goose_version",
+        "kilo_version",
+        "kimi_version",
+        "openclaw_version",
+        "opencode_version",
+        "pi_version",
+        "pool_version",
+        "prime_agent_version",
+        "qwen_version",
+    }
+)
 
 
 #: Seconds to wait for one model backend's `/models` answer; a slow or absent backend never blocks the run.
@@ -73,6 +103,18 @@ class ServedBackend(BaseModel):
     id: str | None = None
     root: str | None = None
     unknown_reason: str | None = None
+
+
+class AgentServerHarness(BaseModel):
+    """The agent harness one agent server runs, as the run's config names and pins it."""
+
+    # The key under `responses_api_agents`, such as `opencode_agent` or `simple_agent`.
+    agent_type: str
+    # The allowlisted settings that name the harness or pin its version, such as `{"opencode_version": "1.17.11"}`.
+    # A version the config does not pin is the agent's default at `gym_commit`.
+    harness: dict[str, str] = Field(default_factory=dict)
+    # The model server the agent calls (its `model_server.name`), a key of `served_models`.
+    model_server: str | None = None
 
 
 class RunProvenance(BaseModel):
@@ -100,6 +142,8 @@ class RunProvenance(BaseModel):
     served_models: dict[str, list[ServedBackend]] = Field(default_factory=dict)
     # Why `served_models` is empty: no model server could be found or asked. Absent when it was filled.
     served_models_unknown_reason: str | None = None
+    # The harness each agent server runs, keyed by agent server name: the `agent_ref.name` a rollout carries.
+    agent_servers: dict[str, AgentServerHarness] = Field(default_factory=dict)
     # A versioned Eval Factory config the caller ran this under, recorded as given.
     efb_config_ref: str | None = None
 
@@ -121,7 +165,8 @@ def _sampling(config: Mapping) -> dict[str, JsonValue]:
 def build_provenance(
     config: Mapping[str, object], *, materialized_fpath: Path | None = None, prompt_config: str | None = None
 ) -> RunProvenance:
-    """Snapshot model, judge, template and sampling settings. The masked config itself is saved separately."""
+    """Snapshot model, judge, template and sampling settings and each agent server's harness. The masked config itself
+    is saved separately."""
     record = RunProvenance(gym_commit=installed_gym_commit())
     efb_config_ref = config.get("efb_config_ref")
     if isinstance(efb_config_ref, str):
@@ -169,6 +214,7 @@ def build_provenance(
                     record.sampling_parameters[location] = selected
 
     visit(config, "")
+    record.agent_servers = agent_servers(config)
     record.datasets = sorted(set(record.datasets))
     if prompt_config:
         prompt = load_prompt_config(prompt_config)
@@ -218,6 +264,36 @@ def build_provenance(
         record.datasets = sorted(datasets)
         record.input_sampling_parameters = [sampling_profiles[key] for key in sorted(sampling_profiles)]
     return record
+
+
+def agent_servers(config: Mapping[str, object]) -> dict[str, AgentServerHarness]:
+    """The agent type, harness and model server of each agent server in `config`, keyed by agent server name.
+
+    Only allowlisted keys are read: an agent server's settings, its `agent_kwargs` included, can hold credentials
+    under any name."""
+    found: dict[str, AgentServerHarness] = {}
+    for name, node in config.items():
+        if not (isinstance(node, Mapping) and isinstance(node.get("responses_api_agents"), Mapping)):
+            continue
+        for agent_type, settings in node["responses_api_agents"].items():
+            if not isinstance(settings, Mapping):
+                continue
+            harness: dict[str, str] = {}
+            wrapped = settings.get("agent_kwargs")
+            # The agent server's own settings first: they win over the ones it passes to the harness it wraps.
+            for block in (settings, wrapped if isinstance(wrapped, Mapping) else {}):
+                for key in sorted(_HARNESS_KEYS):
+                    value = block.get(key)
+                    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                        harness.setdefault(key, url_without_credentials(str(value)))
+            model_server = settings.get("model_server")
+            model_server_name = model_server.get("name") if isinstance(model_server, Mapping) else None
+            found[str(name)] = AgentServerHarness(
+                agent_type=str(agent_type),
+                harness=harness,
+                model_server=model_server_name if isinstance(model_server_name, str) else None,
+            )
+    return found
 
 
 def _backend_urls(server: Mapping) -> list[str]:
@@ -320,7 +396,8 @@ def write_run_provenance(
     """Write one provenance artifact next to a run's materialized inputs before dispatch.
 
     ``model_server_config`` returns the config that names the run's model servers when ``config`` does not: a
-    ``--no-serve`` collection sees only its own config, and the model servers' entries come from the head server."""
+    ``--no-serve`` collection sees only its own config, and the entries of the model servers, and of the agent servers
+    when ``config`` has none either, come from the head server."""
     from nemo_gym.utils.path_utils import materialized_path_for
 
     try:
@@ -336,6 +413,8 @@ def write_run_provenance(
             record.served_models = served_models(servers)
             if not record.served_models:
                 record.served_models_unknown_reason = "no model server in the run's config"
+            if servers is not config and not record.agent_servers:
+                record.agent_servers = agent_servers(servers)
         except (Exception, SystemExit) as error:
             # Reporting never stops the run, not even when finding the head server exits on its arguments.
             # The message may carry a URL or a head-server address; keep only the type.

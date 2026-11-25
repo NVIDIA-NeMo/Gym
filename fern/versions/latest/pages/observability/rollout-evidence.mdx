@@ -379,6 +379,30 @@ explicit sampling settings and seeds, configured judge models and judge-prompt v
 the running Gym version and commit. Unknown values are null or absent from the corresponding
 settings map. Prompt text and request metadata from the input rows are fingerprinted, not copied.
 
+`agent_servers` records the agent harness of each agent server in the run, keyed by agent server
+name: the `agent_ref.name` each rollout carries, so a result can be split by the harness that
+produced it. Each entry holds:
+
+- `agent_type`: the key under `responses_api_agents`, such as `opencode_agent` or `simple_agent`.
+- `harness`: the settings that name the harness a wrapper agent runs (`agent` for
+  `harness_exa_search`, `agent_framework` for `swe_agents`) and that pin the harness version (such
+  as `opencode_version`), read from the agent server's settings and from its `agent_kwargs`. A
+  version the config does not pin is the agent's default at `gym_commit`.
+- `model_server`: the name of the model server the agent calls, a key of `served_models`.
+
+```json
+"agent_servers": {
+  "partner_if_swe_agent": {
+    "agent_type": "opencode_agent",
+    "harness": {"opencode_version": "1.17.11"},
+    "model_server": "partner_if_policy_model"
+  }
+}
+```
+
+Only these allowlisted settings are read from an agent server's config, which can hold
+credentials under any name.
+
 `resolved_config` holds the whole resolved Gym configuration, so two results can be compared
 setting by setting. Secret-shaped keys (tokens, keys, headers, passwords, cookies) are masked as
 `****`, as in configurations exported to W&B and MLflow; every value under an `env` block is masked;
