@@ -9,7 +9,7 @@ config_paths:
 
 # Forwarded as kwargs to benchmarks/beaver/prepare.py's prepare(). Override with the Hydra `+` prefix, for example
 # `+prepare_script_args.sample=400`; the prepared file's name then changes (see prepare.output_fpath_for), so point
-# `jsonl_fpath` at it too, or use eval.sh, which does both.
+# `jsonl_fpath` at it too (README.md, "Preparing data and evaluating", shows both overrides).
 prepare_script_args:
   domains: [dw]
   sample: 300
