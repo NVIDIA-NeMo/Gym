@@ -10,6 +10,9 @@ opencode_sandboxed_agent:
         type: responses_api_models
         name: policy_model
       token_id_capture: true
+      # The release this deprecated agent's plugins and capture were checked on; the code default follows
+      # opencode_agent's (OPENCODE_VERSION in responses_api_agents/opencode_agent/runtime.py).
+      opencode_version: 1.17.11
 
       debug: false
 
