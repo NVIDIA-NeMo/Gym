@@ -30,9 +30,10 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecArgvUnsupportedError,
@@ -324,6 +325,8 @@ def _private_env_file(staging_dir: Path, content: bytes) -> Iterator[Path | None
 
 class ApptainerProvider:
     """Sandbox provider backed by the local Apptainer CLI."""
+
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="same_host")
 
     name = "apptainer"
 

@@ -19,7 +19,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 from urllib.parse import urlsplit
 
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
@@ -358,27 +358,51 @@ class SandboxSnapshotInUseError(SandboxSnapshotError):
     """Raised when a provider refuses to delete a snapshot because something still uses it."""
 
 
+NetworkRule = Literal["inherit", "no_network", "model_only", "model_and_tools", "hosts_only"]
+"""The egress rule a sandbox starts with.
+
+``inherit`` keeps the provider's default. ``no_network`` allows no egress. ``model_only`` allows the model server,
+``model_and_tools`` the model server and the tool servers, and ``hosts_only`` only the hosts listed for the sandbox.
+Every restricted rule also allows the listed hosts.
+"""
+NETWORK_RULES: frozenset[NetworkRule] = frozenset(get_args(NetworkRule))
+
 # What a snapshot of a sandbox can keep.
 SnapshotContent = Literal["files", "processes"]
+Reconnect = Literal["always", "same_host", "never"]
 
 
 @dataclass(frozen=True)
 class SandboxCapabilities:
-    """What a provider class can do, declared as its ``capabilities`` class attribute.
+    """What a provider class can do beyond start, commands, file transfer and stop, declared as its ``capabilities``
+    class attribute.
 
-    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none.
+    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none. Every owner,
+    typed config, ``OwnedSandboxes``, ``borrow()``, stop and shutdown sweep works on every provider. These capabilities
+    are needed only by servers that use them, which are refused as early as they can be known.
 
     Attributes:
         snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots. With
             ``"processes"``, a snapshot saves memory and running processes, and a sandbox created from it
             continues them.
+        network_rules: The egress rules the provider can apply at creation (see :data:`NetworkRule`). A provider
+            that lists any rule besides ``inherit`` implements :class:`SupportsSandboxNetworkRules`.
+        reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
+            ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
+            ``never``.
     """
 
     snapshot_keeps: frozenset[SnapshotContent] = frozenset()
+    network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
+    reconnect: Reconnect = "always"
 
 
-def provider_capabilities(provider: object) -> SandboxCapabilities:
-    """The capabilities ``provider`` declares; the defaults for a provider that declares none."""
+def provider_capabilities(provider: object, *, config: Mapping[str, Any] | None = None) -> SandboxCapabilities:
+    """The provider's effective capabilities, resolved from its deployment config when checking a class at startup."""
+    if config is not None and isinstance(provider, type):
+        resolve = getattr(provider, "capabilities_for_config", None)
+        if resolve is not None:
+            return resolve(config)
     capabilities = getattr(provider, "capabilities", None)
     return capabilities if isinstance(capabilities, SandboxCapabilities) else SandboxCapabilities()
 
@@ -449,6 +473,20 @@ class SandboxProvider(Protocol):
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxNetworkRules(Protocol):
+    """A provider that applies egress rules besides ``inherit`` when it creates a sandbox."""
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with ``rule`` applied, allowing ``hosts``; only called for a rule it declares.
+
+        ``hosts`` are host names or addresses a sandbox on this provider can reach, already resolved by the owner.
+        """
         ...
 
 

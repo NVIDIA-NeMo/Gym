@@ -42,9 +42,10 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecResult,
@@ -426,6 +427,8 @@ class BwrapProvider:
     """Sandbox provider backed by a pinned bubblewrap binary on the Gym process's host."""
 
     name = PROVIDER_NAME
+    # A borrower reconnects only on the same host and as the same user.
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="same_host")
 
     def __init__(self, **config: Any) -> None:
         self._config = BwrapConfig(**config)
