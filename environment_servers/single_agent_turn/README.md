@@ -57,18 +57,40 @@ A restore rebuilds a borrowed sandbox under a new ID. When the replacement attem
 
 ## A sandbox for each attempt
 
-This server can own the sandbox groups of each attempt: it starts them, lends them to the agent and to the verifier, and stops them, so a harness that runs its loop in a sandbox, such as Simple Agent, never runs on a host. The Resources Server and the agent only borrow them. The lifecycle is the base `BaseEnvironmentServer`'s, configured through `AttemptSandboxEnvironmentServerConfig`. Set `sandbox_provider` to a named sandbox provider block and `sandbox_config` to the groups' settings; set both or neither. They say how a group starts, not whether: where the agent and the verifier run is fixed per task (see below). Unset, this server starts no sandbox and the agent runs where it ran before; an attempt whose Resources Server declares a group or a `verifier_mode` other than `none` fails for good.
+This server can own the sandbox groups of each attempt: it starts them, lends them to the agent and to the verifier, and stops them, so a harness that runs its loop in a sandbox, such as Simple Agent, never runs on a host. The Resources Server and the agent only borrow them. The lifecycle is the base `BaseEnvironmentServer`'s, configured through `AttemptSandboxEnvironmentServerConfig`:
+
+| Field | Says |
+|------|------|
+| `sandbox_provider` | The named sandbox provider block every group starts on. Set exactly when `sandbox_config` or `verifier.sandbox` is. |
+| `sandbox_config` | The task sandbox: the group the agent borrows. Optional; without it, a task whose agent needs a group fails at seed. |
+| `verifier.mode` | Where `/verify` runs: `none`, `shared` or `separate`. Unset, where the Resources Server declares (see [Where it runs](#where-it-runs)). |
+| `verifier.sandbox` | With `mode: separate` only: the verifier's group settings that differ from `sandbox_config`'s. |
+
+They say how a group starts and where `/verify` runs, not whether the agent gets a group: that is fixed per task (see below). With none of them set, this server starts no sandbox and the agent runs where it ran before; an attempt whose Resources Server declares a group or a verifier mode other than `none` fails for good.
 
 ```yaml
 environment_servers:
   single_agent_turn:
     sandbox_provider: attempt_sandboxes  # a top-level sandbox provider block
-    sandbox_config:
+    sandbox_config:                      # the task sandbox
       image: python:3.13-slim
       workdir: /workspace
       ttl_s: 25200  # above the episode timeout plus the cleanup timeout
       network: model_only
       model_server: policy_model  # the agent's model server
+    verifier:
+      mode: separate  # none | shared | separate; unset, the Resources Server's verifier_mode
+      sandbox:        # separate only; unset fields come from sandbox_config
+        resources: {cpu: 1, memory_mib: 4096}
+```
+
+A grader that needs a group while the agent needs none, as for code_gen, leaves `sandbox_config` out and gives the whole group in `verifier.sandbox`, with `image` and `ttl_s` at least:
+
+```yaml
+    sandbox_provider: attempt_sandboxes
+    verifier:
+      mode: separate
+      sandbox: {image: python:3.13-slim, workdir: /tmp, ttl_s: 25200}  # network: no_network is the default
 ```
 
 For OpenSandbox, the example requires packet-level egress enforcement on the deployment.
@@ -96,14 +118,15 @@ At seed, the Resources Server may declare what the group holds, as `sandbox_grou
 | Hook on the Resources Server | Declares |
 |------|------|
 | `sandbox_group(body)` | The task's `image`, `workdir`, `env`, text `files` delivered before anyone borrows the group, and `sidecars` that serve its environment tools. `image` and `workdir` fall back to `sandbox_config`. Each sidecar gets its own egress, never the main container's: only its `egress_hosts` (`hosts_only`), or none (`no_network`). `tools_port` names the port on which it serves the Resources Server's HTTP tools; an Environment Server that does not grant those tools to the agent (`grants_tool_sidecars`, not yet set here) refuses such a sidecar. Sidecars need a provider that starts them and applies those rules. |
-| `verifier_mode = "shared"` or `"separate"` | Where `/verify` runs (see below); the class attribute, left at `"none"`, keeps it in the Resources Server with no sandbox. |
+| `verifier_mode = "shared"` or `"separate"` | Where `/verify` runs when `verifier.mode` is unset (see below); the class attribute, left at `"none"`, keeps it in the Resources Server with no sandbox. |
+| `supported_verifier_modes` | Every mode its `/verify` can run in, `verifier_mode` among them; unset, only `verifier_mode`. A `/verify` that grades in a sandbox when it is lent one and in its own process otherwise supports `none` too. |
 | `prepare_sandbox(body)` | Serves `/prepare_sandbox`: once the group has started, this server sends the seed's `task_data` and operate-scope access to the group, and the Resources Server prepares the task through `borrow()`, such as starting a sidecar's tool service, before the agent or the verifier borrows it. |
 
 A seed reply lends a sandbox (`sandbox_access`) or declares one (`sandbox_group`), never both. An episode that holds a group this server starts is a restart: no checkpoint exports it, and the declared files and environment variables never reach a checkpoint.
 
 ### Where it runs
 
-There is no switch. Where the agent and the verifier run is fixed per task, and each borrows only what this server lends. A benchmark's README states its placement in a short table with these columns and words, and links here for the rules:
+No setting turns the agent's sandbox off: where the agent runs is fixed per task. Where the verifier runs is the pairing's `verifier.mode`, or the Resources Server's declared mode. Each borrows only what this server lends. A benchmark's README states its placement in a short table with these columns and words, the Verifier column being the pairing's `verifier.mode`, and links here for the rules:
 
 | Agent | Verifier | Why |
 |------|------|------|
@@ -123,14 +146,33 @@ The agent's side is derived:
 
 The agent says which it is on `GET /v1/agent_sessions/capabilities` (`runs_loop_without_sandbox`, set by the agent class), which this server asks once per process, only for a task without tools. An agent server without the route is lent a group, so an undeclared agent fails closed.
 
-The verifier's side is declared by the Resources Server at seed, as `verifier_mode` next to its `sandbox_group` (the class's `verifier_mode`; Harbor's words):
+The verifier's side is the pairing's `verifier.mode` (Harbor's words). Unset, it is the mode the Resources Server declares at seed, as `verifier_mode` next to its `sandbox_group`. Either way, the mode must be one the Resources Server says its `/verify` can run in (`supported_verifier_modes`):
 
-| `verifier_mode` | `/verify` |
+| Verifier mode | `/verify` |
 |------|------|
 | `none` (the default) | runs in the Resources Server and is lent nothing. For a verifier that executes nothing and calls no tools: rules, a judge call. A verifier that hands model output to an evaluating parser, as math-verify does with SymPy, does not qualify. |
-| `shared` | borrows the agent's group after the agent closes. Refused at seed when the agent borrows no group. |
-| `separate` | borrows a fresh group of its own, started right before `/verify` from the declared image (or `sandbox_config.image`) with `no_network`, after the agent's group, if any, has stopped. The verifier gets the response, not the agent's files; carrying files over is not supported yet. The provider must apply `no_network`: Docker and OpenSandbox do, Enroot does not. |
+| `shared` | borrows the agent's group after the agent closes. |
+| `separate` | borrows a fresh group of its own, started right before `/verify`, after the agent's group, if any, has stopped. The verifier gets the response, not the agent's files; carrying files over is not supported yet. |
 
-Every group stops once `/verify` replies, and again in the episode's cleanup if that stop failed. These are refused at seed for good (a terminal seed failure), since every attempt would fail alike, before the agent's turn: a group needed but no `sandbox_provider` set; `shared` without an agent group; `separate` on a provider without `no_network`; a group with no image or working directory; sidecars on a provider that cannot start them. A group that cannot start fails the attempt as a retryable infrastructure failure, with the agent's response kept as evidence, and records no reward.
+A separate verifier's group starts from `verifier.sandbox` over `sandbox_config`: each field `verifier.sandbox` sets replaces the task sandbox's, and the rest are copied, except the network rule, which is `no_network` unless `verifier.sandbox` sets one. It starts with the declared files and environment variables, but without sidecars. Its image is the first of `verifier.sandbox.image`, the image the Resources Server declares at seed, and `sandbox_config.image`; its working directory follows the same order.
+
+Every group stops once `/verify` replies, and again in the episode's cleanup if that stop failed.
+
+Refused at startup:
+- `verifier.sandbox` without `mode: separate`;
+- `mode: shared` without a `sandbox_config`, since no agent group can exist;
+- `mode: separate` without a `sandbox_config` and without `image` and `ttl_s` in `verifier.sandbox`;
+- `mode: separate` on a provider that cannot apply its rule: Docker and OpenSandbox apply `no_network`, Enroot does not.
+
+Refused at seed for good (a terminal seed failure, before the agent's turn), since every attempt would fail alike:
+- a verifier mode the Resources Server says its `/verify` cannot run in;
+- a group needed but no `sandbox_provider` set;
+- an agent that needs a group, but no `sandbox_config`;
+- `shared` without an agent group;
+- a declared `separate` on a provider without `no_network`;
+- a group with no image or working directory;
+- sidecars on a provider that cannot start them.
+
+A group that cannot start fails the attempt as a retryable infrastructure failure, with the agent's response kept as evidence, and records no reward.
 
 The server supports `num_workers > 1`. Episode state and cleanup remain local to the worker handling that request. `max_concurrent_episodes` and queue admission are also enforced independently by each worker, so the deployment-wide concurrency limit is approximately `num_workers * max_concurrent_episodes`.
