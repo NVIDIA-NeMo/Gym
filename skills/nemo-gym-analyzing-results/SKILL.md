@@ -50,7 +50,7 @@ Hand off when the main job is different:
 - The run directories. Every `gym eval run` writes its files next to its `--output` file (`<stem>.jsonl`); see step 1.
 - NeMo Gym (`pip install "nemo-gym>=0.7"`, which needs Python 3.13.14 or newer) for `gym eval compare`, `gym eval health-check`, `gym eval profile` and `gym eval reverify`. None of them call the policy model; `gym eval reverify` calls the judge on judged benchmarks. If `gym` is missing, read the files directly.
 - "After 0.7.0" marks options and files that are on the main branch but not in the 0.7.0 release. An install from main reports its version as `0.7.0rc0`, so check for the option in `--help` or for the file instead of comparing version numbers.
-- Python 3 for the snippets in the references. They use only the standard library.
+- Python 3 for the snippets in the references. On a run without `<stem>_manifest.json` they need only the standard library. On a managed run (after 0.7.0) run them with the Python that has nemo-gym installed; the recipe that profiles selected rows always needs it.
 
 ## Instructions
 
@@ -58,7 +58,7 @@ Hand off when the main job is different:
 
 | File, next to `<stem>.jsonl` | What it answers |
 |---|---|
-| `<stem>.jsonl` | One row per saved rollout: `reward`, the model's output, `_ng_task_index` (task) and `_ng_rollout_index` (repeat) |
+| `<stem>.jsonl` | The saved rollouts: `reward`, the model's output, `_ng_task_index` (task) and `_ng_rollout_index` (repeat). One row per rollout in 0.7.0; a managed run can also hold superseded attempts |
 | `<stem>_materialized_inputs.jsonl` | What was planned: one row per task and repeat, with the prompt and the verifier's inputs such as the expected answer |
 | `<stem>_failures.jsonl` | Failed attempts, with `_ng_failure_class` and the error in `_ng_failure_message`. Not in the score by default |
 | `<stem>_aggregate_metrics.json` | The scores per agent: `mean/reward`, per-task (`group_level_metrics`) and per-repeat (`repeat_level_metrics`) statistics, and `*_across_repeats` keys when there are 2 or more repeats |
@@ -72,10 +72,10 @@ Ask for any file that is missing rather than guessing its content. A published n
 
 ### 2. Check each run is complete before reading its score
 
-A score covers only the rollouts that were measured. Count before comparing:
+A score covers the measured rollouts and any failures counted as zeros. Count before comparing:
 
 - **Planned** is the number of rows in `<stem>_materialized_inputs.jsonl`. **Measured** is the number of rollouts whose selected attempt succeeded with a numeric `reward` and no `mask_sample`. After 0.7.0 read it as `measured` in `<stem>_coverage.json`: a managed run's `<stem>.jsonl` can also hold superseded attempts and results that Gym counts as failures. A 0.7.0 run saves one row per rollout, so count its rows in `<stem>.jsonl` with a numeric `reward` and no `mask_sample`.
-- **Failed rollouts are left out of the score by default**, not counted as 0. A run that lost its hardest tasks to failures scores higher than it earned. Count the failures by `_ng_failure_class`, including `judge_failed`; a rollout that failed and later succeeded on `--resume` appears in both files and is not failed.
+- **Failed rollouts are left out of the score by default**, not counted as 0. The exception is a failure row that a benchmark or agent policy marks `_ng_failure_counts_as_zero` (after 0.7.0): it scores 0 (see failure accounting in step 3). A run that lost its hardest tasks to failures scores higher than it earned. Count the failures by `_ng_failure_class`, including `judge_failed`; a rollout that failed and later succeeded on `--resume` appears in both files and is not failed.
 - Results that the benchmark marked `mask_sample` (not a valid measurement) also leave the score.
 - With failed or missing rollouts, one run's metrics disagree: `mean/reward` weights rollouts, `pass@1[avg-of-K]` for the full repeat count K weights tasks equally, and `pass@k` leaves out tasks with fewer than k measured rollouts, so it can read 100% while some tasks never pass. Decide that rollouts are missing from the counts above, not from a gap between metrics. A gap points to uneven coverage only when both numbers score the same reward and differ only in weighting, as MCQA's `pass@1[avg-of-K]/accuracy` divided by 100 and `mean/reward` do. Other metrics differ even in a complete run: BEAM's `pass@1[avg-of-K]/overall` is already on 0–1 and averages its abilities, and keys with a smaller k use only each task's first k repeats.
 - `run.artifacts.healthy: true` in `<run_dir>/quality_summary.json` only means that nothing is missing or recorded twice. Failure limits are off by default, so read `run.artifacts.failed` too.
@@ -177,13 +177,13 @@ Next step: resume the candidate to finish the 11 rollouts, then compare again. A
 |---|---|---|
 | `gym eval compare` shows `—` (JSON `null`) for the delta interval | A side has fewer than 2 usable repeats, or the metric exists only for the whole run (such as pass@k) | Collect 2 or more repeats per side; read per-repeat metrics such as `mean/reward` |
 | `gym eval compare` cannot find `<stem>_aggregate_metrics.json` | The run used `--disable-aggregation`, the metrics file is elsewhere, or a strict run ended incomplete (after 0.7.0 it writes no metrics then) | Run `gym eval aggregate` (it needs the servers running), pass the file with `--baseline-agg-metrics` / `--candidates-agg-metrics`, or resume the incomplete run |
-| `gym eval compare` finds no shared agent | The runs used different agent names | Pick them with `--baseline-agent` and `--candidate-agents` |
+| `gym eval compare` fails with `No agent name is present in every run, so there is nothing to compare.` | The runs used different agent names | Pick them with `--baseline-agent` and `--candidate-agents` |
 | `UserWarning: ... has incomplete or unequal task coverage across repeats` | Some repeats of one run measured fewer tasks: failed or missing rollouts | Check step 2; resume the run before trusting the interval |
 | `gym eval profile` fails with `Missing rollout results for N materialized input rows` | Rollouts failed or are missing | Add `++allow_partial_rollouts=True` and report coverage with the numbers |
 | `gym eval profile` fails with `Duplicate result row for rollout key` | The rollouts file of a managed run holds more than one attempt of a rollout | Profile the run's selected rows, as shown in `references/failure-diagnosis.md` |
 | Failure rows whose `_ng_failure_class` starts with `provider_` (after 0.7.0), or other sandbox errors | The sandbox was not ready or not reachable | Infrastructure, not model quality. Fix the sandbox; a resume reruns these while `_ng_failure_terminal` is false and attempts remain |
 | Unmasked zeros in `<stem>.jsonl` from verification that did not finish (`failure_kind` `harbor:verifier_timeout`, `harbor:missing_reward` or `harbor:invalid_reward`, or `evaluation_completed: false` with no `mask_sample`), or an out-of-memory kill during the agent's work counted as 0 | The benchmark's own settled grade: the run counts these as measured, so a resume does not redo them | Keep them in the score and report how many there are. If the evidence shows a grade is invalid, such as verifier timeouts on an overloaded cluster, re-verify where the benchmark supports it or collect a new run, and report both |
-| `evaluation_completed: false` on a masked row or a `judge_failed` failure | Not a grade: the row is left out of the score | When the benchmark's resources server runs the judge, recover judge failures from the saved answers with `gym eval reverify --judge-failed-only`. Benchmarks that judge inside their Environment Server, such as SWE-Together, stop with `reverify: no resources server found in the config`: report those rows as left out and use the benchmark's own recovery or a new run. Resume other retryable failures |
+| `evaluation_completed: false` on a masked row or a `judge_failed` failure | Not a grade: the row is left out of the score | When the benchmark's resources server runs the judge, recover judge failures from the saved answers with `gym eval reverify --judge-failed-only`. Benchmarks that judge inside their Environment Server, such as SWE-Together, stop with `reverify: no resources server found in the config`: report those rows as left out; only new rollouts of those tasks recover them. Resume other retryable failures |
 | `judge_failed` or other failure rows whose `_ng_failure_message` shows HTTP 401 or 403 | A bad or missing API key for the policy or judge endpoint | Fix the key, then recover judge failures as in the row above; resume policy failures |
 | `gym eval reverify` cannot reach the judge, or fails with connection errors | The judge endpoint is unreachable or the URL is wrong | Check the judge URL and key in the config passed to `--config`, then rerun with `--resume` |
 | `gym eval health-check` replaced reports in a shared folder | It writes `<run_dir>/quality_summary.json` and `<run_dir>/rollout_verdicts.jsonl` | Copy a shared or read-only run before checking it |

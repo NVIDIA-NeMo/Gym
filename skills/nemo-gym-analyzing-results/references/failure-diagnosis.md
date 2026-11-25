@@ -21,7 +21,7 @@ This sorts every planned task by its measured rewards, separately for each agent
 python3 - results/rollouts.jsonl <<'EOF'
 import collections, json, sys
 from pathlib import Path
-out = Path(sys.argv[1]).resolve()  # Like Gym, read a symlinked run beside the file it points to.
+out = Path(sys.argv[1]).resolve()  # Read a symlinked run beside its target, as Gym does after 0.7.0.
 def rows(p):
     if not p.exists():
         sys.exit(f"missing {p}: point this at the run's rollouts file, next to its materialized inputs")
@@ -169,7 +169,7 @@ Recommend how to measure each fix before rerunning everything; running and resum
   from pathlib import Path
   def scores(path):
       """Valid, unmasked rewards of each rollout's counted attempt; exits when the file is missing."""
-      p = Path(path).resolve()  # Like Gym, read a symlinked run beside the file it points to.
+      p = Path(path).resolve()  # Read a symlinked run beside its target, as Gym does after 0.7.0.
       if not p.exists():
           sys.exit(f"missing {p}")
       if p.with_name(p.stem + "_manifest.json").exists():
