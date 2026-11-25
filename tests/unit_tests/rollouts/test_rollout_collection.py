@@ -501,6 +501,34 @@ class TestResentRunIsRecorded:
         assert [e["failure_kind"] for e in events] == (["transport_peer_drop"] if dropped else [])
         assert saved[0].get("_ng_failure_id") is None
 
+    async def test_an_unbounded_dispatch_that_dropped_after_connecting_is_not_reported_as_not_sent(
+        self, tmp_path, monkeypatch, empty_global_config
+    ):
+        """A connection that dropped before the final refusal may have delivered /run, so the row says so."""
+        from aiohttp import ServerDisconnectedError
+
+        from tests.unit_tests.rollouts.test_rollout_recovery import _refused_connection
+
+        async def post(*, _on_transport_failure=None, **kwargs):
+            assert "_max_num_tries" not in kwargs  # run_examples sets no attempt bound
+            _on_transport_failure(ServerDisconnectedError(), True)  # connected, then dropped
+            refused = _refused_connection()
+            _on_transport_failure(refused, True)  # every later attempt was refused
+            raise refused
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "_record_rollout_health", lambda *args: None)
+        [future] = list(
+            RolloutCollectionHelper().run_examples(
+                [failing_row(0)], record_output_dir=tmp_path, record_shard="shard", route_failures_to_sidecar=True
+            )
+        )
+        await future
+
+        failures = [json.loads(line) for line in (tmp_path / "rollouts-shard_failures.jsonl").read_text().splitlines()]
+        # Before the callback was always installed, nothing was recorded here and this read "not_sent".
+        assert [f["_ng_failure_record"]["delivery"] for f in failures] == ["possibly_delivered"]
+
 
 class TestRecoveryDriverMetrics:
     @pytest.mark.parametrize("max_resident_tasks", [None, 2])

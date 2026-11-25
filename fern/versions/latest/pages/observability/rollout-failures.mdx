@@ -170,3 +170,13 @@ flag, and Collection saves `_ng_failure_events_omitted`. The real status and bod
 still arrive. This diagnostic loss does not change the task outcome. Old records with
 no failure report keep their meaning. The final saved-record migration remains a
 separate change.
+
+### Delivery of a dispatch that was not bounded
+
+Collection now observes every dropped `/run` attempt, including those of a caller that sets no attempt bound
+(`run_examples`, for example). Before, only a bounded dispatch recorded them. A caller that persists the failed
+outcome of such a dispatch sees one change. When an attempt dropped after it connected and every later attempt was
+refused, the failure's `delivery` is now `possibly_delivered`, where it was `not_sent`. The earlier attempt may have
+delivered `/run`, so the new value is the accurate one. `is_interruption_failure`, which retry budgets and progress
+accounting read, follows it: it is now false for that sequence. A dispatch whose attempts were all refused or timed
+out connecting is still `not_sent`.
