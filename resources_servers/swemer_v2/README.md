@@ -118,3 +118,16 @@ gym env start \
   --config resources_servers/swemer_v2/configs/swemer_v2_opencode.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
+
+`configs/swemer_v2_swe_mm_opencode_agent.yaml` is the training pairing for SWE-MM, multimodal issue repair whose
+prompts attach the issue's screenshots as images. It runs the OpenCode session agent (`swe_mm_opencode_agent`) in the
+task's own sandbox behind `single_agent_turn_legacy`, with the agent's network limited to the policy model server, a
+dedicated OpenSandbox provider instance (`swe_mm_sandbox`), and the OpenCode runtime the task images carry under
+`/opt/gym-assets` (pinned by SHA-256). It ships no dataset: rows come from the training framework and set
+`agent_ref` to `swe_mm_opencode_agent`.
+
+```bash
+gym env validate \
+  --config resources_servers/swemer_v2/configs/swemer_v2_swe_mm_opencode_agent.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+```
