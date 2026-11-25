@@ -153,6 +153,32 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["verify"]},
     )
+    image: str | None = Field(
+        default=None,
+        description=(
+            "Prebuilt image of the instance, e.g. 'swebench/sweb.eval.x86_64.<instance>:latest'; read when the "
+            "resources server's evaluation_spec_source is 'row'."
+        ),
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    eval_script: str | None = Field(
+        default=None,
+        description="Full evaluation script of the instance; read when evaluation_spec_source is 'row'.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    log_parser: str | None = Field(
+        default=None,
+        description="Name of the SWE-bench log parser for the test output; read when evaluation_spec_source is 'row'.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    eval_type: str | None = Field(
+        default=None,
+        description=(
+            "'pass_and_fail', or 'fail_only' when the log records failing tests only; read when "
+            "evaluation_spec_source is 'row'."
+        ),
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
 
     @field_validator("image_assets", mode="before")
     @classmethod

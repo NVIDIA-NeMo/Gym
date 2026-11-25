@@ -58,6 +58,21 @@ SWE Bench Pro
   planned test, Jasmine ran its specs without an "Incomplete" report, or every p5.js browser suite printed passing
   tests. Without it the evaluation is reported as not completed, and the sample is masked as a verifier error.
 
+## Rows that define their evaluation
+Since swebench 5.0, a SWE-bench row carries its own evaluation: the prebuilt image (`image`), the full evaluation
+script (`eval_script`), the name of the log parser (`log_parser`) and whether passing tests are read from the log or
+assumed (`eval_type`: `pass_and_fail` or `fail_only`). The pinned swebench 4.1.0 harness derives these from
+per-repository specs instead, and has none for the repositories of the SWE-bench Multimodal test split.
+
+With `evaluation_spec_source: row` (default `swebench_harness`) the server uses the row's fields: the task and
+verification sandboxes start from `image`, verification runs `eval_script` with the test command's exit status
+recorded, and `row_evaluation.py` grades the output with SWE-bench 5's rules and the parsers in `row_log_parsers.py`
+(both adapted from SWE-bench v5.0.1, MIT; see the file headers). Under those rules a `fail_only` log with no sign
+that the suite ran, or a log that shows no failure while the test command exited non-zero, is unresolved. The
+test patch's binary files are uploaded to the verification sandbox and copied into place after the script applies
+the test patch, as SWE-bench 5 does. `benchmarks/swebench/multimodal_test/` uses this source; the dev recipes keep
+the harness.
+
 
 # Licensing information
 Code: ?

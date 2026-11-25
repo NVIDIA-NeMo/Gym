@@ -10,15 +10,23 @@ Adds multiple SWE benchmarks to Gym. These are useable across agents/harnesses.
   issue's images and attaches them to the prompt, and stores the test patch's reference images
   for the verifier, so it needs internet access; rollouts and verification do not. See
   [SWE Bench Multimodal grading](../../resources_servers/swebench/README.md#swe-bench-multimodal-grading).
-  The test split is not prepared, because the pinned SWE-bench harness (swebench 4.1.0) has no
-  environment specs for its repositories. `multimodal/hermes.yaml` runs the same tasks with Hermes.
+  `multimodal/hermes.yaml` runs the same tasks with Hermes.
+- SWE Bench Multimodal test (`benchmarks/swebench/multimodal_test/opencode.yaml`): the test split of
+  `SWE-bench/SWE-bench_Multimodal` at a pinned revision, 480 JavaScript and TypeScript tasks from eleven
+  repositories, prepared like the dev split. The pinned SWE-bench harness (swebench 4.1.0) has no environment specs
+  for these repositories, so the Resources Server evaluates each row with the image, evaluation script, log parser
+  and evaluation type the row carries (`evaluation_spec_source: row`, SWE-bench's row format since swebench 5.0;
+  see [Rows that define their evaluation](../../resources_servers/swebench/README.md#rows-that-define-their-evaluation)).
+  `multimodal_test/hermes.yaml` runs the same tasks with Hermes. Run the dev and test recipes separately: each
+  recipe's `--split benchmark` covers its own split.
 
 ## Harnesses
 
 Use the `opencode.yaml` recipe of Verified, Multilingual, Pro or Multimodal. It runs `opencode_agent` through
 `single_agent_turn`, as `verified/hermes.yaml` and `multimodal/hermes.yaml` run Hermes: the Resources Server starts
 the task sandbox, lends it to the agent session, and grades the captured patch after the agent closes. Rows reach it
-through the recipe's taskset (`swebench:verified`, `swebench:multilingual`, `swebench:pro` or `swebench:multimodal`).
+through the recipe's taskset (`swebench:verified`, `swebench:multilingual`, `swebench:pro`, `swebench:multimodal` or
+`swebench:multimodal_test`).
 Both harnesses receive the Multimodal issue images as prompt images.
 
 The `opencode_legacy_agent.yaml` recipes of Verified, Multilingual, Pro and Multimodal are deprecated. They run

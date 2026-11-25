@@ -649,9 +649,10 @@ def test_task_data_matches_the_instance_request():
 
     wire = mod.SWEBenchInstanceRequest.model_fields
     assert set(TaskData.model_fields) == set(wire)
-    # image_assets is the one optional field: only SWE-bench Multimodal rows carry it.
-    assert {n for n, f in TaskData.model_fields.items() if f.is_required()} == set(wire) - {"image_assets"}
-    assert not TaskData.model_fields["image_assets"].is_required()
+    # The optional fields: image_assets, which only SWE-bench Multimodal rows carry, and a row's own evaluation.
+    optional = {"image_assets", "image", "eval_script", "log_parser", "eval_type"}
+    assert {n for n, f in TaskData.model_fields.items() if f.is_required()} == set(wire) - optional
+    assert not any(TaskData.model_fields[name].is_required() for name in optional)
     assert {n: f.annotation for n, f in TaskData.model_fields.items()} == {n: f.annotation for n, f in wire.items()}
 
 

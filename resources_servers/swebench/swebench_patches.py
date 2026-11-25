@@ -26,6 +26,7 @@ from swebench.harness.run_evaluation import *
 from nemo_gym import PARENT_DIR
 from nemo_gym.sandbox import AsyncSandbox
 from resources_servers.swebench.failure_only_grading import failure_only_suite_completed
+from resources_servers.swebench.row_evaluation import RowTestSpec, get_row_eval_report, karma_runs_completed
 
 
 # The eval script's stderr joins its stdout, in order. SWE-bench's start and end markers are no-op commands that
@@ -35,11 +36,25 @@ from resources_servers.swebench.failure_only_grading import failure_only_suite_c
 EVAL_SCRIPT_COMMAND = "/bin/bash /eval.sh 2>&1"
 
 
+def eval_report_for(test_spec: TestSpec | RowTestSpec, pred: dict, test_output_path: Path) -> dict:
+    """SWE-bench's report for ``pred``. A row that defines its own evaluation is graded with its own log parser and
+    eval_type under SWE-bench 5's rules, which also refuse a fail_only verdict from a log that shows no sign the
+    suite ran; any other test spec with the pinned harness."""
+    if isinstance(test_spec, RowTestSpec):
+        return get_row_eval_report(test_spec, pred, str(test_output_path), include_tests_status=True)
+    return get_eval_report(
+        test_spec=test_spec,
+        prediction=pred,
+        test_log_path=test_output_path,
+        include_tests_status=True,
+    )
+
+
 # @bxyu-nvidia: We modify the run_instance function to:
 # 1. Enable async container operations.
 # 2. Avoid complicated patching logic.
 async def run_instance(
-    test_spec: TestSpec,
+    test_spec: TestSpec | RowTestSpec,
     pred: dict,
     rm_image: bool,
     force_rebuild: bool,
@@ -72,12 +87,7 @@ async def run_instance(
         test_output_path = log_dir / LOG_TEST_OUTPUT
         if not test_output_path.exists():
             raise ValueError(f"Test output file {test_output_path} does not exist")
-        report = get_eval_report(
-            test_spec=test_spec,
-            prediction=pred,
-            test_log_path=test_output_path,
-            include_tests_status=True,
-        )
+        report = eval_report_for(test_spec, pred, test_output_path)
         # Write report to report.json
         with open(report_path, "w") as f:
             f.write(json.dumps(report, indent=4))
@@ -229,16 +239,13 @@ async def run_instance(
 
         # Get report from test output
         logger.info(f"Grading answer for {instance_id}...")
-        eval_report = get_eval_report(
-            test_spec=test_spec,
-            prediction=pred,
-            test_log_path=test_output_path,
-            include_tests_status=True,
-        )
+        eval_report = eval_report_for(test_spec, pred, test_output_path)
         # Failure-only grading counts every test missing from the log as passing, so a suite that never started or
-        # stopped part way would read as resolved. Accept that verdict only from a suite that ran to completion.
+        # stopped part way would read as resolved. Accept that verdict only from a suite that ran to completion. The
+        # row grader makes its own check.
         if (
             eval_report[instance_id]["resolved"]
+            and not isinstance(test_spec, RowTestSpec)
             and test_spec.repo in FAIL_ONLY_REPOS
             and not failure_only_suite_completed(test_spec.repo, test_output)
         ):
@@ -246,6 +253,19 @@ async def run_instance(
                 instance_id,
                 f"The {test_spec.repo} test suite did not run to completion, so its failure-only report shows no "
                 "verdict",
+                logger,
+            )
+        # The same rule for a fail_only row: a Karma run that stopped part way shows no verdict.
+        if (
+            eval_report[instance_id]["resolved"]
+            and isinstance(test_spec, RowTestSpec)
+            and test_spec.eval_type == "fail_only"
+            and not karma_runs_completed(test_output)
+        ):
+            raise EvaluationError(
+                instance_id,
+                f"The {test_spec.repo} Karma run did not execute every planned test, so its failure-only report shows "
+                "no verdict",
                 logger,
             )
         report = eval_report
