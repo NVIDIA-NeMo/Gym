@@ -48,6 +48,7 @@ from nemo_gym.core import (
     BaseEpisodeRequest,
     rollout_context,
 )
+from nemo_gym.core.failure_kinds import ENVIRONMENT_PROTOCOL_VIOLATION
 from nemo_gym.server_runtime import CleanupContext
 from nemo_gym.trajectory import grading_result_binding
 
@@ -357,7 +358,7 @@ def test_run_uses_native_horizon_and_masks_missing_measurement(
             == {
                 "unscored": ENVIRONMENT_SERVER_FAILED,
                 "unclean": HARNESS_TERMINATION_UNCONFIRMED,
-                "wrong_backend": ENVIRONMENT_SERVER_FAILED,
+                "wrong_backend": ENVIRONMENT_PROTOCOL_VIOLATION,
             }[fault]
         )
         if fault == "wrong_backend":
@@ -704,3 +705,122 @@ def test_opencode_relay_normalizes_input_images_and_expands_sse_over_aiohttp() -
 
 async def _collect_async(stream):
     return [chunk async for chunk in stream]
+
+
+def test_agent_seed_request_and_pool_recovery_and_clean_cancel(runtime, tmp_path: Path, monkeypatch) -> None:
+    template, manifest, _, digest = runtime
+    second = "general_pickup__standard__g1__l1"
+    panel = json.loads(manifest.read_text())
+    panel["panel_id"], panel["panel_sha256"] = "test", "a" * 64
+    panel["cases"].append({**panel["cases"][0], "case_id": second, "layout_id": 1})
+    write_json(manifest, panel)
+    validity = tmp_path / "validity.json"
+    write_json(
+        validity,
+        {
+            "panel_id": "test",
+            "panel_sha256": "a" * 64,
+            "validity_sha256": "b" * 64,
+            "assignment": [{"slot": case, "case_id": case} for case in (CASE, second)],
+        },
+    )
+    launcher = tmp_path / "pool.py"
+    launcher.write_text(
+        "import json, socket, sys, time\n"
+        "from pathlib import Path\n"
+        "root = Path(sys.argv[1])\n"
+        "cases = json.loads((root / 'cases.json').read_text())\n"
+        "sockets = []\n"
+        "for idx, bound in enumerate(cases.values()):\n"
+        "    listener = socket.socket(socket.AF_UNIX)\n"
+        "    bound['native_pool_socket'] = str(root / f'{idx}.sock')\n"
+        "    bound['native_pool_evidence'] = str(root / f'case-{idx}')\n"
+        "    bound['step_limit'] = 999999\n"
+        "    listener.bind(bound['native_pool_socket'])\n"
+        "    listener.listen()\n"
+        "    sockets.append(listener)\n"
+        "(root / 'seats.json').write_text(json.dumps(cases))\n"
+        "time.sleep(60)\n"
+    )
+    config = RoboDojoEnvironmentConfig(
+        name="robodojo_environment",
+        host="127.0.0.1",
+        port=8012,
+        entrypoint="app.py",
+        agent_server={"type": "responses_api_agents", "name": "robodojo"},
+        model_server={"type": "responses_api_models", "name": "policy_model"},
+        model_name="test",
+        bridge_config=template,
+        panel_manifest=manifest,
+        case_validity=validity,
+        bridge_python=Path(sys.executable),
+        simulation_python=Path(sys.executable),
+        output_root=tmp_path / "outputs",
+        evidence_export_root=tmp_path / "evidence",
+        pool_cases=f"{CASE},{second}",
+        pool_launcher=launcher,
+        pool_startup_seconds=5,
+    )
+    client = ServerClient(
+        head_server_config={"host": "127.0.0.1", "port": 8000},
+        global_config_dict=OmegaConf.create(
+            {"policy_model": {"responses_api_models": {"vllm_model": {"host": "127.0.0.1", "port": 8011}}}}
+        ),
+    )
+    server = RoboDojoEnvironmentServer(config=config, server_client=client)
+    seed_req = server.agent_seed_request(_episode_request(CASE, 0))
+    assert seed_req.agent_context.values == {
+        "case_id": CASE,
+        "assigned_case_id": CASE,
+        "layout_sha256": digest,
+    }
+
+    seen_urls: list[str] = []
+    seen_limits: list[int] = []
+    call_count = 0
+
+    async def run():
+        async def fake_episode(self, bound):
+            nonlocal call_count
+            call_count += 1
+            seen_urls.append(bound["model"]["base_url"])
+            seen_limits.append(bound["step_limit"])
+            if call_count == 1:
+                raise asyncio.CancelledError()
+            return "scored", HorizonScores(
+                within_native=True,
+                within_budget=True,
+                score_within_native=1.0,
+                score_within_budget=1.0,
+                task_step_limit=200,
+                control_budget=400,
+            )
+
+        def broken_export(self, root):
+            raise TypeError("malformed summary")
+
+        monkeypatch.setattr(Episode, "run", fake_episode)
+        monkeypatch.setattr(Episode, "export_evidence", broken_export)
+        app = server.setup_webserver()
+        async with app.router.lifespan_context(app):
+            req0 = _episode_request(CASE, 0)
+            with pytest.raises(asyncio.CancelledError):
+                await server.run(req0, CleanupContext(episode_id=req0.episode_id, cleanup_timeout_seconds=5.0))
+            # Clean cancel must NOT poison the server; crashed pool must restart.
+            assert server._cleanup_unconfirmed is False
+            first_pid = server._pool.process.pid
+            server._pool.process.kill()
+            await server._pool.process.wait()
+
+            req1 = _episode_request(CASE, 1)
+            res1 = await server.run(req1, CleanupContext(episode_id=req1.episode_id, cleanup_timeout_seconds=5.0))
+            second_pid = server._pool.process.pid
+            assert second_pid != first_pid
+            assert res1.result["reward"] == 1.0
+            assert res1.result["mask_sample"] is False
+            assert len(res1.result["ng_verifier_invocations"]) == 1
+            assert seen_limits == [400, 400]
+            assert len(set(seen_urls)) == 2
+
+    with rollout_context("robodojo-recovery-test"):
+        asyncio.run(run())

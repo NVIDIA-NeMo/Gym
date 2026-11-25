@@ -31,7 +31,7 @@ from nemo_gym.client import request as gym_http_request
 
 
 _SKIP_REQUEST_HEADERS = frozenset({"host", "content-length", "connection", "transfer-encoding", "accept-encoding"})
-_STREAM_TIMEOUT = ClientTimeout(total=None, sock_connect=60.0)
+_STREAM_TIMEOUT = ClientTimeout(total=1800.0, sock_connect=60.0, sock_read=600.0)
 
 
 def normalize_opencode_responses_body(body: dict[str, Any]) -> dict[str, Any]:

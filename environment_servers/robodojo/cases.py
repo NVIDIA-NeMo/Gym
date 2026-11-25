@@ -12,6 +12,11 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
 RoboDojoSimulator = Literal["isaaclab3_newton", "isaacsim_physx"]
 ROBODOJO_SIMULATORS: dict[str, RoboDojoSimulator] = {
     "isaaclab3": "isaaclab3_newton",
@@ -85,8 +90,11 @@ def bind_case(
 
     assigned_id = case_id
     config.pop("eval_case", None)
+    panel_file_sha256 = _file_sha256(panel_path)
     if validity_path is not None:
-        validity = json.loads(validity_path.read_text())
+        validity_bytes = validity_path.read_bytes()
+        validity_file_sha256 = hashlib.sha256(validity_bytes).hexdigest()
+        validity = json.loads(validity_bytes)
         if (
             panel.panel_id is None
             or panel.panel_sha256 is None
@@ -101,9 +109,11 @@ def bind_case(
         config["eval_case"] = {
             "manifest": str(panel_path.resolve()),
             "panel_sha256": panel.panel_sha256,
+            "panel_file_sha256": panel_file_sha256,
             "case_id": assigned_id,
             "validity": str(validity_path.resolve()),
             "validity_sha256": validity["validity_sha256"],
+            "validity_file_sha256": validity_file_sha256,
         }
 
     cases = {case.case_id: case for case in panel.cases + panel.substitutes}

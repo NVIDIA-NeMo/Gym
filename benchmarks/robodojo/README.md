@@ -71,15 +71,24 @@ stops the actor process as part of each episode.
 
 ## Results
 
-Gym reward is the native success flag at the selected control budget. The
-rollout also contains the native-limit and extended `Score` and success flags,
-slot and assigned case identifiers, a layout hash, the simulator identity,
-and paths to the native evidence and video when available. Gym checks the
-backend against the simulator's reset receipt before scoring. Compare
-results using the same simulator. The aggregate includes both horizon means
-and counts of scored and unscored episodes. Missing or unverified simulation
-evidence is masked. The engine owns policy replies and simulator trajectories,
-which are written alongside the Gym rollout.
+Gym reward is the native success flag at the selected control budget, recorded
+through `observe_verifier` so every scored rollout carries a bound grading
+record (`ng_verifier_invocations`). Policy-side terminal failures — including
+`policy_failure.decision_budget` (`agent_limit`), `policy_failure.deadline`
+(`agent_timeout`), `policy_failure.context` (`model_context_limit`), and
+`policy_failure.no_progress` (`agent_invalid_output`) — are scored unmasked
+with their measured native grade so slow or budget-exhausted episodes remain in
+the mean. Outer supervisor timeouts and unverified simulation/infrastructure
+faults are masked (`mask_sample: true`) as evaluation-side failures
+(`environment_server_failed`, `environment_protocol_violation`, or
+`harness_termination_unconfirmed`). The rollout also contains the native-limit
+and extended `Score` and success flags, slot and assigned case identifiers, a
+layout hash, the simulator identity, and paths to the native evidence and video
+when available. Gym checks the backend against the simulator's reset receipt
+before scoring. Compare results using the same simulator. The aggregate
+includes both horizon means and counts of scored and unscored episodes. The
+engine owns policy replies and simulator trajectories, which are written
+alongside the Gym rollout.
 
 The external-agent-loop integration uses `environment_servers/robodojo` with
 `responses_api_agents/robodojo_agent` and supplies its own scoring checks. Run

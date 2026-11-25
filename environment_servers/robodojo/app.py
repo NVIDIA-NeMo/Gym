@@ -5,7 +5,9 @@
 
 import asyncio
 import logging
+import os
 import secrets
+import tarfile
 import tempfile
 from contextlib import asynccontextmanager, nullcontext
 from pathlib import Path
@@ -15,6 +17,7 @@ from typing import Literal, Self
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, model_validator
 
+from benchmarks.robodojo.episode_binding import RoboDojoEpisodeBinding
 from environment_servers.robodojo.cases import (
     ROBODOJO_SIMULATORS,
     RoboDojoSimulator,
@@ -24,6 +27,7 @@ from environment_servers.robodojo.cases import (
 from environment_servers.robodojo.episode import CleanupUnconfirmed, Episode, EpisodeError
 from environment_servers.robodojo.native_pool import NativePool
 from environment_servers.robodojo.opencode_relay import mount_opencode_relay
+from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import (
     AgentServerRef,
@@ -46,6 +50,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.core.failure_kinds import ENVIRONMENT_PROTOCOL_VIOLATION
 from nemo_gym.server_runtime import (
+    AgentContext,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     BaseVerifyResponse,
@@ -161,7 +166,42 @@ class RoboDojoEnvironmentServer(
         prefixed = apply_rollout_prefix(base_url, rollout_id)
         return f"{prefixed}/v1"
 
-    async def _pool_slot(self, case_id: str, bound: dict, binding: dict, runner: Episode) -> dict:
+    def agent_seed_request(self, request: BaseEpisodeRequest[RoboDojoTaskInput]) -> AgentSeedSessionRequest:
+        """Bind the prepared RoboDojo case and build the Gym agent-session seed."""
+        config = self.config
+        if (
+            config.bridge_config is None
+            or config.panel_manifest is None
+            or config.bridge_python is None
+            or config.simulation_python is None
+        ):
+            raise HTTPException(422, "Configure the installed RoboDojo runtime, frozen panel and Gym model server")
+        model_url = self._resolve_model_base_url(request.episode_id.capture_key)
+        try:
+            _, case = bind_case(
+                template_path=config.bridge_config,
+                panel_path=config.panel_manifest,
+                validity_path=config.case_validity,
+                case_id=request.task.task_input.case_id,
+                horizon=config.horizon_profile,
+                model_url=model_url,
+                model_name=config.model_name,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise HTTPException(422, str(error)) from error
+        binding = RoboDojoEpisodeBinding(
+            case_id=request.task.task_input.case_id,
+            assigned_case_id=case.case_id,
+            layout_sha256=case.layout.sha256,
+        )
+        return AgentSeedSessionRequest(
+            agent_session_id=request.episode_id.capture_key,
+            episode_id=request.episode_id,
+            task_id=request.task.task_id,
+            agent_context=AgentContext(values=binding.model_dump(mode="json")),
+        )
+
+    async def _pool_slot(self, case_id: str, bound: dict, base_binding: dict, runner: Episode) -> dict:
         config = self.config
         cases = parse_pool_cases(config.pool_cases)
         if case_id not in cases:
@@ -169,16 +209,28 @@ class RoboDojoEnvironmentServer(
         async with self._pool_lock:
             if self._cleanup_unconfirmed:
                 raise CleanupUnconfirmed("An earlier episode did not release the GPU")
+            if self._pool is not None and self._pool.process is not None and self._pool.process.returncode is not None:
+                crashed_pool = self._pool
+                self._pool = None
+                self._active_pool_cases.clear()
+                try:
+                    await crashed_pool.close(config.cleanup_timeout_seconds)
+                except BaseException:
+                    self._cleanup_unconfirmed = True
+                    raise
             if self._pool is None:
-                cohort = {key: bind_case(case_id=key, **binding)[0] for key in cases}
+                cohort = {key: bind_case(case_id=key, **base_binding)[0] for key in cases}
                 pool = NativePool()
+                pool_log = (
+                    config.evidence_export_root or config.output_root
+                ) / f"native-pool-{os.getpid()}-{secrets.token_hex(4)}.log"
                 try:
                     await pool.start(
                         config.bridge_python,
                         config.pool_launcher,
                         cohort,
                         runner.environment,
-                        (config.evidence_export_root or config.output_root) / "native-pool.log",
+                        pool_log,
                         config.pool_startup_seconds,
                     )
                 except BaseException:
@@ -196,7 +248,11 @@ class RoboDojoEnvironmentServer(
             self._active_pool_cases.add(case_id)
             seat = self._pool.seats[case_id]
         runner.pool_evidence = Path(seat["native_pool_evidence"]).resolve()
-        return {**seat, "model": bound["model"]}
+        return {
+            **bound,
+            "native_pool_socket": seat["native_pool_socket"],
+            "native_pool_evidence": seat["native_pool_evidence"],
+        }
 
     async def run(
         self, request: BaseEpisodeRequest[RoboDojoTaskInput], cleanup: CleanupContext
@@ -260,14 +316,13 @@ class RoboDojoEnvironmentServer(
         failure_kind = None
         failure_reason = None
         relay_id: str | None = None
+        relay_url: str | None = None
         claimed_pool_case: str | None = None
         if self._relay_mounted:
             relay_id = secrets.token_urlsafe(18)
             self._relays[relay_id] = model_url
             relay_host = "127.0.0.1" if config.host in ("0.0.0.0", "::", "") else config.host
             relay_url = f"http://{relay_host}:{config.port}/_opencode_relay/{relay_id}/v1"
-            binding["model_url"] = relay_url
-            bound["model"]["base_url"] = relay_url
         try:
             async with self._gpu if config.pool_cases is None else nullcontext():
                 try:
@@ -276,18 +331,22 @@ class RoboDojoEnvironmentServer(
                     if config.pool_cases is not None:
                         bound = await self._pool_slot(task_input.case_id, bound, binding, runner)
                         claimed_pool_case = task_input.case_id
+                    if relay_url is not None:
+                        bound["model"] = {**bound["model"], "base_url": relay_url}
                     outcome, scores = await runner.run(bound)
                 except CleanupUnconfirmed as error:
                     self._cleanup_unconfirmed = True
                     failure_kind, failure_reason = HARNESS_TERMINATION_UNCONFIRMED, str(error)
                 except asyncio.CancelledError:
-                    self._cleanup_unconfirmed = True
                     raise
                 except TimeoutError:
                     failure_kind = ENVIRONMENT_SERVER_FAILED
                     failure_reason = "RoboDojo supervisor exceeded its episode deadline"
                 except (EpisodeError, OSError, RuntimeError, ValueError, KeyError) as error:
-                    failure_kind = ENVIRONMENT_SERVER_FAILED
+                    if isinstance(error, EpisodeError) and "differs from the configured backend" in str(error):
+                        failure_kind = ENVIRONMENT_PROTOCOL_VIOLATION
+                    else:
+                        failure_kind = ENVIRONMENT_SERVER_FAILED
                     failure_reason = f"{type(error).__name__}: RoboDojo native measurement failed"
                     LOGGER.warning("RoboDojo case %s could not be scored", task_input.case_id, exc_info=True)
                 else:
@@ -306,7 +365,7 @@ class RoboDojoEnvironmentServer(
             try:
                 directory = await asyncio.to_thread(runner.export_evidence, config.evidence_export_root)
                 common["evidence_dir"] = str(directory)
-            except (OSError, ValueError, KeyError):
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError):
                 LOGGER.warning("Could not export RoboDojo evidence from %s", directory, exc_info=True)
         video = directory / "native" / "evaluation" / "sensors.mp4"
         trajectory = directory / "native" / "actor" / "transcript.jsonl"
