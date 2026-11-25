@@ -9,6 +9,7 @@ real tool host starts, is seeded, answers tool calls and exports its state, as i
 import asyncio
 import gzip
 import io
+import json
 import os
 import shutil
 import signal
@@ -23,11 +24,12 @@ from typing import Any, ClassVar
 
 import aiohttp
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.client.server_client import ServerClient, rollout_path_prefix
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient, rollout_path_prefix
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.environment import tool_sidecar
@@ -42,6 +44,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSeedSessionRequest,
     SimpleResourcesServer,
 )
+from nemo_gym.server_runtime.tool_sidecar import ToolSidecarImportStateRequest
 from tests.unit_tests.environment.fixtures.tool_server.app import LedgerConfig, LedgerResourcesServer
 
 
@@ -462,3 +465,199 @@ def test_a_servers_own_group_override_keeps_the_tool_sidecar() -> None:
         ["tools"],
         True,
     )
+
+
+class _SimulatedSidecar:
+    """A sidecar that answers the commands the Resources Server sends it, without running anything.
+
+    ``ready`` lists what each readiness probe answers, in turn; ``failing`` maps a command fragment to the result it
+    gets instead of success; ``tool_host`` answers each ``--call`` request with ``(status, body)``.
+    """
+
+    def __init__(self, tool_host: Callable[[dict[str, Any]], tuple[int, str]]) -> None:
+        self.files: dict[str, bytes] = {}
+        self.ready: list[bool] = []
+        self.failing: dict[str, SandboxExecResult] = {}
+        self.tool_host = tool_host
+        self.commands: list[str] = []
+
+    async def exec(self, *argv: str, timeout_s: float) -> SandboxExecResult:
+        command = " ".join(argv)
+        self.commands.append(command)
+        for fragment, result in self.failing.items():
+            if fragment in command:
+                return result
+        if "--ready" in command:
+            answered = self.ready.pop(0) if self.ready else True
+            return SandboxExecResult(stdout="", stderr=None, return_code=0 if answered else 1)
+        if "--call" in argv:
+            request = json.loads(self.files[argv[argv.index("--call") + 2]])
+            status, body = self.tool_host(request)
+            self.files[argv[argv.index("--call") + 3]] = json.dumps(
+                {"status": status, "body": body, "cookies": {}}
+            ).encode()
+        return SandboxExecResult(stdout="", stderr=None, return_code=0)
+
+    async def upload(self, local_path: Any, remote_path: str) -> None:
+        self.files[remote_path] = Path(local_path).read_bytes()
+
+    async def download(self, remote_path: str, local_path: Any) -> None:
+        Path(local_path).write_bytes(self.files[remote_path])
+
+
+class _Runtime:
+    """The tool host's runtime, missing from the sidecar until ``install`` runs."""
+
+    python = "/runtime/python3"
+
+    def __init__(self) -> None:
+        self.installed = False
+
+    async def is_installed(self, sandbox: Any) -> bool:
+        return self.installed
+
+    async def install(self, sandbox: Any, *, timeout_s: float) -> None:
+        self.installed = True
+
+
+@pytest.fixture
+def simulated(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The group the Resources Server borrows, holding one simulated tool sidecar."""
+    calls: list[dict[str, Any]] = []
+    replies: dict[str, tuple[int, str]] = {}
+
+    def tool_host(request: dict[str, Any]) -> tuple[int, str]:
+        calls.append(request)
+        return replies.get(request["path"], (200, "{}"))
+
+    sidecar = _SimulatedSidecar(tool_host)
+    runtime = _Runtime()
+    monkeypatch.setattr(LedgerResourcesServer, "tool_host_runtime", lambda self: runtime)
+
+    class _Group:
+        provider_name = "simulated"
+
+        def sidecar(self, name: str) -> _SimulatedSidecar:
+            assert name == "tools"
+            return sidecar
+
+        async def disconnect(self) -> None:
+            return None
+
+    async def borrow(access: SandboxAccess) -> _Group:
+        return _Group()
+
+    monkeypatch.setattr(tool_sidecar, "borrow", borrow)
+    return SimpleNamespace(sidecar=sidecar, runtime=runtime, calls=calls, replies=replies)
+
+
+async def test_a_sidecar_without_the_runtime_gets_it_before_the_tool_host_starts(simulated: SimpleNamespace) -> None:
+    simulated.sidecar.ready = [False, False, True]
+
+    await _server(_config()).prepare_sandbox(_prepare())
+
+    assert simulated.runtime.installed is True
+    started = [command for command in simulated.sidecar.commands if "setsid nohup" in command]
+    assert len(started) == 1 and "/runtime/python3 -E -s" in started[0]
+    # The seed reached the tool host once it answered, and its call files are gone from the sidecar.
+    assert [call["path"] for call in simulated.calls] == ["/seed_session"]
+    [removed] = [command for command in simulated.sidecar.commands if command.startswith("rm -f")]
+    assert ".request.json" in removed and ".reply.json" in removed
+
+
+async def test_a_tool_host_that_fails_the_seed_fails_the_prepare_for_a_retry(simulated: SimpleNamespace) -> None:
+    simulated.replies["/seed_session"] = (503, "busy")
+
+    with pytest.raises(RuntimeError, match="failed the seed with HTTP 503: busy"):
+        await _server(_config()).prepare_sandbox(_prepare())
+
+
+async def test_sources_the_sidecar_cannot_unpack_fail_the_prepare(simulated: SimpleNamespace) -> None:
+    simulated.sidecar.ready = [False]
+    simulated.sidecar.failing["tar -xzf"] = SandboxExecResult(stdout="", stderr="gzip: bad archive", return_code=2)
+
+    with pytest.raises(RuntimeError, match="Could not unpack the tool host's sources in the tool sidecar: gzip"):
+        await _server(_config()).prepare_sandbox(_prepare())
+
+
+async def test_a_tool_host_whose_process_cannot_be_checked_fails_the_prepare(simulated: SimpleNamespace) -> None:
+    simulated.sidecar.ready = [False, False]
+    simulated.sidecar.failing["kill -0"] = SandboxExecResult(
+        stdout=None, stderr=None, return_code=None, error_type="timeout"
+    )
+
+    with pytest.raises(RuntimeError, match="process could not be checked: timeout"):
+        await _server(_config()).prepare_sandbox(_prepare())
+
+
+def _import_request() -> SimpleNamespace:
+    """The import request as the Environment Server sends it, with the Resources session's cookie."""
+    return SimpleNamespace(session={SESSION_ID_KEY: SESSION}, cookies={"session": "signed"})
+
+
+async def test_a_state_the_tool_host_does_not_export_is_never_imported(simulated: SimpleNamespace) -> None:
+    server = _server(_config())
+    simulated.replies["/_tool_sidecar/state"] = (500, "export failed")
+
+    with pytest.raises(RuntimeError, match="did not export its state: HTTP 500: export failed"):
+        await server.import_tool_sidecar_state(
+            _import_request(),  # type: ignore[arg-type]
+            ToolSidecarImportStateRequest(sandbox_access=_access()),
+        )
+    # The call carried the Resources session's cookie.
+    assert simulated.calls[-1]["cookies"] == {"session": "signed"}
+
+
+class _StatelessTools(ToolSidecarResources, _ServerThatPrepares):
+    """A server whose tools keep no state: it overrides neither state hook."""
+
+    config: LedgerConfig
+
+
+async def test_tools_that_keep_no_state_import_nothing(simulated: SimpleNamespace) -> None:
+    server = _StatelessTools(config=_config(), server_client=_server(_config()).server_client)
+    simulated.replies["/_tool_sidecar/state"] = (200, json.dumps({"state": server.export_tool_state(SESSION)}))
+
+    imported = await server.import_tool_sidecar_state(
+        _import_request(),  # type: ignore[arg-type]
+        ToolSidecarImportStateRequest(sandbox_access=_access()),
+    )
+
+    assert imported.imported is False
+    assert await server.import_tool_state(SESSION, {"ignored": True}) is None
+
+
+async def test_a_server_whose_tools_run_in_process_has_no_state_to_import() -> None:
+    server = _server(_config().model_copy(update={"tool_sidecar": None}))
+
+    with pytest.raises(HTTPException) as refused:
+        await server.import_tool_sidecar_state(
+            _import_request(),  # type: ignore[arg-type]
+            ToolSidecarImportStateRequest(sandbox_access=_access()),
+        )
+    assert refused.value.status_code == 404
+
+
+def test_the_tool_hosts_runtime_holds_gyms_packages_and_the_servers_own() -> None:
+    class _WithExtras(LedgerResourcesServer):
+        tool_sidecar_requirements: ClassVar[tuple[str, ...]] = ("regex",)
+
+    plain = LedgerResourcesServer.tool_host_runtime(_server(_config()))
+    extra = _WithExtras(config=_config(), server_client=_server(_config()).server_client).tool_host_runtime()
+
+    assert plain.requirements == tool_sidecar.TOOL_HOST_REQUIREMENTS
+    assert extra.requirements == (*tool_sidecar.TOOL_HOST_REQUIREMENTS, "regex")
+    # A runtime with other packages is another runtime, so neither reuses the other's install.
+    assert plain.directory != extra.directory
+
+
+def test_a_server_that_signs_sessions_with_a_secret_cannot_serve_its_tools_from_a_sidecar() -> None:
+    class _RunSecret(LedgerResourcesServer):
+        signs_sessions_with_run_secret: ClassVar[bool] = True
+
+    with pytest.raises(ValueError, match="secret the tool host does not share"):
+        _RunSecret(config=_config(), server_client=_server(_config()).server_client)
+
+
+def test_credentials_in_lists_of_blocks_are_found() -> None:
+    assert secret_paths({"servers": [{"name": "a"}, {"api_key": "k"}]}) == ["servers[1].api_key"]

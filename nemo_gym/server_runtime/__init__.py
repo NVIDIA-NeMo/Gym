@@ -172,6 +172,7 @@ if TYPE_CHECKING:
         ToolSidecarImportStateRequest,
         ToolSidecarImportStateResponse,
         tool_sidecar_config_of,
+        tool_sidecar_reachable,
     )
     from nemo_gym.server_runtime.verifier_observability import (
         observe_llm_judge_grading,
@@ -290,6 +291,7 @@ _PUBLIC_API = {
     "ToolSidecarImportStateResponse": "tool_sidecar",
     "ToolSidecarConfig": "tool_sidecar",
     "tool_sidecar_config_of": "tool_sidecar",
+    "tool_sidecar_reachable": "tool_sidecar",
     "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
     "checkpoint_state_dir": "owned_sandboxes",

@@ -10,6 +10,7 @@ After the agent closes and before ``/verify``, it asks the Resources Server to c
 the sidecar (``/tool_sidecar/import_state``), then stops the group. No tool call of the agent reaches the Resources host.
 """
 
+import shlex
 from collections.abc import Mapping
 from typing import Any
 
@@ -17,12 +18,15 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PositiveFloat
 
 from nemo_gym.sandbox.access import SandboxAccess
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SupportsSandboxSidecars
 from nemo_gym.server_runtime.attempt_sandbox import SandboxGroupSidecar
 from nemo_gym.server_runtime.owned_sandboxes import check_network_rule
 
 
 TOOL_SIDECAR_IMPORT_STATE_PATH = "/tool_sidecar/import_state"
+# The tool host's readiness route, which anyone may call.
+TOOL_HOST_READY_PATH = "/_tool_sidecar/ready"
 
 
 class ToolSidecarConfig(BaseModel):
@@ -114,3 +118,33 @@ def tool_sidecar_config_of(resources_config: Mapping[str, Any]) -> ToolSidecarCo
     return ToolSidecarConfig.model_validate(
         OmegaConf.to_container(raw, resolve=True) if OmegaConf.is_config(raw) else raw
     )
+
+
+async def tool_sidecar_reachable(sandbox: AsyncSandbox, host: str, port: int) -> bool:
+    """Probe a tool host from ``sandbox``, the agent container, as the agent's tool calls will reach it.
+
+    With ``python3`` the probe asks the tool host whether it is ready; with only ``bash`` it opens a connection to its
+    port.
+
+    Returns:
+        True once the tool host answers; False when the image has neither ``python3`` nor ``bash``, so the reach was
+        not checked.
+
+    Raises:
+        RuntimeError: If the agent container cannot reach the tool host.
+    """
+    ready = shlex.quote(f"http://{host}:{port}{TOOL_HOST_READY_PATH}")
+    probe = (
+        "if command -v python3 >/dev/null; then "
+        f"python3 -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=10)' {ready}; "
+        "elif command -v bash >/dev/null; then "
+        f"bash -c 'exec 3<>\"/dev/tcp/$0/$1\"' {shlex.quote(host)} {int(port)}; "
+        "else exit 127; fi"
+    )
+    result = await sandbox.exec(probe, cwd="/", timeout_s=60)
+    if result.return_code == 127 and result.error_type is None:
+        return False
+    if result.return_code != 0 or result.error_type is not None:
+        detail = result.error_type or (result.stderr or result.stdout or "").strip()[-1000:]
+        raise RuntimeError(f"The agent container cannot reach the tool sidecar at {host}:{port}: {detail}")
+    return True
