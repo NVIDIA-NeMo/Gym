@@ -548,7 +548,8 @@ async def test_a_close_drops_the_session_from_the_checkpointer_without_waiting_f
         assert (await _post_seed(http, _seed())).status_code == 200
         checkpointer = server._checkpointer()
         path, body = _close_path(_seed())
-        async with checkpointer._semaphore:  # every turn is taken, as while a commit submits its snapshots
+        assert checkpointer._stop_limit is not None
+        async with checkpointer._stop_limit:  # every stop slot is taken, as while other sessions stop theirs
             closed = await asyncio.wait_for(http.post(path, json=body), timeout=10)
 
     assert closed.status_code == 200, closed.text
@@ -756,7 +757,7 @@ async def test_a_failed_restore_does_not_wait_for_a_fork_whose_stop_hangs(
     states = await _exported(make_server(provider, config), ["a", "b"])
     restored = make_server(provider, config)
     object.__setattr__(restored, "_task_sandbox_response", AsyncMock(side_effect=RuntimeError("install failed")))
-    monkeypatch.setattr("nemo_gym.server_runtime._checkpoint.sandbox.STOP_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("nemo_gym.server_runtime.owned_sandboxes.STOP_TIMEOUT_S", 0.05)
     close = provider.close
 
     async def hung(handle: Any) -> None:

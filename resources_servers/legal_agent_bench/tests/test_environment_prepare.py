@@ -69,6 +69,11 @@ def test_materialization_preserves_identity_params_and_isolates_rubric(assets, t
         assert params["temperature"] == 0.4 and params["max_output_tokens"] == 1234
         assert params["input"][-1]["content"] == "Keep caller text"
         assert "PRIVATE RUBRIC" not in json.dumps(params)
+        instruction = (folder / name / "instruction.md").read_text()
+        for path in ("/workspace/vdr", "/workspace/output", "/workspace/skills"):
+            assert path in instruction
+        assert "$OUTPUT_DIR" not in instruction and "$DOCUMENTS_DIR" not in instruction
+        assert "$WORKSPACE_DIR/documents" not in instruction
         assert not (folder / name / "environment/task.json").exists()
         assert task.python_verifier is not None
         assert task.config.verifier.environment_mode == "separate"

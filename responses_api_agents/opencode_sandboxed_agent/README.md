@@ -27,6 +27,9 @@ python responses_api_agents/opencode_sandboxed_agent/client.py \
 ```
 
 ## Prefetch OpenCode binary and upload to S3
+`configs/opencode_sandboxed_agent.yaml` pins OpenCode 1.17.11; a config without `opencode_version` gets
+`opencode_agent`'s default, now 1.19.6. A prefetched binary must be the configured release: setup checks
+`opencode --version`.
 ```bash
 curl -L https://opencode.ai/install -o opencode_install.sh
 

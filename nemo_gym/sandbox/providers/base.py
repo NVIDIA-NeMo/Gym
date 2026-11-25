@@ -14,12 +14,12 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 from urllib.parse import urlsplit
 
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
@@ -286,6 +286,14 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+class SandboxExecArgvUnsupportedError(NotImplementedError):
+    """Raised before anything runs when an ``exec`` argument list cannot run without a shell.
+
+    The provider lacks ``SupportsSandboxExecArgv``, or it cannot honor this call's options without a shell (a
+    ``user`` it switches to only through ``su``, say). The list is never joined into shell text instead.
+    """
+
+
 def sandbox_credentials_rejected(
     error: BaseException,
     *,
@@ -350,27 +358,51 @@ class SandboxSnapshotInUseError(SandboxSnapshotError):
     """Raised when a provider refuses to delete a snapshot because something still uses it."""
 
 
+NetworkRule = Literal["inherit", "no_network", "model_only", "model_and_tools", "hosts_only"]
+"""The egress rule a sandbox starts with.
+
+``inherit`` keeps the provider's default. ``no_network`` allows no egress. ``model_only`` allows the model server,
+``model_and_tools`` the model server and the tool servers, and ``hosts_only`` only the hosts listed for the sandbox.
+Every restricted rule also allows the listed hosts.
+"""
+NETWORK_RULES: frozenset[NetworkRule] = frozenset(get_args(NetworkRule))
+
 # What a snapshot of a sandbox can keep.
 SnapshotContent = Literal["files", "processes"]
+Reconnect = Literal["always", "same_host", "never"]
 
 
 @dataclass(frozen=True)
 class SandboxCapabilities:
-    """What a provider class can do, declared as its ``capabilities`` class attribute.
+    """What a provider class can do beyond start, commands, file transfer and stop, declared as its ``capabilities``
+    class attribute.
 
-    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none.
+    Read it with :func:`provider_capabilities`, which also answers for a provider that declares none. Every owner,
+    typed config, ``OwnedSandboxes``, ``borrow()``, stop and shutdown sweep works on every provider. These capabilities
+    are needed only by servers that use them, which are refused as early as they can be known.
 
     Attributes:
         snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots. With
             ``"processes"``, a snapshot saves memory and running processes, and a sandbox created from it
             continues them.
+        network_rules: The egress rules the provider can apply at creation (see :data:`NetworkRule`). A provider
+            that lists any rule besides ``inherit`` implements :class:`SupportsSandboxNetworkRules`.
+        reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
+            ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
+            ``never``.
     """
 
     snapshot_keeps: frozenset[SnapshotContent] = frozenset()
+    network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
+    reconnect: Reconnect = "always"
 
 
-def provider_capabilities(provider: object) -> SandboxCapabilities:
-    """The capabilities ``provider`` declares; the defaults for a provider that declares none."""
+def provider_capabilities(provider: object, *, config: Mapping[str, Any] | None = None) -> SandboxCapabilities:
+    """The provider's effective capabilities, resolved from its deployment config when checking a class at startup."""
+    if config is not None and isinstance(provider, type):
+        resolve = getattr(provider, "capabilities_for_config", None)
+        if resolve is not None:
+            return resolve(config)
     capabilities = getattr(provider, "capabilities", None)
     return capabilities if isinstance(capabilities, SandboxCapabilities) else SandboxCapabilities()
 
@@ -416,7 +448,11 @@ class SandboxProvider(Protocol):
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        """Run a command inside a sandbox."""
+        """Run a command inside a sandbox.
+
+        ``command`` is shell text. Only a provider that implements ``SupportsSandboxExecArgv`` also takes a list of
+        strings, declared there; ``AsyncSandbox.exec`` passes a list to no other provider.
+        """
         ...
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
@@ -437,6 +473,20 @@ class SandboxProvider(Protocol):
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxNetworkRules(Protocol):
+    """A provider that applies egress rules besides ``inherit`` when it creates a sandbox."""
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with ``rule`` applied, allowing ``hosts``; only called for a rule it declares.
+
+        ``hosts`` are host names or addresses a sandbox on this provider can reach, already resolved by the owner.
+        """
         ...
 
 
@@ -468,6 +518,31 @@ class SupportsSandboxExecScopedProcesses(Protocol):
     """
 
     async def exec_processes_terminated(self, handle: SandboxHandle) -> bool: ...
+
+
+@runtime_checkable
+class SupportsSandboxExecArgv(Protocol):
+    """Optional provider capability: ``exec`` runs an argument list without a shell.
+
+    Such a provider's ``exec`` takes ``command`` as shell text or as a list of strings, and runs a list as the
+    process's argv with no shell in between, as ``SupportsSandboxSidecars.sidecar_exec`` does because sidecar images
+    can be distroless. ``AsyncSandbox.exec`` hands a list only to a provider whose ``exec_takes_argv()`` is true and
+    raises ``SandboxExecArgvUnsupportedError`` for any other. The provider may still refuse one call with that error,
+    before anything runs, when an option such as ``user`` would need a shell; it never joins the list into shell text.
+    """
+
+    def exec_takes_argv(self) -> bool: ...
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str | Sequence[str],
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult: ...
 
 
 @runtime_checkable

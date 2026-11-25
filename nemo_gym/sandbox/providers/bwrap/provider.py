@@ -39,12 +39,13 @@ import socket
 import stat
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecResult,
@@ -52,6 +53,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import require_shell_text
 
 
 LOGGER = logging.getLogger(__name__)
@@ -425,6 +427,8 @@ class BwrapProvider:
     """Sandbox provider backed by a pinned bubblewrap binary on the Gym process's host."""
 
     name = PROVIDER_NAME
+    # A borrower reconnects only on the same host and as the same user.
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(reconnect="same_host")
 
     def __init__(self, **config: Any) -> None:
         self._config = BwrapConfig(**config)
@@ -812,7 +816,7 @@ class BwrapProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -825,6 +829,7 @@ class BwrapProvider:
         namespace (and every background process in it) is torn down. On timeout or
         cancellation the bwrap process group is SIGKILLed, which also kills the namespace.
         """
+        command = require_shell_text(command, provider=self.name)
         if user is not None:
             raise ValueError("The bwrap sandbox provider runs commands as the Gym process's user only")
         inst: _BwrapSandbox = handle.raw

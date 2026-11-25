@@ -36,6 +36,9 @@ against a path that does not exist, which scores as a quiet 0.
 | `tool_names` | none | `function_calling` only. None: `bash` calls, keeping just `command` (mini-swe-agent). A list: calls to any of these tools, with whatever JSON-object arguments the model wrote (e.g. AutomationBench's `api_search`, `api_fetch`, `base64_encode`) |
 | `render_assistant_text` | false | render the text an assistant turn carried alongside its tool calls, as an `Assistant:` line before the calls. Off matches the reference bridge, which dropped it. The primer still opens the candidate's turn on the tool-call line, so the candidate sees narrated turns but cannot narrate its own |
 | `max_tokens`, `temperature`, `top_p` | 1024, 0.6, none | sampling |
+| `request_timeout_seconds` | none | Time limit for each HTTP attempt, not for the whole call. A timed-out attempt is retried like any other transport error; a timeout while reading the response body is raised without resending the request. None means no limit |
+| `max_connection_retries` | none | Connection-error attempts one call makes before raising: `N` allows N attempts, so `1` means no retry. Also caps the timeout and error retry path. It does not cap the attempts of the separate HTTP-status retry loop. None means no limit |
+| `connection_retry_timeout_s` | none | Wall-clock seconds one call may spend retrying connection errors. Not a deadline for the whole call. None means no limit |
 
 **Truncated generations.** When a generation hits `max_tokens` with `tool_names` set, the calls written in full
 before the cut are returned and the call the cut landed in is dropped. The response is still marked truncated: on
