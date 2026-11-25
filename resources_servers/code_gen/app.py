@@ -23,8 +23,8 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
-from sandbox_execution import check_correctness_in_sandbox, task_deadline_s
-from task_data import ResourceLimits
+from sandbox_execution import check_assertions_in_sandbox, check_correctness_in_sandbox, task_deadline_s
+from task_data import AssertionTests, ResourceLimits
 
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.metrics import (
@@ -48,6 +48,9 @@ from nemo_gym.verification import SandboxVerificationConfig, SandboxVerification
 
 
 LOG = logging.getLogger(__name__)
+
+# Assertion tests without a task memory limit get 4 GB by default.
+_ASSERTION_MEMORY_LIMIT_MB = 4096
 
 
 # ----------------------------
@@ -223,15 +226,19 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 "outputs": _decoded["outputs"],
                 "fn_name": _raw_tests.get("fn_name"),
             }
-        tests = UnitTests.model_validate(_raw_tests)
+        if isinstance(_raw_tests, dict) and _raw_tests.get("type") == "assertions":
+            tests = AssertionTests.model_validate(_raw_tests)
+        else:
+            tests = UnitTests.model_validate(_raw_tests)
         raw_limits = body.verifier_metadata.get("resource_limits")
         task_limits = ResourceLimits.model_validate({} if raw_limits is None else raw_limits)
         timeout = (
             task_limits.time_limit_s if task_limits.time_limit_s is not None else self.config.unit_test_timeout_secs
         )
-        # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
-        deadline_s = task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
-        limits = ResourceLimits(time_limit_s=timeout or None, memory_limit_mb=task_limits.memory_limit_mb)
+        memory_limit_mb = task_limits.memory_limit_mb
+        if isinstance(tests, AssertionTests) and memory_limit_mb is None:
+            memory_limit_mb = _ASSERTION_MEMORY_LIMIT_MB
+        limits = ResourceLimits(time_limit_s=timeout or None, memory_limit_mb=memory_limit_mb)
 
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
@@ -273,24 +280,38 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             # We can directly measure here since we are inside the semaphore.
             start_time = time()
 
-            task_args = (
-                {"input_output": tests.model_dump_json()},  # sample
-                code,  # generation
-                timeout,
-                self.config.debug,  # debug
-            )
-
             provider, sandbox_metadata = self._resolve_sandbox_target()
             try:
-                result, metadata = await check_correctness_in_sandbox(
-                    *task_args,
-                    num_tests=len(tests.inputs),
-                    provider=provider,
-                    config=self.config.sandbox_config,
-                    metadata=sandbox_metadata,
-                    memory_limit_mb=task_limits.memory_limit_mb,
-                    deadline_s=deadline_s,
-                )
+                if isinstance(tests, AssertionTests):
+                    result, metadata = await check_assertions_in_sandbox(
+                        code,
+                        tests.tests,
+                        time_limit_s=timeout,
+                        memory_limit_mb=memory_limit_mb,
+                        provider=provider,
+                        config=self.config.sandbox_config,
+                        metadata=sandbox_metadata,
+                    )
+                else:
+                    task_args = (
+                        {"input_output": tests.model_dump_json()},  # sample
+                        code,  # generation
+                        timeout,
+                        self.config.debug,  # debug
+                    )
+                    # A task's own time limit also bounds compilation; otherwise check_correctness keeps its deadline.
+                    deadline_s = (
+                        task_deadline_s(timeout, len(tests.inputs)) if task_limits.time_limit_s is not None else None
+                    )
+                    result, metadata = await check_correctness_in_sandbox(
+                        *task_args,
+                        num_tests=len(tests.inputs),
+                        provider=provider,
+                        config=self.config.sandbox_config,
+                        metadata=sandbox_metadata,
+                        memory_limit_mb=memory_limit_mb,
+                        deadline_s=deadline_s,
+                    )
             except SandboxVerificationError as e:
                 # The environment failed, not the policy: exclude the sample rather than score it.
                 LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)

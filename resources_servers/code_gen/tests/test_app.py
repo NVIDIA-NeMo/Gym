@@ -467,12 +467,79 @@ class TestSandboxVerify:
             await self._sandbox_server().verify(request)
         assert calls == []
 
-    async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        "resource_limits, time_limit_s, memory_limit_mb",
+        [(None, 10, 4096), ({"time_limit_s": 1.5, "memory_limit_mb": 256}, 1.5, 256)],
+    )
+    async def test_assertion_tests_use_the_assertion_harness(
+        self, monkeypatch, resource_limits, time_limit_s, memory_limit_mb
+    ) -> None:
+        calls = []
+
+        async def _passing(generation, tests, **kwargs):
+            calls.append((tests, kwargs))
+            return [True], None
+
+        monkeypatch.setattr(code_gen_app, "check_assertions_in_sandbox", _passing)
+        request = _verify_request("def f(x):\n    return x")
+        request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert f(1) == 1"]}
+        if resource_limits is not None:
+            request.verifier_metadata["resource_limits"] = resource_limits
+        res = await self._sandbox_server().verify(request)
+
+        ((tests, kwargs),) = calls
+        assert tests == ["assert f(1) == 1"]
+        assert (kwargs["time_limit_s"], kwargs["memory_limit_mb"]) == (time_limit_s, memory_limit_mb)
+        assert res.reward == 1.0
+        assert res.limits.model_dump() == {"time_limit_s": time_limit_s, "memory_limit_mb": memory_limit_mb}
+
+    @pytest.mark.parametrize(
+        "unit_tests",
+        [
+            {"type": "assertions", "tests": ["assert f(1) == 1"], "unexpected": 1},
+            {"type": "assertions", "tests": ["assert f(1) == 1"], "packed": ""},
+            {"type": "assertions", "tests": ["assert f(1) == 1"], "inputs": ["1"], "outputs": ["1"]},
+            {"type": "assertions", "tests": []},
+            {"type": "assertions"},
+        ],
+    )
+    async def test_invalid_assertion_tests_are_rejected_before_grading(self, monkeypatch, unit_tests) -> None:
+        calls = []
+
+        async def _passing(generation, tests, **kwargs):
+            calls.append(tests)
+            return [True], None
+
+        monkeypatch.setattr(code_gen_app, "check_assertions_in_sandbox", _passing)
+        request = _verify_request("def f(x):\n    return x")
+        request.verifier_metadata["unit_tests"] = unit_tests
+        with pytest.raises(ValidationError):
+            await self._sandbox_server().verify(request)
+        assert calls == []
+
+    async def test_invalid_assertion_syntax_masks_the_sample(self, tmp_path) -> None:
+        # Exercise the actual local provider, runner, and server error translation.
+        server = self._sandbox_server()
+        server._sandbox_target = ({"local": {}}, {})
+        server.config.sandbox_config.python = sys.executable
+        request = _verify_request("answer = 42")
+        request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert False", "assert answer =="]}
+        response = await server.verify(request)
+        assert response.mask_sample is True
+        assert response.failure_kind == VERIFIER_ERROR
+        assert "Invalid assertion test at index 1" in response.failure_reason
+
+    @pytest.mark.parametrize("test_format", ["unit-tests", "assertions"])
+    async def test_infrastructure_failure_masks_the_sample(self, monkeypatch, test_format) -> None:
         async def _failing(*args, **kwargs):
             raise SandboxVerificationError(VERIFIER_ERROR, "runner failed (exit=137)")
 
-        monkeypatch.setattr(code_gen_app, "check_correctness_in_sandbox", _failing)
-        res = await self._sandbox_server().verify(_verify_request("print(9)"))
+        harness = "check_assertions_in_sandbox" if test_format == "assertions" else "check_correctness_in_sandbox"
+        monkeypatch.setattr(code_gen_app, harness, _failing)
+        request = _verify_request("print(9)")
+        if test_format == "assertions":
+            request.verifier_metadata["unit_tests"] = {"type": "assertions", "tests": ["assert True"]}
+        res = await self._sandbox_server().verify(request)
 
         assert res.mask_sample is True
         assert res.failure_kind == VERIFIER_ERROR

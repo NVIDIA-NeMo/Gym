@@ -10,13 +10,16 @@ The dataset is in preparation and the example data can be found in `data/example
   - Use only a user message with the problem statement and instructions (e.g., "You are an expert competitive programmer...").
   - `verifier_metadata` (required):
     - `unit_tests` (required): dict with `inputs` and `outputs` arrays containing test cases.
-      - `type` (optional): `unit-tests`, the only format so far and the default when omitted.
+      - `type` (optional): `unit-tests` (the default) or `assertions`.
       - `inputs`: list of strings representing stdin input for each test case
       - `outputs`: list of strings representing expected stdout output for each test case
+      - With `type: assertions`, `tests` replaces `inputs` and `outputs`: Python statements, usually asserts,
+        run in order after the candidate's code.
     - `resource_limits` (optional): the task's own limits. Each applies on its own; one left out keeps the server's.
-      - `time_limit_s`: seconds per test case, fractions allowed. Default: `unit_test_timeout_secs`.
+      - `time_limit_s`: seconds per test case, or for all assertions together; fractions allowed.
+        Default: `unit_test_timeout_secs`.
       - `memory_limit_mb`: memory for the candidate, see [Test execution](#test-execution). Default: none
-        beyond the fixed 4 GiB guard.
+        beyond the fixed 4 GiB guard for unit tests, 4096 MB for assertions.
 
 **Notes**
 - All test cases must pass for a solution to receive a reward of 1.0
@@ -38,6 +41,16 @@ Confirmed timeouts return `-3`. `metadata.stage` identifies `compilation` (inclu
 `test`, `preparation`, or the overall `grading` deadline. A worker that exits early without a result returns
 `-1` with stage `worker` and its `exit_code`; it is not reported as a timeout.
 
+All assertion statements are compiled before measuring the worker's memory baseline and held in an immutable
+tuple, so fixture compilation does not consume the candidate's memory allowance. Invalid task syntax or a worker
+setup failure makes the runner fail and verification mask the sample with `failure_kind: verifier_error`.
+Candidate syntax errors remain ordinary compilation failures.
+
+Assertions run in a child process the same way (`assertion_harness/`): the candidate's code, then each statement of
+`tests` in one `__main__` module, under one timer and the same memory cap, stopping at the first failure. Exiting
+before the last statement fails. Tests are compiled with `optimize=0`, so assertions remain active even when
+the sandbox interpreter uses `-O`, `-OO`, or `PYTHONOPTIMIZE`. Results use the harness's codes (`-1` compile, `-2` assertion, `-3` time, `-4` runtime).
+
 ### Running unit tests in a sandbox
 Configure a [sandbox provider](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox)
 and a runtime image before starting the server. Both `sandbox_provider` and `sandbox_config.image`
@@ -54,6 +67,8 @@ Where each part runs:
 |---|---|
 | `sandbox/sandbox_runner.py` | Only in the sandbox; uploaded with every verification. |
 | `lcb_integration/__init__.py`, `correctness.py`, `testing_util.py` | The grading harness, uploaded next to the runner in each sandbox. |
+| `assertion_harness/__init__.py`, `check.py` | The assertion harness, uploaded the same way. |
+| `sandbox_limits.py` | Task memory limits for both harnesses, uploaded the same way. |
 | `sandbox/Dockerfile` | Builds the sandbox image; not uploaded. |
 | Everything else, including the server entrypoints and `sandbox_execution.py` (which does the upload) | Only in the Gym server. |
 
