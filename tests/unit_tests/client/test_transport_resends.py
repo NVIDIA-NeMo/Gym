@@ -203,6 +203,23 @@ async def test_downstream_resends_reach_the_callers_log(
     assert log.transport_resends == expected
 
 
+@pytest.mark.parametrize("gym_server", [True, False], ids=["a Gym server", "an external endpoint"])
+async def test_a_model_client_with_the_external_retry_policy_reads_a_gym_servers_resends(
+    monkeypatch: pytest.MonkeyPatch, gym_server: bool
+) -> None:
+    """A Gym model server resolved from the registry, called without the internal client's unbounded retries."""
+    from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI
+
+    _install_transport(monkeypatch, [ServerDisconnectedError(), _response({RESEND_HEADER: "3"})])
+    client = NeMoGymAsyncOpenAI(
+        base_url="http://gym/v1", api_key="dummy", internal=False, gym_server=gym_server, max_connection_retries=2
+    )
+    with RequestFailureLog.capture() as log:
+        await client._request(method="GET", url="http://gym/v1/models")
+    # The client's own resend counts either way; the reply's count only from a Gym server.
+    assert log.transport_resends == (4 if gym_server else 1)
+
+
 @pytest.mark.parametrize(
     "raw",
     ["9" * (TransportResendHeader.MAX_DIGITS + 1), "9" * 4301],

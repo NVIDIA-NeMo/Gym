@@ -459,6 +459,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         ),
     )
 
+    gym_server: bool = Field(
+        default=False,
+        description=(
+            "Set this to true when base_url is a NeMo Gym server, such as one resolved from the server registry, "
+            "but the client keeps the external retry policy (internal=False). The transport resends the server "
+            "reports in its replies then join the caller's count, as they do for an internal client. Changes no "
+            "retry policy."
+        ),
+    )
+
     max_connection_retries: Optional[int] = Field(
         default=None,
         description=(
@@ -646,6 +656,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         request_kwargs = request_kwargs | {
             "headers": headers,
             "_internal": self.internal,
+            "_gym_server": self.gym_server,
             "_max_num_tries": self.max_num_tries,
             "_max_connection_retries": connection_retries,
         }

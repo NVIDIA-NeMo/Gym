@@ -768,6 +768,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 api_key="dummy",
                 # Not `internal`: that client retries forever. The bounds surface an outage to this handler.
                 internal=False,
+                gym_server=True,
                 max_connection_retries=MODEL_CONNECTION_RETRIES,
                 max_http_attempts=MODEL_HTTP_ATTEMPTS,
                 default_headers={"x-session-id": invocation_id} if invocation_id is not None else {},
