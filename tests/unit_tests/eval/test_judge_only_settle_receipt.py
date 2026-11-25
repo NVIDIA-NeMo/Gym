@@ -209,6 +209,24 @@ def test_a_job_refused_the_run_never_writes_its_run_status(tmp_path, verifier, a
     assert status.read_bytes() == owned
 
 
+def test_a_job_whose_run_changed_while_queued_never_writes_its_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
+    """The run that replaced the queued one keeps the status its own collection wrote."""
+    output, _ = _run_with_judge_failures(tmp_path, judge_failures=1)
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    stale = json.loads(_snapshot(output))
+    stale["rollouts.jsonl"] = "0" * 64
+    status = batch_status_path_for(output)
+    status.write_text('{"schema_version": "1", "tracking": "enabled", "members": {}}')
+    replacement = status.read_bytes()
+
+    with pytest.raises(ConfigError, match="changed while queued"):
+        eval_cli._reverify_with_receipt(
+            {"config_paths": ["fixture.yaml"]}, _job_config(output, settle_source_snapshot_json=json.dumps(stale))
+        )
+
+    assert status.read_bytes() == replacement
+
+
 def test_a_job_through_a_rollout_alias_recounts_the_run_status(tmp_path, verifier, aggregation) -> None:  # noqa: F811
     """The status sits beside the resolved run, which settlement writes, not beside the alias the job was given."""
     run = tmp_path / "real"

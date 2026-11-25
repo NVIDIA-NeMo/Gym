@@ -1902,10 +1902,11 @@ class RolloutReverificationHelper(BaseModel):
                 print(_RECOVERY_TWO_SOURCES_WARNING)
                 if config.settle_into_source:
                     settle_lock.enter_context(run_lock(rollouts_jsonl_fpath))
-                    # Runs last before the lock is released, after a failed pass settled what it judged.
-                    settle_lock.callback(refresh_run_status, rollouts_jsonl_fpath)
                     if config.settle_source_snapshot_json is not None:
                         validate_settle_source_snapshot(rollouts_jsonl_fpath, config.settle_source_snapshot_json)
+                    # Only for the run the job was queued for; runs last before the lock is released, after a failed
+                    # pass settled what it judged.
+                    settle_lock.callback(refresh_run_status, rollouts_jsonl_fpath)
                     settle_binding = bind_judge_failures(
                         rollouts_jsonl_fpath,
                         skip_spent=config.skip_spent_judge_failures,
