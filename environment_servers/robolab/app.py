@@ -29,19 +29,56 @@ from nemo_gym.config import (
     ModelServerRef,
     get_first_server_config_dict,
 )
-from nemo_gym.core import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
+from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    ENVIRONMENT_SERVER_FAILED,
+    MODEL_CONTEXT_LIMIT,
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    EpisodeFailure,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_runtime import (
     AgentContext,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
+    BaseVerifyResponse,
     CleanupContext,
+    observe_verifier,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+POLICY_FAILURE_KINDS = {
+    "policy_failure.decision_budget": AGENT_LIMIT,
+    "policy_failure.deadline": AGENT_TIMEOUT,
+    "policy_failure.context": MODEL_CONTEXT_LIMIT,
+    "policy_failure.no_progress": AGENT_INVALID_OUTPUT,
+}
 
 
 class RoboLabTaskInput(BaseModel):
     case_id: str
     verifier_metadata: dict[str, JsonValue]
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming = Field(
+        default_factory=lambda: NeMoGymResponseCreateParamsNonStreaming(input=[])
+    )
+
+
+class RoboLabVerifyResponse(BaseVerifyResponse):
+    case_id: str
+    seed: int
+    manifest_sha256: str
+    official_manifest_sha256: str
+    native_source_sha256: str
+    terminal_sha256: str
+    native_score: Score | None = None
+    native_success: bool | None = None
+    native_outcome: str
+    cleanup_confirmed: bool
 
 
 class RoboLabEnvironmentConfig(BaseEnvironmentServerConfig):
@@ -276,10 +313,65 @@ class RoboLabEnvironmentServer(
             return self.failure_response(
                 request, EpisodeFailure(failure_reason=str(error), terminal=True, stage="verification")
             )
+        model_info = manifest.bridge_config.get("model")
+        model_id = (
+            model_info.get("id")
+            if isinstance(model_info, dict) and isinstance(model_info.get("id"), str) and model_info.get("id")
+            else "robolab"
+        )
+        response = NeMoGymResponse(
+            id=attempt.name,
+            created_at=0,
+            model=model_id,
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tools=[],
+            tool_choice="none",
+            metadata={"episode_engine": "robolab_bridge"},
+        )
+        common = {
+            "responses_create_params": request.task.task_input.responses_create_params,
+            "response": response,
+            "case_id": result["case_id"],
+            "seed": result["seed"],
+            "manifest_sha256": result["manifest_sha256"],
+            "official_manifest_sha256": result["official_manifest_sha256"],
+            "native_source_sha256": result["native_source_sha256"],
+            "terminal_sha256": result["terminal_sha256"],
+            "native_outcome": result["native_outcome"],
+            "cleanup_confirmed": result["cleanup_confirmed"],
+        }
+        if result["native_score"] is None:
+            outcome = str(result["native_outcome"])
+            verify_response = RoboLabVerifyResponse(
+                **common,
+                reward=0.0,
+                native_score=None,
+                native_success=None,
+                mask_sample=True,
+                failure_kind=POLICY_FAILURE_KINDS.get(outcome, ENVIRONMENT_SERVER_FAILED),
+                failure_reason=outcome,
+            )
+            return self.response_model(
+                episode_id=request.episode_id,
+                task_id=request.task.task_id,
+                result=verify_response.model_dump(mode="json"),
+            )
+
+        async def verified_grade() -> RoboLabVerifyResponse:
+            return RoboLabVerifyResponse(
+                **common,
+                reward=float(result["reward"]),
+                native_score=result["native_score"],
+                native_success=result["native_success"],
+            )
+
+        graded = await observe_verifier(verified_grade, enabled=True, verifier_name=self.config.name)()
         return self.response_model(
             episode_id=request.episode_id,
             task_id=request.task.task_id,
-            result=result,
+            result=graded.model_dump(mode="json"),
         )
 
 

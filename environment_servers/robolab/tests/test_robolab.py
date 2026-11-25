@@ -30,8 +30,9 @@ from environment_servers.robolab.opencode_relay import (
 from environment_servers.robolab.terminal import read_condition
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import BaseEpisodeRequest
+from nemo_gym.core import BaseEpisodeRequest, rollout_context
 from nemo_gym.server_runtime import CleanupContext
+from nemo_gym.trajectory import grading_result_binding
 
 
 SOURCE_SHA = "b" * 64
@@ -292,11 +293,17 @@ def test_environment_server_runs_mock_backend_and_aggregates_metrics(tmp_path: P
         }
     )
     cleanup = CleanupContext(episode_id=req.episode_id, cleanup_timeout_seconds=10.0)
-    resp = asyncio.run(server.run(req, cleanup))
+    with rollout_context("robolab-test"):
+        resp = asyncio.run(server.run(req, cleanup))
     assert resp.result is not None
     assert resp.result["reward"] == 1.0
     assert resp.result["native_score"] == 1.0
     assert resp.result["native_success"] is True
+    assert resp.result["mask_sample"] is False
+    (invocation,) = resp.result["ng_verifier_invocations"]
+    assert invocation["grading_record"]["verdict"] == "scored"
+    assert invocation["grading_record"]["score"] == resp.result["reward"]
+    assert invocation["grading_record"]["result_binding_sha256"] == grading_result_binding(resp.result)
 
     agg = asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[resp.result])))
     assert agg.key_metrics["num/scored_cases"] == 1
