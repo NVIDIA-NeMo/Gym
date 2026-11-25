@@ -54,7 +54,12 @@ from nemo_gym.config.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     scoped_global_config_dict,
 )
-from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
 from nemo_gym.server_runtime.base_server import (
     RUN_SESSION_SECRET_ENV_PREFIX,
     BaseServer,
@@ -1485,6 +1490,7 @@ class TestRunWebserverProxyKwargs:
 
         def run(**kwargs) -> None:
             captured.update(kwargs)
+            self.session_secret_at_run = os.environ.get(_run_secret_variable("my_server"))
             self.blocked_signals_at_run = signal.pthread_sigmask(signal.SIG_BLOCK, ())  # reads the mask, adds nothing
 
         monkeypatch.setattr(nemo_gym.server_runtime.base_server.uvicorn, "run", run)
@@ -1500,10 +1506,14 @@ class TestRunWebserverProxyKwargs:
             **({} if mcp is None else {"expose_tools_over_mcp": True, **mcp}),
         )
         ray_setting = ray_enabled
+        server_type = SimpleServer if mcp is None else SimpleResourcesServer
 
-        class TestSimpleServer(SimpleServer):
+        class TestSimpleServer(server_type):
             ray_enabled = ray_setting
             routes_sessions_to_owner = routes_sessions
+
+            async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+                return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
             def owned_session_routing(self) -> dict:
                 return {}
@@ -1516,6 +1526,8 @@ class TestRunWebserverProxyKwargs:
                 return unsupported_reason
 
             def setup_webserver(self) -> FastAPI:
+                if mcp is not None:
+                    return super().setup_webserver()
                 return FastAPI()
 
             def setup_telemetry(self) -> None: ...
@@ -1527,6 +1539,25 @@ class TestRunWebserverProxyKwargs:
 
         TestSimpleServer.run_webserver()
         return captured
+
+    @mark.parametrize("bearer", [False, True])
+    def test_multi_worker_main_initializes_the_secret_before_uvicorn_starts(
+        self, monkeypatch: MonkeyPatch, bearer: bool
+    ) -> None:
+        variable = _run_secret_variable("my_server")
+        monkeypatch.delenv(variable, raising=False)
+
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch, {}, num_workers=4, is_worker=False, mcp={"mcp_bearer_token": bearer}
+        )
+
+        assert kwargs["workers"] == 4
+        if bearer:
+            assert self.session_secret_at_run
+            assert self.session_secret_at_run == os.environ[variable]
+            assert self.session_secret_at_run != "TestSimpleServer___my_server"
+        else:
+            assert self.session_secret_at_run is None
 
     @mark.parametrize(
         ("config_dict", "num_workers", "uses_reuse_port"),
