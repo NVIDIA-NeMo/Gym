@@ -4,14 +4,20 @@
 config_paths:
   - benchmarks/nemotron_3.5_super/build_container_configs/swe_8n-11_reward_profiling.yaml
 
+slurm:
+  account: nemotron_n4_longeval
+  qos: n4_longeval
+  partition: batch_long
+
 shared_run_warmup_env_vars:
   NUM_PREFILL_NODES: 6
   NUM_DECODE_NODES: 6
+  SEGMENT: 1
 
 run:
   env:
     EXPERIMENT_NAME: swe_20261118/super_3.5_GA-BF16-p6d6-rewardprofiling
-    SBATCH_TIMELIMIT: "04:00:00"
+    SBATCH_TIMELIMIT: "12:00:00"
   # The input JSONL supplies the tasks. Clear R2E's unused catalog entry, whose
   # free-form license string is rejected by Gym's dataset schema.
   args: |
