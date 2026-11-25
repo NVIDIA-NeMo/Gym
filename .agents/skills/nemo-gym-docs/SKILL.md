@@ -172,10 +172,10 @@ Fern renders `title:` as the page heading, so do not repeat it as a `# <Page Tit
 
 ## Validate
 
-Authenticate the Fern CLI when a command requires it:
+First-time setup: authenticate the CLI against the `nvidia` Fern org via Google SSO (one-time, browser flow):
 
 ```bash
-npx -y fern-api@latest login    # opens the supported Fern CLI login flow
+npx -y fern-api@latest login    # opens browser → sign in with your @nvidia.com Google account
 ```
 
 Run from `fern/` (no install step — scripts shell out to `npx -y fern-api@latest`):

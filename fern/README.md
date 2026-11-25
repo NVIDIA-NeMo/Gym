@@ -23,7 +23,8 @@ First time on this machine (run from the repo root):
 npm install -g fern-api
 # or use it ad-hoc via:  npx -y fern-api@latest <subcommand>
 
-# 2. Authenticate the Fern CLI when required (one-time per machine).
+# 2. Provision your Fern account + CLI auth (one-time per machine).
+#    Walks you through the dashboard sign-in step before running `fern login`.
 make docs-login   # or `make docs-login-remote` when working on a headless remote machine
 
 # 3. Build the API library reference and start the local dev server
@@ -33,13 +34,15 @@ make docs           # http://localhost:3000
 make docs-check
 ```
 
-`make docs-login` runs the Fern CLI authentication flow. Documentation checks and PR previews use CI credentials and do not require local Fern authentication. Generating the API reference may require an account with the necessary Fern access; if access is denied, use the public maintainer issue form below.
+**`make docs-login` is load-bearing.** Skip it and `fern docs md generate` returns `HTTP 403: User does not belong to organization` — the CLI's `fern login` flow alone is *not* enough; Fern requires that you sign in to the dashboard first so your account record exists in Fern's user DB.
 
 ### External contributors
 
-You do **not** need Fern dashboard organization membership to contribute documentation. Edit MDX under `fern/versions/latest/pages/` (update [`fern/versions/main.yml`](./versions/main.yml) only when a new page is not auto-discovered), open a PR, and use CI (`fern check` + the automatic preview comment), which authenticates with the repository `DOCS_FERN_TOKEN`.
+You do **not** need Fern `nvidia` org membership to contribute documentation. Edit MDX under `fern/versions/latest/pages/` (update [`fern/versions/main.yml`](./versions/main.yml) only when a new page is not auto-discovered), open a PR, and use CI (`fern check` + the automatic preview comment), which authenticates with the repository `DOCS_FERN_TOKEN`.
 
-If local API reference generation is denied for lack of access, [open a GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) and describe the command and error. Maintainers can route the request through the appropriate process. Do not include credentials or restricted information in the issue.
+Fern `nvidia` org membership is only needed for local library autodoc generation (`make docs` / `fern docs md generate`) when you hit that 403. To request access, [open a GitHub issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) with a title like `Fern nvidia org access request` (label `community-request` if available). Maintainers triage the request.
+
+**NVIDIA employees:** if you have NVIDIA Slack, you can also ask in `#fern`. Slack is not required for external contributors.
 
 ### Fern CLI + docs reference
 
@@ -92,7 +95,7 @@ make docs-publish           # trigger the `Publish Fern Docs` workflow on origin
 make docs-generate-library  # standalone library regeneration (rarely needed; `make docs` runs it)
 ```
 
-For first-time-on-this-machine setup, see the [Quickstart](#quickstart) above — `make docs-login` / `make docs-login-remote` runs the Fern CLI login flow.
+For first-time-on-this-machine setup, see the [Quickstart](#quickstart) above — `make docs-login` / `make docs-login-remote` walks through dashboard provisioning + `fern login` together.
 
 `make docs` first runs `fern docs md generate`, which populates `fern/product-docs/` from the `nemo_gym` package source declared in the `libraries:` block of `docs.yml`. Without it, a cold `fern docs dev` will fail with `Folder not found: ./product-docs/...`. Re-run only when the upstream Python source changes — for prose-only iteration after the first generation, `cd fern && npm run dev` is enough.
 
