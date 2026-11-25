@@ -334,6 +334,11 @@ def test_collect_rollouts_writes_the_resolved_config_of_a_resume_once_it_is_acce
     assert "policy_model_name: current" in before_collection[-1]
     assert _ON_RUN_ACCEPTED.get() is None
 
+    # A quoted "false" is no resume for the collection config, so it is none here: the run starts fresh.
+    config.resume_from_cache = "false"
+    collect(saved_rollouts=True, accepts=False)
+    assert "policy_model_name: current" in before_collection[-1]
+
 
 @pytest.mark.parametrize("fails", [False, True])
 def test_aggregate_rollouts_sets_up_telemetry_before_aggregating_and_shuts_it_down(monkeypatch, fails):

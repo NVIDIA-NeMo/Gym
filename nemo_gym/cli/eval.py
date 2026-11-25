@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, List
 
 import yaml
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, TypeAdapter, ValidationError, field_validator
 from rich.table import Table
 
 from nemo_gym._moved_paths import moved_names_getattr
@@ -373,18 +373,29 @@ def _resumes_saved_run(global_config_dict: DictConfig | Mapping[str, Any], outpu
     from nemo_gym.rollouts.rollout_records import resolve_rollout_path
     from nemo_gym.rollouts.rollout_store import saved_run_files
 
-    if not (global_config_dict.get("resume_from_cache") or global_config_dict.get("resubmit")):
+    try:
+        # As the collection config reads them, so a quoted "false" is not a resume here either.
+        resume = any(
+            TypeAdapter(bool).validate_python(global_config_dict.get(key) or False)
+            for key in ("resume_from_cache", "resubmit")
+        )
+    except ValidationError:
+        return False  # The collection config refuses the value with its own message.
+    if not resume:
         return False
     return any(path.exists() for path in saved_run_files(resolve_rollout_path(output)))
 
 
 @contextmanager
-def _resume_of_saved_run(global_config_dict: DictConfig | Mapping[str, Any], output: Path) -> Iterator[None]:
+def _resume_of_saved_run(
+    global_config_dict: DictConfig | Mapping[str, Any], output: Path, *, driver: bool
+) -> Iterator[None]:
     """Run a collection that resumes the rollouts saved under ``output``'s names, built-in or a custom driver's.
 
     Until the collector accepts the resume, the saved rollouts are the earlier run's, and so is the resolved config
     beside them. The collector calls back, under the run lock, once it has: the resolved config is written then. A
-    driver that never runs the built-in collector has it written when it finishes.
+    custom ``driver`` may collect without the built-in collector and never call back; what it wrote is still this
+    command's, so its resolved config is written when it ends, failed or not.
 
     A ``ConfigError`` before that point (the collector refused the resume, a file of the saved run is missing,
     another collector owns the run) leaves the saved run as it was, and sets ``_saved_run_untouched``.
@@ -405,6 +416,10 @@ def _resume_of_saved_run(global_config_dict: DictConfig | Mapping[str, Any], out
         yield
     except ConfigError:
         _saved_run_untouched = not accepted
+        raise
+    except BaseException:
+        if driver and not accepted:
+            write_resolved_config(global_config_dict, output)
         raise
     finally:
         _ON_RUN_ACCEPTED.reset(token)
@@ -514,7 +529,11 @@ def e2e_rollout_collection():  # pragma: no cover
     collection_completed = False
     interrupted = False
     try:
-        with _resume_of_saved_run(global_config_dict, output_fpath) if resumes_saved_run else nullcontext():
+        with (
+            _resume_of_saved_run(global_config_dict, output_fpath, driver=bool(driver_path))
+            if resumes_saved_run
+            else nullcontext()
+        ):
             if driver_path:
                 module_name, _, fn_name = driver_path.partition(":")
                 if not module_name or not fn_name:
@@ -1318,7 +1337,7 @@ def collect_rollouts():  # pragma: no cover
     init_telemetry(server_name="driver", server_type="driver")
     _interrupt_on_sigterm()
     try:
-        with _resume_of_saved_run(global_config_dict, output) if resumes_saved_run else nullcontext():
+        with _resume_of_saved_run(global_config_dict, output, driver=False) if resumes_saved_run else nullcontext():
             _collect_and_rejudge(rch, config, global_config_dict, output)
         _check_collection_completion(output, require_complete=config.require_complete, completed=True)
     except KeyboardInterrupt:

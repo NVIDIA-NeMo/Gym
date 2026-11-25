@@ -1132,6 +1132,43 @@ async def _single_pass_driver(rollout_collection_config, global_config_dict):
     await RolloutCollectionHelper().run_from_config(rollout_collection_config)
 
 
+async def _driver_failing_on_its_own(rollout_collection_config, global_config_dict):
+    """A custom driver that collects without the built-in collector, and fails."""
+    raise RuntimeError("the driver failed after writing rows of its own")
+
+
+def test_a_driver_that_fails_without_the_collector_still_saves_its_resolved_config(
+    tmp_path, monkeypatch, capsys, oracle_collection
+):
+    """A custom driver may collect without the built-in collector, which is what reports that a resume was
+    accepted. What such a driver wrote before it failed is its command's, so that command's resolved config and run
+    summary are written, not left as the earlier run's."""
+    write_task(tmp_path / "ds" / "a")
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+    oracle_collection.payload = lambda row: result(response={"output": []})
+    rollouts = tmp_path / "results" / "harbor" / "ds" / "rollouts.jsonl"
+
+    def run(*flags):
+        monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+        argv = ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", "opencode_agent", "--model-type", "vllm_model"]
+        policy = ["+policy_model_name=test-model", "+policy_base_url=http://localhost:1", "+policy_api_key=none"]
+        monkeypatch.setattr(sys, "argv", [*argv, *policy, "+disable_aggregation=true", *flags])
+        main_module.main()
+
+    run()
+    assert "_driver_failing_on_its_own" not in resolved_config_path_for(rollouts).read_text()
+    capsys.readouterr()
+
+    with pytest.raises(RuntimeError, match="the driver failed"):
+        run(
+            "+resume_from_cache=true",
+            "+reuse_existing_data_preparation=true",
+            f"+rollout_collection_driver={__name__}:_driver_failing_on_its_own",
+        )
+    assert "_driver_failing_on_its_own" in resolved_config_path_for(rollouts).read_text()
+    assert "Run summary written" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("driver", [(), (f"+rollout_collection_driver={__name__}:_single_pass_driver",)])
 def test_a_refused_resume_keeps_the_run_summary_and_resolved_config(
     tmp_path, monkeypatch, capsys, oracle_collection, driver

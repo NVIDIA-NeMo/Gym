@@ -2670,6 +2670,16 @@ _MAX_FAILURE_BODY_CHARS = 2000
 # the collector a custom ``rollout_collection_driver`` runs calls it too.
 _ON_RUN_ACCEPTED: ContextVar[Callable[[], None] | None] = ContextVar("_ON_RUN_ACCEPTED", default=None)
 
+
+def _report_run_accepted() -> None:
+    """Tell the command that dispatched this collection that the run under its output names is now this one: the
+    collector started it or accepted its resume. A custom driver that collects without ``run_from_config`` calls
+    this once it has decided to resume or replace the saved run."""
+    on_run_accepted = _ON_RUN_ACCEPTED.get()
+    if on_run_accepted is not None:
+        on_run_accepted()
+
+
 _OWNED_JOB_SPAN_CONTEXT: ContextVar[Optional["SpanContext"]] = ContextVar(
     "nemo_gym_owned_job_span_context", default=None
 )
@@ -4562,9 +4572,7 @@ executions → not run again (left to recovery)
             return input_rows, manifest
 
         store = _start_or_resume_store(output_fpath, config, prepare_inputs)
-        on_run_accepted = _ON_RUN_ACCEPTED.get()
-        if on_run_accepted is not None:
-            on_run_accepted()
+        _report_run_accepted()
         if store.started_fresh and agent_complete_dir_for(output_fpath).exists():
             # A fresh run must not inherit completion files from an older run that used the same output path.
             shutil.rmtree(agent_complete_dir_for(output_fpath))
