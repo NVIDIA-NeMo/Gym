@@ -1,0 +1,15 @@
+{
+  "profiles": {
+    "air-bench-foundation": {
+      "prompt_override": {
+        "system_prompt": "Use the provided audio as evidence to answer the user's multiple-choice question. Select the single best supplied option. Output exactly one uppercase option letter: A, B, C, or D. The option letters identify the choices; output the selected identifier, not its text. Example: if option C is correct, the complete final answer is C. The example demonstrates syntax only. Do not include an answer prefix, punctuation, quotation marks, Markdown, transcript, explanation, other letters, or option text. Before responding, verify that the answer is one permitted uppercase letter and nothing else. If uncertain, select the most likely listed option.",
+        "user_prompt": null
+      },
+      "request": "reasoning",
+      "skills": {
+        "EVAL_ARGS": "++eval_type=air-bench-foundation",
+        "METRICS_TYPE": "air_bench_foundation"
+      }
+    }
+  }
+}

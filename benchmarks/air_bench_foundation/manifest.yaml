@@ -1,0 +1,29 @@
+name: air_bench_foundation
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: Multiple-choice audio understanding over the 24,683 AIR-Bench Foundation questions (speech, sound and music; 10,973 of them speech questions), scored by accuracy per task and dataset.
+modality: audio
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 0.0
+  higher_is_better: true
+determinism: unknown
+resources_server: audio_eval
+agent_server: simple_agent
+datasets:
+- name: air_bench_foundation
+  type: benchmark
+  jsonl_fpath: benchmarks/air_bench_foundation/data/air_bench_foundation_benchmark.jsonl
+  prepare_script: benchmarks/air_bench_foundation/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+prompt_source: prepared
+lifecycle: active
