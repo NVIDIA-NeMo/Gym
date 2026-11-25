@@ -17,6 +17,8 @@ import contextlib
 import logging
 import multiprocessing as mp
 import re
+import resource
+import sys
 import unicodedata
 from io import StringIO
 from typing import Any, ClassVar, Dict, List, Optional, Union
@@ -55,6 +57,9 @@ class LibraryJudgeMathResourcesServerConfig(BaseResourcesServerConfig):
     should_use_judge: bool = True
     format_tolerant_answer_extraction: bool = False
     library_verifier_timeout_seconds: PositiveFloat = 10.0
+    # Address space each verifier child may add to what it inherits from this server (Linux only), so an answer that
+    # asks for a huge object fails in its child instead of exhausting the host. None leaves it uncapped.
+    library_verifier_memory_limit_mb: Optional[PositiveInt] = 4096
     library_verifier_max_concurrency: PositiveInt = 32
 
 
@@ -364,9 +369,30 @@ def _run_math_verify(
         return 0.0, None
 
 
-def _run_math_verify_in_subprocess(expected_answer: str, generated_answer: str, result_connection: Any) -> None:
+def _cap_address_space(limit_mb: Optional[int]) -> None:
+    """Let this process map at most ``limit_mb`` more than it already has: past that, allocation raises MemoryError.
+
+    A forked child starts with the server's whole address space mapped, so the cap is relative to the current size.
+    Linux only: other platforms do not enforce ``RLIMIT_AS``, and the timeout alone bounds the child there.
+    """
+    if limit_mb is None or not sys.platform.startswith("linux"):
+        return
+    with open("/proc/self/statm") as statm:
+        mapped_bytes = int(statm.read().split()[0]) * resource.getpagesize()
+    _, hard = resource.getrlimit(resource.RLIMIT_AS)
+    soft = mapped_bytes + limit_mb * 1024 * 1024
+    if hard != resource.RLIM_INFINITY:
+        soft = min(soft, hard)
+    resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+
+
+def _run_math_verify_in_subprocess(
+    expected_answer: str, generated_answer: str, result_connection: Any, memory_limit_mb: Optional[int] = None
+) -> None:
     # Keep math_verify construction inside the child process. A wedged SymPy call
-    # can then be killed by terminating this process without poisoning the server.
+    # can then be killed by terminating this process without poisoning the server,
+    # and an answer that allocates past the cap fails here (MemoryError scores 0).
+    _cap_address_space(memory_limit_mb)
     library_verifier = math_metric(
         gold_extraction_target=(LatexExtractionConfig(),),
         pred_extraction_target=(
@@ -531,7 +557,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
             result_connection, child_connection = ctx.Pipe(duplex=False)
             process = ctx.Process(
                 target=_run_math_verify_in_subprocess,
-                args=(expected_answer, generated_answer, child_connection),
+                args=(
+                    expected_answer,
+                    generated_answer,
+                    child_connection,
+                    self.config.library_verifier_memory_limit_mb,
+                ),
             )
             process.start()
             child_connection.close()

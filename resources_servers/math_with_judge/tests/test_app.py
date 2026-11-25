@@ -15,6 +15,7 @@
 import asyncio
 import json
 import multiprocessing as mp
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -810,10 +811,10 @@ class TestApp:
         )
 
     def test_sympy_string_parsing_runs_code(self, tmp_path: Path) -> None:
-        # The control for the tests below: SymPy's evaluating parser runs its input, so a verifier that passed the
-        # answer text to it would run this code.
+        # The control for the tests below: SymPy's parser runs its input even as Math-Verify calls it
+        # (evaluate=False), so a verifier that passed the answer text to it would run this code.
         sentinel = tmp_path / "ran"
-        sympify(self._code_that_touches(sentinel))
+        sympy_parser.parse_expr(self._code_that_touches(sentinel), evaluate=False)
         assert sentinel.exists()
 
     async def test_the_record_sees_what_the_verifier_child_evaluates(
@@ -833,6 +834,8 @@ class TestApp:
             "\\boxed{{{code}}}",
             "\\boxed{{\\operatorname{{rank}}({code})}}",
             "\\boxed{{\\gcd({code}, 2)}}",
+            "\\boxed{{\\text{{{code}}}}}",
+            "\\boxed{{\\mathrm{{{code}}}}}",
             "$${code}$$",
             "The final answer is {code}",
             "Final answer is 1+{code}",
@@ -855,11 +858,14 @@ class TestApp:
         # answer: no text of the answer other than numerals and arithmetic reaches SymPy's evaluating parser.
         sentinel = tmp_path / "ran"
         answer = template.format(code=self._code_that_touches(sentinel))
-        # A child that timed out or crashed also scores 0, so record that Math-Verify returned on this answer.
+        # A child that timed out or crashed also scores 0, so record that every Math-Verify call on this answer
+        # returned.
         verified = tmp_path / "verified"
         run_math_verify = math_with_judge_app._run_math_verify
 
         def recording_run_math_verify(*args: Any) -> tuple[float, str | None]:
+            with verified.open("a") as file:
+                file.write("started\n")
             result = run_math_verify(*args)
             with verified.open("a") as file:
                 file.write("returned\n")
@@ -869,12 +875,33 @@ class TestApp:
         server = self._tolerant_server(config)
 
         await server._verify_answer_with_library_async("\\pi^{e}", answer)
+        assert verified.read_text().split() == ["started", "returned"]
+        # This call runs Math-Verify again only when it finds a final-answer candidate.
         await server._verify_answer("question", "\\pi^{e}", answer)
-
-        assert verified.read_text().count("returned") >= 1
+        calls = verified.read_text().split()
+        assert calls in (["started", "returned"], ["started", "returned"] * 2)
         assert not sentinel.exists()
         evaluated = evaluated_texts.read_text() if evaluated_texts.exists() else ""
         assert "pathlib" not in evaluated
+
+    @mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_AS is enforced on Linux only")
+    async def test_verifier_child_memory_is_capped(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
+        # Uncapped, this answer allocates until the timeout; capped, its child fails fast and scores 0.
+        server = LibraryJudgeMathResourcesServer(
+            config=config.model_copy(
+                update={"library_verifier_timeout_seconds": 60.0, "library_verifier_memory_limit_mb": 256}
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        result = await server._verify_answer_with_library_async("1", "\\boxed{\\operatorname{eye}(1000000000)}")
+
+        assert result == (0.0, None)
+        assert loop.time() - started < 30
+        # The cap leaves room for an ordinary answer.
+        assert (await server._verify_answer_with_library_async("4", "\\boxed{4}"))[0] == approx(1.0)
 
     def test_run_math_verify_handles_timeout_exception(self) -> None:
         timeout_mock = MagicMock(side_effect=TimeoutException())

@@ -59,16 +59,18 @@ attempt's sandbox group (`sandbox_opt_out.verifier: true`):
 
 - Math-Verify reads a LaTeX answer with latex2sympy2_extended's ANTLR parser, which builds SymPy objects. Names it
   dispatches on come from fixed lists in its grammar and code; any other name becomes an undefined SymPy function.
-- SymPy's evaluating parser (`parse_expr`, which `sympify` and `Number` also call on a string) receives only numerals
-  and the text Math-Verify's plain-expression regex admits: digits, a decimal point, whitespace and
-  `+ - * × / ^ ( ) ÷`. None of these characters is part of a valid Python identifier, so that text names nothing that
+- SymPy's evaluating parser (`parse_expr`, which `sympify` and `Number` also call on a string) receives numerals
+  (including `1.5E3` and percentages), formulas SymPy builds itself from fixed names (`\gcd` of a decimal goes
+  through `nsimplify`), and the text Math-Verify's plain-expression regex admits: digits, a decimal point, whitespace
+  and `+ - * × / ^ ( ) ÷`. None of these characters can start a Python identifier, so that text names nothing that
   could be called.
 - With `should_use_judge: true`, an answer Math-Verify rejects goes to a judge model: a model call, not code.
 
-Each check runs in a forked child that is killed after `library_verifier_timeout_seconds`. That bounds the time an
-answer can take, such as `9^9^9`, but the child is not isolated: it runs as this server's user, with its files and
-network, and its memory is not capped. An answer can still ask for a large object, such as
-`\operatorname{eye}(1000000000)`, which allocates until the timeout.
+Each check runs in a forked child that is killed after `library_verifier_timeout_seconds`, which bounds the time an
+answer can take, such as `9^9^9`. On Linux the child may also map at most `library_verifier_memory_limit_mb` (default
+4096) beyond what it inherits from the server, so an answer that asks for a huge object, such as
+`\operatorname{eye}(1000000000)`, fails in its child and scores 0 instead of exhausting the host; `null` removes the
+cap. The child is not otherwise isolated: it runs as this server's user, with its files and network.
 
 `test_verifier_does_not_run_code_in_the_answer` checks this for the pinned `math-verify`; check it again when you
 upgrade `math-verify` or `latex2sympy2_extended`.
